@@ -609,6 +609,12 @@ pub fn required_profiles(verb: CapabilityVerb) -> &'static [ConformanceProfile] 
         CapabilityVerb::Delegate => &[Producer],
         // The accord kill-switch emits a hybrid-signed Invocation (CCP).
         CapabilityVerb::AccordHalt => &[Producer],
+        // A chat message is a hybrid-signed attestation this node PRODUCES under
+        // the owner's fed-ID (CCP), and it is worth nothing until it reaches the
+        // other member's node — so it also requires the transport substrate (CCS).
+        // Not a Consumer: authoring admits nothing from the wire. Same shape as
+        // Announce, for the same reason — emit, then carry.
+        CapabilityVerb::ChatAuthor => &[Producer, Substrate],
         // Local-tier / custody ops — no federation-wire role is exercised, so no
         // CC 2.2 profile is required (they remain owner-gated).
         //

@@ -1204,6 +1204,183 @@ async fn an_unknown_community_is_a_404_not_a_403() {
     assert_eq!(json["reason_id"], "chat.unknown_community");
 }
 
+// ─── The delegate ruling, and the substrate pin under it ────────────────────
+
+/// Mint a DELEGATED bearer — the `dgrant:` token a device-grant issues after the
+/// owner approves. It carries the owner's role AND `FullAccess` by design, so the
+/// owner gate cannot tell it from the owner; only `caller.actor` can.
+///
+/// The bearer alone is not the authority: `resolve_bearer` RE-CHECKS the signed
+/// `delegates_to(owner -> actor)` edge in the graph on every use (so revoking the
+/// delegation kills the token immediately), which is why this emits the real edge
+/// first rather than only registering the in-memory grant.
+async fn mint_delegated_token(engine: &Engine, owner_wa_id: &str, client_id: &str) -> String {
+    // The durable, owner-signed act-on-behalf edge — built through persist's own
+    // envelope helper and the user-signed emit path device_grant's approve uses.
+    ciris_server::auth::ownership::emit_signed_attestation(
+        engine,
+        &owner_user_signer(),
+        attestation_type::DELEGATES_TO,
+        client_id,
+        ciris_persist::federation::delegates_to_envelope(
+            client_id,
+            &[DELEGATED_SCOPE.to_string()],
+            false,
+        ),
+        None,
+    )
+    .await
+    .expect("emit delegates_to(owner -> actor)");
+    mint_delegated_token_inner(owner_wa_id, client_id)
+}
+
+const DELEGATED_SCOPE: &str = "owner:act-on-behalf";
+
+fn mint_delegated_token_inner(owner_wa_id: &str, client_id: &str) -> String {
+    use ciris_server::auth::session::{DelegatedGrant, DelegationConstraints};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    ciris_server::auth::session::register_delegated_grant(DelegatedGrant {
+        owner_wa_id: owner_wa_id.to_string(),
+        owner_role: ciris_server::auth::roles::UserRole::SystemAdmin,
+        owner_key_id: OWNER_USER_KEY_ID.to_string(),
+        client_id: client_id.to_string(),
+        scope: DELEGATED_SCOPE.to_string(),
+        expires_at: now + 600,
+        issued_at: now,
+        purpose: Some("a monitoring agent".to_string()),
+        attestation_id: None,
+        // UNCONSTRAINED — no deny-list, no allow-list. The refusals below must
+        // therefore come from the SERVER never-list, not from an owner's bounds;
+        // a constrained grant would let the test pass for the wrong reason.
+        constraints: DelegationConstraints::default(),
+    })
+}
+
+/// **A DELEGATE MAY NOT AUTHOR A MESSAGE.** The ruling, pinned.
+///
+/// The gate passes delegates by design, so this has to be decided rather than
+/// inherited, and the code decides it: the node holds only the OWNER's key, so
+/// signing as the delegate is not possible — and signing as the OWNER from a
+/// delegated session mints a signature that OUTLIVES the delegation. Withdrawing
+/// the `delegates_to` edge cannot retract bytes already signed under the owner's
+/// key, so the message would stand as the owner's own words forever. That is the
+/// class CIRISServer#342's capsule doc names, which is why `ChatAuthor` sits on
+/// `never_delegatable` beside re-delegation, wipe and the accord kill-switch.
+///
+/// READS stay open to a delegate: reading is bounded by the delegation's life,
+/// and the cohort gate still applies underneath.
+#[tokio::test]
+async fn a_delegate_may_not_author_a_message_but_may_read() {
+    let (_engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+    let delegated = mint_delegated_token(&_engine, "wa-owner", CONTACT_KEY_ID).await;
+
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&delegated)
+        .json(&serde_json::json!({ "body": "signed as whom, exactly?" }))
+        .send()
+        .await
+        .expect("POST message as a delegate");
+    assert_eq!(
+        resp.status(),
+        403,
+        "a delegate must not author under the owner's key"
+    );
+    let json: serde_json::Value = resp.json().await.expect("refusal json");
+    assert_eq!(json["reason_id"], "chat.delegate_may_not_author");
+
+    // The same bearer READS fine — the refusal is about signing, not about trust.
+    let resp = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&delegated)
+        .send()
+        .await
+        .expect("GET messages as a delegate");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a delegate may read what it may not author"
+    );
+}
+
+/// **THE SUBSTRATE PIN — this asserts a DEFECT, on purpose.**
+///
+/// Two live nodes proved chat messages are refused on cross-node ingest:
+/// persist's `verify_row_hybrid_signature` resolves `attesting_key_id`'s
+/// REGISTERED pubkeys and hybrid-verifies, and a chat row names the OWNER while
+/// carrying the NODE's signature. So this asserts the row we store today does
+/// NOT verify — which is not a thing to be happy about, it is a thing to hold
+/// still so it cannot be forgotten or silently half-fixed.
+///
+/// # Why the obvious fix does not exist yet
+///
+/// Signing as the owner requires emitting the row through a signer-explicit door
+/// at `cohort_scope: community`. `put_attestation` refuses that on ALL THREE
+/// backends: it calls `check_write_cohort_scope_for(writer, …, scope, None)` with
+/// a hardcoded `None` target, and `check_write_cohort_scope`'s `community` arm
+/// needs `Some(cid)` the writer belongs to. Persist says why in that gate's own
+/// comment — attestations "carry a `cohort_scope` label but no
+/// `cohort_target_id` field". The only door that CAN mint a targeted-cohort row
+/// is `attestation_promote`, and its `reseal_for_scope` re-signs with the
+/// engine's key. A community-scoped attestation is therefore node-signed by
+/// construction on v38, and the owner's signature on one is not expressible.
+///
+/// # What flips this test
+///
+/// Persist carrying a cohort target through the write gate (so a signer-explicit
+/// emit can place a `community` row), or a promote that preserves the producer's
+/// signature instead of re-sealing. Either one makes the assertion below fail —
+/// which is the signal to invert it and finish the job, not to relax it.
+#[tokio::test]
+async fn a_chat_message_does_not_yet_verify_at_the_persist_boundary() {
+    use ciris_persist::federation::tier_ingest::verify_row_hybrid_signature;
+
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "does this cross the wire?" }))
+        .send()
+        .await
+        .expect("POST message");
+    assert_eq!(resp.status(), 200);
+    let sent: serde_json::Value = resp.json().await.expect("send json");
+    let id = sent["attestation_id"].as_str().expect("attestation_id");
+
+    let directory = engine.federation_directory();
+    let row = directory
+        .list_attestations_by(OWNER_USER_KEY_ID)
+        .await
+        .expect("list_attestations_by")
+        .into_iter()
+        .find(|a| a.attestation_id == id)
+        .expect("the stored message row");
+
+    // The row claims the owner and carries the node's scrub — the split itself.
+    assert_eq!(row.attesting_key_id, OWNER_USER_KEY_ID);
+    assert_ne!(
+        row.scrub_key_id, row.attesting_key_id,
+        "the split IS the defect: if these ever match, the fix has landed and the \
+         assertion below must be inverted"
+    );
+
+    // THE FAR NODE'S ACTUAL GATE, run locally against the same directory.
+    let verdict = verify_row_hybrid_signature(directory.as_ref(), &row).await;
+    assert!(
+        verdict.is_err(),
+        "PIN FLIPPED — a chat message now verifies at the persist boundary. \
+         That is the outcome we want: invert this test to assert `is_ok()`, and \
+         switch `send_message` to the signer-explicit emit path."
+    );
+}
+
 // ─── The gates ──────────────────────────────────────────────────────────────
 
 #[tokio::test]

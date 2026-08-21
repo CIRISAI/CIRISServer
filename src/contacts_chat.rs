@@ -99,7 +99,7 @@ use ciris_persist::prelude::{CallerScope, Engine};
 
 use crate::auth::refusal::refuse;
 use crate::auth::roles::{Permission, UserRole};
-use crate::auth::session::resolve_bearer;
+use crate::auth::session::{resolve_bearer, SessionCaller};
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
@@ -155,6 +155,12 @@ struct Owner {
     /// The responsible party's federation identity key (the fedID) —
     /// `auth::gate::require_owner_bound`'s return, not a caller-supplied value.
     key_id: String,
+    /// The verified session. Carried because the OWNER-vs-DELEGATE distinction
+    /// is invisible in the role (`resolve_bearer` hands a `dgrant:` token the
+    /// owner's role AND `FullAccess` by design), so only `caller.actor` can tell
+    /// them apart — and one route here may not be exercised by a delegate at
+    /// all. See [`CapabilityVerb::ChatAuthor`].
+    caller: SessionCaller,
 }
 
 /// Owner-authority gate for this surface: a `SYSTEM_ADMIN` session on an
@@ -176,10 +182,13 @@ async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Res
             "missing bearer session token",
         ));
     };
-    match resolve_bearer(&st.engine, token).await {
+    let caller = match resolve_bearer(&st.engine, token).await {
         Ok(Some(caller))
             if caller.role == UserRole::SystemAdmin
-                && caller.permissions.contains(&Permission::FullAccess) => {}
+                && caller.permissions.contains(&Permission::FullAccess) =>
+        {
+            caller
+        }
         Ok(Some(_)) => {
             return Err(refuse(
                 StatusCode::FORBIDDEN,
@@ -201,7 +210,7 @@ async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Res
                 format!("session store: {e}"),
             ))
         }
-    }
+    };
     let node_key_id = crate::self_identity::resolve(&st.engine, "contacts_chat")
         .await
         .map_err(|e| {
@@ -226,7 +235,26 @@ async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Res
     Ok(Owner {
         node_key_id,
         key_id,
+        caller,
     })
+}
+
+/// Render a delegation refusal in THIS surface's `{error, reason_id}` shape.
+///
+/// The RULE is single-sourced in [`crate::auth::gate::authorize_delegated`] —
+/// this only chooses how to say it. `auth::gate::deny_response` emits the
+/// `delegation_denied` envelope `admin_ops` and the peering routes use; this
+/// surface's contract is `{error, reason_id}` and clients bind localization keys
+/// against it (see `auth::refusal`'s own note that the two are deliberately
+/// different contracts). Two renderings of one rule, never two rules.
+fn require_verb(
+    owner: &Owner,
+    verb: crate::auth::gate::CapabilityVerb,
+    reason_id: &'static str,
+) -> Option<Response> {
+    crate::auth::gate::authorize_delegated(&owner.caller, verb)
+        .err()
+        .map(|deny| refuse(StatusCode::FORBIDDEN, reason_id, deny.detail))
 }
 
 // ─── The derived pair-community id ──────────────────────────────────────────
@@ -390,6 +418,18 @@ async fn add_contact(
         Ok(o) => o,
         Err(r) => return r,
     };
+    // `POST /v1/contacts` emits the SAME `consent:replication:v1` grant
+    // `POST /v1/federation/peering` does, so it MUST answer to the same verb.
+    // Without this a delegate an owner had explicitly denied `peer` could author
+    // the identical object through the contacts door — a gate is only as narrow
+    // as its widest route.
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::Peer,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
     let req: AddContactRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -870,6 +910,16 @@ async fn send_message(
         Ok(o) => o,
         Err(r) => return r,
     };
+    // NEVER-DELEGATABLE (see `CapabilityVerb::ChatAuthor`). Checked AHEAD of the
+    // membership read because it is a pure function of the session: a delegate
+    // must not learn whether a community exists from the shape of its refusal.
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatAuthor,
+        "chat.delegate_may_not_author",
+    ) {
+        return resp;
+    }
     if let Err(r) = require_member(&st, &owner, &community_id).await {
         return r;
     }
@@ -921,6 +971,31 @@ async fn send_message(
         // a message, and a positive constant is the honest "this was said".
         "score": 1.0,
     });
+    // ── WHY THIS STAGES AND PROMOTES INSTEAD OF SIGNING AS THE OWNER ─────────
+    //
+    // It should sign as the owner. The row names the owner as `attesting_key_id`
+    // and persist's ingest gate verifies against THAT key's registered pubkeys,
+    // so a node-signed row claiming the owner is refused by every peer — which
+    // is exactly what two live nodes observed ("Classical signature verification
+    // failed: Ed25519") while node-authored rows landed beside it.
+    //
+    // It cannot, on persist v38, and the gate is unambiguous. `put_attestation`
+    // calls `check_write_cohort_scope_for(writer, "put_attestation", scope,
+    // None)` on all three backends — the target is a hardcoded `None`, and the
+    // `community` arm of `check_write_cohort_scope` requires `Some(cid)` the
+    // writer is a member of. Persist's own comment states the consequence:
+    // attestations "carry a `cohort_scope` label but no `cohort_target_id`
+    // field", so `family` / `community` are REFUSED at that door. The ONLY door
+    // that can mint a targeted-cohort row is `attestation_promote` — whose
+    // `reseal_for_scope` re-signs with `self.sign_hybrid`, the ENGINE's key.
+    //
+    // So on this substrate version a `cohort_scope: community` attestation is
+    // node-signed BY CONSTRUCTION, and the owner's signature on one is not
+    // expressible. Bending it would mean either publishing private chat at
+    // `federation` scope or re-attributing messages away from the human who
+    // wrote them; both are worse than the delivery bug. The characterization pin
+    // in `tests/contacts_chat.rs` holds the exact refusal so this flips the day
+    // persist carries a cohort target through the write gate.
     let envelope_core =
         match ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope) {
             Ok(e) => e,
@@ -943,9 +1018,6 @@ async fn send_message(
         expires_at: None,
         attestation_envelope: envelope_core,
         subject_key_ids: vec![owner.key_id.clone()],
-        // Staged `self`, then PLACED at `community` by the promote below — the
-        // same two-step `safety::moderation` uses. Signature is deferred to the
-        // promote (persist v13 #171).
         cohort_scope: cohort_scope::SELF.to_owned(),
         scrub_signature_classical: None,
         scrub_signature_pqc: None,
@@ -965,8 +1037,6 @@ async fn send_message(
             )
         }
     };
-    // Place it at the community tier: federation TIER (so it replicates to the
-    // other member) with `community` PLACEMENT (so only the cohort sees it).
     if let Err(e) = st
         .engine
         .attestation_promote(&attestation_id, cohort_scope::COMMUNITY)
