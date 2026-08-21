@@ -607,11 +607,18 @@ object BudgetApprovalSeam {
         val intPart = parts[0].ifEmpty { "0" }
         val fracPart = parts.getOrNull(1).orEmpty()
         if (fracPart.length > AMOUNT_SCALE) return null
-        if (intPart.length > 12) return null // guards the Long multiply below
 
         val intValue = intPart.toLongOrNull() ?: return null
         val fracPadded = fracPart.padEnd(AMOUNT_SCALE, '0')
         val fracValue = if (fracPadded.isEmpty()) 0L else fracPadded.toLongOrNull() ?: return null
+        // THE EXACT OVERFLOW BOUND, not a digit count. The old `length > 12`
+        // check did not guard the multiply it claimed to: with an 8-decimal
+        // scale, 100000000000 (12 digits) scales past Long.MAX_VALUE and WRAPS
+        // — a negative or unrelated-positive amount that then drives grant
+        // validation, headroom comparison, and remaining-budget display.
+        // Money that cannot be represented exactly is money we refuse to
+        // parse, same verdict as every other malformed amount.
+        if (intValue > (Long.MAX_VALUE - fracValue) / SCALE_FACTOR) return null
         return intValue * SCALE_FACTOR + fracValue
     }
 

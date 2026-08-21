@@ -42,6 +42,23 @@ class BudgetApprovalSeamTest {
     }
 
     @Test
+    fun parseAmount_refusesAmountsThatWouldOverflowTheFixedPoint() {
+        // 12 digits passed the old length guard and WRAPPED: 1e11 * 1e8 > Long.MAX.
+        assertNull(BudgetApprovalSeam.parseAmount("100000000000"))
+        assertNull(BudgetApprovalSeam.parseAmount("999999999999.99999999"))
+        // The largest representable whole part still parses — the bound is
+        // exact, not a digit count that also rejects valid values.
+        assertNotNull(BudgetApprovalSeam.parseAmount("92233720368"))
+        // And a parsed near-max amount round-trips instead of wrapping.
+        assertEquals(
+            "92233720368",
+            BudgetApprovalSeam.parseAmount("92233720368")?.let {
+                BudgetApprovalSeam.formatAmount(it)
+            },
+        )
+    }
+
+    @Test
     fun parseAmount_rejectsAnythingThatIsNotAPlainDecimal() {
         assertNull(BudgetApprovalSeam.parseAmount(""))
         assertNull(BudgetApprovalSeam.parseAmount("abc"))

@@ -628,11 +628,20 @@ class WiseAuthorityViewModel(
                     // there would re-notify the operator about the very approval
                     // they just acted on. Same rule as [updateProposalStatus].
                     if (promote) {
-                        val promoted = api.updateTicketStatus(
-                            approvalId,
-                            BudgetApprovalSeam.PROMOTED_STATUS,
-                            null,
-                        )
+                        // FOLLOW-UP I/O AFTER A RECORDED GRANT: a throw here must
+                        // not fall into the outer catch, which would report the
+                        // committed grant as failed and invite a retry of a money
+                        // authorization the server already holds.
+                        val promoted = try {
+                            api.updateTicketStatus(
+                                approvalId,
+                                BudgetApprovalSeam.PROMOTED_STATUS,
+                                null,
+                            )
+                        } catch (e: Exception) {
+                            logWarn(method, "Promotion call failed after grant: ${e.message}")
+                            false
+                        }
                         if (promoted) {
                             notifier?.forget(approvalId)
                         } else {
@@ -648,8 +657,18 @@ class WiseAuthorityViewModel(
                     logError(method, "Grant refused: ${outcome.error} ${outcome.message}")
                 }
 
-                fetchDataInternal()
+                // THE OUTCOME IS COMMITTED — report it BEFORE the refresh. A
+                // transient 401/500/network blip in the follow-up refresh used to
+                // fall into the outer catch and REPLACE a recorded success with
+                // BudgetGrantOutcome(false, …): dialog already closed, stale
+                // proposal still visible, operator told the approval failed and
+                // invited to re-authorize money the server already granted.
                 onResult(outcome)
+                try {
+                    fetchDataInternal()
+                } catch (e: Exception) {
+                    logWarn(method, "Post-grant refresh failed (grant outcome already reported): ${e.message}")
+                }
             } catch (e: Exception) {
                 logError(method, "Grant failed: ${e::class.simpleName}: ${e.message}")
                 val outcome = BudgetGrantOutcome(false, BudgetGrantError.UNKNOWN, e.message)

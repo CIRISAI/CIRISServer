@@ -110,7 +110,13 @@ suspend fun CIRISApiClient.checkLlmConfig(
 ): LlmConfigCheck {
     // A local server is handed a dummy key on purpose, so an empty key is only
     // a problem for a remote provider.
-    val needsKey = provider != "local" && provider != "local_ondevice"
+    // The keyless set must name the provider ids setup ACTUALLY uses:
+    // `mobile_local` and `local_inference` are the canonical on-device paths
+    // (see SetupViewModel's provider choices); `local`/`local_ondevice` are
+    // kept for older configs. Missing them meant "Enter an API key" refused
+    // the Test Connection button on exactly the providers that have no key.
+    val keylessProviders = setOf("local", "local_ondevice", "mobile_local", "local_inference")
+    val needsKey = provider !in keylessProviders
     if (needsKey && apiKey.isBlank()) {
         return LlmConfigCheck(
             key = CheckState.UNKNOWN,
