@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "مسدود",
     "contacts_trust_trusted": "قابلِ اعتماد",
     "contacts_trust_unknown": "نامعلوم",
-    "contacts_trust_untrusted": "غیر معتمد"
+    "contacts_trust_untrusted": "غیر معتمد",
+    "approvals_alerts_off": "منظوری کے الرٹس بند ہیں۔ جب ایجنٹ کو آپ کی ضرورت ہو تو مطلع ہونے کے لیے اپنی سسٹم سیٹنگز میں CIRIS کے لیے نوٹیفکیشنز آن کریں۔",
+    "contacts_chat_not_covered": "پیغامات ابھی اس رابطے تک نہیں پہنچ سکتے — رضامندی کی اجازت میں چیٹ شامل نہیں۔ اسے وسیع کرنے کے لیے انہیں دوبارہ شامل کریں۔",
+    "contacts_node_too_old_body": "رابطوں اور چیٹ کے لیے ciris-server 0.5.185 یا اس سے نیا درکار ہے۔ یہ نوڈ پرانا ورژن چلا رہا ہے، اس لیے ابھی جواب نہیں دے سکتا — باقی سب کچھ معمول کے مطابق کام کرتا ہے۔",
+    "contacts_node_too_old_title": "اس نوڈ میں ابھی رابطے موجود نہیں",
+    "directory_picker_approve": "منتخب کریں",
+    "directory_picker_save_title": "فائل کہاں محفوظ کرنی ہے، منتخب کریں",
+    "directory_picker_usb_title": "ماؤنٹ شدہ USB فولڈر منتخب کریں",
+    "accord_written_by": "تحریر: {who}"
   },
   "moderation": {
     "ladder": {

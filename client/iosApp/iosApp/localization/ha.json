@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "an toshe",
     "contacts_trust_trusted": "amintacce",
     "contacts_trust_unknown": "ba a sani ba",
-    "contacts_trust_untrusted": "ba amintacce ba"
+    "contacts_trust_untrusted": "ba amintacce ba",
+    "approvals_alerts_off": "An kashe faɗakarwar amincewa. Kunna sanarwa don CIRIS a cikin saitunan na'urarka domin a sanar da kai lokacin da wakili ke bukatarka.",
+    "contacts_chat_not_covered": "Saƙonni ba za su iya isa ga wannan lambar sadarwa ba tukuna — izinin yarda bai haɗa da hira ba. Ƙara su sake domin faɗaɗa shi.",
+    "contacts_node_too_old_body": "Lambobin sadarwa da hira suna bukatar ciris-server 0.5.185 ko sabuwa. Wannan node yana amfani da tsohuwar siga, don haka ba zai iya amsawa ba tukuna — sauran komai yana aiki kamar yadda aka saba.",
+    "contacts_node_too_old_title": "Wannan node ba shi da lambobin sadarwa tukuna",
+    "directory_picker_approve": "Zaɓi",
+    "directory_picker_save_title": "Zaɓi inda za a adana fayil ɗin",
+    "directory_picker_usb_title": "Zaɓi babban fayil na USB da aka haɗa",
+    "accord_written_by": "{who} ne ya rubuta"
   },
   "moderation": {
     "ladder": {

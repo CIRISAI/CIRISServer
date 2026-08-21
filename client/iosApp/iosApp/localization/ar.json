@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "محظور",
     "contacts_trust_trusted": "موثوق",
     "contacts_trust_unknown": "غير معروف",
-    "contacts_trust_untrusted": "غير موثوق"
+    "contacts_trust_untrusted": "غير موثوق",
+    "approvals_alerts_off": "تنبيهات الموافقة متوقفة. فعّل الإشعارات لتطبيق CIRIS في إعدادات النظام ليتم إعلامك عندما يحتاجك الوكيل.",
+    "contacts_chat_not_covered": "لا يمكن للرسائل الوصول إلى جهة الاتصال هذه بعد — إذن الموافقة لا يشمل الدردشة. أضفها مرة أخرى لتوسيع نطاقه.",
+    "contacts_node_too_old_body": "تتطلب جهات الاتصال والدردشة ciris-server بإصدار 0.5.185 أو أحدث. تعمل هذه العقدة بإصدار أقدم، لذا لا يمكنها الرد بعد — كل شيء آخر يعمل بشكل طبيعي.",
+    "contacts_node_too_old_title": "لا تتوفر جهات اتصال في هذه العقدة بعد",
+    "directory_picker_approve": "اختيار",
+    "directory_picker_save_title": "اختر مكان حفظ الملف",
+    "directory_picker_usb_title": "اختر مجلد USB المُوصَّل",
+    "accord_written_by": "كتبه {who}"
   },
   "moderation": {
     "ladder": {

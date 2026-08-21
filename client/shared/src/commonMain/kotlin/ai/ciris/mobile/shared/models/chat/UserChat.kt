@@ -21,8 +21,28 @@ import kotlinx.serialization.Serializable
 data class CegChatMessage(
     @SerialName("attestation_id")
     val attestationId: String,
+    /**
+     * **WHAT SIGNED IT — the NODE's engine key, not the person.**
+     *
+     * Do NOT render this as "who wrote this". Messages are authored by a human
+     * and signed by the box they used; reading the sender off this field labels
+     * every message with the node, on your own messages and the far side's
+     * alike. That is the one-name-two-axes mistake this codebase keeps paying
+     * for. [author] is the other axis.
+     */
     @SerialName("attesting_key_id")
     val attestingKeyId: String = "",
+    /**
+     * **WHO WROTE IT** — the human's fed-ID, recovered by the server from the
+     * signed envelope's `on_behalf_of_key_id`, so it is covered by the signature
+     * rather than asserted beside it.
+     *
+     * Null on rows from a node that predates the split. Callers fall back to
+     * [attestingKeyId] and must NOT mark such a row broken — an old row is not a
+     * bad row, and the two fields genuinely coincided before the node key became
+     * the attester.
+     */
+    val author: String? = null,
     @SerialName("attested_key_id")
     val attestedKeyId: String = "",
     @SerialName("attestation_type")
@@ -44,10 +64,27 @@ data class CegChatMessage(
     /** RFC3339. The transcript is ordered by this, ascending (OLDEST FIRST). */
     @SerialName("asserted_at")
     val assertedAt: String = "",
-    /** `true` when this node's owner authored the message. Drives alignment + authority. */
+    /**
+     * `true` when this node's owner is the AUTHOR — the same source as [author],
+     * NOT the attester. Drives alignment and viewer authority.
+     */
     val mine: Boolean = false,
 ) {
     val isLive: Boolean get() = status == STATUS_LIVE
+
+    /**
+     * Who to NAME as the speaker. [author] when the node sent one, else the
+     * attester — the pre-split shape, where the two coincided.
+     */
+    val speakerKeyId: String get() = author?.takeIf { it.isNotBlank() } ?: attestingKeyId
+
+    /**
+     * The signature and the authorship are genuinely different parties, so both
+     * are worth showing. False on an old row, where naming them separately would
+     * invent a distinction the row does not carry.
+     */
+    val authorDiffersFromAttester: Boolean
+        get() = author?.takeIf { it.isNotBlank() }?.let { it != attestingKeyId } ?: false
 
     companion object {
         const val STATUS_LIVE = "live"

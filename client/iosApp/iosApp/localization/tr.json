@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "engellenmiş",
     "contacts_trust_trusted": "güvenilir",
     "contacts_trust_unknown": "bilinmiyor",
-    "contacts_trust_untrusted": "güvenilmeyen"
+    "contacts_trust_untrusted": "güvenilmeyen",
+    "approvals_alerts_off": "Onay uyarıları kapalı. Ajanın size ihtiyacı olduğunda haberdar olmak için sistem ayarlarınızdan CIRIS bildirimlerini açın.",
+    "contacts_chat_not_covered": "Mesajlar bu kişiye henüz ulaşamıyor — onay izni sohbeti kapsamıyor. Kapsamı genişletmek için kişiyi yeniden ekleyin.",
+    "contacts_node_too_old_body": "Kişiler ve sohbet, ciris-server 0.5.185 veya daha yeni bir sürüm gerektirir. Bu düğüm daha eski bir sürüm çalıştırdığından henüz yanıt veremiyor — diğer her şey normal şekilde çalışıyor.",
+    "contacts_node_too_old_title": "Bu düğümde henüz kişiler yok",
+    "directory_picker_approve": "Seç",
+    "directory_picker_save_title": "Dosyanın kaydedileceği yeri seçin",
+    "directory_picker_usb_title": "Bağlı USB klasörünü seçin",
+    "accord_written_by": "{who} tarafından yazıldı"
   },
   "moderation": {
     "ladder": {

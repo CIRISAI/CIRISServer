@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "bloqueado",
     "contacts_trust_trusted": "de confianza",
     "contacts_trust_unknown": "desconocido",
-    "contacts_trust_untrusted": "no confiable"
+    "contacts_trust_untrusted": "no confiable",
+    "approvals_alerts_off": "Las alertas de aprobación están desactivadas. Activa las notificaciones de CIRIS en los ajustes del sistema para recibir un aviso cuando el agente te necesite.",
+    "contacts_chat_not_covered": "Los mensajes aún no pueden llegar a este contacto: el consentimiento otorgado no cubre el chat. Añádelo de nuevo para ampliarlo.",
+    "contacts_node_too_old_body": "Los contactos y el chat necesitan ciris-server 0.5.185 o más reciente. Este nodo ejecuta una versión anterior, por lo que todavía no puede responder; todo lo demás funciona con normalidad.",
+    "contacts_node_too_old_title": "Este nodo todavía no tiene contactos",
+    "directory_picker_approve": "Seleccionar",
+    "directory_picker_save_title": "Elige dónde guardar el archivo",
+    "directory_picker_usb_title": "Selecciona la carpeta USB montada",
+    "accord_written_by": "escrito por {who}"
   },
   "moderation": {
     "ladder": {

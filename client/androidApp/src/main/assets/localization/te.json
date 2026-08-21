@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "బ్లాక్ చేయబడింది",
     "contacts_trust_trusted": "విశ్వసనీయం",
     "contacts_trust_unknown": "తెలియదు",
-    "contacts_trust_untrusted": "విశ్వసనీయం కాదు"
+    "contacts_trust_untrusted": "విశ్వసనీయం కాదు",
+    "approvals_alerts_off": "ఆమోద హెచ్చరికలు ఆఫ్‌లో ఉన్నాయి. ఏజెంట్‌కు మీరు అవసరమైనప్పుడు తెలియజేయడానికి మీ సిస్టమ్ సెట్టింగ్స్‌లో CIRIS కోసం నోటిఫికేషన్‌లను ఆన్ చేయండి.",
+    "contacts_chat_not_covered": "సందేశాలు ఈ కాంటాక్ట్‌కు ఇంకా చేరలేవు — సమ్మతి మంజూరు చాట్‌ను కవర్ చేయదు. దాన్ని విస్తరించడానికి వారిని మళ్లీ జోడించండి.",
+    "contacts_node_too_old_body": "కాంటాక్ట్‌లు మరియు చాట్‌కు ciris-server 0.5.185 లేదా కొత్త వెర్షన్ అవసరం. ఈ నోడ్ పాత వెర్షన్‌ను నడుపుతోంది, కాబట్టి ఇది ఇంకా సమాధానం ఇవ్వలేకపోతోంది — మిగతావన్నీ మామూలుగా పనిచేస్తాయి.",
+    "contacts_node_too_old_title": "ఈ నోడ్‌లో ఇంకా కాంటాక్ట్‌లు లేవు",
+    "directory_picker_approve": "ఎంచుకోండి",
+    "directory_picker_save_title": "ఫైల్‌ను ఎక్కడ సేవ్ చేయాలో ఎంచుకోండి",
+    "directory_picker_usb_title": "మౌంట్ చేసిన USB ఫోల్డర్‌ను ఎంచుకోండి",
+    "accord_written_by": "{who} రాశారు"
   },
   "moderation": {
     "ladder": {

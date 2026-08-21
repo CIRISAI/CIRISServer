@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "अवरोधित",
     "contacts_trust_trusted": "विश्वसनीय",
     "contacts_trust_unknown": "अज्ञात",
-    "contacts_trust_untrusted": "अविश्वसनीय"
+    "contacts_trust_untrusted": "अविश्वसनीय",
+    "approvals_alerts_off": "मंजुरी सूचना बंद आहेत. एजंटला तुमची गरज असताना कळण्यासाठी तुमच्या सिस्टम सेटिंग्जमध्ये CIRIS साठी सूचना चालू करा.",
+    "contacts_chat_not_covered": "संदेश अजून या संपर्कापर्यंत पोहोचू शकत नाहीत — संमती मंजुरीमध्ये चॅटचा समावेश नाही. ती विस्तारण्यासाठी त्यांना पुन्हा जोडा.",
+    "contacts_node_too_old_body": "संपर्क आणि चॅटसाठी ciris-server 0.5.185 किंवा त्याहून नवीन आवृत्ती आवश्यक आहे. हा नोड जुनी आवृत्ती चालवत आहे, त्यामुळे तो अजून उत्तर देऊ शकत नाही — बाकी सर्व काही नेहमीप्रमाणे चालते.",
+    "contacts_node_too_old_title": "या नोडमध्ये अजून संपर्क नाहीत",
+    "directory_picker_approve": "निवडा",
+    "directory_picker_save_title": "फाइल कुठे सेव्ह करायची ते निवडा",
+    "directory_picker_usb_title": "माउंट केलेले USB फोल्डर निवडा",
+    "accord_written_by": "{who} यांनी लिहिले"
   },
   "moderation": {
     "ladder": {

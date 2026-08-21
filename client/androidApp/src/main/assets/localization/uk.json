@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "заблокований",
     "contacts_trust_trusted": "довірений",
     "contacts_trust_unknown": "невідомий",
-    "contacts_trust_untrusted": "недовірений"
+    "contacts_trust_untrusted": "недовірений",
+    "approvals_alerts_off": "Сповіщення про підтвердження вимкнено. Увімкніть сповіщення для CIRIS у системних налаштуваннях, щоб дізнаватися, коли агенту потрібна ваша участь.",
+    "contacts_chat_not_covered": "Повідомлення поки не можуть дійти до цього контакту — надана згода не охоплює чат. Додайте контакт ще раз, щоб розширити її.",
+    "contacts_node_too_old_body": "Для контактів і чату потрібен ciris-server 0.5.185 або новіший. На цьому вузлі працює старіша версія, тому він поки не може відповісти — усе інше працює як зазвичай.",
+    "contacts_node_too_old_title": "На цьому вузлі поки немає контактів",
+    "directory_picker_approve": "Вибрати",
+    "directory_picker_save_title": "Виберіть, куди зберегти файл",
+    "directory_picker_usb_title": "Виберіть змонтовану папку USB",
+    "accord_written_by": "автор: {who}"
   },
   "moderation": {
     "ladder": {

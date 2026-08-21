@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "imezuiwa",
     "contacts_trust_trusted": "inaaminika",
     "contacts_trust_unknown": "haijulikani",
-    "contacts_trust_untrusted": "haiaminiki"
+    "contacts_trust_untrusted": "haiaminiki",
+    "approvals_alerts_off": "Arifa za idhini zimezimwa. Washa arifa za CIRIS katika mipangilio ya mfumo wako ili ujulishwe wakati wakala anakuhitaji.",
+    "contacts_chat_not_covered": "Jumbe haziwezi kumfikia mwasiliani huyu bado — ruhusa ya idhini haijumuishi gumzo. Mwongeze tena ili kuipanua.",
+    "contacts_node_too_old_body": "Anwani na gumzo zinahitaji ciris-server 0.5.185 au mpya zaidi. Nodi hii inatumia toleo la zamani, kwa hivyo haiwezi kujibu bado — mengine yote yanafanya kazi kama kawaida.",
+    "contacts_node_too_old_title": "Nodi hii haina anwani bado",
+    "directory_picker_approve": "Chagua",
+    "directory_picker_save_title": "Chagua mahali pa kuhifadhi faili",
+    "directory_picker_usb_title": "Chagua folda ya USB iliyounganishwa",
+    "accord_written_by": "imeandikwa na {who}"
   },
   "moderation": {
     "ladder": {

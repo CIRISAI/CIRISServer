@@ -64,8 +64,16 @@ class ContactsViewModel(
 
     /**
      * A contact whose live grant does NOT cover `chat:` — messages to them
-     * cannot replicate (CIRISServer#458). Keyed by key_id; a contact absent from
-     * this set is either fine or was added by a node too old to say.
+     * cannot replicate (CIRISServer#458). Keyed by key_id.
+     *
+     * BELT AND SUSPENDERS, deliberately. The server tightened `GET /v1/contacts`
+     * to list only peers whose LIVE grant covers `chat:` — a contact IS someone
+     * you can actually message — so on a current node this set stays empty and a
+     * successful `POST /v1/contacts` always comes back carrying `chat:`. It is
+     * kept because the client must not depend on that: an older node still
+     * serves the wider set, and a narrow grant arriving from anywhere must be
+     * SAID rather than rendered as an ordinary contact. Silence about it is
+     * exactly how #458 stayed invisible.
      */
     private val _chatIneligible = MutableStateFlow<Set<String>>(emptySet())
     val chatIneligible: StateFlow<Set<String>> = _chatIneligible.asStateFlow()

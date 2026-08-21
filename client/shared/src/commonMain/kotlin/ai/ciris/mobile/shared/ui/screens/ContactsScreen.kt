@@ -490,6 +490,10 @@ private fun ContactRow(
      * cannot replicate (CIRISServer#458). Said out loud on the row, because a
      * contact that silently cannot receive anything is the failure mode that
      * defect hid behind.
+     *
+     * A DEGRADED state, not a common one: a current node only lists peers whose
+     * grant already covers chat, so this fires for an older node's wider listing
+     * — which is precisely when the reader most needs telling.
      */
     chatIneligible: Boolean,
     onOpenChat: () -> Unit,

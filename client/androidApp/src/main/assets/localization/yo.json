@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "tí a dínà",
     "contacts_trust_trusted": "tí a gbẹ́kẹ̀lé",
     "contacts_trust_unknown": "àìmọ̀",
-    "contacts_trust_untrusted": "tí a kò gbẹ́kẹ̀lé"
+    "contacts_trust_untrusted": "tí a kò gbẹ́kẹ̀lé",
+    "approvals_alerts_off": "Àwọn ìtanijí ìfọwọ́sí ti wà ní pípa. Tan àwọn ìwífún fún CIRIS nínú ètò ẹ̀rọ rẹ kí a lè sọ fún ọ nígbà tí aṣojú bá nílò rẹ.",
+    "contacts_chat_not_covered": "Àwọn ìfiránṣẹ́ kò tíì lè dé ọ̀dọ̀ olùbásọ̀rọ̀ yìí — ìyọ̀ǹda tí a fún kò bo ìfọ̀rọ̀wérọ̀. Fi wọ́n kún un lẹ́ẹ̀kan sí i láti mú un gbòòrò sí i.",
+    "contacts_node_too_old_body": "Àwọn olùbásọ̀rọ̀ àti ìfọ̀rọ̀wérọ̀ nílò ciris-server 0.5.185 tàbí èyí tí ó tuntun jù. Nóòdù yìí ń lo ẹ̀yà àtijọ́, nítorí náà kò tíì lè dáhùn — gbogbo ohun mìíràn ń ṣiṣẹ́ dáadáa.",
+    "contacts_node_too_old_title": "Nóòdù yìí kò tíì ní àwọn olùbásọ̀rọ̀",
+    "directory_picker_approve": "Yan",
+    "directory_picker_save_title": "Yan ibi tí a ó fi fáìlì náà pamọ́ sí",
+    "directory_picker_usb_title": "Yan fódà USB tí a ti so pọ̀",
+    "accord_written_by": "tí {who} kọ"
   },
   "moderation": {
     "ladder": {

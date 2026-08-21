@@ -118,8 +118,27 @@ data class Attestation(
     val styleKey: String? = null,
     /** The one metadata line that varies (e.g. "identity_type:node,canonical"). */
     val dimension: String? = null,
-    /** "attested by …" — the signer / scrubber key_id, or null. */
+    /**
+     * "attested by …" — WHAT SIGNED the row (the signer / scrubber key_id), or
+     * null.
+     *
+     * This is the SIGNATURE axis, and on some kinds it is NOT the authorship
+     * axis. A chat message is signed by the node's engine key and written by a
+     * human; rendering this as "who wrote this" names the box instead of the
+     * person. Where the two differ, supply [authorKeyId] as well and the card
+     * states both.
+     */
     val attesterKeyId: String? = null,
+    /**
+     * "written by …" — WHO SPOKE, when that is a different party from
+     * [attesterKeyId].
+     *
+     * Null for every kind where the signer IS the author (the accord family,
+     * holders, canonicals), and null on rows from a node that predates the
+     * split — in both cases the card says only "attested by", because inventing
+     * a second name for one party would be a distinction the row does not carry.
+     */
+    val authorKeyId: String? = null,
     /** RFC-3339 instant or null. */
     val timestamp: String? = null,
     /** m — signers so far (for a threshold object), or null. */
@@ -386,6 +405,14 @@ fun AttestationCard(
 @Composable
 private fun buildProvenance(att: Attestation): String {
     val parts = mutableListOf<String>()
+    // AUTHOR FIRST, and only when it is a genuinely different party from the
+    // signer. Who SPOKE is what a reader wants; what SIGNED is the audit fact
+    // that backs it. Collapsing them onto one line is how a message ends up
+    // attributed to the machine that carried it.
+    val author = att.authorKeyId?.takeIf { it.isNotBlank() }
+    if (author != null && author != att.attesterKeyId) {
+        parts += localizedString("mobile.accord_written_by", "who", author)
+    }
     att.attesterKeyId?.takeIf { it.isNotBlank() }?.let {
         parts += localizedString("mobile.accord_attested_by", "who", it)
     }

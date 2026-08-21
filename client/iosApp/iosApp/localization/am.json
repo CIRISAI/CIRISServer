@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "የታገደ",
     "contacts_trust_trusted": "የታመነ",
     "contacts_trust_unknown": "ያልታወቀ",
-    "contacts_trust_untrusted": "ያልታመነ"
+    "contacts_trust_untrusted": "ያልታመነ",
+    "approvals_alerts_off": "የማጽደቅ ማንቂያዎች ጠፍተዋል። ወኪሉ ሲፈልግዎት እንዲነገርዎት በስርዓት ቅንብሮችዎ ውስጥ ለ CIRIS ማሳወቂያዎችን ያብሩ።",
+    "contacts_chat_not_covered": "መልዕክቶች ገና ወደዚህ እውቂያ መድረስ አይችሉም — የፈቃድ ስጦታው ውይይትን አይሸፍንም። ለማስፋት እንደገና ያክሏቸው።",
+    "contacts_node_too_old_body": "እውቂያዎች እና ውይይት ciris-server 0.5.185 ወይም አዲስ ይፈልጋሉ። ይህ ኖድ የቆየ ስሪት እያሄደ ነው፣ ስለዚህ ገና መመለስ አይችልም — ሌላው ሁሉ በመደበኛነት ይሰራል።",
+    "contacts_node_too_old_title": "ይህ ኖድ ገና እውቂያዎች የሉትም",
+    "directory_picker_approve": "ይምረጡ",
+    "directory_picker_save_title": "ፋይሉ የት እንደሚቀመጥ ይምረጡ",
+    "directory_picker_usb_title": "የተጫነውን የ USB አቃፊ ይምረጡ",
+    "accord_written_by": "በ{who} የተጻፈ"
   },
   "moderation": {
     "ladder": {

@@ -2946,7 +2946,15 @@
     "contacts_trust_blocked": "ব্লক করা",
     "contacts_trust_trusted": "বিশ্বস্ত",
     "contacts_trust_unknown": "অজানা",
-    "contacts_trust_untrusted": "অবিশ্বস্ত"
+    "contacts_trust_untrusted": "অবিশ্বস্ত",
+    "approvals_alerts_off": "অনুমোদনের সতর্কতা বন্ধ আছে। এজেন্টের আপনাকে প্রয়োজন হলে তা জানতে আপনার সিস্টেম সেটিংসে CIRIS-এর জন্য নোটিফিকেশন চালু করুন।",
+    "contacts_chat_not_covered": "বার্তা এখনও এই পরিচিতির কাছে পৌঁছাতে পারছে না — সম্মতির অনুমোদনে চ্যাট অন্তর্ভুক্ত নেই। পরিধি বাড়াতে তাঁকে আবার যোগ করুন।",
+    "contacts_node_too_old_body": "পরিচিতি ও চ্যাটের জন্য ciris-server 0.5.185 বা নতুন সংস্করণ প্রয়োজন। এই নোডটি একটি পুরোনো সংস্করণে চলছে, তাই এটি এখনও সাড়া দিতে পারছে না — বাকি সবকিছু স্বাভাবিকভাবে কাজ করে।",
+    "contacts_node_too_old_title": "এই নোডে এখনও পরিচিতি নেই",
+    "directory_picker_approve": "নির্বাচন করুন",
+    "directory_picker_save_title": "ফাইলটি কোথায় সংরক্ষণ করবেন তা বেছে নিন",
+    "directory_picker_usb_title": "মাউন্ট করা USB ফোল্ডারটি নির্বাচন করুন",
+    "accord_written_by": "{who} লিখেছেন"
   },
   "moderation": {
     "ladder": {

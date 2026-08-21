@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "blockiert",
     "contacts_trust_trusted": "vertraut",
     "contacts_trust_unknown": "unbekannt",
-    "contacts_trust_untrusted": "nicht vertraut"
+    "contacts_trust_untrusted": "nicht vertraut",
+    "approvals_alerts_off": "Genehmigungsbenachrichtigungen sind deaktiviert. Aktiviere Benachrichtigungen für CIRIS in den Systemeinstellungen, um informiert zu werden, wenn der Agent dich braucht.",
+    "contacts_chat_not_covered": "Nachrichten können diesen Kontakt noch nicht erreichen — die erteilte Einwilligung umfasst keinen Chat. Füge den Kontakt erneut hinzu, um sie zu erweitern.",
+    "contacts_node_too_old_body": "Kontakte und Chat benötigen ciris-server 0.5.185 oder neuer. Dieser Knoten läuft mit einer älteren Version und kann daher noch nicht antworten — alles andere funktioniert normal.",
+    "contacts_node_too_old_title": "Dieser Knoten hat noch keine Kontakte",
+    "directory_picker_approve": "Auswählen",
+    "directory_picker_save_title": "Speicherort für die Datei wählen",
+    "directory_picker_usb_title": "Eingebundenen USB-Ordner auswählen",
+    "accord_written_by": "verfasst von {who}"
   },
   "moderation": {
     "ladder": {

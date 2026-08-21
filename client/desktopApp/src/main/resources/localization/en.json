@@ -1174,6 +1174,7 @@
     "accord_subtitle": "The founding keyholders that anchor the canonical mesh and jointly hold the kill-switch. Visible to everyone; only the accord holders can act. The app holds no keys; the node signs.",
     "accord_title": "Trust Root",
     "accord_trust_1of1": "1-of-1",
+    "accord_written_by": "written by {who}",
     "adapter_add": "Add Adapter",
     "adapter_browser_hint": "If browser didn't open, tap below:",
     "adapter_complete": "Complete",

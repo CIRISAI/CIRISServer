@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "ブロック済み",
     "contacts_trust_trusted": "信頼済み",
     "contacts_trust_unknown": "不明",
-    "contacts_trust_untrusted": "未信頼"
+    "contacts_trust_untrusted": "未信頼",
+    "approvals_alerts_off": "承認アラートはオフになっています。エージェントが対応を必要としたときに通知を受け取るには、システム設定でCIRISの通知をオンにしてください。",
+    "contacts_chat_not_covered": "この連絡先にはまだメッセージを届けられません。同意の付与にチャットが含まれていません。もう一度追加して範囲を広げてください。",
+    "contacts_node_too_old_body": "連絡先とチャットには ciris-server 0.5.185 以降が必要です。このノードは古いバージョンで動作しているため、まだ応答できません。その他の機能は通常どおり動作します。",
+    "contacts_node_too_old_title": "このノードにはまだ連絡先機能がありません",
+    "directory_picker_approve": "選択",
+    "directory_picker_save_title": "ファイルの保存先を選択してください",
+    "directory_picker_usb_title": "マウントされたUSBフォルダを選択してください",
+    "accord_written_by": "作成者: {who}"
   },
   "moderation": {
     "ladder": {

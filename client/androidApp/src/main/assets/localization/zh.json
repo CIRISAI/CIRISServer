@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "已屏蔽",
     "contacts_trust_trusted": "已信任",
     "contacts_trust_unknown": "未知",
-    "contacts_trust_untrusted": "未信任"
+    "contacts_trust_untrusted": "未信任",
+    "approvals_alerts_off": "审批提醒已关闭。请在系统设置中为 CIRIS 开启通知，以便在智能体需要您时收到提醒。",
+    "contacts_chat_not_covered": "消息暂时无法送达此联系人——同意授权未涵盖聊天。请重新添加以扩大授权范围。",
+    "contacts_node_too_old_body": "联系人和聊天功能需要 ciris-server 0.5.185 或更新版本。此节点运行的是旧版本，因此暂时无法响应——其他功能均正常。",
+    "contacts_node_too_old_title": "此节点尚不支持联系人功能",
+    "directory_picker_approve": "选择",
+    "directory_picker_save_title": "选择文件保存位置",
+    "directory_picker_usb_title": "选择已挂载的 USB 文件夹",
+    "accord_written_by": "由 {who} 撰写"
   },
   "moderation": {
     "ladder": {

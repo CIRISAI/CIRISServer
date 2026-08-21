@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "đã chặn",
     "contacts_trust_trusted": "tin cậy",
     "contacts_trust_unknown": "không rõ",
-    "contacts_trust_untrusted": "không tin cậy"
+    "contacts_trust_untrusted": "không tin cậy",
+    "approvals_alerts_off": "Cảnh báo phê duyệt đang tắt. Hãy bật thông báo cho CIRIS trong cài đặt hệ thống để được báo khi tác tử cần bạn.",
+    "contacts_chat_not_covered": "Tin nhắn chưa thể đến được liên hệ này — quyền đồng ý chưa bao gồm trò chuyện. Hãy thêm họ lần nữa để mở rộng quyền.",
+    "contacts_node_too_old_body": "Danh bạ và trò chuyện cần ciris-server 0.5.185 trở lên. Nút này đang chạy phiên bản cũ hơn nên chưa thể phản hồi — mọi tính năng khác vẫn hoạt động bình thường.",
+    "contacts_node_too_old_title": "Nút này chưa có danh bạ",
+    "directory_picker_approve": "Chọn",
+    "directory_picker_save_title": "Chọn nơi lưu tệp",
+    "directory_picker_usb_title": "Chọn thư mục USB đã gắn kết",
+    "accord_written_by": "viết bởi {who}"
   },
   "moderation": {
     "ladder": {

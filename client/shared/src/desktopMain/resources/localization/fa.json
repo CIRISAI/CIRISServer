@@ -2951,7 +2951,15 @@
     "contacts_trust_blocked": "مسدود",
     "contacts_trust_trusted": "مورد اعتماد",
     "contacts_trust_unknown": "ناشناخته",
-    "contacts_trust_untrusted": "غیرقابل اعتماد"
+    "contacts_trust_untrusted": "غیرقابل اعتماد",
+    "approvals_alerts_off": "هشدارهای تأیید خاموش است. برای اینکه هنگام نیاز عامل به شما باخبر شوید، اعلان‌های CIRIS را در تنظیمات سیستم روشن کنید.",
+    "contacts_chat_not_covered": "پیام‌ها هنوز نمی‌توانند به این مخاطب برسند — مجوز رضایت شامل گفتگو نمی‌شود. برای گسترش آن، او را دوباره اضافه کنید.",
+    "contacts_node_too_old_body": "مخاطبین و گفتگو به ciris-server 0.5.185 یا جدیدتر نیاز دارند. این گره نسخهٔ قدیمی‌تری را اجرا می‌کند، بنابراین هنوز نمی‌تواند پاسخ دهد — بقیهٔ امکانات به‌طور عادی کار می‌کنند.",
+    "contacts_node_too_old_title": "این گره هنوز مخاطبی ندارد",
+    "directory_picker_approve": "انتخاب",
+    "directory_picker_save_title": "محل ذخیرهٔ فایل را انتخاب کنید",
+    "directory_picker_usb_title": "پوشهٔ USB متصل‌شده را انتخاب کنید",
+    "accord_written_by": "نوشتهٔ {who}"
   },
   "moderation": {
     "ladder": {

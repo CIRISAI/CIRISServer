@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "차단됨",
     "contacts_trust_trusted": "신뢰됨",
     "contacts_trust_unknown": "알 수 없음",
-    "contacts_trust_untrusted": "신뢰되지 않음"
+    "contacts_trust_untrusted": "신뢰되지 않음",
+    "approvals_alerts_off": "승인 알림이 꺼져 있습니다. 에이전트가 사용자의 확인을 필요로 할 때 알림을 받으려면 시스템 설정에서 CIRIS 알림을 켜세요.",
+    "contacts_chat_not_covered": "메시지를 아직 이 연락처에게 보낼 수 없습니다. 동의 허가에 채팅이 포함되어 있지 않습니다. 연락처를 다시 추가하여 범위를 넓히세요.",
+    "contacts_node_too_old_body": "연락처와 채팅 기능에는 ciris-server 0.5.185 이상이 필요합니다. 이 노드는 이전 버전을 실행 중이어서 아직 응답할 수 없지만, 다른 기능은 모두 정상적으로 작동합니다.",
+    "contacts_node_too_old_title": "이 노드에는 아직 연락처 기능이 없습니다",
+    "directory_picker_approve": "선택",
+    "directory_picker_save_title": "파일을 저장할 위치 선택",
+    "directory_picker_usb_title": "마운트된 USB 폴더 선택",
+    "accord_written_by": "작성자: {who}"
   },
   "moderation": {
     "ladder": {

@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "diblokir",
     "contacts_trust_trusted": "tepercaya",
     "contacts_trust_unknown": "tidak dikenal",
-    "contacts_trust_untrusted": "tidak tepercaya"
+    "contacts_trust_untrusted": "tidak tepercaya",
+    "approvals_alerts_off": "Peringatan persetujuan sedang mati. Aktifkan notifikasi untuk CIRIS di pengaturan sistem Anda agar diberi tahu saat agen membutuhkan Anda.",
+    "contacts_chat_not_covered": "Pesan belum bisa sampai ke kontak ini — izin persetujuan belum mencakup obrolan. Tambahkan mereka lagi untuk memperluasnya.",
+    "contacts_node_too_old_body": "Kontak dan obrolan memerlukan ciris-server 0.5.185 atau yang lebih baru. Node ini menjalankan versi yang lebih lama, jadi belum bisa merespons — semua yang lain berfungsi seperti biasa.",
+    "contacts_node_too_old_title": "Node ini belum memiliki kontak",
+    "directory_picker_approve": "Pilih",
+    "directory_picker_save_title": "Pilih tempat menyimpan file",
+    "directory_picker_usb_title": "Pilih folder USB yang terpasang",
+    "accord_written_by": "ditulis oleh {who}"
   },
   "moderation": {
     "ladder": {

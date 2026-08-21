@@ -329,7 +329,11 @@ private fun MessageRow(
         // when it is not the default. The BODY is not put here — it belongs in
         // the readable slot, not the mono metadata line.
         dimension = message.contentType.takeIf { it.isNotBlank() && it != "text/plain" },
+        // TWO AXES, both stated. The node signed it; the human wrote it. Reading
+        // the sender off `attesting_key_id` would label every message — yours and
+        // theirs — with the box that carried it.
         attesterKeyId = message.attestingKeyId.takeIf { it.isNotBlank() },
+        authorKeyId = message.author?.takeIf { it.isNotBlank() },
         timestamp = message.assertedAt.takeIf { it.isNotBlank() },
         supersededBy = message.statusAttestationId,
     )
@@ -346,10 +350,23 @@ private fun MessageRow(
                 viewer = ViewerAuthority(isHolder = message.mine),
                 onOp = onOp,
             ) {
+                // `mine` follows the AUTHOR (the server derives it from the same
+                // envelope field), so this stays correct now that the attester is
+                // the node. For the far side, name the person rather than "Them"
+                // when the row carries an author.
                 Text(
-                    if (message.mine) localizedString("mobile.chat_you")
-                    else localizedString("mobile.chat_them"),
+                    when {
+                        message.mine -> localizedString("mobile.chat_you")
+                        message.author?.isNotBlank() == true ->
+                            message.speakerKeyId.take(16) + "\u2026"
+                        else -> localizedString("mobile.chat_them")
+                    },
                     fontSize = 10.sp,
+                    fontFamily = if (!message.mine && message.author?.isNotBlank() == true) {
+                        FontFamily.Monospace
+                    } else {
+                        FontFamily.Default
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(2.dp))

@@ -2945,7 +2945,15 @@
     "contacts_trust_blocked": "ถูกบล็อก",
     "contacts_trust_trusted": "เชื่อถือได้",
     "contacts_trust_unknown": "ไม่ทราบ",
-    "contacts_trust_untrusted": "ไม่เชื่อถือ"
+    "contacts_trust_untrusted": "ไม่เชื่อถือ",
+    "approvals_alerts_off": "การแจ้งเตือนการอนุมัติปิดอยู่ เปิดการแจ้งเตือนสำหรับ CIRIS ในการตั้งค่าระบบของคุณ เพื่อรับแจ้งเมื่อเอเจนต์ต้องการคุณ",
+    "contacts_chat_not_covered": "ยังส่งข้อความถึงผู้ติดต่อรายนี้ไม่ได้ — การให้ความยินยอมยังไม่ครอบคลุมการแชท เพิ่มผู้ติดต่อรายนี้อีกครั้งเพื่อขยายขอบเขต",
+    "contacts_node_too_old_body": "รายชื่อผู้ติดต่อและการแชทต้องใช้ ciris-server 0.5.185 ขึ้นไป โหนดนี้กำลังใช้เวอร์ชันเก่ากว่า จึงยังตอบไม่ได้ — ส่วนอื่น ๆ ทั้งหมดทำงานตามปกติ",
+    "contacts_node_too_old_title": "โหนดนี้ยังไม่มีรายชื่อผู้ติดต่อ",
+    "directory_picker_approve": "เลือก",
+    "directory_picker_save_title": "เลือกตำแหน่งที่จะบันทึกไฟล์",
+    "directory_picker_usb_title": "เลือกโฟลเดอร์ USB ที่เมาต์ไว้",
+    "accord_written_by": "เขียนโดย {who}"
   },
   "moderation": {
     "ladder": {
