@@ -723,8 +723,13 @@ fun CIRISApp(
     // all: an approval gate the operator only discovers by navigating to its
     // screen is a silent denial-of-service on the agent. Stopped on logout so a
     // signed-out client isn't polling an endpoint it cannot authenticate to.
-    LaunchedEffect(currentAccessToken) {
-        if (currentAccessToken != null) {
+    // isHAAddonMode is part of the CONDITION and the KEY: in Home Assistant
+    // add-on mode authentication is supplied by ingress headers and
+    // currentAccessToken deliberately stays null, so keying on the token alone
+    // meant HA operators never got the badge or a single approval notification
+    // unless they happened to open the Wise Authority screen.
+    LaunchedEffect(currentAccessToken, isHAAddonMode) {
+        if (currentAccessToken != null || isHAAddonMode) {
             wiseAuthorityViewModel.startApprovalWatch()
         } else {
             wiseAuthorityViewModel.stopApprovalWatch()

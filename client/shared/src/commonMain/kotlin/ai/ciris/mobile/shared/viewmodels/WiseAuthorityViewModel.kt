@@ -244,12 +244,37 @@ class WiseAuthorityViewModel(
         }
     }
 
-    /** Stop the session-wide watch (logout / shutdown). */
+    /**
+     * Stop the session-wide watch (logout / shutdown) AND clear the
+     * session-owned approval state.
+     *
+     * The clear is not tidiness: this ViewModel is scoped to [CIRISApp], so it
+     * outlives the login session. Cancelling only the watcher left the previous
+     * user's badge count and proposal details standing for the NEXT user until
+     * their first successful fetch — or indefinitely when that fetch failed.
+     * What a signed-out client shows must not be another user's approvals.
+     *
+     * The notifier's persisted dedupe set is deliberately NOT cleared: it is
+     * device-scoped at-most-once by design (its own doc: restarting the app
+     * must not re-announce). A next user's OWN backlog still notifies — those
+     * ids were never remembered.
+     */
     fun stopApprovalWatch() {
         logInfo("stopApprovalWatch", "Stopping approval watch")
         watchJob?.cancel()
         watchJob = null
         watchStarted = false
+        _waStatus.value = null
+        _deferrals.value = emptyList()
+        _approvals.value = emptyList()
+        _pendingApprovalCount.value = 0
+        _budgetCapability.value = BudgetCapability.UNKNOWN
+        _selectedBudgetState.value = null
+        openApprovalId = null
+        _error.value = null
+        _successMessage.value = null
+        _isConnected.value = false
+        _isResolving.value = false
     }
 
     /**
@@ -338,9 +363,12 @@ class WiseAuthorityViewModel(
      * Fetch WA status, deferrals and proposal tickets, rebuild the unified
      * approval list, and hand it to the notifier.
      *
-     * Deferral fetch failures propagate (the screen shows a connection error);
-     * proposal fetch failures do not, because a deployment may legitimately
-     * have no tickets API and that must not blank the deferral list.
+     * Deferral fetch failures propagate (the screen shows a connection error).
+     * Proposal fetch failures ALSO propagate — except the specific
+     * feature-absent responses (404/405/501, see [ApprovalsApi.isTicketsApiAbsent]),
+     * because a deployment may legitimately have no tickets API and that must
+     * not blank the deferral list. A 401/500/transient failure is NOT proof of
+     * absence and no longer silently empties the approval card.
      */
     private suspend fun fetchDataInternal() {
         val method = "fetchDataInternal"
