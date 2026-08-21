@@ -361,11 +361,32 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     // replicates to. An ordinarily-federated peer carries the default
     // `capacity:`/`trace:` grant and no `chat:`; listing them would offer the
     // human a conversation that silently never leaves this node.
-    let peer_ids: Vec<String> = grants
-        .into_iter()
-        .filter(|(_, prefixes)| prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX))
-        .map(|(peer, _)| peer)
-        .collect();
+    //
+    // #472 — a routable grant names the contact's NODE, but the contact IS the
+    // PERSON: each chat-covering subject resolves through persist's owner_of
+    // (the withdraws-aware owner-binding fold) back to the human it speaks
+    // for. A person-subject grant (legacy, or the unclaimed-contact fallback)
+    // stays as-is; two grants resolving to one person are ONE contact.
+    let mut peer_ids: Vec<String> = Vec::new();
+    for (subject, prefixes) in grants {
+        if !prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX) {
+            continue;
+        }
+        let person = match st.engine.owner_of(&subject).await {
+            Ok(Some(owner_key)) => owner_key,
+            Ok(None) => subject,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("owner_of({subject}): {e}"),
+                )
+            }
+        };
+        if !peer_ids.contains(&person) {
+            peer_ids.push(person);
+        }
+    }
     let directory = st.engine.federation_directory();
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
@@ -549,11 +570,14 @@ async fn add_contact(
     // stayed ineligible to replicate to them. The people you know best were
     // exactly the people you could not message.
     //
-    // `ensure_replication_consent_covers` asks the question the guard did not:
-    // does the LIVE grant cover `chat:`? If not it supersedes it with the union.
+    // `ensure_contact_consent_covers` asks BOTH questions the guard did not:
+    // does the LIVE grant cover `chat:`, and does it name a subject the WIRE
+    // can route (#472 — the contact's bound NODE, resolved through persist's
+    // own withdraws-aware nodes_stewarded_by; an unclaimed contact falls back
+    // to the person-subject grant as recorded intent).
     let mut prefixes = crate::peer::default_attestation_prefixes();
     prefixes.push(CHAT_ATTESTATION_PREFIX.to_owned());
-    let grant = match crate::peer::ensure_replication_consent_covers(
+    let (grant, _covered_subjects) = match crate::peer::ensure_contact_consent_covers(
         &st.engine,
         &owner.node_key_id,
         &key_id,
@@ -678,7 +702,7 @@ async fn start_chat(
     // locally and never become eligible to replicate — a one-way plane that looks
     // like a working conversation from this side, which is the worst way for it
     // to fail.
-    match crate::peer::live_grant_prefixes(&st.engine, &owner.node_key_id, &key_id).await {
+    match crate::peer::contact_grant_prefixes(&st.engine, &owner.node_key_id, &key_id).await {
         Ok(Some(prefixes)) if prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX) => {}
         Ok(Some(prefixes)) => {
             return refuse(
@@ -816,7 +840,16 @@ async fn start_chat(
         // A LOST RACE IS A SUCCESS SOMEONE ELSE ALREADY HAD. Two concurrent
         // POSTs (double-tap, client retry, two devices) can both observe
         // `lookup_community` returning None above; one insert wins and the
-        // other lands here on the primary-key conflict. The room the loser
+        // other lands here on the primary-key conflict.
+        //
+        // persist v38.2.0 NARROWED when this arm fires: an IDENTICAL re-put is
+        // now an Ok no-op at the door (first-accepted authority signature
+        // preserved), so the ordinary race never errors at all. What still
+        // reaches here is the typed Conflict for DIFFERING content under the
+        // id — a roster-fork signal — plus any backend that predates the
+        // verdict semantics. The roster-equality re-read below is exactly the
+        // fork discriminator: matching roster → idempotent success;
+        // differing → the 500 carries the substrate's own Conflict message. The room the loser
         // asked for EXISTS — reporting 500 would break the route's advertised
         // idempotency exactly on the inputs where idempotency matters. So on
         // failure, re-read the derived id: if the room is there with the same

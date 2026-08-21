@@ -130,7 +130,10 @@ impl Peer {
     /// (CIRISPersist#659 / CIRISVerify#252). The producer binds all four into the
     /// bytes it signs, and that is the same projection persist checks.
     async fn signed_key_record(&self) -> SignedKeyRecord {
-        let rec = produce_self_key_record(&self.identity, identity_type::WITNESS, VALID_FROM, &[])
+        // NODE, not WITNESS: these fixtures ARE replication target nodes, and
+        // since the #472 arc the coordinator set is filtered to transport-
+        // capable (NODE-role) subjects — a person or witness gets no dialer.
+        let rec = produce_self_key_record(&self.identity, identity_type::NODE, VALID_FROM, &[])
             .await
             .expect("peer self-signed key record");
         // The same serde round-trip `test_bless::maybe_test_bless_self` adopts

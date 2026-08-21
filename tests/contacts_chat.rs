@@ -277,6 +277,20 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
 }
 
 /// Serve the contacts+chat router on an ephemeral port.
+
+/// The CONSENT subjects (persist's revocation-folded list) — distinct from
+/// `replication_peers_from_consent`, which since the #472 arc is the TRANSPORT
+/// set (NODE-role subjects only, persons resolved through their bindings).
+/// A person-subject grant is real consent the wire cannot dial; these tests
+/// assert the CONSENT fact.
+async fn consent_subjects(engine: &Engine, node: &str) -> Vec<String> {
+    engine
+        .federation_directory()
+        .list_consent_peers(node)
+        .await
+        .expect("list_consent_peers")
+}
+
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
     let app = contacts_chat::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -416,9 +430,7 @@ async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
     // The grant is a real `consent:replication:v1` row this node authored, and
     // persist's revocation-folded projection can see it.
     let node = node_key_id(&engine).await;
-    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
-        .await
-        .expect("consent peer set");
+    let peers = consent_subjects(&engine, &node).await;
     assert!(
         peers.iter().any(|p| p == CONTACT_KEY_ID),
         "the contact must land in the consent peer set: {peers:?}"
@@ -512,8 +524,13 @@ async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
     assert!(peered.freshly_emitted);
     assert_eq!(
         live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
-        vec!["capacity:".to_string(), "trace:".to_string()],
-        "the fixture must actually start NARROW, or this test proves nothing"
+        vec![
+            "capacity:".to_string(),
+            "self:delegates_to:".to_string(),
+            "trace:".to_string(),
+        ],
+        "the fixture must actually start NARROW (the default set, sans chat:), \
+         or this test proves nothing"
     );
 
     let client = reqwest::Client::new();
@@ -546,6 +563,7 @@ async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
         vec![
             "capacity:".to_string(),
             "chat:".to_string(),
+            "self:delegates_to:".to_string(),
             "trace:".to_string()
         ],
         "the widened grant must carry the UNION — dropping capacity:/trace: would \
@@ -557,9 +575,7 @@ async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
 
     // The contact is still a contact — a widening must not drop the peer out of
     // the revocation-folded set on its way through.
-    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
-        .await
-        .expect("consent peer set");
+    let peers = consent_subjects(&engine, &node).await;
     assert!(peers.iter().any(|p| p == CONTACT_KEY_ID), "{peers:?}");
 
     // And a SECOND add is now a true no-op: nothing written, nothing superseded.
@@ -636,7 +652,7 @@ async fn widening_preserves_the_standing_grants_policy() {
     // above is unchanged, which is the property this test exists for.
     assert_eq!(
         payload["attestation_prefixes"],
-        serde_json::json!(["capacity:", "chat:", "trace:"]),
+        serde_json::json!(["capacity:", "chat:", "self:delegates_to:", "trace:"]),
         "the union must be sorted + deduped so the JCS bytes are stable"
     );
 }
@@ -711,9 +727,7 @@ async fn emit_replication_consent_re_grants_after_a_withdraw() {
             .is_empty(),
         "the withdraw must clear the live grant"
     );
-    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
-        .await
-        .expect("consent peer set");
+    let peers = consent_subjects(&engine, &node).await;
     assert!(!peers.iter().any(|p| p == CONTACT_KEY_ID), "{peers:?}");
 
     // RE-CONSENT. Under the old guard this returned freshly_emitted:false and
@@ -734,9 +748,7 @@ async fn emit_replication_consent_re_grants_after_a_withdraw() {
     let live = live_grants_for(&engine, &node, CONTACT_KEY_ID).await;
     assert_eq!(live.len(), 1, "exactly one live grant after re-consent");
     assert_eq!(live[0].attestation_id, second.attestation_id);
-    let peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
-        .await
-        .expect("consent peer set");
+    let peers = consent_subjects(&engine, &node).await;
     assert!(
         peers.iter().any(|p| p == CONTACT_KEY_ID),
         "the peer must be replicable again: {peers:?}"
@@ -804,6 +816,7 @@ async fn re_adding_an_un_contacted_person_restores_a_live_grant() {
         vec![
             "capacity:".to_string(),
             "chat:".to_string(),
+            "self:delegates_to:".to_string(),
             "trace:".to_string()
         ]
     );
@@ -1725,10 +1738,17 @@ async fn concurrent_chat_creation_is_an_idempotent_success() {
              success, got {sa}/{sb}: {ja} / {jb}"
         );
         assert_eq!(ja["community_id"], jb["community_id"], "round {round}");
-        assert!(
-            !(ja["freshly_created"] == true && jb["freshly_created"] == true),
-            "round {round}: both arrivals claim to have created the room — the \
-             loser must report freshly_created=false"
+        // Under persist v38.2.0 an IDENTICAL re-put is an Ok NO-OP (the typed
+        // Conflict is reserved for a DIFFERING roster — a fork signal), so two
+        // concurrent creators of the same deterministic room are
+        // indistinguishable and BOTH may honestly report freshly_created. The
+        // pre-v38.2 assertion "at most one freshly_created" pinned the old
+        // door's shape. What must hold in every world: one room, one roster,
+        // and the no-op preserved the first-accepted authority signature —
+        // there is exactly ONE stored row and its member set is the pair.
+        assert_eq!(
+            ja["member_key_ids"], jb["member_key_ids"],
+            "round {round}: both arrivals must see the same roster"
         );
     }
 }
@@ -2010,4 +2030,85 @@ fn both_chat_write_handlers_enforce_declared_conformance() {
              explicitly does not claim the roles for"
         );
     }
+}
+
+/// **CIRISServer#472 — a claimed contact's grant names their bound NODE**, the
+/// only subject the wire can route. The person stays the CONTACT (the listing
+/// resolves the node-subject back through the owner-binding, once), and the
+/// chat guard reads coverage through the same resolution — one door, both
+/// directions.
+#[tokio::test]
+async fn a_claimed_contacts_grant_names_their_bound_node() {
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+
+    // Claim the contact: a NODE-role key bound by the contact's own live
+    // owner-binding — the same fixture shape the forged-author test uses.
+    const CONTACT_NODE: &str = "contact-node-1";
+    seed_node_key(&engine, CONTACT_NODE, 0xE0, 0xE1).await;
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ciris_server::auth::ownership::emit_steward_binding(
+        &engine,
+        &contact_signer(),
+        CONTACT_NODE,
+        &scopes,
+    )
+    .await
+    .expect("bind contact -> their node");
+
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    // THE ROUTABLE FACT: the chat:-covering grant's live subject is the NODE.
+    let node = node_key_id(&engine).await;
+    let node_prefixes = ciris_server::peer::live_grant_prefixes(&engine, &node, CONTACT_NODE)
+        .await
+        .expect("read node-subject grant");
+    let node_prefixes = node_prefixes.expect("the grant must name the contact's bound node");
+    assert!(
+        node_prefixes.iter().any(|p| p == "chat:"),
+        "the NODE-subject grant must cover chat: — that is what makes messages \
+         eligible to leave this node: {node_prefixes:?}"
+    );
+    // And the PERSON carries no fresh person-subject grant on this path (the
+    // fallback is for unclaimed contacts only).
+    let person_prefixes = ciris_server::peer::live_grant_prefixes(&engine, &node, CONTACT_KEY_ID)
+        .await
+        .expect("read person-subject grant");
+    assert!(
+        person_prefixes.is_none(),
+        "a claimed contact must not get the unroutable person-subject grant: \
+         {person_prefixes:?}"
+    );
+
+    // THE HUMAN FACT: the listing shows the PERSON, exactly once — the
+    // node-subject resolves back through owner_of.
+    let resp = client
+        .get(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET /v1/contacts");
+    let list: serde_json::Value = resp.json().await.expect("contacts json");
+    assert_eq!(list["total"], 1, "one person, one contact: {list}");
+    assert_eq!(list["contacts"][0]["key_id"], CONTACT_KEY_ID);
+
+    // And the chat door opens through the SAME resolution.
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 200, "start chat: {:?}", resp.text().await);
 }

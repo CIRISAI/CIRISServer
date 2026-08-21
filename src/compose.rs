@@ -3243,9 +3243,49 @@ pub(crate) async fn start_replication_runtime(
     // TransportDestination — resolved by namespace/cohort_scope from persist's registry
     // (v15.1.0) rather than a hand-wired list_* + selector per object type. `None` would
     // preserve the pre-selector cohort projection; we publish our own.
-    let own_key_id = node_key_id.to_string();
-    let self_provider: ciris_edge::replication::CohortProvider =
-        Arc::new(move || vec![own_key_id.clone()]);
+    // CIRISServer#472 arc — the publish-own set names the node AND ITS OWNER.
+    //
+    // Self-projected planes are PUBLISHED-OWN: edge advertises a `self`-scoped
+    // row only when its attester is in this provider's set. The owner-binding
+    // `delegates_to(user → node)` and the owner's occurrence rows are attested
+    // by the USER key — with only the node key here, every node kept its
+    // owner's records to itself, and every person→node resolution walk on
+    // every OTHER node starved (measured: after three ladder fixes the binding
+    // still never crossed; this was the last door). The owner is resolved at
+    // runtime (claiming happens after boot) by the updater task below, through
+    // persist's withdraws-aware owner_of.
+    let self_publish_keys: Arc<std::sync::RwLock<Vec<String>>> =
+        Arc::new(std::sync::RwLock::new(vec![node_key_id.to_string()]));
+    let self_provider: ciris_edge::replication::CohortProvider = {
+        let keys = Arc::clone(&self_publish_keys);
+        Arc::new(move || keys.read().expect("self_publish_keys poisoned").clone())
+    };
+    tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let keys = Arc::clone(&self_publish_keys);
+        let node = node_key_id.to_string();
+        async move {
+            // Detached by design: it only reads the directory and updates a
+            // Vec; on shutdown the runtime drop aborts it mid-sleep. Re-checks
+            // every 30s so a claim (or a re-rooted ownership) is picked up
+            // without a restart, and an owner it has already added is a no-op.
+            loop {
+                if let Ok(Some(owner)) = engine.owner_of(&node).await {
+                    let mut w = keys.write().expect("self_publish_keys poisoned");
+                    if !w.contains(&owner) {
+                        tracing::info!(
+                            owner = %owner,
+                            "publish-own set gains this node's OWNER — their \
+                             self-plane rows (owner-binding, occurrences) now \
+                             advertise to consent peers (CIRISServer#472 arc)"
+                        );
+                        w.push(owner);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        }
+    });
 
     // CIRISEdge#370 — wire the Edge's metrics handle into the runtime so the
     // scheduler routes per-round RoundEvents into the round-outcome counter
