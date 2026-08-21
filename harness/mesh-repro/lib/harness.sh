@@ -45,7 +45,24 @@ compose() {
 # (CI reuses one build across scenarios).
 harness_build_wheel() {
   if [ "${SKIP_BUILD:-0}" = "1" ] && ls "$HARNESS_DIR"/wheels/ciris_server-*.whl >/dev/null 2>&1; then
-    echo "── SKIP_BUILD=1: reusing $(ls -t "$HARNESS_DIR"/wheels/ciris_server-*.whl | head -1)"
+    local wheel newest
+    wheel="$(ls -t "$HARNESS_DIR"/wheels/ciris_server-*.whl | head -1)"
+    echo "── SKIP_BUILD=1: reusing $wheel"
+    # STALENESS IS SILENT, so say it out loud. `pack_wheel.py` already purges
+    # stale wheels because "a run that silently tests yesterday's substrate — it
+    # happened"; this is the same failure one level up, and it bit during the
+    # c84add0/71adb94 sequence: a commit landed WHILE cargo was compiling, so the
+    # artifact may or may not have contained it and no output said which. A run
+    # whose verdict a release reads must not be ambiguous about which tree it
+    # measured. Warn, never fail: SKIP_BUILD is also the legitimate CI path where
+    # the build step ran moments earlier.
+    newest="$(find "$HARNESS_DIR/../../src" -name '*.rs' -newer "$wheel" -print -quit 2>/dev/null)"
+    if [ -n "$newest" ]; then
+      echo "  ⚠ THE WHEEL IS OLDER THAN THE TREE — at least $newest changed after it was packed."
+      echo "    This ladder is about to measure a substrate that is not the one in src/."
+      echo "    Rebuild before trusting the verdict:"
+      echo "      cargo build --release --features test-anchor,python && python3 pack_wheel.py"
+    fi
     return 0
   fi
   echo "── building test-anchor wheel from the working tree ──"

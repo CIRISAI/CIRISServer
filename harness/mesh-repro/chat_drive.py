@@ -358,24 +358,56 @@ def probe_arrived(base, token, cid, att_id):
     return 0
 
 
-def probe_hamburger(base, token, cid, att_id, attester):
-    """The CEG identity fields on B's copy. Arrival that strips identity is
-    delivery of a rumour, not testimony — so every field the hamburger renders
-    (`attestation_id`, `attesting_key_id`, `cohort_scope`, `status`) is checked,
-    not just presence of a row."""
+def probe_hamburger(base, token, cid, att_id, owner, node_key, author_field, world):
+    """THE TWO-FACT ASSERTION: who SIGNED and who AUTHORED are separate fields,
+    and both must be right.
+
+    `attesting_key_id` is WIRE-TRUE — the key that actually signed and that a
+    peer verified. Rewriting it to the owner would make one field answer two
+    questions with one answer wrong, on the provenance surface of all places.
+    The person is carried beside it, in `author_field`, derived from the signed
+    envelope's attribution. "Node attests, envelope names the owner, the
+    owner-binding is live" is not a rumour: it is a signed on-behalf record whose
+    authority chain a peer can walk.
+
+    `author == owner` is asserted UNCONDITIONALLY, so this survives the day
+    persist can express a signer-explicit community write and the attester
+    converges to the owner. `world` names which key may legitimately attest
+    TODAY, and is the one thing that moves between those worlds.
+    """
+    if not author_field:
+        # No guessed name. An absent field and a wrong name look identical from
+        # here, and calling the second one a product failure would be a lie.
+        return 0
     _, _, msgs = _messages(base, token, cid)
     for m in msgs:
         if m.get("attestation_id") != att_id:
             continue
-        if (
-            m.get("attesting_key_id") == attester
+        author = m.get(author_field)
+        ok = (
+            author == owner
             and m.get("cohort_scope") == "community"
             and m.get("status") == "live"
             and m.get("community_id") == cid
-            and attester in (m.get("subject_key_ids") or [])
-        ):
-            return 1
-        return 0
+            # PRODUCER-ONLY, stated as persist states it, so this survives both
+            # worlds: `check_promotion_cohort_standing` refuses a community
+            # placement whose attested_key_id or any subject_key_ids entry is
+            # anyone but the producer (admission.rs:2236-2240). So the subject set
+            # tracks whoever attests — the OWNER today, the NODE the moment the
+            # node attests. Asserting `owner in subject_key_ids` would therefore
+            # go red on a correct row, which is why it does not appear here.
+            and (m.get("subject_key_ids") or []) == [m.get("attesting_key_id")]
+        )
+        if world == "owner":
+            # The post-ask world: the producer's own signature survived, so the
+            # two fields converge — and that convergence is the proof, not a
+            # weakening of the check.
+            ok = ok and m.get("attesting_key_id") == owner
+        else:
+            # persist v38: community rows are node-signed by construction. The
+            # split is the DESIGN here, so it is asserted, not tolerated.
+            ok = ok and m.get("attesting_key_id") == node_key and author != m.get("attesting_key_id")
+        return 1 if ok else 0
     return 0
 
 
@@ -408,7 +440,7 @@ def main():
         return 0
     table = {
         "arrived": (4, probe_arrived),
-        "hamburger": (5, probe_hamburger),
+        "hamburger": (8, probe_hamburger),
         "dark": (4, probe_dark),
     }
     if cmd not in table:

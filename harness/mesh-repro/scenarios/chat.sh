@@ -170,7 +170,7 @@
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
 SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="cross-node chat proven — two nodes converged on one derived room, A's bytes landed in B's transcript with their CEG identity intact, and the canonical that carries the mesh cannot read the room."
+SUCCESS_MESSAGE="the chat substrate held everywhere it is wired: two nodes converged on one derived room with no coordination, the consent/authz/attribution gates all bit in the right order, and the canonical that carries the mesh cannot read the room. Delivery itself is the RED-EXPECTED list above — when those flip, this line gets to say A's bytes landed in B's transcript."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
@@ -199,6 +199,26 @@ CHAT_RECIPIENTS="${CHAT_NODES#* }"
 # Every service that gets claimed. The canonical is always present: it is the
 # dial target, and it is the non-member the `dark` stage interrogates.
 CHAT_SERVICES="canonical $CHAT_NODES"
+
+# WHO MAY ATTEST A COMMUNITY-SCOPED CHAT ROW, and what the route calls the AUTHOR.
+#
+# `attesting_key_id` is the key that SIGNED; the author field is the person the
+# signed envelope attributes the words to. They are separate questions and the
+# projection answers them separately (team-lead ruling, §8.1.12.7 fidelity).
+#
+#   CHAT_ATTESTER_WORLD=node   persist v38 — `put_attestation` refuses every
+#                              community-scope row at the write gate, so
+#                              `attestation_promote`'s re-seal is the only minting
+#                              door and it signs with the engine (e81a103). The
+#                              split is the design; the stage asserts it.
+#   CHAT_ATTESTER_WORLD=owner  after persist ask (a) or (b) — the producer's
+#                              signature survives promotion and the two converge.
+#
+# CHAT_AUTHOR_FIELD is EMPTY until server-wire reports the name it chose. Empty
+# means the stage refuses to assert rather than probe a guess: a name that does
+# not exist and a feature that does not work read identically from here.
+CHAT_ATTESTER_WORLD="${CHAT_ATTESTER_WORLD:-node}"
+CHAT_AUTHOR_FIELD="${CHAT_AUTHOR_FIELD:-author}"
 # The console binary, bind-mounted from the SAME release build that produced the
 # wheel (docker-compose.chat.yml). `identity create` and `claim` live only in the
 # Rust bin target; the wheel's `ciris-server` console script cannot run them.
@@ -616,6 +636,9 @@ HINT_arrived="the sender's message never reached the recipient. The diagnosis be
      transcript, \`collect_messages\` anchors on \`active_community_members\`, so
      the recipient must hold the community row AND the author must still be a member."
 EXIT_arrived=35
+# RED-EXPECTED — the operator decided 0.5.185 ships over this; the line below,
+# not a CI failure everyone routes around, is the record of what remains.
+XFAIL_arrived="THE OPERATOR DECIDED TO SHIP 0.5.185 OVER THIS. Cross-node delivery does not work yet — but the SIGNATURE defect is CURED: this ladder's own release-read run printed 'signer IS the attester' (attesting_key_id == scrub_key_id == the sender NODE's key, c84add0), and the block MOVED one layer down. The measured mechanism now: node-a WITHHOLDS the attestation plane — 'recipient is not in this node's live consent:replication send-set' — because the chat:-covering grant names the contact's PERSON fed-ID, and edge resolves recipients by EXACT key match against list_consent_peers(local): a person's key has no transport binding, so a grant naming them is not routable. The 7 control rows land because the admission-door grants name NODE keys. THE FIX IS OURS (CIRISServer#472, 0.5.186): resolve the contact to their BOUND NODE through the replicated owner-binding (the same walk collect_messages already does) when emitting/widening the consent grant, and read coverage through the same resolution on the accept side. Further gates may sit behind this one (attester-membership at community admission is unmeasured while nothing is served) — this ladder names them as the send-set opens."
 # THE THREE-WAY SPLIT. "It did not arrive" is three different asks, addressed to
 # three different owners, and a diagnosis that does not say which is a diagnosis
 # nobody can act on:
@@ -699,10 +722,18 @@ stage_hamburger() {
   _chat_load
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python /opt/harness/chat_drive.py hamburger \
-    "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" "$CHAT_A_OWNER" 2>/dev/null | tr -d '[:space:]'
+    "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" \
+    "$CHAT_A_OWNER" "$CHAT_A_NODE_KEY" "${CHAT_AUTHOR_FIELD:-}" "${CHAT_ATTESTER_WORLD:-node}" \
+    2>/dev/null | tr -d '[:space:]'
 }
 HINT_hamburger="the row reached the recipient but not with its identity intact — attesting_key_id is not the sender's owner, cohort_scope is not \`community\`, the subject set does not name the author, or the status folded away from \`live\`. Any of those makes the arrived object a different object from the one that was sent."
 EXIT_hamburger=36
+# RED-EXPECTED — strictly downstream of arrived: this stage asserts the two-fact
+# projection (attester == sender node, author == owner) on the DELIVERED copy,
+# and nothing is delivered while the send-set withholds. It flips live in the
+# same change that greens arrived; XFAILing it separately would be a lie of
+# precision (it has its own assertion, not its own defect).
+XFAIL_hamburger="downstream of arrived — the two-fact assertion (attesting_key_id == the sender NODE, author == the owner from the signed envelope's on_behalf_of_key_id) has no delivered row to run against until the consent send-set names the contact's bound NODE. Delete this in the same change that deletes XFAIL_arrived."
 DIAG_hamburger() {
   _chat_load
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python -c '
@@ -794,7 +825,7 @@ HINT_one_sided="the recipient could not resolve a room the sender had already cr
 EXIT_one_sided=38
 # RED-EXPECTED. The value names the mechanism because that is the entire point of
 # the marking: this line, not a CI failure everyone routes around, is the ask.
-XFAIL_one_sided="no Community coordinator in compose::build_replication_peers (src/compose.rs:3045 registers Attestation/Key/IdentityOccurrence/TransportDestination only) — the community roster never replicates, so a recipient cannot admit community-scoped rows for a room it did not itself open. Edge and persist both implement the plane; only the registration is missing. THE ASK: add EnvelopeKind::Community (and Family, by the same argument) to that list."
+XFAIL_one_sided="the community roster did not converge over the real transport: the recipient held 0 federation_communities rows for a room the sender had already created, then derived the identical convergent id itself. The compose::build_replication_peers coordinator for Community + CommunityMembershipRevocation IS registered now (71adb94 — boot and reconcile, one list), and the red SURVIVED it — so the registration was necessary but not sufficient. The measured evidence is consistent with the same person/node axis that blocks arrived: the roster's members are PERSONS, edge's serve policy classes Community as cohort-scoped, and the requesting transport peer is a NODE that is not a member — and/or the same consent send-set withhold gates the plane's delivery. Named for the 0.5.186 routing arc (CIRISServer#472) alongside XFAIL_arrived; this stage flips live when a one-sided room resolves cross-node."
 DIAG_one_sided() {
   _chat_load
   echo "  recipient's answer for the sender's room, before it opened one:"
