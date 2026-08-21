@@ -4,6 +4,7 @@ import ai.ciris.mobile.shared.localization.localizedString
 import ai.ciris.mobile.shared.models.chat.CegChatMessage
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
+import ai.ciris.mobile.shared.platform.testableWithHandler
 import ai.ciris.mobile.shared.ui.components.AttKind
 import ai.ciris.mobile.shared.ui.components.AttOp
 import ai.ciris.mobile.shared.ui.components.AttStatus
@@ -272,11 +273,23 @@ fun ChatScreen(
                             modifier = Modifier.weight(1f).testable("input_chat_body"),
                         )
                         Spacer(Modifier.width(8.dp))
+                        // ONE predicate for the human and the robot. The
+                        // Material `enabled` gates the real button, but
+                        // `testableClickable` appends an UNCONDITIONAL
+                        // clickable — a second tap mid-flight (or on an
+                        // oversized draft) fired send() through the automation
+                        // layer, and a message is an attestation: the duplicate
+                        // is irreversible. `testableWithHandler` registers for
+                        // automation without adding a clickable, and the
+                        // handler re-checks the SAME predicate the button uses.
+                        val canSend = !sending && draft.isNotBlank() &&
+                            draftBytes <= MAX_MESSAGE_BYTES
                         Button(
                             onClick = { viewModel.send() },
-                            enabled = !sending && draft.isNotBlank() &&
-                                draftBytes <= MAX_MESSAGE_BYTES,
-                            modifier = Modifier.testableClickable("btn_chat_send") { viewModel.send() },
+                            enabled = canSend,
+                            modifier = Modifier.testableWithHandler("btn_chat_send") {
+                                if (canSend) viewModel.send()
+                            },
                         ) {
                             Text(
                                 if (sending) localizedString("mobile.chat_sending")

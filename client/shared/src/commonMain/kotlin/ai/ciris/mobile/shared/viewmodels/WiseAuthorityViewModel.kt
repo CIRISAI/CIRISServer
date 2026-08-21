@@ -437,10 +437,22 @@ class WiseAuthorityViewModel(
                 val result = api.resolveDeferral(deferralId, resolution, guidance)
                 logInfo(method, "Deferral resolved: ${result.deferralId}, success=${result.success}")
 
-                _successMessage.value = "Deferral resolved successfully"
-                notifier?.forget(deferralId)
+                // HTTP success is transport; `result.success` is the DECISION.
+                // The response model carries the flag independently — e.g.
+                // another authority resolved this deferral concurrently — and
+                // announcing success on `success=false` forgot the notification
+                // key and closed the dialog as though THIS decision committed.
+                if (result.success) {
+                    _successMessage.value = "Deferral resolved successfully"
+                    notifier?.forget(deferralId)
+                } else {
+                    _error.value =
+                        "The deferral was not resolved — it may have been decided by another authority"
+                    logWarn(method, "Resolve refused by the server (success=false) for $deferralId")
+                }
 
-                // Refresh to update the list
+                // Refresh either way: on refusal the list shows the deferral's
+                // ACTUAL current state, which is the honest answer.
                 fetchDataInternal()
             } catch (e: Exception) {
                 logError(method, "Failed to resolve deferral: ${e::class.simpleName}: ${e.message}")

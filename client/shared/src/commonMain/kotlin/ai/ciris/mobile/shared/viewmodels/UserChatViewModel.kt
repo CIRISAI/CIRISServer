@@ -182,12 +182,21 @@ class UserChatViewModel(
         val id = _community.value?.communityId ?: return
         val text = _draft.value
         if (text.isBlank()) return
+        // Captured at SEND TIME, not at completion. Reading `entryEpoch` after
+        // the round-trip compares against whatever room is CURRENT — so a send
+        // finishing after the user entered room B passed the guard and painted
+        // A's transcript under B's header, while A's completion also cleared
+        // B's freshly-typed draft. The message itself still lands in A (the id
+        // was captured) — only the local after-effects must be discarded.
+        val epochAtSend = entryEpoch
         viewModelScope.launch {
             _sending.value = true
             clearRefusal()
             try {
                 val result = apiClient.sendChatMessage(id, text)
-                _draft.value = ""
+                if (epochAtSend == entryEpoch) {
+                    _draft.value = ""
+                }
                 if (result.message != null) {
                     PlatformLogger.i(tag, "[send] ${result.attestationId.take(24)}… projected")
                 } else {
@@ -196,13 +205,18 @@ class UserChatViewModel(
                         "[send] ${result.attestationId.take(24)}… landed; read-back deferred — refreshing",
                     )
                 }
-                loadMessages(id, entryEpoch)
+                loadMessages(id, epochAtSend)
             } catch (e: NodeRefusal) {
-                recordRefusal("send", e)
+                if (epochAtSend == entryEpoch) recordRefusal("send", e)
             } catch (e: Exception) {
-                _refusalDetail.value = e.message ?: e::class.simpleName
+                if (epochAtSend == entryEpoch) {
+                    _refusalDetail.value = e.message ?: e::class.simpleName
+                }
                 PlatformLogger.e(tag, "[send] ${e.message}", e)
             } finally {
+                // Unconditional: a stale completion clearing the spinner is
+                // corrective (the new room has no send in flight), and a live
+                // one must always clear it.
                 _sending.value = false
             }
         }

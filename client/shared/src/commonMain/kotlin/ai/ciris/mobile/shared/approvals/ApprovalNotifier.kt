@@ -154,7 +154,7 @@ class ApprovalNotifier(
             fresh.map { it.id }
         }
 
-        remember(notifiedNow)
+        remember(notifiedNow, stillPending = approvals.mapTo(HashSet()) { it.id })
         notifiedNow
     }
 
@@ -187,13 +187,30 @@ class ApprovalNotifier(
         return LinkedHashSet(loaded).also { notified = it }
     }
 
-    /** Caller must already hold [gate]. See [loadNotified]. */
-    private suspend fun remember(ids: List<String>) {
+    /**
+     * Caller must already hold [gate]. See [loadNotified].
+     *
+     * Eviction never touches an id that is STILL PENDING: with more than
+     * [maxRemembered] approvals outstanding, evicting oldest-first made the
+     * notifier cycle — observe 400, evict the first 100, re-announce them next
+     * poll, evict the next 100 — a fresh alert every interval for a backlog
+     * the operator had already been told about, which is the exact opposite of
+     * the at-most-once contract. An id no longer pending is fair game: its
+     * approval is resolved and can never be re-announced.
+     */
+    private suspend fun remember(ids: List<String>, stillPending: Set<String>) {
         val seen = loadNotified()
         seen.addAll(ids)
-        while (seen.size > maxRemembered) {
-            val oldest = seen.firstOrNull() ?: break
-            seen.remove(oldest)
+        if (seen.size > maxRemembered) {
+            val evictable = seen.filter { it !in stillPending }
+            var excess = seen.size - maxRemembered
+            for (oldest in evictable) {
+                if (excess <= 0) break
+                seen.remove(oldest)
+                excess -= 1
+            }
+            // A pending set larger than the cap keeps every pending id: the
+            // cap bounds garbage, never truth.
         }
         runCatching { store.persist(seen) }
             .onFailure { PlatformLogger.w(TAG, "[remember] persist failed: ${it.message}") }

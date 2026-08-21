@@ -820,6 +820,13 @@ fun CIRISApp(
     val contactsViewModel: ContactsViewModel = viewModel {
         ContactsViewModel(apiClient)
     }
+    // Same leak class as the approvals ViewModel (both are app-scoped and
+    // survive logout): the contact list is owner-gated content and must not
+    // survive into the next session. Declared here, not in the approval-watch
+    // effect above, because this ViewModel is constructed later in composition.
+    LaunchedEffect(currentAccessToken) {
+        if (currentAccessToken == null) contactsViewModel.clearSessionState()
+    }
     // The node predates /v1/contacts (the embedded APK node lags one release).
     // Contacts is the node-mode HOME, so landing there would put the user on a
     // surface that cannot answer. Fall back to the PREVIOUS default (Nodes) once,

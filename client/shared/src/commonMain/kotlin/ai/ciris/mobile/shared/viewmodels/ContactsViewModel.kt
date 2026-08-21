@@ -327,4 +327,30 @@ class ContactsViewModel(
                     .thenBy { it.keyId },
             )
     }
+
+    /**
+     * Clear every piece of session-owned state (logout).
+     *
+     * This ViewModel is CIRISApp-scoped and survives the login session — the
+     * same shape as the approvals ViewModel's leak: after owner A logs out,
+     * A's contact list stayed visible to the next signer-in until (unless) a
+     * new fetch succeeded; for an observer, the owner-gated list stayed
+     * exposed indefinitely. [routeUnsupported] is deliberately NOT cleared —
+     * a lagging node lags regardless of who signs in; it is a node fact, not
+     * session state.
+     */
+    fun clearSessionState() {
+        _allContacts.value = emptyList()
+        _contacts.value = emptyList()
+        _contactsLoaded.value = false
+        _chatIneligible.value = emptySet()
+        _allPeers.value = emptyList()
+        _peers.value = emptyList()
+        _searchQuery.value = ""
+        _selectedPeer.value = null
+        _addBusy.value = false
+        _addRefusalReasonId.value = null
+        _addError.value = null
+        _justAdded.value = null
+    }
 }
