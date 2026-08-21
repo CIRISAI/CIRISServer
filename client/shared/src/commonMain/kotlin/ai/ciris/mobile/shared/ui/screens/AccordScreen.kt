@@ -23,6 +23,8 @@ import ai.ciris.mobile.shared.ui.components.CanonicalCosignSheet
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.components.ConfirmDestructive
 import ai.ciris.mobile.shared.ui.components.CosignSheet
+import ai.ciris.mobile.shared.ui.components.FailureKind
+import ai.ciris.mobile.shared.ui.components.FailurePanel
 import ai.ciris.mobile.shared.ui.components.HardwareScrubSheet
 import ai.ciris.mobile.shared.ui.components.HolderSignInputs
 import ai.ciris.mobile.shared.ui.components.NewAttestationAction
@@ -219,6 +221,23 @@ fun AccordScreen(
                                         enabled = family == null,
                                     ) { onStartCeremony() },
                                 )
+                                // NODE VENDOR DRIFT #24 (restored after the 2.9.28
+                                // re-vendor dropped it): the ONLY route into the Duty
+                                // Conferral card (CIRISServer#392). `CIRISApp` still
+                                // wires `Screen.DutyConferral` and `onConferDuty` is
+                                // still a parameter above, but with this entry gone
+                                // nothing in the UI could reach either — a whole
+                                // ceremony was dead code behind a live route.
+                                add(
+                                    NewAttestationAction(
+                                        "confer_duty",
+                                        "mobile.accord_new_confer_duty",
+                                        // The mirror of found_accord: you cannot
+                                        // confer on behalf of an accord that does
+                                        // not exist yet.
+                                        enabled = family != null,
+                                    ) { onConferDuty() },
+                                )
                                 add(
                                     NewAttestationAction("drill", "mobile.accord_new_drill") {
                                         sheet = AccordSheet.Drill
@@ -278,6 +297,7 @@ fun AccordScreen(
             // Save flow: pick a folder, then write the partial JSON into it.
             DirectoryPickerDialog(
                 show = saveDir == "",
+                purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.SaveFile,
                 onDirectoryPicked = { dir ->
                     saveDir = null
                     val json = lastCoscrubJson
@@ -933,6 +953,10 @@ private fun RemintTrustRootSheet(
 ) {
     val source by viewModel.remintSource.collectAsState()
     val seed by viewModel.genesisSeed.collectAsState()
+    // NODE VENDOR DRIFT #24 (restored after the 2.9.28 re-vendor dropped it):
+    // the SAME error the screen banner reads. This dialog covers that banner, so
+    // without collecting it here a failed propose/cosign is invisible.
+    val sheetError by viewModel.error.collectAsState()
     val clipboard = LocalClipboardManager.current
     val saveScope = rememberCoroutineScope()
 
@@ -1055,6 +1079,49 @@ private fun RemintTrustRootSheet(
                     modifier = Modifier.testable("remint_step_indicator"),
                 )
                 Spacer(Modifier.height(10.dp))
+
+                // ── NODE VENDOR DRIFT #24 (restored after the 2.9.28 re-vendor
+                // dropped it): the ceremony REFUSED, and the operator must see it
+                // HERE ────────────────────────────────────────────────────────
+                //
+                // `AccordViewModel` sets `_error` on every propose/cosign
+                // failure, and the screen renders it as a Banner — in the SCREEN
+                // BODY, which this AlertDialog covers. So on 2026-08-14 a YubiKey
+                // refusal ("the specified PIN is incorrect") was written to the
+                // log, painted underneath the modal, and the ceremony card sat
+                // looking idle. The operator saw a ceremony that did nothing.
+                //
+                // A modal that can fail must render its own failures.
+                sheetError?.let { msg ->
+                    Banner(msg, error = true, tag = "remint_error")
+                    Spacer(Modifier.height(10.dp))
+                }
+
+                // ── NODE VENDOR DRIFT #24: the bundle is BROKEN, not merely
+                // unfinished (CIRISPersist#683) ───────────────────────────────
+                // Distinct from the banner above: that is "this attempt failed",
+                // this is "this bundle can never complete". `complete=false`
+                // used to be the only signal for both, and it reads as "not
+                // yet" — which sent an operator after a third holder for a
+                // bundle no signature could repair.
+                seed?.blockedBy?.let { reason ->
+                    FailurePanel(
+                        // Retrying refuses again, and so does signing it with
+                        // anyone else.
+                        kind = FailureKind.Unrecoverable,
+                        title = localizedString("mobile.accord_remint_invalid_title"),
+                        detail = reason,
+                        context = "genesis seed ceremony",
+                        modifier = Modifier.testable("remint_invalid"),
+                    )
+                    Text(
+                        localizedString("mobile.accord_remint_invalid_desc"),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testable("remint_invalid_desc"),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
 
                 when {
                     // ── Done — the authorized, portable seed ──
@@ -1442,6 +1509,7 @@ private fun RemintTrustRootSheet(
     // screen's co-scrub partial save).
     DirectoryPickerDialog(
         show = bundleSaveDir == "",
+        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.SaveFile,
         onDirectoryPicked = { dir ->
             bundleSaveDir = null
             val json = seed?.prettyJson

@@ -97,6 +97,12 @@ fun LoginScreen(
     // offering a sign-in that can only fail with redirect_uri_mismatch. Defaults
     // true so callers that don't (yet) probe providers keep the button live.
     googleOAuthAvailable: Boolean = true,
+    // NODE VENDOR DRIFT #25 (restored after the 2.9.28 re-vendor dropped it):
+    // true when setup JUST completed and the node restarted — the banner below
+    // explaining why a SUCCESSFUL setup lands back on this screen
+    // (CIRISServer#393). Defaulted so a caller that does not track it still
+    // compiles and simply renders no banner.
+    justCompletedSetup: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var marketingOptIn by remember { mutableStateOf(false) }
@@ -196,6 +202,36 @@ fun LoginScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.width(280.dp)
                 )
+
+                // NODE VENDOR DRIFT #25 (restored after the 2.9.28 re-vendor
+                // dropped it): JUST FINISHED SETUP? SAY SO (CIRISServer#393).
+                //
+                // Completing setup restarts the node, and a restart invalidates
+                // the session by design — the secret that signs it is per-process.
+                // So landing back on this screen is CORRECT, but it looks exactly
+                // like a failure: the user has just spent several minutes proving
+                // who they are and is being asked again, with no explanation.
+                //
+                // A banner is the whole difference between "it worked, sign back
+                // in" and "something broke". Same credentials, not new ones —
+                // people reach for the wrong door when a screen is silent about
+                // which one they used.
+                if (justCompletedSetup) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = LoginColors.White.copy(alpha = 0.12f),
+                        modifier = Modifier.width(300.dp).testable("banner_setup_complete_relogin"),
+                    ) {
+                        Text(
+                            text = localizedString("mobile.login_setup_complete_relogin"),
+                            color = LoginColors.White,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(12.dp),
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(16.dp))
 

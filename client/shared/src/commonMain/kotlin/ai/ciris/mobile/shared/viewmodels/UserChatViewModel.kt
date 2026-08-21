@@ -59,40 +59,49 @@ class UserChatViewModel(
     val refusalDetail: StateFlow<String?> = _refusalDetail.asStateFlow()
 
     /**
-     * Open (or re-open) the room with [contactKeyId], then load the transcript.
+     * Enter the room with [contactKeyId], then load the transcript.
      *
-     * `POST /v1/chat` is idempotent on the DERIVED pair id, so this is also the
-     * safe way to re-enter an existing conversation.
+     * # Why this ALWAYS calls `POST /v1/chat`
+     *
+     * The earlier shape skipped the call when the contact card said the room
+     * already existed, and loaded the transcript straight from the card's
+     * derived id. That left [_community] holding whatever room was viewed
+     * BEFORE — this ViewModel is a process singleton, created once in
+     * `CIRISApp` — and [send] / [refresh] both read the community id from
+     * there. On a fresh instance they silently no-opped; on a second
+     * conversation they addressed the FIRST one, which means a draft written
+     * to Bob could be committed, signed and replicated into the room with
+     * Alice. A message is an attestation: there is no unsend.
+     *
+     * `start_chat` returns BEFORE any write when the community exists
+     * (`lookup_community` → `freshly_created: false`), so for an open room this
+     * is a read, and it is the only read that answers with the authoritative
+     * roster the header needs. The contact card's `chat_started` is therefore
+     * advisory, not load bearing — one fewer client-side guess that can be
+     * wrong.
+     *
+     * The reset below is SYNCHRONOUS and happens before the first suspension
+     * point: between navigating and `startChat` returning there is a window in
+     * which the composer is live, and a stale [_community] in that window is
+     * the same wrong-room send by another route.
      */
-    fun open(contactKeyId: String) {
+    fun enter(communityId: String, contactKeyId: String) {
+        if (_community.value?.communityId != communityId) {
+            _community.value = null
+            _messages.value = emptyList()
+            _transcriptLoaded.value = false
+            // The draft belongs to the room it was written in, not to the screen.
+            _draft.value = ""
+        }
         viewModelScope.launch {
             clearRefusal()
             val opened = callTyped("startChat") { apiClient.startChat(contactKeyId) } ?: return@launch
             _community.value = opened
             PlatformLogger.i(
                 tag,
-                "[open] community=${opened.communityId.take(24)}… fresh=${opened.freshlyCreated}",
+                "[enter] community=${opened.communityId.take(24)}… fresh=${opened.freshlyCreated}",
             )
             loadMessages(opened.communityId)
-        }
-    }
-
-    /**
-     * Enter a room whose id is already known (a contact card carries the derived
-     * `chat_community_id` whether or not the room exists yet).
-     *
-     * [alsoStart] is what handles the "not yet" case: the transcript route
-     * refuses `chat.unknown_community` for a room that was never opened, and
-     * opening it is exactly what the user asked for by tapping the contact.
-     */
-    fun enter(communityId: String, contactKeyId: String, alsoStart: Boolean) {
-        if (alsoStart) {
-            open(contactKeyId)
-        } else {
-            viewModelScope.launch {
-                clearRefusal()
-                loadMessages(communityId)
-            }
         }
     }
 

@@ -62,6 +62,35 @@ data class ClaimRemoteRequest(
      */
     @SerialName("owner_username")
     val ownerUsername: String? = null,
+    // Vendor drift #21: node-side OAuth owner fields (CIRISServer#384). The
+    // CIRISAgent v2.9.28 re-vendor deleted them; restored verbatim. Upstream
+    // changed nothing else in this file, so there is no upstream improvement to
+    // merge around them.
+    /**
+     * The claiming owner's OAuth provider (`google` / `apple`), when they signed
+     * in rather than setting a password.
+     *
+     * **This is an OAuth owner's only session path (CIRISServer#384.)** The claim
+     * installs the ROOT cert and rotates the setup bearer, so every later call
+     * 401s by design and the only route back is `/v1/auth/login`. A password
+     * owner has [ownerPassword]; an OAuth owner has none, so without this the
+     * claim succeeded and then the owner could authenticate to nothing — the age
+     * band and the federation announce were silently skipped while the wizard
+     * still reported success.
+     *
+     * The node stamps the pair on the ROOT cert, and OAuth sign-in resolves an
+     * existing cert by `(provider, subject)` before minting anything — so the
+     * owner signs in with Google and lands on the SYSTEM_ADMIN session.
+     */
+    @SerialName("owner_oauth_provider")
+    val ownerOauthProvider: String? = null,
+    /**
+     * The provider's stable subject (`sub`) paired with [ownerOauthProvider].
+     * Send BOTH or NEITHER — the node keys its lookup on the pair, so a half
+     * pair writes a ROOT cert the sign-in can never find.
+     */
+    @SerialName("owner_oauth_external_id")
+    val ownerOauthExternalId: String? = null,
 )
 
 /**
@@ -83,4 +112,26 @@ data class ClaimRemoteResponse(
     val role: String? = null,
     /** Error string when the claim was rejected (non-2xx bodies). */
     val error: String? = null,
+    // Vendor drift #21: the claim-minted owner session (CIRISServer#393),
+    // deleted by the CIRISAgent v2.9.28 re-vendor and restored verbatim.
+    /**
+     * The owner's session, minted BY the claim (CIRISServer#393).
+     *
+     * The claim proves ownership with a one-time PIN and a hybrid signature over
+     * the owner-binding — strictly stronger evidence than a password. Before
+     * this the wizard then had to log in again to obtain an owner session, which
+     * an OAuth owner simply cannot do: `owner_login SKIPPED
+     * (password_present=false)`, and with it `set_age`, `announce` and
+     * `federation_consent` all skipped while the app fell back to the login
+     * screen. The node was claimed correctly and the user was bounced.
+     *
+     * The node passes the target's setup/root body straight through, so this
+     * arrives on both the self-claim and the remote-claim paths.
+     */
+    @SerialName("access_token")
+    val accessToken: String? = null,
+    @SerialName("token_type")
+    val tokenType: String? = null,
+    @SerialName("expires_in")
+    val expiresIn: Long? = null,
 )

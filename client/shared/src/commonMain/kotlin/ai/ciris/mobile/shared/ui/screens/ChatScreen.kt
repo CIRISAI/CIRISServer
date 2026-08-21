@@ -52,8 +52,21 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** The server's own ceiling (`src/contacts_chat.rs::MAX_MESSAGE_BYTES`). */
+/**
+ * The server's own ceiling (`src/contacts_chat.rs::MAX_MESSAGE_BYTES`).
+ *
+ * The server measures `req.body.len()` on a Rust `String` — that is UTF-8
+ * BYTES. Kotlin's `String.length` is UTF-16 code UNITS, and the two disagree on
+ * every character outside ASCII: an emoji is 4 bytes but 2 code units, most CJK
+ * is 3 bytes and 1 unit. Gating on `length` therefore lets ~6,000 emoji (24 KB)
+ * past the button to be refused at the wire, and would block a 16,000-character
+ * ASCII message that the server would have accepted. Always compare
+ * [utf8Size], never `length`.
+ */
 private const val MAX_MESSAGE_BYTES = 16 * 1024
+
+/** The draft's size in the units the server counts: UTF-8 bytes. */
+private fun String.utf8Size(): Int = encodeToByteArray().size
 
 /**
  * **User-to-user chat** — a two-member community whose messages ARE CEG
@@ -85,10 +98,12 @@ fun ChatScreen(
     viewModel: UserChatViewModel,
     /** The contact's fed-ID — the other member of the pair. */
     contactKeyId: String,
-    /** The DERIVED pair community id from the contact card. */
+    /**
+     * The DERIVED pair community id from the contact card — used to tell one
+     * room from another, NOT as the address to send to. The ViewModel resolves
+     * the authoritative community from the node before anything can be sent.
+     */
     communityId: String,
-    /** `false` when the room has never been opened — entering opens it. */
-    chatStarted: Boolean,
     /** Display name for the other member (alias if the peer store has one). */
     contactLabel: String,
     onBack: () -> Unit,
@@ -103,7 +118,7 @@ fun ChatScreen(
     val refusalDetail by viewModel.refusalDetail.collectAsState()
 
     LaunchedEffect(communityId, contactKeyId) {
-        viewModel.enter(communityId, contactKeyId, alsoStart = !chatStarted)
+        viewModel.enter(communityId, contactKeyId)
     }
 
     // The transcript is OLDEST FIRST, so the newest row is the last one — that
@@ -243,6 +258,9 @@ fun ChatScreen(
             }
 
             // ── Composer ──────────────────────────────────────────────────────
+            // Recomputed once per keystroke rather than once per recomposition:
+            // encoding a 16 KB string on every frame of a scroll would be waste.
+            val draftBytes = remember(draft) { draft.utf8Size() }
             Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     Row(verticalAlignment = Alignment.Bottom) {
@@ -257,7 +275,7 @@ fun ChatScreen(
                         Button(
                             onClick = { viewModel.send() },
                             enabled = !sending && draft.isNotBlank() &&
-                                draft.length <= MAX_MESSAGE_BYTES,
+                                draftBytes <= MAX_MESSAGE_BYTES,
                             modifier = Modifier.testableClickable("btn_chat_send") { viewModel.send() },
                         ) {
                             Text(
@@ -268,17 +286,17 @@ fun ChatScreen(
                     }
                     // Say the ceiling BEFORE the node refuses at it — the
                     // refusal is correct but arrives after the writing.
-                    if (draft.length > MAX_MESSAGE_BYTES / 2) {
+                    if (draftBytes > MAX_MESSAGE_BYTES / 2) {
                         Text(
                             localizedString(
                                 "mobile.chat_length_counter",
                                 mapOf(
-                                    "used" to draft.length.toString(),
+                                    "used" to draftBytes.toString(),
                                     "max" to MAX_MESSAGE_BYTES.toString(),
                                 ),
                             ),
                             fontSize = 10.sp,
-                            color = if (draft.length > MAX_MESSAGE_BYTES) {
+                            color = if (draftBytes > MAX_MESSAGE_BYTES) {
                                 MaterialTheme.colorScheme.error
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant

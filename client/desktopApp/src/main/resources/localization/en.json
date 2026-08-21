@@ -1275,7 +1275,7 @@
     "chat_details_subjects": "subjects {ids}",
     "chat_empty": "No messages yet. What you send here is a signed attestation in this two-person community — the same kind of record as everything else on this node.",
     "chat_input_hint": "Write a message",
-    "chat_length_counter": "{used} / {max} characters",
+    "chat_length_counter": "{used} / {max} bytes",
     "chat_op_recant_unavailable": "Recanting a message needs your own key's signature over the recantation. A sign-in session cannot produce one, and this node offers no route for it yet.",
     "chat_op_supersede_unavailable": "Editing a message needs your own key's signature over the replacement. A sign-in session cannot produce one, and this node offers no route for it yet.",
     "chat_op_withdraw_unavailable": "Withdrawing a message needs your own key's signature over the withdrawal. A sign-in session cannot produce one, and this node offers no route for it yet.",

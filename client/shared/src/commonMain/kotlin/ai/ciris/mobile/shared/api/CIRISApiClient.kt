@@ -2231,17 +2231,37 @@ class CIRISApiClient(
         token: String? = accessToken,
         ownerPassword: String? = null,
         ownerUsername: String? = null,
+        // NODE VENDOR DRIFT #11 (restored after the 2.9.28 re-vendor dropped it):
+        // an OAuth owner has NO password, so without these two the claim succeeds
+        // and the owner can then authenticate to NOTHING (CIRISServer#384).
+        ownerOauthProvider: String? = null,
+        ownerOauthExternalId: String? = null,
     ): ClaimRemoteResponse {
         val method = "claimRemote"
-        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope ownerPw=${ownerPassword != null}")
+        // Log WHETHER an owner session path is being installed, and which kind.
+        // #384 was invisible for exactly this reason: the claim reported success
+        // and nothing said the owner had no way back in.
+        val sessionPath = when {
+            ownerPassword != null -> "password"
+            ownerOauthProvider != null && ownerOauthExternalId != null -> "oauth:$ownerOauthProvider"
+            else -> "NONE (owner will have no session path)"
+        }
+        logInfo(method, "POST $localNodeUrl/v1/setup/claim-remote node_code=${nodeCode.take(20)}… cohort=$cohortScope owner_session=$sessionPath")
         val client = federationHttpClient()
         return try {
+            // Both halves or neither — a half pair is a ROOT cert the OAuth
+            // sign-in lookup cannot key on, which silently reproduces #384.
+            val oauthPair = ownerOauthProvider
+                ?.takeIf { it.isNotBlank() }
+                ?.let { pr -> ownerOauthExternalId?.takeIf { it.isNotBlank() }?.let { pr to it } }
             val request = ClaimRemoteRequest(
                 nodeCode = nodeCode,
                 claimPin = claimPin,
                 cohortScope = cohortScope,
                 ownerPassword = ownerPassword,
                 ownerUsername = ownerUsername,
+                ownerOauthProvider = oauthPair?.first,
+                ownerOauthExternalId = oauthPair?.second,
             )
             val bodyText = jsonConfig.encodeToString(ClaimRemoteRequest.serializer(), request)
             val response = client.post("$localNodeUrl/v1/setup/claim-remote") {
@@ -2806,6 +2826,55 @@ class CIRISApiClient(
         } catch (e: Exception) {
             logException(method, e, "nodeUrl=$nodeUrl, sourceDir=$sourceDir")
             throw e
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * NODE VENDOR DRIFT #12 (restored after the 2.9.28 re-vendor dropped it):
+     * **does this folder hold a portable keyset?** (CIRISServer#404)
+     *
+     * Read-only: it discovers, it does not install. Ask it after a folder is
+     * picked and before the operator commits, so "I have no idea if this folder
+     * has the materials" stops being the state they are left in.
+     *
+     * A transport failure is NOT reported as "no keyset" — that would turn "we
+     * could not ask" into "we asked and there is nothing there", which are
+     * different facts with different remedies. It returns `null` for the first
+     * and a verdict for the second, and the caller must render them differently.
+     */
+    suspend fun inspectKeysetFolder(
+        dir: String,
+        nodeUrl: String = LOCAL_NODE_URL,
+        token: String? = accessToken,
+    ): ai.ciris.mobile.shared.models.federation.KeysetInspection? {
+        val method = "inspectKeysetFolder"
+        logInfo(method, "POST $nodeUrl/v1/self/identity/inspect dir=$dir")
+        val client = federationHttpClient()
+        return try {
+            val bodyText = jsonConfig.encodeToString(
+                ai.ciris.mobile.shared.models.federation.KeysetInspectRequest.serializer(),
+                ai.ciris.mobile.shared.models.federation.KeysetInspectRequest(dir = dir),
+            )
+            val response = client.post("$nodeUrl/v1/self/identity/inspect") {
+                token?.let { header("Authorization", "Bearer $it") }
+                contentType(ContentType.Application.Json)
+                setBody(bodyText)
+            }
+            val raw = response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                logWarn(method, "inspect refused: ${response.status}: ${raw.take(200)}")
+                null
+            } else {
+                jsonConfig.decodeFromString(
+                    ai.ciris.mobile.shared.models.federation.KeysetInspection.serializer(),
+                    raw,
+                )
+            }
+        } catch (e: Exception) {
+            logWarn(method, "inspect unavailable: ${e.message}")
+            null
         } finally {
             client.close()
         }
@@ -5694,21 +5763,28 @@ class CIRISApiClient(
     }
 
     /**
-     * Probe the node's structured server health at `/v1/health` (unauthenticated —
+     * NODE VENDOR DRIFT #26 (restored after the 2.9.28 re-vendor dropped it):
+     * probe the node's MERGED health at `/v1/system/health` (unauthenticated —
      * liveness is public). Returns the [NodeHealth] facts that drive the universal
      * client's node-vs-agent gate ([ai.ciris.mobile.shared.models.ClientMode]) and
      * the version-mismatch banner: the node `version`, its `role`
-     * (`"fabric-node"` for a bare node), and the optional `cognitive_state` (present
-     * only when an agent enriches the endpoint).
+     * (`"fabric-node"` for a bare node), the optional `cognitive_state`, and the
+     * three-state `data.agent.{folded,reachable}` verdict.
      *
-     * `/v1/health` is a SUBSTRATE prefix — served natively by the NODE on :4243 and
-     * never proxied from the brain, and the Python brain on :8080 does not serve it
-     * at all. Callers must therefore pass the NODE base URL; the [baseUrl] default
-     * is kept only for clients already constructed against the node.
+     * `/v1/system/health` (not `/v1/health`) since server 0.5.168 (CIRISServer#390):
+     * that endpoint is the node's own health enriched with the folded brain's
+     * `cognitive_state`/`services` plus `agent.{folded,reachable}` — a strict
+     * superset of `/v1/health` (`version` still arrives for the mismatch banner),
+     * and the ONLY surface where a folded agent does not read as a bare node.
+     * The re-vendor pointed this back at `/v1/health`, which cannot answer the
+     * folded question at all, so every folded agent read as a bare node.
+     * Still served natively by the NODE on :4243; callers must pass the NODE base
+     * URL — the [baseUrl] default is kept only for clients already constructed
+     * against the node.
      */
     suspend fun getNodeHealth(nodeUrl: String = baseUrl): NodeHealth {
         val method = "getNodeHealth"
-        logDebug(method, "Probing node health at $nodeUrl/v1/health")
+        logDebug(method, "Probing node health at $nodeUrl/v1/system/health")
 
         val client = io.ktor.client.HttpClient {
             install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) { json(jsonConfig) }
@@ -5719,7 +5795,7 @@ class CIRISApiClient(
         }
 
         return try {
-            val response = client.get("$nodeUrl/v1/health") {
+            val response = client.get("$nodeUrl/v1/system/health") {
                 authHeader()?.let { header("Authorization", it) }
             }
 
@@ -5727,21 +5803,7 @@ class CIRISApiClient(
                 throw RuntimeException("Node health failed: ${response.status}")
             }
 
-            val body = response.bodyAsText()
-            val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
-            val data = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
-
-            val cognitiveState = data?.get("cognitive_state")?.jsonPrimitive?.contentOrNull
-            var serviceCount = 0
-            data?.get("services")?.jsonObject?.forEach { (_, _) -> serviceCount++ }
-
-            NodeHealth(
-                status = data?.get("status")?.jsonPrimitive?.contentOrNull ?: "unknown",
-                role = data?.get("role")?.jsonPrimitive?.contentOrNull,
-                version = data?.get("version")?.jsonPrimitive?.contentOrNull,
-                cognitiveState = cognitiveState,
-                serviceCount = serviceCount
-            )
+            parseNodeHealth(response.bodyAsText())
         } finally {
             client.close()
         }
@@ -13517,18 +13579,60 @@ data class SystemHealthData(
 )
 
 /**
- * Structured server health from `/v1/health` — the facts the universal client's
- * node-vs-agent gate keys off (see [ai.ciris.mobile.shared.models.ClientMode]).
+ * NODE VENDOR DRIFT #26 (restored after the 2.9.28 re-vendor dropped it):
+ * the node's merged health from `/v1/system/health` — the facts the universal
+ * client's node-vs-agent gate keys off (see [ai.ciris.mobile.shared.models.ClientMode]).
  * A bare node reports `role="fabric-node"` with no [cognitiveState] and an empty
- * service map; an agent enriches the endpoint with [cognitiveState] + services.
+ * service map; a folded agent's [cognitiveState] + services are merged over the
+ * node's own health by the server (0.5.168, CIRISServer#390).
+ *
+ * [agentFolded]/[agentReachable] carry the server's THREE-state verdict
+ * (`data.agent.{folded,reachable}`): no brain, brain answering, and brain
+ * attached-but-not-answering are different facts. The defaults are `false` so a
+ * pre-0.5.168 envelope (no `agent` block) parses as "nothing known about a
+ * brain" — the shape the two-arg `clientModeFrom` already handled.
  */
 data class NodeHealth(
     val status: String,
     val role: String?,
     val version: String?,
     val cognitiveState: String?,
-    val serviceCount: Int
+    val serviceCount: Int,
+    val agentFolded: Boolean = false,
+    val agentReachable: Boolean = false
 )
+
+/**
+ * NODE VENDOR DRIFT #26 (restored after the 2.9.28 re-vendor dropped it):
+ * parse a `/v1/system/health` response body into [NodeHealth]. Pure — split out
+ * of [CIRISApiClient.getNodeHealth] so the wire contract is testable without
+ * Ktor (the DeadmitRefusalWireTest pattern): the Kotlin read is pinned against
+ * the envelopes the Rust side emits (`tests/folded_health.rs`).
+ *
+ * Tolerates a bare object (no `{"data":{…}}` envelope) for the same reason the
+ * server's merge does (`src/health.rs`): being strict over a shape difference
+ * would reintroduce the exact failure this surface exists to close — a real
+ * agent rendered as a bare node.
+ */
+fun parseNodeHealth(body: String): NodeHealth {
+    val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    val root = json.parseToJsonElement(body).jsonObject
+    val data = root["data"]?.jsonObject ?: root
+
+    var serviceCount = 0
+    data["services"]?.jsonObject?.forEach { (_, _) -> serviceCount++ }
+    val agent = data["agent"]?.jsonObject
+
+    return NodeHealth(
+        status = data["status"]?.jsonPrimitive?.contentOrNull ?: "unknown",
+        role = data["role"]?.jsonPrimitive?.contentOrNull,
+        version = data["version"]?.jsonPrimitive?.contentOrNull,
+        cognitiveState = data["cognitive_state"]?.jsonPrimitive?.contentOrNull,
+        serviceCount = serviceCount,
+        agentFolded = agent?.get("folded")?.jsonPrimitive?.booleanOrNull ?: false,
+        agentReachable = agent?.get("reachable")?.jsonPrimitive?.booleanOrNull ?: false
+    )
+}
 
 data class UnifiedTelemetryData(
     val health: String,

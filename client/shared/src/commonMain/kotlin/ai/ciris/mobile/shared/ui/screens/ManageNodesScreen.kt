@@ -534,6 +534,7 @@ private fun NodesListView(
 
     DirectoryPickerDialog(
         show = showSaveUsbPicker,
+        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
         onDirectoryPicked = { dir ->
             showSaveUsbPicker = false
             if (dir.isNotBlank()) viewModel.saveNodeListToUsb(dir)
@@ -542,6 +543,7 @@ private fun NodesListView(
     )
     DirectoryPickerDialog(
         show = showRestoreUsbPicker,
+        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
         onDirectoryPicked = { dir ->
             showRestoreUsbPicker = false
             if (dir.isNotBlank()) viewModel.restoreNodeListFromUsb(dir)

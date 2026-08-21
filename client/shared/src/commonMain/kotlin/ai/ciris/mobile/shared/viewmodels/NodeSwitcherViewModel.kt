@@ -1,7 +1,11 @@
 package ai.ciris.mobile.shared.viewmodels
 
 import ai.ciris.mobile.shared.api.CIRISApiClient
+// NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor dropped it):
+// the node-switch mode re-derive (CIRISServer#390) needs the gate types back.
+import ai.ciris.mobile.shared.models.ClientMode
 import ai.ciris.mobile.shared.models.NodeProfile
+import ai.ciris.mobile.shared.models.clientModeFrom
 import ai.ciris.mobile.shared.platform.PlatformLogger
 import ai.ciris.mobile.shared.platform.readTextFile
 import ai.ciris.mobile.shared.platform.util.DecodedNodeCode
@@ -57,6 +61,17 @@ class NodeSwitcherViewModel(
         /** Filename of the node list written to / read from a chosen USB folder. */
         const val NODE_LIST_FILENAME = "ciris-nodes.json"
 
+        /**
+         * NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor dropped it).
+         *
+         * Bounded retry (seconds) for an UNDETERMINED mode probe during a node
+         * switch — brain folded but not answering yet (CIRISServer#390). Short,
+         * unlike the startup budget: the switch target is a node the user can
+         * already see running, so a brain still binding is the rare case, and
+         * this delay sits inside the switch spinner.
+         */
+        private const val SWITCH_MODE_POLLS = 10
+
         private val NODE_LIST_JSON = Json {
             prettyPrint = true
             ignoreUnknownKeys = true
@@ -79,6 +94,21 @@ class NodeSwitcherViewModel(
     /** Transient success notice (e.g. "Saved 3 nodes to USB"); cleared by the UI. */
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    /**
+     * NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor dropped it).
+     *
+     * The node-vs-agent mode re-derived for the most recently switched-to node
+     * (CIRISServer#390). The gate is probed once at startup against the ORIGINAL
+     * node, so without a re-derive here a switch from an agent to a bare node
+     * (or back) left the whole UI branching on the OLD node's answer — stale
+     * mode on node switch was a live bug. `CIRISApp` collects this to keep its
+     * composable gate (and the startup lights count) in step; the shared API
+     * client's own gate is pushed directly in [switchTo]. Null until a switch
+     * resolves a verdict.
+     */
+    private val _switchedMode = MutableStateFlow<ClientMode?>(null)
+    val switchedMode: StateFlow<ClientMode?> = _switchedMode.asStateFlow()
 
     /**
      * Session-scoped, in-memory nodes the user added by URL or NodeCode this run
@@ -272,6 +302,14 @@ class NodeSwitcherViewModel(
                 _profiles.value = _profiles.value.map {
                     if (it.id == profile.id) it.copy(lastUsedEpochMs = now) else it
                 }
+                // NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor
+                // dropped it): re-derive the ONE node-vs-agent gate against the
+                // NEW node (CIRISServer#390) — the startup probe answered for
+                // the node we just left, and branching the UI on that stale
+                // verdict was a live bug. After marking active, so screens
+                // reloading off [activeProfileId] are not held behind the
+                // probe. Non-fatal: a failed probe must not fail the switch.
+                deriveModeFor(profile.baseUrl)
                 PlatformLogger.i(
                     TAG,
                     "[switchTo] active='${profile.id}' — node list (${_profiles.value.size}): " +
@@ -283,6 +321,77 @@ class NodeSwitcherViewModel(
             } finally {
                 _isSwitching.value = false
             }
+        }
+    }
+
+    /**
+     * NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor dropped it).
+     *
+     * Probe the switched-to node's merged `/v1/system/health` and re-derive the
+     * node-vs-agent gate (CIRISServer#390). Pushes the verdict into the shared
+     * API client (so its endpoint gating follows the new node) and publishes it
+     * on [switchedMode] for `CIRISApp`'s composable gate.
+     *
+     * UNDETERMINED (`agent.folded && !reachable` — a brain EXISTS but is not
+     * answering yet) is retried briefly and then GIVEN UP on without touching
+     * the gate: latching NODE against a brain we know exists is the exact
+     * defect this probe replaces, and keeping the previous verdict beats
+     * committing a wrong one. No `getSystemStatus` fallback here, deliberately:
+     * after [CIRISApiClient.updateBaseUrl] it would hit the very same
+     * `/v1/system/health` on the very same base URL — a switch target carries
+     * ONE URL, so there is no second port to ask.
+     *
+     * The setup-status question (CIRISAgent#1075) is asked too, exactly as
+     * `CIRISApp`'s startup gate asks it: a brain that is up but still
+     * unconfigured runs 10 wizard services and reports `cognitive_state=SETUP`,
+     * and promoting THAT to AGENT on a switch would restart the 503 poll storm
+     * against the new node. [CIRISApiClient.updateBaseUrl] has already
+     * repointed the SDK instances, so this asks the node we switched TO. A
+     * failed probe defaults to `false` — never a downgrade.
+     */
+    private suspend fun deriveModeFor(baseUrl: String) {
+        try {
+            val brainUnconfigured = runCatching {
+                val s = apiClient.getSetupStatus().data
+                s.setup_required && !s.has_env_file
+            }.getOrDefault(false)
+            var health = apiClient.getNodeHealth(baseUrl)
+            var probe = clientModeFrom(
+                health.cognitiveState, health.serviceCount,
+                health.agentFolded, health.agentReachable,
+                brainUnconfigured,
+            )
+            var polls = 0
+            while (probe.undetermined && polls < SWITCH_MODE_POLLS) {
+                kotlinx.coroutines.delay(1000)
+                polls++
+                runCatching { apiClient.getNodeHealth(baseUrl) }.onSuccess { nh ->
+                    health = nh
+                    probe = clientModeFrom(
+                        nh.cognitiveState, nh.serviceCount,
+                        nh.agentFolded, nh.agentReachable,
+                        brainUnconfigured,
+                    )
+                }
+            }
+            if (probe.undetermined) {
+                PlatformLogger.w(
+                    TAG,
+                    "[switchTo] mode UNDETERMINED after ${polls}s (brain folded, not answering) — keeping the previous gate rather than latching NODE",
+                )
+                return
+            }
+            apiClient.setClientMode(probe.mode)
+            _switchedMode.value = probe.mode
+            PlatformLogger.i(
+                TAG,
+                "[switchTo] clientMode re-derived for $baseUrl → ${probe.mode} " +
+                    "(cognitive_state=${health.cognitiveState}, services=${health.serviceCount}, " +
+                    "folded=${health.agentFolded}, reachable=${health.agentReachable}, " +
+                    "brainUnconfigured=$brainUnconfigured)",
+            )
+        } catch (e: Exception) {
+            PlatformLogger.w(TAG, "[switchTo] mode probe failed for $baseUrl (${e.message}) — keeping the previous gate")
         }
     }
 

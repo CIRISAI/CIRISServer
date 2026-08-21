@@ -328,6 +328,23 @@ data class FederationIdentitySetupState(
     /** The honest hardware-tier label ("YubiKey" / "TPM / Secure Enclave" /
      *  "software") the local node reported. */
     val hardwareLabel: String? = null,
+    // ── NODE VENDOR DRIFT #12 (restored after the 2.9.28 re-vendor dropped it):
+    //    look BEFORE you import (CIRISServer#404) ──────────────────────────
+    /** A folder the operator picked and has not yet committed to importing. */
+    val inspectDir: String? = null,
+    /** `true` while the node is being asked about [inspectDir]. */
+    val inspecting: Boolean = false,
+    /**
+     * What the node found in [inspectDir] — the IMPORTER's own discovery.
+     *
+     * `null` while [inspecting], and also when the node could not be asked at
+     * all. Those two are rendered differently on purpose: "we could not look" is
+     * not "we looked and it is empty", and a UI that shows one for the other
+     * tells the operator their good USB is bad.
+     */
+    val inspection: ai.ciris.mobile.shared.models.federation.KeysetInspection? = null,
+    /** Set when the probe itself failed, as opposed to finding nothing. */
+    val inspectUnavailable: Boolean = false,
 ) {
     /**
      * Is the entered [label] a usable, UNIQUE federation-identity name?
@@ -457,6 +474,20 @@ data class NodeOwnershipClaimState(
     /** Human-readable failure reason (e.g. "claim PIN not captured"). */
     val error: String? = null,
     /**
+     * NODE VENDOR DRIFT #14 (restored after the 2.9.28 re-vendor dropped it):
+     * is [error] worth RETRYING? Set where the failure happens, because that is
+     * the only place that knows.
+     *
+     * Every claim failure used to render as unrecoverable — including "claim PIN
+     * not captured", whose own message tells the operator to claim later, and
+     * ordinary network blips. So the panel said retrying could not work and
+     * offered a wipe-and-reinstall for a node that was fine. Classifying HERE
+     * rather than pattern-matching the message downstream keeps one author for
+     * the fact: a screen that greps an error string is a second opinion about
+     * what happened.
+     */
+    val errorRecoverable: Boolean = false,
+    /**
      * Non-fatal soft notice from the optional federation-announce opt-in. The
      * claim itself already succeeded; the announce can be retried later, so a
      * failure here is surfaced (not fatal). Null when not attempted / succeeded.
@@ -499,6 +530,11 @@ data class SetupFormState(
     val ownershipClaim: NodeOwnershipClaimState = NodeOwnershipClaimState(),
 
     // Google/Apple OAuth state
+    //
+    // NODE VENDOR DRIFT #12: `isGoogleAuth` is misnamed — it is set from `isAuth`
+    // for BOTH Google and Apple (see SetupViewModel's OAuth handler), so it means
+    // "authenticated via an external provider", not "Google specifically". Read it
+    // through [SetupState.isExternalAuth] rather than directly.
     val isGoogleAuth: Boolean = false,
     val googleIdToken: String? = null,
     val googleEmail: String? = null,

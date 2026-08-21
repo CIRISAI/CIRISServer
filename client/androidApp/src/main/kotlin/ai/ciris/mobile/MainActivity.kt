@@ -184,10 +184,19 @@ class MainActivity : ComponentActivity() {
                 // Show the full KMP app with native StartupScreen (22 lights)
                 CIRISApp(
                     accessToken = "pending", // Will be set after auth
-                    // The Python brain. The ciris-server node read API is
-                    // separate (:4243) and takes the CIRISApp default —
-                    // 8080 never fronts 4243 (FSD FIRST_RUN_WIZARD_2.9.14 §2).
-                    apiBaseUrl = "http://localhost:8080",
+                    // NODE VENDOR DRIFT #17 (restored after the 2.9.28 re-vendor
+                    // reverted apiBaseUrl to :8080 and dropped nodeBaseUrl). TWO
+                    // parameters upstream, ONE service here (CIRISServer#430; same
+                    // trap Main.kt documents for desktop). The agent build has a
+                    // Python brain on :8080 and a node read API on :4243; this is
+                    // the NODE client (CIRISBuild.HAS_AGENT == false), so there is
+                    // no brain to address — the Chaquopy-launched ciris-server
+                    // serves the whole surface on :4243. Pointing apiBaseUrl at the
+                    // upstream :8080 default aims EVERY shared-client call at a
+                    // dead port. Do not "fix" this back to 8080 — that port only
+                    // exists in the CIRISAgent build.
+                    apiBaseUrl = "http://127.0.0.1:4243",
+                    nodeBaseUrl = "http://127.0.0.1:4243",
                     googleSignInCallback = googleSignInCallback,
                     purchaseLauncher = purchaseLauncher,
                     deviceAttestationCallback = deviceAttestationCallback,

@@ -118,6 +118,7 @@ fun ColumnScope.HolderSignInputs(
     )
     DirectoryPickerDialog(
         show = usbPicker,
+        purpose = ai.ciris.mobile.shared.platform.DirectoryPickerPurpose.UsbCustody,
         onDirectoryPicked = { onUsb(it); usbPicker = false },
         onDismiss = { usbPicker = false },
     )

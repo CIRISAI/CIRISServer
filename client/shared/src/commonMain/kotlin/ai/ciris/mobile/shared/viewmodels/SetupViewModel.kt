@@ -1094,6 +1094,10 @@ class SetupViewModel(
                         error = "claim PIN not captured — this node's one-time ownership " +
                             "PIN was not seen on its console. You can claim ownership later " +
                             "from the Network surface using the PIN printed on the node.",
+                        // NODE VENDOR DRIFT #14 (restored after the 2.9.28
+                        // re-vendor dropped it): the message itself says "later",
+                        // so the panel must not say "not recoverable by retrying".
+                        errorRecoverable = true,
                     )
                 )
                 return@launch
@@ -1169,6 +1173,18 @@ class SetupViewModel(
                     // prerequisite for approving a device-auth grant.
                     ownerPassword = _state.value.userPassword.ifBlank { null },
                     ownerUsername = _state.value.username.ifBlank { null },
+                    // NODE VENDOR DRIFT #11 (restored after the 2.9.28 re-vendor
+                    // dropped it): OAuth owners have NO password, so the two lines
+                    // above give them nothing and the claim would leave them unable
+                    // to authenticate to the node they just claimed — age band and
+                    // announce silently skipped (CIRISServer#384). The node stamps
+                    // this pair on the ROOT cert and OAuth sign-in resolves it, so
+                    // signing in with Google IS the owner session. Sent only when
+                    // the user actually signed in.
+                    ownerOauthProvider = _state.value.oauthProvider
+                        .takeIf { _state.value.isGoogleAuth },
+                    ownerOauthExternalId = _state.value.googleUserId
+                        ?.takeIf { _state.value.isGoogleAuth },
                 )
                 // [ORDER] E5→E9 GATE (FSD/FIRST_RUN_STATECHART.md): on a successful
                 // claim, inProgress stays TRUE through the whole post-claim block
@@ -1204,7 +1220,27 @@ class SetupViewModel(
                 if (resp.role != null) {
                     val waId = resp.waId
                     val password = _state.value.userPassword
-                    if (!waId.isNullOrBlank() && password.isNotBlank()) {
+                    // NODE VENDOR DRIFT #11 (restored after the 2.9.28 re-vendor
+                    // dropped it): THE CLAIM IS THE AUTHENTICATION (CIRISServer#393).
+                    //
+                    // The node returns the owner's session WITH the claim, so we take
+                    // it and stop. Re-authenticating here asked the owner to prove
+                    // with a password what they had just proved with a one-time PIN
+                    // and a hybrid signature over the owner-binding — weaker evidence,
+                    // twice — and an OAuth owner HAS no password, so the block below
+                    // was skipped entirely and every step that needed the owner
+                    // session (age band, announce, replication consent) skipped with
+                    // it. The node was claimed and the app fell back to login.
+                    val claimToken = resp.accessToken
+                    if (!claimToken.isNullOrBlank()) {
+                        client.setAccessToken(claimToken)
+                        sessionKind = "owner"
+                        ownerLoginOk = true
+                        PlatformLogger.i(
+                            TAG,
+                            "[ORDER] owner_login ok (session minted BY the claim — no re-auth)",
+                        )
+                    } else if (!waId.isNullOrBlank() && password.isNotBlank()) {
                         try {
                             PlatformLogger.i(TAG, "[ORDER] owner_login begin (session=$sessionKind → owner, target=node)")
                             // MUST target the NODE (:4243): the claim wrote the owner
@@ -1408,10 +1444,75 @@ class SetupViewModel(
                             "Couldn't claim ownership of this device's local node: " +
                                 "${e.message ?: "unknown error"}"
                         },
+                        // NODE VENDOR DRIFT #14 (restored after the 2.9.28
+                        // re-vendor dropped it): a REJECTED pin will be rejected
+                        // again — the node has already been claimed, or the pin is
+                        // spent. Anything else here is an exception reaching the
+                        // local node: it may not have finished starting, so
+                        // retrying is exactly the remedy.
+                        errorRecoverable = !isPinRejection,
                     )
                 )
             }
         }
+    }
+
+    // ========== Look before you import (CIRISServer#404) ==========
+
+    /**
+     * NODE VENDOR DRIFT #12 (restored after the 2.9.28 re-vendor dropped it):
+     * **look before you import** — ask the node what is in `dir` and hold the
+     * answer, WITHOUT importing anything.
+     *
+     * The wizard used to import the instant a folder was picked, so the operator
+     * found out whether the folder held their identity by watching the import
+     * either work or fail. Both outcomes are irreversible-feeling in the middle
+     * of first-run setup, and one of them replaces this device's identity.
+     */
+    fun inspectKeysetDir(dir: String) {
+        val client = apiClient as? CIRISApiClient ?: return
+        val src = dir.trim()
+        if (src.isBlank()) return
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = src,
+                inspecting = true,
+                inspection = null,
+                inspectUnavailable = false,
+                error = null,
+            )
+        )
+        viewModelScope.launch {
+            val verdict = client.inspectKeysetFolder(dir = src)
+            _state.value = _state.value.copy(
+                federationIdentity = _state.value.federationIdentity.copy(
+                    inspecting = false,
+                    inspection = verdict,
+                    // A null verdict means the NODE could not be asked — not that
+                    // the folder is empty. Kept as its own flag so the screen can
+                    // say which happened.
+                    inspectUnavailable = verdict == null,
+                )
+            )
+            PlatformLogger.i(
+                TAG,
+                "inspectKeysetDir($src): " +
+                    (verdict?.let { "importable=${it.importable} alias=${it.alias}" }
+                        ?: "node unavailable"),
+            )
+        }
+    }
+
+    /** Drop a pending inspection (the operator backed out of the folder). */
+    fun clearKeysetInspection() {
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = null,
+                inspecting = false,
+                inspection = null,
+                inspectUnavailable = false,
+            )
+        )
     }
 
     // ========== Accord Metrics Opt-In ==========
