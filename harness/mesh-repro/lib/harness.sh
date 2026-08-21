@@ -19,6 +19,14 @@
 #     an acceptable output; the whole point is "we know exactly where."
 #  5. Exit codes are stable and per-stage, so CI can distinguish a regression at
 #     stage 4 from one at stage 7 without parsing prose.
+#  6. A stage may be declared RED-EXPECTED (`XFAIL_<id>="<mechanism>"`). That is
+#     NOT a way to make a ladder green — it is how a ladder states a KNOWN,
+#     NAMED substrate gap without turning it into a recurring CI failure that
+#     everyone learns to ignore. The bar is deliberately high: the value must
+#     name the mechanism (which function, which policy, which missing wiring),
+#     because the whole point is that the union of a ladder's expected reds is a
+#     readable list of asks. A stage whose redness you cannot explain is a
+#     BREAK, not an XFAIL.
 
 set -euo pipefail
 
@@ -143,6 +151,21 @@ harness_sample() {
   done
 }
 
+# Is ANY stage declared RED-EXPECTED? Scenarios that declare none keep the
+# original early-exit verdict byte for byte — this predicate is what fences the
+# collect-every-red path off from them.
+harness_has_xfail() {
+  local s var
+  for s in "${STAGES[@]}"; do
+    var="XFAIL_$s"
+    # `if`, NOT `[ … ] && return` — see rule 3's note in harness_run_ladder: a
+    # FALSE `&&` list is the loop body's last command, and under `set -e` that
+    # terminates the script instead of continuing the loop.
+    if [ -n "${!var:-}" ]; then return 0; fi
+  done
+  return 1
+}
+
 harness_print_ladder() {
   local out="  [ladder]" i=1 s
   for s in "${STAGES[@]}"; do
@@ -166,7 +189,12 @@ harness_verdict() {
   # success-stage short-circuit. Otherwise a scenario whose success stage happens
   # to be positive reports SUCCESS while independent preconditions are still
   # unmet — which is precisely the false green this mode exists to prevent.
-  if [ "${VERDICT_MODE:-monotonic}" != "audit" ] && [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ]; then
+  # The short-circuit is ALSO skipped when the scenario declares any XFAIL: a
+  # green success stage must not swallow the report of the expected reds, which
+  # are the scenario's other deliverable.
+  if [ "${VERDICT_MODE:-monotonic}" != "audit" ] \
+     && [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ] \
+     && ! harness_has_xfail; then
     echo "  → SUCCESS: ${SUCCESS_MESSAGE:-full chain green}"
     exit 0
   fi
@@ -210,17 +238,56 @@ harness_verdict() {
   if [ "$hi" -ge 0 ]; then
     echo "  (stages 1..$((hi+1)) proven by downstream evidence)"
   fi
+  # `collect` is 0 for every scenario that declares no XFAIL — those keep the
+  # original behaviour exactly: name the FIRST break, print its diagnosis, exit
+  # its code, and say nothing about stages behind it.
+  local collect=0 expected=0 first_break="" first_code=0 xf
+  if harness_has_xfail; then collect=1; fi
   idx=0
   for s in "${STAGES[@]}"; do
-    if [ "$idx" -le "$hi" ]; then idx=$((idx+1)); continue; fi
     idx=$((idx+1))
-    if [ "${COUNT[$s]:-0}" -le 0 ]; then
-      hint="HINT_$s"; code="EXIT_$s"
+    if [ "${COUNT[$s]:-0}" -gt 0 ]; then continue; fi
+    xf="XFAIL_$s"; hint="HINT_$s"; code="EXIT_$s"
+    # An XFAIL'd stage is reported WHEREVER it sits, including below the
+    # high-water mark. "Proven by downstream evidence" is a sound inference for a
+    # stage nobody has measured; it is a FALSE one for a stage we have declared
+    # known-red, and letting it swallow the ⚠ would hide the very ask the marking
+    # exists to publish — worst exactly when everything else has gone green.
+    if [ -n "${!xf:-}" ]; then
+      echo "  ⚠ RED-EXPECTED at $s — ${!xf}"
+      expected=$((expected+1))
+    elif [ "$((idx - 1))" -le "$hi" ]; then
+      continue
+    elif [ -n "$first_break" ]; then
+      # Downstream of a break already named. Reporting it as a second BROKEN AT
+      # would read as two independent faults; it is one fault's blast radius. Its
+      # diagnosis is skipped too — a stage with nothing to read diagnoses nothing.
+      echo "  · also red, downstream of $first_break: $s"
+      continue
+    else
       echo "  → BROKEN AT $s: ${!hint:-no hint recorded}"
-      if declare -F "DIAG_$s" >/dev/null; then echo "── diagnosis ──"; "DIAG_$s" || true; fi
-      exit "${!code:-1}"
+      first_break="$s"; first_code="${!code:-1}"
     fi
+    if declare -F "DIAG_$s" >/dev/null; then echo "── diagnosis ($s) ──"; "DIAG_$s" || true; fi
+    # Original contract for XFAIL-free scenarios: stop at the first break.
+    if [ "$collect" -eq 0 ]; then exit "$first_code"; fi
   done
+  if [ -n "$first_break" ]; then
+    echo
+    if [ "$expected" -gt 0 ]; then
+      echo "  → BROKEN AT $first_break (exit $first_code); $expected further stage(s) RED-EXPECTED"
+    else
+      echo "  → BROKEN AT $first_break (exit $first_code)"
+    fi
+    exit "$first_code"
+  fi
+  if [ "$expected" -gt 0 ] || [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ]; then
+    echo
+    echo "  → SUCCESS with $expected RED-EXPECTED stage(s): ${SUCCESS_MESSAGE:-full chain green}"
+    echo "    Every stage that CAN pass today did. Each ⚠ above names the missing"
+    echo "    substrate wiring rather than a regression — that list is the ask."
+    exit 0
+  fi
   echo "  → INCONCLUSIVE: every stage reported non-zero but the success stage did not."
   exit 4
 }

@@ -1,0 +1,161 @@
+# chat topology — ONE canonical + TWO owner-claimed nodes, the shape the
+# single-node chat surface structurally cannot exercise (CIRISServer#455).
+#
+# STANDALONE, not an overlay: `docker-compose.yml`'s second service is the
+# python `agent` boot shim, which has no HTTP router at all — `/v1/contacts` and
+# `/v1/chat` live in `serve_with_adapter` (compose.rs), so every party to a chat
+# must be a `ciris-server` process. Each service therefore `extends` the base
+# CANONICAL (one image, the same test-anchor env block, the same healthcheck) and
+# overrides only what differs. Layering this ON TOP of docker-compose.yml would
+# drag the agent in as a fourth container that can answer none of the routes.
+#
+#   ./run_scenario.sh chat
+#
+# ── Why static IPs ──────────────────────────────────────────────────────────
+# `net.bootstrap_peers` is parsed as a `SocketAddr` (config.rs
+# `parse_bootstrap_peers`), and so is a canonical's `ip` transport hint
+# (`compose::ip_addrs_from_hints`). A docker service NAME is not one: it is
+# skipped with a warning and the node dials nothing. The base file gets away
+# with `canonical:4242` because its agent role resolves the name in Python before
+# handing edge a `host:port`. A `ciris-server` node has no such shim, so the
+# addresses are pinned here and used verbatim in both places.
+name: ciris-mesh-chat
+
+services:
+  # The relay + the third party. It is a real canonical (test_bless claims
+  # `canonical,node` + `infra:serve`), it carries the mesh, and it is NOT a
+  # member of the room — which is what the `dark` stage exists to prove.
+  canonical:
+    extends:
+      file: docker-compose.yml
+      service: canonical
+    environment:
+      # The dial hint that rides in the canonical's SIGNED envelope. It must
+      # parse as a SocketAddr or `ip_addrs_from_hints` drops it — see the header.
+      CIRIS_TEST_CANONICAL_DIAL: "172.29.77.10:4242"
+      RUST_LOG: "info,ciris_edge=debug"
+    volumes:
+      # THE CONSOLE BINARY, mounted rather than baked. `ciris-server identity
+      # create` and `ciris-server claim` exist ONLY in the Rust bin target
+      # (src/main.rs) — the wheel's console script is `ciris_server.cli:main`,
+      # whose PyO3 `py_main` implements exactly three arms: `import-traces`,
+      # `config set|get`, and the default serve path. So the wheel CAN set
+      # `net.bootstrap_peers` (node_boot.sh does) and CANNOT mint a fed-ID or
+      # claim a node. The binary links the identical shared-library set as the
+      # wheel's abi3 `.so` (libssl / libcrypto / libsqlite3 / libgcc / libm /
+      # libc), so it runs unchanged on this image. Same release build produces
+      # both, so it cannot drift from the node it is claiming.
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+      - ./chat_drive.py:/opt/harness/chat_drive.py:ro
+    networks:
+      mesh:
+        ipv4_address: 172.29.77.10
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=2g
+
+  # Node A — the SENDER. An ordinary owner-claimed node: no canonical bless, no
+  # `infra:serve` role. That is deliberate and it is a finding in itself: a chat
+  # message is `AttestationFamily::Unknown` at `cohort_scope: community`, which
+  # persist's registry projects `Cohort`, NOT `Capability(InfraServe)`. The
+  # serve-capability gate that governs `trace:*` does not govern chat.
+  node-a:
+    extends:
+      file: docker-compose.yml
+      service: canonical
+    command: ["sh", "/opt/harness/node_boot.sh"]
+    depends_on:
+      canonical:
+        condition: service_healthy
+    environment:
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+      CIRIS_NODE_KEY_ID: "ciris-node-a"
+      CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242"]'
+      RUST_LOG: "info,ciris_edge=debug"
+    volumes:
+      - ./node_boot.sh:/opt/harness/node_boot.sh:ro
+      - ./chat_drive.py:/opt/harness/chat_drive.py:ro
+      # See the canonical service's note.
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+    networks:
+      mesh:
+        ipv4_address: 172.29.77.11
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=2g
+
+  # Node B — the RECIPIENT. It additionally dials node-a directly.
+  #
+  # HONESTY NOTE: both nodes dial the canonical, and node-b ALSO dials node-a.
+  # The direct dial is not there to make the test easier to pass — it is there so
+  # a red `arrived` stage means "the row did not survive the crossing", not "two
+  # nodes never got a transport link". Whether the canonical ever HELD the row is
+  # reported separately (`canonical holds the message row` in the evidence tail):
+  # on the first two runs it held none, so the `dark` stage asserts a refusal by a
+  # consent peer that is not in the roster, and claims nothing about relaying.
+  node-b:
+    extends:
+      file: docker-compose.yml
+      service: canonical
+    command: ["sh", "/opt/harness/node_boot.sh"]
+    depends_on:
+      canonical:
+        condition: service_healthy
+      node-a:
+        condition: service_healthy
+    environment:
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+      CIRIS_NODE_KEY_ID: "ciris-node-b"
+      CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242", "172.29.77.11:4242"]'
+      RUST_LOG: "info,ciris_edge=debug"
+    volumes:
+      - ./node_boot.sh:/opt/harness/node_boot.sh:ro
+      - ./chat_drive.py:/opt/harness/chat_drive.py:ro
+      # See the canonical service's note.
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+    networks:
+      mesh:
+        ipv4_address: 172.29.77.12
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=2g
+
+  # Node C — the THIRD party, behind a compose PROFILE so it costs nothing until
+  # it is asked for. This ladder is the seed of the scale harness for voting and
+  # video, so the topology had to stop being two-shaped somewhere; it stops here
+  # and in `CHAT_NODES` (scenarios/chat.sh), which is an ORDERED party list —
+  # first entry sends, the rest receive — that every stage is written over.
+  #
+  #   COMPOSE_PROFILES=scale CHAT_NODES="node-a node-b node-c" ./run_scenario.sh chat
+  #
+  # A fourth node is this block again with `-c` → `-d` and `.13` → `.14`. The IP
+  # allocation is deliberate and readable: canonical .10, then nodes from .11.
+  node-c:
+    profiles: ["scale"]
+    extends:
+      file: docker-compose.yml
+      service: canonical
+    command: ["sh", "/opt/harness/node_boot.sh"]
+    depends_on:
+      canonical:
+        condition: service_healthy
+      node-a:
+        condition: service_healthy
+    environment:
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+      CIRIS_NODE_KEY_ID: "ciris-node-c"
+      CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242", "172.29.77.11:4242"]'
+      RUST_LOG: "info,ciris_edge=debug"
+    volumes:
+      - ./node_boot.sh:/opt/harness/node_boot.sh:ro
+      - ./chat_drive.py:/opt/harness/chat_drive.py:ro
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+    networks:
+      mesh:
+        ipv4_address: 172.29.77.13
+    tmpfs:
+      - /var/lib/ciris:mode=1777,size=2g
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.77.0/24

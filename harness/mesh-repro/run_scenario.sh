@@ -62,5 +62,16 @@ harness_build_wheel
 export CIRIS_SERVER_VERSION="local"
 harness_up || { echo "→ stack failed to come up"; exit 3; }
 harness_wait_healthy "${HEALTH_SERVICE:-canonical}"
+# OPTIONAL scenario hook, between "the stack is up" and "start measuring".
+# A carrier scenario needs none — traceflow's agent drives itself from inside its
+# container. A scenario whose subject is an OWNER-GATED HTTP surface does: nothing
+# in the containers can claim a node, and a claim is not a measurement. It is
+# invoked only when the scenario defines it, so every existing scenario is
+# unaffected. It must not `exit` — a failed setup has to reach the ladder, which
+# is what names the stage it broke at.
+if declare -F harness_scenario_prepare >/dev/null; then
+  echo "═══ $SCENARIO_NAME: scenario prepare ═══"
+  harness_scenario_prepare || echo "── prepare returned non-zero — continuing to the ladder"
+fi
 harness_run_ladder "$WINDOW" "${RESAMPLE_SECS:-30}"
 harness_verdict
