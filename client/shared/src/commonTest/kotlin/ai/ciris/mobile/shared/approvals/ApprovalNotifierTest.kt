@@ -258,17 +258,30 @@ class ApprovalNotifierTest {
     }
 
     @Test
-    fun rememberedIdsAreCappedSoTheSetCannotGrowWithoutBound() = runTest {
+    fun theCapBoundsResolvedGarbageNeverPendingTruth() = runTest {
         val sink = FakeSink()
         val store = InMemoryNotifiedApprovalStore()
         val notifier = ApprovalNotifier(sink, store, maxRemembered = 5, burstThreshold = 100)
 
+        // 20 approvals, ALL still pending: none may be evicted, even past the
+        // cap. The old oldest-first eviction here made the notifier CYCLE — the
+        // evicted ids re-announced on the next poll, a fresh alert every
+        // interval for a backlog the operator had already been told about.
         notifier.onApprovalsObserved((1..20).map { approval("a$it") })
+        assertEquals(20, store.load().size, "a pending id is truth, not garbage")
+        assertEquals(
+            emptyList(),
+            notifier.onApprovalsObserved((1..20).map { approval("a$it") }),
+            "the whole point: a still-pending backlog must never re-announce",
+        )
 
+        // The backlog resolves down to a18..a20 and a21 arrives: NOW the cap
+        // bites, on resolved ids only, oldest first.
+        notifier.onApprovalsObserved((18..21).map { approval("a$it") })
         assertEquals(5, store.load().size)
-        // Oldest evicted first.
-        assertTrue("a20" in store.load())
-        assertTrue("a1" !in store.load())
+        assertTrue("a21" in store.load())
+        assertTrue("a18" in store.load(), "still-pending ids survive the eviction")
+        assertTrue("a1" !in store.load(), "resolved ids evict oldest first")
     }
 
     // ─── Copy ──────────────────────────────────────────────────────────────
