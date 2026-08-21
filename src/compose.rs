@@ -3261,7 +3261,7 @@ pub(crate) async fn start_replication_runtime(
         Arc::new(move || keys.read().expect("self_publish_keys poisoned").clone())
     };
     tokio::spawn({
-        let engine = Arc::clone(&engine);
+        let engine = Arc::clone(engine);
         let keys = Arc::clone(&self_publish_keys);
         let node = node_key_id.to_string();
         async move {
