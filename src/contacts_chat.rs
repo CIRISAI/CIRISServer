@@ -140,6 +140,26 @@ const PAIR_CONSENSUS_PROTOCOL: &str = "unanimous";
 /// name one"), so this is server vocabulary, spelled the same way
 /// `safety::moderation` already spells it.
 const FIELD_COMMUNITY_ID: &str = "community_id";
+/// **The attribution member: whose words these are.**
+///
+/// The row is attested and signed by the NODE (see `send_message` for why it
+/// cannot be the owner on this substrate), so the author cannot be read off
+/// `attesting_key_id`. It rides here instead — INSIDE the signed envelope, so it
+/// is covered by the same signature the far side verifies and a relay cannot
+/// rewrite it.
+///
+/// Named to persist's own §8.1.12.7 idiom, which spells an acting party as a
+/// `<role>_key_id` member beside the claim (`delegates_to_agent_envelope` →
+/// `agent_occurrence_key_id`; `partnership_grant_envelope` →
+/// `partner_occurrence_key_id`), and to the tree's existing `on_behalf_of`
+/// vocabulary (`auth::session` logs a delegated call as
+/// `on_behalf_of = <owner>`).
+///
+/// NOT an `envelope::paths` constant: `chat:message:v1` is a new family, so this
+/// member is ours to PROPOSE. Blessing it into persist's superset manifest is
+/// part of the substrate ask — until then it is server vocabulary, and the
+/// single-source rule (SRV-1) binds only the keys persist already owns.
+const FIELD_ON_BEHALF_OF: &str = "on_behalf_of_key_id";
 /// Envelope member carrying the message text.
 const FIELD_BODY: &str = "body";
 /// Envelope member carrying the body's media type.
@@ -810,7 +830,12 @@ struct ChatMessage {
     content_type: String,
     /// RFC3339. The transcript is ordered by this, ascending.
     asserted_at: String,
-    /// `true` when this node's owner authored the message.
+    /// **WHO WROTE IT** — read from the envelope's `on_behalf_of_key_id`, never
+    /// from `attesting_key_id`. The node attests and signs; the human authors.
+    /// A client that read the attester would name the box instead of the person,
+    /// on its own messages and the far side's alike.
+    author: String,
+    /// `true` when this node's owner is the AUTHOR (same source as `author`).
     mine: bool,
 }
 
@@ -1018,37 +1043,60 @@ async fn send_message(
     let envelope = serde_json::json!({
         (paths::DIMENSION): CHAT_MESSAGE_DIMENSION,
         FIELD_COMMUNITY_ID: community_id,
+        // WHOSE WORDS. Inside the signed bytes, so the far side gets it under
+        // the same signature it already verifies.
+        FIELD_ON_BEHALF_OF: owner.key_id,
         FIELD_BODY: req.body,
         FIELD_CONTENT_TYPE: content_type,
         // A `scores` row carries a score; the magnitude is not load bearing for
         // a message, and a positive constant is the honest "this was said".
         "score": 1.0,
     });
-    // ── WHY THIS STAGES AND PROMOTES INSTEAD OF SIGNING AS THE OWNER ─────────
+    // ── WHO SIGNS, AND WHY IT IS THE NODE ───────────────────────────────────
     //
-    // It should sign as the owner. The row names the owner as `attesting_key_id`
-    // and persist's ingest gate verifies against THAT key's registered pubkeys,
-    // so a node-signed row claiming the owner is refused by every peer — which
-    // is exactly what two live nodes observed ("Classical signature verification
-    // failed: Ed25519") while node-authored rows landed beside it.
+    // The node signs, on the owner's behalf, under the recorded owner-binding.
+    // The row is attested by the node's own key (so signer == attester and every
+    // peer's ingest gate passes), and the AUTHOR rides in the signed envelope as
+    // `on_behalf_of_key_id`. What makes that a verifiable claim rather than the
+    // node's say-so is that the binding it acts under —
+    // `delegates_to(owner -> this node)` — is itself a federation-tier, REPLICATED,
+    // revocable CEG row: the far side can resolve the chain and check it, and an
+    // owner who withdraws the binding invalidates the authority for every row
+    // that leans on it.
     //
-    // It cannot, on persist v38, and the gate is unambiguous. `put_attestation`
-    // calls `check_write_cohort_scope_for(writer, "put_attestation", scope,
-    // None)` on all three backends — the target is a hardcoded `None`, and the
-    // `community` arm of `check_write_cohort_scope` requires `Some(cid)` the
-    // writer is a member of. Persist's own comment states the consequence:
-    // attestations "carry a `cohort_scope` label but no `cohort_target_id`
-    // field", so `family` / `community` are REFUSED at that door. The ONLY door
-    // that can mint a targeted-cohort row is `attestation_promote` — whose
-    // `reseal_for_scope` re-signs with `self.sign_hybrid`, the ENGINE's key.
+    // TWO substrate facts force this shape, and neither is a preference:
     //
-    // So on this substrate version a `cohort_scope: community` attestation is
-    // node-signed BY CONSTRUCTION, and the owner's signature on one is not
-    // expressible. Bending it would mean either publishing private chat at
-    // `federation` scope or re-attributing messages away from the human who
-    // wrote them; both are worse than the delivery bug. The characterization pin
-    // in `tests/contacts_chat.rs` holds the exact refusal so this flips the day
-    // persist carries a cohort target through the write gate.
+    // 1. A community-scoped row CANNOT be signer-explicit. `put_attestation`
+    //    calls `check_write_cohort_scope_for(…, scope, None)` on all three
+    //    backends with a hardcoded `None` target, and the `community` arm needs
+    //    `Some(cid)` the writer belongs to — so the put door refuses EVERY
+    //    `cohort_scope: community` row, from any signer. Only `attestation_promote`
+    //    can mint one, and its `reseal_for_scope` re-signs with the engine key.
+    //    A community-scoped attestation is node-signed by construction here.
+    //
+    // 2. The node may not hold agency, so it does not claim any. CC 4.4.3.4.3 /
+    //    CC 1.13.5 — persist's `check_node_agency_admission` REJECTS a
+    //    `delegates_to` to a node-only key carrying `agency:*` (or the legacy
+    //    `message_io`), and this node registers as `identity_type::NODE`. So the
+    //    envelope names the AUTHOR and stops there: no scope claim, because
+    //    "infrastructure must not have agency" is the rule, not an obstacle. The
+    //    authority actually exercised is the infra owner-binding — store and
+    //    serve the owner's content — which is what this node legitimately holds.
+    //
+    // THE UPGRADE PATH: when persist carries a cohort TARGET through the write
+    // gate, a signer-explicit `community` write becomes possible and this flips
+    // to signing with the author's own key (the owner's app occurrence, which
+    // self-at-login legitimately grants `agency:message_io`, is the
+    // constitutionally correct signer — not the node, and not the node's engine
+    // key). `on_behalf_of_key_id` STAYS in both worlds: it is true either way,
+    // and a reader that learned to trust it does not have to relearn anything.
+    //
+    // THE LIVE-BINDING PRECONDITION is already enforced, once, upstream:
+    // `require_owner` runs `auth::gate::require_owner_bound`, which is
+    // `is_steward_bound` -> `owner_binding_stands` (withdraws-aware). An unclaimed
+    // node, or one whose binding has been withdrawn, is refused there with
+    // `auth.owner_gate.node_unowned` before any row is built. Re-checking it here
+    // would be a second answer to a question already answered.
     let envelope_core =
         match ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope) {
             Ok(e) => e,
@@ -1062,15 +1110,19 @@ async fn send_message(
         };
     let input = LocalAttestationInput {
         attestation_id: None,
-        attesting_key_id: owner.key_id.clone(),
-        // Producer-only, at BOTH of these fields — `check_promotion_cohort_standing`
-        // refuses a `community` placement that names any other party.
-        attested_key_id: Some(owner.key_id.clone()),
+        // THE NODE ATTESTS. Signer == attester by construction: the promote below
+        // re-seals with the engine's key, and the engine's key is what this names.
+        // The human is named in the envelope, not here.
+        attesting_key_id: owner.node_key_id.clone(),
+        // Producer-only at BOTH — `check_promotion_cohort_standing` refuses a
+        // `community` placement naming any other party, so these follow the
+        // attester rather than the author.
+        attested_key_id: Some(owner.node_key_id.clone()),
         attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
         attestation_envelope: envelope_core,
-        subject_key_ids: vec![owner.key_id.clone()],
+        subject_key_ids: vec![owner.node_key_id.clone()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         scrub_signature_classical: None,
         scrub_signature_pqc: None,
@@ -1148,14 +1200,51 @@ async fn collect_messages(
         .active_community_members(community_id)
         .await
         .map_err(|e| format!("active_community_members: {e}"))?;
+    // ── WHOSE ROWS TO SCAN ──────────────────────────────────────────────────
+    //
+    // Messages are attested by NODES, not by members (the node signs on its
+    // owner's behalf — see `send_message`), so scanning the roster alone finds
+    // nothing. The nodes to scan are the ones the members are bound to, and each
+    // member's own `delegates_to(member -> node)` owner-binding NAMES them — a
+    // federation-tier row that replicates, so the far side's node is resolvable
+    // here exactly as ours is.
+    //
+    // That binding arrives in the SAME scan the roster already needs, so this
+    // costs no extra read: walk each member once, keep their chat rows, and
+    // collect the node ids their bindings point at.
     let mut rows: Vec<Attestation> = Vec::new();
+    let mut node_key_ids: Vec<String> = vec![owner.node_key_id.clone()];
     for member in &members {
-        let mut authored = directory
+        let authored = directory
             .list_attestations_by(&member.key_id)
             .await
             .map_err(|e| format!("list_attestations_by({}): {e}", member.key_id))?;
-        rows.append(&mut authored);
+        for row in &authored {
+            if row.attestation_type == attestation_type::DELEGATES_TO
+                && ciris_persist::federation::admission::is_owner_binding_envelope(
+                    &row.attestation_envelope,
+                )
+                && !node_key_ids.contains(&row.attested_key_id)
+            {
+                node_key_ids.push(row.attested_key_id.clone());
+            }
+        }
+        // A member's own rows are still scanned: pre-attribution messages, and
+        // the signer-explicit ones a future substrate lets them author directly,
+        // are attested by the human. Both shapes read back through one path.
+        rows.extend(authored);
     }
+    for node in &node_key_ids {
+        let authored = directory
+            .list_attestations_by(node)
+            .await
+            .map_err(|e| format!("list_attestations_by({node}): {e}"))?;
+        rows.extend(authored);
+    }
+    // One row can arrive twice (a member IS scanned, and so is their node);
+    // dedup on the row identity rather than trusting the walk not to overlap.
+    rows.sort_by(|a, b| a.attestation_id.cmp(&b.attestation_id));
+    rows.dedup_by(|a, b| a.attestation_id == b.attestation_id);
     // Composers first, so a message's status is available when it is projected.
     let mut composers: HashMap<String, Vec<&Attestation>> = HashMap::new();
     for row in &rows {
@@ -1174,6 +1263,17 @@ async fn collect_messages(
             continue;
         }
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
+        // The author, or an honest fallback: a row with no attribution member is
+        // pre-attribution or foreign, and naming its ATTESTER would silently
+        // report the node as the human. Reporting the attester is still the least
+        // wrong answer available — but only because there is no other — so it is
+        // the documented fallback rather than the primary read.
+        let author = row
+            .attestation_envelope
+            .get(FIELD_ON_BEHALF_OF)
+            .and_then(|v| v.as_str())
+            .unwrap_or(row.attesting_key_id.as_str())
+            .to_owned();
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),
@@ -1197,7 +1297,8 @@ async fn collect_messages(
                 .unwrap_or(DEFAULT_CONTENT_TYPE)
                 .to_owned(),
             asserted_at: row.asserted_at.to_rfc3339(),
-            mine: row.attesting_key_id == owner.key_id,
+            author: author.clone(),
+            mine: author == owner.key_id,
         });
     }
     // Newest LAST — a transcript reads down the page. `asserted_at` can tie

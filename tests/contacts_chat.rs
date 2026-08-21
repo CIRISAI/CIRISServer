@@ -884,7 +884,7 @@ async fn a_chat_with_a_non_contact_is_refused() {
 
 #[tokio::test]
 async fn send_and_list_round_trip_carries_the_hamburger_fields() {
-    let (_engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _h) = fixture().await;
     let client = reqwest::Client::new();
     let community_id = open_chat(&client, &base, &owner).await;
 
@@ -930,15 +930,20 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     // THE HAMBURGER FIELDS. The client renders each message with the same
     // attestation card it uses everywhere else; a bespoke `{from,text,at}` would
     // have hidden every one of these.
+    let node = node_key_id(&engine).await;
     let m = &messages[0];
     assert_eq!(m["attestation_id"], serde_json::json!(first_id));
-    assert_eq!(m["attesting_key_id"], OWNER_USER_KEY_ID);
-    assert_eq!(m["attested_key_id"], OWNER_USER_KEY_ID);
+    // THE NODE ATTESTS, THE HUMAN AUTHORS — two fields, two questions. A card
+    // that read `attesting_key_id` as the sender would label every message with
+    // the box it passed through.
+    assert_eq!(m["attesting_key_id"], serde_json::json!(node));
+    assert_eq!(m["attested_key_id"], serde_json::json!(node));
+    assert_eq!(m["author"], OWNER_USER_KEY_ID);
     assert_eq!(m["attestation_type"], attestation_type::SCORES);
     assert_eq!(m["cohort_scope"], cohort_scope::COMMUNITY);
     assert_eq!(m["community_id"], serde_json::json!(community_id));
     assert_eq!(m["status"], "live");
-    assert_eq!(m["subject_key_ids"], serde_json::json!([OWNER_USER_KEY_ID]));
+    assert_eq!(m["subject_key_ids"], serde_json::json!([node]));
     assert_eq!(m["content_type"], "text/plain");
     assert_eq!(m["mine"], true);
     assert!(m["asserted_at"].is_string());
@@ -1017,17 +1022,20 @@ async fn strangers_community(engine: &Engine) -> String {
 /// shape `POST /v1/chat/{id}/messages` writes, so the withheld content is real
 /// content and not an empty transcript.
 async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &str) -> String {
+    // NODE-attested, AUTHOR-attributed — the shape `send_message` writes.
+    let node = node_key_id(engine).await;
     let envelope = serde_json::json!({
         (paths::DIMENSION): contacts_chat::CHAT_MESSAGE_DIMENSION,
         "community_id": community_id,
+        "on_behalf_of_key_id": author,
         "body": body,
         "content_type": "text/plain",
         "score": 1.0,
     });
     let input = LocalAttestationInput {
         attestation_id: None,
-        attesting_key_id: author.to_string(),
-        attested_key_id: Some(author.to_string()),
+        attesting_key_id: node.clone(),
+        attested_key_id: Some(node.clone()),
         attestation_type: attestation_type::SCORES.to_string(),
         weight: None,
         expires_at: None,
@@ -1035,7 +1043,7 @@ async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &
             envelope,
         )
         .expect("envelope"),
-        subject_key_ids: vec![author.to_string()],
+        subject_key_ids: vec![node],
         cohort_scope: cohort_scope::SELF.to_string(),
         scrub_signature_classical: None,
         scrub_signature_pqc: None,
@@ -1063,51 +1071,36 @@ async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &
 /// server can stage a message on the owner's behalf, but only the holder of the
 /// owner's key can retract one.
 async fn withdraw_own_message(engine: &Engine, target_attestation_id: &str) {
-    use ciris_persist::federation::admission::truncate_to_substrate_resolution;
-    use ciris_persist::federation::envelope::{EnvelopeCore, RowMirror};
-
+    // Same shape as the message it retracts: NODE-attested, node-signed,
+    // owner-attributed. The owner exercises revocation THROUGH the node, which is
+    // consistent with the route being owner-gated and `ChatAuthor` never
+    // delegatable — and unlike the earlier owner-signed form, this one actually
+    // reaches the far side, which is the whole point of a retraction.
+    let node = node_key_id(engine).await;
     let envelope = serde_json::json!({
         (paths::DIMENSION): contacts_chat::CHAT_MESSAGE_DIMENSION,
         (paths::REFERENCES_ATTESTATION_ID): target_attestation_id,
     });
-    let mut core = EnvelopeCore::from_value(envelope).expect("withdraw envelope");
-    // A transit row is NOT stamped by the local door (the door stamps only
-    // durable rows — it must not mutate bytes a signature already covers), so
-    // the producer carries the #643 mirror and the #598 instant itself. That
-    // makes the row's identity and its seven typed columns part of the signed
-    // bytes, which is the whole point: a relay cannot rewrite `subject_key_ids`
-    // out from under a signature that still verifies.
-    let attestation_id = ciris_server::ids::new_id();
-    core.asserted_at = Some(truncate_to_substrate_resolution(chrono::Utc::now()).to_rfc3339());
-    core.row = Some(RowMirror {
-        attestation_id: attestation_id.clone(),
-        attesting_key_id: OWNER_USER_KEY_ID.to_string(),
-        attestation_type: attestation_type::WITHDRAWS.to_string(),
-        attested_key_id: OWNER_USER_KEY_ID.to_string(),
-        subject_key_ids: vec![OWNER_USER_KEY_ID.to_string()],
-        cohort_scope: cohort_scope::SELF.to_string(),
-        weight: None,
-    });
-    // Sign the envelope AS THE DOOR WILL SEE IT — `EnvelopeCore::to_value` is
-    // what `verify_envelope_hybrid_signature` recanonicalizes, so signing any
-    // other rendering of the same JSON would verify against different bytes.
-    let canonical = ceg_produce_canonicalize(&core.to_value()).expect("canonicalize withdraw");
-    let sig = owner_user_signer()
-        .sign_hybrid(&canonical)
-        .await
-        .expect("owner hybrid-signs their own withdraw");
     let input = LocalAttestationInput {
-        attestation_id: Some(attestation_id),
-        attesting_key_id: OWNER_USER_KEY_ID.to_string(),
-        attested_key_id: Some(OWNER_USER_KEY_ID.to_string()),
+        attestation_id: None,
+        attesting_key_id: node.clone(),
+        attested_key_id: Some(node.clone()),
         attestation_type: attestation_type::WITHDRAWS.to_string(),
         weight: None,
         expires_at: None,
-        attestation_envelope: core,
-        subject_key_ids: vec![OWNER_USER_KEY_ID.to_string()],
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .expect("withdraw envelope"),
+        // EMPTY, and load-bearing: `is_subject_side_revocation` classifies a
+        // `withdraws` whose attester is among its own subjects as a §10.1.3
+        // TRANSIT revocation, which the local door then demands a bound-hybrid
+        // signature for. Naming nobody keeps it an ordinary durable row — and
+        // matches persist's own `consent_peer_set` fixture composer.
+        subject_key_ids: Vec::new(),
         cohort_scope: cohort_scope::SELF.to_string(),
-        scrub_signature_classical: Some(BASE64.encode(&sig.classical.signature)),
-        scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
     };
     let id = engine
         .federation_directory()
@@ -1514,36 +1507,19 @@ async fn an_ordinarily_federated_peer_is_not_a_contact() {
     assert_eq!(resp.status(), 200, "the room opens once chat: is covered");
 }
 
-/// **THE SUBSTRATE PIN — this asserts a DEFECT, on purpose.**
+/// **THE BOUNDARY GATE — the pin, flipped.**
 ///
-/// Two live nodes proved chat messages are refused on cross-node ingest:
-/// persist's `verify_row_hybrid_signature` resolves `attesting_key_id`'s
-/// REGISTERED pubkeys and hybrid-verifies, and a chat row names the OWNER while
-/// carrying the NODE's signature. So this asserts the row we store today does
-/// NOT verify — which is not a thing to be happy about, it is a thing to hold
-/// still so it cannot be forgotten or silently half-fixed.
+/// Its predecessor asserted this FAILED, and named exactly what would flip it.
+/// This is that flip: the row a send writes is now attested and signed by the
+/// same key, so persist's own `verify_row_hybrid_signature` — the gate the far
+/// node runs on ingest — accepts it. Two live nodes observed the old row refused
+/// with "Classical signature verification failed: Ed25519" while node-authored
+/// rows landed beside it; this asserts the difference is gone.
 ///
-/// # Why the obvious fix does not exist yet
-///
-/// Signing as the owner requires emitting the row through a signer-explicit door
-/// at `cohort_scope: community`. `put_attestation` refuses that on ALL THREE
-/// backends: it calls `check_write_cohort_scope_for(writer, …, scope, None)` with
-/// a hardcoded `None` target, and `check_write_cohort_scope`'s `community` arm
-/// needs `Some(cid)` the writer belongs to. Persist says why in that gate's own
-/// comment — attestations "carry a `cohort_scope` label but no
-/// `cohort_target_id` field". The only door that CAN mint a targeted-cohort row
-/// is `attestation_promote`, and its `reseal_for_scope` re-signs with the
-/// engine's key. A community-scoped attestation is therefore node-signed by
-/// construction on v38, and the owner's signature on one is not expressible.
-///
-/// # What flips this test
-///
-/// Persist carrying a cohort target through the write gate (so a signer-explicit
-/// emit can place a `community` row), or a promote that preserves the producer's
-/// signature instead of re-sealing. Either one makes the assertion below fail —
-/// which is the signal to invert it and finish the job, not to relax it.
+/// It runs the REAL gate against the REAL directory rather than re-deriving what
+/// verification ought to mean, so it cannot pass by agreeing with itself.
 #[tokio::test]
-async fn a_chat_message_does_not_yet_verify_at_the_persist_boundary() {
+async fn a_chat_message_verifies_at_the_persist_boundary() {
     use ciris_persist::federation::tier_ingest::verify_row_hybrid_signature;
 
     let (engine, base, owner, _h) = fixture().await;
@@ -1560,30 +1536,104 @@ async fn a_chat_message_does_not_yet_verify_at_the_persist_boundary() {
     let sent: serde_json::Value = resp.json().await.expect("send json");
     let id = sent["attestation_id"].as_str().expect("attestation_id");
 
+    let node = node_key_id(&engine).await;
     let directory = engine.federation_directory();
     let row = directory
-        .list_attestations_by(OWNER_USER_KEY_ID)
+        .list_attestations_by(&node)
         .await
         .expect("list_attestations_by")
         .into_iter()
         .find(|a| a.attestation_id == id)
         .expect("the stored message row");
 
-    // The row claims the owner and carries the node's scrub — the split itself.
-    assert_eq!(row.attesting_key_id, OWNER_USER_KEY_ID);
-    assert_ne!(
+    // Signer == attester: the property the far side's gate actually turns on.
+    assert_eq!(row.attesting_key_id, node);
+    assert_eq!(
         row.scrub_key_id, row.attesting_key_id,
-        "the split IS the defect: if these ever match, the fix has landed and the \
-         assertion below must be inverted"
+        "the split that made every cross-node ingest refuse must be gone"
+    );
+    verify_row_hybrid_signature(directory.as_ref(), &row)
+        .await
+        .expect("the far node's own ingest gate must accept this row");
+}
+
+/// **THE ATTRIBUTION HALF.** Delivery and authorship are two properties and the
+/// pin above only holds one of them — a row could verify perfectly while having
+/// quietly lost the human whose words it carries. That failure would be
+/// invisible: everything green, every message signed, every message attributed
+/// to a box.
+///
+/// So this asserts the other half, and asserts it INSIDE the signed bytes: the
+/// envelope names the owner, the projection reads the author from THERE (not
+/// from the attester), and the live owner-binding the node acts under actually
+/// exists.
+#[tokio::test]
+async fn the_message_names_its_human_author_inside_the_signed_envelope() {
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "my words, the node's signature" }))
+        .send()
+        .await
+        .expect("POST message");
+    assert_eq!(resp.status(), 200);
+    let sent: serde_json::Value = resp.json().await.expect("send json");
+    let id = sent["attestation_id"].as_str().expect("attestation_id");
+
+    let node = node_key_id(&engine).await;
+    let row = engine
+        .federation_directory()
+        .list_attestations_by(&node)
+        .await
+        .expect("list_attestations_by")
+        .into_iter()
+        .find(|a| a.attestation_id == id)
+        .expect("the stored message row");
+
+    // IN THE ENVELOPE — covered by the signature the far side verifies, so a
+    // relay cannot rewrite the author while the row still checks out.
+    assert_eq!(
+        row.attestation_envelope["on_behalf_of_key_id"],
+        serde_json::json!(OWNER_USER_KEY_ID),
+        "the signed envelope must name the human: {:?}",
+        row.attestation_envelope
+    );
+    assert_ne!(
+        row.attesting_key_id, OWNER_USER_KEY_ID,
+        "the node attests — if this ever equals the owner the signer-explicit \
+         upgrade has landed, and `author` should come from the attester again"
     );
 
-    // THE FAR NODE'S ACTUAL GATE, run locally against the same directory.
-    let verdict = verify_row_hybrid_signature(directory.as_ref(), &row).await;
-    assert!(
-        verdict.is_err(),
-        "PIN FLIPPED — a chat message now verifies at the persist boundary. \
-         That is the outcome we want: invert this test to assert `is_ok()`, and \
-         switch `send_message` to the signer-explicit emit path."
+    // THE AUTHORITY IT ACTS UNDER is live and resolvable — not the node's say-so.
+    // `is_steward_bound` is withdraws-aware, so this is the same read that would
+    // stop being true the moment the owner revoked the binding.
+    assert_eq!(
+        ciris_server::auth::ownership::is_steward_bound(&engine, &node).await,
+        Some(OWNER_USER_KEY_ID.to_string()),
+        "a node authoring on its owner's behalf must hold a LIVE owner-binding"
+    );
+
+    // AND THE PROJECTION READS THE ENVELOPE, not the attester.
+    let resp = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages");
+    let list: serde_json::Value = resp.json().await.expect("messages json");
+    let m = &list["messages"][0];
+    assert_eq!(m["author"], OWNER_USER_KEY_ID, "author is the human: {m}");
+    assert_eq!(
+        m["attesting_key_id"],
+        serde_json::json!(node),
+        "attester is the node"
+    );
+    assert_eq!(
+        m["mine"], true,
+        "`mine` follows the author, not the attester"
     );
 }
 
