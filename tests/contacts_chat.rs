@@ -1732,3 +1732,256 @@ async fn concurrent_chat_creation_is_an_idempotent_success() {
         );
     }
 }
+
+// ─── The author claim is validated, not trusted ─────────────────────────────
+
+/// Seed a NODE-role key: a steward-binding's target must be a node —
+/// `delegates_to` onto a user-role key is guardianship-only (CC 3.2, the
+/// refusal this test first hit), so the contact's node must carry
+/// `identity_type::NODE` exactly as a real node registration does.
+async fn seed_node_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8) {
+    let ed = SigningKey::from_bytes(&[ed_seed; 32]);
+    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{key_id}-pqc"))
+        .expect("ML-DSA-65 seed");
+    let now = chrono::Utc::now();
+    let envelope = serde_json::json!({ "key_id": key_id });
+    let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");
+    let record = KeyRecord {
+        key_id: key_id.to_string(),
+        pubkey_ed25519_base64: BASE64.encode(ed.verifying_key().to_bytes()),
+        pubkey_ml_dsa_65_base64: Some(BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"))),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: identity_type::NODE.into(),
+        identity_ref: key_id.to_string(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: envelope,
+        original_content_hash: hex::encode(Sha256::digest(&canonical)),
+        scrub_signature_classical: String::new(),
+        scrub_signature_pqc: None,
+        scrub_key_id: key_id.to_string(),
+        scrub_timestamp: now,
+        pqc_completed_at: Some(now),
+        persist_row_hash: String::new(),
+        capability_roles: Vec::new(),
+        attestation_evidence: None,
+        consent_role: None,
+        additional_scrubs: Vec::new(),
+    };
+    engine
+        .federation_directory()
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .unwrap_or_else(|e| panic!("seed node key {key_id}: {e}"));
+}
+
+/// Build a signer for `CONTACT_KEY_ID` from the same seeds the fixture
+/// registered its pubkeys under, so a binding it emits verifies as the real
+/// contact's act.
+fn contact_signer() -> LocalSigner {
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{CONTACT_KEY_ID}-pqc"))
+            .expect("contact ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        SigningKey::from_bytes(&[0xB0; 32]),
+        CONTACT_KEY_ID.to_string(),
+        Some(pqc),
+        Some(format!("{CONTACT_KEY_ID}-pqc")),
+    )
+}
+
+/// **A forged `on_behalf_of_key_id` cannot render as the local owner's words**
+/// (codex, contacts_chat.rs:1303).
+///
+/// The envelope member is producer-asserted: any node inside the transcript's
+/// scan set can sign a valid community row whose envelope claims OUR owner as
+/// author. The projection now honors the claim only when the attesting node's
+/// LIVE owner-binding names the claimed member. Three assertions, one run:
+/// the forgery projects the WIRE TRUTH (the forging node) and never `mine`;
+/// the same forger's row claiming its OWN bound member projects that member
+/// (the positive case that makes the far side's legitimate messages work);
+/// and the owner's genuine message still projects the owner.
+#[tokio::test]
+async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+
+    // A genuine message from the owner, as a control.
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "genuine" }))
+        .send()
+        .await
+        .expect("send genuine");
+    assert_eq!(resp.status(), 200);
+
+    // The contact's node: a real key the CONTACT's own live owner-binding
+    // names — which puts it in the transcript's scan set, exactly the position
+    // the attack requires.
+    const EVIL_NODE: &str = "contact-node-1";
+    seed_node_key(&engine, EVIL_NODE, 0xE0, 0xE1).await;
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ciris_server::auth::ownership::emit_steward_binding(
+        &engine,
+        &contact_signer(),
+        EVIL_NODE,
+        &scopes,
+    )
+    .await
+    .expect("bind contact -> its node");
+
+    // The forgery: attested by the contact's node, claiming OUR owner.
+    let forged =
+        seed_message_attested_by(&engine, EVIL_NODE, OWNER_USER_KEY_ID, &community_id).await;
+    // The far side's legitimate shape: same node, claiming ITS bound member.
+    let legit = seed_message_attested_by(&engine, EVIL_NODE, CONTACT_KEY_ID, &community_id).await;
+
+    let resp = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages");
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("messages json");
+    let msgs = json["messages"].as_array().expect("messages array");
+
+    let find = |id: &str| {
+        msgs.iter()
+            .find(|m| m["attestation_id"] == id)
+            .unwrap_or_else(|| panic!("row {id} missing from transcript"))
+    };
+    let f = find(&forged);
+    assert_eq!(
+        f["author"], EVIL_NODE,
+        "a claim the attesting node's binding does not back must project the \
+         WIRE TRUTH, not the claim: {f}"
+    );
+    assert_eq!(
+        f["mine"], false,
+        "a forged claim must never render as the local owner's own words: {f}"
+    );
+    let l = find(&legit);
+    assert_eq!(
+        l["author"], CONTACT_KEY_ID,
+        "the same node claiming its OWN bound member is the legitimate far-side \
+         shape and must project the member: {l}"
+    );
+    let genuine = msgs
+        .iter()
+        .find(|m| m["body"] == "genuine")
+        .expect("genuine message");
+    assert_eq!(genuine["author"], OWNER_USER_KEY_ID);
+    assert_eq!(genuine["mine"], true);
+}
+
+/// A message row attested by `node`, claiming `author` — the wire shape a
+/// FOREIGN node's row arrives in (raw put, community scope, no promote step:
+/// a replicated row lands already at its tier).
+async fn seed_message_attested_by(
+    engine: &Engine,
+    node: &str,
+    author: &str,
+    community_id: &str,
+) -> String {
+    let envelope = serde_json::json!({
+        (paths::DIMENSION): contacts_chat::CHAT_MESSAGE_DIMENSION,
+        "community_id": community_id,
+        "on_behalf_of_key_id": author,
+        "body": format!("as {author}"),
+        "content_type": "text/plain",
+        "score": 1.0,
+    });
+    let input = LocalAttestationInput {
+        attestation_id: None,
+        attesting_key_id: node.to_string(),
+        attested_key_id: Some(node.to_string()),
+        attestation_type: attestation_type::SCORES.to_string(),
+        weight: None,
+        expires_at: None,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .expect("envelope"),
+        subject_key_ids: vec![node.to_string()],
+        cohort_scope: cohort_scope::SELF.to_string(),
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
+    };
+    let id = engine
+        .federation_directory()
+        .attestation_upsert_local(input)
+        .await
+        .expect("upsert foreign-shaped chat message");
+    engine
+        .attestation_promote(&id, cohort_scope::COMMUNITY)
+        .await
+        .expect("promote to community tier");
+    id
+}
+
+/// **A pre-planted room under the derived pair id is a conflict, not a chat**
+/// (codex, contacts_chat.rs:702).
+///
+/// The pair id is derivable by anyone, so a peer can replicate a community
+/// under it carrying the pair PLUS a stowaway. The front door now applies the
+/// same sorted-member equality the insert-race arm uses — and the refusal
+/// leaks nothing about who is on the poisoned roster.
+#[tokio::test]
+async fn a_poisoned_roster_under_the_pair_id_is_refused() {
+    use ciris_persist::federation::types::{Community, CommunityMember};
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200);
+
+    let community_id = pair_community_key_id(OWNER_USER_KEY_ID, CONTACT_KEY_ID);
+    let now = chrono::Utc::now();
+    engine
+        .put_community_self_signed(Community {
+            community_key_id: community_id.clone(),
+            community_name: "poisoned".to_string(),
+            members: [OWNER_USER_KEY_ID, CONTACT_KEY_ID, STRANGER_A_KEY_ID]
+                .iter()
+                .map(|k| CommunityMember {
+                    key_id: (*k).to_string(),
+                    joined_at: now,
+                    role: None,
+                })
+                .collect(),
+            founded_at: now,
+            consensus_protocol: "unanimous".to_string(),
+            policy_blob: None,
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("pre-plant the poisoned room");
+
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 409, "a wrong-roster room must refuse");
+    let body = resp.text().await.expect("refusal body");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("refusal json");
+    assert_eq!(json["reason_id"], "chat.community_shape_conflict");
+    assert!(
+        !body.contains(STRANGER_A_KEY_ID),
+        "the refusal must not leak who is on the poisoned roster: {body}"
+    );
+}

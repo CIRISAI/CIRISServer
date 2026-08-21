@@ -697,19 +697,41 @@ async fn start_chat(
     }
 
     let community_id = pair_community_key_id(&owner.key_id, &key_id);
+    let mut expected_members = vec![owner.key_id.clone(), key_id.clone()];
+    expected_members.sort();
     match directory.lookup_community(&community_id).await {
         Ok(Some(existing)) => {
+            // THE ROSTER IS PART OF THE IDENTITY. The pair id is derivable by
+            // anyone, so a peer can pre-replicate a community under it carrying
+            // the pair PLUS an extra member — and a front door that accepts any
+            // row at the derived id would open that room, with every subsequent
+            // community-scoped message readable by the stowaway. Same sorted-
+            // member equality the insert-race arm applies: a room at this id
+            // that is not EXACTLY this pair is a conflict, not a chat.
+            let mut existing_members: Vec<String> =
+                existing.members.iter().map(|m| m.key_id.clone()).collect();
+            existing_members.sort();
+            if existing_members != expected_members {
+                return refuse(
+                    StatusCode::CONFLICT,
+                    "chat.community_shape_conflict",
+                    format!(
+                        "a community already exists under the derived pair id but its                          roster is not this pair ({} member(s), expected 2) — refusing                          to open it as this chat",
+                        existing_members.len()
+                    ),
+                );
+            }
             return (
                 StatusCode::OK,
                 Json(StartChatResponse {
                     community_id: existing.community_key_id,
                     community_name: existing.community_name,
-                    member_key_ids: existing.members.into_iter().map(|m| m.key_id).collect(),
+                    member_key_ids: existing_members,
                     cohort_scope: cohort_scope::COMMUNITY,
                     freshly_created: false,
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Ok(None) => {}
         Err(e) => {
@@ -758,8 +780,7 @@ async fn start_chat(
         );
     };
 
-    let mut member_key_ids = vec![owner.key_id.clone(), key_id.clone()];
-    member_key_ids.sort();
+    let member_key_ids = expected_members;
     let community = Community {
         community_key_id: community_id.clone(),
         community_name: pair_community_name(&owner.key_id, &key_id),
@@ -1242,6 +1263,10 @@ async fn collect_messages(
     // collect the node ids their bindings point at.
     let mut rows: Vec<Attestation> = Vec::new();
     let mut node_key_ids: Vec<String> = vec![owner.node_key_id.clone()];
+    // (member, binding attestation_id, bound node) — kept so the AUTHOR claim can
+    // be validated against the binding's FOLDED status below, not its mere
+    // existence: a withdrawn binding must not keep authenticating claims.
+    let mut binding_edges: Vec<(String, String, String)> = Vec::new();
     for member in &members {
         let authored = directory
             .list_attestations_by(&member.key_id)
@@ -1252,9 +1277,15 @@ async fn collect_messages(
                 && ciris_persist::federation::admission::is_owner_binding_envelope(
                     &row.attestation_envelope,
                 )
-                && !node_key_ids.contains(&row.attested_key_id)
             {
-                node_key_ids.push(row.attested_key_id.clone());
+                binding_edges.push((
+                    member.key_id.clone(),
+                    row.attestation_id.clone(),
+                    row.attested_key_id.clone(),
+                ));
+                if !node_key_ids.contains(&row.attested_key_id) {
+                    node_key_ids.push(row.attested_key_id.clone());
+                }
             }
         }
         // A member's own rows are still scanned: pre-attribution messages, and
@@ -1285,23 +1316,56 @@ async fn collect_messages(
             composers.entry(target.to_owned()).or_default().push(row);
         }
     }
+    // WHICH HUMAN EACH NODE MAY SPEAK FOR — from the LIVE owner-bindings only.
+    // The `on_behalf_of_key_id` member is producer-asserted: any admitted node
+    // can sign a valid community row whose envelope claims OUR owner as author,
+    // and a projection that trusts the claim renders the forgery as
+    // `mine: true`. The claim is honored only when the attesting node's live
+    // binding names the claimed member — the same chain the design says a
+    // verifier walks, actually walked.
+    let mut bound_member_of: HashMap<&str, &str> = HashMap::new();
+    for (member, binding_id, node) in &binding_edges {
+        if fold_status(composers.get(binding_id)).0 == "live" {
+            bound_member_of.insert(node.as_str(), member.as_str());
+        }
+    }
     let mut out: Vec<ChatMessage> = Vec::new();
     for row in &rows {
         if !is_message_for(row, community_id) {
             continue;
         }
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
-        // The author, or an honest fallback: a row with no attribution member is
-        // pre-attribution or foreign, and naming its ATTESTER would silently
-        // report the node as the human. Reporting the attester is still the least
-        // wrong answer available — but only because there is no other — so it is
-        // the documented fallback rather than the primary read.
-        let author = row
+        // The author: the envelope's claim, VALIDATED against the attesting
+        // node's live owner-binding. Three shapes:
+        //   * claim matches the binding — the human, as designed;
+        //   * NO claim — pre-attribution or signer-explicit row; the attester
+        //     is the least-wrong answer available (documented fallback);
+        //   * claim does NOT match — a forgery or an unresolvable binding, and
+        //     the projection reports the WIRE TRUTH (the attesting node), never
+        //     the claim. `mine` derives from author, so a forged claim can no
+        //     longer render as the local owner's own words.
+        let claimed = row
             .attestation_envelope
             .get(FIELD_ON_BEHALF_OF)
-            .and_then(|v| v.as_str())
-            .unwrap_or(row.attesting_key_id.as_str())
-            .to_owned();
+            .and_then(|v| v.as_str());
+        let author = match claimed {
+            Some(c)
+                if bound_member_of.get(row.attesting_key_id.as_str()) == Some(&c)
+                    || c == row.attesting_key_id.as_str() =>
+            {
+                c.to_owned()
+            }
+            Some(c) => {
+                tracing::warn!(
+                    attestation_id = %row.attestation_id,
+                    attesting_key_id = %row.attesting_key_id,
+                    claimed_author = %c,
+                    "chat: on_behalf_of claim does not match the attesting node's                      live owner-binding — projecting the attester, not the claim"
+                );
+                row.attesting_key_id.clone()
+            }
+            None => row.attesting_key_id.clone(),
+        };
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),

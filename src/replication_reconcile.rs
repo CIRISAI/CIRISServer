@@ -182,6 +182,7 @@ pub async fn reconcile_once(
     // health:liveness in).
     let directory = engine.federation_directory();
     let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 4);
+    let mut admitted_peers: usize = 0;
     for peer in consented {
         // Fail closed: an over-threshold attester — or one whose behavioral ledger
         // we cannot read at all — is dropped from the desired set this tick.
@@ -215,6 +216,7 @@ pub async fn reconcile_once(
                 desired.extend(crate::compose::build_replication_peers(
                     std::slice::from_ref(&peer),
                 ));
+                admitted_peers += 1;
             }
             Ok(None) => tracing::warn!(
                 peer_key_id = %peer,
@@ -234,7 +236,11 @@ pub async fn reconcile_once(
     // their rounds + drop inbound routing — all without a restart.
     // `desired` holds THREE coordinators per peer (Attestation + Key +
     // IdentityOccurrence); the reported count is distinct consent peers.
-    let count = desired.len() / 3;
+    // COUNT PEERS, NOT COORDINATORS. The old `desired.len() / 3` baked a
+    // plane count into a denominator two files away from the plane list — it
+    // was already stale at four planes and reported 2x peers at six. The
+    // admitted-peer counter cannot drift with the fan-out.
+    let count = admitted_peers;
     if let Err(e) = runtime.set_peers(desired).await {
         // The runtime's scheduler has stopped (shutdown) — surface so the caller
         // logs + skips; the controller never panics.
