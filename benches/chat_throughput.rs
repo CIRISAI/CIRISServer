@@ -33,7 +33,8 @@
 //! that copy was right, the producer was wrong, and everything was green. So this
 //! copy does not merely run — it **asserts its own preconditions** at the first
 //! message and at each list: the round-trip must carry `attestation_id`,
-//! `cohort_scope: community`, `attesting_key_id == OWNER_USER_KEY_ID`, and the
+//! `cohort_scope: community`, `author == OWNER_USER_KEY_ID` with a node-attested
+//! row (the c84add0 two-fact shape), and the
 //! transcript total must equal the number of messages actually emitted. A fixture
 //! that has drifted out from under this file fails the bench instead of quietly
 //! measuring a shape that no longer matches production.
@@ -512,9 +513,25 @@ async fn emit_messages(
                     json["cohort_scope"]
                 ));
             }
-            if json["message"]["attesting_key_id"] != OWNER_USER_KEY_ID {
+            // THE TWO-FACT SHAPE (c84add0): messages are AUTHORED by the human
+            // and ATTESTED by the node that carried them — the attester is the
+            // engine's derived key, never the owner. Asserting the owner in
+            // attesting_key_id was the pre-attribution shape; this guard fired
+            // (correctly) the day the producer changed, and the fix is to
+            // assert what production now writes, on both axes.
+            if json["message"]["author"] != OWNER_USER_KEY_ID {
                 return Err(format!(
-                    "the read-back message is not attested by the owner: {json}"
+                    "the read-back message does not name the owner as AUTHOR: {json}"
+                ));
+            }
+            if json["message"]["attesting_key_id"] == OWNER_USER_KEY_ID {
+                return Err(format!(
+                    "the read-back message is attested by the OWNER — a community                      row must be node-attested (signer==attester is what makes it                      deliver); the owner belongs in `author`: {json}"
+                ));
+            }
+            if json["message"]["mine"] != true {
+                return Err(format!(
+                    "the sender's own message must be `mine` (derived from author): {json}"
                 ));
             }
         } else {
