@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: "scenario to run (see harness/mesh-repro/scenarios/)"
+        description: "scenario to run: traceflow | genesis_seed | chat (see harness/mesh-repro/scenarios/)"
         type: string
         default: traceflow
       window:
@@ -40,6 +40,12 @@ on:
       - "src/federation_peers.rs"
       - "src/test_bless.rs"
       - "src/scorer.rs"
+      # The chat ladder's subject: the owner-gated surface, the consent grant it
+      # rides, and the composition root that decides which planes replicate.
+      - "src/contacts_chat.rs"
+      - "src/peer.rs"
+      - "src/federation_admin.rs"
+      - "src/auth/**"
       - "harness/mesh-repro/**"
       - ".github/workflows/mesh-harness.yml"
 
@@ -54,7 +60,23 @@ permissions:
 
 jobs:
   ladder:
-    name: ${{ github.event.inputs.scenario || 'traceflow' }} ladder
+    name: ${{ matrix.scenario }} ladder
+    # TWO LADDERS, IN PARALLEL, not one after the other. They are independent
+    # stacks on independent compose projects and the release gates on both, so
+    # serializing them would add ~20 min to every PR for no isolation the
+    # separate projects do not already give. `fail-fast: false` because a red
+    # chat ladder must not cancel traceflow — the two answer different questions
+    # and "we never found out about the other one" is the worst outcome here.
+    #
+    # On workflow_dispatch the matrix collapses to the ONE scenario asked for
+    # (the input has a default, so it is never empty); on pull_request and the
+    # nightly schedule it is both. genesis_seed stays dispatch-only: it is an
+    # AUDIT of unfinished genesis, red by design, and gating PRs on it would be
+    # gating on work nobody has claimed yet.
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat"]') }}
     runs-on: ubuntu-latest
     # 0.5.166 raised this from 45: this ladder builds a test-anchor wheel, and
     # `lto = "thin"` + `codegen-units = 1` (CIRISServer#378) roughly doubles the
@@ -161,6 +183,31 @@ jobs:
         # harness bug (and DOCKER_BUILDKIT=0 avoids the flaky path entirely).
         run: docker pull python:3.12-slim
 
+      # Each scenario owns its own compose file set and its own service names, and
+      # the two steps AFTER the ladder (logs, teardown) need both. Resolve them
+      # ONCE here rather than restating the traceflow pair in three places — a
+      # teardown pointed at the wrong compose files leaves the stack running and
+      # the next run inherits it.
+      - name: Resolve the scenario's compose topology
+        id: topo
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          case "$SCENARIO" in
+            # THREE ciris-server nodes, no python agent role — the cross-node chat
+            # topology is standalone, not an overlay (CIRISServer#455).
+            chat)
+              echo 'files=-f docker-compose.chat.yml' >> "$GITHUB_OUTPUT"
+              echo 'services=canonical node-a node-b'  >> "$GITHUB_OUTPUT" ;;
+            genesis_seed)
+              echo 'files=-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis.yml' >> "$GITHUB_OUTPUT"
+              echo 'services=canonical agent' >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo 'files=-f docker-compose.yml -f docker-compose.traceflow.yml' >> "$GITHUB_OUTPUT"
+              echo 'services=canonical agent' >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Run the stage ladder
         id: ladder
         env:
@@ -168,17 +215,17 @@ jobs:
           SKIP_BUILD: "1"          # reuse the wheel built above
         working-directory: harness/mesh-repro
         run: |
-          ./run_scenario.sh "${{ github.event.inputs.scenario || 'traceflow' }}" \
-                            "${{ github.event.inputs.window || '780' }}"
+          ./run_scenario.sh "${{ matrix.scenario }}" \
+                            "${{ inputs.window || '780' }}"
 
       - name: Collect logs on failure
         if: failure()
         working-directory: harness/mesh-repro
         run: |
-          for svc in canonical agent; do
+          for svc in ${{ steps.topo.outputs.services }}; do
             echo "════════ $svc ════════"
-            docker compose -p "ciris-${{ github.event.inputs.scenario || 'traceflow' }}" \
-              -f docker-compose.yml -f docker-compose.traceflow.yml \
+            docker compose -p "ciris-${{ matrix.scenario }}" \
+              ${{ steps.topo.outputs.files }} \
               logs "$svc" 2>/dev/null | tail -400 || true
           done > harness-logs.txt
           tail -120 harness-logs.txt
@@ -187,7 +234,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mesh-harness-${{ github.event.inputs.scenario || 'traceflow' }}-logs
+          name: mesh-harness-${{ matrix.scenario }}-logs
           path: harness/mesh-repro/harness-logs.txt
           if-no-files-found: ignore
           retention-days: 14
@@ -196,6 +243,6 @@ jobs:
         if: always()
         working-directory: harness/mesh-repro
         run: |
-          docker compose -p "ciris-${{ github.event.inputs.scenario || 'traceflow' }}" \
-            -f docker-compose.yml -f docker-compose.traceflow.yml \
+          docker compose -p "ciris-${{ matrix.scenario }}" \
+            ${{ steps.topo.outputs.files }} \
             down -v --remove-orphans || true

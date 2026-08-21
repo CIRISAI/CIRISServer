@@ -1,7 +1,8 @@
 package ai.ciris.mobile.shared
+import ai.ciris.mobile.shared.platform.isIOS
+import ai.ciris.mobile.shared.platform.openUrlInBrowser
 import ai.ciris.mobile.shared.platform.PlatformBackHandler
 import ai.ciris.mobile.shared.platform.PlatformLogger
-import ai.ciris.mobile.shared.platform.openUrlInBrowser
 import ai.ciris.mobile.shared.platform.TestAutomation
 import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
@@ -86,6 +87,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
@@ -435,13 +439,26 @@ fun CIRISApp(
     var contactsPickerSourceScreen by remember { mutableStateOf<Screen?>(null) }
     var pickedDelegationKeyId by remember { mutableStateOf<String?>(null) }
 
+    // Add-Federation-ID (catch-up) return target + one-shot guard. The guided
+    // AddFederationIdScreen is reached two ways: manually from Manage Nodes
+    // (return there) and auto-presented after login for a legacy owner with no
+    // fed-ID (return to Interact). [addFederationIdReturnScreen] records which,
+    // and [fedIdCatchupPrompted] makes the auto-present fire at most once per
+    // session so returning to Interact doesn't re-trigger it.
+    var addFederationIdReturnScreen by remember { mutableStateOf<Screen>(Screen.ManageNodes) }
+    var fedIdCatchupPrompted by remember { mutableStateOf(false) }
+
     // Track screen changes for test automation
     LaunchedEffect(currentScreen) {
         TestAutomation.setCurrentScreen(currentScreen::class.simpleName ?: "unknown")
     }
 
+
     // Handle system back button - navigate back to appropriate parent screen
-    PlatformBackHandler(enabled = currentScreen !is Screen.Startup && currentScreen !is Screen.Interact) {
+    // HOME_SCREEN, not Screen.Interact: on the node client the landing surface is
+    // Contacts, and a back press there must fall through to the platform (leave
+    // the app) rather than navigating to a screen that is not in the sidebar.
+    PlatformBackHandler(enabled = currentScreen !is Screen.Startup && currentScreen != HOME_SCREEN) {
         currentScreen = when (currentScreen) {
             // Login/Setup flow - don't go back, let user complete the flow
             is Screen.Login, is Screen.Setup -> currentScreen
@@ -449,12 +466,13 @@ fun CIRISApp(
             // GraphMemory goes back to Memory list
             is Screen.GraphMemory -> Screen.Memory
 
-            // Add Federation ID (catch-up) goes back to Manage Nodes
-            is Screen.AddFederationId -> Screen.ManageNodes
+            // Add Federation ID (catch-up) goes back to its origin: Manage Nodes
+            // for the manual entry, Interact for the post-login auto-present.
+            is Screen.AddFederationId -> addFederationIdReturnScreen
 
-            // DataManagement and LLMSettings go back to Interact (main screen)
-            is Screen.DataManagement -> Screen.Interact
-            is Screen.LLMSettings -> Screen.Interact
+            // DataManagement and LLMSettings go back to the landing screen
+            is Screen.DataManagement -> HOME_SCREEN
+            is Screen.LLMSettings -> HOME_SCREEN
             is Screen.VizSettings -> Screen.Settings
 
             // Federation sub-screens (reached from Global Commons hub tiles) go
@@ -473,20 +491,27 @@ fun CIRISApp(
             // Peer detail (parameterised) goes back to the peer list, not the hub
             is Screen.NetworkPeerDetail -> Screen.NetworkPeers
 
-            // Contacts goes back to the picker source (Delegations) or Interact
+            // Contacts goes back to the picker source (Delegations) or home
             is Screen.Contacts -> {
                 val src = contactsPickerSourceScreen
                 contactsPickerSourceScreen = null
-                src ?: Screen.Interact
+                src ?: HOME_SCREEN
             }
 
-            // All other screens go back to Interact (main screen)
-            else -> Screen.Interact
+            // A chat goes back to the contact list it was opened from
+            is Screen.UserChat -> Screen.Contacts
+
+            // All other screens go back to the landing screen
+            else -> HOME_SCREEN
         }
     }
 
     // First-run detection state
     var isFirstRun by remember { mutableStateOf<Boolean?>(null) }
+    // The brain says it still needs setup and holds no config. Drives ClientMode.NODE
+    // (see the gate below) and the "set up the agent" entry point in Settings, which
+    // is the ONLY way out of node mode into a configured agent.
+    var brainUnconfigured by remember { mutableStateOf(false) }
     var checkingFirstRun by remember { mutableStateOf(false) }
 
     // Post-setup RECONFIGURING hold. After /v1/setup/complete the runtime
@@ -497,7 +522,8 @@ fun CIRISApp(
     // Setup↔Startup↔Interact↔Login for minutes. Cleared once we land on
     // Login/Setup, or the rebind times out.
     var reconfiguring by remember { mutableStateOf(false) }
-    // Setup just completed and the node restarted — drives the login banner.
+    // NODE VENDOR DRIFT #25 (restored after the 2.9.28 re-vendor dropped it):
+    // setup just completed and the node restarted — drives the login banner.
     var justCompletedSetup by remember { mutableStateOf(false) }
 
     // Login state
@@ -686,8 +712,32 @@ fun CIRISApp(
         AdaptersViewModel(apiClient, apiBaseUrl)
     }
     val wiseAuthorityViewModel: WiseAuthorityViewModel = viewModel {
-        WiseAuthorityViewModel(apiClient)
+        // secureStorage persists the notification dedupe set, so restarting the
+        // app does not re-announce approvals the operator has already seen.
+        WiseAuthorityViewModel(apiClient, secureStorage)
     }
+
+    // ── HITL approval watch (#938) ──────────────────────────────────────────
+    // Runs for the whole authenticated session, NOT per-screen. This is what
+    // lets the nav badge and the "new approval arrived" notification exist at
+    // all: an approval gate the operator only discovers by navigating to its
+    // screen is a silent denial-of-service on the agent. Stopped on logout so a
+    // signed-out client isn't polling an endpoint it cannot authenticate to.
+    // isHAAddonMode is part of the CONDITION and the KEY: in Home Assistant
+    // add-on mode authentication is supplied by ingress headers and
+    // currentAccessToken deliberately stays null, so keying on the token alone
+    // meant HA operators never got the badge or a single approval notification
+    // unless they happened to open the Wise Authority screen.
+    LaunchedEffect(currentAccessToken, isHAAddonMode) {
+        if (currentAccessToken != null || isHAAddonMode) {
+            wiseAuthorityViewModel.startApprovalWatch()
+        } else {
+            wiseAuthorityViewModel.stopApprovalWatch()
+        }
+    }
+    // Drives the nav badge — see EpistemicSidebar(badges = ...) below.
+    val pendingApprovalCount by wiseAuthorityViewModel.pendingApprovalCount.collectAsState()
+
     val servicesViewModel: ServicesViewModel = viewModel {
         ServicesViewModel(apiClient)
     }
@@ -698,12 +748,12 @@ fun CIRISApp(
     val nodeSwitcherViewModel: NodeSwitcherViewModel = viewModel {
         NodeSwitcherViewModel(apiClient)
     }
-    // Keep the composable node-vs-agent gate in step across node switches
-    // (CIRISServer#390): the startup probe answered for the ORIGINAL node, and
-    // a switch to a different kind of node otherwise left the whole UI (agent
-    // wording, the 22 cognitive lights) branching on the stale verdict. The VM
-    // re-derives the mode against the new node's merged health and publishes
-    // it here; the shared API client's own gate is pushed inside switchTo().
+    // NODE VENDOR DRIFT #28 (restored after the 2.9.28 re-vendor dropped it):
+    // keep the node-vs-agent gate in step across node switches (CIRISServer#390).
+    // The startup probe answered for the ORIGINAL node; a switch to a different
+    // KIND of node otherwise left the whole UI — agent wording, the 22 cognitive
+    // lights — branching on the stale verdict. The VM re-derives the mode against
+    // the new node's merged health and publishes it here.
     val switchedMode by nodeSwitcherViewModel.switchedMode.collectAsState()
     LaunchedEffect(switchedMode) {
         switchedMode?.let { mode ->
@@ -712,6 +762,46 @@ fun CIRISApp(
                 clientMode = mode
                 startupViewModel.setClientMode(mode)
             }
+        }
+    }
+    // Catch-up: an existing logged-in owner whose local node has NO fed-ID
+    // (legacy WA claim) must be auto-presented the guided Add Federation ID flow
+    // after login — the startup owned-nodes projection ran UNAUTHENTICATED (or
+    // pre-claim), so it couldn't know. We hook the FINAL landing screen rather
+    // than the token assignment so we don't race the several login continuations
+    // that set currentScreen afterwards. Once authenticated and on that screen,
+    // refresh owned-nodes and reuse the SAME condition Manage Nodes uses to show
+    // the entry (ownerHasFedId == false: legacy owner, no fed-ID; null = unknown
+    // → fail-closed, don't prompt). One-shot via fedIdCatchupPrompted; naturally
+    // false once a fed-ID exists.
+    //
+    // KEYED ON [HOME_SCREEN], NOT ON Screen.Interact. This effect used to name
+    // Interact literally, which was the landing screen for BOTH builds when it
+    // was written. Moving node mode's home to Contacts silently made it
+    // unreachable: node users never visit Interact (it is not even in their
+    // sidebar), so a legacy owner with no fed-ID stopped being offered the Add
+    // Federation ID flow and landed instead on a Contacts surface they cannot
+    // use — the catch-up existing to prevent exactly that. The return
+    // destination follows for the same reason.
+    // isHAAddonMode counts as authenticated here, exactly as the approval
+    // watcher's effect treats it: ingress-header sessions keep
+    // currentAccessToken null by design, and gating on the token alone denied
+    // HA legacy owners the guided Add Federation ID flow this effect exists
+    // to provide.
+    LaunchedEffect(currentScreen, currentAccessToken, isHAAddonMode) {
+        if (currentScreen != HOME_SCREEN) return@LaunchedEffect
+        val authenticated = currentAccessToken != null || isHAAddonMode
+        if (!authenticated || fedIdCatchupPrompted) return@LaunchedEffect
+        try {
+            nodeSwitcherViewModel.reload()
+        } catch (e: Exception) {
+            PlatformLogger.w(TAG, "[fed-id-catchup] owned-nodes reload failed: ${e.message}")
+        }
+        if (nodeSwitcherViewModel.ownerHasFedId.value == false) {
+            fedIdCatchupPrompted = true
+            addFederationIdReturnScreen = HOME_SCREEN
+            PlatformLogger.i(TAG, "[fed-id-catchup] legacy owner has no fed-ID — auto-presenting Add Federation ID")
+            currentScreen = Screen.AddFederationId
         }
     }
     val consentObjectsViewModel: ConsentObjectsViewModel = viewModel {
@@ -733,13 +823,44 @@ fun CIRISApp(
     val identityManagementViewModel: ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.IdentityManagementViewModel(apiClient)
     }
+    val contactsViewModel: ContactsViewModel = viewModel {
+        ContactsViewModel(apiClient)
+    }
+    // Same leak class as the approvals ViewModel (both are app-scoped and
+    // survive logout): the contact list is owner-gated content and must not
+    // survive into the next session. Declared here, not in the approval-watch
+    // effect above, because this ViewModel is constructed later in composition.
+    LaunchedEffect(currentAccessToken) {
+        if (currentAccessToken == null) contactsViewModel.clearSessionState()
+    }
+    // The node predates /v1/contacts (the embedded APK node lags one release).
+    // Contacts is the node-mode HOME, so landing there would put the user on a
+    // surface that cannot answer. Fall back to the PREVIOUS default (Nodes) once,
+    // and only from the automatic landing — if the user navigates to Contacts
+    // themselves they get the explanatory state and stay there, which is the
+    // honest answer to a question they asked on purpose.
+    val contactsUnsupported by contactsViewModel.routeUnsupported.collectAsState()
+    var contactsHomeFallbackApplied by remember { mutableStateOf(false) }
+    LaunchedEffect(contactsUnsupported, currentScreen) {
+        if (contactsUnsupported && !contactsHomeFallbackApplied &&
+            currentScreen is Screen.Contacts && contactsPickerSourceScreen == null
+        ) {
+            contactsHomeFallbackApplied = true
+            platformLog(TAG, "[INFO] node predates /v1/contacts — home falls back to Nodes")
+            currentScreen = Screen.ManageNodes
+        }
+    }
+
+    // User-to-user chat — a two-member community whose messages ARE CEG
+    // attestations (rendered through the same AttestationCard as every other
+    // CEG object).
+    val userChatViewModel: ai.ciris.mobile.shared.viewmodels.UserChatViewModel = viewModel {
+        ai.ciris.mobile.shared.viewmodels.UserChatViewModel(apiClient)
+    }
     // Delegate moderation duty — the co-scrubbed conferral of slash/moderate/review
     // onto another self, with the sub-delegation depth stated up front.
     val dutyConferralViewModel: ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel(apiClient)
-    }
-    val contactsViewModel: ContactsViewModel = viewModel {
-        ContactsViewModel(apiClient)
     }
     val accordViewModel: ai.ciris.mobile.shared.viewmodels.AccordViewModel = viewModel {
         ai.ciris.mobile.shared.viewmodels.AccordViewModel(apiClient)
@@ -835,29 +956,42 @@ fun CIRISApp(
             platformLog(TAG, "[INFO] Startup READY, checking first-run status...")
 
             // ─── Derive the ONE node-vs-agent gate (server now reachable) ────
-            // PRIMARY verdict: the NODE's /v1/system/health, which since server
-            // 0.5.168 (CIRISServer#390) is the MERGED health — the folded
-            // brain's cognitive_state/services over the node's own, plus the
-            // three-state `agent.{folded,reachable}`. One probe answers both
-            // "is the node up?" (+ version for the mismatch banner) and "is
-            // there a brain, and is it talking?".
+            // Probe the NODE's /v1/health ONCE for its version (the mismatch
+            // banner) and its role. The node's own health is deliberately bare —
+            // `role: "fabric-node"`, `services: {}`, no cognitive_state — and
+            // /v1/health is a substrate prefix that is never proxied, so the
+            // AGENT enrichment can only come from the brain's /v1/system/health.
+            // Probe that second and let it upgrade the gate: AGENT iff either
+            // surface reports a cognitive_state / a non-empty service map.
             try {
                 var nodeHealth = apiClient.getNodeHealth(nodeBaseUrl)
                 nodeVersion = nodeHealth.version
+                // Is the brain configured at all? A brain with no config runs 10 of
+                // its 22 services to serve the wizard and reports cognitive_state
+                // "SETUP" — which reads as an agent to a health probe, and is not
+                // one. Only the brain can answer this, so ask before deciding.
+                // Unreachable/failed probe => false, i.e. no downgrade: the gate
+                // keeps its previous behaviour rather than guessing NODE.
+                brainUnconfigured = runCatching {
+                    val s = apiClient.getSetupStatus().data
+                    s.setup_required && !s.has_env_file
+                }.getOrDefault(false)
+                // NODE VENDOR DRIFT #16 (restored after the 2.9.28 re-vendor
+                // dropped it): the folded-brain THREE-state probe (CIRISServer#390).
+                // "No brain", "brain answering" and "brain attached but not
+                // answering yet" are three different facts; the re-vendor collapsed
+                // the third into the first, which latches NODE against a brain we
+                // KNOW exists.
                 var probe = ai.ciris.mobile.shared.models.clientModeFrom(
                     nodeHealth.cognitiveState, nodeHealth.serviceCount,
                     nodeHealth.agentFolded, nodeHealth.agentReachable,
+                    brainUnconfigured,
                 )
-                // UNDETERMINED is a retry signal, not a verdict. The fold boots
-                // the brain on a daemon thread AFTER the node composes, so a
-                // probe at READY can legitimately see folded=true/reachable=false
-                // — a brain that EXISTS but has not bound yet. Committing to
-                // NODE here latched the gate and hid the 22 cognitive lights
-                // for the whole session (the live #390 client defect). Bounded
-                // by the same tiered device budget as the reconfigure hold.
+                // UNDETERMINED is a RETRY SIGNAL, not a verdict: the fold boots the
+                // brain on a daemon thread AFTER the node composes, so a probe at
+                // READY can legitimately see folded=true/reachable=false.
                 if (probe.undetermined) {
-                    val maxModePolls =
-                        ai.ciris.mobile.shared.ui.components.StartupBudget.seconds()
+                    val maxModePolls = ai.ciris.mobile.shared.ui.components.StartupBudget.seconds()
                     var modePolls = 0
                     platformLog(TAG, "[INFO][gate] brain folded but not answering yet — retrying up to ${maxModePolls}s")
                     while (probe.undetermined && modePolls < maxModePolls) {
@@ -869,28 +1003,29 @@ fun CIRISApp(
                             probe = ai.ciris.mobile.shared.models.clientModeFrom(
                                 nh.cognitiveState, nh.serviceCount,
                                 nh.agentFolded, nh.agentReachable,
+                                brainUnconfigured,
                             )
                         }
                     }
                 }
                 if (probe.undetermined) {
-                    // A brain we KNOW exists never answered within the budget.
-                    // Leave the gate UNSET (agent-default wording, same as a
-                    // failed probe) rather than latch NODE against it — a later
-                    // path (node switch, next launch) can still resolve it.
+                    // Leave the gate UNSET rather than latch NODE against a brain we
+                    // KNOW exists — a node switch or the next launch can still
+                    // resolve it. Guessing here is what made a real agent render as
+                    // a bare node for the rest of the session.
                     platformLog(TAG, "[WARN][gate] brain folded but unreachable for the whole budget — leaving clientMode unset")
                 } else {
                     var mode = probe.mode
                     if (mode.isNode) {
-                        // Merged health says bare node. KEEP the direct-brain
-                        // fallback for pre-0.5.168 nodes (no folded enrichment)
-                        // and split deployments where the brain lives on its
-                        // own port: ask the brain's /v1/system/health before
-                        // concluding NODE.
+                        // Bare node health — ask the brain whether it is running on top.
+                        // KEPT for pre-0.5.168 nodes and split deployments where the
+                        // brain has its own port. brainUnconfigured is passed here
+                        // too: without it this probe sees "SETUP" and promotes the
+                        // half-started brain straight back to AGENT.
                         runCatching { apiClient.getSystemStatus() }
                             .onSuccess { sys ->
                                 mode = ai.ciris.mobile.shared.models.clientModeFrom(
-                                    sys.cognitive_state, sys.services_total
+                                    sys.cognitive_state, sys.services_total, brainUnconfigured
                                 )
                             }
                             .onFailure { e ->
@@ -943,15 +1078,7 @@ fun CIRISApp(
                 startupViewModel.setKeepTimerAlive(true)
                 startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_reconfiguring"))
 
-                // TIERED, not one flat number (CIRISServer#401). 60s on ordinary
-                // hardware; 240s on 32-bit ARM, which is fully supported and
-                // genuinely slower to bring a node up. The old flat 240s made the
-                // fast majority wait out the slow minority's budget, and four
-                // minutes of spinner is indistinguishable from a hang — the
-                // timeout that existed to produce a clear message produced the
-                // longest possible ambiguity instead.
-                val maxReconfigPolls =
-                    ai.ciris.mobile.shared.ui.components.StartupBudget.seconds()
+                val maxReconfigPolls = 240 // ~4 minutes at 1s cadence
                 var reconfigPolls = 0
                 var routed = false
                 while (reconfigPolls < maxReconfigPolls) {
@@ -965,10 +1092,11 @@ fun CIRISApp(
                             // catch-up (POST /v1/self/upgrade-owner) — never by
                             // re-running the wizard.
                             platformLog(TAG, "[INFO] Node back + $ownership after reconfigure → Login")
-                            // Tell the login screen WHY it is being shown: setup
-                            // succeeded and the restart invalidated the session
-                            // (CIRISServer#393). Without this the screen is
-                            // indistinguishable from a failure.
+                            // NODE VENDOR DRIFT #25: tell the login screen WHY it is
+                            // being shown — setup succeeded and the restart
+                            // invalidated the session BY DESIGN (CIRISServer#393).
+                            // Without this the screen is indistinguishable from a
+                            // failure.
                             justCompletedSetup = true
                             isFirstRun = false
                             reconfiguring = false
@@ -1019,16 +1147,7 @@ fun CIRISApp(
                 maxRetries = 60,  // Wait up to 30 seconds (60 * 500ms)
                 onStatusUpdate = { status ->
                     startupViewModel.setStatus(status)
-                },
-                // SAY WHY (CIRISServer#439). Routing straight to the password
-                // form is the correct destination, but silent: the user asked
-                // for setup and got a login box. Without this line the node
-                // looks broken — which is exactly how this arrived, as a bug
-                // report about first-run OAuth.
-                onClaimedNodeDetected = {
-                    loginStatusMessage =
-                        LocalizationHelper.getString("mobile.login_node_already_claimed")
-                },
+                }
             )
 
             startupViewModel.setKeepTimerAlive(false)
@@ -1362,34 +1481,42 @@ fun CIRISApp(
             Screen.Login -> {
                 platformLog(TAG, "[DEBUG][Screen.Login] Rendering login screen, googleSignInCallback=${if (googleSignInCallback != null) "PRESENT" else "NULL"}, isFirstRun=$isFirstRun")
 
-                // During FIRST RUN, go to setup wizard
-                // Desktop: auto-trigger since no OAuth; iOS: show login first for auth
+                // FIRST RUN shows the Login screen on EVERY platform — including
+                // desktop. Desktop has no native Google SDK, but ciris-server 0.5.165+
+                // serves a browser sign-in the app collects over /v1/auth/oauth/handoff
+                // (CIRISAgent#1028), so `googleSignInCallback == null` no longer means
+                // "no OAuth possible" — it only means "use the browser flow." Auto-
+                // skipping desktop straight to Setup buried the Google option the user
+                // came for; now they land on Login and CHOOSE Google (browser) or local.
                 LaunchedEffect(googleSignInCallback, isFirstRun) {
-                    if (isFirstRun == true) {
-                        // EVERY platform shows the login screen first, so the human
-                        // picks how they sign in — Google or a local account.
-                        //
-                        // Desktop used to auto-skip straight to the wizard on the
-                        // premise "no OAuth on desktop". That premise died when the
-                        // node started serving the browser flow: skipping the screen
-                        // meant desktop silently offered ONE option, and the account
-                        // step asked for a username and password as though nothing
-                        // else existed.
-                        platformLog(TAG, "[INFO][Screen.Login] First-run — showing the login screen so the user picks a sign-in method")
-                    } else if (false) {
-                        // iOS/Android: first run with OAuth - show login so user can sign in,
-                        // then auth flow will detect first user and redirect to setup
-                        platformLog(TAG, "[INFO][Screen.Login] Mobile first-run - showing login for OAuth sign-in")
-                    } else if (googleSignInCallback == null && isFirstRun == false) {
-                        // Returning user on desktop. We show the OPTIONS, not the
-                        // password form — the absence of a native Google SDK is
-                        // not the absence of OAuth (CIRISServer#393).
-                        platformLog(
-                            TAG,
-                            "[INFO][Screen.Login] Returning user — offering the sign-in choice " +
-                                "(Google or local), not assuming a password account",
-                        )
+                    when {
+                        isFirstRun == true && googleSignInCallback == null ->
+                            platformLog(TAG, "[INFO][Screen.Login] Desktop first-run - showing Login (Google via browser handoff, or local)")
+                        isFirstRun == true && googleSignInCallback != null ->
+                            platformLog(TAG, "[INFO][Screen.Login] Mobile first-run - showing login for OAuth sign-in")
+                        googleSignInCallback == null && isFirstRun == false ->
+                            platformLog(TAG, "[INFO][Screen.Login] Desktop existing user - showing local login form")
                     }
+                }
+
+                // Probe which OAuth providers this build actually has credentials for.
+                // A provider is present only when the node was provisioned with its
+                // client_id + client_secret (the PKCE secret CI bakes into oauth.json).
+                // Absent → grey the sign-in button rather than dangle a door that opens
+                // onto redirect_uri_mismatch. Native Apple sign-in (iOS) doesn't ride
+                // the node's browser-OAuth creds, so it stays live regardless.
+                var googleOAuthAvailable by remember { mutableStateOf(true) }
+                LaunchedEffect(Unit) {
+                    val providerId = if (isIOS()) "apple" else "google"
+                    runCatching { apiClient.getOAuthProviders(nodeBaseUrl) }
+                        .onSuccess { providers ->
+                            googleOAuthAvailable = isIOS() || providers.any { it.equals(providerId, ignoreCase = true) }
+                            platformLog(TAG, "[INFO][OAuthProviders] available=$providers gate=$providerId enabled=$googleOAuthAvailable")
+                        }
+                        .onFailure { e ->
+                            googleOAuthAvailable = isIOS()
+                            platformLog(TAG, "[DEBUG][OAuthProviders] probe failed: ${e.message?.take(60)} → enabled=$googleOAuthAvailable")
+                        }
                 }
 
                 // 2.9.2 — Fetch the personal-install owner hint each time
@@ -1624,100 +1751,101 @@ fun CIRISApp(
                                     }
                                 }
                             }
-                        } else {
-                            // DESKTOP: no native Google SDK, so sign in through the
-                            // BROWSER against this node's OAuth front door. Until the
-                            // node minted a session on callback there was nothing for
-                            // this process to hold, so desktop offered local login
-                            // only and this branch just said "not available".
-                            //
-                            // Two processes, one sign-in: we generate a nonce, open the
-                            // browser with it, and poll until the node hands the bearer
-                            // over. 204 means NOT YET, which is why the loop keeps
-                            // going instead of treating a quiet answer as failure.
-                            platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser flow (no native SDK)")
-                            isLoginLoading = true
-                            loginErrorMessage = null
-                            loginStatusMessage = LocalizationHelper.getString("auth.browser_signin.waiting")
-                            val nonce = buildString {
-                                val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-                                repeat(32) { append(alphabet[kotlin.random.Random.nextInt(alphabet.length)]) }
-                            }
-                            val signInUrl = apiClient.oauthBrowserLoginUrl("google", nonce, nodeBaseUrl)
-                            // Log the URL we hand the browser. A sign-in completed in
-                            // some OTHER tab — one opened earlier at the plain
-                            // /login URL — carries no app_nonce, parks nothing, and
-                            // leaves this poll waiting forever while the node reports
-                            // a perfectly successful sign-in. Without this line the
-                            // two are indistinguishable from the client side.
-                            platformLog(TAG, "[INFO][onGoogleSignIn] opening browser: $signInUrl")
-                            openUrlInBrowser(signInUrl)
-                            coroutineScope.launch {
-                                // ~3 minutes: long enough for a real sign-in with a
-                                // password manager and 2FA, short enough that an
-                                // abandoned attempt does not spin forever.
-                                var token: ai.ciris.mobile.shared.models.OAuthHandoff? = null
-                                var attempts = 0
-                                while (token == null && attempts < 90) {
-                                    kotlinx.coroutines.delay(2000)
-                                    attempts++
-                                    // After ~20s our own tab has had its chance;
-                                    // accept a sign-in that completed in a stray
-                                    // tab rather than spin while the node holds a
-                                    // perfectly good session.
-                                    token = apiClient.collectOAuthHandoff(
-                                        nonce,
-                                        nodeBaseUrl,
-                                        allowUnbound = attempts > 10,
-                                    )
-                                    // Heartbeat every ~20s: "still waiting" must be
-                                    // visible, or a stalled flow looks like a crashed one.
-                                    if (token == null && attempts % 10 == 0) {
-                                        platformLog(TAG, "[INFO][onGoogleSignIn] still waiting for the browser (${attempts * 2}s)")
-                                    }
+                    } else {
+                        // DESKTOP: no native Google SDK, so sign in through the
+                        // BROWSER against this node's OAuth front door. Until the
+                        // node minted a session on callback there was nothing for
+                        // this process to hold, so desktop offered local login
+                        // only and this branch just said "not available".
+                        //
+                        // Two processes, one sign-in: we generate a nonce, open the
+                        // browser with it, and poll until the node hands the bearer
+                        // over. 204 means NOT YET, which is why the loop keeps
+                        // going instead of treating a quiet answer as failure.
+                        platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser flow (no native SDK)")
+                        isLoginLoading = true
+                        loginErrorMessage = null
+                        loginStatusMessage = LocalizationHelper.getString("auth.browser_signin.waiting")
+                        val nonce = buildString {
+                            val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+                            repeat(32) { append(alphabet[kotlin.random.Random.nextInt(alphabet.length)]) }
+                        }
+                        val signInUrl = apiClient.oauthBrowserLoginUrl("google", nonce, nodeBaseUrl)
+                        // Log the URL we hand the browser. A sign-in completed in
+                        // some OTHER tab — one opened earlier at the plain
+                        // /login URL — carries no app_nonce, parks nothing, and
+                        // leaves this poll waiting forever while the node reports
+                        // a perfectly successful sign-in. Without this line the
+                        // two are indistinguishable from the client side.
+                        platformLog(TAG, "[INFO][onGoogleSignIn] opening browser: $signInUrl")
+                        openUrlInBrowser(signInUrl)
+                        coroutineScope.launch {
+                            // ~3 minutes: long enough for a real sign-in with a
+                            // password manager and 2FA, short enough that an
+                            // abandoned attempt does not spin forever.
+                            var token: ai.ciris.mobile.shared.models.OAuthHandoff? = null
+                            var attempts = 0
+                            while (token == null && attempts < 90) {
+                                kotlinx.coroutines.delay(2000)
+                                attempts++
+                                // After ~20s our own tab has had its chance;
+                                // accept a sign-in that completed in a stray
+                                // tab rather than spin while the node holds a
+                                // perfectly good session.
+                                token = apiClient.collectOAuthHandoff(
+                                    nonce,
+                                    nodeBaseUrl,
+                                    allowUnbound = attempts > 10,
+                                )
+                                // Heartbeat every ~20s: "still waiting" must be
+                                // visible, or a stalled flow looks like a crashed one.
+                                if (token == null && attempts % 10 == 0) {
+                                    platformLog(TAG, "[INFO][onGoogleSignIn] still waiting for the browser (${attempts * 2}s)")
                                 }
-                                isLoginLoading = false
-                                loginStatusMessage = null
-                                val collected = token
-                                if (collected == null) {
-                                    // Say WHICH failure this is. "Sign-in failed" would
-                                    // cover both "you closed the tab" and "the node is
-                                    // broken", and only one of those is the user's to fix.
-                                    loginErrorMessage =
-                                        LocalizationHelper.getString("auth.browser_signin.timed_out")
-                                    platformLog(TAG, "[WARN][onGoogleSignIn] no hand-off after ${attempts * 2}s. If you signed in successfully, the browser tab was probably an OLD one opened without ?app_nonce= — close stray CIRIS sign-in tabs and use the button again.")
+                            }
+                            isLoginLoading = false
+                            loginStatusMessage = null
+                            val collected = token
+                            if (collected == null) {
+                                // Say WHICH failure this is. "Sign-in failed" would
+                                // cover both "you closed the tab" and "the node is
+                                // broken", and only one of those is the user's to fix.
+                                loginErrorMessage =
+                                    LocalizationHelper.getString("auth.browser_signin.timed_out")
+                                platformLog(TAG, "[WARN][onGoogleSignIn] no hand-off after ${attempts * 2}s. If you signed in successfully, the browser tab was probably an OLD one opened without ?app_nonce= — close stray CIRIS sign-in tabs and use the button again.")
+                            } else {
+                                platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser sign-in collected a session")
+                                currentAccessToken = collected.accessToken
+                                apiClient.setAccessToken(collected.accessToken)
+                                secureStorage.saveAccessToken(collected.accessToken)
+                                onTokenUpdated?.invoke(collected.accessToken)
+                                if (isFirstRun == true) {
+                                    // Hand the identity to the wizard: it derives the
+                                    // federation-ID name from <provider>-<subject>, so
+                                    // arriving with only a bearer would put the user
+                                    // back to inventing a unique name by hand.
+                                    setupViewModel.setGoogleAuthState(
+                                        isAuth = true,
+                                        // Forward the provider's ID token when the node
+                                        // sends one (CIRISServer#434, ciris-server
+                                        // 0.5.177+). This used to be a hard null, which
+                                        // left isGoogleAuth=true with googleIdToken=null
+                                        // — and CIRIS_PROXY sends this token AS the LLM
+                                        // api_key, so a Google-signed-in desktop user
+                                        // could not choose the proxy at all.
+                                        idToken = collected.idToken,
+                                        email = collected.email,
+                                        userId = collected.externalId,
+                                        provider = collected.provider,
+                                    )
+                                    currentScreen = Screen.Setup
                                 } else {
-                                    platformLog(TAG, "[INFO][onGoogleSignIn] desktop browser sign-in collected a session")
-                                    currentAccessToken = collected.accessToken
-                                    apiClient.setAccessToken(collected.accessToken)
-                                    secureStorage.saveAccessToken(collected.accessToken)
-                                    onTokenUpdated?.invoke(collected.accessToken)
-                                    if (isFirstRun == true) {
-                                        // Hand the identity to the wizard: it derives the
-                                        // federation-ID name from <provider>-<subject>, so
-                                        // arriving with only a bearer would put the user
-                                        // back to inventing a unique name by hand.
-                                        setupViewModel.setGoogleAuthState(
-                                            isAuth = true,
-                                            // The node forwards the provider's ID token
-                                            // through the hand-off (CIRISServer#434).
-                                            // This was hard-coded null, so desktop
-                                            // CIRIS_PROXY — whose api_key IS this token —
-                                            // was configured with an empty key while the
-                                            // user was demonstrably signed in with Google.
-                                            idToken = collected.idToken,
-                                            email = collected.email,
-                                            userId = collected.externalId,
-                                            provider = collected.provider,
-                                        )
-                                        currentScreen = Screen.Setup
-                                    } else {
-                                        interactViewModel.startPolling()
-                                        currentScreen = HOME_SCREEN
-                                    }
+                                    interactViewModel.startPolling()
+                                    currentScreen = HOME_SCREEN
                                 }
                             }
                         }
+                    }
                     },
                     onLocalLogin = {
                         // First run - go to setup wizard for BYOK setup
@@ -1745,7 +1873,15 @@ fun CIRISApp(
                                     authResponse.access_token
                                 }
 
-                                platformLog(TAG, "[INFO] Got CIRIS access token: ${cirisToken.take(8)}...${cirisToken.takeLast(4)}")
+                                // SAY WHICH TOKEN THIS IS.
+                                //
+                                // This read "Got CIRIS access token", copied from the
+                                // OAuth exchange path where that is true. Here it is a
+                                // LOCAL session bearer from username/password — no
+                                // OAuth, no CIRIS services. A user reading his own log
+                                // reasonably concluded he had a CIRIS-services token he
+                                // had never signed up for.
+                                platformLog(TAG, "[INFO] Local sign-in session token: ${cirisToken.take(8)}...${cirisToken.takeLast(4)}")
 
                                 // Set the token on the API client
                                 apiClient.setAccessToken(cirisToken)
@@ -1881,23 +2017,22 @@ fun CIRISApp(
                     errorMessage = loginErrorMessage,
                     ownerHint = ownerHint,
                     observerBlocked = observerBlocked,
-                    // ALWAYS OFFER THE CHOICE (CIRISServer#393).
-                    //
-                    // This was `googleSignInCallback == null && !isFirstRun` —
-                    // i.e. "desktop has no native Google SDK, so a returning user
-                    // must want the password form". That premise died when the
-                    // node started serving the browser OAuth flow: after a
-                    // post-setup node restart, a Google owner was dropped onto a
-                    // username-and-password form for an account that has NO
-                    // password, with the Google button one un-obvious "back" away.
-                    //
-                    // The absence of a NATIVE SDK is not the absence of OAuth, and
-                    // the owner-hint on this very screen says `provider=google`.
-                    // Showing the options costs one tap and cannot guess wrong;
-                    // auto-opening the wrong door costs the whole session.
-                    showLocalLoginForm = false,
-                    justCompletedSetup = justCompletedSetup,
+                    // Start the local form EXPANDED only where there is no sign-in
+                    // alternative. A null callback used to mean exactly that — but desktop
+                    // now has the node's browser flow (#1028), and forcing the form there
+                    // hides a Google button whose handler is already fully implemented.
+                    // That is what shipped in 2.9.14. wasmJs and anything else passing
+                    // null keeps the previous behaviour.
+                    showLocalLoginForm = (
+                        googleSignInCallback == null &&
+                            !ai.ciris.mobile.shared.platform.isDesktop() &&
+                            isFirstRun == false
+                    ),
                     isFirstRun = isFirstRun ?: true,
+                    // Grey the sign-in button when this build has no OAuth creds wired
+                    // (probed above from the node's /v1/auth/oauth/providers).
+                    googleOAuthAvailable = googleOAuthAvailable,
+                    justCompletedSetup = justCompletedSetup,
                     // NOTE: no fedID sign-in option here by design — the fedID is the
                     // founder's identity, minted in the first-run wizard and accessed
                     // ONLY via the associated user-account session (log in below). It
@@ -1925,44 +2060,33 @@ fun CIRISApp(
                     viewModel = setupViewModel,
                     apiClient = apiClient,
                     // Provide the one-time ownership CLAIM PIN / NodeCode captured
-                    // from the LOCAL node's console banner so the setup flow can
-                    // self-claim ownership of this node on COMPLETE. Console-only:
-                    // PythonRuntime scrapes it from the node stdout it launched.
-                    // Ask the runtime, which reads the node's durable file. A
-                    // snapshot of `localClaimPin` returned null in the shipped
-                    // wheel, where nothing ever populates that flow.
-                    claimPinProvider = { pythonRuntimeProtocol.claimPin() },
+                    // from the LOCAL node's boot banner so the setup flow can
+                    // self-claim ownership of this node on COMPLETE. PythonRuntime
+                    // latches these asynchronously from the node's boot output
+                    // (console stream + boot-log FILE fallback), so the banner can
+                    // arrive slightly AFTER the COMPLETE step fires. AWAIT the PIN
+                    // with a bounded timeout rather than snapshotting a value that
+                    // may still be null at the instant COMPLETE runs.
+                    claimPinProvider = {
+                        // 1) banner snapshot (if the boot-time latch caught it),
+                        // 2) DURABLE <home>/claim_pin file read on-demand — RACE-FREE: the node
+                        //    writes claim_pin a few seconds AFTER health answers, so a boot-time
+                        //    latch can miss it, but by claim time the file is present,
+                        // 3) last resort, await the banner flow with a bounded timeout.
+                        pythonRuntimeProtocol.localClaimPin.value
+                            ?: pythonRuntimeProtocol.readLocalClaimPin()
+                            ?: withTimeoutOrNull(20_000L) {
+                                pythonRuntimeProtocol.localClaimPin
+                                    .filterNotNull()
+                                    .first { it.isNotBlank() }
+                            }
+                    },
+                    // NodeCode may legitimately never come via the banner (the app
+                    // then fetches it over HTTP in claimLocalNodeOwnership), so we
+                    // only take a snapshot here — no wait — to avoid a needless
+                    // stall on the common banner-omits-NodeCode path.
                     nodeCodeProvider = { pythonRuntimeProtocol.localNodeCode.value },
                     onSetupComplete = {
-                        // A FAILED CLAIM IS TERMINAL (CIRISServer#401).
-                        //
-                        // The wizard reaching its last step is not the same as the node
-                        // being owned. When the claim was rejected the ViewModel already
-                        // recorded `claimed=false` with the reason — and this handler ran
-                        // anyway, kept "the OWNER session established by the claim" that
-                        // no claim had established, declared setup complete, and entered
-                        // the reconfiguring hold to wait for a restart that could not
-                        // change anything. It then re-entered every ~2s: a spin whose
-                        // every line says success while `owned-nodes` reports
-                        // `owner=<UNCLAIMED>`.
-                        //
-                        // Observed on the persist v31 adoption, where the owner-binding's
-                        // registration envelope was refused for not binding its subject
-                        // (#659). The claim could never succeed, and the UI never said so.
-                        //
-                        // Stop, and surface the reason. The operator can retry or read the
-                        // error; both beat a loop that looks like progress.
-                        val claimState = setupViewModel.state.value.ownershipClaim
-                        if (!claimState.claimed) {
-                            platformLog(
-                                TAG,
-                                "[WARN] onSetupComplete REFUSED — the node was not claimed " +
-                                    "(claimed=false). Not entering the reconfiguring hold: " +
-                                    "there is nothing for a restart to settle. error=" +
-                                    (claimState.error ?: "<none recorded>"),
-                            )
-                            return@SetupScreen
-                        }
                         platformLog(TAG, "[INFO] onSetupComplete called - exchanging tokens...")
                         // After setup completes, exchange OAuth ID token for CIRIS access token
                         // Run on IO dispatcher to avoid blocking main thread during network/file operations
@@ -2018,43 +2142,8 @@ fun CIRISApp(
                                     // Clear pending tokens
                                     pendingIdToken = null
                                     pendingUserId = null
-                                } else if (
-                                    (apiClient as? CIRISApiClient)?.currentSessionToken() != null
-                                ) {
-                                    // THE OWNER SESSION OUTRANKS THE SIGN-IN SESSION
-                                    // (CIRISServer#393).
-                                    //
-                                    // If setup already installed a session, it is the one
-                                    // the CLAIM minted for the owner — and it is strictly
-                                    // better than the token captured during the browser
-                                    // sign-in, which belongs to the OAuth placeholder the
-                                    // claim just retired. Re-applying the captured one
-                                    // replaced a live owner session with a dead one, so
-                                    // the next call 401'd and a fully-completed setup
-                                    // landed on the login form.
-                                    //
-                                    // Two tokens, one slot, and the older one was winning
-                                    // because it was the only one this branch could see.
-                                    PlatformLogger.i(
-                                        TAG,
-                                        " Keeping the OWNER session established by the claim " +
-                                            "(not re-applying the browser sign-in token)",
-                                    )
-                                    (apiClient as? CIRISApiClient)?.logTokenState()
-                                } else if (currentAccessToken != null) {
-                                    // DESKTOP browser sign-in: we already hold a NODE
-                                    // session, collected from the hand-off. There is no
-                                    // Google id_token to exchange — the node did the
-                                    // code exchange — so the branch above cannot apply,
-                                    // and falling through to "local auth" tried to log
-                                    // in with an admin password that a Google owner
-                                    // never set. That is what bounced a SUCCESSFUL
-                                    // sign-in back to the local-login form.
-                                    PlatformLogger.i(TAG, " Using the node session from the browser sign-in (no id_token to exchange)")
-                                    apiClient.setAccessToken(currentAccessToken!!)
-                                    apiClient.logTokenState()
                                 } else {
-                                    PlatformLogger.i(TAG, " No pending OAuth token and no session, using local auth")
+                                    PlatformLogger.i(TAG, " No pending OAuth token, using local auth")
                                     // For local login, authenticate with the admin credentials from setup
                                     val setupState = setupViewModel.state.value
                                     val username = setupState.username.ifEmpty { "admin" }
@@ -2266,6 +2355,11 @@ fun CIRISApp(
                     viewModel = settingsViewModel,
                     apiClient = apiClient,
                     secureStorage = secureStorage,
+                    brainUnconfigured = brainUnconfigured,
+                    onSetUpAgent = {
+                        platformLog(TAG, "[INFO] user chose to set up the agent from node mode → Screen.Setup")
+                        currentScreen = Screen.Setup
+                    },
                     onNavigateBack = { currentScreen = Screen.Interact },
                     onLogout = {
                         PlatformLogger.i("CIRISApp", "[onLogout] User initiated logout")
@@ -2297,6 +2391,12 @@ fun CIRISApp(
                     onNavigateToVizSettings = {
                         PlatformLogger.i("CIRISApp", "[Settings] Navigating to Viz Settings")
                         currentScreen = Screen.VizSettings
+                    },
+                    // Consent-objects belong under Settings (not the Interact
+                    // surface). Routes to the consent management surface.
+                    onNavigateToConsent = {
+                        PlatformLogger.i("CIRISApp", "[Settings] Navigating to Manage Consent")
+                        currentScreen = Screen.ManageConsent
                     }
                 )
             }
@@ -2699,6 +2799,9 @@ fun CIRISApp(
                 val isResolving by wiseAuthorityViewModel.isResolving.collectAsState()
                 val waError by wiseAuthorityViewModel.error.collectAsState()
                 val waSuccess by wiseAuthorityViewModel.successMessage.collectAsState()
+                val approvals by wiseAuthorityViewModel.approvals.collectAsState()
+                val budgetCapability by wiseAuthorityViewModel.budgetCapability.collectAsState()
+                val selectedBudgetState by wiseAuthorityViewModel.selectedBudgetState.collectAsState()
 
                 // Start/stop polling based on screen visibility
                 DisposableEffect(Unit) {
@@ -2727,9 +2830,11 @@ fun CIRISApp(
                     }
                 }
 
+                val waAlertsBlocked by wiseAuthorityViewModel.notificationsBlocked.collectAsState()
                 WiseAuthorityScreen(
                     waStatus = waStatus,
                     deferrals = deferrals,
+                    notificationsBlocked = waAlertsBlocked,
                     isLoading = isWALoading,
                     isResolving = isResolving,
                     onResolveDeferral = { deferralId, resolution, guidance ->
@@ -2743,7 +2848,50 @@ fun CIRISApp(
                     onNavigateBack = {
                         PlatformLogger.i("CIRISApp", "[Screen.WiseAuthority] Navigating back to Interact")
                         currentScreen = Screen.Interact
-                    }
+                    },
+                    approvals = approvals,
+                    budgetCapability = budgetCapability,
+                    // Grant + spend ledger + remaining trust envelope for the
+                    // open approval, fetched from GET /v1/tickets/{id}/budget.
+                    // The headroom is the same number the spend gate applies;
+                    // null when no wallet adapter is loaded, in which case the
+                    // row is simply omitted.
+                    selectedBudgetState = selectedBudgetState,
+                    onApprovalOpened = { approvalId ->
+                        wiseAuthorityViewModel.loadBudgetState(approvalId)
+                    },
+                    onApprovalClosed = { wiseAuthorityViewModel.clearBudgetState() },
+                    onGrantBudget = { approvalId, amount, currency, expiryHours, reason, promote, overGrantConfirmed ->
+                        PlatformLogger.i(
+                            "CIRISApp",
+                            "[Screen.WiseAuthority] Granting budget $amount $currency on $approvalId " +
+                                "(promote=$promote, overGrantConfirmed=$overGrantConfirmed)"
+                        )
+                        wiseAuthorityViewModel.grantBudget(
+                            approvalId = approvalId,
+                            amount = amount,
+                            currency = currency,
+                            purpose = reason.ifBlank {
+                                approvals.firstOrNull { it.id == approvalId }
+                                    ?.requestedBudget?.purpose.orEmpty()
+                            },
+                            expiresInHours = expiryHours,
+                            promote = promote,
+                            overGrantConfirmed = overGrantConfirmed,
+                        )
+                    },
+                    onPromoteProposal = { approvalId, note ->
+                        PlatformLogger.i("CIRISApp", "[Screen.WiseAuthority] Promoting proposal $approvalId")
+                        wiseAuthorityViewModel.promoteProposal(approvalId, note.ifBlank { null })
+                    },
+                    onRejectProposal = { approvalId, reason ->
+                        PlatformLogger.i("CIRISApp", "[Screen.WiseAuthority] Rejecting proposal $approvalId")
+                        wiseAuthorityViewModel.rejectProposal(approvalId, reason.ifBlank { null })
+                    },
+                    onDeferProposal = { approvalId, note ->
+                        PlatformLogger.i("CIRISApp", "[Screen.WiseAuthority] Deferring proposal $approvalId")
+                        wiseAuthorityViewModel.deferProposal(approvalId, note.ifBlank { null })
+                    },
                 )
             }
 
@@ -3230,7 +3378,12 @@ fun CIRISApp(
                     onBack = { currentScreen = Screen.Interact },
                     onClaimNode = { currentScreen = Screen.ClaimNode },
                     // Catch-up: legacy owner (no fed-ID) → guided Add Federation ID.
-                    onAddFederationId = { currentScreen = Screen.AddFederationId },
+                    // Manual entry returns to Manage Nodes (vs. the login auto-
+                    // present, which returns to Interact).
+                    onAddFederationId = {
+                        addFederationIdReturnScreen = Screen.ManageNodes
+                        currentScreen = Screen.AddFederationId
+                    },
                     // Graph-view data sources: delegations (you → agent),
                     // consent:replication (node ↔ node), plus the shared API
                     // client that powers the live neural background.
@@ -3246,8 +3399,10 @@ fun CIRISApp(
                 PlatformLogger.d(TAG, "[Screen.AddFederationId] Rendering add-federation-id screen")
                 AddFederationIdScreen(
                     viewModel = nodeSwitcherViewModel,
-                    onBack = { currentScreen = Screen.ManageNodes },
-                    onDone = { currentScreen = Screen.ManageNodes },
+                    // Return to wherever we came from: Manage Nodes for the manual
+                    // entry, Interact for the post-login catch-up auto-present.
+                    onBack = { currentScreen = addFederationIdReturnScreen },
+                    onDone = { currentScreen = addFederationIdReturnScreen },
                 )
             }
 
@@ -3260,6 +3415,9 @@ fun CIRISApp(
                     viewModel = consentObjectsViewModel,
                     onBack = { currentScreen = Screen.Interact },
                     onOpenUserConsent = { currentScreen = Screen.Consent },
+                    // Trace-consent: the alternative view of the SAME CEG object
+                    // the wizard writes. One-tap opt-in/out via the my-data PUT.
+                    dataViewModel = dataManagementViewModel,
                     // No node-side peering-revoke (withdraws) endpoint yet — flag
                     // for upstream. Flip when CIRISServer ships it.
                     revokeEndpointAvailable = false,
@@ -3267,16 +3425,25 @@ fun CIRISApp(
             }
 
             Screen.Contacts -> {
-                // Contacts / Identities (Manage group): browse known federation
-                // peer store. Also reached from Delegations picker flow
-                // (contactsPickerSourceScreen != null = picker mode).
+                // Contacts: the owner's consented peers, and the node client's
+                // HOME surface. Also reached from the Delegations picker flow
+                // (contactsPickerSourceScreen != null = picker mode, which reads
+                // the WIDER peer store — a delegation target need not be a
+                // contact).
                 PlatformLogger.d(TAG, "[Screen.Contacts] Rendering contacts screen (picker=${contactsPickerSourceScreen != null})")
                 ContactsScreen(
                     viewModel = contactsViewModel,
                     onBack = {
                         val src = contactsPickerSourceScreen
                         contactsPickerSourceScreen = null
-                        currentScreen = src ?: Screen.Interact
+                        currentScreen = src ?: HOME_SCREEN
+                    },
+                    onOpenChat = { contact ->
+                        currentScreen = Screen.UserChat(
+                            contactKeyId = contact.keyId,
+                            communityId = contact.chatCommunityId,
+                            contactLabel = contact.aliasOverride ?: (contact.keyId.take(12) + "…"),
+                        )
                     },
                     onPeerPicked = if (contactsPickerSourceScreen != null) { peer ->
                         pickedDelegationKeyId = peer.keyId
@@ -3284,6 +3451,21 @@ fun CIRISApp(
                         contactsPickerSourceScreen = null
                         currentScreen = src ?: Screen.Delegations
                     } else null,
+                )
+            }
+
+            is Screen.UserChat -> {
+                // One two-member chat. Every message renders through the same
+                // AttestationCard + hamburger as every other CEG object — the
+                // message IS an attestation and its card says so.
+                val route = currentScreen as Screen.UserChat
+                PlatformLogger.d(TAG, "[Screen.UserChat] community=${route.communityId.take(24)}…")
+                ChatScreen(
+                    viewModel = userChatViewModel,
+                    contactKeyId = route.contactKeyId,
+                    communityId = route.communityId,
+                    contactLabel = route.contactLabel,
+                    onBack = { currentScreen = Screen.Contacts },
                 )
             }
 
@@ -3316,7 +3498,7 @@ fun CIRISApp(
             }
 
             Screen.DutyConferral -> {
-                // Delegate moderation duty (reached from Safety → Moderation): confer
+                // Delegate moderation duty, reached from the Accord card. Confer
                 // slash / moderate / review on another self, stating in one control
                 // whether — and how far — they may pass the duty on. Co-scrubbed by
                 // the accord holders; the node signs, the app holds no keys.
@@ -3337,13 +3519,6 @@ fun CIRISApp(
                     onBack = { currentScreen = Screen.Interact },
                     // Found-a-new-accord CTA — shown only when no family exists yet.
                     onStartCeremony = { currentScreen = Screen.AccordCeremony },
-                    // Confer a DUTY from the accord (CIRISServer#392). This is an
-                    // ACCORD ceremony — two seated holders, real tokens, adopted at
-                    // the family's own quorum — so it belongs beside the other
-                    // co-scrub flows, not on the Moderation card. The duty happens
-                    // to be a moderation duty; the authority being exercised is the
-                    // accord's, and the card that opens it should be the one whose
-                    // custody UX (holder key_id + USB ML-DSA + PKCS#11) it shares.
                     onConferDuty = { currentScreen = Screen.DutyConferral },
                 )
             }
@@ -3381,6 +3556,8 @@ fun CIRISApp(
                     // Tiers 0-4 of /v1/admin/* — the enforcement ladder.
                     ladderViewModel = adminLadderViewModel,
                     onBack = { currentScreen = Screen.Interact },
+                    // The delegate-moderate-duty flow lives on Family → Delegation.
+                    onOpenDelegation = { currentScreen = Screen.Delegation },
                 )
             }
 
@@ -4000,6 +4177,15 @@ fun CIRISApp(
                             }
                         },
                         onIssueClick = { url -> uriHandler.openUri(url) },
+                        // "The agent is blocked waiting on you", visible from
+                        // every screen. Keyed by NavSurface.id.
+                        badges = if (pendingApprovalCount > 0) {
+                            mapOf(
+                                ai.ciris.mobile.shared.ui.nav.NavSurface.WiseAuthority.id to pendingApprovalCount
+                            )
+                        } else {
+                            emptyMap()
+                        },
                         appVersion = "v2.9.4",
                         // Theme strip at the bottom of the drawer — Light /
                         // System / Dark segmented control. Wired straight to
@@ -4068,6 +4254,17 @@ fun CIRISApp(
                                 Screen.NetworkDiagnostics,
                                 Screen.NetworkContent -> Screen.LayerGlobalCommons
                                 is Screen.NetworkPeerDetail -> Screen.NetworkPeers
+                                // A chat → the contact list it was opened from.
+                                // This is a SECOND, independent mapping: the
+                                // PlatformBackHandler `when` above drives the
+                                // hardware/gesture back, this one drives the
+                                // compact-window overlay's affordance. ChatScreen
+                                // suppresses its OWN back button below 600dp and
+                                // relies on this — so an omission here renders the
+                                // drawer signet instead of a back arrow, and on
+                                // iOS and web (where PlatformBackHandler is a
+                                // no-op) leaves no way out of a chat at all.
+                                is Screen.UserChat -> Screen.Contacts
                                 // Nested sub-screens → their direct parent
                                 Screen.GraphMemory -> Screen.Memory
                                 Screen.SkillStudio -> Screen.Adapters
@@ -4215,12 +4412,7 @@ private suspend fun checkFirstRunStatus(
     apiBaseUrl: String,
     nodeBaseUrl: String,
     maxRetries: Int = 0,
-    onStatusUpdate: ((String) -> Unit)? = null,
-    /// Fires when the brain claimed first-run but the NODE is already owned
-    /// (CIRISServer#439). The caller shows the user WHY they are being asked to
-    /// sign in rather than set up — "not first run" alone is a silent answer to
-    /// a question they did not know they had asked.
-    onClaimedNodeDetected: (() -> Unit)? = null
+    onStatusUpdate: ((String) -> Unit)? = null
 ): Boolean? {
     var attempts = 0
     while (attempts <= maxRetries) {
@@ -4229,34 +4421,72 @@ private suspend fun checkFirstRunStatus(
             val client = CIRISApiClient(apiBaseUrl)
             val setupStatus = client.getSetupStatus()
             platformLog("checkFirstRunStatus", "[INFO] Got setup status: setup_required=${setupStatus.data.setup_required}")
-            // THE BRAIN'S ANSWER IS NOT THE WHOLE QUESTION (CIRISServer#439).
+
+            // "IS THIS A FIRST RUN?" DEPENDS ON TWO STORES, AND THIS ASKED ONE.
             //
-            // "Is this a first run?" depends on TWO stores, and this path was
-            // reading one: the brain answers from its own config (`.env`
-            // present?), while the NODE independently knows whether it has been
-            // claimed. Wipe the brain's config on a node that is already owned
-            // and the two disagree — observed live: brain
-            // `setup_required=true` beside node `setup_required=false` with a
-            // standing owner binding.
+            // The brain answers from its own config; the NODE independently knows
+            // whether it has ever been claimed. They can disagree, and when they do
+            // the node is decisive — an owned node is CONFIGURED, whatever the
+            // brain's .env says. Observed live (CIRISAgent#1061):
             //
-            // The user is then shown the first-run wizard/login for a node that
-            // already has an owner, and a Google sign-in there is REFUSED by the
-            // node (`auth.oauth.no_local_identity`) — correctly, because the
-            // owner is a local credential with no OAuth identity linked. The
-            // node was right every time; the client asked the wrong store.
+            //     brain /v1/setup/status      setup_required=true    (.env was gone)
+            //     node  /v1/setup/owned-nodes owner present          <- decisive
             //
-            // Only probed when the brain says first-run: that is the sole answer
-            // an owned node can contradict, so a configured node pays nothing.
-            // The degrade branches below ALREADY apply this rule — the same
-            // `nodeHasOwner` call with the same reasoning — so the happy path
-            // was the one place the rule was missing, not a new policy.
+            // The user got the first-run login, and a Google sign-in there was
+            // CORRECTLY refused (auth.oauth.no_local_identity — the owner was a
+            // local credential with no OAuth identity linked). Every layer behaved
+            // as written; the node looked broken while being right every time. It
+            // was reported as "OAuth is broken" and was neither first-run nor
+            // broken OAuth.
+            //
+            // Note where the rule already lived: BOTH degrade branches below
+            // consult nodeHasOwner() and explain why. The happy path — the one
+            // that runs when nothing is wrong — was the only place it was missing.
+            // Re-entering the wizard here would re-claim a node that already has
+            // an owner, so this is a correctness fix, not just a UX one.
+            // ...AND THE BRAIN MUST ALREADY HAVE ITS CONFIG. This is the half I
+            // got wrong in 2.9.26 (CIRISAgent#1075).
+            //
+            // An owned node means DO NOT RE-CLAIM THE NODE. It does not mean the
+            // brain is configured — they are two different stores, which is the
+            // whole point of #1061, and I applied that lesson in one direction
+            // only. Skipping the wizard on node-ownership alone left a brain with
+            // no .env, and the brain's remaining 12 services start ONLY from
+            // POST /v1/setup/complete -> runtime.resume_from_first_run():
+            //
+            //     Config: ~/ciris/.env — NOT FOUND (first run will create it)
+            //     [FIRST-RUN] 10/10 minimal services started
+            //     ...wizard skipped, user signed in...
+            //     cognitiveState=SETUP forever, telemetry/audit/LLM bus absent,
+            //     every /v1/system/*, /v1/audit/* and add-provider call 503.
+            //
+            // The agent could not even be given an LLM provider to escape with.
+            //
+            // So: node-ownership suppresses the CLAIM, never the setup. If the
+            // brain has no config, the wizard runs.
             if (setupStatus.data.setup_required && nodeHasOwner(nodeBaseUrl)) {
+                // An OWNED node is not a first run, whether or not the brain is
+                // configured. The two cases diverge AFTER this point:
+                //
+                //   owned + brain configured    -> sign in, full AGENT UI
+                //   owned + brain unconfigured  -> ClientMode.NODE, node UI
+                //
+                // The second is a legitimate state, not a broken agent: the node
+                // works and the cognitive half was never set up. Forcing the wizard
+                // there (which is what I did in the first pass at this) shows setup
+                // to someone who may only want a node.
+                //
+                // It is NOT a dead end. The brain still starts its 10 first-run
+                // services, and Settings offers "set up the agent", which enters the
+                // wizard directly. Deliberately NOT the existing rerun-setup path:
+                // that deletes .env and restarts, and with no .env to delete it
+                // restarts into this same state — a loop.
+                val brainHasConfig = setupStatus.data.has_env_file
                 platformLog(
                     "checkFirstRunStatus",
-                    "[WARN] brain says first-run but the NODE already has an owner → NOT first-run. " +
-                        "Sign in with the existing credential; the wizard would re-claim an owned node."
+                    "[INFO] node has an OWNER → NOT first-run (brain_configured=$brainHasConfig). " +
+                        if (brainHasConfig) "Sign in." else "Brain unconfigured → node mode; set up the agent from Settings.",
                 )
-                onClaimedNodeDetected?.invoke()
                 return false
             }
             return setupStatus.data.setup_required
@@ -4756,20 +4986,23 @@ private fun CIRISTopBar(
 /**
  * The default post-auth landing screen.
  *
- * - **Node client (CIRISBuild.HAS_AGENT == false):** the agent chat
- *   (Screen.Interact) is not a surfaced nav card, so the app opens on the
- *   node-management surface (the Nodes card, NavSurface.Nodes). The Interact
- *   screen object remains defined and reachable; it is simply not the landing
- *   destination and not in the sidebar.
+ * - **Node client (CIRISBuild.HAS_AGENT == false):** the app opens on
+ *   CONTACTS. A node client's reason to exist is the people its owner can
+ *   reach, so the landing surface is the conversation list — and when that list
+ *   is empty, ContactsScreen lands with the "Add a Contact" card as the primary
+ *   action rather than an empty panel, because an empty contacts list has
+ *   exactly one useful next move. (This replaces the old ManageNodes landing:
+ *   node administration is a thing the owner does occasionally, not the thing
+ *   they opened the app for. It stays first-class in the Manage group.)
  * - **Agent build (HAS_AGENT == true):** the full agent client — the agent chat
  *   (AGENT_GROUP → NavSurface.Interact) is a first-class surfaced card, so the
- *   app opens on the reasoning-stream chat. Node management stays reachable from
- *   the Manage group.
+ *   app opens on the reasoning-stream chat. Contacts stays reachable from the
+ *   Manage group.
  *
  * Gated on the flag so the agent's adoption is a single HAS_AGENT flip.
  */
 private val HOME_SCREEN: Screen =
-    if (CIRISBuild.HAS_AGENT) Screen.Interact else Screen.ManageNodes
+    if (CIRISBuild.HAS_AGENT) Screen.Interact else Screen.Contacts
 
 /**
  * Navigation screens
@@ -4824,20 +5057,32 @@ private sealed class Screen {
     object AddFederationId : Screen()
     // Consent management (consent:replication peering + user-data consent).
     object ManageConsent : Screen()
-    // Contacts / Identities — browse the local node's known federation peer store;
-    // also used as a picker when delegating to an existing fed-ID.
+    // Contacts — the owner's consented peers (GET /v1/contacts) and the node
+    // client's HOME surface; also used as a picker (over the wider peer store)
+    // when delegating to an existing fed-ID.
     object Contacts : Screen()
+
+    /**
+     * One two-member chat. Parameterised because the room is identified by the
+     * DERIVED pair community id the contact card carries.
+     *
+     * The card's `chat_started` is deliberately NOT carried here: `POST /v1/chat`
+     * is idempotent and returns before any write for a room that exists, so the
+     * ViewModel always asks the node rather than acting on the client's guess.
+     */
+    data class UserChat(
+        val contactKeyId: String,
+        val communityId: String,
+        val contactLabel: String,
+    ) : Screen()
     // Delegations (device-auth grants — authorize an agent to act on-behalf).
     object Delegations : Screen()
     // Identity Management (my self fed-ID + device roster / occurrences — add /
     // revoke a device; "log in as yourself on another device").
     object IdentityManagement : Screen()
-    // Delegate moderation duty — confer slash/moderate/review on another self with
-    // an explicit sub-delegation depth (co-scrubbed by the accord holders).
-    // Reached from Safety → Moderation's "open delegation" affordance.
-    object DutyConferral : Screen()
     // Accord (HUMANITY_ACCORD — constitutional 2/3 kill-switch + holder roster).
     object Accord : Screen()
+    object DutyConferral : Screen()
     // Provision Accord Holder (mint a portable-2FA accord-holder identity).
     object ProvisionAccordHolder : Screen()
     // Accord Genesis Ceremony (stand up a new mesh's 2-of-3 human kill-switch).
@@ -4947,15 +5192,16 @@ private fun screenToSurface(s: Screen): ai.ciris.mobile.shared.ui.nav.NavSurface
     Screen.ManageNodes -> ai.ciris.mobile.shared.ui.nav.NavSurface.Nodes
     Screen.ManageConsent -> ai.ciris.mobile.shared.ui.nav.NavSurface.ManageConsent
     Screen.Contacts -> ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts
+    // A chat keeps the Contacts card lit — it is a leaf of that surface, not a
+    // sidebar destination of its own.
+    is Screen.UserChat -> ai.ciris.mobile.shared.ui.nav.NavSurface.Contacts
     Screen.Delegations -> ai.ciris.mobile.shared.ui.nav.NavSurface.Delegations
     Screen.IdentityManagement -> ai.ciris.mobile.shared.ui.nav.NavSurface.IdentityManagement
     Screen.Accord -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
+        Screen.DutyConferral -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ProvisionAccordHolder -> ai.ciris.mobile.shared.ui.nav.NavSurface.ProvisionAccordHolder
     Screen.AccordCeremony -> ai.ciris.mobile.shared.ui.nav.NavSurface.AccordCeremony
     Screen.Moderation -> ai.ciris.mobile.shared.ui.nav.NavSurface.Moderation
-    // The duty-conferral flow is opened FROM Moderation and backs out to it, so it
-    // keeps Moderation lit in the sidebar rather than claiming a surface of its own.
-    Screen.DutyConferral -> ai.ciris.mobile.shared.ui.nav.NavSurface.Accord
     Screen.ChildSafety -> ai.ciris.mobile.shared.ui.nav.NavSurface.ChildSafety
     Screen.Storage -> ai.ciris.mobile.shared.ui.nav.NavSurface.Storage
     Screen.Billing -> ai.ciris.mobile.shared.ui.nav.NavSurface.Billing

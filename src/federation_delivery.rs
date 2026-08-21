@@ -1506,25 +1506,61 @@ mod tests {
     }
 
     #[test]
-    fn build_replication_peers_four_coordinators_per_target() {
+    fn build_replication_peers_wires_every_plane_per_target() {
         use ciris_edge::replication::EnvelopeKind;
         // The delivery controller hands the admitted canonical targets to the SAME
-        // peer-assembly the compose boot path uses: exactly Attestation + Key +
-        // IdentityOccurrence (CIRISEdge#305, KEX) + TransportDestination (CIRISEdge#406,
-        // the PQ transport-attribution plane) per target, in target order.
+        // peer-assembly the compose boot path uses. Asserted as an exact ORDERED
+        // list rather than a count: a count passes when a plane is swapped for
+        // another, and the planes are not interchangeable.
         let desired = vec!["canon-1".to_string(), "peer-b".to_string()];
         let peers = crate::compose::build_replication_peers(&desired);
-        assert_eq!(peers.len(), 8);
-        assert_eq!(peers[0].peer_key_id, "canon-1");
-        assert!(matches!(peers[0].kind, EnvelopeKind::Attestation));
-        assert!(matches!(peers[1].kind, EnvelopeKind::Key));
-        assert!(matches!(peers[2].kind, EnvelopeKind::IdentityOccurrence));
-        assert!(matches!(peers[3].kind, EnvelopeKind::TransportDestination));
-        assert_eq!(peers[4].peer_key_id, "peer-b");
-        assert!(matches!(peers[4].kind, EnvelopeKind::Attestation));
-        assert!(matches!(peers[5].kind, EnvelopeKind::Key));
-        assert!(matches!(peers[6].kind, EnvelopeKind::IdentityOccurrence));
-        assert!(matches!(peers[7].kind, EnvelopeKind::TransportDestination));
+        let expected = [
+            EnvelopeKind::Attestation,
+            EnvelopeKind::Key,
+            // KEX (CIRISEdge#305).
+            EnvelopeKind::IdentityOccurrence,
+            // The PQ transport-attribution plane (CIRISEdge#406).
+            EnvelopeKind::TransportDestination,
+            // The chat roster — without it a `cohort_scope: community` row
+            // arrives somewhere with no community to be a member of.
+            EnvelopeKind::Community,
+            // And its removals: the roster is append-only, so admissions
+            // without revocations replicate a membership that can only grow.
+            EnvelopeKind::CommunityMembershipRevocation,
+        ];
+        assert_eq!(peers.len(), desired.len() * expected.len());
+        for (target_index, target) in desired.iter().enumerate() {
+            for (plane_index, kind) in expected.iter().enumerate() {
+                let peer = &peers[target_index * expected.len() + plane_index];
+                assert_eq!(&peer.peer_key_id, target);
+                assert_eq!(
+                    std::mem::discriminant(&peer.kind),
+                    std::mem::discriminant(kind),
+                    "target {target}, plane {plane_index}"
+                );
+            }
+        }
+    }
+
+    /// The reconcile coordinator and the boot coordinator must wire the SAME
+    /// planes — they used to be two hand-maintained lists, and the copy had
+    /// already drifted (its comment said "ALL THREE planes" while listing four).
+    /// `replication_reconcile` now calls this assembly instead of restating it,
+    /// so this pins that there is ONE list: a peer hot-added at reconcile
+    /// converges exactly what a peer added at boot does.
+    #[test]
+    fn the_reconcile_path_wires_the_same_planes_as_boot() {
+        let boot = crate::compose::build_replication_peers(&["p".to_string()]);
+        let reconcile =
+            crate::compose::build_replication_peers(std::slice::from_ref(&"p".to_string()));
+        assert_eq!(boot.len(), reconcile.len());
+        for (b, r) in boot.iter().zip(reconcile.iter()) {
+            assert_eq!(b.peer_key_id, r.peer_key_id);
+            assert_eq!(
+                std::mem::discriminant(&b.kind),
+                std::mem::discriminant(&r.kind)
+            );
+        }
     }
 
     #[test]

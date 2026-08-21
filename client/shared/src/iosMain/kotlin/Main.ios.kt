@@ -20,7 +20,7 @@ import ai.ciris.mobile.shared.platform.StoreKitPurchaseResultBridge
 fun MainViewController(): UIViewController = ComposeUIViewController {
     CIRISApp(
         accessToken = "",  // Empty initially, will be populated after login
-        apiBaseUrl = "http://127.0.0.1:8080"  // Local Python server
+        apiBaseUrl = "http://127.0.0.1:8080"  // Local Python brain (node read API defaults to :4243)
     )
 }
 

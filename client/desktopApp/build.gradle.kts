@@ -1,23 +1,23 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
-// ─── The native-distribution version, DERIVED (CIRISServer#403) ─────────────
+// ─── NODE VENDOR DRIFT #35 (restored after the 2.9.28 re-vendor hardcoded the
+// AGENT's version here): the native-distribution version, DERIVED
+// (CIRISServer#403) ──────────────────────────────────────────────────────────
 //
 // This is packaging metadata only: it names the Dmg/Msi/Deb bundle and, as a
 // side effect, the uber-JAR's filename. It is NOT the client's identity — that
-// is `CLIENT_VERSION` in shared/…/models/ClientMode.kt, which is what the
-// node-vs-client banner compares and what `scripts/sync-client-version.sh`
-// keeps in lockstep with Cargo.toml.
+// is `CLIENT_VERSION` in shared/…/models/ClientMode.kt.
 //
-// It was the hardcoded string "2.6.0" from the day the client was vendored
-// (v0.5.4) until 0.5.171 — never bumped, and worse than merely stale: 2.6.0 is
-// a real CIRISAgent release, so every JAR filename, build log and bug report
-// read as "agent 2.6.0". One string, two meanings, on a version number.
+// It was the hardcoded string "2.6.0" from vendoring day until 0.5.171 — a
+// real CIRISAgent release number, so every JAR filename and bug report read as
+// "agent 2.6.0". The re-vendor reintroduced EXACTLY that defect as "2.9.28",
+// with a sharper edge: shipped once, native upgraders (MSI especially) treat
+// the next real 1.5.x as a DOWNGRADE and refuse it.
 //
 // It cannot simply BE the release version: compose-desktop refuses a 0.x major
-// for Dmg ("Illegal version for 'Dmg': '0.5.171' is not a valid version"),
-// because macOS CFBundleVersion requires a major ≥ 1. So the major is forced to
-// 1 and the rest tracks the release digit for digit — 0.5.171 → 1.5.171. Being
-// derived is the point: there is nothing left to forget to bump.
+// for Dmg (macOS CFBundleVersion requires major >= 1), so the major is forced
+// to 1 and the rest tracks the release digit for digit — 0.5.185 -> 1.5.185.
+// Being derived is the point: there is nothing left to forget to bump.
 val releaseVersion: String =
     Regex("""^version = "([^"]+)"""", RegexOption.MULTILINE)
         .find(rootProject.file("../Cargo.toml").readText())
@@ -68,7 +68,7 @@ compose.desktop {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "CIRIS"
             packageVersion = nativePackageVersion
-            description = "CIRIS Agent Desktop Application"
+            description = "CIRIS Node Desktop Application"
             vendor = "CIRIS L3C"
 
             macOS {
@@ -93,17 +93,6 @@ kotlin {
     jvmToolchain(17)
 }
 
-// Sync localization JSON files from main repo to resources
-tasks.register<Sync>("syncLocalizationResources") {
-    description = "Sync localization JSON files from main repo to resources"
-    from("../../localization") {
-        include("*.json")
-        exclude("manifest.json")
-    }
-    into("src/main/resources/localization")
-}
-
-// Ensure localization resources are synced before processing resources
-tasks.named("processResources") {
-    dependsOn("syncLocalizationResources")
-}
+// NODE VENDOR DRIFT #9 (CIRISServer#465): upstream's syncLocalizationResources
+// is REMOVED — same destination-owning Sync hazard as androidApp's
+// syncLocalizationAssets (see that file's comment for the full account).

@@ -30,19 +30,15 @@ data class OAuthHandoff(
     val externalId: String = "",
     val email: String? = null,
     /**
-     * The provider's OIDC ID token, when this sign-in produced one
-     * (CIRISServer#434).
+     * The provider's raw ID token, when the provider issues one (CIRISServer#434).
      *
-     * CIRIS_PROXY uses a Google ID token as its `api_key`. The native clients
-     * hold one already — they supply it as the login credential — but a desktop
-     * sign-in happens in a BROWSER, so this hand-off is the app's only view of
-     * the provider response. Without it the wizard reached
-     * `llm_api_key = googleIdToken ?: ""` and configured the proxy with an
-     * empty key.
+     * CIRIS_PROXY sends this AS the LLM api_key, so without it a desktop user who
+     * signed in with Google could not select the proxy at all — and was told
+     * "Google sign-in is required" while signed in with Google. The node has held
+     * it since the code exchange; from ciris-server 0.5.177 it forwards it.
      *
-     * Null when the provider issues none (GitHub and Discord are OAuth2, not
-     * OIDC). The node omits the key entirely in that case, so null here means
-     * "there was none", never "it was blank".
+     * Nullable and defaulted on purpose: providers that issue no ID token are a
+     * legitimate case, not an error, and an older node simply omits the field.
      */
     @SerialName("id_token")
     val idToken: String? = null,

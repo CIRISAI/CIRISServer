@@ -110,6 +110,13 @@ pub mod commons_surface;
 /// Gated by `tests/compliance_map.rs`.
 pub mod compliance;
 mod compose;
+/// **Contacts + user chat** — the owner-facing surface over CEG objects that
+/// already existed: a contact is a `consent:replication:v1` grant, a chat is a
+/// two-member `Community` under a DERIVED id both ends compute, and a message is
+/// a `chat:message:v1` `scores` attestation placed at `cohort_scope: community`.
+/// The read gate is persist's own §4.3 predicate (`CallerScope::admits`), so a
+/// non-member is refused even when they own the node.
+pub mod contacts_chat;
 pub mod owner_signer_capsule;
 
 /// **The self-occurrence envelope builder, exposed for tests** (CIRISServer#454).

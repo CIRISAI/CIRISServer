@@ -6,7 +6,7 @@ import ai.ciris.mobile.shared.platform.testable
 import ai.ciris.mobile.shared.platform.testableClickable
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 import ai.ciris.mobile.shared.ui.components.HolderSignInputs
-import ai.ciris.mobile.shared.ui.components.YubiKeyStatusBanner
+import ai.ciris.mobile.shared.ui.screens.YubiKeyStatusBanner
 import ai.ciris.mobile.shared.viewmodels.DutyConferralViewModel
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row

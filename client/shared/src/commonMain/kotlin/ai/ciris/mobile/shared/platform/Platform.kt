@@ -42,6 +42,7 @@ fun isDesktop(): Boolean = getPlatform() == Platform.DESKTOP
 fun isWeb(): Boolean = getPlatform() == Platform.WEB
 
 /**
+ * NODE VENDOR DRIFT #31 (restored after the 2.9.28 re-vendor dropped it):
  * The OAuth provider this platform signs in WITH — a proper noun, shown to the
  * user ("Sign in with Google"), so it is deliberately not translated.
  *
@@ -63,6 +64,7 @@ fun getOAuthProviderName(): String = when (getPlatform()) {
 fun getOAuthProviderId(): String = when (getPlatform()) {
     Platform.IOS -> "apple"
     Platform.ANDROID -> "google"
+    // NODE VENDOR DRIFT #31 (restored after the 2.9.28 re-vendor dropped it):
     // The wire id the node routes on (`/v1/auth/oauth/{provider}/login`).
     // "desktop" was never a provider the node serves — a request for it would
     // 404 "provider not configured".

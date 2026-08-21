@@ -3,7 +3,8 @@ package ai.ciris.mobile.shared.platform
 import androidx.compose.runtime.Composable
 
 /**
- * WHY a folder is being chosen — the question the picker is actually asking.
+ * NODE VENDOR DRIFT #30 (restored after the 2.9.28 re-vendor dropped it): WHY a
+ * folder is being chosen — the question the picker is actually asking.
  *
  * This picker was written for ONE job (find the holder's mounted USB) and its
  * title and start directory were baked in to suit it. Then callers with a
@@ -42,11 +43,29 @@ enum class DirectoryPickerPurpose {
  * chooser; it calls [onDirectoryPicked] with the absolute path on confirm, or
  * [onDismiss] on cancel. The caller resets [show] in both callbacks.
  *
- * [purpose] decides the dialog title and where it opens — see
- * [DirectoryPickerPurpose] for why it is a required argument rather than a
- * default.
+ * ## What a folder is being chosen FOR
  *
- * - Desktop: `JFileChooser` in DIRECTORIES_ONLY mode.
+ * NODE VENDOR DRIFT #20 / #30: removable media, mostly — the accord holder's
+ * AEAD-wrapped ML-DSA-65 half, a portable identity, a node-list backup, the
+ * things that live on a USB key precisely because they must be able to leave the
+ * machine. But callers with a different question ("where should this genesis seed
+ * be saved?") reuse this picker too, because it is the only folder picker there
+ * is. Our version makes that question an ARGUMENT — [purpose], required, with no
+ * default — because one component silently answering two questions is this
+ * codebase's most expensive recurring shape, and here it cost an operator their
+ * seed's location. [purpose] decides the dialog title and where it opens; see
+ * [DirectoryPickerPurpose] for why it is required rather than defaulted.
+ *
+ * ## Threading contract for actuals
+ *
+ * An actual that opens a real native chooser must open it on that toolkit's UI
+ * thread — see the desktop actual (NODE VENDOR DRIFT #13), where running
+ * `JFileChooser` off the Swing EDT crashed a node mid-ceremony out of
+ * `FilePane.doDirectoryChanged`. A picker failure is a CANCELLED PICK, never a
+ * crash: choosing a folder is a convenience, and the holder can always type the
+ * path instead.
+ *
+ * - Desktop: `JFileChooser` in DIRECTORIES_ONLY mode, on the EDT (the ceremony path).
  * - Android/iOS/wasm: no-op for now (the text field stays the source of truth) —
  *   TODO wire the SAF tree picker / iOS document picker for removable media.
  */

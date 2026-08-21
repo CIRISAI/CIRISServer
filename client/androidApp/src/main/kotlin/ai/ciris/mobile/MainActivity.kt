@@ -50,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -136,6 +137,14 @@ class MainActivity : ComponentActivity() {
                     startLogcatReader()
                 }
 
+                // FILE-based capture of the node's one-time ownership CLAIM PIN.
+                // The node writes its boot banner to log FILES (not the filtered
+                // logcat stream the reader above consumes), so tail those files so
+                // the PIN is latched even when logcat never carries the banner.
+                launch {
+                    tailNodeLogsForOwnership()
+                }
+
                 // Run network diagnostics to debug CIRISVerify connectivity
                 launch(Dispatchers.IO) {
                     try {
@@ -175,15 +184,17 @@ class MainActivity : ComponentActivity() {
                 // Show the full KMP app with native StartupScreen (22 lights)
                 CIRISApp(
                     accessToken = "pending", // Will be set after auth
-                    // TWO parameters upstream, ONE service here (CIRISServer#430;
-                    // same trap Main.kt documents for desktop). The agent build
-                    // has a Python brain on :8080 and a node read API on :4243;
-                    // this is the NODE client (CIRISBuild.HAS_AGENT == false), so
-                    // there is no brain to address — the Chaquopy-launched
-                    // ciris-server serves the whole surface on :4243. Pointing
-                    // apiBaseUrl at the upstream :8080 default aims EVERY
-                    // shared-client call at a dead port. Do not "fix" this back
-                    // to 8080 — that port only exists in the CIRISAgent build.
+                    // NODE VENDOR DRIFT #17 (restored after the 2.9.28 re-vendor
+                    // reverted apiBaseUrl to :8080 and dropped nodeBaseUrl). TWO
+                    // parameters upstream, ONE service here (CIRISServer#430; same
+                    // trap Main.kt documents for desktop). The agent build has a
+                    // Python brain on :8080 and a node read API on :4243; this is
+                    // the NODE client (CIRISBuild.HAS_AGENT == false), so there is
+                    // no brain to address — the Chaquopy-launched ciris-server
+                    // serves the whole surface on :4243. Pointing apiBaseUrl at the
+                    // upstream :8080 default aims EVERY shared-client call at a
+                    // dead port. Do not "fix" this back to 8080 — that port only
+                    // exists in the CIRISAgent build.
                     apiBaseUrl = "http://127.0.0.1:4243",
                     nodeBaseUrl = "http://127.0.0.1:4243",
                     googleSignInCallback = googleSignInCallback,
@@ -511,6 +522,82 @@ class MainActivity : ComponentActivity() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Logcat reader error: ${e.message}")
+        }
+    }
+
+    /**
+     * Resolve the directory the in-process ciris-server node writes its logs to.
+     * CIRIS_HOME is set by CirisVerify.setup() to `filesDir/ciris`; the node's
+     * logs (including the boot banner) live under `$CIRIS_HOME/logs`.
+     */
+    private fun resolveNodeLogsDir(): File {
+        val home = System.getenv("CIRIS_HOME")
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { File(it) }
+            ?: File(filesDir, "ciris")
+        return File(home, "logs")
+    }
+
+    /**
+     * FILE-based fallback for capturing the node's one-time ownership CLAIM PIN.
+     *
+     * The node emits its "OWNERSHIP UNCLAIMED" banner (carrying the one-time
+     * CLAIM PIN + NodeCode) at boot, but writes it to log FILES under
+     * `$CIRIS_HOME/logs` — NOT to the filtered logcat stream [startLogcatReader]
+     * consumes (that filter is `python.stdout/stderr` + `CIRISVerify` only). So a
+     * logcat-only capture misses the banner entirely. Here we tail the node's
+     * boot logs and feed each line through the SAME ownership parser
+     * ([PythonRuntime.scanFileLineForOwnership] → parseOwnershipBanner), so the
+     * PIN is latched from the file regardless of what logcat carried.
+     *
+     * Bounded + self-terminating: polls until the PIN is captured or a deadline
+     * elapses. The parser is idempotent (first match wins), so re-reading a file
+     * across polls is harmless.
+     */
+    private suspend fun tailNodeLogsForOwnership() = withContext(Dispatchers.IO) {
+        try {
+            val deadline = System.currentTimeMillis() + 120_000L
+            while (System.currentTimeMillis() < deadline) {
+                if (PythonRuntime.isClaimPinCaptured()) {
+                    Log.i(TAG, "Ownership CLAIM PIN captured — stopping node-log tail")
+                    return@withContext
+                }
+                val logsDir = resolveNodeLogsDir()
+                if (logsDir.isDirectory) {
+                    // Boot banner lands in the current/boot server logs; scan the
+                    // node's boot + rolling logs, newest first.
+                    val candidates = logsDir.listFiles { f ->
+                        f.isFile && (
+                            f.name == "latest.log" ||
+                            f.name.startsWith("ciris-server.log") ||
+                            f.name.startsWith("ciris_agent_")
+                        )
+                    }?.sortedByDescending { it.lastModified() } ?: emptyArray<File>().toList()
+
+                    for (f in candidates) {
+                        if (PythonRuntime.isClaimPinCaptured()) break
+                        try {
+                            f.bufferedReader().useLines { seq ->
+                                // Banner is early in the file; cap the scan so a
+                                // large rolling log never turns this into a hog.
+                                seq.take(20_000).forEach { line ->
+                                    if (line.isNotBlank()) {
+                                        PythonRuntime.scanFileLineForOwnership(line)
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Node-log tail: read failed for ${f.name}: ${e.message}")
+                        }
+                    }
+                }
+                delay(1000)
+            }
+            if (!PythonRuntime.isClaimPinCaptured()) {
+                Log.w(TAG, "Node-log ownership tail: CLAIM PIN not seen before deadline")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Node-log ownership tail error: ${e.message}")
         }
     }
 

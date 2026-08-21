@@ -62,6 +62,10 @@ data class ClaimRemoteRequest(
      */
     @SerialName("owner_username")
     val ownerUsername: String? = null,
+    // Vendor drift #21: node-side OAuth owner fields (CIRISServer#384). The
+    // CIRISAgent v2.9.28 re-vendor deleted them; restored verbatim. Upstream
+    // changed nothing else in this file, so there is no upstream improvement to
+    // merge around them.
     /**
      * The claiming owner's OAuth provider (`google` / `apple`), when they signed
      * in rather than setting a password.
@@ -108,6 +112,8 @@ data class ClaimRemoteResponse(
     val role: String? = null,
     /** Error string when the claim was rejected (non-2xx bodies). */
     val error: String? = null,
+    // Vendor drift #21: the claim-minted owner session (CIRISServer#393),
+    // deleted by the CIRISAgent v2.9.28 re-vendor and restored verbatim.
     /**
      * The owner's session, minted BY the claim (CIRISServer#393).
      *

@@ -22,9 +22,10 @@ actual fun FilePickerDialog(
     LaunchedEffect(show) {
         if (!show) return@LaunchedEffect
 
-        // The CHOOSER runs on the EDT (Swing's contract — see chooseFileOnEdt);
+        // NODE VENDOR DRIFT #18 (restored after the 2.9.28 re-vendor dropped it):
+        // the CHOOSER runs on the EDT (Swing's contract — see chooseFileOnEdt);
         // the file READ stays on IO, because a multi-MB attachment must not be
-        // read on the event thread. Splitting them is the point: the previous
+        // read on the event thread. Splitting them is the point: upstream's
         // version ran BOTH on Dispatchers.IO, which is how the sibling directory
         // picker crashed the whole app mid-ceremony (IndexOutOfBoundsException
         // out of DefaultRowSorter, via FilePane.doDirectoryChanged).
@@ -40,6 +41,8 @@ actual fun FilePickerDialog(
 }
 
 /**
+ * NODE VENDOR DRIFT #18 (restored after the 2.9.28 re-vendor dropped it).
+ *
  * Show the file chooser ON THE EDT and return the selected [File], or `null` on
  * cancel or failure.
  *
@@ -68,6 +71,7 @@ private fun chooseFileOnEdt(mimeTypes: List<String>): File? {
     }
 }
 
+// Returns the chosen FILE: reading it is the caller's job, off the EDT (#18).
 private fun showNativeFileChooser(mimeTypes: List<String>): File? {
     val chooser = JFileChooser().apply {
         dialogTitle = "Select file to attach"

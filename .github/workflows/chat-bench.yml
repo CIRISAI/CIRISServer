@@ -1,0 +1,416 @@
+name: chat bench
+
+# CHAT THROUGHPUT + MEMORY PRESSURE.
+#
+# Modelled deliberately on CIRISAgent's `.github/workflows/memory-benchmark.yml`,
+# because the agent team already learned the thing worth copying: a memory
+# regression is a SHAPE ACROSS PHASES, never a single number. So this samples RSS
+# at four boundaries — cold start, a 100-message warm set, a 1000-message burst,
+# and a 30s idle tail — and reports the deltas between them. A run that only told
+# you "peak RSS was 210 MB" could not tell a resident transcript from a leak.
+#
+# Two tiers:
+#
+#   TIER 1 (always) — `benches/chat_throughput.rs`. In-process, drives the REAL
+#     `contacts_chat::router` on a bound listener against an in-memory substrate.
+#     Every message performs the owner gate, the membership check, an
+#     `attestation_upsert_local`, a hybrid-signed `attestation_promote(community)`
+#     and the read-back projection.
+#
+#   TIER 2 (workflow_dispatch only, until proven on a runner) —
+#     `tools/chat_bench_http.sh`. The same phases over real HTTP against the
+#     BOOTED release binary, sampling the SERVER process's RSS. It boots the
+#     artifact, mints a software fed-ID, performs the real 1-phase claim and logs
+#     in as the owner — all of that works and has been run green locally. What it
+#     CANNOT do is emit chat messages: peer admission needs a hybrid-signed key
+#     record through POST /v1/federation/peering, which a harness cannot mint, and
+#     self-chat is refused by design. That leg reports `ran:false` with the reason
+#     and `messages_emitted: 0` — never a skip, never a pass. See the script header.
+#
+#     It stays behind a dispatch input because it adds a full `cargo build
+#     --release` on top of the bench build, and because it has never executed on a
+#     GitHub runner. That is the 0.5.179 lesson: a gate whose happy path has never
+#     once run in the environment that will run it is how a gate breaks a release.
+#
+# FIRST ITERATION RECORDS, IT DOES NOT GATE. No RSS ceiling is asserted anywhere.
+# Both tiers derive a `suggested_*_ceiling_*` from the growth measured in THAT RUN
+# and mark it `"gating": false`. A ceiling is worth asserting once the weekly cron
+# has produced a baseline series — deriving one from a single noisy shared runner,
+# or inventing a round number, produces a gate that fails for reasons unrelated to
+# the code. Same model as the agent's "weekly for baseline tracking".
+
+on:
+  # Weekly baseline. Tuesday rather than Monday so it does not land in the same
+  # hour as the repo's existing `bench` cron (07:00 Mon) — two full release-profile
+  # Rust builds contending for the same runner pool is a slower answer to both.
+  schedule:
+    - cron: "0 6 * * 2" # Tuesday 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      tier2:
+        description: "Also run TIER 2 (boot the release binary and drive it over HTTP)"
+        type: boolean
+        default: false
+      warm:
+        description: "Messages in the warm phase"
+        default: "100"
+      burst:
+        description: "ADDITIONAL messages in the burst phase (warm + burst = transcript total)"
+        default: "900"
+      idle_secs:
+        description: "Idle-tail length in seconds"
+        default: "30"
+  # PRs that touch the measured code. Narrow on purpose: this is a long job, and
+  # a bench that runs on every PR is a bench people learn to ignore.
+  #   contacts_chat.rs  — the routes under measurement
+  #   safety/moderation.rs — the SAME two-step emit path (`attestation_upsert_local`
+  #                          then `attestation_promote`, at the federation tier
+  #                          rather than community). It is the other caller of the
+  #                          hot loop this bench times, so a change to how a row is
+  #                          staged and placed shows up here first.
+  #   Cargo.toml        — the substrate pins (persist/edge/verify). A persist bump
+  #                       changes what a promote costs, which is the hot loop.
+  pull_request:
+    paths:
+      - "src/contacts_chat.rs"
+      - "src/safety/moderation.rs"
+      - "benches/chat_throughput.rs"
+      - "tools/chat_bench_http.sh"
+      - "Cargo.toml"
+      - ".github/workflows/chat-bench.yml"
+
+# A force-push mid-run wastes a full benchmark cycle — the agent's reason,
+# and ours: the burst phase alone is minutes of runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tier1:
+    name: Tier 1 — in-process router
+    runs-on: ubuntu-latest
+    # ── WALL-TIME ARITHMETIC ────────────────────────────────────────────────
+    # MEASURED, on a 32-core dev box, bench profile, warm dep graph:
+    #   cold start (engine + fixture seed + serve + contact + chat)   0.16 s
+    #   warm  100 messages  (502 msg/s)                               0.20 s
+    #   burst 900 messages  (132 msg/s)                               6.82 s
+    #   list samples (5 @100 + 5 @1000)                              ~0.09 s
+    #   idle tail                                                    30    s
+    #   ─────────────────────────────────────────────────────────────────────
+    #   bench runtime                                               ~37.3  s
+    #
+    # The idle tail is over 80% of that, and it is a fixed 30 s everywhere. The
+    # variable part is the burst, which is SUPERLINEAR by construction:
+    # `send_message` read-backs the entire transcript through `collect_messages`,
+    # so emitting N messages performs O(N²) message projections. That is visible
+    # in the measurement — 502 msg/s over the first 100, 132 msg/s over the next
+    # 900 — so a 4x slower shared runner does not cost 4x on a 6.8 s burst, it
+    # costs somewhere under a minute. Budget 3 min for the whole bench.
+    #
+    # The BUILD is the real cost. The bench profile inherits `[profile.release]`
+    # (thin LTO, codegen-units = 1) over the full substrate. Locally, with every
+    # dependency already compiled, relinking just ciris-server took 8m12s; a CI
+    # cache MISS compiles the whole graph from cold and is the case to budget for,
+    # since the first run after any substrate bump is exactly that.
+    #
+    #   3 (bench, generous) + 35 (cold build) + 3 (checkout/apt/toolchain/cache)
+    #     = 41 min
+    #
+    # 45 leaves a little headroom without letting a wedged apt mirror
+    # (CIRISServer#449) burn an hour before the job names its own failure. With a
+    # CIRISCache hit the same job finishes in well under 10.
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      # The router's own tracing would interleave with the jsonl on stdout.
+      RUST_LOG: error
+      CHAT_BENCH_WARM: ${{ github.event.inputs.warm || '100' }}
+      CHAT_BENCH_BURST: ${{ github.event.inputs.burst || '900' }}
+      CHAT_BENCH_IDLE_SECS: ${{ github.event.inputs.idle_secs || '30' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Set up sccache (compiler cache over GHA)
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Install build deps
+        run: |
+          # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
+          # 403s and tanks apt-get update (its packages are not needed here).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
+          # AND drop the AZURE UBUNTU MIRROR itself (CIRISServer#449). Removing
+          # the Microsoft repos above was not enough: the runner image makes
+          # `azure.archive.ubuntu.com` the PRIMARY Ubuntu mirror via
+          # /etc/apt/apt-mirrors.txt, and when it stops answering, apt retries it
+          # for the InRelease of every suite before falling back. Observed three
+          # times on one PR: `clippy + test` wedged 68 min, `traceflow ladder`
+          # 75 min to a timeout-failure, and the retry of the first wedged again
+          # at the identical `Ign:` lines. A job that hangs for an hour reads as
+          # a slow test suite, which is why it cost a day before anyone looked.
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo find /etc/apt/sources.list.d -type f -exec \
+            sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} + 2>/dev/null || true
+          # Bounded: retry a few times, cap each connection, and cap the whole
+          # step. Without the outer `timeout` a stalled mirror consumes the job's
+          # entire budget and the failure names the job, never the cause.
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          # jq is preinstalled on the ubuntu runner image, but the summary and
+          # honesty-check steps are useless without it, and "jq: command not
+          # found" inside a `|| true` reads as an empty result — i.e. as a pass.
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev jq
+      # CIRISCache (CIRISServer#99) — 4-layer centipede over the Swatinem GHA L1.
+      # Restore only: this workflow never populates the shared blob (bench.yml and
+      # ci.yml own the save on main), it just rides whatever they left.
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT="linux-x86_64"
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+          } >> "$GITHUB_OUTPUT"
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+
+      - name: System info
+        run: |
+          {
+            echo "## Chat bench — system"
+            echo '```'
+            echo "rustc: $(rustc -V)"
+            echo "OS:    $(uname -a)"
+            echo "RAM:   $(free -h | awk '/Mem/{print $2}')"
+            echo "CPU:   $(nproc) cores"
+            echo "phases: warm=$CHAT_BENCH_WARM burst=$CHAT_BENCH_BURST idle=${CHAT_BENCH_IDLE_SECS}s"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Build separately from run so a COMPILE failure is never mistaken for a
+      # benchmark result, and so the run step's own duration is the bench's.
+      - name: Build the bench (bench profile — thin LTO over the full substrate)
+        run: cargo bench --no-run --bench chat_throughput
+
+      - name: Tier 1 — four-phase bench
+        # `stdbuf -oL -eL` + the bench's own explicit flush after every phase.
+        # Rust line-buffers stdout even when piped, so this is belt-and-braces —
+        # but the agent's run 25033091098 burned 13m22s and produced ZERO captured
+        # lines because its output died in a block buffer, and a phase-by-phase
+        # bench is worthless if a run cancelled in phase 3 cannot show phases 1-2.
+        #
+        # Soft-fail so one bad leg does not hide the others (the agent's
+        # `|| echo skipped`) — but LOUD: the jsonl carries a `ran:false` line with
+        # the reason, and the "Honesty check" step below fails the job on it. A
+        # silent `|| true` here would let a bench that never ran read as coverage.
+        run: |
+          set -o pipefail
+          stdbuf -oL -eL cargo bench --bench chat_throughput \
+            2>chat_bench_tier1.log | tee chat_bench_tier1.jsonl \
+            || echo "::warning::tier-1 bench exited non-zero — see the ran:false lines in chat_bench_tier1.jsonl"
+
+      - name: Tier 1 — summary table
+        if: always()
+        run: |
+          {
+            echo "## Tier 1 — in-process router"
+            echo ""
+            echo "| phase | ran | emitted | msgs/s | emit p50 | list p50 | RSS | ΔRSS |"
+            echo "|---|---|---|---|---|---|---|---|"
+            jq -r 'select(.phase|IN("cold_start","warm","burst","idle")) |
+              "| \(.phase) | \(.ran) | \(.messages_emitted // "-") | \(.emit_messages_per_sec // "-") | \(.emit_latency.p50_ms // "-") ms | \(.list_latency.p50_ms // "-") ms | \(.rss_kb // "null") kB | - |"' \
+              chat_bench_tier1.jsonl 2>/dev/null || echo "| (no phase lines) | | | | | | | |"
+            echo ""
+            echo "### RSS deltas (the shape, not the peak)"
+            echo '```json'
+            jq -c 'select(.phase=="summary")' chat_bench_tier1.jsonl 2>/dev/null || echo "{}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Tier 1 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-bench-tier1-${{ github.run_id }}
+          path: |
+            chat_bench_tier1.jsonl
+            chat_bench_tier1.log
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Honesty check — a phase that did not run must fail the job
+        if: always()
+        # The soft-fail above exists so every leg gets a chance to report. It must
+        # NOT mean a bench that never ran passes. Silence is not coverage, and
+        # neither is a `ran:false` line nobody reads.
+        run: |
+          missing=$(jq -r 'select(.ran==false) | "\(.phase): \(.reason)"' \
+            chat_bench_tier1.jsonl 2>/dev/null || echo "")
+          if [ -n "$missing" ]; then
+            echo "::error::Tier 1 phases did not run:"
+            echo "$missing"
+            { echo "### ⚠ phases that did not run"; echo '```'; echo "$missing"; echo '```'; } \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # And a jsonl with no summary line means the run died before finishing.
+          jq -e 'select(.phase=="summary" and .ran==true)' chat_bench_tier1.jsonl >/dev/null 2>&1 || {
+            echo "::error::no summary line — the bench did not reach the end"; exit 1; }
+          echo "all Tier 1 phases ran"
+
+  tier2:
+    name: Tier 2 — booted release binary (dispatch only)
+    needs: tier1
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.tier2 == 'true'
+    runs-on: ubuntu-latest
+    # ── WALL-TIME ARITHMETIC ────────────────────────────────────────────────
+    # The script's own runtime is MEASURED (same dev box, release binary):
+    #   boot to first answer + identity mint + claim + login    1.10 s
+    #   warm  100 owner-gated requests (3,522 req/s)            0.03 s
+    #   burst 900 owner-gated requests (7,807 req/s)            0.12 s
+    #   idle tail                                              30    s
+    #   ─────────────────────────────────────────────────────────────
+    #   script runtime                                        ~31.3  s
+    #
+    # It is almost entirely the fixed idle tail — the load itself is a tenth of a
+    # second, because this leg drives the READ surface, not the emit path (see the
+    # script header for why it cannot emit). Budget 3 min and the build is again
+    # the whole cost: ~35 min on a cold CIRISCache.
+    #
+    #   3 (script) + 35 (cold build) + 3 (setup) = 41 min → 40 is tight, but this
+    #   job only ever runs on an explicit dispatch where a re-run is cheap, and a
+    #   longer ceiling would let a wedged build sit for an hour before failing.
+    #
+    # STILL DISPATCH-ONLY EVEN THOUGH IT WORKS. It has run green locally, end to
+    # end, at these exact volumes — but never on a GitHub runner. Wiring a leg
+    # into anyone's PR before its happy path has executed in the environment that
+    # will run it is precisely what broke the 0.5.179 release. Flip it on after it
+    # comes up green on a real dispatch.
+    timeout-minutes: 40
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      RUST_LOG: warn
+      CHAT_BENCH_WARM: ${{ github.event.inputs.warm || '100' }}
+      CHAT_BENCH_BURST: ${{ github.event.inputs.burst || '900' }}
+      CHAT_BENCH_IDLE_SECS: ${{ github.event.inputs.idle_secs || '30' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Install build deps
+        run: |
+          # Same apt hardening as every other job in this repo — see the Tier 1
+          # step above for why azure.archive.ubuntu.com is removed by hand.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo find /etc/apt/sources.list.d -type f -exec \
+            sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} + 2>/dev/null || true
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev jq
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          PLAT="linux-x86_64"
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+          } >> "$GITHUB_OUTPUT"
+      - name: CIRISCache restore (server→edge→persist→verify, first hit)
+        uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+
+      - name: Build the release binary (the artifact under measurement)
+        run: cargo build --release --bin ciris-server
+
+      - name: Tier 2 — four phases over real HTTP
+        # Soft-failed like Tier 1, and checked the same way below. The script
+        # ALWAYS emits an `emit` phase with `ran:false` — it genuinely cannot
+        # emit chat messages without a second admitted federation key — so the
+        # honesty check here excludes that ONE known line by name rather than
+        # tolerating any absence. Naming it is the point: an unexpected
+        # `ran:false` still fails.
+        run: |
+          set -o pipefail
+          stdbuf -oL -eL tools/chat_bench_http.sh target/release/ciris-server \
+            2>chat_bench_tier2.log | tee chat_bench_tier2.jsonl \
+            || echo "::warning::tier-2 exited non-zero — see the ran:false lines in chat_bench_tier2.jsonl"
+
+      - name: Tier 2 — summary
+        if: always()
+        run: |
+          {
+            echo "## Tier 2 — booted release binary"
+            echo ""
+            echo '```json'
+            jq -c '.' chat_bench_tier2.jsonl 2>/dev/null || echo "{}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Tier 2 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-bench-tier2-${{ github.run_id }}
+          path: |
+            chat_bench_tier2.jsonl
+            chat_bench_tier2.log
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Honesty check — only the known-blocked leg may report ran:false
+        if: always()
+        run: |
+          unexpected=$(jq -r 'select(.ran==false and .phase!="emit") | "\(.phase): \(.reason)"' \
+            chat_bench_tier2.jsonl 2>/dev/null || echo "")
+          if [ -n "$unexpected" ]; then
+            echo "::error::Tier 2 phases did not run:"; echo "$unexpected"; exit 1
+          fi
+          jq -e 'select(.phase=="emit" and .ran==false)' chat_bench_tier2.jsonl >/dev/null 2>&1 || {
+            echo "::error::the emit leg did not report its own status — a missing line is not a pass"
+            exit 1; }
+          echo "Tier 2 ran; the emit leg reported ran:false with its reason, as designed"

@@ -200,7 +200,7 @@ jobs:
       # RAISING THIS NUMBER IS THE REVIEW. Do it in the same commit as the new
       # site, never after, and never by dropping the flag.
       - name: cohort_scope emit-site ratchet (CIRISServer#38)
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 41
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 43
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one

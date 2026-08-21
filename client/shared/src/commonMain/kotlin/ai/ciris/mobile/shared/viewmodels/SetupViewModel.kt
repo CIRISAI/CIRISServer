@@ -129,53 +129,16 @@ class SetupViewModel(
             // the fork was what made the trace-consent checkbox unreachable on
             // the non-OAuth path while showing a disabled one on the OAuth path.
             currentStep = _state.value.currentStep,
-            // Pre-populate the federation-ID name from the OAuth identity that
-            // just signed in. The account step now comes BEFORE the fed-ID step
-            // precisely so this value exists by the time the field is rendered:
-            // the OAuth identity is who OWNS the federation key, so deriving the
-            // name from it is the honest default rather than asking the user to
-            // invent one.
-            //
-            // `<provider>-<sub>` is unique BY CONSTRUCTION — a provider subject
-            // is globally unique — which is exactly what `isLabelValid` is
-            // guarding: its doc warns that a generic alias "caused TWO machines
-            // to mint DIFFERENT identities under the SAME alias". A typed name
-            // can collide; this cannot.
-            //
-            // Only fills a BLANK or generic field. A user who typed their own
-            // name, or who is re-entering the wizard with a real label already
-            // set, keeps it — signing in must never silently rewrite an identity
-            // name the user chose.
+            // Auto-derive the Fed-ID label from the OAuth identity (email local-
+            // part, else the userId) until the user edits the label directly.
             federationIdentity = _state.value.federationIdentity.let { fed ->
-                val derived = deriveFederationLabel(provider, userId)
-                if (isAuth && derived != null && !fed.isLabelValid()) {
-                    fed.copy(label = derived)
+                if (isAuth && !fed.labelManuallyEdited && !fed.minted && !fed.admitted) {
+                    fed.copy(label = deriveFedLabel(email ?: userId))
                 } else {
                     fed
                 }
-            },
+            }
         )
-    }
-
-    /**
-     * `<provider>-<subject>` reduced to the character set a fed-ID label may use.
-     *
-     * The label becomes the local node's `label-fingerprint` key_id, so anything
-     * outside `[a-z0-9-]` is normalised here rather than being rejected by the
-     * node after the user has already moved on. Runs of separators collapse and
-     * the edges are trimmed, so a provider that ever returns an email-shaped or
-     * punctuated subject still yields a clean label. Returns null when there is
-     * no usable subject — the caller then leaves the field for the user, which
-     * is the honest outcome rather than a label like `google-`.
-     */
-    private fun deriveFederationLabel(provider: String, userId: String?): String? {
-        val sub = userId?.trim().orEmpty()
-        if (sub.isEmpty()) return null
-        val raw = "${provider.trim()}-$sub".lowercase()
-        val cleaned = buildString {
-            for (c in raw) append(if (c.isLetterOrDigit()) c else '-')
-        }.trim('-').replace(Regex("-+"), "-")
-        return cleaned.ifEmpty { null }
     }
 
     // ========== Setup Mode ==========
@@ -379,7 +342,24 @@ class SetupViewModel(
      * Set the username for local user account.
      */
     fun setUsername(username: String) {
-        _state.value = _state.value.copy(username = username)
+        val s = _state.value
+        val fed = s.federationIdentity
+        // Auto-derive the Fed-ID label from the username until the user edits the
+        // label field directly — one fewer field to fill on the YOU step.
+        val newFed =
+            if (!fed.labelManuallyEdited && !fed.minted && !fed.admitted) {
+                fed.copy(label = deriveFedLabel(username))
+            } else {
+                fed
+            }
+        _state.value = s.copy(username = username, federationIdentity = newFed)
+    }
+
+    /** Derive a federation-identity label from a username / email / OAuth id: the
+     *  email local-part when it looks like an email, else the trimmed seed. */
+    private fun deriveFedLabel(seed: String?): String {
+        val s = (seed ?: "").trim()
+        return (if ("@" in s) s.substringBefore("@") else s).trim()
     }
 
     /**
@@ -649,7 +629,7 @@ class SetupViewModel(
      */
     fun setFederationLabel(label: String) {
         _state.value = _state.value.copy(
-            federationIdentity = _state.value.federationIdentity.copy(label = label)
+            federationIdentity = _state.value.federationIdentity.copy(label = label, labelManuallyEdited = true)
         )
     }
 
@@ -752,61 +732,6 @@ class SetupViewModel(
      * self-claim (the auto-mint-on-Next + mint-if-absent backstop both no-op once
      * an identity is present).
      */
-    /**
-     * **Look before you import** (CIRISServer#404) — ask the node what is in
-     * `dir` and hold the answer, without importing anything.
-     *
-     * The wizard used to import the instant a folder was picked, so the operator
-     * found out whether the folder held their identity by watching the import
-     * either work or fail. Both outcomes are irreversible-feeling in the middle
-     * of first-run setup, and one of them replaces this device's identity.
-     */
-    fun inspectKeysetDir(dir: String) {
-        val client = apiClient as? CIRISApiClient ?: return
-        val src = dir.trim()
-        if (src.isBlank()) return
-        _state.value = _state.value.copy(
-            federationIdentity = _state.value.federationIdentity.copy(
-                inspectDir = src,
-                inspecting = true,
-                inspection = null,
-                inspectUnavailable = false,
-                error = null,
-            )
-        )
-        viewModelScope.launch {
-            val verdict = client.inspectKeysetFolder(dir = src)
-            _state.value = _state.value.copy(
-                federationIdentity = _state.value.federationIdentity.copy(
-                    inspecting = false,
-                    inspection = verdict,
-                    // A null verdict means the NODE could not be asked — not that
-                    // the folder is empty. Kept as its own flag so the screen can
-                    // say which happened.
-                    inspectUnavailable = verdict == null,
-                )
-            )
-            PlatformLogger.i(
-                TAG,
-                "inspectKeysetDir($src): " +
-                    (verdict?.let { "importable=${it.importable} alias=${it.alias}" }
-                        ?: "node unavailable"),
-            )
-        }
-    }
-
-    /** Drop a pending inspection (the operator backed out of the folder). */
-    fun clearKeysetInspection() {
-        _state.value = _state.value.copy(
-            federationIdentity = _state.value.federationIdentity.copy(
-                inspectDir = null,
-                inspecting = false,
-                inspection = null,
-                inspectUnavailable = false,
-            )
-        )
-    }
-
     fun importPortableFromUsb(sourceDir: String) {
         val client = apiClient as? CIRISApiClient ?: run {
             _state.value = _state.value.copy(
@@ -952,6 +877,8 @@ class SetupViewModel(
         _state.value = _state.value.copy(
             ageRange = _state.value.ageRange.copy(
                 selectedBandToken = if (band == AgeBand.MINOR) "minor" else "adult",
+                // Stating a band supersedes a previous decline.
+                declined = false,
                 error = null,
             ),
             // Switching to ADULT clears any pending under-18 stewardship request
@@ -962,6 +889,36 @@ class SetupViewModel(
             } else {
                 _state.value.minorStewardship
             },
+        )
+    }
+
+    /**
+     * The subject declines to state an age. This is a RIGHT, not a refusal to
+     * comply, and it is never punished.
+     *
+     * What it does NOT do is buy adult treatment. A subject who has not told us
+     * they are an adult is treated as a child — [SetupFormState.isMinorBand]
+     * returns true, so the protective defaults and the CC 0.5.1 §2580 stewardship
+     * rule apply exactly as they would to a declared minor. Adult treatment
+     * follows from an adult declaration; silence never yields it.
+     *
+     * Nothing is POSTED. Recording `age_self_declared:minor:v1` here would write a
+     * statement into the subject's own assurance record that they never made, and
+     * age.rs's honesty discipline — self-declared, subject-controlled, never
+     * punitive — is precisely what this surface exists to uphold. The band stays
+     * null so the set_age call is skipped rather than fabricated.
+     */
+    fun declineAgeRange() {
+        PlatformLogger.i(TAG, "[age] subject declined to state an age — treated as minor, nothing recorded")
+        _state.value = _state.value.copy(
+            ageRange = _state.value.ageRange.copy(
+                selectedBandToken = null,
+                declined = true,
+                error = null,
+            ),
+            // Declining lands in the same protective branch as MINOR, so any
+            // stewardship request already generated is KEPT — same reasoning as
+            // re-selecting MINOR above.
         )
     }
 
@@ -1137,8 +1094,9 @@ class SetupViewModel(
                         error = "claim PIN not captured — this node's one-time ownership " +
                             "PIN was not seen on its console. You can claim ownership later " +
                             "from the Network surface using the PIN printed on the node.",
-                        // The message itself says "later", so the panel must not
-                        // say "not recoverable by retrying".
+                        // NODE VENDOR DRIFT #14 (restored after the 2.9.28
+                        // re-vendor dropped it): the message itself says "later",
+                        // so the panel must not say "not recoverable by retrying".
                         errorRecoverable = true,
                     )
                 )
@@ -1215,13 +1173,14 @@ class SetupViewModel(
                     // prerequisite for approving a device-auth grant.
                     ownerPassword = _state.value.userPassword.ifBlank { null },
                     ownerUsername = _state.value.username.ifBlank { null },
-                    // OAuth owners have NO password, so the two lines above give
-                    // them nothing and the claim would leave them unable to
-                    // authenticate to the node they just claimed — age band and
-                    // announce silently skipped (CIRISServer#384). The node
-                    // stamps this pair on the ROOT cert and OAuth sign-in
-                    // resolves it, so signing in with Google IS the owner
-                    // session. Sent only when the user actually signed in.
+                    // NODE VENDOR DRIFT #11 (restored after the 2.9.28 re-vendor
+                    // dropped it): OAuth owners have NO password, so the two lines
+                    // above give them nothing and the claim would leave them unable
+                    // to authenticate to the node they just claimed — age band and
+                    // announce silently skipped (CIRISServer#384). The node stamps
+                    // this pair on the ROOT cert and OAuth sign-in resolves it, so
+                    // signing in with Google IS the owner session. Sent only when
+                    // the user actually signed in.
                     ownerOauthProvider = _state.value.oauthProvider
                         .takeIf { _state.value.isGoogleAuth },
                     ownerOauthExternalId = _state.value.googleUserId
@@ -1261,14 +1220,15 @@ class SetupViewModel(
                 if (resp.role != null) {
                     val waId = resp.waId
                     val password = _state.value.userPassword
-                    // THE CLAIM IS THE AUTHENTICATION (CIRISServer#393).
+                    // NODE VENDOR DRIFT #11 (restored after the 2.9.28 re-vendor
+                    // dropped it): THE CLAIM IS THE AUTHENTICATION (CIRISServer#393).
                     //
-                    // The node now returns the owner's session with the claim, so we
-                    // take it and stop. Re-authenticating here asked the owner to
-                    // prove with a password what they had just proved with a one-time
-                    // PIN and a hybrid signature over the owner-binding — weaker
-                    // evidence, twice — and an OAuth owner HAS no password, so this
-                    // block was skipped entirely and every step that needed the owner
+                    // The node returns the owner's session WITH the claim, so we take
+                    // it and stop. Re-authenticating here asked the owner to prove
+                    // with a password what they had just proved with a one-time PIN
+                    // and a hybrid signature over the owner-binding — weaker evidence,
+                    // twice — and an OAuth owner HAS no password, so the block below
+                    // was skipped entirely and every step that needed the owner
                     // session (age band, announce, replication consent) skipped with
                     // it. The node was claimed and the app fell back to login.
                     val claimToken = resp.accessToken
@@ -1484,16 +1444,75 @@ class SetupViewModel(
                             "Couldn't claim ownership of this device's local node: " +
                                 "${e.message ?: "unknown error"}"
                         },
-                        // A REJECTED pin will be rejected again — the node has
-                        // already been claimed, or the pin is spent. Anything
-                        // else here is an exception reaching the local node: it
-                        // may not have finished starting, so retrying is exactly
-                        // the remedy.
+                        // NODE VENDOR DRIFT #14 (restored after the 2.9.28
+                        // re-vendor dropped it): a REJECTED pin will be rejected
+                        // again — the node has already been claimed, or the pin is
+                        // spent. Anything else here is an exception reaching the
+                        // local node: it may not have finished starting, so
+                        // retrying is exactly the remedy.
                         errorRecoverable = !isPinRejection,
                     )
                 )
             }
         }
+    }
+
+    // ========== Look before you import (CIRISServer#404) ==========
+
+    /**
+     * NODE VENDOR DRIFT #12 (restored after the 2.9.28 re-vendor dropped it):
+     * **look before you import** — ask the node what is in `dir` and hold the
+     * answer, WITHOUT importing anything.
+     *
+     * The wizard used to import the instant a folder was picked, so the operator
+     * found out whether the folder held their identity by watching the import
+     * either work or fail. Both outcomes are irreversible-feeling in the middle
+     * of first-run setup, and one of them replaces this device's identity.
+     */
+    fun inspectKeysetDir(dir: String) {
+        val client = apiClient as? CIRISApiClient ?: return
+        val src = dir.trim()
+        if (src.isBlank()) return
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = src,
+                inspecting = true,
+                inspection = null,
+                inspectUnavailable = false,
+                error = null,
+            )
+        )
+        viewModelScope.launch {
+            val verdict = client.inspectKeysetFolder(dir = src)
+            _state.value = _state.value.copy(
+                federationIdentity = _state.value.federationIdentity.copy(
+                    inspecting = false,
+                    inspection = verdict,
+                    // A null verdict means the NODE could not be asked — not that
+                    // the folder is empty. Kept as its own flag so the screen can
+                    // say which happened.
+                    inspectUnavailable = verdict == null,
+                )
+            )
+            PlatformLogger.i(
+                TAG,
+                "inspectKeysetDir($src): " +
+                    (verdict?.let { "importable=${it.importable} alias=${it.alias}" }
+                        ?: "node unavailable"),
+            )
+        }
+    }
+
+    /** Drop a pending inspection (the operator backed out of the folder). */
+    fun clearKeysetInspection() {
+        _state.value = _state.value.copy(
+            federationIdentity = _state.value.federationIdentity.copy(
+                inspectDir = null,
+                inspecting = false,
+                inspection = null,
+                inspectUnavailable = false,
+            )
+        )
     }
 
     // ========== Accord Metrics Opt-In ==========
@@ -2561,23 +2580,21 @@ class SetupViewModel(
             // This allows OAuth users to use their own API keys while still using OAuth for login
             // HA addon mode is treated as external auth (SUPERVISOR_TOKEN) - no password needed
             // ONE derivation, shared with the CIRIS-proxy branch — see
-            // SetupState.isExternalAuth. This used to read
-            // `isGoogleAuth && googleUserId != null`, which asked a DIFFERENT
-            // question than the proxy branch did: an OAuth sign-in whose provider
-            // returned no subject id fell through as a PASSWORD account, and
-            // `/v1/setup/complete` correctly refused it with "New user password
+            // SetupFormState.isExternalAuth. This used to read
+            // `isGoogleAuth && googleUserId != null`, a DIFFERENT question than
+            // the proxy branch asked: an OAuth sign-in whose provider returned no
+            // subject id fell through as a PASSWORD account, and
+            // /v1/setup/complete correctly refused it with "New user password
             // must be at least 8 characters" — to someone who had just signed in
             // with Google and never set a password.
             //
             // `googleUserId` is evidence about WHICH account, not about WHETHER
             // OAuth happened, so it must not gate this.
-            val isExternalAuthUser = currentState.isExternalAuth
-            val effectiveOAuthProvider = currentState.effectiveOAuthProvider
-            // OAuth SPECIFICALLY (HA add-on is external auth but not OAuth), for
-            // the username shape and the oauth_* identity fields below. Note this
-            // no longer requires a subject id: a provider that returns none still
-            // authenticated the user, and `oauth_external_id` simply goes null.
             val isOAuthUser = currentState.isGoogleAuth
+            val isExternalAuthUser = currentState.isExternalAuth
+
+            // Determine the effective OAuth provider
+            val effectiveOAuthProvider = currentState.effectiveOAuthProvider
 
             CompleteSetupRequest(
                 llm_provider = providerId,

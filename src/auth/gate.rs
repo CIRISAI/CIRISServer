@@ -56,6 +56,42 @@ pub enum CapabilityVerb {
     Wipe,
     /// Accord kill-switch / halt (`/v1/accord/*` custody ops). NEVER delegatable.
     AccordHalt,
+    /// Author a chat message as the owner (`POST /v1/chat/{id}/messages`).
+    /// **NEVER delegatable**, and for a reason that is about signatures rather
+    /// than about trust.
+    ///
+    /// A chat message is a CEG attestation whose `attesting_key_id` is the
+    /// owner's fed-ID, and persist's ingest gate resolves the attester's
+    /// REGISTERED pubkeys and hybrid-verifies against them — so the row must
+    /// carry the OWNER'S OWN signature or no peer will admit it. That leaves
+    /// exactly two things a delegated session could do, and both are refused:
+    ///
+    /// - **Sign as the delegate.** Not possible: the delegate's key lives on the
+    ///   delegate's device; this node holds only the owner's. There is nothing
+    ///   here to sign with.
+    /// - **Sign as the owner.** Possible, and worse. A signature outlives the
+    ///   delegation that authorized it — withdrawing the `delegates_to` edge
+    ///   cannot retract bytes already signed under the owner's key, so the
+    ///   message would stand as the owner's own words forever, unrevokably.
+    ///   That is the exact class CIRISServer#342's capsule doc names.
+    ///
+    /// So it sits on the never-list beside re-delegation, wipe and the accord
+    /// kill-switch: acts whose consequences a delegation cannot bound.
+    ChatAuthor,
+    /// Read the contacts + chat surface (`GET /v1/contacts`,
+    /// `GET /v1/chat/{id}/messages`). DELEGATABLE on purpose — an owner may hand
+    /// an assistant "read my messages" without also handing it the ability to
+    /// SEND any, which is why [`Self::ChatAuthor`] is a separate verb. Still
+    /// verb-gated rather than left open: an allow-list naming `announce` and
+    /// nothing else must not silently also grant a delegate the owner's private
+    /// transcripts. A verb absent from a set allow-list is denied — so a route
+    /// with NO verb is a route with NO enforcement.
+    ChatRead,
+    /// Open a chat room — create/get the two-member community
+    /// (`POST /v1/chat`). Delegatable, and distinct from [`Self::ChatAuthor`]
+    /// because opening a room and speaking in it are different powers; an owner
+    /// may reasonably grant the first without the second.
+    ChatCreate,
     /// CIRISServer#356 — read the composed operator surface
     /// (`GET /v1/node/state`, [`crate::operator_surface`]). A READ, and the
     /// only read-shaped verb here: the view names this node's peers in the
@@ -79,17 +115,24 @@ impl CapabilityVerb {
             CapabilityVerb::Delegate => "delegate",
             CapabilityVerb::Wipe => "wipe",
             CapabilityVerb::AccordHalt => "accord_halt",
+            CapabilityVerb::ChatAuthor => "chat_author",
+            CapabilityVerb::ChatRead => "chat_read",
+            CapabilityVerb::ChatCreate => "chat_create",
             CapabilityVerb::ReadNodeState => "read_node_state",
         }
     }
 
     /// Verbs NO delegate may ever exercise, regardless of the grant's allow-list —
-    /// the server floor (re-delegation, data wipe, the humanity-accord kill-switch).
-    /// These stay the owner's alone; a delegated bearer is refused unconditionally.
+    /// the server floor (re-delegation, data wipe, the humanity-accord kill-switch,
+    /// and authoring under the owner's own signature). These stay the owner's
+    /// alone; a delegated bearer is refused unconditionally.
     pub fn never_delegatable(self) -> bool {
         matches!(
             self,
-            CapabilityVerb::Delegate | CapabilityVerb::Wipe | CapabilityVerb::AccordHalt
+            CapabilityVerb::Delegate
+                | CapabilityVerb::Wipe
+                | CapabilityVerb::AccordHalt
+                | CapabilityVerb::ChatAuthor
         )
     }
 }

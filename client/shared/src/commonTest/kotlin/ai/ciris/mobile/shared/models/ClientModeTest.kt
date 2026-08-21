@@ -1,33 +1,133 @@
 package ai.ciris.mobile.shared.models
 
+// NODE VENDOR DRIFT #29 (restored after the 2.9.28 re-vendor dropped it):
+// the parseNodeHealth envelope pins below read the restored wire parse
+// (CIRISApiClient.kt, NODE VENDOR DRIFT #26).
 import ai.ciris.mobile.shared.api.parseNodeHealth
 import kotlin.test.Test
 import kotlin.test.assertEquals
+// Vendor drift #23: used by the restored node-mode assertions below.
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * **The node-vs-agent gate must not latch the wrong way** (CIRISServer#390).
+ * **A half-started brain is not an agent** (CIRISAgent#1075).
  *
- * The universal client derives its ONE node-vs-agent gate from
- * `/v1/system/health`, which since server 0.5.168 is the MERGED health: the
- * folded brain's `cognitive_state`/`services` over the node's own, plus the
- * THREE-state `data.agent.{folded,reachable}`. The live defect: the fold boots
- * the brain on a daemon thread AFTER the node composes, so a probe at READY can
- * see `folded=true / reachable=false` — a brain that EXISTS but has not bound
- * yet — and the client committed to NODE, hiding the 22 cognitive lights of the
- * very agent it was talking to for the whole session.
+ * [clientModeFrom] is the ONE node-vs-agent gate. Everything that must not call
+ * an AGENT-only endpoint keys off it — the shared API client is handed the
+ * result so every poller stops at once.
  *
- * `clientModeFrom` had ZERO coverage before this file. These pin the pure
- * derivation (no HTTP — the SetupExternalAuthTest pattern) and pin the Kotlin
- * `parseNodeHealth` read against the envelopes the Rust side emits
- * (`src/health.rs`, asserted by `tests/folded_health.rs`) — server-side those
- * tests prove the server EMITS the shape; this proves the client READS it.
- * Neither alone catches a rename.
+ * It used to read a non-null `cognitive_state` as proof of an agent. A brain
+ * with no config starts 10 of its 22 services to serve the setup wizard and
+ * reports `cognitive_state = "SETUP"` throughout, so the client ran the full
+ * AGENT UI against a runtime with no telemetry, no audit and no LLM bus. On a
+ * live macOS install that produced a 503 per poll, every 3 seconds, with a Java
+ * stack trace each time — including on `addLlmProvider`, so the user could not
+ * configure their way out of it.
+ *
+ * The first attempted fix keyed on `serviceCount == 0` and was INERT: the count
+ * comes from the `services` map in `/v1/system/health`, which during first-run
+ * holds the 10 that ARE running. These cases pin the real signal — the brain's
+ * own answer about whether it is configured — so that mistake cannot return.
  */
 class ClientModeTest {
 
-    // ─── The pure derivation ────────────────────────────────────────────────
+    @Test
+    fun setup_state_brain_with_no_config_is_NODE_not_AGENT() {
+        assertEquals(
+            ClientMode.NODE,
+            clientModeFrom(cognitiveState = "SETUP", serviceCount = 10, brainUnconfigured = true),
+            "a brain running its 10 first-run services has no telemetry, audit or LLM bus — " +
+                "running the AGENT UI against it is what produced the 503 storm",
+        )
+    }
+
+    @Test
+    fun service_count_alone_must_not_decide_it() {
+        // The exact shape of the inert fix: SETUP, but the wizard's services are
+        // up, so any check of the form `serviceCount == 0` never fires.
+        assertEquals(
+            ClientMode.NODE,
+            clientModeFrom("SETUP", serviceCount = 10, brainUnconfigured = true),
+            "first-run reports a NON-ZERO service count; a gate keyed on zero is dead code",
+        )
+    }
+
+    @Test
+    fun a_configured_agent_in_SETUP_is_still_an_AGENT() {
+        // Mid-boot on a configured install: cognitive_state is SETUP but the brain
+        // HAS config, so it is a real agent coming up and must not be demoted.
+        assertEquals(
+            ClientMode.AGENT,
+            clientModeFrom("SETUP", serviceCount = 22, brainUnconfigured = false),
+            "SETUP alone must not demote a configured agent — only the brain's own " +
+                "'I am not configured' may",
+        )
+    }
+
+    @Test
+    fun a_working_agent_is_an_AGENT() {
+        assertEquals(ClientMode.AGENT, clientModeFrom("WORK", serviceCount = 22))
+        assertEquals(ClientMode.AGENT, clientModeFrom("DREAM", serviceCount = 22))
+    }
+
+    @Test
+    fun a_bare_node_is_a_NODE() {
+        // The canonical node health envelope: role fabric-node, no cognitive_state,
+        // empty service map.
+        assertEquals(ClientMode.NODE, clientModeFrom(cognitiveState = null, serviceCount = 0))
+    }
+
+    @Test
+    fun a_service_map_alone_still_proves_an_agent() {
+        // An agent that reports services but no cognitive_state stays AGENT — this
+        // path predates the fix and must not regress.
+        assertEquals(ClientMode.AGENT, clientModeFrom(cognitiveState = null, serviceCount = 22))
+    }
+
+    @Test
+    fun an_unreachable_setup_probe_does_not_downgrade_a_real_agent() {
+        // The call site defaults brainUnconfigured to false when the probe fails,
+        // so a transient setup-status outage must never demote a live agent to
+        // NODE and blank its UI.
+        assertEquals(
+            ClientMode.AGENT,
+            clientModeFrom("WORK", serviceCount = 22, brainUnconfigured = false),
+        )
+    }
+
+    // ─── Vendor drift #23: the node half of this file (CIRISServer#390) ─────
+    //
+    // The CIRISAgent v2.9.28 re-vendor dropped every node-mode assertion this
+    // file carried. The subset that survives the CURRENT `clientModeFrom` API
+    // was restored first, below. The rest — the folded-brain THREE-state probe
+    // and the `parseNodeHealth` envelope pins — had to wait for commonMain:
+    // the same re-vendor removed BOTH APIs. They are back (NODE VENDOR DRIFT
+    // #26 in CIRISApiClient.kt, #27 in ClientMode.kt), and so are their tests
+    // (NODE VENDOR DRIFT #29, further down).
+
+    @Test
+    fun a_bare_node_is_NODE_and_either_agent_signal_alone_is_AGENT() {
+        // A node reports NEITHER half of the agent enrichment, so it is NODE —
+        // the verdict the whole node-mode UI keys off. Either half ALONE is
+        // already an agent: a cognitive_state with an empty service map (a
+        // brain that answered before its service map filled), or a service map
+        // with no cognitive_state.
+        assertEquals(ClientMode.NODE, clientModeFrom(null, 0))
+        assertEquals(ClientMode.AGENT, clientModeFrom("WORK", 0))
+        assertEquals(ClientMode.AGENT, clientModeFrom(null, 22))
+    }
+
+    // ─── NODE VENDOR DRIFT #29: the folded-brain THREE-state probe ─────────
+    //
+    // (restored after the 2.9.28 re-vendor dropped it — CIRISServer#390.)
+    //
+    // A CIRIS node can have (1) no brain, (2) a brain that is folded and
+    // answering, (3) a brain attached but NOT answering. Three facts, three
+    // fixes. The re-vendor's two-state view collapsed (3) into (1), so a
+    // folded agent read as a bare node and the client hid the 22 cognitive
+    // lights of the very agent it was talking to. `mode` is NOT a verdict
+    // while `undetermined` is set.
 
     @Test
     fun a_bare_node_is_NODE_and_the_answer_is_final() {
@@ -81,20 +181,31 @@ class ClientModeTest {
     }
 
     @Test
-    fun the_two_arg_form_is_the_pre_0_5_168_derivation_and_is_always_final() {
-        // No agent block on the wire ⇒ nothing to be undetermined about.
-        assertEquals(ClientMode.NODE, clientModeFrom(null, 0))
-        assertEquals(ClientMode.AGENT, clientModeFrom("WORK", 0))
-        assertEquals(ClientMode.AGENT, clientModeFrom(null, 22))
+    fun the_two_axes_compose_a_half_started_brain_that_ANSWERED_is_still_NODE() {
+        // NODE VENDOR DRIFT #29 + CIRISAgent#1075: the two restorations meet
+        // here. An answering folded brain is normally AGENT, but a brain that
+        // said "I hold no config" is the wizard, not an agent — and because it
+        // SPOKE to say so, that NODE is final, not a state to retry.
+        val probe = clientModeFrom(
+            cognitiveState = "SETUP", serviceCount = 10,
+            agentFolded = true, agentReachable = true,
+            brainUnconfigured = true,
+        )
+        assertEquals(ClientMode.NODE, probe.mode)
+        assertFalse(probe.undetermined, "the brain answered — there is nothing left to retry")
     }
 
-    // ─── parseNodeHealth pinned against the Rust emit (tests/folded_health.rs) ──
+    // ─── NODE VENDOR DRIFT #29: parseNodeHealth pinned against the Rust emit ──
+    //
+    // (restored after the 2.9.28 re-vendor dropped it — tests/folded_health.rs.)
     //
     // The three states of `/v1/system/health` as `src/health.rs` builds them:
     // `node_health()` is always the base, `folded_health` adds `agent` and (when
     // the brain answers) merges its `cognitive_state`/`services` on top. The
     // brain halves below are copied verbatim from the Rust tests' `spawn_brain`
-    // bodies, so a server-side rename breaks this file too.
+    // bodies, so a server-side rename breaks this file too. Server-side those
+    // tests prove the server EMITS the shape; these prove the client READS it.
+    // Neither alone catches a rename.
 
     /** Rust: `a_bare_node_reports_no_agent_and_no_cognitive_state`. */
     private val bareNodeEnvelope = """
@@ -204,6 +315,11 @@ class ClientModeTest {
     }
 
     // ─── The version-mismatch banner ────────────────────────────────────────
+    //
+    // Vendor drift #23: `isVersionMismatch` drives the node-vs-client
+    // VERSION-MISMATCH banner and has no other coverage in commonTest; the
+    // re-vendor removed its only three tests. Restored verbatim — the API is
+    // unchanged in the current ClientMode.kt.
 
     @Test
     fun version_mismatch_never_fires_on_an_unknown_node_version() {

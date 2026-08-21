@@ -127,10 +127,10 @@ fun AccordScreen(
     onStartCeremony: () -> Unit = {},
     /**
      * Open the DUTY conferral card (CIRISServer#392) — the accord confers a
-     * moderation duty on a fed-ID at its own quorum. An ACCORD ceremony (two
-     * seated holders, real tokens, the same holder-custody inputs as the co-scrub
-     * flows), so it lives here rather than on the Moderation card: the duty is
-     * about moderation, but the AUTHORITY being exercised is the accord's.
+     * moderation duty on a fed-ID at its own quorum. It lives here rather than on
+     * the Moderation card because the duty is ABOUT moderation but the authority
+     * being exercised is the accord's: two seated holders, real tokens, the same
+     * holder-custody inputs (key_id + USB ML-DSA + PKCS#11) as the co-scrub flows.
      */
     onConferDuty: () -> Unit = {},
 ) {
@@ -221,6 +221,13 @@ fun AccordScreen(
                                         enabled = family == null,
                                     ) { onStartCeremony() },
                                 )
+                                // NODE VENDOR DRIFT #24 (restored after the 2.9.28
+                                // re-vendor dropped it): the ONLY route into the Duty
+                                // Conferral card (CIRISServer#392). `CIRISApp` still
+                                // wires `Screen.DutyConferral` and `onConferDuty` is
+                                // still a parameter above, but with this entry gone
+                                // nothing in the UI could reach either — a whole
+                                // ceremony was dead code behind a live route.
                                 add(
                                     NewAttestationAction(
                                         "confer_duty",
@@ -946,7 +953,8 @@ private fun RemintTrustRootSheet(
 ) {
     val source by viewModel.remintSource.collectAsState()
     val seed by viewModel.genesisSeed.collectAsState()
-    // The SAME error the screen banner reads. This dialog covers that banner, so
+    // NODE VENDOR DRIFT #24 (restored after the 2.9.28 re-vendor dropped it):
+    // the SAME error the screen banner reads. This dialog covers that banner, so
     // without collecting it here a failed propose/cosign is invisible.
     val sheetError by viewModel.error.collectAsState()
     val clipboard = LocalClipboardManager.current
@@ -1023,7 +1031,12 @@ private fun RemintTrustRootSheet(
     val proposeReady = proposeHolder.isNotBlank() && proposeUsb.isNotBlank() &&
         proposePin.isNotBlank() && selected != null && !busy
     val cosignReady = cosignHolder.isNotBlank() && cosignUsb.isNotBlank() &&
-        cosignPin.isNotBlank() && seed != null && !busy
+        cosignPin.isNotBlank() && seed != null && !busy &&
+        // NODE VENDOR DRIFT #32: a bundle the server called blocked cannot be
+        // repaired by another signature, so don't leave a live button asking for
+        // one. The Unrecoverable panel above says why; this stops the tap that
+        // would spend a second holder's YubiKey on a guaranteed refusal.
+        seed?.blockedBy == null
 
     val doPropose = {
         selected?.let { sel ->
@@ -1072,7 +1085,9 @@ private fun RemintTrustRootSheet(
                 )
                 Spacer(Modifier.height(10.dp))
 
-                // ── The ceremony REFUSED, and the operator must see it here ──
+                // ── NODE VENDOR DRIFT #24 (restored after the 2.9.28 re-vendor
+                // dropped it): the ceremony REFUSED, and the operator must see it
+                // HERE ────────────────────────────────────────────────────────
                 //
                 // `AccordViewModel` sets `_error` on every propose/cosign
                 // failure, and the screen renders it as a Banner — in the SCREEN
@@ -1087,12 +1102,13 @@ private fun RemintTrustRootSheet(
                     Spacer(Modifier.height(10.dp))
                 }
 
-                // ── The bundle is BROKEN, not merely unfinished ──────────────
+                // ── NODE VENDOR DRIFT #24: the bundle is BROKEN, not merely
+                // unfinished (CIRISPersist#683) ───────────────────────────────
                 // Distinct from the banner above: that is "this attempt failed",
                 // this is "this bundle can never complete". `complete=false`
                 // used to be the only signal for both, and it reads as "not
                 // yet" — which sent an operator after a third holder for a
-                // bundle no signature could repair (CIRISPersist#683).
+                // bundle no signature could repair.
                 seed?.blockedBy?.let { reason ->
                     FailurePanel(
                         // Retrying refuses again, and so does signing it with

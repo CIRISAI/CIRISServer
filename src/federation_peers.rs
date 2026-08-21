@@ -546,6 +546,53 @@ pub(crate) async fn peer_counts(
     Ok((seen.len(), canonical))
 }
 
+/// **One key, projected as a `LocalPeerState`** — for the contacts surface
+/// ([`crate::contacts_chat`]).
+///
+/// Contacts render on the peer card the client already binds, so the contacts
+/// route must serve the SAME projection this module serves rather than a second
+/// one that starts identical and drifts. Returns the JSON rather than the
+/// private struct so the shape stays owned HERE: a caller may add contact-only
+/// members to the object, but cannot fork the peer half of it.
+///
+/// # Why per-key, and not [`collect_peers`]
+///
+/// [`PEER_IDENTITY_TYPES`] — the union `GET /v1/federation/peers` walks — does
+/// **not** include [`identity_type::USER`]. That is correct for the peers
+/// endpoint (a human is not a peer of this node, and `peer_counts` reads the
+/// same list, so a human on it would inflate `peer_count_total`), and it means a
+/// human contact is INVISIBLE to the bulk listing. A contact is a key this node
+/// has already consented to by `key_id`, so resolving it directly is both
+/// cheaper and the only way a `user` identity projects at all.
+///
+/// `Ok(None)` iff the key is not in the federation directory.
+pub(crate) async fn peer_projection(
+    engine: Arc<Engine>,
+    key_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let st = PeersState { engine };
+    let dir = st.engine.federation_directory();
+    let Some(rec) = dir
+        .lookup_public_key(key_id)
+        .await
+        .map_err(|e| format!("lookup_public_key({key_id}): {e}"))?
+    else {
+        return Ok(None);
+    };
+    // The owner's local annotations, overlaid by the same `to_peer` that serves
+    // the peers endpoint — so trust overrides and appearance follow a key onto
+    // its contact card without a second overlay implementation.
+    let sideband = load_sideband(&st, key_id)
+        .await
+        // The internal form is a ready `Response`; the contacts route re-types
+        // the failure under its own `reason_id`, so only the status crosses.
+        .map_err(|resp| format!("peer sideband refused ({})", resp.status()))?;
+    let peer = to_peer(dir.as_ref(), rec, sideband.as_ref()).await;
+    serde_json::to_value(&peer)
+        .map(Some)
+        .map_err(|e| format!("serialize LocalPeerState({key_id}): {e}"))
+}
+
 /// `GET /v1/federation/peers` → `{ "peers": [LocalPeerState…], "total": N }`.
 async fn list_peers(State(st): State<PeersState>) -> Response {
     match collect_peers(&st).await {

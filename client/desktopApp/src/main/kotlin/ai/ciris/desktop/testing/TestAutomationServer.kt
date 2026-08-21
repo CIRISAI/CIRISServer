@@ -46,7 +46,8 @@ class TestAutomationServer(
 
     // Window position offset (for converting window coords to screen coords).
     //
-    // These are only the LAST-KNOWN values. `Main.kt` seeds them from a
+    // NODE VENDOR DRIFT #19 (restored after the 2.9.28 re-vendor dropped it):
+    // these are only the LAST-KNOWN values. `Main.kt` seeds them from a
     // `LaunchedEffect(Unit)` that reads `frame.x/frame.y` before the window
     // manager has placed the window, and its `componentMoved` listener never
     // fires for that initial placement — so on any WM that positions windows
@@ -60,8 +61,9 @@ class TestAutomationServer(
     var windowY: Int = 0
 
     /**
-     * The screen origin of the Compose CONTENT area, read live so a WM-placed
-     * or user-dragged window cannot desynchronise the element registry.
+     * NODE VENDOR DRIFT #19: the screen origin of the Compose CONTENT area, read
+     * live so a WM-placed or user-dragged window cannot desynchronise the element
+     * registry.
      *
      * Compose reports element positions via `positionInWindow()`, which is
      * relative to the content area — so the frame's decoration insets have to
@@ -91,6 +93,8 @@ class TestAutomationServer(
     private val robot: Robot by lazy { Robot() }
 
     /**
+     * NODE VENDOR DRIFT #19 (restored after the 2.9.28 re-vendor dropped it).
+     *
      * Bring the app window to the front and let the compositor settle.
      *
      * `Robot.createScreenCapture` grabs a REGION OF THE SCREEN, not the window's
@@ -148,7 +152,7 @@ class TestAutomationServer(
      */
     fun registerElement(testTag: String, x: Int, y: Int, width: Int, height: Int, text: String? = null) {
         // Convert window-relative to screen-absolute coordinates, against the
-        // window's LIVE origin (see originX/originY).
+        // window's LIVE origin (see originX/originY — NODE VENDOR DRIFT #19).
         val screenX = x + originX
         val screenY = y + originY
         elements[testTag] = ElementInfo(

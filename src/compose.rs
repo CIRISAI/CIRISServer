@@ -1202,6 +1202,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // unauthenticated like the other directory read surfaces;
                     // excludes the node's own self key.
                     .merge(crate::federation_peers::router(Arc::clone(&engine)))
+                    // CONTACTS + USER CHAT: GET/POST /v1/contacts, POST /v1/chat,
+                    // GET/POST /v1/chat/{community_id}/messages. Owner-gated on
+                    // every arm. It shares the peers projection above (a contact
+                    // IS a peer, rendered by the same card) and adds nothing to
+                    // the substrate: a contact is a `consent:replication:v1`
+                    // grant, a chat is a two-member `Community` under a derived
+                    // id, and a message is a `chat:message:v1` attestation at
+                    // `cohort_scope: community`. See `crate::contacts_chat`.
+                    .merge(crate::contacts_chat::router(Arc::clone(&engine)))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -3062,6 +3071,39 @@ pub(crate) fn build_replication_peers(
                 ReplicationPeer {
                     peer_key_id: p.clone(),
                     kind: EnvelopeKind::TransportDestination,
+                },
+                // THE COMMUNITY PLANE — the roster, and its removals.
+                //
+                // A `cohort_scope: community` row is only readable by members,
+                // and membership is decided by the ROSTER: the receiving node
+                // runs the same §4.3 predicate we do, resolving the caller's
+                // communities from `federation_communities`. Without a round for
+                // this kind the roster never crosses, so the far side has no
+                // community to be a member OF — every message it receives is
+                // scoped to a cohort it cannot see, and one-sided initiation
+                // (the common case: one person opens the chat) cannot work at
+                // all. The room existed on exactly one node.
+                //
+                // Structural plane, so this needs no consent-object change:
+                // `consent_transferability(Community)` is `StructuralPlane`, not
+                // `Consentable` — naming it in a grant's `payload.kinds` is
+                // REFUSED. It rides beside Key / IdentityOccurrence /
+                // TransportDestination, which are structural for the same reason.
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::Community,
+                },
+                // Its REMOVAL primitive, wired with it deliberately. The roster
+                // is append-only; effective membership is
+                // `admitted AND NOT revoked`, and `active_community_members`
+                // composes the two. Shipping the admissions without the
+                // revocations would replicate a roster that can only ever GROW
+                // on the far side — a removed member would keep passing
+                // `require_member` there forever, which is the failure the
+                // forward-secrecy primitive exists to prevent.
+                ReplicationPeer {
+                    peer_key_id: p.clone(),
+                    kind: EnvelopeKind::CommunityMembershipRevocation,
                 },
             ]
         })

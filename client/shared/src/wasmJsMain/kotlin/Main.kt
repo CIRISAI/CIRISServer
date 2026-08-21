@@ -19,9 +19,11 @@ fun main() {
     ) {
         CIRISApp(
             accessToken = "",
-            // In the browser both surfaces are reached through the same origin
-            // (the HA ingress / static host proxies them), so brain and node
-            // share one base URL rather than the :8080 / :4243 split.
+            // NODE VENDOR DRIFT #17 (restored after the 2.9.28 re-vendor
+            // reworded it): in the browser both surfaces are reached through
+            // the same origin (the HA ingress / static host proxies them), so
+            // brain and node share one base URL rather than the :8080 / :4243
+            // split.
             apiBaseUrl = getBaseUrl(),
             nodeBaseUrl = getBaseUrl(),
             googleSignInCallback = null,

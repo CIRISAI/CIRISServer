@@ -118,8 +118,27 @@ data class Attestation(
     val styleKey: String? = null,
     /** The one metadata line that varies (e.g. "identity_type:node,canonical"). */
     val dimension: String? = null,
-    /** "attested by …" — the signer / scrubber key_id, or null. */
+    /**
+     * "attested by …" — WHAT SIGNED the row (the signer / scrubber key_id), or
+     * null.
+     *
+     * This is the SIGNATURE axis, and on some kinds it is NOT the authorship
+     * axis. A chat message is signed by the node's engine key and written by a
+     * human; rendering this as "who wrote this" names the box instead of the
+     * person. Where the two differ, supply [authorKeyId] as well and the card
+     * states both.
+     */
     val attesterKeyId: String? = null,
+    /**
+     * "written by …" — WHO SPOKE, when that is a different party from
+     * [attesterKeyId].
+     *
+     * Null for every kind where the signer IS the author (the accord family,
+     * holders, canonicals), and null on rows from a node that predates the
+     * split — in both cases the card says only "attested by", because inventing
+     * a second name for one party would be a distinction the row does not carry.
+     */
+    val authorKeyId: String? = null,
     /** RFC-3339 instant or null. */
     val timestamp: String? = null,
     /** m — signers so far (for a threshold object), or null. */
@@ -190,6 +209,32 @@ private fun AttOp.enabledFor(att: Attestation, viewer: ViewerAuthority): Boolean
     AttOp.Delegate, AttOp.Recant -> false
 }
 
+/**
+ * Why a DISABLED op is disabled, when there is a specific answer worth saying.
+ *
+ * A greyed menu item with no explanation is the worst of both worlds: it admits
+ * the op exists and refuses to say why the reader cannot reach it. This returns
+ * a localization key for the cases where the reason is structural rather than
+ * "not your object" — chiefly a chat message's revocation ops, which are absent
+ * for a reason the reader cannot infer from the card.
+ *
+ * Returns null when the op is enabled, or when its absence is self-evident from
+ * the row (an already-withdrawn record, a non-threshold object's Cosign).
+ */
+private fun AttOp.disabledReasonKey(att: Attestation): String? = when {
+    att.kind != AttKind.Message -> null
+    // A message withdraw is a TRANSIT revocation: it needs the AUTHOR'S OWN
+    // hybrid signature over an envelope naming the target attestation_id. An
+    // owner BEARER session is not that signature, and the node exposes no route
+    // that would produce one, so the op is shown-and-disabled rather than
+    // hidden (the object really does have the verb) or fake-enabled (which would
+    // fail at the wire after the user believed the message was gone).
+    this == AttOp.Withdraw -> "mobile.chat_op_withdraw_unavailable"
+    this == AttOp.Recant -> "mobile.chat_op_recant_unavailable"
+    this == AttOp.Supersede -> "mobile.chat_op_supersede_unavailable"
+    else -> null
+}
+
 private fun AttOp.labelKey(): String = when (this) {
     AttOp.ViewDetails -> "mobile.accord_op_view_details"
     AttOp.History -> "mobile.accord_op_history"
@@ -233,13 +278,27 @@ fun AttestationHamburger(
         AttOp.values().forEach { op ->
             val enabled = op.enabledFor(att, viewer)
             val tint = if (op.destructive()) MaterialTheme.colorScheme.error else Color.Unspecified
+            val whyDisabled = if (enabled) null else op.disabledReasonKey(att)
             DropdownMenuItem(
                 enabled = enabled,
                 text = {
-                    Text(
-                        localizedString(op.labelKey()),
-                        color = if (enabled && op.destructive()) tint else Color.Unspecified,
-                    )
+                    Column {
+                        Text(
+                            localizedString(op.labelKey()),
+                            color = if (enabled && op.destructive()) tint else Color.Unspecified,
+                        )
+                        // The reason a structural refusal cannot be reached, in
+                        // the reader's language — never a hidden item and never
+                        // a silent grey one.
+                        whyDisabled?.let { key ->
+                            Text(
+                                localizedString(key),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testable("mi_op_${op.verb()}_why_${att.id}"),
+                            )
+                        }
+                    }
                 },
                 onClick = { onDismiss(); onOp(op) },
                 modifier = Modifier.testableClickable("mi_op_${op.verb()}_${att.id}") {
@@ -300,7 +359,11 @@ fun AttestationCard(
                     ) {
                         Icon(
                             CIRISIcons.moreVert,
-                            contentDescription = "Actions",
+                            // The `⋮` is the ONLY action affordance on the card,
+                            // so for a screen-reader user this string is the
+                            // entire op menu. It was the one piece of the card
+                            // that never translated.
+                            contentDescription = localizedString("mobile.attestation_actions_desc"),
                             modifier = Modifier.size(18.dp),
                             tint = style.onContainer,
                         )
@@ -342,6 +405,14 @@ fun AttestationCard(
 @Composable
 private fun buildProvenance(att: Attestation): String {
     val parts = mutableListOf<String>()
+    // AUTHOR FIRST, and only when it is a genuinely different party from the
+    // signer. Who SPOKE is what a reader wants; what SIGNED is the audit fact
+    // that backs it. Collapsing them onto one line is how a message ends up
+    // attributed to the machine that carried it.
+    val author = att.authorKeyId?.takeIf { it.isNotBlank() }
+    if (author != null && author != att.attesterKeyId) {
+        parts += localizedString("mobile.accord_written_by", "who", author)
+    }
     att.attesterKeyId?.takeIf { it.isNotBlank() }?.let {
         parts += localizedString("mobile.accord_attested_by", "who", it)
     }

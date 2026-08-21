@@ -172,12 +172,14 @@ fun main() {
             ) {
                 CIRISApp(
                     accessToken = accessToken,
-                    // TWO parameters upstream, ONE service here. The agent build
-                    // has a Python brain on :8080 and a node read API on :4243;
-                    // this is the NODE client (CIRISBuild.HAS_AGENT == false), so
-                    // there is no brain to address — ciris-server serves the whole
-                    // surface on :4243. Pointing apiBaseUrl at the upstream :8080
-                    // default would aim every shared-client call at a dead port.
+                    // NODE VENDOR DRIFT #17 (restored after the 2.9.28 re-vendor
+                    // reverted both URLs to upstream's split). TWO parameters
+                    // upstream, ONE service here. The agent build has a Python
+                    // brain on :8080 and a node read API on :4243; this is the
+                    // NODE client (CIRISBuild.HAS_AGENT == false), so there is no
+                    // brain to address — ciris-server serves the whole surface on
+                    // :4243. Pointing apiBaseUrl at the upstream :8080 default
+                    // would aim every shared-client call at a dead port.
                     // CIRIS_NODE_URL is the upstream name; CIRIS_API_URL is kept
                     // because this build has always used it to mean the node.
                     apiBaseUrl = System.getenv("CIRIS_NODE_URL")

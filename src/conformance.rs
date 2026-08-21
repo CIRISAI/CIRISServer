@@ -609,6 +609,17 @@ pub fn required_profiles(verb: CapabilityVerb) -> &'static [ConformanceProfile] 
         CapabilityVerb::Delegate => &[Producer],
         // The accord kill-switch emits a hybrid-signed Invocation (CCP).
         CapabilityVerb::AccordHalt => &[Producer],
+        // A chat message is a hybrid-signed attestation this node PRODUCES under
+        // the owner's fed-ID (CCP), and it is worth nothing until it reaches the
+        // other member's node — so it also requires the transport substrate (CCS).
+        // Not a Consumer: authoring admits nothing from the wire. Same shape as
+        // Announce, for the same reason — emit, then carry.
+        CapabilityVerb::ChatAuthor => &[Producer, Substrate],
+        // Opening a room writes a signed `Community` record that must reach the
+        // other member (CCP + CCS): the roster IS the cohort every message in
+        // that room is scoped against, so a roster that never arrives is a room
+        // only one side can see.
+        CapabilityVerb::ChatCreate => &[Producer, Substrate],
         // Local-tier / custody ops — no federation-wire role is exercised, so no
         // CC 2.2 profile is required (they remain owner-gated).
         //
@@ -617,10 +628,15 @@ pub fn required_profiles(verb: CapabilityVerb) -> &'static [ConformanceProfile] 
         // from it, so it exercises no profile. Conformance-gating a gauge would
         // make a node that cannot declare its profiles also unable to say WHY,
         // which is the failure mode the surface exists to remove.
+        //
+        // The contacts/chat READ surface is the same shape: it serves rows this
+        // node already holds, puts nothing on the wire, and admits nothing from
+        // it. (Authoring and room-creation, which do both, are above.)
         CapabilityVerb::ConfigWrite
         | CapabilityVerb::SetAge
         | CapabilityVerb::Wipe
-        | CapabilityVerb::ReadNodeState => &[],
+        | CapabilityVerb::ReadNodeState
+        | CapabilityVerb::ChatRead => &[],
     }
 }
 

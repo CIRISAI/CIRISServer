@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use ciris_edge::replication::{EnvelopeKind, ReplicationPeer, ReplicationRuntime};
+use ciris_edge::replication::{ReplicationPeer, ReplicationRuntime};
 use ciris_persist::prelude::Engine;
 use tokio::sync::{watch, Notify};
 
@@ -182,6 +182,7 @@ pub async fn reconcile_once(
     // health:liveness in).
     let directory = engine.federation_directory();
     let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 4);
+    let mut admitted_peers: usize = 0;
     for peer in consented {
         // Fail closed: an over-threshold attester — or one whose behavioral ledger
         // we cannot read at all — is dropped from the desired set this tick.
@@ -198,38 +199,24 @@ pub async fn reconcile_once(
         }
         match directory.lookup_public_key(&peer).await {
             Ok(Some(_)) => {
-                // ALL THREE planes per admitted peer (mirrors compose::build_replication_peers):
-                //  - Attestation: capacity:* out, health:liveness in (as before).
-                //  - Key (#144, CIRISEdge#257): the KEY-PLANE anti-entropy. Paired
-                //    with the runtime's `key_selector` (publishes the node's OWN
-                //    record — KERI publish-own), this converges a node's scrub-signed
-                //    accord-anchored record to its consent peers so they can ROOT it.
-                //  - IdentityOccurrence (CIRISEdge#305): the KEX plane — the occurrence
-                //    carries the content-tier `encryption_pubkeys`. Paired with the
-                //    runtime's `occurrence_selector` (publish-own), this converges the
-                //    node's enc keys to peers so they can SEAL to it (and pulls peers'
-                //    enc keys in). Without it a hot-added peer roots but never KEXes.
-                desired.push(ReplicationPeer {
-                    peer_key_id: peer.clone(),
-                    kind: EnvelopeKind::Attestation,
-                });
-                desired.push(ReplicationPeer {
-                    peer_key_id: peer.clone(),
-                    kind: EnvelopeKind::Key,
-                });
-                desired.push(ReplicationPeer {
-                    peer_key_id: peer.clone(),
-                    kind: EnvelopeKind::IdentityOccurrence,
-                });
-                //  - TransportDestination (CIRISEdge#406): paired with the publish-own
-                //    self_provider, offers this node's OWN SIGNED transport-dest so a
-                //    peer receives it and can satisfy its #393 item-2 PQ attribution
-                //    gate. Without a round for this kind the signed TD is published
-                //    locally but never transferred (the item-2 dead end).
-                desired.push(ReplicationPeer {
-                    peer_key_id: peer,
-                    kind: EnvelopeKind::TransportDestination,
-                });
+                // EVERY plane per admitted peer — from the ONE list that
+                // defines them (`compose::build_replication_peers`), not a
+                // hand-maintained copy of it.
+                //
+                // This used to restate the kinds inline, and the restatement had
+                // already drifted: its own comment said "ALL THREE planes" while
+                // listing four, and the community plane added beside it would
+                // have made that five in one file and three in the other. Two
+                // lists that must agree about what replicates is the shape this
+                // tree keeps paying for — a peer hot-added HERE would silently
+                // converge fewer planes than one added at boot, and nothing
+                // would fail until someone noticed a room that never arrived.
+                //
+                // The per-plane rationale lives at the definition site.
+                desired.extend(crate::compose::build_replication_peers(
+                    std::slice::from_ref(&peer),
+                ));
+                admitted_peers += 1;
             }
             Ok(None) => tracing::warn!(
                 peer_key_id = %peer,
@@ -249,7 +236,11 @@ pub async fn reconcile_once(
     // their rounds + drop inbound routing — all without a restart.
     // `desired` holds THREE coordinators per peer (Attestation + Key +
     // IdentityOccurrence); the reported count is distinct consent peers.
-    let count = desired.len() / 3;
+    // COUNT PEERS, NOT COORDINATORS. The old `desired.len() / 3` baked a
+    // plane count into a denominator two files away from the plane list — it
+    // was already stale at four planes and reported 2x peers at six. The
+    // admitted-peer counter cannot drift with the fan-out.
+    let count = admitted_peers;
     if let Err(e) = runtime.set_peers(desired).await {
         // The runtime's scheduler has stopped (shutdown) — surface so the caller
         // logs + skips; the controller never panics.

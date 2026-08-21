@@ -170,17 +170,20 @@ actual fun Modifier.testable(tag: String, text: String?): Modifier = composed {
  * handler outlives the visible button (and walk-tests can dispatch clicks
  * to handlers whose UI is gone).
  *
- * The effect is keyed on the tag ALONE, so it runs once per composition-entry
- * and never again — which is what we want for register/unregister lifetime, but
- * would freeze the very first `onClick` lambda forever if we registered it
- * directly. Any lambda that closes over changing state (`if (!labelHasError)
- * …`, a `remember(activeGroup)` map, …) would then keep its first capture,
- * while the real `.clickable{}` path recomposes normally — so a programmatic
- * click would execute a STALE closure and `POST /click` would still answer
- * `success: true`. That silent divergence between the automated and the human
- * path is exactly what an automation harness must never have, so the handler
- * indirects through [rememberUpdatedState] and always dispatches the CURRENT
- * lambda.
+ * NODE VENDOR DRIFT #33 (restored after the 2.9.28 re-vendor dropped it): the
+ * effect is keyed on the tag ALONE, so it runs once per composition-entry and
+ * never again — which is exactly what the register/unregister LIFETIME wants,
+ * but which would freeze the very first `onClick` lambda forever if we
+ * registered it directly. Any lambda that closes over changing state keeps its
+ * first capture, while the real `.clickable {}` path recomposes normally — so a
+ * programmatic click executes a STALE closure and `POST /click` still answers
+ * `success: true`. The proposal approval buttons are the live example: their
+ * callbacks capture `canApprove`, the amount and the confirmation state, so
+ * automation could run the initial DISABLED/no-op callback long after the
+ * visible button became enabled, and report success for it. A `/click` that
+ * diverges from a human click while claiming to be one poisons every harness
+ * built on this server, so the handler indirects through [rememberUpdatedState]
+ * and always dispatches the CURRENT lambda.
  */
 actual fun Modifier.testableClickable(tag: String, text: String?, onClick: () -> Unit): Modifier = composed {
     if (TestAutomation.isEnabled()) {
@@ -219,9 +222,16 @@ actual fun Modifier.testableClickable(tag: String, text: String?, onClick: () ->
  * Desktop implementation of testableWithHandler modifier.
  * Registers click handler WITHOUT adding clickable - for components that handle clicks internally.
  *
- * Same DisposableEffect pattern as `testableClickable` — including its
- * [rememberUpdatedState] indirection, so the registered handler dispatches the
- * CURRENT lambda rather than the one captured at first composition.
+ * Same DisposableEffect pattern as `testableClickable` so handlers attached
+ * to internally-clickable widgets (switches, sliders, etc.) unregister on
+ * dispose.
+ *
+ * NODE VENDOR DRIFT #33 (restored after the 2.9.28 re-vendor dropped it): that
+ * includes the [rememberUpdatedState] indirection, and it matters MORE here —
+ * this modifier adds no `.clickable {}` of its own, so the registered handler is
+ * the only path automation has, and a frozen one has nothing to diverge from
+ * visibly. The registered handler dispatches the CURRENT lambda, never the one
+ * captured at first composition.
  */
 actual fun Modifier.testableWithHandler(tag: String, onClick: () -> Unit): Modifier = composed {
     if (TestAutomation.isEnabled()) {

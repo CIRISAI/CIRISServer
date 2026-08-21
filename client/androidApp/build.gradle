@@ -25,13 +25,13 @@ android {
         applicationId "ai.ciris.mobile"
         minSdk 24
         targetSdk 35
-        versionCode 144
-        versionName "2.9.7"
+        versionCode 165
+        versionName "2.9.28"
 
         ndk {
             // Include x86_64 for emulator testing (Chaquopy reads abiFilters at config time)
             // Release builds use App Bundle which splits by ABI automatically
-            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64"  // all 3 ABIs permanent (CIRISServer#264 must-keep); x86_64 = android_24_x86_64 emulator-native wheel (no translation)
         }
 
         // Chaquopy Python configuration
@@ -42,32 +42,52 @@ android {
             // ciris_engine MUST be included for startup hash verification to work!
             // ciris_edge added in 2.9.4 — Edge is the third leg of the
             // substrate triple and must be import-able from Python at boot.
-            extractPackages "pydantic_core", "ciris_persist", "ciris_edge", "ciris_lens_core", "ciris_engine", "ciris_adapters"
+            extractPackages "pydantic_core", "ciris_server", "ciris_engine", "ciris_adapters"
 
             pip {
                 options "--find-links", "wheels"  // Local wheels directory
 
-                // 2.9.6 substrate quad — persist 5.5.3 / edge 2.1.1 /
-                // verify 5.1.0 / lens-core 1.0.1 (CIRISConformance/matrices/
-                // current.yaml). persist + edge ship Chaquopy-shaped Android
-                // wheels under `{prefix}-v{ver}-android-wheels.tar.gz`,
-                // dropped into wheels/ by the substrate updater
-                // (`tools/update_substrate_libs.py` / legacy
-                // `update_android_libs.py --lib X V`).
-                // Pins MUST match requirements.txt — version skew breaks
-                // cohabitation (CIRISEdge#16/#43 etc.). Without these
-                // installs the Android-bundled Python raises ModuleNotFound
-                // on `from ciris_persist import …` / `import ciris_edge` at
-                // boot, and `/v1/federation/identity` 503s the UI.
-                install "ciris-persist==5.5.5"
-                install "ciris-edge==2.2.1"
+                // HOW THIS WORKS **IN CIRISServer** (corrected 0.5.185).
+                //
+                // The block that stood here was inherited verbatim from
+                // CIRISAgent and was factually wrong for this repo in three
+                // ways, each of which sent a reader somewhere that does not
+                // exist:
+                //   - it cited `tools/update_substrate_libs.py` (and a legacy
+                //     `update_android_libs.py`). NEITHER EXISTS HERE.
+                //   - it demanded the pins match `requirements.txt`. THERE IS
+                //     NO requirements.txt IN THIS REPO.
+                //   - it named a "2.9.6 substrate quad" of persist 5.5.3 /
+                //     edge 2.1.1 / lens-core 1.0.1. The wheels actually in
+                //     wheels/ are persist 5.5.5 / edge 2.2.1 / lens-core 1.3.0.
+                //
+                // THE REALITY:
+                //   - The Android substrate wheels are COMMITTED to wheels/
+                //     and picked up by `--find-links wheels` below. They are
+                //     updated by hand when a substrate leg moves; there is no
+                //     updater script in this tree.
+                //   - `ciris-server` is NOT one of them. It is pulled from
+                //     PyPI by the pin below, so it can only name a version
+                //     that has already PUBLISHED — which is why this pin lags
+                //     Cargo.toml by up to one release, and why the client
+                //     must feature-detect new node routes rather than assume
+                //     them (see ContactsViewModel.routeUnsupported).
+                //   - The pin is bumped MANUALLY, per release, after the
+                //     wheel publishes.
+                // Without these installs the Android-bundled Python raises
+                // ModuleNotFound on `from ciris_persist import …` /
+                // `import ciris_edge` at boot, and `/v1/federation/identity`
+                // 503s the UI.
+                // EXACT pin, from PyPI (not from wheels/). Bumped by hand per
+                // release, and only once that version has published — so this
+                // may sit one release behind Cargo.toml. A client feature that
+                // needs a NEWER node route must degrade honestly rather than
+                // assume the embedded node has it.
+                install "ciris-server==0.5.181"
                 // ciris-lens-core is REQUIRED by the accord_metrics adapter
-                // in 2.9.6+ (CIRISAgent#866 LensCore fold) — the fourth
-                // substrate leg. Android wheels ship in the lens-core release
-                // artifacts as of v1.0.1 (CIRISLensCore#43.3); refreshed by
-                // the substrate updater (`tools/update_substrate_libs.py
-                // --platform android --lib lens V`).
-                install "ciris-lens-core==1.3.0"
+                // (CIRISAgent#866 LensCore fold) — the fourth substrate leg.
+                // Its Android wheels are committed to wheels/ like the other
+                // three; refreshed by hand.
 
                 // Core dependencies (same as original android/app/build.gradle)
                 install "pydantic-core==2.23.4"
@@ -197,25 +217,19 @@ android {
     }
 }
 
-// Sync localization JSON files from main repo to assets
-// This ensures mobile has all translated strings available at runtime
-task syncLocalizationAssets(type: Sync) {
-    description = "Sync localization JSON files from main repo to assets"
-
-    from("../../localization") {
-        include "*.json"
-        // Exclude manifest.json (not needed at runtime)
-        exclude "manifest.json"
-    }
-    into "src/main/assets/localization"
-}
-
-// Make preBuild depend on localization sync
-tasks.whenTaskAdded { task ->
-    if (task.name == "preBuild") {
-        task.dependsOn syncLocalizationAssets
-    }
-}
+// NODE VENDOR DRIFT #9 (CIRISServer#465): upstream's syncLocalizationAssets is
+// REMOVED, not carried. It was `Sync` — destination-owning — from
+// ../../localization (the AGENT repo's root dir) into the COMMITTED assets
+// bundle. Here that source does not exist, so Gradle skipped it NO-SOURCE; the
+// day anyone creates a root localization/ dir, Sync makes the committed bundle
+// match an empty source and every locale silently vanishes from the built APK
+// while all committed-bundle gates stay green. Upstream's own
+// syncBackendLocalization (below) documents this exact hazard for another dir
+// and deliberately uses a non-destructive copy instead. Our bundles are
+// committed and mirrored by client/tools/check_localization_sync.py; no
+// build-time sync is wanted. The client-artifacts workflow now asserts the
+// BUILT artifact carries all 30 locale files, so a regression here fails CI
+// rather than shipping silent.
 
 // Generate obfuscated secrets file for Python
 // Reads from ~/.<key_name> files (not in git) and generates XOR-obfuscated Python
@@ -339,9 +353,11 @@ task syncPythonSources(type: Exec) {
     dependsOn cleanPythonSources
     dependsOn cleanChaquopyOutputs
 
-    // In the agent repo the canonical runtime lives at ../.. ; when this client
-    // is vendored into another repo (e.g. CIRISServer/client) point at the
-    // CIRISAgent checkout via -PcirisAgentRoot=/path/to/CIRISAgent.
+    // NODE VENDOR DRIFT #10 (restored after the 2.9.28 re-vendor dropped it and
+    // CI's APK job failed with ModuleNotFoundError): in the agent repo the
+    // canonical runtime lives at ../.. ; when this client is vendored into
+    // another repo (CIRISServer/client) point at the CIRISAgent checkout via
+    // -PcirisAgentRoot=/path/to/CIRISAgent — client-artifacts passes it.
     workingDir(findProperty("cirisAgentRoot") ?: file("../.."))
     commandLine "python3", "-m", "tools.dev.stage_runtime", "${buildDir}/python-src", "--quiet"
 
@@ -360,19 +376,24 @@ task syncPythonSources(type: Exec) {
     }
 }
 
-// Copy backend localization JSON files to ciris_engine/data/localized/
-// This ensures the Python backend has access to localized strings
-task syncBackendLocalization(type: Copy) {
-    description = "Copy localization JSON files to Python package data"
-
-    from("../../localization") {
-        include "*.json"
+// Copy backend localization JSON files to ciris_engine/data/localized/.
+// NOTE: this MUST NOT be a `type: Copy` task with `into data/localized` — Gradle
+// treats that dir as the task's output and CLEANS stale files it didn't produce,
+// which wipes stage_runtime's checked-in polyglot/ACCORD/guide *.txt (105 files)
+// and leaves the on-device PDMA unable to resolve {{POLYGLOT_PDMA_FRAMING}}
+// (data/localized ends up JSON-only while the un-owned dma/prompts/localized
+// survives — the exact asymmetry that caused this). A plain `copy {}` inside a
+// doLast merges the JSON WITHOUT owning/cleaning the shared dir.
+task syncBackendLocalization {
+    description = "Merge localization JSON into the staged Python package data (non-destructive)"
+    dependsOn syncPythonSources
+    doLast {
+        copy {
+            from("../../localization") { include "*.json" }
+            into "${buildDir}/python-src/ciris_engine/data/localized"
+        }
     }
-    into "${buildDir}/python-src/ciris_engine/data/localized"
 }
-
-// Make syncBackendLocalization run after syncPythonSources
-syncBackendLocalization.dependsOn syncPythonSources
 
 // Chaquopy's extractPackages only extracts directories that contain __init__.py.
 // Resource-only dirs (localized accord/guide .txt, polyglot block .txt, per-language

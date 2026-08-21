@@ -32,28 +32,7 @@ data class SetupStatusResponse(
 data class SetupStatusData(
     val setup_required: Boolean,
     val has_env_file: Boolean = false,
-    val has_admin_user: Boolean = false,
-    /**
-     * Absolute path of the node's one-time claim-PIN file (`<home>/claim_pin`,
-     * mode 0600) — the PATH only, never the PIN (CIRISServer#395).
-     *
-     * The wizard proves operator presence by READING that file: a same-uid read
-     * of a 0600 file in the node's own home, which is a stronger check than
-     * loopback (any local process of any user passes loopback). The read is the
-     * proof, so publishing the location weakens nothing.
-     *
-     * Before this field the client had to GUESS the node's home from its OWN
-     * environment (`CIRIS_HOME`, else `$HOME/ciris`, else `user.home/ciris`).
-     * Any topology where the app and the node resolve home differently — a
-     * launcher passing `--home`, a container, systemd, sudo — sent the app to a
-     * path the node never wrote, and the claim failed `401 invalid one-time
-     * claim PIN` with the file readable a directory away.
-     *
-     * `null` on a claimed node (the PIN is consumed on first claim) and on any
-     * server too old to send it — callers keep the environment guess as a
-     * fallback for exactly that case.
-     */
-    val claim_pin_file: String? = null
+    val has_admin_user: Boolean = false
 )
 
 // ========== GET /v1/setup/providers ==========
