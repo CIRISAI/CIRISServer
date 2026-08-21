@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import ai.ciris.mobile.shared.ui.theme.SemanticColors
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * Wise Authority screen — the human-in-the-loop approval surface.
@@ -77,6 +78,13 @@ fun WiseAuthorityScreen(
     approvals: List<PendingApproval> = emptyList(),
     /** Whether this server exposes budget issuance. Degrades the dialog when not. */
     budgetCapability: BudgetCapability = BudgetCapability.UNKNOWN,
+    /**
+     * Approval alerts are suppressed because the OS denied notification
+     * permission. Defaulted false so every existing caller is unaffected; when
+     * true this screen is the ONLY way the operator learns the agent is blocked,
+     * so it says so.
+     */
+    notificationsBlocked: Boolean = false,
     /**
      * Freshly-read budget state for the approval currently open — grant, spend
      * ledger and remaining trust envelope. Loaded on open via [onApprovalOpened].
@@ -157,6 +165,26 @@ fun WiseAuthorityScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Alerts are off at the OS level, so the ONLY way the operator learns
+            // the agent is blocked is by opening this screen. Say so here rather
+            // than letting silence read as "nothing needed you".
+            item {
+                if (notificationsBlocked) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth().testable("wa_alerts_blocked"),
+                    ) {
+                        Text(
+                            localizedString("mobile.approvals_alerts_off"),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(10.dp),
+                        )
+                    }
+                }
+            }
+
             // "The agent is blocked waiting on you" — first thing on the screen,
             // above service status, because a stuck agent is more urgent than a
             // health readout. Renders nothing when nothing is pending.

@@ -34,9 +34,14 @@ interface ApprovalsApi {
 
     /**
      * Tickets the agent proposed and cannot itself start — `status=blocked`
-     * carrying `metadata.__proposal__`. Implementations must return an empty
-     * list (not throw) when the server has no tickets API, so a deployment
-     * without it still shows deferrals.
+     * carrying `metadata.__proposal__`.
+     *
+     * Implementations must return an empty list (not throw) when the server
+     * has **no tickets API at all**, so a deployment without it still shows
+     * deferrals. Every other failure — expired token, server error, network
+     * blip, unparseable body — must throw. "Empty" and "unknown" are different
+     * facts about a blocked agent, and only one of them may clear the card,
+     * the badge and the notification path.
      */
     suspend fun fetchProposals(): List<TicketData>
 
@@ -82,6 +87,41 @@ class CIRISApprovalsApi(private val client: CIRISApiClient) : ApprovalsApi {
 
     private companion object {
         const val TAG = "CIRISApprovalsApi"
+
+        /**
+         * Statuses that mean *the feature is not in this build of the server*,
+         * as opposed to *this request failed*. 404/405 are what a router that
+         * has never heard of `/v1/tickets` answers; 501 is what one that knows
+         * the route and refuses to implement it answers.
+         *
+         * 401/403 are deliberately **not** here: an expired token is a failure
+         * to read the proposals, not proof there are none.
+         */
+        val UNSUPPORTED_ENDPOINT_STATUSES = setOf(404, 405, 501)
+
+        /**
+         * [CIRISApiClient] renders a non-2xx as `RuntimeException("API error:
+         * HTTP <code>")`; Ktor's own `ResponseException` messages read
+         * `... invalid: <code> <reason>`. Both shapes are matched here rather
+         * than in the client, because only this caller knows which codes mean
+         * "absent feature" — the client has no business deciding that for
+         * every one of its ~70 call sites.
+         */
+        val HTTP_STATUS_IN_MESSAGE = Regex("""(?:HTTP|invalid:)\s*(\d{3})""")
+    }
+
+    /**
+     * True only for the one response that legitimately means "no tickets API".
+     *
+     * A positive match is required, so anything unrecognised — a socket error,
+     * a serialization failure, a coroutine cancellation — falls through to
+     * being thrown. That default is the whole point of the classifier: an
+     * unknown failure must never be reported to the operator as "no approvals".
+     */
+    private fun isTicketsApiAbsent(e: Exception): Boolean {
+        val status = HTTP_STATUS_IN_MESSAGE.find(e.message ?: return false)
+            ?.groupValues?.get(1)?.toIntOrNull() ?: return false
+        return status in UNSUPPORTED_ENDPOINT_STATUSES
     }
 
     override suspend fun fetchWAStatus(): WAStatusData = client.getWAStatus()
@@ -98,9 +138,22 @@ class CIRISApprovalsApi(private val client: CIRISApiClient) : ApprovalsApi {
         client.listTickets(statusFilter = BudgetApprovalSeam.PROPOSAL_STATUS, limit = 100)
             .filter { BudgetApprovalSeam.isProposal(it.status, it.metadata) }
     } catch (e: Exception) {
-        // A deployment without the tickets API must still show deferrals.
-        PlatformLogger.d(TAG, "[fetchProposals] tickets unavailable (${e.message}) — treating as none")
-        emptyList()
+        if (isTicketsApiAbsent(e)) {
+            // A deployment without the tickets API must still show deferrals.
+            PlatformLogger.d(TAG, "[fetchProposals] no tickets API on this server (${e.message}) — treating as none")
+            emptyList()
+        } else {
+            // Everything else is rethrown, because swallowing it publishes a
+            // lie: the caller merges this list into the approval list, so an
+            // empty return after a 401 or a 500 *erases* the agent's blocked
+            // proposals from the card, the badge and the notifier while the
+            // agent goes on waiting for a human. The deferral fetch can still
+            // succeed, so nothing else would tell the operator anything is
+            // wrong. Failing loudly leaves the previous list standing and puts
+            // an error on the screen instead.
+            PlatformLogger.e(TAG, "[fetchProposals] failed: ${e::class.simpleName}: ${e.message}")
+            throw e
+        }
     }
 
     override suspend fun fetchTicketBudget(ticketId: String): TicketBudgetState? =

@@ -368,7 +368,20 @@ fun LoginScreen(
                     // Explain the greyed button rather than leaving a dead control.
                     if (!googleOAuthAvailable) {
                         Text(
-                            text = localizedString("mobile.login_google_unavailable"),
+                            // The string is "Sign-in with {provider} isn't available
+                            // on this install." — and this call passed no params, so
+                            // the brace survived into the rendered sentence and the
+                            // user was told the provider is literally named
+                            // "{provider}". Same half of the same defect as the
+                            // "Sign in with Desktop" button label: the provider was
+                            // never named at the point where the user reads it. Uses
+                            // the `providerName` the button above already resolved,
+                            // so the explanation names the account the button offered.
+                            text = localizedString(
+                                "mobile.login_google_unavailable",
+                                "provider",
+                                providerName,
+                            ),
                             color = LoginColors.White.copy(alpha = 0.7f),
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,

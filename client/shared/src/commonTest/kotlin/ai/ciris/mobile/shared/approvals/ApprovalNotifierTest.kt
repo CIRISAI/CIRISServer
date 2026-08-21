@@ -1,6 +1,8 @@
 package ai.ciris.mobile.shared.approvals
 
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -31,6 +33,23 @@ class ApprovalNotifierTest {
         override fun show(id: String, title: String, body: String) {
             if (throwOnShow) throw IllegalStateException("no notification channel")
             shown += Triple(id, title, body)
+        }
+    }
+
+    /**
+     * A store whose read *suspends*, which every real one does —
+     * EncryptedSharedPreferences on `Dispatchers.IO`, Keychain, keyring. The
+     * in-memory store never suspends, so it cannot express the race.
+     */
+    private class SuspendingStore(private var ids: Set<String> = emptySet()) : NotifiedApprovalStore {
+        override suspend fun load(): Set<String> {
+            yield()
+            return ids
+        }
+
+        override suspend fun persist(ids: Set<String>) {
+            yield()
+            this.ids = ids
         }
     }
 
@@ -75,6 +94,30 @@ class ApprovalNotifierTest {
         notifier.onApprovalsObserved(approvals)
 
         assertEquals(1, sink.shown.size, "one approval must produce exactly one notification")
+    }
+
+    @Test
+    fun concurrentFirstObservationsStillNotifyOnlyOnce() = runTest {
+        // Both callers exist in production and overlap by design: the
+        // session-wide watch and the Wise Authority screen. On a cold start
+        // they can both reach the hydrate before either has finished it, and
+        // the hydrate suspends — so without one critical section around
+        // load/filter/remember each sees an empty set and announces the same
+        // backlog. At-most-once has to hold under that, not just in sequence.
+        val sink = FakeSink()
+        val notifier = ApprovalNotifier(sink, SuspendingStore())
+        val approvals = listOf(approval("a1"), approval("a2"))
+
+        val watch = launch { notifier.onApprovalsObserved(approvals) }
+        val screen = launch { notifier.onApprovalsObserved(approvals) }
+        watch.join()
+        screen.join()
+
+        assertEquals(
+            listOf("a1", "a2"),
+            sink.shown.map { it.first },
+            "two concurrent first observations must not double-announce",
+        )
     }
 
     @Test

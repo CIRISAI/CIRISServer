@@ -762,15 +762,24 @@ fun CIRISApp(
     // Catch-up: an existing logged-in owner whose local node has NO fed-ID
     // (legacy WA claim) must be auto-presented the guided Add Federation ID flow
     // after login — the startup owned-nodes projection ran UNAUTHENTICATED (or
-    // pre-claim), so it couldn't know. We hook the FINAL landing screen
-    // (Interact) rather than the token assignment so we don't race the several
-    // login continuations that set currentScreen afterwards. Once authenticated
-    // and on Interact, refresh owned-nodes and reuse the SAME condition Manage
-    // Nodes uses to show the entry (ownerHasFedId == false: legacy owner, no
-    // fed-ID; null = unknown → fail-closed, don't prompt). One-shot via
-    // fedIdCatchupPrompted; naturally false once a fed-ID exists.
+    // pre-claim), so it couldn't know. We hook the FINAL landing screen rather
+    // than the token assignment so we don't race the several login continuations
+    // that set currentScreen afterwards. Once authenticated and on that screen,
+    // refresh owned-nodes and reuse the SAME condition Manage Nodes uses to show
+    // the entry (ownerHasFedId == false: legacy owner, no fed-ID; null = unknown
+    // → fail-closed, don't prompt). One-shot via fedIdCatchupPrompted; naturally
+    // false once a fed-ID exists.
+    //
+    // KEYED ON [HOME_SCREEN], NOT ON Screen.Interact. This effect used to name
+    // Interact literally, which was the landing screen for BOTH builds when it
+    // was written. Moving node mode's home to Contacts silently made it
+    // unreachable: node users never visit Interact (it is not even in their
+    // sidebar), so a legacy owner with no fed-ID stopped being offered the Add
+    // Federation ID flow and landed instead on a Contacts surface they cannot
+    // use — the catch-up existing to prevent exactly that. The return
+    // destination follows for the same reason.
     LaunchedEffect(currentScreen, currentAccessToken) {
-        if (currentScreen !is Screen.Interact) return@LaunchedEffect
+        if (currentScreen != HOME_SCREEN) return@LaunchedEffect
         if (currentAccessToken == null || fedIdCatchupPrompted) return@LaunchedEffect
         try {
             nodeSwitcherViewModel.reload()
@@ -779,7 +788,7 @@ fun CIRISApp(
         }
         if (nodeSwitcherViewModel.ownerHasFedId.value == false) {
             fedIdCatchupPrompted = true
-            addFederationIdReturnScreen = Screen.Interact
+            addFederationIdReturnScreen = HOME_SCREEN
             PlatformLogger.i(TAG, "[fed-id-catchup] legacy owner has no fed-ID — auto-presenting Add Federation ID")
             currentScreen = Screen.AddFederationId
         }
@@ -2803,9 +2812,11 @@ fun CIRISApp(
                     }
                 }
 
+                val waAlertsBlocked by wiseAuthorityViewModel.notificationsBlocked.collectAsState()
                 WiseAuthorityScreen(
                     waStatus = waStatus,
                     deferrals = deferrals,
+                    notificationsBlocked = waAlertsBlocked,
                     isLoading = isWALoading,
                     isResolving = isResolving,
                     onResolveDeferral = { deferralId, resolution, guidance ->
@@ -4225,6 +4236,17 @@ fun CIRISApp(
                                 Screen.NetworkDiagnostics,
                                 Screen.NetworkContent -> Screen.LayerGlobalCommons
                                 is Screen.NetworkPeerDetail -> Screen.NetworkPeers
+                                // A chat → the contact list it was opened from.
+                                // This is a SECOND, independent mapping: the
+                                // PlatformBackHandler `when` above drives the
+                                // hardware/gesture back, this one drives the
+                                // compact-window overlay's affordance. ChatScreen
+                                // suppresses its OWN back button below 600dp and
+                                // relies on this — so an omission here renders the
+                                // drawer signet instead of a back arrow, and on
+                                // iOS and web (where PlatformBackHandler is a
+                                // no-op) leaves no way out of a chat at all.
+                                is Screen.UserChat -> Screen.Contacts
                                 // Nested sub-screens → their direct parent
                                 Screen.GraphMemory -> Screen.Memory
                                 Screen.SkillStudio -> Screen.Adapters

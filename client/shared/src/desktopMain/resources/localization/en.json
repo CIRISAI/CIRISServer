@@ -1250,6 +1250,7 @@
     "announce_decision_trace_desc": "Share reasoning-quality scores and decision patterns (no message content) with the trusted canonical server group.",
     "announce_decision_trace_locked": "Turn on announcing above to enable sending reasoning traces and joining communities.",
     "announce_decision_trace_title": "Send reasoning traces",
+    "approvals_alerts_off": "Approval alerts are off. Turn on notifications for CIRIS in your system settings to be told when the agent needs you.",
     "attestation_actions_desc": "Actions for this record",
     "audit_context": "Context",
     "audit_hash_chain": "Hash Chain",

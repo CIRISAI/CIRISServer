@@ -130,6 +130,24 @@ class WiseAuthorityViewModel(
     private val _pendingApprovalCount = MutableStateFlow(0)
     val pendingApprovalCount: StateFlow<Int> = _pendingApprovalCount.asStateFlow()
 
+    /**
+     * Approval alerts are being SUPPRESSED because the OS denied notification
+     * permission.
+     *
+     * Re-exposed from the notifier, which is private here, so a surface can tell
+     * the operator. On Android 13+ `POST_NOTIFICATIONS` starts DENIED and nothing
+     * in this app ever requests it, so on a fresh install the session-wide watcher
+     * runs, finds work, and silently drops every alert. A denial nobody is told
+     * about is indistinguishable from an agent that never needed anything — which
+     * is the one thing this surface exists to disprove.
+     *
+     * This is the HONEST MINIMUM, not the cure: the cure is an Activity-backed
+     * runtime request behind an explicit opt-in, and the platform seam carries no
+     * Activity today (see ApprovalNotifier's KDoc for what that needs).
+     */
+    val notificationsBlocked: StateFlow<Boolean> =
+        notifier?.notificationsBlocked ?: MutableStateFlow(false).asStateFlow()
+
     /** Whether this server exposes budget *issuance*. See [BudgetCapability]. */
     private val _budgetCapability = MutableStateFlow(BudgetCapability.UNKNOWN)
     val budgetCapability: StateFlow<BudgetCapability> = _budgetCapability.asStateFlow()
@@ -423,6 +441,11 @@ class WiseAuthorityViewModel(
         viewModelScope.launch {
             try {
                 val state = api.fetchTicketBudget(approvalId)
+                // UPSTREAM RELAY CANDIDATE (CIRISAgent#1086 pattern): this file
+                // was byte-identical to CIRISAgent 2.9.28 before this guard, so
+                // the race is upstream's too — 2.9.28:409 publishes on a ticketId
+                // echo alone, and 2.9.28:421 wipes the flow unconditionally.
+                //
                 // Publish only while this approval is still the open one.
                 //
                 // A response for a dialog the operator has already dismissed or
@@ -566,6 +589,10 @@ class WiseAuthorityViewModel(
                         ?: ""
                     _successMessage.value = "Approved $amount $currency$overNote$signedNote"
 
+                    // UPSTREAM RELAY CANDIDATE (CIRISAgent#1086 pattern):
+                    // CIRISAgent 2.9.28:522 forgets the id unconditionally right
+                    // here, so a grant without promotion re-notifies there too.
+                    //
                     // Only a *successful* promotion retires the notification id.
                     // Issuing a budget without promoting deliberately leaves the
                     // ticket blocked, so the proposal is still in the pending set
@@ -661,6 +688,10 @@ class WiseAuthorityViewModel(
     }
 
     /**
+     * UPSTREAM RELAY CANDIDATE (CIRISAgent#1086 pattern): CIRISAgent 2.9.28 has
+     * no such flag — 2.9.28:598 forgets the id on every status write, the defer
+     * that leaves the proposal pending included, so the bug is upstream's too.
+     *
      * @param retiresNotification whether this transition removes the approval
      *   from the pending set. Only then may the notifier forget the id:
      *   forgetting means "announce it again if it comes back", and for a status

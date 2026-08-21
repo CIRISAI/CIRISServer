@@ -409,6 +409,38 @@ object BudgetApprovalSeam {
         val amountScaled = parseAmount(amount)
             ?: return BudgetGrantOutcome(false, BudgetGrantError.INVALID_AMOUNT, "Enter an amount like 25.00")
 
+        // A requested amount of zero is not "asked for no money". That is
+        // spelled by omitting [KEY_REQUESTED_BUDGET] altogether — see the
+        // contract note at the top, and [F_REQUESTED_AT_GRANT], which reads a
+        // null request as "no ratio to name, and not an over-grant". Absence
+        // never reaches this function at all: `requested` is non-null here by
+        // signature. So a `__requested_budget__` object asserting "0" is a
+        // budget request that is not one, and it is refused on the same footing
+        // as the unparseable one immediately above — the *ticket* is malformed,
+        // which is a different judgement from second-guessing the operator.
+        //
+        // It cannot be carried through the machinery below either. `granted >
+        // requested` would hold for every positive amount, while the friction
+        // that makes an over-grant legible is a *ratio*, and there is no ratio
+        // against zero: the banding note on [describeOverGrant] is explicit
+        // that a figure is what does the work and that dressing up a case
+        // without one only trains people to click past the warning that
+        // matters. Confirming an unbounded over-grant with a blank checkbox
+        // would be exactly that.
+        //
+        // Left unhandled this was the worst outcome of the three: because
+        // [describeOverGrant] reads `requestedScaled <= 0` as "not an
+        // over-grant", the one grant that exceeds the request by an unbounded
+        // amount was also the only one that got no confirmation at all.
+        if (requestedScaled <= 0L) {
+            return BudgetGrantOutcome(
+                false,
+                BudgetGrantError.INVALID_AMOUNT,
+                "This proposal's requested budget is zero, which is not a budget request — " +
+                    "ask the agent to re-propose with an amount",
+            )
+        }
+
         if (amountScaled <= 0L) {
             return BudgetGrantOutcome(false, BudgetGrantError.INVALID_AMOUNT, "Amount must be greater than zero")
         }
@@ -475,6 +507,11 @@ object BudgetApprovalSeam {
         requestedScaled: Long,
         amountScaled: Long,
     ): OverGrant? {
+        // `requestedScaled <= 0` answers a presentation question — "is there a
+        // ratio to draw?" — and the answer is no. It is NOT permission to
+        // submit: [validateGrant] refuses a zero-valued request outright before
+        // it gets this far, so nothing reaches issuance unconfirmed on the
+        // strength of this branch.
         if (requestedScaled <= 0L || amountScaled <= requestedScaled) return null
         val multiple = amountScaled.toDouble() / requestedScaled.toDouble()
         val magnitude = when {
