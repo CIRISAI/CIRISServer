@@ -8,6 +8,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- NODE VENDOR DRIFT #34 (restored after the 2.9.28 re-vendor's manifest
+         replacement dropped it): on-device YubiKey PIV over NFC (YubiKey-backed
+         fed-ID). Not required, so the app still installs on devices without NFC
+         (they keep the non-YubiKey path). YubiKeyPivSigner.android.kt calls
+         YubiKitManager.startNfcDiscovery — without the permission every
+         YubiKey-backed federation-ID or accord ceremony hangs waiting for a tap. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="false" />
     <!--
       Local-network discovery: the embedded Python backend uses mDNS/zeroconf
       (jetson.local, ollama.local, ...) and Reticulum AutoInterface to find LAN

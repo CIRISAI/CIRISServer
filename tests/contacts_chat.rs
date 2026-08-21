@@ -1677,3 +1677,58 @@ async fn every_route_refuses_without_an_owner_session() {
         assert_eq!(json["reason_id"], "auth.owner_gate.not_owner");
     }
 }
+
+/// **Two concurrent `POST /v1/chat` for the same pair both succeed** — the
+/// advertised idempotency must hold exactly on the inputs where it matters:
+/// a double tap, a client retry, two devices. Both requests can observe
+/// `lookup_community == None` before either insert lands; the loser hits the
+/// primary-key conflict, and before the race arm it surfaced that as a 500 for
+/// a room that EXISTS.
+///
+/// The race is scheduler-dependent, so this is a PROPERTY test: many rounds of
+/// truly concurrent pairs on fresh state, asserting the contract — never a
+/// 5xx, both bodies name the same convergent room, and at most one arrival
+/// claims `freshly_created`. Rounds where the race does not interleave pass
+/// trivially; a round where it does would have failed before the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_chat_creation_is_an_idempotent_success() {
+    for round in 0..12 {
+        let (_engine, base, owner, _h) = fixture().await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base}/v1/contacts"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+            .send()
+            .await
+            .expect("POST /v1/contacts");
+        assert_eq!(resp.status(), 200, "round {round}: add contact");
+
+        let post = |c: reqwest::Client, b: String, o: String| async move {
+            c.post(format!("{b}/v1/chat"))
+                .bearer_auth(&o)
+                .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+                .send()
+                .await
+                .expect("POST /v1/chat")
+        };
+        let (a, b) = tokio::join!(
+            post(client.clone(), base.clone(), owner.clone()),
+            post(client.clone(), base.clone(), owner.clone())
+        );
+        let (sa, sb) = (a.status(), b.status());
+        let ja: serde_json::Value = a.json().await.expect("json a");
+        let jb: serde_json::Value = b.json().await.expect("json b");
+        assert!(
+            sa == 200 && sb == 200,
+            "round {round}: a concurrent chat creation must be an idempotent \
+             success, got {sa}/{sb}: {ja} / {jb}"
+        );
+        assert_eq!(ja["community_id"], jb["community_id"], "round {round}");
+        assert!(
+            !(ja["freshly_created"] == true && jb["freshly_created"] == true),
+            "round {round}: both arrivals claim to have created the room — the \
+             loser must report freshly_created=false"
+        );
+    }
+}

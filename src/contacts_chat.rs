@@ -781,6 +781,34 @@ async fn start_chat(
     // never a hand-rolled `SignedCommunity`, because the JCS field-set gate
     // verifies the signature over `Community::signing_envelope()` exactly.
     if let Err(e) = st.engine.put_community_self_signed(community).await {
+        // A LOST RACE IS A SUCCESS SOMEONE ELSE ALREADY HAD. Two concurrent
+        // POSTs (double-tap, client retry, two devices) can both observe
+        // `lookup_community` returning None above; one insert wins and the
+        // other lands here on the primary-key conflict. The room the loser
+        // asked for EXISTS — reporting 500 would break the route's advertised
+        // idempotency exactly on the inputs where idempotency matters. So on
+        // failure, re-read the derived id: if the room is there with the same
+        // convergent identity, this call is the second arrival, not an error.
+        // A re-read that finds nothing (or a different shape) is a REAL
+        // failure and keeps the 500 with the original error.
+        if let Ok(Some(existing)) = directory.lookup_community(&community_id).await {
+            let mut existing_members: Vec<String> =
+                existing.members.iter().map(|m| m.key_id.clone()).collect();
+            existing_members.sort();
+            if existing_members == member_key_ids {
+                return (
+                    StatusCode::OK,
+                    Json(StartChatResponse {
+                        community_id: existing.community_key_id,
+                        community_name: existing.community_name,
+                        member_key_ids: existing_members,
+                        cohort_scope: cohort_scope::COMMUNITY,
+                        freshly_created: false,
+                    }),
+                )
+                    .into_response();
+            }
+        }
         return refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chat.community_create_failed",
