@@ -38,7 +38,7 @@ defer { try? FileManager.default.removeItem(at: dir) }
 let big = dir.appendingPathComponent("big.log")
 var lines: [String] = []
 for i in 0..<400_000 { lines.append("line \(i) — padding padding padding padding padding") }
-try! lines.joined(separator: "\n").write(to: big, encoding: .utf8)
+try! lines.joined(separator: "\n").write(to: big, atomically: true, encoding: .utf8)
 let t0 = Date()
 guard let tail = LogTail.tail(of: big) else { fail("big file returned nil") }
 let elapsed = Date().timeIntervalSince(t0)
@@ -50,7 +50,7 @@ guard elapsed < 2.0 else { fail("capped read took \(elapsed)s — is it reading 
 
 // 2. A file SMALLER than one window and shorter than maxLines: intact.
 let small = dir.appendingPathComponent("small.log")
-try! "alpha\nbeta\ngamma".write(to: small, encoding: .utf8)
+try! "alpha\nbeta\ngamma".write(to: small, atomically: true, encoding: .utf8)
 guard LogTail.tail(of: small) == "alpha\nbeta\ngamma" else { fail("small file must come back intact") }
 
 // 3. Empty file and missing file: nil, same verdict as the old !isEmpty guard.
@@ -64,7 +64,7 @@ guard LogTail.tail(of: dir.appendingPathComponent("missing.log")) == nil else { 
 let uni = dir.appendingPathComponent("uni.log")
 var ulines: [String] = []
 for i in 0..<100_000 { ulines.append("行 \(i) — 🚀 ünïcode päddîng テスト") }
-try! ulines.joined(separator: "\n").write(to: uni, encoding: .utf8)
+try! ulines.joined(separator: "\n").write(to: uni, atomically: true, encoding: .utf8)
 guard let utail = LogTail.tail(of: uni) else { fail("unicode file returned nil") }
 let ugot = utail.split(separator: "\n", omittingEmptySubsequences: false)
 guard ugot.count == 400, ugot.last == "行 99999 — 🚀 ünïcode päddîng テスト" else { fail("unicode tail wrong: count=\(ugot.count) last=\(ugot.last ?? "nil")") }
