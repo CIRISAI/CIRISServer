@@ -1,0 +1,18 @@
+name: iOS LogTail
+
+# Dispatch-only, per the scarce-lane policy: the macOS pool is org-wide and
+# this needs one short job, on demand — when LogTail (or its harness) changes.
+# The ubuntu-side extraction checks (markers present, Foundation-only) ride in
+# the script itself, so drift fails HERE, loudly, not silently on Linux.
+on:
+  workflow_dispatch:
+
+jobs:
+  logtail:
+    name: LogTail standalone (macOS toolchain)
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract, compile, and exercise LogTail
+        run: client/iosApp/scripts/test_logtail.sh
