@@ -1288,6 +1288,16 @@ class CIRISApiClient(
         return NodeRefusal(reasonId = reason, detail = detail, statusCode = status.value)
     }
 
+    // CONTACTS/CHAT FOLLOW THE ACTIVE NODE (codex, #464 sweep 6): these FIVE
+    // methods — and only these — build their URLs from the MUTABLE baseUrl that
+    // NodeSwitcherViewModel.switchTo() updates. The compile-time LOCAL_NODE_URL
+    // here meant the app could display the switched node's mode and token while
+    // listing LOCAL contacts and committing messages into LOCAL rooms — a
+    // wrong-node send, and an attestation is irreversible. In node mode baseUrl
+    // defaults to the same 127.0.0.1:4243, so unswitched behavior is unchanged.
+    // The local-only surfaces above (claim, setup, owned-nodes) deliberately
+    // keep LOCAL_NODE_URL: they must address the node PHYSICALLY HERE even
+    // while the UI is switched elsewhere.
     /**
      * The owner's contacts — every federation identity this node holds a
      * `consent:replication:v1` grant to, with the derived pair-chat id.
@@ -1298,10 +1308,10 @@ class CIRISApiClient(
      */
     suspend fun listContacts(): ContactListResponse {
         val method = "listContacts"
-        logInfo(method, "GET $LOCAL_NODE_URL/v1/contacts")
+        logInfo(method, "GET $baseUrl/v1/contacts")
         val client = federationHttpClient()
         return try {
-            val response = client.get("$LOCAL_NODE_URL/v1/contacts") {
+            val response = client.get("$baseUrl/v1/contacts") {
                 authHeader()?.let { header("Authorization", it) }
             }
             val raw = response.bodyAsText()
@@ -1310,7 +1320,7 @@ class CIRISApiClient(
             logInfo(method, "${decoded.contacts.size} contact(s) of ${decoded.total}")
             decoded
         } catch (e: Exception) {
-            logException(method, e, "url=$LOCAL_NODE_URL")
+            logException(method, e, "url=$baseUrl")
             throw e
         } finally {
             client.close()
@@ -1330,11 +1340,11 @@ class CIRISApiClient(
      */
     suspend fun addContact(keyId: String): AddContactResponse {
         val method = "addContact"
-        logInfo(method, "POST $LOCAL_NODE_URL/v1/contacts key_id=${keyId.take(16)}…")
+        logInfo(method, "POST $baseUrl/v1/contacts key_id=${keyId.take(16)}…")
         val client = federationHttpClient()
         return try {
             val body = buildJsonObject { put("key_id", keyId) }
-            val response = client.post("$LOCAL_NODE_URL/v1/contacts") {
+            val response = client.post("$baseUrl/v1/contacts") {
                 authHeader()?.let { header("Authorization", it) }
                 contentType(ContentType.Application.Json)
                 setBody(body.toString())
@@ -1345,7 +1355,7 @@ class CIRISApiClient(
             logInfo(method, "contact added freshly_emitted=${decoded.freshlyEmitted} community=${decoded.chatCommunityId.take(20)}…")
             decoded
         } catch (e: Exception) {
-            logException(method, e, "url=$LOCAL_NODE_URL")
+            logException(method, e, "url=$baseUrl")
             throw e
         } finally {
             client.close()
@@ -1365,11 +1375,11 @@ class CIRISApiClient(
      */
     suspend fun startChat(keyId: String): ChatCommunity {
         val method = "startChat"
-        logInfo(method, "POST $LOCAL_NODE_URL/v1/chat key_id=${keyId.take(16)}…")
+        logInfo(method, "POST $baseUrl/v1/chat key_id=${keyId.take(16)}…")
         val client = federationHttpClient()
         return try {
             val body = buildJsonObject { put("key_id", keyId) }
-            val response = client.post("$LOCAL_NODE_URL/v1/chat") {
+            val response = client.post("$baseUrl/v1/chat") {
                 authHeader()?.let { header("Authorization", it) }
                 contentType(ContentType.Application.Json)
                 setBody(body.toString())
@@ -1380,7 +1390,7 @@ class CIRISApiClient(
             logInfo(method, "community=${decoded.communityId.take(24)}… members=${decoded.memberKeyIds.size} fresh=${decoded.freshlyCreated}")
             decoded
         } catch (e: Exception) {
-            logException(method, e, "url=$LOCAL_NODE_URL")
+            logException(method, e, "url=$baseUrl")
             throw e
         } finally {
             client.close()
@@ -1399,10 +1409,10 @@ class CIRISApiClient(
      */
     suspend fun listChatMessages(communityId: String): ChatTranscript {
         val method = "listChatMessages"
-        logInfo(method, "GET $LOCAL_NODE_URL/v1/chat/$communityId/messages")
+        logInfo(method, "GET $baseUrl/v1/chat/$communityId/messages")
         val client = federationHttpClient()
         return try {
-            val response = client.get("$LOCAL_NODE_URL/v1/chat/$communityId/messages") {
+            val response = client.get("$baseUrl/v1/chat/$communityId/messages") {
                 authHeader()?.let { header("Authorization", it) }
             }
             val raw = response.bodyAsText()
@@ -1411,7 +1421,7 @@ class CIRISApiClient(
             logInfo(method, "${decoded.messages.size} message(s) of ${decoded.total}")
             decoded
         } catch (e: Exception) {
-            logException(method, e, "url=$LOCAL_NODE_URL")
+            logException(method, e, "url=$baseUrl")
             throw e
         } finally {
             client.close()
@@ -1435,14 +1445,14 @@ class CIRISApiClient(
         contentType: String? = null,
     ): SendChatMessageResult {
         val method = "sendChatMessage"
-        logInfo(method, "POST $LOCAL_NODE_URL/v1/chat/$communityId/messages bytes=${body.length}")
+        logInfo(method, "POST $baseUrl/v1/chat/$communityId/messages bytes=${body.length}")
         val client = federationHttpClient()
         return try {
             val payload = buildJsonObject {
                 put("body", body)
                 contentType?.let { put("content_type", it) }
             }
-            val response = client.post("$LOCAL_NODE_URL/v1/chat/$communityId/messages") {
+            val response = client.post("$baseUrl/v1/chat/$communityId/messages") {
                 authHeader()?.let { header("Authorization", it) }
                 contentType(ContentType.Application.Json)
                 setBody(payload.toString())
@@ -1456,7 +1466,7 @@ class CIRISApiClient(
             )
             decoded
         } catch (e: Exception) {
-            logException(method, e, "url=$LOCAL_NODE_URL")
+            logException(method, e, "url=$baseUrl")
             throw e
         } finally {
             client.close()

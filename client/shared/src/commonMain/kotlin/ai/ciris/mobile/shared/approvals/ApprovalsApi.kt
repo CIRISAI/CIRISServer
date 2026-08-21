@@ -135,7 +135,14 @@ class CIRISApprovalsApi(private val client: CIRISApiClient) : ApprovalsApi {
     ): ResolveDeferralData = client.resolveDeferral(deferralId, resolution, guidance)
 
     override suspend fun fetchProposals(): List<TicketData> = try {
-        client.listTickets(statusFilter = BudgetApprovalSeam.PROPOSAL_STATUS, limit = 100)
+        // limit = null requests the UNBOUNDED form. The endpoint is newest-first
+        // with no offset in its contract, so any fixed window makes every poll
+        // re-fetch the same newest-N: with more than N blocked proposals, the
+        // older ones never reached the card, badge, or notifier — their agents
+        // waiting indefinitely while newer items came and went. Blocked
+        // proposals are bounded by how many agents can be blocked at once, not
+        // by history, so the unbounded read stays small in practice.
+        client.listTickets(statusFilter = BudgetApprovalSeam.PROPOSAL_STATUS, limit = null)
             .filter { BudgetApprovalSeam.isProposal(it.status, it.metadata) }
     } catch (e: Exception) {
         if (isTicketsApiAbsent(e)) {

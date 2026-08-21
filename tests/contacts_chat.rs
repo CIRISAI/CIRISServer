@@ -1985,3 +1985,29 @@ async fn a_poisoned_roster_under_the_pair_id_is_refused() {
         "the refusal must not leak who is on the poisoned roster: {body}"
     );
 }
+
+/// **Both chat WRITE handlers call the declared-conformance gate** (codex,
+/// contacts_chat.rs:633). ChatCreate/ChatAuthor declare [Producer, Substrate]
+/// in `conformance::required_profiles`, and a declaration is only real if
+/// something REFUSES when it is absent — the profiles were declared (the
+/// exhaustive match forced it) while neither write handler enforced them, so a
+/// node whose config omitted CCP/CCS still authored federation-wire rows.
+/// Source-scoped to each handler's body, the owner_signer_capsule lesson: a
+/// whole-file grep also matches the comment that explains the rule.
+#[test]
+fn both_chat_write_handlers_enforce_declared_conformance() {
+    let src = include_str!("../src/contacts_chat.rs");
+    for handler in ["async fn start_chat(", "async fn send_message("] {
+        let start = src
+            .find(handler)
+            .unwrap_or_else(|| panic!("{handler} must exist"));
+        let body = &src[start..(start + 6000).min(src.len())];
+        assert!(
+            body.contains("conformance::require_op"),
+            "{handler} no longer calls the declared-conformance gate — a node \
+             whose config:node.conformance_profiles does not claim \
+             [Producer, Substrate] would author federation-wire chat rows it \
+             explicitly does not claim the roles for"
+        );
+    }
+}

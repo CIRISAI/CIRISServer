@@ -167,7 +167,15 @@ fun ChatScreen(
                     IconButton(
                         onClick = { viewModel.refresh() },
                         enabled = !loading,
-                        modifier = Modifier.testableClickable("btn_chat_refresh") { viewModel.refresh() },
+                        // Same rule as the send button: testableClickable appends
+                        // an UNCONDITIONAL clickable, so a disabled refresh still
+                        // fired — and a second loadMessages on the same epoch can
+                        // finish first, letting the OLDER response overwrite the
+                        // newer transcript. The handler re-checks what enabled
+                        // gates.
+                        modifier = Modifier.testableWithHandler("btn_chat_refresh") {
+                            if (!loading) viewModel.refresh()
+                        },
                     ) {
                         Icon(
                             CIRISIcons.refresh,

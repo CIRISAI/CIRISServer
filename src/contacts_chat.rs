@@ -633,6 +633,17 @@ async fn start_chat(
     ) {
         return resp;
     }
+    // The DECLARED-conformance gate, beside the delegation gate: ChatCreate is
+    // [Producer, Substrate] in conformance::required_profiles, and a
+    // declaration is only real if something REFUSES when it is absent — a node
+    // whose config:node.conformance_profiles does not claim those roles must
+    // not author a federation-wire Community. Same idiom as peering's gate.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatCreate)
+            .await
+    {
+        return resp;
+    }
     let req: StartChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -1045,6 +1056,15 @@ async fn send_message(
         crate::auth::gate::CapabilityVerb::ChatAuthor,
         "chat.delegate_may_not_author",
     ) {
+        return resp;
+    }
+    // Declared-conformance gate (see start_chat's for the reasoning) — still
+    // AHEAD of the membership read: this too is a pure function of the node's
+    // own declaration and must not leak community existence.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
         return resp;
     }
     if let Err(r) = require_member(&st, &owner, &community_id).await {

@@ -1108,7 +1108,24 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
             .collect::<Vec<String>>(),
     );
     let grant = emit_grant_row(engine, node_key_id, peer_key_id, &union, &opts).await?;
-    emit_grant_supersedes(engine, node_key_id, &standing.attestation_id).await?;
+    // THE GRANT IS COMMITTED THE MOMENT THE LINE ABOVE RETURNS: the projection
+    // folds the upsert as replace-by-subject, so the widened coverage is
+    // ALREADY the live consent state — the supersedes composer only makes the
+    // corpus SAY what the projection already did. So a composer failure here
+    // must not propagate: returning 500 would tell the caller the add FAILED
+    // while chat: coverage is live, inviting a retry of a committed act — the
+    // exact defect class the grant-outcome fix closed in the WA client. The
+    // corpus legibility gap is real and is REPORTED (ERROR, both ids), but a
+    // committed consent change outranks a missing footnote about it.
+    if let Err(e) = emit_grant_supersedes(engine, node_key_id, &standing.attestation_id).await {
+        tracing::error!(
+            peer_key_id,
+            committed_grant = %grant.attestation_id,
+            unretired_grant = %standing.attestation_id,
+            error = %e,
+            "consent widening COMMITTED but the supersedes composer failed — the              corpus lacks the audit row explaining why the narrower grant stopped              standing; the live projection is already correct"
+        );
+    }
     tracing::info!(
         peer_key_id,
         superseded = %standing.attestation_id,

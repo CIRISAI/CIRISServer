@@ -564,10 +564,22 @@ class WiseAuthorityViewModel(
         onResult: (BudgetGrantOutcome) -> Unit = {},
     ) {
         val method = "grantBudget"
+        // CLAIM THE SUBMISSION SYNCHRONOUSLY, before anything suspends. The
+        // in-flight flag was only assigned inside the coroutine, so a rapid
+        // double activation — or the independently-registered automation
+        // handler — reached api.grantBudget twice and could commit TWO signed
+        // money authorizations for one operator decision. The ViewModel is
+        // main-thread confined, so check-and-set here is race-free.
+        if (_isResolving.value) {
+            logWarn(method, "A submission is already in flight — ignoring duplicate activation for $approvalId")
+            return
+        }
+        _isResolving.value = true
         val approval = _approvals.value.firstOrNull { it.id == approvalId }
         val requested = approval?.requestedBudget
 
         if (requested == null) {
+            _isResolving.value = false
             logError(method, "No requested budget on approval $approvalId")
             val outcome = BudgetGrantOutcome(
                 ok = false,
@@ -592,6 +604,7 @@ class WiseAuthorityViewModel(
             overGrantConfirmed = overGrantConfirmed,
         )
         if (!validation.ok) {
+            _isResolving.value = false
             logWarn(method, "Local validation refused grant: ${validation.error} (${validation.message})")
             _error.value = validation.message ?: describe(validation.error)
             onResult(validation)
@@ -607,7 +620,7 @@ class WiseAuthorityViewModel(
         )
 
         viewModelScope.launch {
-            _isResolving.value = true
+            // Claimed synchronously above; this block only ever releases it.
             _error.value = null
 
             try {

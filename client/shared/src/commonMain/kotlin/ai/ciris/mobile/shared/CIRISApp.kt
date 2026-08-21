@@ -783,9 +783,15 @@ fun CIRISApp(
     // Federation ID flow and landed instead on a Contacts surface they cannot
     // use — the catch-up existing to prevent exactly that. The return
     // destination follows for the same reason.
-    LaunchedEffect(currentScreen, currentAccessToken) {
+    // isHAAddonMode counts as authenticated here, exactly as the approval
+    // watcher's effect treats it: ingress-header sessions keep
+    // currentAccessToken null by design, and gating on the token alone denied
+    // HA legacy owners the guided Add Federation ID flow this effect exists
+    // to provide.
+    LaunchedEffect(currentScreen, currentAccessToken, isHAAddonMode) {
         if (currentScreen != HOME_SCREEN) return@LaunchedEffect
-        if (currentAccessToken == null || fedIdCatchupPrompted) return@LaunchedEffect
+        val authenticated = currentAccessToken != null || isHAAddonMode
+        if (!authenticated || fedIdCatchupPrompted) return@LaunchedEffect
         try {
             nodeSwitcherViewModel.reload()
         } catch (e: Exception) {

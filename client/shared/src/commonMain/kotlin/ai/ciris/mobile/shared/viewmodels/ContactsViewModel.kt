@@ -36,6 +36,16 @@ class ContactsViewModel(
 
     // ── Contacts (browse mode — GET /v1/contacts) ────────────────────────────
 
+    /**
+     * Session epoch: advanced by [clearSessionState]. Every coroutine that
+     * publishes into this ViewModel captures it at LAUNCH and re-checks before
+     * publishing — the clear empties the flows exactly once, and without the
+     * gate an authenticated request still in flight at logout repopulates them
+     * afterward, exposing the previous owner's contacts to the signed-out
+     * screen or the next user (codex, fresh evidence after the first clear fix).
+     */
+    private var sessionEpoch: Long = 0L
+
     private val _allContacts = MutableStateFlow<List<Contact>>(emptyList())
 
     private val _contacts = MutableStateFlow<List<Contact>>(emptyList())
@@ -139,14 +149,22 @@ class ContactsViewModel(
 
     /** Pull a fresh contact list (browse mode). */
     fun refreshContacts() {
+        val epoch = sessionEpoch
         viewModelScope.launch {
+            if (epoch != sessionEpoch) return@launch
             _loading.value = true
             try {
                 val resp = apiClient.listContacts()
+                // THE gate that matters: the await above is where a logout
+                // interleaves. The clear emptied the flows once; publishing A's
+                // response now would repopulate them for the signed-out screen
+                // or the next user.
+                if (epoch != sessionEpoch) return@launch
                 _routeUnsupported.value = false
                 _allContacts.value = sortedContacts(resp.contacts)
                 applySearch()
             } catch (e: NodeRefusal) {
+                if (epoch != sessionEpoch) return@launch
                 if (e.statusCode == 404 && e.reasonId == null) {
                     // The route is not mounted — a version fact, not a failure.
                     _routeUnsupported.value = true
@@ -160,23 +178,29 @@ class ContactsViewModel(
                     )
                 }
             } catch (e: Exception) {
+                if (epoch != sessionEpoch) return@launch
                 _error.value = e.message ?: e::class.simpleName
                 PlatformLogger.e(tag, "[listContacts] ${e.message}", e)
             } finally {
-                _loading.value = false
-                // Loaded means "the question was asked", success or not — an empty
-                // list after a failed call must not render as "you have no contacts".
-                _contactsLoaded.value = true
+                if (epoch == sessionEpoch) {
+                    _loading.value = false
+                    // Loaded means "the question was asked", success or not — an
+                    // empty list after a failed call must not render as "you have
+                    // no contacts".
+                    _contactsLoaded.value = true
+                }
             }
         }
     }
 
     /** Pull a fresh peer list from the node (picker mode). */
     fun refreshPeers() {
+        val epoch = sessionEpoch
         viewModelScope.launch {
             runApi("listFederationPeers") {
                 apiClient.listFederationPeers()
             }?.let { resp ->
+                if (epoch != sessionEpoch) return@launch
                 _allPeers.value = sortedPeers(resp.peers)
                 applySearch()
             }
@@ -205,12 +229,14 @@ class ContactsViewModel(
     fun addContact(keyId: String) {
         val trimmed = keyId.trim()
         if (trimmed.isEmpty()) return
+        val epoch = sessionEpoch
         viewModelScope.launch {
             _addBusy.value = true
             _addRefusalReasonId.value = null
             _addError.value = null
             try {
                 val added = apiClient.addContact(trimmed)
+                if (epoch != sessionEpoch) return@launch
                 PlatformLogger.i(
                     tag,
                     "[addContact] ${trimmed.take(16)}… wrote_row=${added.freshlyEmitted} " +
@@ -237,6 +263,7 @@ class ContactsViewModel(
                     occurrenceKeyIds = added.occurrenceKeyIds,
                 )
             } catch (e: NodeRefusal) {
+                if (epoch != sessionEpoch) return@launch
                 _addRefusalReasonId.value = e.reasonId
                 _addError.value = e.detail
                 PlatformLogger.w(
@@ -244,10 +271,11 @@ class ContactsViewModel(
                     "[addContact] refused reason_id=${e.reasonId ?: "<none>"} status=${e.statusCode}",
                 )
             } catch (e: Exception) {
+                if (epoch != sessionEpoch) return@launch
                 _addError.value = e.message ?: e::class.simpleName
                 PlatformLogger.e(tag, "[addContact] ${e.message}", e)
             } finally {
-                _addBusy.value = false
+                if (epoch == sessionEpoch) _addBusy.value = false
             }
         }
     }
@@ -340,6 +368,7 @@ class ContactsViewModel(
      * session state.
      */
     fun clearSessionState() {
+        sessionEpoch += 1
         _allContacts.value = emptyList()
         _contacts.value = emptyList()
         _contactsLoaded.value = false
