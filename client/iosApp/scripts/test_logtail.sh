@@ -15,7 +15,11 @@ SRC=iosApp/ContentView.swift
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-awk '/^\/\/ ── LogTail ─/{f=1} f{print} /^\/\/ ── end LogTail ─/{f=0}' "$SRC" > "$WORK/logtail.swift"
+# The block is Foundation-only by contract but carries no import of its own —
+# file-scope imports live at the top of ContentView.swift. The harness supplies
+# the ONE import the contract permits.
+echo "import Foundation" > "$WORK/logtail.swift"
+awk '/^\/\/ ── LogTail ─/{f=1} f{print} /^\/\/ ── end LogTail ─/{f=0}' "$SRC" >> "$WORK/logtail.swift"
 grep -q "enum LogTail" "$WORK/logtail.swift" || { echo "::error::LogTail block not found in $SRC — markers moved?"; exit 1; }
 if grep -E "^import (SwiftUI|shared|UIKit)" "$WORK/logtail.swift"; then
   echo "::error::LogTail grew a non-Foundation dependency — the standalone gate exists to catch exactly this"; exit 1
