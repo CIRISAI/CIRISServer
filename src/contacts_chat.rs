@@ -6,7 +6,7 @@
 //!
 //! | route | the CEG object it moves | the persist primitive |
 //! |---|---|---|
-//! | `GET /v1/contacts` | `consent:replication:v1` grants, revocation-folded | [`crate::peer::replication_peers_from_consent`] → `list_consent_peers` |
+//! | `GET /v1/contacts` | `consent:replication:v1` grants, revocation-folded | [`crate::peer::live_consent_grants`] → `list_live_consent_grants_by` |
 //! | `POST /v1/contacts` | one `consent:replication:v1` grant | [`crate::peer::ensure_replication_consent_covers`] |
 //! | `POST /v1/chat` | a 2-member [`Community`] | `Engine::put_community_self_signed` |
 //! | `POST /v1/chat/{id}/messages` | a `chat:message:v1` `scores` attestation | `attestation_upsert_local` + `attestation_promote(community)` |
@@ -23,11 +23,25 @@
 //! grant covers `chat:` — emitting it, or widening a narrower standing one by
 //! superseding it (PR #464 P1: an already-peered key holds a
 //! `capacity:`/`trace:`-only grant, and a plain emit was a silent no-op against
-//! it) — and `GET /v1/contacts` reads
-//! [`crate::peer::replication_peers_from_consent`] — persist's
-//! `list_consent_peers` projection, which has the `withdraws`/`supersedes` fold
-//! ALREADY applied. Un-contacting is therefore the ordinary CEG withdraw of the
-//! grant row, with no second code path to keep in step.
+//! it).
+//!
+//! And a CONTACT is specifically a peer whose live grant covers `chat:` — not
+//! every consent peer. Both read sites (`GET /v1/contacts` and the guard on
+//! `POST /v1/chat`) check the prefix, because an ordinarily-federated peer is
+//! someone this node replicates to and CANNOT message: offering them as a
+//! contact opens a room whose messages never leave. The fold that decides
+//! liveness is persist's (`list_live_consent_grants_by`), so un-contacting stays
+//! the ordinary CEG withdraw of the grant row, with no second code path.
+//!
+//! # Every route names a capability verb
+//!
+//! `resolve_bearer` hands a `dgrant:` token the owner's role AND `FullAccess`
+//! together with the delegate's action constraints, so a role-only gate accepts
+//! an announce-only delegate. The constraints are only enforced where a route
+//! NAMES its verb — a route with no verb is a route with no enforcement — so all
+//! five name one: `ChatRead` (both reads), `Peer` (add contact — it emits the
+//! same object `POST /v1/federation/peering` does), `ChatCreate` (open a room),
+//! and `ChatAuthor` (send), which is on the server never-list.
 //!
 //! The rows are then projected through [`crate::federation_peers::peer_projection`]
 //! — the SAME `LocalPeerState` shape the contacts screen already binds to — so a
@@ -302,19 +316,36 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
         Ok(o) => o,
         Err(r) => return r,
     };
-    // Persist's revocation-FOLDED consent peer set — a withdrawn grant is
-    // already gone here, so un-contacting needs no second code path.
-    let peer_ids =
-        match crate::peer::replication_peers_from_consent(&st.engine, &owner.node_key_id).await {
-            Ok(p) => p,
-            Err(e) => {
-                return refuse(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "contacts.store_unavailable",
-                    format!("consent peer set: {e}"),
-                )
-            }
-        };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatRead,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
+    // Persist's revocation-FOLDED consent peer set, WITH what each grant covers.
+    // A withdrawn grant is already gone here, so un-contacting needs no second
+    // code path — and the `chat:` filter below is why this reads prefixes rather
+    // than bare peer ids.
+    let grants = match crate::peer::live_consent_grants(&st.engine, &owner.node_key_id).await {
+        Ok(g) => g,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "contacts.store_unavailable",
+                format!("consent peer set: {e}"),
+            )
+        }
+    };
+    // A CONTACT is a peer this node can actually MESSAGE, not merely one it
+    // replicates to. An ordinarily-federated peer carries the default
+    // `capacity:`/`trace:` grant and no `chat:`; listing them would offer the
+    // human a conversation that silently never leaves this node.
+    let peer_ids: Vec<String> = grants
+        .into_iter()
+        .filter(|(_, prefixes)| prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX))
+        .map(|(peer, _)| peer)
+        .collect();
     let directory = st.engine.federation_directory();
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
@@ -575,6 +606,13 @@ async fn start_chat(
         Ok(o) => o,
         Err(r) => return r,
     };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatCreate,
+        "chat.delegation_denied",
+    ) {
+        return resp;
+    }
     let req: StartChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -602,12 +640,27 @@ async fn start_chat(
     }
     let directory = st.engine.federation_directory();
 
-    // The contact must be a CONTACT, not merely a known key: a chat community
-    // whose messages this node has not consented to replicate to the other
-    // member is a room nothing ever leaves.
-    match crate::peer::replication_peers_from_consent(&st.engine, &owner.node_key_id).await {
-        Ok(peers) if peers.iter().any(|p| p == &key_id) => {}
-        Ok(_) => {
+    // The peer must be a CONTACT — meaning the LIVE grant covers `chat:`, not
+    // merely that a grant exists. Being federated with someone is not the same as
+    // being able to message them: an ordinarily-peered key carries `capacity:`/
+    // `trace:` only, and accepting it here opens a room whose messages are stored
+    // locally and never become eligible to replicate — a one-way plane that looks
+    // like a working conversation from this side, which is the worst way for it
+    // to fail.
+    match crate::peer::live_grant_prefixes(&st.engine, &owner.node_key_id, &key_id).await {
+        Ok(Some(prefixes)) if prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX) => {}
+        Ok(Some(prefixes)) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "chat.not_a_contact",
+                format!(
+                    "{key_id:?} is a consent peer but its live grant does not cover \
+                     {CHAT_ATTESTATION_PREFIX:?} (it covers {prefixes:?}) — POST /v1/contacts \
+                     to widen it"
+                ),
+            )
+        }
+        Ok(None) => {
             return refuse(
                 StatusCode::FORBIDDEN,
                 "chat.not_a_contact",
@@ -1183,6 +1236,13 @@ async fn list_messages(
         Ok(o) => o,
         Err(r) => return r,
     };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatRead,
+        "chat.delegation_denied",
+    ) {
+        return resp;
+    }
     if let Err(r) = require_member(&st, &owner, &community_id).await {
         return r;
     }

@@ -880,6 +880,70 @@ async fn emit_grant_row<S: AsRef<str>>(
     })
 }
 
+/// The prefix set a live grant covers, or `None` when its payload does not parse.
+///
+/// `None` and `Some(vec![])` are DIFFERENT facts and both are honest: a grant
+/// whose payload fails the closed grammar covers nothing AND cannot be reasoned
+/// about, while an empty set would claim it was read and found bare. Callers
+/// treat `None` as "covers nothing" — the same verdict `promote_consented_backlog`
+/// reaches when it warns and skips.
+fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
+    ciris_persist::federation::consent_grammar::parse_grant_payload(&grant.attestation_envelope)
+        .ok()
+        .map(|policy| normalize_prefixes(&policy.attestation_prefixes))
+}
+
+/// **What this node's LIVE grant to `peer_key_id` actually covers.**
+///
+/// The sibling of [`standing_live_grant`] on the same revocation-folded read —
+/// deliberately not a second predicate, because "is there a live grant" and
+/// "what does it cover" are two questions about ONE row, and answering them
+/// through two lookups is how they drift apart.
+///
+/// `Ok(None)` = no live grant at all (never granted, or withdrawn).
+/// `Ok(Some(prefixes))` = a live grant covering exactly these.
+pub async fn live_grant_prefixes(
+    engine: &Engine,
+    node_key_id: &str,
+    peer_key_id: &str,
+) -> Result<Option<Vec<String>>> {
+    Ok(standing_live_grant(engine, node_key_id, peer_key_id)
+        .await?
+        .map(|g| grant_prefixes(&g).unwrap_or_default()))
+}
+
+/// Every peer this node holds a LIVE grant for, paired with what that grant
+/// covers — the list form of [`live_grant_prefixes`], reading the folded set
+/// ONCE rather than per peer.
+///
+/// This is what a caller wants when "is X a peer" is not the question: a
+/// contacts list needs to know which peers it can actually MESSAGE, and a peer
+/// federated under the default `capacity:`/`trace:` grant is not one of them.
+pub async fn live_consent_grants(
+    engine: &Engine,
+    node_key_id: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let grants = engine
+        .federation_directory()
+        .list_live_consent_grants_by(node_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({node_key_id}): {e}"))?;
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for grant in &grants {
+        let prefixes = grant_prefixes(grant).unwrap_or_default();
+        for peer in &grant.subject_key_ids {
+            // Rows come back `asserted_at DESC`, so the FIRST grant naming a peer
+            // is the most recent — keep it and ignore any older row that also
+            // names them.
+            if !out.iter().any(|(p, _)| p == peer) {
+                out.push((peer.clone(), prefixes.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 /// The outcome of [`ensure_replication_consent_covers`] — what is LIVE after
 /// the call, and what it cost.
 #[derive(Debug, Clone)]
@@ -993,6 +1057,8 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
 
     // What does it actually cover, and under what policy?
     let (covered, opts) = match parse_grant_payload(&standing.attestation_envelope) {
+        // `grant_prefixes` reads the same field through the same parser; the
+        // policy axes below need the whole parsed struct, so this arm keeps it.
         Ok(policy) => {
             let opts = ConsentGrantOptions {
                 audience: Some(policy.audience.clone()),

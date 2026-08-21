@@ -44,6 +44,7 @@ use ciris_persist::prelude::{Engine, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 
+use ciris_server::auth::session::DelegationConstraints;
 use ciris_server::auth::store;
 use ciris_server::contacts_chat::{self, pair_community_key_id};
 
@@ -1231,13 +1232,49 @@ async fn mint_delegated_token(engine: &Engine, owner_wa_id: &str, client_id: &st
     )
     .await
     .expect("emit delegates_to(owner -> actor)");
-    mint_delegated_token_inner(owner_wa_id, client_id)
+    mint_delegated_token_inner(owner_wa_id, client_id, DelegationConstraints::default())
+}
+
+/// The same, with an owner-set ALLOW-LIST — the case codex named: a delegate
+/// granted one verb and reaching for the others.
+async fn mint_constrained_delegated_token(
+    engine: &Engine,
+    owner_wa_id: &str,
+    client_id: &str,
+    allow: &[&str],
+) -> String {
+    ciris_server::auth::ownership::emit_signed_attestation(
+        engine,
+        &owner_user_signer(),
+        attestation_type::DELEGATES_TO,
+        client_id,
+        ciris_persist::federation::delegates_to_envelope(
+            client_id,
+            &[DELEGATED_SCOPE.to_string()],
+            false,
+        ),
+        None,
+    )
+    .await
+    .expect("emit delegates_to(owner -> actor)");
+    mint_delegated_token_inner(
+        owner_wa_id,
+        client_id,
+        DelegationConstraints {
+            actions_allow: Some(allow.iter().map(|s| (*s).to_string()).collect()),
+            ..Default::default()
+        },
+    )
 }
 
 const DELEGATED_SCOPE: &str = "owner:act-on-behalf";
 
-fn mint_delegated_token_inner(owner_wa_id: &str, client_id: &str) -> String {
-    use ciris_server::auth::session::{DelegatedGrant, DelegationConstraints};
+fn mint_delegated_token_inner(
+    owner_wa_id: &str,
+    client_id: &str,
+    constraints: DelegationConstraints,
+) -> String {
+    use ciris_server::auth::session::DelegatedGrant;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -1252,10 +1289,7 @@ fn mint_delegated_token_inner(owner_wa_id: &str, client_id: &str) -> String {
         issued_at: now,
         purpose: Some("a monitoring agent".to_string()),
         attestation_id: None,
-        // UNCONSTRAINED — no deny-list, no allow-list. The refusals below must
-        // therefore come from the SERVER never-list, not from an owner's bounds;
-        // a constrained grant would let the test pass for the wrong reason.
-        constraints: DelegationConstraints::default(),
+        constraints,
     })
 }
 
@@ -1306,6 +1340,178 @@ async fn a_delegate_may_not_author_a_message_but_may_read() {
         200,
         "a delegate may read what it may not author"
     );
+}
+
+/// **EVERY OWNER-GATED ROUTE ANSWERS TO A VERB.** The other half of the
+/// delegation hole: `resolve_bearer` hands a `dgrant:` token the owner's role AND
+/// `FullAccess` together with the delegate's constraints, so the role check
+/// cannot see the bounds. They bind only where a route NAMES its verb — a route
+/// with no verb is a route with no enforcement — and none of these five named one
+/// until now.
+///
+/// The grant here allows `announce` and nothing else, which is the shape codex
+/// described: a delegate provisioned for one job reaching every other surface on
+/// the node. All five must refuse, and each must say which contract refused it.
+#[tokio::test]
+async fn an_announce_only_delegate_reaches_no_contacts_or_chat_route() {
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+    let delegated =
+        mint_constrained_delegated_token(&engine, "wa-owner", CONTACT_KEY_ID, &["announce"]).await;
+
+    for (method, path, reason) in [
+        (
+            "GET",
+            "/v1/contacts".to_string(),
+            "contacts.delegation_denied",
+        ),
+        (
+            "POST",
+            "/v1/contacts".to_string(),
+            "contacts.delegation_denied",
+        ),
+        ("POST", "/v1/chat".to_string(), "chat.delegation_denied"),
+        (
+            "GET",
+            format!("/v1/chat/{community_id}/messages"),
+            "chat.delegation_denied",
+        ),
+        (
+            "POST",
+            format!("/v1/chat/{community_id}/messages"),
+            "chat.delegate_may_not_author",
+        ),
+    ] {
+        let url = format!("{base}{path}");
+        let req = match method {
+            "GET" => client.get(&url),
+            _ => client
+                .post(&url)
+                .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID, "body": "x" })),
+        };
+        let resp = req
+            .bearer_auth(&delegated)
+            .send()
+            .await
+            .expect("constrained delegate request");
+        assert_eq!(
+            resp.status(),
+            403,
+            "{method} {path} must refuse a delegate outside its allow-list"
+        );
+        let json: serde_json::Value = resp.json().await.expect("refusal json");
+        assert_eq!(json["reason_id"], reason, "{method} {path}");
+    }
+}
+
+/// A delegate granted the READ verb may read, and still may not SEND. The two
+/// powers are separate verbs precisely so an owner can hand over one of them;
+/// without this, "gate everything" and "gate the right things" look identical.
+#[tokio::test]
+async fn a_read_granted_delegate_reads_but_still_cannot_send() {
+    let (engine, base, owner, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let community_id = open_chat(&client, &base, &owner).await;
+    let delegated =
+        mint_constrained_delegated_token(&engine, "wa-owner", CONTACT_KEY_ID, &["chat_read"]).await;
+
+    let resp = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&delegated)
+        .send()
+        .await
+        .expect("GET messages");
+    assert_eq!(
+        resp.status(),
+        200,
+        "an explicitly read-granted delegate may read"
+    );
+
+    // `chat_author` is on the SERVER never-list, so even naming it in the
+    // allow-list would not help — but here it simply is not granted.
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&delegated)
+        .json(&serde_json::json!({ "body": "not mine to send" }))
+        .send()
+        .await
+        .expect("POST message");
+    assert_eq!(resp.status(), 403);
+    let json: serde_json::Value = resp.json().await.expect("refusal json");
+    assert_eq!(json["reason_id"], "chat.delegate_may_not_author");
+}
+
+/// **A FEDERATED PEER IS NOT A CONTACT.** The accept-side mirror of the widening
+/// fix: `POST /v1/contacts` widens a narrow grant on the SEND side, but the guard
+/// on `POST /v1/chat` accepted any consent peer — so an ordinarily-federated key
+/// carrying only `capacity:`/`trace:` could have a room opened with it and
+/// messages accepted locally, while `chat:` stayed ineligible to replicate.
+///
+/// A one-way plane is worse than a closed one: it looks like a working
+/// conversation from this side and arrives nowhere.
+#[tokio::test]
+async fn an_ordinarily_federated_peer_is_not_a_contact() {
+    let (engine, base, owner, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+    // Ordinary federation peering — capacity:/trace: only, never a contact.
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &node,
+        CONTACT_KEY_ID,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("federation peering grant");
+    let client = reqwest::Client::new();
+
+    // NOT listed: offering them would promise a conversation that never leaves.
+    let listed = contacts_list(&client, &base, &owner).await;
+    assert_eq!(
+        listed["total"], 0,
+        "a peer whose grant does not cover chat: is not a contact: {listed}"
+    );
+
+    // NOT accepted, and the refusal NAMES the missing prefix rather than saying
+    // only "not a contact" — the operator needs to know it is a coverage gap and
+    // not an unknown key.
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.expect("refusal body");
+    assert!(body.contains("chat.not_a_contact"), "{body}");
+    assert!(
+        body.contains("chat:"),
+        "the refusal must name the missing prefix: {body}"
+    );
+
+    // Adding them as a contact widens the grant, and BOTH doors then accept.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200);
+    let listed = contacts_list(&client, &base, &owner).await;
+    assert_eq!(
+        listed["total"], 1,
+        "widening makes them a contact: {listed}"
+    );
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 200, "the room opens once chat: is covered");
 }
 
 /// **THE SUBSTRATE PIN — this asserts a DEFECT, on purpose.**
