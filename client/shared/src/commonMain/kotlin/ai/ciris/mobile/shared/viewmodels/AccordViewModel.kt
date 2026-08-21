@@ -1002,6 +1002,16 @@ class AccordViewModel(
             // Sticky: once any step re-blessed the canonical, the whole ceremony did.
             serveNodeReblessed = res.serveNodeReblessed ||
                 (_genesisSeed.value?.serveNodeReblessed ?: false),
+            // NODE VENDOR DRIFT #32 (restored after the 2.9.28 re-vendor dropped it):
+            // dropping this read the server's "this bundle is INVALID" verdict as
+            // "it is merely short of signatures", and the card sent the operator
+            // to fetch more holders for a seed no signature could ever repair.
+            //
+            // NOT sticky — the opposite of serveNodeReblessed. This is the
+            // CURRENT verdict on the CURRENT bundle: a later step that fixes the
+            // bundle must clear it, or the card would keep telling the operator
+            // the seed is unrepairable after it stopped being so.
+            blockedBy = res.blockedBy,
         )
     }
 

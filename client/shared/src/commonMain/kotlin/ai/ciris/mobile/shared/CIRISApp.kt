@@ -806,6 +806,24 @@ fun CIRISApp(
     val contactsViewModel: ContactsViewModel = viewModel {
         ContactsViewModel(apiClient)
     }
+    // The node predates /v1/contacts (the embedded APK node lags one release).
+    // Contacts is the node-mode HOME, so landing there would put the user on a
+    // surface that cannot answer. Fall back to the PREVIOUS default (Nodes) once,
+    // and only from the automatic landing — if the user navigates to Contacts
+    // themselves they get the explanatory state and stay there, which is the
+    // honest answer to a question they asked on purpose.
+    val contactsUnsupported by contactsViewModel.routeUnsupported.collectAsState()
+    var contactsHomeFallbackApplied by remember { mutableStateOf(false) }
+    LaunchedEffect(contactsUnsupported, currentScreen) {
+        if (contactsUnsupported && !contactsHomeFallbackApplied &&
+            currentScreen is Screen.Contacts && contactsPickerSourceScreen == null
+        ) {
+            contactsHomeFallbackApplied = true
+            platformLog(TAG, "[INFO] node predates /v1/contacts — home falls back to Nodes")
+            currentScreen = Screen.ManageNodes
+        }
+    }
+
     // User-to-user chat — a two-member community whose messages ARE CEG
     // attestations (rendered through the same AttestationCard as every other
     // CEG object).

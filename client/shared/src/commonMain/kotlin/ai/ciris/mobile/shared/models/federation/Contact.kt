@@ -85,11 +85,52 @@ data class AddContactResponse(
     val keyId: String,
     @SerialName("consent_attestation_id")
     val consentAttestationId: String = "",
-    /** `false` = an existing grant was returned, not re-emitted (the route is idempotent). */
+    /**
+     * A grant row was WRITTEN — first grant OR a widening of a narrower standing
+     * one (CIRISServer#458). `false` is the true no-op: the standing grant already
+     * covered everything this add needed.
+     *
+     * Note the meaning changed with the widening fix: it no longer means "the
+     * first grant", so it must not be read as "this contact is new".
+     */
     @SerialName("freshly_emitted")
     val freshlyEmitted: Boolean = false,
+    /**
+     * The narrower grant this add SUPERSEDED, when adding widened one.
+     * Omitted when nothing was superseded — absence is the common case, not an
+     * error.
+     */
+    @SerialName("superseded_attestation_id")
+    val supersededAttestationId: String? = null,
+    /**
+     * What the LIVE grant actually covers.
+     *
+     * The one field that answers "can I message this person": `"chat:"` present
+     * means messages to this contact are eligible to replicate. Its ABSENCE is
+     * the failure #458 stayed invisible for — the contact is added, the row is
+     * green, and nothing ever leaves the room. Read it through [chatEligible]
+     * and say so in the UI rather than letting silence stand.
+     */
+    @SerialName("consent_prefixes")
+    val consentPrefixes: List<String> = emptyList(),
     @SerialName("occurrence_key_ids")
     val occurrenceKeyIds: List<String> = emptyList(),
     @SerialName("chat_community_id")
     val chatCommunityId: String = "",
-)
+) {
+    /**
+     * Does the standing grant cover chat?
+     *
+     * Absent `consent_prefixes` (an older node that does not send the field) is
+     * NOT treated as ineligible — that would show every contact on a lagging
+     * node as broken. Only an explicitly-returned list that lacks the prefix is
+     * a negative answer.
+     */
+    val chatEligible: Boolean
+        get() = consentPrefixes.isEmpty() || consentPrefixes.any { it.startsWith(CHAT_PREFIX) }
+
+    companion object {
+        /** The attestation-prefix the chat plane replicates under. */
+        const val CHAT_PREFIX = "chat:"
+    }
+}

@@ -45,6 +45,31 @@ class ContactsViewModel(
     private val _contactsLoaded = MutableStateFlow(false)
     val contactsLoaded: StateFlow<Boolean> = _contactsLoaded.asStateFlow()
 
+    /**
+     * The node does not serve `/v1/contacts` at all — it predates the surface.
+     *
+     * The Android APK's EMBEDDED node pins `ciris-server` from PyPI and cannot
+     * pin a release that has not published yet, so for one release the packaged
+     * node 404s this route. That is a KNOWN, temporary, version-shaped fact, and
+     * it must not render as "you have no contacts" (a lie) or as a red error (a
+     * bug report for something working as designed).
+     *
+     * Detected as `404 with NO reason_id`: every refusal this surface authors
+     * carries a typed id, and the GET has no 404 arm at all, so a bare 404 is
+     * axum saying the route is not mounted. A 404 that DOES carry an id is a
+     * real refusal and is reported normally.
+     */
+    private val _routeUnsupported = MutableStateFlow(false)
+    val routeUnsupported: StateFlow<Boolean> = _routeUnsupported.asStateFlow()
+
+    /**
+     * A contact whose live grant does NOT cover `chat:` — messages to them
+     * cannot replicate (CIRISServer#458). Keyed by key_id; a contact absent from
+     * this set is either fine or was added by a node too old to say.
+     */
+    private val _chatIneligible = MutableStateFlow<Set<String>>(emptySet())
+    val chatIneligible: StateFlow<Set<String>> = _chatIneligible.asStateFlow()
+
     // ── Raw peer list (picker mode — all, unsearched) ────────────────────────
 
     private val _allPeers = MutableStateFlow<List<LocalPeerState>>(emptyList())
@@ -107,13 +132,34 @@ class ContactsViewModel(
     /** Pull a fresh contact list (browse mode). */
     fun refreshContacts() {
         viewModelScope.launch {
-            runApi("listContacts") { apiClient.listContacts() }?.let { resp ->
+            _loading.value = true
+            try {
+                val resp = apiClient.listContacts()
+                _routeUnsupported.value = false
                 _allContacts.value = sortedContacts(resp.contacts)
                 applySearch()
+            } catch (e: NodeRefusal) {
+                if (e.statusCode == 404 && e.reasonId == null) {
+                    // The route is not mounted — a version fact, not a failure.
+                    _routeUnsupported.value = true
+                    _error.value = null
+                    PlatformLogger.i(tag, "[listContacts] node predates /v1/contacts (bare 404)")
+                } else {
+                    _error.value = e.detail ?: e.reasonId
+                    PlatformLogger.w(
+                        tag,
+                        "[listContacts] refused reason_id=${e.reasonId ?: "<none>"} status=${e.statusCode}",
+                    )
+                }
+            } catch (e: Exception) {
+                _error.value = e.message ?: e::class.simpleName
+                PlatformLogger.e(tag, "[listContacts] ${e.message}", e)
+            } finally {
+                _loading.value = false
+                // Loaded means "the question was asked", success or not — an empty
+                // list after a failed call must not render as "you have no contacts".
+                _contactsLoaded.value = true
             }
-            // Loaded means "the question was asked", success or not — an empty
-            // list after a failed call must not render as "you have no contacts".
-            _contactsLoaded.value = true
         }
     }
 
@@ -159,8 +205,23 @@ class ContactsViewModel(
                 val added = apiClient.addContact(trimmed)
                 PlatformLogger.i(
                     tag,
-                    "[addContact] ${trimmed.take(16)}… freshly_emitted=${added.freshlyEmitted}",
+                    "[addContact] ${trimmed.take(16)}… wrote_row=${added.freshlyEmitted} " +
+                        "superseded=${added.supersededAttestationId?.take(16) ?: "none"} " +
+                        "prefixes=${added.consentPrefixes.joinToString(",")}",
                 )
+                // CIRISServer#458: a contact whose grant does not cover `chat:`
+                // is added, green, and unable to receive a single message. Record
+                // it so the row can SAY so — silence here is how #458 hid.
+                _chatIneligible.value = if (added.chatEligible) {
+                    _chatIneligible.value - added.keyId
+                } else {
+                    PlatformLogger.w(
+                        tag,
+                        "[addContact] ${added.keyId.take(16)}… grant does NOT cover chat: " +
+                            "(prefixes=${added.consentPrefixes.joinToString(",")})",
+                    )
+                    _chatIneligible.value + added.keyId
+                }
                 refreshContacts()
                 _justAdded.value = Contact(
                     keyId = added.keyId,

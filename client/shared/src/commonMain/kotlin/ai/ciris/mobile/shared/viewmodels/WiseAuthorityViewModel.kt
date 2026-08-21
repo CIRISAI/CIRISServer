@@ -147,6 +147,21 @@ class WiseAuthorityViewModel(
     private val _selectedBudgetState = MutableStateFlow<TicketBudgetState?>(null)
     val selectedBudgetState: StateFlow<TicketBudgetState?> = _selectedBudgetState.asStateFlow()
 
+    /**
+     * Which approval's dialog is open right now, or null when none is.
+     *
+     * This is the *identity of the open dialog*, and it is the only thing that
+     * can tell a budget response that is still wanted from one whose dialog has
+     * since been dismissed or replaced. The fetched [TicketBudgetState.ticketId]
+     * cannot: it is whatever the request asked for, so comparing it against the
+     * id that same request captured is true by construction and guards nothing.
+     *
+     * Plain field rather than a flow or an atomic on purpose — [viewModelScope]
+     * is main-confined, so every write here (dialog open/close) and every read
+     * (a resumed fetch) happens on the same dispatcher.
+     */
+    private var openApprovalId: String? = null
+
     // Loading state
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -401,11 +416,32 @@ class WiseAuthorityViewModel(
      */
     fun loadBudgetState(approvalId: String) {
         val method = "loadBudgetState"
+        // Claim the dialog *before* suspending. Opening B is what makes A's
+        // in-flight read obsolete, so obsolescence has to be recorded at the
+        // moment of the open, not when some response happens to land.
+        openApprovalId = approvalId
         viewModelScope.launch {
             try {
                 val state = api.fetchTicketBudget(approvalId)
-                // Guard against a late response for a dialog the user already
-                // dismissed or replaced.
+                // Publish only while this approval is still the open one.
+                //
+                // A response for a dialog the operator has already dismissed or
+                // replaced must never become the state the *current* dialog
+                // renders and validates against: the dialog reads headroom
+                // straight off this flow and runs the local amount check
+                // against it, so a stale figure landing here — or, just as bad,
+                // a null one wiping the live figure — silently changes what the
+                // operator is being asked to consent to. Comparing
+                // `state.ticketId` to `approvalId` cannot catch this; it only
+                // confirms the server echoed the ticket we asked for.
+                if (approvalId != openApprovalId) {
+                    logDebug(
+                        method,
+                        "Discarding budget state for $approvalId — open dialog is now " +
+                            (openApprovalId ?: "none")
+                    )
+                    return@launch
+                }
                 if (state == null || state.ticketId == approvalId) {
                     _selectedBudgetState.value = state
                 }
@@ -418,13 +454,23 @@ class WiseAuthorityViewModel(
                 }
             } catch (e: Exception) {
                 logDebug(method, "Budget state unavailable for $approvalId: ${e.message}")
-                _selectedBudgetState.value = null
+                // Blank only the dialog this failure actually belongs to. A 404
+                // for an approval the operator has moved on from must not take
+                // the open dialog's headroom with it — losing the ceiling is
+                // exactly how an over-envelope amount gets past the local check.
+                if (approvalId == openApprovalId) {
+                    _selectedBudgetState.value = null
+                }
             }
         }
     }
 
     /** Drop the loaded budget state when the dialog closes. */
     fun clearBudgetState() {
+        // Releasing the claim is what marks any read still in flight obsolete;
+        // without it a slow response lands after the dialog is gone and
+        // re-publishes state for an approval nobody is looking at any more.
+        openApprovalId = null
         _selectedBudgetState.value = null
     }
 
@@ -519,15 +565,22 @@ class WiseAuthorityViewModel(
                         ?: overGrant?.let { " — above the ${it.requestedAmount} requested" }
                         ?: ""
                     _successMessage.value = "Approved $amount $currency$overNote$signedNote"
-                    notifier?.forget(approvalId)
 
+                    // Only a *successful* promotion retires the notification id.
+                    // Issuing a budget without promoting deliberately leaves the
+                    // ticket blocked, so the proposal is still in the pending set
+                    // and the refresh below re-observes it — forgetting the id
+                    // there would re-notify the operator about the very approval
+                    // they just acted on. Same rule as [updateProposalStatus].
                     if (promote) {
                         val promoted = api.updateTicketStatus(
                             approvalId,
                             BudgetApprovalSeam.PROMOTED_STATUS,
                             null,
                         )
-                        if (!promoted) {
+                        if (promoted) {
+                            notifier?.forget(approvalId)
+                        } else {
                             _error.value = "Budget approved, but starting the work failed — promote it manually"
                             logWarn(method, "Grant succeeded but promotion failed for $approvalId")
                         }
@@ -561,14 +614,28 @@ class WiseAuthorityViewModel(
     fun promoteProposal(approvalId: String, note: String?) {
         val method = "promoteProposal"
         logInfo(method, "Promoting proposal $approvalId to ${BudgetApprovalSeam.PROMOTED_STATUS}")
-        updateProposalStatus(approvalId, BudgetApprovalSeam.PROMOTED_STATUS, note, "Approved — work started")
+        updateProposalStatus(
+            approvalId,
+            BudgetApprovalSeam.PROMOTED_STATUS,
+            note,
+            "Approved — work started",
+            // Promotion takes the proposal out of the pending set.
+            retiresNotification = true,
+        )
     }
 
     /** Refuse a proposal outright. Nothing is issued and the work never starts. */
     fun rejectProposal(approvalId: String, reason: String?) {
         val method = "rejectProposal"
         logInfo(method, "Rejecting proposal $approvalId")
-        updateProposalStatus(approvalId, BudgetApprovalSeam.REJECTED_STATUS, reason, "Proposal rejected")
+        updateProposalStatus(
+            approvalId,
+            BudgetApprovalSeam.REJECTED_STATUS,
+            reason,
+            "Proposal rejected",
+            // Rejection takes the proposal out of the pending set.
+            retiresNotification = true,
+        )
     }
 
     /**
@@ -579,14 +646,34 @@ class WiseAuthorityViewModel(
     fun deferProposal(approvalId: String, note: String?) {
         val method = "deferProposal"
         logInfo(method, "Deferring proposal $approvalId (status unchanged)")
-        updateProposalStatus(approvalId, BudgetApprovalSeam.PROPOSAL_STATUS, note, "Left for later")
+        updateProposalStatus(
+            approvalId,
+            BudgetApprovalSeam.PROPOSAL_STATUS,
+            note,
+            "Left for later",
+            // "Not now" leaves the proposal exactly where it was — still
+            // blocked, still pending — so it must stay marked as
+            // already-notified. Retiring the id here would let the refresh that
+            // follows the defer re-observe the unchanged proposal as new and
+            // notify again the instant the operator asked to be left alone.
+            retiresNotification = false,
+        )
     }
 
+    /**
+     * @param retiresNotification whether this transition removes the approval
+     *   from the pending set. Only then may the notifier forget the id:
+     *   forgetting means "announce it again if it comes back", and for a status
+     *   that leaves the item pending, the [fetchDataInternal] below *is* it
+     *   coming back — immediately, which reads as a notification bug rather
+     *   than as the decision the operator made.
+     */
     private fun updateProposalStatus(
         approvalId: String,
         status: String,
         note: String?,
         successText: String,
+        retiresNotification: Boolean,
     ) {
         viewModelScope.launch {
             _isResolving.value = true
@@ -595,7 +682,9 @@ class WiseAuthorityViewModel(
                 val ok = api.updateTicketStatus(approvalId, status, note)
                 if (ok) {
                     _successMessage.value = successText
-                    notifier?.forget(approvalId)
+                    if (retiresNotification) {
+                        notifier?.forget(approvalId)
+                    }
                 } else {
                     _error.value = "Server refused the update"
                 }

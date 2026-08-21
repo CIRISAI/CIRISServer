@@ -47,25 +47,47 @@ android {
             pip {
                 options "--find-links", "wheels"  // Local wheels directory
 
-                // 2.9.6 substrate quad — persist 5.5.3 / edge 2.1.1 /
-                // verify 5.1.0 / lens-core 1.0.1 (CIRISConformance/matrices/
-                // current.yaml). persist + edge ship Chaquopy-shaped Android
-                // wheels under `{prefix}-v{ver}-android-wheels.tar.gz`,
-                // dropped into wheels/ by the substrate updater
-                // (`tools/update_substrate_libs.py` / legacy
-                // `update_android_libs.py --lib X V`).
-                // Pins MUST match requirements.txt — version skew breaks
-                // cohabitation (CIRISEdge#16/#43 etc.). Without these
-                // installs the Android-bundled Python raises ModuleNotFound
-                // on `from ciris_persist import …` / `import ciris_edge` at
-                // boot, and `/v1/federation/identity` 503s the UI.
-                install "ciris-server==0.5.181"  // ONE substrate wheel — #979/#984 refloat (2026-08-02): mint_location_proof (CIRISServer#341, §0.8.1 rough-only bound enforced at mint) + sign_object/verify_object (detached artifact signing, label sealed in the envelope). EXACT pin, lockstep with requirements.txt (tools/update_substrate_libs.py --lib server). Android wheels sha256-verified in client/androidApp/wheels/.
-                                // ciris-lens-core is REQUIRED by the accord_metrics adapter
-                // in 2.9.6+ (CIRISAgent#866 LensCore fold) — the fourth
-                // substrate leg. Android wheels ship in the lens-core release
-                // artifacts as of v1.0.1 (CIRISLensCore#43.3); refreshed by
-                // the substrate updater (`tools/update_substrate_libs.py
-                // --platform android --lib lens V`).
+                // HOW THIS WORKS **IN CIRISServer** (corrected 0.5.185).
+                //
+                // The block that stood here was inherited verbatim from
+                // CIRISAgent and was factually wrong for this repo in three
+                // ways, each of which sent a reader somewhere that does not
+                // exist:
+                //   - it cited `tools/update_substrate_libs.py` (and a legacy
+                //     `update_android_libs.py`). NEITHER EXISTS HERE.
+                //   - it demanded the pins match `requirements.txt`. THERE IS
+                //     NO requirements.txt IN THIS REPO.
+                //   - it named a "2.9.6 substrate quad" of persist 5.5.3 /
+                //     edge 2.1.1 / lens-core 1.0.1. The wheels actually in
+                //     wheels/ are persist 5.5.5 / edge 2.2.1 / lens-core 1.3.0.
+                //
+                // THE REALITY:
+                //   - The Android substrate wheels are COMMITTED to wheels/
+                //     and picked up by `--find-links wheels` below. They are
+                //     updated by hand when a substrate leg moves; there is no
+                //     updater script in this tree.
+                //   - `ciris-server` is NOT one of them. It is pulled from
+                //     PyPI by the pin below, so it can only name a version
+                //     that has already PUBLISHED — which is why this pin lags
+                //     Cargo.toml by up to one release, and why the client
+                //     must feature-detect new node routes rather than assume
+                //     them (see ContactsViewModel.routeUnsupported).
+                //   - The pin is bumped MANUALLY, per release, after the
+                //     wheel publishes.
+                // Without these installs the Android-bundled Python raises
+                // ModuleNotFound on `from ciris_persist import …` /
+                // `import ciris_edge` at boot, and `/v1/federation/identity`
+                // 503s the UI.
+                // EXACT pin, from PyPI (not from wheels/). Bumped by hand per
+                // release, and only once that version has published — so this
+                // may sit one release behind Cargo.toml. A client feature that
+                // needs a NEWER node route must degrade honestly rather than
+                // assume the embedded node has it.
+                install "ciris-server==0.5.181"
+                // ciris-lens-core is REQUIRED by the accord_metrics adapter
+                // (CIRISAgent#866 LensCore fold) — the fourth substrate leg.
+                // Its Android wheels are committed to wheels/ like the other
+                // three; refreshed by hand.
 
                 // Core dependencies (same as original android/app/build.gradle)
                 install "pydantic-core==2.23.4"

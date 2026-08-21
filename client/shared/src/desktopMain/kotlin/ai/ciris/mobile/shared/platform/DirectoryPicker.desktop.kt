@@ -1,5 +1,6 @@
 package ai.ciris.mobile.shared.platform
 
+import ai.ciris.mobile.shared.localization.localizedString
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import java.io.File
@@ -15,12 +16,42 @@ actual fun DirectoryPickerDialog(
     onDirectoryPicked: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // NODE VENDOR DRIFT #30 (cont.): the dialog title is the picker's ONLY
+    // user-visible string, and it was hardcoded English in all 29 languages.
+    // It is resolved HERE, at the composable level, because `localizedString`
+    // reads a CompositionLocal — `chooseDirectory` runs on a background
+    // dispatcher and then the Swing EDT, where no composition exists — so the
+    // resolved String is handed DOWN rather than the key being looked up from
+    // outside the composition.
+    val (titleKey, englishTitle) =
+        when (purpose) {
+            DirectoryPickerPurpose.UsbCustody ->
+                "mobile.directory_picker_usb_title" to "Select the mounted USB folder"
+            DirectoryPickerPurpose.SaveFile ->
+                "mobile.directory_picker_save_title" to "Choose where to save the file"
+        }
+    // `localizedString` returns the KEY itself when the bundle has no entry yet
+    // (or is still loading). A folder chooser headed
+    // `mobile.directory_picker_usb_title` is worse than an untranslated one, so
+    // an unresolved key falls back to the English text this replaced.
+    val resolvedTitle = localizedString(titleKey)
+    val title = if (resolvedTitle == titleKey) englishTitle else resolvedTitle
+    // The APPROVE BUTTON is the picker's second user-visible string and was
+    // missed the first time round because the title got all the attention. Same
+    // treatment, same fallback.
+    val resolvedApprove = localizedString("mobile.directory_picker_approve")
+    val approveLabel =
+        if (resolvedApprove == "mobile.directory_picker_approve") "Select" else resolvedApprove
+
+    // Keyed on `show` alone, NOT on `title`: a language change while the native
+    // chooser is already open must not relaunch it. The title is captured as the
+    // dialog opens.
     LaunchedEffect(show) {
         if (!show) return@LaunchedEffect
         // NODE VENDOR DRIFT #13: Dispatchers.IO only to get OFF the Compose frame
         // thread; `chooseDirectory` hops to the EDT itself. Swing must never be
         // touched from an IO thread.
-        val path = withContext(Dispatchers.IO) { chooseDirectory(purpose) }
+        val path = withContext(Dispatchers.IO) { chooseDirectory(purpose, title, approveLabel) }
         if (path != null) onDirectoryPicked(path) else onDismiss()
     }
 }
@@ -69,8 +100,17 @@ actual fun DirectoryPickerDialog(
  * were hardcoded for USB custody, so "save the genesis seed" opened a dialog
  * headed *Select the mounted USB folder* rooted at /media. See
  * [DirectoryPickerPurpose] for what that cost.
+ *
+ * [title] arrives already localized and already chosen for [purpose] — see
+ * [DirectoryPickerDialog], which resolves it while it still has a composition to
+ * read the localization CompositionLocal from. [purpose] still decides the START
+ * DIRECTORY here, which is a filesystem question and not a translatable one.
  */
-private fun chooseDirectory(purpose: DirectoryPickerPurpose): String? {
+private fun chooseDirectory(
+    purpose: DirectoryPickerPurpose,
+    title: String,
+    approveLabel: String,
+): String? {
     // Resolved BEFORE touching Swing — see (2) above.
     val user = System.getProperty("user.name") ?: ""
     val removable: File? =
@@ -80,20 +120,17 @@ private fun chooseDirectory(purpose: DirectoryPickerPurpose): String? {
     val home: File? = System.getProperty("user.home")?.let(::File)?.takeIf { it.isDirectory }
 
     // NODE VENDOR DRIFT #30 (restored after the 2.9.28 re-vendor dropped it):
-    // the question the dialog asks is the CALLER's, not this file's.
-    // TODO(localize): both titles are hardcoded English (as they were in our base
-    // — pre-existing, not new here). Keys `mobile.directory_picker_usb_title` and
-    // `mobile.directory_picker_save_title` do not exist in any bundle yet.
-    val (title, start) =
+    // the question the dialog asks is the CALLER's, not this file's. The TITLE
+    // half now arrives localized from the composable; this is the WHERE half.
+    val start: File? =
         when (purpose) {
             // Land near the USB key rather than $HOME; fall back to home when no
             // removable mount exists, because an empty chooser helps nobody.
-            DirectoryPickerPurpose.UsbCustody ->
-                "Select the mounted USB folder" to (removable ?: home)
+            DirectoryPickerPurpose.UsbCustody -> removable ?: home
             // The answer is usually home or Documents. A USB is reachable from
             // there like any other folder; the reverse is not true, which is why
             // the wrong default cost an operator their seed's location.
-            DirectoryPickerPurpose.SaveFile -> "Choose where to save the file" to home
+            DirectoryPickerPurpose.SaveFile -> home
         }
 
     val picked = arrayOfNulls<String>(1)
@@ -107,7 +144,7 @@ private fun chooseDirectory(purpose: DirectoryPickerPurpose): String? {
                     fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
                     isMultiSelectionEnabled = false
                 }
-            if (chooser.showDialog(null, "Select") == JFileChooser.APPROVE_OPTION) {
+            if (chooser.showDialog(null, approveLabel) == JFileChooser.APPROVE_OPTION) {
                 picked[0] = chooser.selectedFile?.absolutePath
             }
         } catch (t: Throwable) {

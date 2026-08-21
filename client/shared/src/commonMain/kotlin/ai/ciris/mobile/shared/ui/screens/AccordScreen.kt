@@ -1031,7 +1031,12 @@ private fun RemintTrustRootSheet(
     val proposeReady = proposeHolder.isNotBlank() && proposeUsb.isNotBlank() &&
         proposePin.isNotBlank() && selected != null && !busy
     val cosignReady = cosignHolder.isNotBlank() && cosignUsb.isNotBlank() &&
-        cosignPin.isNotBlank() && seed != null && !busy
+        cosignPin.isNotBlank() && seed != null && !busy &&
+        // NODE VENDOR DRIFT #32: a bundle the server called blocked cannot be
+        // repaired by another signature, so don't leave a live button asking for
+        // one. The Unrecoverable panel above says why; this stops the tap that
+        // would spend a second holder's YubiKey on a guaranteed refusal.
+        seed?.blockedBy == null
 
     val doPropose = {
         selected?.let { sel ->

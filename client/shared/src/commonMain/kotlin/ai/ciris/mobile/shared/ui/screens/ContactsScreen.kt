@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
@@ -119,6 +120,8 @@ fun ContactsScreen(
     val addRefusalReasonId by viewModel.addRefusalReasonId.collectAsState()
     val addError by viewModel.addError.collectAsState()
     val justAdded by viewModel.justAdded.collectAsState()
+    val routeUnsupported by viewModel.routeUnsupported.collectAsState()
+    val chatIneligible by viewModel.chatIneligible.collectAsState()
 
     LaunchedEffect(Unit) { viewModel.load() }
 
@@ -128,7 +131,8 @@ fun ContactsScreen(
     var addExpanded by remember { mutableStateOf(false) }
     var addKeyId by remember { mutableStateOf("") }
     val listIsEmpty = contacts.isEmpty() && searchQuery.isBlank()
-    val showAddCard = !pickerMode && (addExpanded || (contactsLoaded && listIsEmpty))
+    val showAddCard = !pickerMode && !routeUnsupported &&
+        (addExpanded || (contactsLoaded && listIsEmpty))
 
     Scaffold(
         topBar = {
@@ -245,6 +249,39 @@ fun ContactsScreen(
                 )
             }
 
+            // ── The node predates this surface ────────────────────────────────
+            // Checked BEFORE loading/empty, because both of those would be a
+            // wrong answer to a question this node cannot answer at all.
+            if (routeUnsupported && !pickerMode) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(32.dp).testable("contacts_unsupported"),
+                    ) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            localizedString("mobile.contacts_node_too_old_title"),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            localizedString("mobile.contacts_node_too_old_body"),
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                return@Column
+            }
+
             // ── Loading spinner ───────────────────────────────────────────────
             val listEmptyNow = if (pickerMode) peers.isEmpty() else contacts.isEmpty()
             if (loading && listEmptyNow) {
@@ -288,7 +325,11 @@ fun ContactsScreen(
                     }
                 } else {
                     items(contacts, key = { it.keyId }) { contact ->
-                        ContactRow(contact = contact, onOpenChat = { onOpenChat(contact) })
+                        ContactRow(
+                            contact = contact,
+                            chatIneligible = contact.keyId in chatIneligible,
+                            onOpenChat = { onOpenChat(contact) },
+                        )
                     }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
@@ -444,6 +485,13 @@ private fun AddContactCard(
 @Composable
 private fun ContactRow(
     contact: Contact,
+    /**
+     * The live consent grant does not cover `chat:` — messages to this contact
+     * cannot replicate (CIRISServer#458). Said out loud on the row, because a
+     * contact that silently cannot receive anything is the failure mode that
+     * defect hid behind.
+     */
+    chatIneligible: Boolean,
     onOpenChat: () -> Unit,
 ) {
     val (icon, tint) = trustGlyph(contact.trust)
@@ -518,6 +566,14 @@ private fun ContactRow(
                         text = localizedString("mobile.contacts_projection_missing"),
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (chatIneligible) {
+                    Text(
+                        text = localizedString("mobile.contacts_chat_not_covered"),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testable("contacts_chat_ineligible_${contact.keyId}"),
                     )
                 }
             }

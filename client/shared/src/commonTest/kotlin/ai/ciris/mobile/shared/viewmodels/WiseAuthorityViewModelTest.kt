@@ -696,6 +696,23 @@ class WiseAuthorityViewModelTest {
     }
 
     @Test
+    fun loadBudgetState_dropsAResponseForADialogTheOperatorHasClosed() = runTest {
+        val api = FakeApprovalsApi(budgetState = budgetState())
+        val (vm, _) = viewModel(api)
+
+        // The read is still in flight when the operator dismisses the dialog.
+        vm.loadBudgetState("t1")
+        vm.clearBudgetState()
+        advanceUntilIdle()
+
+        // A late response for a dismissed or replaced approval must never
+        // become the state the *current* dialog renders — and validates its
+        // amount against. Which approval is open is the only thing that decides
+        // that; the response's own ticketId is whatever we asked for.
+        assertNull(vm.selectedBudgetState.value)
+    }
+
+    @Test
     fun grantBudget_refusesAnAmountAboveTheLoadedHeadroom() = runTest {
         val api = FakeApprovalsApi(
             proposals = listOf(proposalTicket("t1", "25.00")),
@@ -755,6 +772,42 @@ class WiseAuthorityViewModelTest {
 
         // Fail-closed stays fail-closed: nothing is issued, nothing starts.
         assertEquals(listOf("t1" to "blocked"), api.statusUpdates)
+    }
+
+    @Test
+    fun deferProposal_doesNotAnnounceTheProposalStraightBack() = runTest {
+        val api = FakeApprovalsApi(proposals = listOf(proposalTicket("t1")))
+        val (vm, sink) = viewModel(api)
+
+        vm.refresh()
+        advanceUntilIdle()
+        assertEquals(listOf("t1"), sink.shown)
+
+        vm.deferProposal("t1", "ask me tomorrow")
+        advanceUntilIdle()
+
+        // "Not now" leaves the proposal pending, and the refresh that follows
+        // the defer re-observes it. It has to stay marked as already-notified,
+        // or the operator's attempt to leave it for later notifies them again
+        // the instant it completes.
+        assertEquals(listOf("t1"), sink.shown)
+    }
+
+    @Test
+    fun grantBudget_withoutPromotionDoesNotRenotifyTheStillBlockedProposal() = runTest {
+        val api = FakeApprovalsApi(proposals = listOf(proposalTicket("t1", "25.00")))
+        val (vm, sink) = viewModel(api)
+
+        vm.refresh()
+        advanceUntilIdle()
+        assertEquals(listOf("t1"), sink.shown)
+
+        // Money issued, work deliberately not started: the ticket stays blocked
+        // and therefore stays pending, so the id is not spent yet.
+        vm.grantBudget("t1", "10.00", "USDC", "fee", 24, promote = false)
+        advanceUntilIdle()
+
+        assertEquals(listOf("t1"), sink.shown)
     }
 
     @Test
