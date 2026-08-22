@@ -147,7 +147,14 @@ fn inbound(event_type: &str, thought_id: &str, ts: &str) -> InboundEvent {
 /// `public_key_b64()` is sufficient.
 async fn register_key_in_directory(engine: &Engine, signer: &LocalSigner) {
     let pubkey_b64 = signer.public_key_b64();
-    let key_id = signer.key_id().to_owned();
+    // THE DERIVED ID, not the alias (CIRISPersist#247's floor): a signer's
+    // rows are attested under `derived_key_id()` — `<alias>-<fingerprint>` —
+    // and `lookup_public_key` is asked for exactly that. Registering the bare
+    // alias put a row in the directory that the verifier never asks about, so
+    // the trace signed fine and resolved to "unknown signing key id:
+    // sovereign-rlib-key-gnan6vglih". The fingerprint suffix in that error IS
+    // the tell.
+    let key_id = signer.derived_key_id();
     let now = Utc::now();
 
     let record = KeyRecord {

@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use ciris_persist::prelude::Engine;
 
 use crate::config::RetentionPolicy;
-use crate::retention::summary::{EvictionPlan, EvictionSummary};
+use crate::retention::summary::{DiskPressure, EvictionPlan, EvictionSummary};
 
 /// Per-statement batch size when looping `delete_traces_older_than`.
 /// Keeps transactions small — both Postgres + SQLite happier on
@@ -64,9 +64,11 @@ pub fn plan_eviction(
     // (evict-until-below-threshold loop with size estimation) is a
     // follow-up; this v0.4 slice picks a conservative cut that's
     // monotonic — never *less* aggressive than `max_age_days`.
+    let mut disk_pressure = DiskPressure::Unbounded;
     if let Some(max_disk_gb) = policy.max_disk_gb {
-        let cap_bytes = max_disk_gb.saturating_mul(1_000_000_000) as f64;
-        if (summary.total_disk_bytes as f64) >= cap_bytes * DISK_EVICTION_THRESHOLD {
+        let cap_bytes = max_disk_gb.saturating_mul(1_000_000_000);
+        let used_bytes = summary.total_disk_bytes;
+        if (used_bytes as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD {
             // Use the trace_events table's age midpoint as the cut.
             // If the table is empty or has a single row, no cut.
             if let (Some(oldest), Some(newest)) = (
@@ -82,6 +84,34 @@ pub fn plan_eviction(
                     None => midpoint,
                 });
             }
+            // CIRISServer#476 — THE VERDICT, and the reason this branch is not
+            // allowed to fall through silently any more. Over the trigger, the
+            // question is no longer "what do we cut" but "can we cut anything
+            // AT ALL". Answered from the same summary the cut was planned
+            // from: if neither lever produced an action, the bytes are in
+            // tables this policy cannot reach, and every future pass will
+            // decide exactly this again.
+            let evictable_rows = summary
+                .trace_events
+                .rows
+                .saturating_add(summary.audit_log.rows);
+            disk_pressure = if delete_traces_older_than.is_some() {
+                DiskPressure::Relieving {
+                    used_bytes,
+                    cap_bytes,
+                }
+            } else {
+                DiskPressure::Unreachable {
+                    used_bytes,
+                    cap_bytes,
+                    evictable_rows,
+                }
+            };
+        } else {
+            disk_pressure = DiskPressure::Within {
+                used_bytes,
+                cap_bytes,
+            };
         }
     }
 
@@ -106,9 +136,27 @@ pub fn plan_eviction(
     //   the derived `detection_events` table. Needs a separate
     //   primitive.
 
+    // An audit archive is also a lever: if THAT can act, the bound is not
+    // unreachable even with an empty trace table. Folded in after dimension 3
+    // so the verdict accounts for every action the plan actually carries.
+    if archive_audit_range.is_some() {
+        if let DiskPressure::Unreachable {
+            used_bytes,
+            cap_bytes,
+            ..
+        } = disk_pressure
+        {
+            disk_pressure = DiskPressure::Relieving {
+                used_bytes,
+                cap_bytes,
+            };
+        }
+    }
+
     EvictionPlan {
         delete_traces_older_than,
         trace_batch_size: DEFAULT_TRACE_BATCH_SIZE,
+        disk_pressure,
         archive_audit_range,
     }
 }
@@ -159,6 +207,7 @@ pub async fn execute_plan(
     let freed_bytes_estimate = bytes_before.saturating_sub(bytes_after);
 
     Ok(EvictionSummary {
+        disk_pressure: plan.disk_pressure,
         evicted_traces,
         archived_audit_entries,
         archived_audit_ranges,
@@ -359,5 +408,127 @@ mod tests {
             t("2026-05-28T00:00:00Z"),
         );
         assert_eq!(plan.trace_batch_size, DEFAULT_TRACE_BATCH_SIZE);
+    }
+}
+
+/// **The disk bound must confess when it cannot bite** (CIRISServer#476).
+///
+/// Every case here is modelled on the production node that exposed the defect:
+/// ciris-status, a 389 MB store made almost entirely of attestations and wire
+/// index, with ZERO trace rows, reporting "inside every configured bound" on
+/// every hourly pass.
+#[cfg(test)]
+mod disk_bound_honesty {
+    use super::*;
+    use crate::config::RetentionPolicy;
+    use crate::retention::summary::DiskPressure;
+    use ciris_persist::retention::{StorageSummary, TableUsage};
+
+    fn now() -> DateTime<Utc> {
+        "2026-08-22T22:00:00Z".parse().unwrap()
+    }
+
+    /// A store shaped like ciris-status: `bytes` on disk, and NOTHING the
+    /// policy's levers can reach.
+    fn unreachable_store(bytes: u64) -> StorageSummary {
+        StorageSummary {
+            trace_events: TableUsage::default(),
+            trace_llm_calls: TableUsage::default(),
+            detection_events: TableUsage::default(),
+            audit_log: TableUsage::default(),
+            edge_outbound_queue: TableUsage::default(),
+            federation_keys: TableUsage::default(),
+            total_disk_bytes: bytes,
+        }
+    }
+
+    /// THE DEFECT, as a test: over the cap, no lever, and the planner must say
+    /// so. Before #476 this produced an empty plan indistinguishable from a
+    /// healthy pass.
+    #[test]
+    fn a_store_over_cap_with_no_evictable_rows_reports_unreachable() {
+        // 2 GB of attestations against a 1 GB cap.
+        let summary = unreachable_store(2_000_000_000);
+        let policy = RetentionPolicy::default().with_max_disk_gb(Some(1));
+
+        let plan = plan_eviction(&summary, &policy, now());
+
+        assert!(
+            plan.delete_traces_older_than.is_none(),
+            "there are no traces to cut — that part was never the bug"
+        );
+        assert!(
+            plan.disk_pressure.is_unreachable(),
+            "a cap exceeded with no reachable bytes MUST report Unreachable, \
+             not an empty plan that reads as steady state: {:?}",
+            plan.disk_pressure
+        );
+        match plan.disk_pressure {
+            DiskPressure::Unreachable {
+                used_bytes,
+                cap_bytes,
+                evictable_rows,
+            } => {
+                assert_eq!(used_bytes, 2_000_000_000);
+                assert_eq!(cap_bytes, 1_000_000_000);
+                assert_eq!(
+                    evictable_rows, 0,
+                    "near-zero evictable rows beside a large store IS the diagnosis"
+                );
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    /// The same store UNDER its cap is ordinary health — the fault must not
+    /// fire merely because the evictable classes are empty. Without this, the
+    /// fix would alarm on every small node that keeps no traces.
+    #[test]
+    fn the_same_store_under_its_cap_is_not_a_fault() {
+        let summary = unreachable_store(100_000_000); // 100 MB
+        let policy = RetentionPolicy::default().with_max_disk_gb(Some(1));
+
+        let plan = plan_eviction(&summary, &policy, now());
+
+        assert!(!plan.disk_pressure.is_unreachable());
+        assert!(!plan.disk_pressure.is_over_trigger());
+        assert!(matches!(plan.disk_pressure, DiskPressure::Within { .. }));
+    }
+
+    /// Over the cap WITH traces to cut is the case that always worked, and it
+    /// must keep reading as actionable rather than inheriting the new alarm.
+    #[test]
+    fn over_cap_with_traces_to_cut_is_relieving_not_unreachable() {
+        let mut summary = unreachable_store(2_000_000_000);
+        summary.trace_events = TableUsage {
+            bytes: 0,
+            rows: 96_265,
+            oldest_ts: Some("2026-07-31T22:41:29Z".parse().unwrap()),
+            newest_ts: Some("2026-08-22T18:00:39Z".parse().unwrap()),
+            ..TableUsage::default()
+        };
+        let policy = RetentionPolicy::default().with_max_disk_gb(Some(1));
+
+        let plan = plan_eviction(&summary, &policy, now());
+
+        assert!(
+            plan.delete_traces_older_than.is_some(),
+            "traces exist and the cap is blown — the midpoint cut must fire"
+        );
+        assert!(matches!(plan.disk_pressure, DiskPressure::Relieving { .. }));
+        assert!(!plan.disk_pressure.is_unreachable());
+    }
+
+    /// No cap configured is NOT health — it is the absence of a question. The
+    /// verdict must not launder "unbounded" into "within bounds".
+    #[test]
+    fn no_cap_configured_reports_unbounded_never_within() {
+        let summary = unreachable_store(50_000_000_000); // 50 GB, no cap
+        let policy = RetentionPolicy::default();
+
+        let plan = plan_eviction(&summary, &policy, now());
+
+        assert!(matches!(plan.disk_pressure, DiskPressure::Unbounded));
+        assert!(!plan.disk_pressure.is_over_trigger());
     }
 }

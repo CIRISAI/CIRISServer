@@ -120,23 +120,48 @@ pub enum RetentionOutcome {
         freed_bytes_estimate: u64,
         total_disk_bytes: u64,
     },
+    /// **A CONFIGURED BOUND IS EXCEEDED AND NO LEVER REACHES THE BYTES**
+    /// (CIRISServer#476). The one arm here that IS a fault.
+    ///
+    /// `retention.max_disk_gb` measures the whole database; the only levers
+    /// this policy owns delete `trace_events` and archive `audit_log`. A node
+    /// whose mass is in neither class can sail past its cap while every pass
+    /// correctly decides there is nothing to evict.
+    ///
+    /// Measured, not hypothesised: ciris-status carried a 389 MB store —
+    /// 52,125 attestations, 52,160 wire-index rows, ZERO traces — and reported
+    /// "inside every configured bound" every hour. The cap was never the
+    /// protection anyone believed it was.
+    BoundUnenforceable {
+        used_bytes: u64,
+        cap_bytes: u64,
+        /// Rows the levers CAN reach. Near-zero here is the whole diagnosis.
+        evictable_rows: u64,
+    },
 }
 
 impl RetentionOutcome {
     /// Whether an operator should be ALARMED by this outcome.
     ///
-    /// Constant `false`, and deliberately written down rather than left implicit.
-    /// Every arm of this enum is the system behaving correctly — evicting,
-    /// finding nothing to evict, or having been told not to evict. The only
-    /// alarm-worthy event in this module is a pass that ERRORED, which is an
-    /// `Err` and not an arm here. Making that a checkable property rather than a
-    /// convention is what stops the next person adding a WARN to a happy path
-    /// (see `tests/retention_loop.rs`).
+    /// This was `false` for every arm, written down deliberately so nobody
+    /// could quietly add a WARN to a happy path: evicting, finding nothing to
+    /// evict, and having been told not to evict are all the system working,
+    /// and the only alarm-worthy event was an `Err`.
+    ///
+    /// **CIRISServer#476 found a fourth state that is none of those.** A
+    /// configured bound can be EXCEEDED and simultaneously unenforceable — the
+    /// disk cap reads the whole store while the levers reach only traces and
+    /// audit. That is not the system working: the operator asked for a limit
+    /// the node cannot honour, and silence there is the most expensive kind.
+    /// So the invariant is now "exactly one arm is a fault, and it is the one
+    /// where a bound cannot bite" — still checkable, still pinned, and the
+    /// happy paths are still forbidden from alarming.
     pub fn is_fault(&self) -> bool {
         match self {
             RetentionOutcome::Unbounded
             | RetentionOutcome::WithinBounds { .. }
             | RetentionOutcome::Evicted { .. } => false,
+            RetentionOutcome::BoundUnenforceable { .. } => true,
         }
     }
 }
@@ -188,6 +213,38 @@ pub async fn run_pass(
     // The threshold comes from lens-core's own const — writing `90%` here would
     // be a second literal that stays at 90 while the planner moves.
     let bounds = describe_bounds(&cfg.policy, before.total_disk_bytes);
+
+    // THE VERDICT OUTRANKS THE COUNT. "Evicted nothing" and "could not evict
+    // anything, while over the cap" produce the same zero and mean opposite
+    // things — checking the count first is exactly how the production node
+    // reported steady state for weeks while it grew.
+    if let ciris_lens_core::retention::DiskPressure::Unreachable {
+        used_bytes,
+        cap_bytes,
+        evictable_rows,
+    } = summary.disk_pressure
+    {
+        tracing::error!(
+            used_bytes,
+            cap_bytes,
+            evictable_rows,
+            trace_rows = before.trace_events.rows,
+            audit_rows = before.audit_log.rows,
+            %bounds,
+            "retention BOUND EXCEEDED AND UNENFORCEABLE — the store is over its \
+             configured disk cap and NO configured lever reaches the bytes. This \
+             policy can delete `trace_events` and archive `audit_log`; the mass is \
+             in neither (see evictable_rows). No future pass changes this on its \
+             own: narrow what this node ACCEPTS (consent prefixes / replication \
+             planes) or give the node more disk. Raising max_disk_gb silences the \
+             alarm without freeing a byte."
+        );
+        return Ok(RetentionOutcome::BoundUnenforceable {
+            used_bytes,
+            cap_bytes,
+            evictable_rows,
+        });
+    }
 
     if summary.evicted_traces == 0 && summary.archived_audit_entries == 0 {
         let outcome = RetentionOutcome::WithinBounds {

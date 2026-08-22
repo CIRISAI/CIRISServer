@@ -188,7 +188,17 @@ jobs:
       # `default-members` entry: both of those also change what a bare local
       # `cargo test` builds, and on the maintainer's box a workspace-wide build
       # OOMs. This keeps the local command untouched and names the package.
-      - run: cargo test -p ciris-lens-core --lib
+      # CIRISServer#476 — `--lib` was HALF the gap. The step above was added
+      # because lens-core's unit tests had never run; it left the crate's
+      # INTEGRATION tests (tests/*.rs) equally unrun, and one of them —
+      # sovereign_rlib, which drives the whole capture→seal→verify path — had
+      # been red since the persist v38 adoption while CI stayed green. Same
+      # lesson, one directory over: a test nobody runs is not a gate.
+      #
+      # Still deliberately NOT `--workspace` (see above): that changes what a
+      # bare local `cargo test` builds, and a workspace-wide build OOMs the
+      # maintainer's box. Naming the package keeps both true.
+      - run: cargo test -p ciris-lens-core
       # ── cohort_scope drift ratchet (CIRISServer#38) ─────────────────────────
       #
       # `tools/audit_cohort_scope_callers.py` has existed since v0.5.11 and was
