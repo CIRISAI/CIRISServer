@@ -172,7 +172,22 @@ pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 /// `covered_prefixes: ["capacity:","trace:"]`. A fixture that supplies the value
 /// production defaults cannot prove the default; it proved a path production
 /// could not take. `default_covers_the_trace_plane` below is the gate.
-pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &["capacity:", "trace:"];
+pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &[
+    "capacity:",
+    // CIRISServer#472 arc — the AUTHORITY plane. Owner-binding `delegates_to`
+    // rows ride the attestation plane under this prefix
+    // (`self_at_login::DIMENSION_DELEGATES_TO` = "self:delegates_to:v1"), and
+    // WITHOUT it in the default grant no node ever serves anyone's bindings:
+    // measured on the chat ladder — every node held only its OWN owner-binding,
+    // so every person→node resolution walk starved one hop out (our consent
+    // healer, edge v18.4's #523 owner_of serve widening, the far side's
+    // transcript reads). A mesh that does not replicate the records that say
+    // WHO SPEAKS FOR WHOM cannot verify authority beyond one hop — the bindings
+    // are federation-tier and hybrid-signed precisely so peers can check them
+    // (§8.1.12.7 step 5, "promote so peers verify the agent's authority").
+    "self:delegates_to:",
+    "trace:",
+];
 
 /// **The operator-facing consent disclosure — the copy a setup wizard SHOWS.**
 ///
@@ -944,6 +959,120 @@ pub async fn live_consent_grants(
     Ok(out)
 }
 
+/// **CIRISServer#472 — the person/node axis on the consent plane.**
+///
+/// A contact is a PERSON, but the wire routes NODE keys: edge resolves
+/// replication recipients by EXACT key match against `list_consent_peers`, and
+/// a person's fed-ID has no transport binding — a grant naming them is stored,
+/// folded, honored by every server-side reader, and NEVER SERVES A BYTE. The
+/// ladder measured it: the plane withheld with the person-named grant, seven
+/// node-named control rows landing on the same link.
+///
+/// The bridge is the replicated owner-binding, and persist walks it for us:
+/// [`Engine::nodes_stewarded_by`] folds liveness, withdraws/recants, and the
+/// live-user-role anchor — the substrate's own answer to "which nodes speak
+/// for this person", never a hand-rolled scan. (The CLASS fix — the send-set
+/// resolving persons itself — is filed as CIRISPersist#764; until it ships,
+/// naming the bound node here is the working path, and it stays correct
+/// afterward.)
+///
+/// An UNCLAIMED contact (no live bound node) is not an error: the grant falls
+/// back to the person-subject form — a recorded intent the UI already renders
+/// as chat-ineligible — and the next `POST /v1/contacts` after they claim a
+/// node widens onto it.
+pub async fn bound_nodes_of(engine: &Engine, person_key_id: &str) -> Result<Vec<String>> {
+    let stewarded = engine
+        .nodes_stewarded_by(person_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("nodes_stewarded_by({person_key_id}): {e}"))?;
+    // `nodes_stewarded_by` answers OWNERSHIP, deliberately including U itself
+    // (self-stewardship) and U's device OCCURRENCES. A replication grant's
+    // subject must be a TRANSPORT peer, and the discriminator is the registered
+    // identity_type: only NODE-role keys are what edge's consent send-set
+    // matches links against. Granting to the person or a phone occurrence is
+    // exactly the unroutable-subject defect this function exists to avoid —
+    // and persist's owner_of (the listing's reverse walk) only resolves
+    // delegates_to edges, so a phone-subject grant would also list as a
+    // phantom second contact.
+    let directory = engine.federation_directory();
+    let mut nodes: Vec<String> = Vec::new();
+    for cand in stewarded {
+        if cand == person_key_id {
+            continue;
+        }
+        let record = directory
+            .lookup_public_key(&cand)
+            .await
+            .map_err(|e| anyhow::anyhow!("lookup_public_key({cand}): {e}"))?;
+        if let Some(rec) = record {
+            let types =
+                ciris_persist::federation::types::identity_type::parse_set(&rec.identity_type);
+            if types.contains(&ciris_persist::federation::types::identity_type::NODE) {
+                nodes.push(cand);
+            }
+        }
+    }
+    nodes.sort();
+    Ok(nodes)
+}
+
+/// #472 — ensure chat-grade coverage for a CONTACT: cover every live bound
+/// node (the routable form), or fall back to the person-subject grant when no
+/// binding resolves. Returns the coverage of the FIRST routable subject (the
+/// row the response reports) plus every subject now covered.
+pub async fn ensure_contact_consent_covers<S: AsRef<str>>(
+    engine: &Engine,
+    node_key_id: &str,
+    contact_key_id: &str,
+    required_prefixes: &[S],
+) -> Result<(ConsentCoverage, Vec<String>)> {
+    let nodes = bound_nodes_of(engine, contact_key_id).await?;
+    if nodes.is_empty() {
+        let coverage = ensure_replication_consent_covers(
+            engine,
+            node_key_id,
+            contact_key_id,
+            required_prefixes,
+        )
+        .await?;
+        return Ok((coverage, vec![contact_key_id.to_owned()]));
+    }
+    let mut first: Option<ConsentCoverage> = None;
+    let mut any_fresh = false;
+    for node in &nodes {
+        let c =
+            ensure_replication_consent_covers(engine, node_key_id, node, required_prefixes).await?;
+        any_fresh |= c.freshly_emitted;
+        if first.is_none() {
+            first = Some(c);
+        }
+    }
+    let mut coverage = first.expect("nodes is non-empty");
+    coverage.freshly_emitted = any_fresh;
+    Ok((coverage, nodes))
+}
+
+/// #472 — what this node's live grants cover FOR a contact person: the union
+/// over their bound nodes' grants, plus any legacy or unclaimed-fallback
+/// person-subject grant. `Ok(None)` = no live grant on any subject.
+pub async fn contact_grant_prefixes(
+    engine: &Engine,
+    node_key_id: &str,
+    contact_key_id: &str,
+) -> Result<Option<Vec<String>>> {
+    let mut union: Vec<String> = Vec::new();
+    let mut any = false;
+    let mut subjects = bound_nodes_of(engine, contact_key_id).await?;
+    subjects.push(contact_key_id.to_owned());
+    for subject in &subjects {
+        if let Some(prefixes) = live_grant_prefixes(engine, node_key_id, subject).await? {
+            any = true;
+            union.extend(prefixes);
+        }
+    }
+    Ok(any.then(|| normalize_prefixes(&union)))
+}
+
 /// The outcome of [`ensure_replication_consent_covers`] — what is LIVE after
 /// the call, and what it cost.
 #[derive(Debug, Clone)]
@@ -1229,12 +1358,51 @@ pub async fn replication_peers_from_consent(
 ) -> Result<Vec<String>> {
     // persist returns the revocation-folded peer set already sorted + deduped
     // (a projection maintained by the Registry-of-Record), so this is a direct
-    // read — no client-side filtering that could re-introduce the drift.
-    engine
+    // read — no client-side re-filtering of LIVENESS that could re-introduce
+    // the drift.
+    let subjects = engine
         .federation_directory()
         .list_consent_peers(node_key_id)
         .await
-        .map_err(|e| anyhow::anyhow!("list consent peers for {node_key_id}: {e}"))
+        .map_err(|e| anyhow::anyhow!("list consent peers for {node_key_id}: {e}"))?;
+    // ── CIRISServer#472 — coordinators are for TRANSPORT peers only ──
+    //
+    // A consent subject may be a PERSON (the contact-grant fallback for an
+    // unclaimed contact, or a legacy grant). Spawning six coordinators for a
+    // person dials a key with no Reticulum destination: measured on the ladder
+    // as per-round "target is admitted but NOT rooted" WARN spam plus §24
+    // store-and-forward queue growth, and the wasted rounds contributed to
+    // CIRISEdge#373 backpressure drops on the planes that DO route. A person
+    // subject resolves to their live bound nodes (which the grants also name
+    // once the healer has run) and is otherwise skipped — the grant stays live
+    // as recorded intent; it is the DIAL that is meaningless, not the consent.
+    let directory = engine.federation_directory();
+    let mut peers: Vec<String> = Vec::new();
+    for subject in subjects {
+        let record = directory
+            .lookup_public_key(&subject)
+            .await
+            .map_err(|e| anyhow::anyhow!("lookup_public_key({subject}): {e}"))?;
+        let is_node = record
+            .map(|rec| {
+                ciris_persist::federation::types::identity_type::parse_set(&rec.identity_type)
+                    .contains(&ciris_persist::federation::types::identity_type::NODE)
+            })
+            .unwrap_or(false);
+        if is_node {
+            if !peers.contains(&subject) {
+                peers.push(subject);
+            }
+            continue;
+        }
+        for node in bound_nodes_of(engine, &subject).await? {
+            if !peers.contains(&node) {
+                peers.push(node);
+            }
+        }
+    }
+    peers.sort();
+    Ok(peers)
 }
 
 #[cfg(test)]

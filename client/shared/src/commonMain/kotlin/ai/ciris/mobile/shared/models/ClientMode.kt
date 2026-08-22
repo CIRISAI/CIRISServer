@@ -194,7 +194,7 @@ fun clientModeFrom(
  * there is no sync script" is true there and FALSE here; do not let it travel
  * back with a vendor sync (it did, in 2.9.28).
  */
-const val CLIENT_VERSION = "0.5.185"
+const val CLIENT_VERSION = "0.5.186"
 
 /**
  * Whether [nodeVersion] differs materially from [CLIENT_VERSION] — i.e. a

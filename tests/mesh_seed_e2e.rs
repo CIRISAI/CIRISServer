@@ -385,7 +385,8 @@ async fn register_self(engine: &Engine) -> (String, String) {
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
         &key_id,
-        identity_type::STEWARD,
+        // NODE (was STEWARD): the node's own key — same #472 transport-role rule.
+        identity_type::NODE,
         serde_json::Value::Null,
     )
     .await
@@ -536,7 +537,10 @@ impl PeerNodeB {
         ciris_persist::federation::admission::bind_subject_into_envelope(
             &mut envelope,
             NODE_B_KEY_LABEL,
-            identity_type::WITNESS,
+            // NODE, not WITNESS: this key IS a mesh node, and since the #472
+            // arc the coordinator set is transport-role filtered — a witness
+            // gets consent but no dialer.
+            identity_type::NODE,
             &ed_pub,
             Some(&pqc_pub),
         )
@@ -552,7 +556,7 @@ impl PeerNodeB {
             pubkey_ed25519_base64: ed_pub,
             pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
-            identity_type: identity_type::WITNESS.into(),
+            identity_type: identity_type::NODE.into(),
             identity_ref: NODE_B_KEY_LABEL.to_string(),
             valid_from: now,
             valid_until: None,

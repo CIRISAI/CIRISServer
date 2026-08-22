@@ -158,7 +158,12 @@ jobs:
           S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
           V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
-          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          # tag-pin OR rev-pin (an adoption branch rides a rev until upstream tags —
+          # a grep matching nothing must not kill the step: the 0.5.181 lesson).
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/' || true)
+          if [ -z "$EDGE" ]; then
+            EDGE=$(grep -m1 'CIRISEdge.*rev = "' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/r\1/' || true)
+          fi
           BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
           KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
           KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"
@@ -314,7 +319,12 @@ jobs:
           S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
           P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
           V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
-          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          # tag-pin OR rev-pin (an adoption branch rides a rev until upstream tags —
+          # a grep matching nothing must not kill the step: the 0.5.181 lesson).
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/' || true)
+          if [ -z "$EDGE" ]; then
+            EDGE=$(grep -m1 'CIRISEdge.*rev = "' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/r\1/' || true)
+          fi
           BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
           KEY_VERIFY="${BASE}-pnone-enone-v${V:-none}"
           KEY_PERSIST="${BASE}-p${P:-none}-enone-v${V:-none}"

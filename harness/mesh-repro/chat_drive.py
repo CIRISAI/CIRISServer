@@ -59,7 +59,9 @@ CHAT_PREFIX = "chat:"
 # a PERSON, and a person's fed-ID carries no transport binding: edge resolves
 # recipients by exact key match against `list_consent_peers(local)`, so the row
 # leaves this node only if the peer NODE is in that set.
-PEER_PREFIXES = ["capacity:", "chat:", "trace:"]
+# self:delegates_to: carries the owner-binding rows — without it no node can
+# resolve who speaks for whom beyond one hop (the #472 arc's measured starve).
+PEER_PREFIXES = ["capacity:", "chat:", "self:delegates_to:", "trace:"]
 
 
 def req(method, url, token=None, body=None):
