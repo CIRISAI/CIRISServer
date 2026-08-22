@@ -276,8 +276,6 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
     ciris_server::auth::session::test_support_issue_session_token(wa_id)
 }
 
-/// Serve the contacts+chat router on an ephemeral port.
-
 /// The CONSENT subjects (persist's revocation-folded list) — distinct from
 /// `replication_peers_from_consent`, which since the #472 arc is the TRANSPORT
 /// set (NODE-role subjects only, persons resolved through their bindings).
@@ -291,6 +289,7 @@ async fn consent_subjects(engine: &Engine, node: &str) -> Vec<String> {
         .expect("list_consent_peers")
 }
 
+/// Serve the contacts+chat router on an ephemeral port.
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
     let app = contacts_chat::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
