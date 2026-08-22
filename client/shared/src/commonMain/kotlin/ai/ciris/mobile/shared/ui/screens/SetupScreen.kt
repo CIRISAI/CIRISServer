@@ -1,6 +1,5 @@
 package ai.ciris.mobile.shared.ui.screens
 
-import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.api.CIRISApiClient
 import ai.ciris.mobile.shared.api.CheckState
 import ai.ciris.mobile.shared.api.checkLlmConfig
@@ -165,6 +164,13 @@ fun SetupScreen(
     viewModel: SetupViewModel,
     apiClient: CIRISApiClient,
     onSetupComplete: () -> Unit,
+    /**
+     * Does the attached node carry a brain? (CIRISServer#479 — the probed
+     * `ClientMode`.) Decides whether the wizard offers the AI/assistant steps.
+     * Defaults to `false` for the same reason the landing screen does: asking a
+     * brainless node's owner to configure an LLM is the worse wrong guess.
+     */
+    hasAgent: Boolean = false,
     onBackToLogin: (() -> Unit)? = null,  // Optional callback to return to login screen
     // The one-time ownership CLAIM PIN / NodeCode captured from the LOCAL node's
     // boot banner (PythonRuntime.localClaimPin / .localNodeCode). Used on setup
@@ -351,6 +357,7 @@ fun SetupScreen(
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
             // Step indicators at top
             StepIndicators(
+                hasAgent = hasAgent,
                 currentStep = state.currentStep,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -364,7 +371,7 @@ fun SetupScreen(
                     .fillMaxWidth()
             ) {
                 when (state.currentStep) {
-                    SetupStep.YOU -> YouStep(viewModel, state)
+                    SetupStep.YOU -> YouStep(viewModel, state, hasAgent)
                     SetupStep.JOIN_FEDERATION -> JoinFederationStep(viewModel, state, apiClient)
                     SetupStep.AI -> AiStep(viewModel, state, apiClient)
                     SetupStep.COMPLETE ->
@@ -468,6 +475,7 @@ fun SetupScreen(
 
             // Navigation buttons - with navigation bar padding to avoid overlap
             NavigationButtons(
+                hasAgent = hasAgent,
                 currentStep = state.currentStep,
                 canProceed = state.canProceedFromCurrentStep(),
                 validationError = state.getStepValidationError(),
@@ -478,9 +486,9 @@ fun SetupScreen(
                     // AI on the agent build and JOIN_FEDERATION on the node
                     // client; on COMPLETE we ALSO self-claim ownership of the
                     // local node for the just-created user.
-                    val isFinalStep = isFinalSetupStep(state.currentStep, CIRISBuild.HAS_AGENT)
+                    val isFinalStep = isFinalSetupStep(state.currentStep, hasAgent)
 
-                    if (isFinalStep && !CIRISBuild.HAS_AGENT) {
+                    if (isFinalStep && !hasAgent) {
                         // NODE CLIENT final step: there is NO agent /v1/setup/complete
                         // on ciris-server. The fed-ID was already minted (fed-ID step,
                         // first-run); the automated LAST step is the ownership
@@ -590,11 +598,13 @@ fun SetupScreen(
 @Composable
 private fun StepIndicators(
     currentStep: SetupStep,
+    /** The probed mode (CIRISServer#479) — three dots with a brain, two without. */
+    hasAgent: Boolean,
     modifier: Modifier = Modifier
 ) {
     // Three screens: You → Join the federation → AI. The node client has no
     // brain to configure, so it shows two.
-    val steps = if (CIRISBuild.HAS_AGENT) {
+    val steps = if (hasAgent) {
         listOf(SetupStep.YOU to "1", SetupStep.JOIN_FEDERATION to "2", SetupStep.AI to "3")
     } else {
         listOf(SetupStep.YOU to "1", SetupStep.JOIN_FEDERATION to "2")
@@ -677,6 +687,8 @@ private fun l10nOr(key: String, fallback: String): String {
 private fun YouStep(
     viewModel: SetupViewModel,
     state: SetupFormState,
+    /** The probed mode (CIRISServer#479) — the welcome copy differs. */
+    hasAgent: Boolean,
     modifier: Modifier = Modifier
 ) {
     // ONE scroll for the whole screen — the sections below deliberately do not
@@ -695,7 +707,7 @@ private fun YouStep(
             modifier = Modifier.padding(bottom = 8.dp)
         )
         Text(
-            text = if (CIRISBuild.HAS_AGENT) {
+            text = if (hasAgent) {
                 localizedString("setup.welcome_desc")
             } else {
                 localizedString("mobile.setup_welcome_desc_node")
@@ -2995,6 +3007,8 @@ private fun CompleteStep(
 @Composable
 private fun NavigationButtons(
     currentStep: SetupStep,
+    /** The probed mode (CIRISServer#479) — decides which step is FINAL. */
+    hasAgent: Boolean,
     canProceed: Boolean,
     validationError: String?,
     isSubmitting: Boolean,
@@ -3063,7 +3077,7 @@ private fun NavigationButtons(
                         )
                     } else {
                         Text(
-                            if (isFinalSetupStep(currentStep, CIRISBuild.HAS_AGENT)) {
+                            if (isFinalSetupStep(currentStep, hasAgent)) {
                                 localizedString("setup.finish")
                             } else {
                                 localizedString("setup.next")

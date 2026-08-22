@@ -42,7 +42,15 @@ private const val TAG = "SetupViewModel"
  * - Survives configuration changes and app backgrounding (extends ViewModel)
  */
 class SetupViewModel(
-    private val apiClient: CIRISApiClientProtocol
+    private val apiClient: CIRISApiClientProtocol,
+    /**
+     * Does the attached node carry a brain? (CIRISServer#479 — the probed
+     * `ClientMode`, not `CIRISBuild.HAS_AGENT`.) Decides whether the setup flow
+     * includes the AI/assistant steps. Defaults to `false`: a wizard that has
+     * not yet learned the answer must not ask a brainless node's owner to
+     * configure an LLM.
+     */
+    private val hasAgent: Boolean = false,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SetupFormState())
@@ -563,7 +571,7 @@ class SetupViewModel(
             return false
         }
         _state.value = currentState.copy(
-            currentStep = nextSetupStep(currentState.currentStep, CIRISBuild.HAS_AGENT),
+            currentStep = nextSetupStep(currentState.currentStep, hasAgent),
         )
         return true
     }
@@ -574,7 +582,7 @@ class SetupViewModel(
     fun previousStep() {
         val currentState = _state.value
         _state.value = currentState.copy(
-            currentStep = previousSetupStep(currentState.currentStep, CIRISBuild.HAS_AGENT),
+            currentStep = previousSetupStep(currentState.currentStep, hasAgent),
         )
     }
 

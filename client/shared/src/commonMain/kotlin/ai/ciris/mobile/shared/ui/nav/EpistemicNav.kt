@@ -1,7 +1,6 @@
 package ai.ciris.mobile.shared.ui.nav
 
 import androidx.compose.ui.graphics.vector.ImageVector
-import ai.ciris.mobile.shared.CIRISBuild
 import ai.ciris.mobile.shared.ui.components.CIRISIcons
 
 /**
@@ -482,7 +481,7 @@ data class NavGroup(
 /**
  * The AGENT group — the agent's own brain cards, re-applied on top of the
  * inherited server (node) nav shell ONLY on the agent build (gated in
- * [EPISTEMIC_NAV_GROUPS] on [CIRISBuild.HAS_AGENT]). This is the FULL agent
+ * [epistemicNavGroups] on the probed mode). This is the FULL agent
  * client = the node client + the agent's cards. The server prunes these pure
  * agent/brain surfaces for its standalone AI-free node build; on the agent build
  * they are surfaced again so the agent's Interact reasoning-stream chat, sessions,
@@ -492,7 +491,7 @@ data class NavGroup(
  * also lives in the [NODE_GROUP] below; a few surfaces intentionally appear in
  * both — the agent framing (a Settings sub-tree, a Memory→Graph card) alongside
  * the node-infra framing. Defined unconditionally (route/reference stability);
- * only surfaced when HAS_AGENT.
+ * only surfaced when the probed node carries a brain.
  */
 val AGENT_GROUP = NavGroup(
     id = "agent",
@@ -570,7 +569,13 @@ val MANAGE_GROUP = NavGroup(
  * lands the scaffolding; Phase B folds existing Network federation surface into
  * LayerGlobalCommons.
  */
-val COMMONS_GROUP = NavGroup(
+/**
+ * The Commons group. **A FUNCTION OF THE PROBED MODE, not of the build**
+ * (CIRISServer#479): `LayerAgent` is surfaced when the attached node actually
+ * carries a brain, so a node that gains one reveals it on the next probe
+ * instead of on the next reinstall.
+ */
+fun commonsGroup(hasAgent: Boolean) = NavGroup(
     id = "commons-layers",
     label = "Commons",
     icon = CIRISIcons.globe,
@@ -579,7 +584,7 @@ val COMMONS_GROUP = NavGroup(
         // LayerAgent (Agent/Self) — the agent's own self-scope layer hub. Surfaced
         // only on the agent build; dropped from the AI-free node client's nav (the
         // object remains defined for route compatibility).
-        if (CIRISBuild.HAS_AGENT) add(NavSurface.LayerAgent)
+        if (hasAgent) add(NavSurface.LayerAgent)
         add(NavSurface.LayerFamily)
         add(NavSurface.LayerLocalCommunity)
         add(NavSurface.LayerGlobalCommunities)
@@ -597,7 +602,7 @@ val COMMONS_GROUP = NavGroup(
 // per-scope Trust sections + NetworkTrustGraph) were removed entirely.
 
 // CLIENT_GROUP — surfaced only on the agent build (gated in [EPISTEMIC_NAV_GROUPS]
-// on [CIRISBuild.HAS_AGENT]). Its surfaces (AgentsList, ClientInterface) are pure
+// on the probed mode). Its surfaces (AgentsList, ClientInterface) are pure
 // agent/client cards the server drops for its standalone AI-free node build; on
 // the agent build they are surfaced again. Defined unconditionally for
 // route/reference stability.
@@ -615,26 +620,26 @@ val CLIENT_GROUP = NavGroup(
  *  used to be the separate Federation group (deleted 2.9.6). The former "Agent"
  *  group is now the node-observation "Node" group.
  *
- *  Agent-only groups (AGENT_GROUP, CLIENT_GROUP) are gated on
- *  [CIRISBuild.HAS_AGENT] — dormant/absent for the AI-free node client, so the
- *  agent's adoption is a single flag flip. Under HAS_AGENT the full agent client
+ *  Agent-only groups (AGENT_GROUP, CLIENT_GROUP) are gated on the PROBED
+ *  mode (CIRISServer#479) — absent while the attached node carries no brain,
+ *  present the moment it does, with no reinstall. Under `hasAgent` the client
  *  leads with AGENT_GROUP (agent brain cards), followed by the inherited
  *  node-observation NODE_GROUP + the shared Safety / Manage / Commons shells, with
  *  CLIENT_GROUP last. */
-val EPISTEMIC_NAV_GROUPS: List<NavGroup> = buildList {
-    if (CIRISBuild.HAS_AGENT) add(AGENT_GROUP)
+fun epistemicNavGroups(hasAgent: Boolean): List<NavGroup> = buildList {
+    if (hasAgent) add(AGENT_GROUP)
     add(NODE_GROUP)
     add(SAFETY_GROUP)
     add(MANAGE_GROUP)
-    add(COMMONS_GROUP)
-    if (CIRISBuild.HAS_AGENT) add(CLIENT_GROUP)
+    add(commonsGroup(hasAgent))
+    if (hasAgent) add(CLIENT_GROUP)
 }
 
 /**
  * Walk the entire surface tree (depth-first) — used by routers needing the
  * full leaf catalog without re-traversing the group structure each time.
  */
-fun allSurfaces(): List<NavSurface> = EPISTEMIC_NAV_GROUPS.flatMap { group ->
+fun allSurfaces(): List<NavSurface> = epistemicNavGroups(hasAgent = true).flatMap { group ->
     group.surfaces.flatMap { surface -> surface.descendantsAndSelf() }
 }
 
