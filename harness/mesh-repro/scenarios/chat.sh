@@ -170,7 +170,7 @@
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
 SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="the chat substrate held everywhere it is wired: two nodes converged on one derived room with no coordination, the consent/authz/attribution gates all bit in the right order, and the canonical that carries the mesh cannot read the room. Delivery itself is the RED-EXPECTED list above — when those flip, this line gets to say A's bytes landed in B's transcript."
+SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the node, author the owner, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
@@ -546,19 +546,23 @@ DIAG_peered() {
 # authors its own narrow grant first (see chat_drive.py), so every run has a
 # standing grant for `POST /v1/contacts` to widen.
 _chat_contact_one() {
-  local svc="$1" peer="$2"
+  # CIRISServer#472 — a routable contact grant names the peer's bound NODE;
+  # the person-subject form remains as the unclaimed-contact fallback and the
+  # legacy shape. Coverage on EITHER subject is a contact.
+  local svc="$1" owner="$2" node="$3"
   harness_db_count "$svc" federation_attestations \
     "attestation_type='scores' \
      AND CAST(attestation_envelope AS TEXT) LIKE '%consent:replication%' \
-     AND CAST(attestation_envelope AS TEXT) LIKE '%${peer}%' \
+     AND (CAST(attestation_envelope AS TEXT) LIKE '%${owner}%' \
+          OR CAST(attestation_envelope AS TEXT) LIKE '%${node}%') \
      AND CAST(attestation_envelope AS TEXT) LIKE '%chat:%'"
 }
 stage_contact() {
   _chat_load
   if [ -z "${CHAT_A_OWNER:-}" ] || [ -z "${CHAT_B_OWNER:-}" ]; then echo 0; return; fi
   local a b
-  a="$(_chat_contact_one "$CHAT_SENDER" "$CHAT_B_OWNER")"
-  b="$(_chat_contact_one "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_A_OWNER")"
+  a="$(_chat_contact_one "$CHAT_SENDER" "$CHAT_B_OWNER" "${CHAT_B_NODE_KEY:-__none__}")"
+  b="$(_chat_contact_one "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_A_OWNER" "${CHAT_A_NODE_KEY:-__none__}")"
   if [ "${a:-0}" -gt 0 ] && [ "${b:-0}" -gt 0 ]; then echo 2; else echo 0; fi
 }
 HINT_contact="the contact grant naming the peer's OWNER does not carry the \`chat:\` prefix on both nodes. Read the contact call's freshly_emitted: FALSE means \`ensure_replication_consent_covers\` decided the standing grant already covered everything asked for — check what that standing grant actually covers (the admission door authors one covering \`self:delegates_to:\` alone), because a grant that looks authoritative and covers nothing chat rides on is the CIRISServer#458 shape. TRUE with no \`chat:\` in the row means the widening ran and the union came out wrong."
@@ -636,9 +640,6 @@ HINT_arrived="the sender's message never reached the recipient. The diagnosis be
      transcript, \`collect_messages\` anchors on \`active_community_members\`, so
      the recipient must hold the community row AND the author must still be a member."
 EXIT_arrived=35
-# RED-EXPECTED — the operator decided 0.5.185 ships over this; the line below,
-# not a CI failure everyone routes around, is the record of what remains.
-XFAIL_arrived="ONE SEAM LEFT, and it moved three layers deeper this arc: the message now CROSSES THE WIRE (send-set names the node, zero withholds, envelope delivered) and is REFUSED at persist v38.2's community write door — 'scope_no_community_membership, class=retry_after_community_roster [TRANSIENT]'. The transient never transitions, and the mechanism is exact: ingest's writer_admission resolves the writer through resolve_identity_for_occurrence (the OCCURRENCE axis), but every node's occurrence row is SELF-REFERENTIAL (identity==occurrence==node — the #454 sealing shape), so the singleton fallback makes the node its own identity and membership resolves EMPTY forever, even with the roster AND the owner-binding both present on the recipient. The node's authority to speak for its owner lives on the DELEGATES_TO axis, which the door never walks — persist's own owner_of accessor (admission.rs:7341) is one call away. Filed as CIRISPersist#765; the server-side alternative (rebinding the node occurrence to its owner) collides with the #454 signer_acts_for sealing path and is not taken lightly. Everything upstream of this door is DONE and ladder-proven: signer==attester, bindings replicate (publish-own + self:delegates_to: prefix), send-set clean, coordinators transport-only."
 # THE THREE-WAY SPLIT. "It did not arrive" is three different asks, addressed to
 # three different owners, and a diagnosis that does not say which is a diagnosis
 # nobody can act on:
@@ -728,12 +729,6 @@ stage_hamburger() {
 }
 HINT_hamburger="the row reached the recipient but not with its identity intact — attesting_key_id is not the sender's owner, cohort_scope is not \`community\`, the subject set does not name the author, or the status folded away from \`live\`. Any of those makes the arrived object a different object from the one that was sent."
 EXIT_hamburger=36
-# RED-EXPECTED — strictly downstream of arrived: this stage asserts the two-fact
-# projection (attester == sender node, author == owner) on the DELIVERED copy,
-# and nothing is delivered while the send-set withholds. It flips live in the
-# same change that greens arrived; XFAILing it separately would be a lie of
-# precision (it has its own assertion, not its own defect).
-XFAIL_hamburger="downstream of arrived — the two-fact assertion (attesting_key_id == the sender NODE, author == the owner from the signed envelope's on_behalf_of_key_id) has no delivered row to run against until the consent send-set names the contact's bound NODE. Delete this in the same change that deletes XFAIL_arrived."
 DIAG_hamburger() {
   _chat_load
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python -c '
@@ -825,7 +820,7 @@ HINT_one_sided="the recipient could not resolve a room the sender had already cr
 EXIT_one_sided=38
 # RED-EXPECTED. The value names the mechanism because that is the entire point of
 # the marking: this line, not a CI failure everyone routes around, is the ask.
-XFAIL_one_sided="the roster now CROSSES THE WIRE (Community-plane frames delivered on the a<->b link — the coordinator (71adb94), the publish-own owner widening, and the self:delegates_to: prefix policy all took) and the residual is CONGESTION, not policy: the recipient's coordinator inbound channel drops the frames under load (CIRISEdge#373 backpressure, counted), and re-offers race the bounded window. No Community refusal was ever logged. Expected to converge with channel tuning (#373's court) or a longer window; behind it sits the same writer-resolution door as XFAIL_arrived for the apply. This stage flips live when a one-sided room resolves cross-node."
+XFAIL_one_sided="the roster now CROSSES THE WIRE (Community-plane frames delivered on the a<->b link — the coordinator (71adb94), the publish-own owner widening, and the self:delegates_to: prefix policy all took) and the residual is CONGESTION, not policy: the recipient's coordinator inbound channel drops the frames under load (CIRISEdge#373 backpressure, counted), and re-offers race the bounded window. No Community refusal was ever logged. Expected to converge with channel tuning (#373's court) or a longer window — the writer-resolution door that used to sit behind it is FIXED (persist v38.3.0 / #765; arrived and hamburger are REQUIRED stages now and pass). This stage flips live when a one-sided room resolves cross-node."
 DIAG_one_sided() {
   _chat_load
   echo "  recipient's answer for the sender's room, before it opened one:"
