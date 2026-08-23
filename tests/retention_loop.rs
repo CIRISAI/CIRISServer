@@ -423,3 +423,101 @@ fn only_an_unenforceable_bound_is_a_fault() {
          let ciris-status pass its cap unnoticed"
     );
 }
+
+// ── 5. The alarm reaches health, and comes back down ─────────────────────────
+
+/// The degradation registry is a PROCESS-GLOBAL and libtest runs these cases in
+/// parallel threads of one process, so one case's `raise` lands inside another's
+/// window. Caught by construction here rather than by a flake: both cases below
+/// raise the SAME code and then assert it is gone, which is exactly the pair
+/// that interleaves into a false failure. `src/degradation.rs` carries the same
+/// lock for the same reason, and `oauth_state_matrix.rs` records the first time
+/// this repo paid for a leaked global.
+static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// **A retention fault must be visible where someone is looking**, and a
+/// recovered node must stop shouting (CIRISServer#446).
+///
+/// The ERROR line `run_pass` emits goes to a log nobody tails. The half that
+/// matters for an operator on a phone is `GET /v1/node/health`, and the half
+/// that matters for whether they ever trust it again is that a fixed node
+/// clears. A warning that only ever goes up is one people learn to skip — the
+/// same silence #476 set out to fix, approached from the other side.
+///
+/// Driven through the real `run_pass` rather than by calling `clear` directly,
+/// because the defect this guards against is a future arm that returns early
+/// and skips the clear.
+#[tokio::test]
+async fn a_healthy_pass_takes_a_standing_retention_alarm_down() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    // Start from a known state for THIS code specifically — `reset_for_test`
+    // is deliberately not public, so a test clears exactly what it asserts on
+    // rather than being handed a lever that empties a live node's health.
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+    let engine = node().await;
+    ingest_aged_traces(&engine, 3, 0).await;
+
+    // Pretend a previous pass found the bound unenforceable.
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "a bound from a previous pass that has since been fixed",
+    ));
+    assert!(
+        ciris_server::degradation::degraded_mode(),
+        "fixture: the node must start this test degraded"
+    );
+
+    let cfg = RetentionConfig::from_resolved(&ResolvedConfig::default());
+    let outcome = retention_loop::run_pass(&engine, &cfg)
+        .await
+        .expect("a healthy pass must not error");
+    assert!(!outcome.is_fault(), "fixture: {outcome:?} must be healthy");
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the store is inside every bound and the node is STILL reporting an unenforceable \
+         cap. A stale alarm is worse than no alarm: it trains the operator to ignore the \
+         real one. Standing: {standing:?}"
+    );
+}
+
+/// The unbounded arm returns EARLY, before the store is even read — so it needs
+/// its own clear, and this is the test that would catch its absence.
+///
+/// Clearing here is not reassurance. An unbounded store still grows and the
+/// INFO line says so; it is refusing to leave standing a claim ("the configured
+/// bound cannot bite") that stops being true the moment there is no configured
+/// bound.
+#[tokio::test]
+async fn the_early_unbounded_return_also_clears() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    // Start from a known state for THIS code specifically — `reset_for_test`
+    // is deliberately not public, so a test clears exactly what it asserts on
+    // rather than being handed a lever that empties a live node's health.
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+    let engine = node().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "raised while a cap was configured; the operator has since removed it",
+    ));
+
+    let cfg = RetentionConfig::from_resolved(&retention_config(3600, 0));
+    let outcome = retention_loop::run_pass(&engine, &cfg)
+        .await
+        .expect("an unbounded pass must not error");
+    assert_eq!(outcome, RetentionOutcome::Unbounded, "fixture");
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the unbounded path returns before the sweep and skipped the clear, so removing a \
+         cap leaves the node permanently degraded. Standing: {standing:?}"
+    );
+}

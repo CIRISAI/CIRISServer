@@ -378,6 +378,28 @@ pub fn spawn(
                 );
             }
 
+            // The node's own health, on the cadence that is already running.
+            //
+            // Deliberately BEFORE the reconcile call and outside its result:
+            // the counters describe the rounds edge already ran, so they are
+            // just as readable on a tick whose reconcile is about to fail — and
+            // a tick that fails is exactly when an operator wants them. Reading
+            // them here rather than spawning a fourth loop also means the
+            // degradation window is the reconcile cadence, which is the same
+            // clock the operator surface's peer counts move on.
+            //
+            // `current_edge()` is fallible by design (a fold with no edge in
+            // process). Absent edge raises nothing: this loop reports what edge
+            // measured, and has no standing to invent a verdict when there is
+            // nothing to measure with.
+            match ciris_edge::current_edge() {
+                Ok(e) => crate::degradation::report_edge_metrics(&e.metrics().snapshot()),
+                Err(e) => tracing::debug!(
+                    error = %e,
+                    "no in-process edge to read round counters from this tick —                      network degradation not evaluated (not the same as 'healthy')"
+                ),
+            }
+
             match reconcile_once(&engine, &node_key_id, &runtime).await {
                 Ok(count) => {
                     // INFO only on a genuine transition; otherwise the per-tick

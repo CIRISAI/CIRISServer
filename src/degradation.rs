@@ -36,7 +36,7 @@
 //!   right now", and collapsing them would make the flag useless the first time
 //!   an advisory fired.
 //! * **Cannot-measure is not healthy.** A probe that fails to read its input
-//!   reports that it could not read it (see [`MemoryReading::Unavailable`]),
+//!   reports that it could not read it (see [`MemoryReading`](crate::degradation::MemoryReading)),
 //!   never a comfortable number — the distinct-zeroes discipline this repo has
 //!   now paid for four times.
 
@@ -533,6 +533,112 @@ pub fn report_network_rounds(timed_out: u64, total: u64) {
     }
 }
 
+/// **Cumulative counters are not a health reading.** This is the bridge.
+///
+/// Every counter on [`EdgeMetricsBundle`] is monotonic for the process
+/// lifetime. Health is a question about NOW. Feeding a lifetime total to
+/// [`report_network_rounds`] would mean a node that timed out badly during a
+/// two-minute network partition on Tuesday still reads `degraded` on Friday —
+/// and, worse, a node that is timing out RIGHT NOW but has a long healthy
+/// history reads fine, because the fresh failures are diluted by a denominator
+/// that only ever grows. Both errors are silent.
+///
+/// So the window lives here, in ONE place, rather than in each caller. The
+/// previous snapshot is process-global for the same reason the registry is:
+/// there is one edge runtime per process, and two callers differencing against
+/// two different baselines would produce two different verdicts about the same
+/// node.
+static LAST_EDGE_COUNTERS: std::sync::Mutex<Option<EdgeCounters>> = std::sync::Mutex::new(None);
+
+#[derive(Clone, Copy, Default)]
+struct EdgeCounters {
+    timed_out: u64,
+    rounds_total: u64,
+    backpressure_drops: u64,
+}
+
+/// Saturating difference. A counter that went BACKWARDS means the edge runtime
+/// restarted and reset its metrics — the honest window is then "everything
+/// since the restart", which is what a saturating subtract against a zeroed
+/// baseline gives once the baseline is replaced below.
+const fn window(now: u64, then: u64) -> u64 {
+    now.saturating_sub(then)
+}
+
+/// Read edge's own round + back-pressure counters and raise what they say.
+///
+/// **Nothing here is re-derived.** Edge books `RoundOutcome` at the scheduler
+/// and `replication_inbound_backpressure_drops` at the coordinator drain; this
+/// differences those two counters and hands them to the raise points. Counting
+/// rounds from this side would be a second implementation of a number edge
+/// already owns — the [`crate::operator_surface`] rule, and the shape
+/// CIRISPersist#541 cost a week.
+///
+/// Call it on a cadence from wherever the bundle is already in hand. The FIRST
+/// call establishes the baseline and raises nothing: with no previous snapshot
+/// the only available window is "since process start", which is the lifetime
+/// total this function exists to avoid.
+pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle) {
+    use ciris_edge::observability::RoundOutcome;
+
+    let now = EdgeCounters {
+        timed_out: bundle
+            .replication_round_outcomes_total
+            .get(&RoundOutcome::TimedOut)
+            .copied()
+            .unwrap_or(0),
+        rounds_total: bundle.replication_round_outcomes_total.values().sum(),
+        backpressure_drops: bundle.replication_inbound_backpressure_drops,
+    };
+
+    // Poison-recovering, like every other lock in this module: a panic in one
+    // reporter must not blind the node for the rest of its life.
+    let mut slot = LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = slot.replace(now);
+    drop(slot);
+
+    let Some(previous) = previous else {
+        // Baseline established. Raising nothing here is deliberate and is NOT
+        // "all clear" — the very next call has a real window.
+        return;
+    };
+
+    report_network_rounds(
+        window(now.timed_out, previous.timed_out),
+        window(now.rounds_total, previous.rounds_total),
+    );
+    report_backpressure_drops(window(now.backpressure_drops, previous.backpressure_drops));
+}
+
+/// **Back-pressure that DROPS is not back-pressure that holds** (CIRISEdge#373).
+///
+/// This is the counter behind "we need to be able to trust our backpressure".
+/// A queue that fills and blocks is a system protecting itself; a queue that
+/// fills and discards inbound frames is a system losing data while every
+/// surface above it reports a successful round. Edge raised this from a silent
+/// WARN to a counter precisely so it could be alarmed on, and it is the one
+/// number here that should sit at exactly zero on a healthy node.
+///
+/// So there is no advisory band. Any drop inside the window is an error: the
+/// frames are already gone, and the peer that sent them has no way to know.
+pub fn report_backpressure_drops(dropped_in_window: u64) {
+    const CODE: &str = "network.inbound_frames_dropped";
+    if dropped_in_window == 0 {
+        clear(CODE);
+        return;
+    }
+    raise(Warning::error(
+        CODE,
+        format!(
+            "{dropped_in_window} inbound replication frames were DROPPED on coordinator \
+             back-pressure — rows a peer sent this node are gone, and the peer was not told. \
+             This is data loss, not delay: the round can still report `completed`. A stalled \
+             responder reply parks the drain, so look at what this node is slow to ANSWER \
+             before looking at what it is slow to receive."
+        ),
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +657,110 @@ mod tests {
         let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         g
+    }
+
+    /// **The first call must not alarm, and the second must.**
+    ///
+    /// The failure this pins is the one that makes cumulative counters
+    /// dangerous in a health surface: if the baseline were treated as zero, a
+    /// process whose edge had ever timed out would raise on its very first
+    /// health read and stay raised, because the lifetime total is not a window.
+    #[test]
+    fn the_first_edge_report_establishes_a_baseline_and_raises_nothing() {
+        use ciris_edge::observability::RoundOutcome;
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut bundle = ciris_edge::observability::EdgeMetrics::new().snapshot();
+        // A long, ugly history: 90 of 100 rounds timed out before we ever looked.
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 90);
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 10);
+        bundle.replication_inbound_backpressure_drops = 4_000;
+
+        report_edge_metrics(&bundle);
+        assert!(
+            snapshot().is_empty(),
+            "the first read has no window — it must establish a baseline silently, \
+             not convict the process of its whole history: {:?}",
+            snapshot()
+        );
+
+        // Second read, same counters: nothing happened SINCE, so nothing is wrong.
+        report_edge_metrics(&bundle);
+        assert!(
+            snapshot().is_empty(),
+            "an unchanged counter is an idle window, not a failing one: {:?}",
+            snapshot()
+        );
+
+        // Now the window carries real failures.
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 96);
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 14);
+        report_edge_metrics(&bundle);
+        let raised = snapshot();
+        let codes: Vec<&str> = raised.iter().map(|w| w.code.as_str()).collect();
+        assert!(
+            codes.contains(&"network.rounds_timing_out"),
+            "6 of 10 rounds in the window timed out and nothing was raised: {codes:?}"
+        );
+        assert!(degraded_mode(), "a 60% timeout window is not an advisory");
+    }
+
+    /// **A dropped inbound frame has no advisory band.**
+    ///
+    /// Back-pressure that discards is data loss with a `completed` round on top
+    /// of it — the peer is never told. One drop is an error.
+    #[test]
+    fn any_backpressure_drop_in_the_window_is_an_error_and_recovery_clears_it() {
+        let _g = exclusive();
+
+        report_backpressure_drops(1);
+        assert!(
+            degraded_mode(),
+            "a single dropped inbound frame is lost data, not a hint: {:?}",
+            snapshot()
+        );
+
+        report_backpressure_drops(0);
+        assert!(
+            !degraded_mode(),
+            "a clean window must take the alarm DOWN — a warning that only ever \
+             goes up is one operators learn to ignore: {:?}",
+            snapshot()
+        );
+    }
+
+    /// A counter that went backwards means edge restarted and zeroed its
+    /// metrics. The window must not underflow into a colossal false alarm.
+    #[test]
+    fn a_counter_reset_does_not_underflow_into_a_false_alarm() {
+        use ciris_edge::observability::RoundOutcome;
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut bundle = ciris_edge::observability::EdgeMetrics::new().snapshot();
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 5_000);
+        bundle.replication_inbound_backpressure_drops = 77;
+        report_edge_metrics(&bundle);
+
+        // Edge restarted: every counter is back to zero.
+        let fresh = ciris_edge::observability::EdgeMetrics::new().snapshot();
+        report_edge_metrics(&fresh);
+        assert!(
+            snapshot().is_empty(),
+            "a metrics reset must read as an empty window, never as u64 wraparound: {:?}",
+            snapshot()
+        );
     }
 
     /// The registry's contract, and the reason `degraded_mode` is not "any

@@ -191,6 +191,11 @@ pub async fn run_pass(
              is unbounded and will grow until the disk does. Legitimate for an archive node; set \
              `retention.max_age_days` via POST /v1/config if it is not deliberate."
         );
+        // No bound is configured, so "the configured bound cannot bite" is not
+        // a claim this node can make. Clearing is NOT reassurance — an
+        // unbounded store still grows, and the INFO above says so; it is
+        // refusing to leave a warning standing that has stopped being true.
+        crate::degradation::clear(RETENTION_BOUND_CODE);
         return Ok(RetentionOutcome::Unbounded);
     }
 
@@ -239,12 +244,33 @@ pub async fn run_pass(
              planes) or give the node more disk. Raising max_disk_gb silences the \
              alarm without freeing a byte."
         );
+        // The ERROR above goes to a log nobody is tailing. This puts the same
+        // fact on `GET /v1/node/health`, where the client already renders it —
+        // which is the whole point of #446: ciris-status carried an
+        // unenforceable cap for weeks and every surface it had said "ok".
+        crate::degradation::raise(crate::degradation::Warning::error(
+            RETENTION_BOUND_CODE,
+            format!(
+                "the configured disk cap cannot be enforced: {used} of {cap} used, and only \
+                 {evictable_rows} rows are reachable by any configured lever. Narrow what this \
+                 node ACCEPTS (consent prefixes / replication planes) or give it more disk. \
+                 Raising max_disk_gb silences this without freeing a byte.",
+                used = human_bytes(used_bytes),
+                cap = human_bytes(cap_bytes),
+            ),
+        ));
         return Ok(RetentionOutcome::BoundUnenforceable {
             used_bytes,
             cap_bytes,
             evictable_rows,
         });
     }
+
+    // Past this point the bound is enforceable, so a previously-raised alarm is
+    // STALE and must come down. A warning that only ever goes up is a warning
+    // operators learn to ignore, which is the same silence #446 set out to fix
+    // approached from the other side.
+    crate::degradation::clear(RETENTION_BOUND_CODE);
 
     if summary.evicted_traces == 0 && summary.archived_audit_entries == 0 {
         let outcome = RetentionOutcome::WithinBounds {
@@ -284,6 +310,30 @@ pub async fn run_pass(
         freed_bytes_estimate: summary.freed_bytes_estimate,
         total_disk_bytes: after.total_disk_bytes,
     })
+}
+
+/// The degradation code for an unenforceable bound. One constant, because the
+/// raise site and BOTH clear sites must agree on the string or a stale alarm
+/// never comes down.
+const RETENTION_BOUND_CODE: &str = "retention.bound_unenforceable";
+
+/// Bytes as an operator reads them. The log line beside this raise carries the
+/// exact integers; the warning goes to a phone screen, where `202135808` and
+/// `209715200` are the same number at a glance and `192.8 MiB of 200.0 MiB` is
+/// the sentence that makes someone act.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }
 
 /// One operator-readable line naming the live bounds — so a zero pass says what

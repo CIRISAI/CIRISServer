@@ -764,7 +764,7 @@ pub struct TraceCorpus {
 ///
 /// # Free information that was being thrown away
 ///
-/// [`trace_corpus`] already reads `Engine::storage_summary` on every call and
+/// [`corpus_and_store`] already reads `Engine::storage_summary` on every call and
 /// keeps two fields of one table. The aggregate answers for SIX tables plus the
 /// whole-database byte count, and the other five were discarded — so the cost
 /// was already being paid and the answer already computed. This carries it out.
@@ -2173,7 +2173,8 @@ pub async fn operator_state(
     )
 }
 
-/// CIRISServer#369 — **the corpus read behind `last_admitted_at`.**
+/// CIRISServer#369 / #446 — **one `storage_summary` read, BOTH readings**: the
+/// trace band behind `last_admitted_at` and the store footprint.
 ///
 /// `Engine::storage_summary` is persist's OWN aggregate, and the trace-plane
 /// half of it is a pushed-down `SELECT count(*), MIN(ts), MAX(ts)` on both
@@ -2182,33 +2183,29 @@ pub async fn operator_state(
 /// and — decisively — there is no second implementation of "when did a trace
 /// last arrive" that could disagree with persist's own. A hand-rolled scan would
 /// be the two-lists-that-disagree shape (#541) applied to the one signal this
-/// node's health hangs on.
+/// node's health hangs on. The footprint half obeys the same rule for the same
+/// reason: every byte and row count below is persist's, and nothing here counts.
 ///
 /// # What it costs, stated because the surface invites polling
 ///
-/// `storage_summary` answers for SIX tables, not one, so a read is six of those
-/// aggregates plus (on SQLite) two `PRAGMA`s — five tables more than this
-/// reading uses. Every one is read-only, which is what
-/// `polling_the_surface_writes_nothing` pins, but `count(*)` is a scan on
+/// `storage_summary` answers for SIX tables, so a read is six of those
+/// aggregates plus (on SQLite) two `PRAGMA`s. Every one is read-only, which is
+/// what `polling_the_surface_writes_nothing` pins, but `count(*)` is a scan on
 /// Postgres and the trace table is the largest on the node. That is an
 /// acceptable price for having one implementation instead of two; it is NOT a
 /// licence to poll this route at seconds' cadence, and it is written down here
 /// rather than discovered later.
 ///
-/// A read failure comes back as `Err`, and the caller must keep it an `Err`:
-/// [`TracePlaneStanding::Unreadable`] and [`TracePlaneStanding::NeverAdmitted`]
-/// are different facts, and #369's whole ask is that they never render alike.
-async fn trace_corpus(engine: &Engine) -> Result<TraceCorpus, String> {
-    corpus_of(engine.storage_summary().await)
-}
-
-/// One `storage_summary` read, BOTH readings — the trace band and the footprint.
+/// **Which is exactly why this is one call and not two.** #446 wanted a second
+/// reading from the same aggregate. Asking twice would double a cost this
+/// surface invites callers to pay on a poll, and would let the two answers
+/// describe different instants — a footprint from one moment beside a corpus
+/// from another, with nothing on the wire to say so.
 ///
-/// Deliberately not two calls. The aggregate is six `count(*)`s plus two
-/// PRAGMAs and the doc above already warns it is not free; reading it twice to
-/// answer two questions about the same store would double a cost this surface
-/// invites callers to pay on a poll, and would let the two answers describe
-/// different instants.
+/// A read failure comes back as `Err` on BOTH halves, and the caller must keep
+/// them `Err`: [`TracePlaneStanding::Unreadable`] and
+/// [`TracePlaneStanding::NeverAdmitted`] are different facts, and #369's whole
+/// ask is that they never render alike.
 async fn corpus_and_store(
     engine: &Engine,
 ) -> (Result<TraceCorpus, String>, Result<StoreFootprint, String>) {
@@ -2224,7 +2221,7 @@ async fn corpus_and_store(
     }
 }
 
-/// The pure half of [`trace_corpus`]: pick the trace-plane fields out of
+/// The pure half of [`corpus_and_store`]: pick the trace-plane fields out of
 /// persist's aggregate, and **keep a failure a failure.**
 ///
 /// Split out from the `await` for one reason: this `map_err` is the single line
