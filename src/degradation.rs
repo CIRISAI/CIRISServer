@@ -587,7 +587,17 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
             .get(&RoundOutcome::TimedOut)
             .copied()
             .unwrap_or(0),
-        rounds_total: bundle.replication_round_outcomes_total.values().sum(),
+        // `sum()` would panic on overflow in a debug build. These are
+        // free-running counters read on a health path that must not be able to
+        // take a node down — on a 32-bit target (arm32, some Home Assistant
+        // installs) an integer panic here would be an outage caused by the
+        // instrument. Saturating is also the honest arithmetic: a total that
+        // has run to u64::MAX is "more than any window cares about", not a
+        // wrapped small number.
+        rounds_total: bundle
+            .replication_round_outcomes_total
+            .values()
+            .fold(0u64, |a, b| a.saturating_add(*b)),
         backpressure_drops: bundle.replication_inbound_backpressure_drops,
     };
 

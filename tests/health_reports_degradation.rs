@@ -199,3 +199,63 @@ async fn health_stays_cheap_and_leaves_the_store_footprint_to_node_state() {
         );
     }
 }
+
+/// **Nothing here may take a node down** (the arm32 / iOS / Home Assistant
+/// rule).
+///
+/// This module is an INSTRUMENT. An instrument that panics is worse than one
+/// that reads `unavailable`, because the failure it causes is bigger than the
+/// one it was watching for — and these run on 32-bit targets where integer
+/// overflow panics in a debug build, on iOS and Android where there is no
+/// cgroup and no PSI, and inside Home Assistant add-ons where `/sys` may not
+/// be readable at all.
+///
+/// So: saturated counters, a counter that ran backwards, and a probe pass on
+/// whatever host this happens to be. Any panic fails the test.
+#[tokio::test]
+async fn the_instrument_survives_saturated_counters_and_a_hostile_host() {
+    use ciris_edge::observability::{EdgeMetrics, RoundOutcome};
+    let _g = REGISTRY_LOCK.lock().await;
+
+    let mut bundle = EdgeMetrics::new().snapshot();
+    // Every counter at the ceiling: the sum of these overflows u64, which is a
+    // debug-build panic for `Iterator::sum` and a wrapped garbage denominator
+    // for the release build. Both are unacceptable in a health path.
+    bundle
+        .replication_round_outcomes_total
+        .insert(RoundOutcome::TimedOut, u64::MAX);
+    bundle
+        .replication_round_outcomes_total
+        .insert(RoundOutcome::Completed, u64::MAX);
+    bundle
+        .replication_round_outcomes_total
+        .insert(RoundOutcome::Refused, u64::MAX);
+    bundle.replication_inbound_backpressure_drops = u64::MAX;
+    degradation::report_edge_metrics(&bundle);
+    degradation::report_edge_metrics(&bundle);
+
+    // And straight back to zero — an edge restart, mid-window.
+    degradation::report_edge_metrics(&EdgeMetrics::new().snapshot());
+
+    // The raise points, driven directly at their edges.
+    degradation::report_network_rounds(0, 0);
+    degradation::report_network_rounds(u64::MAX, 1);
+    degradation::report_backpressure_drops(u64::MAX);
+
+    // The probes, on whatever this host is. On CI that is Linux with cgroup v2
+    // and PSI; on the macOS runners it is neither, and the requirement is the
+    // same: report, do not panic.
+    let _ = degradation::probe_memory();
+    let _ = degradation::probe_contention();
+
+    // Still serving, and still well-formed. A surface that survives by
+    // returning nothing has not survived.
+    let data = health_data("/v1/health").await;
+    assert!(
+        data["warnings"].is_array() && !data["status"].as_str().unwrap_or_default().is_empty(),
+        "the health payload did not survive the hostile pass intact: {data:#}"
+    );
+
+    degradation::report_backpressure_drops(0);
+    degradation::report_network_rounds(0, 0);
+}
