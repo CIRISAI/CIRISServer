@@ -169,9 +169,26 @@ def _without_test_modules(text: str) -> str:
     while (i := text.find(marker, i)) != -1:
         # Find this item's opening brace, then its matching close. Anything
         # before the brace (`mod tests`, attributes) is inert either way.
-        brace = text.find("{", i)
-        if brace == -1:
-            break
+        # **A brace-less item ends at its SEMICOLON, not at the next `{`.**
+        #
+        # `#[cfg(test)] use foo::bar;` / `const N: usize = 3;` / a type alias
+        # are all valid, and searching blindly for `{` skips the semicolon and
+        # adopts the opening brace of the NEXT — production — item. The matcher
+        # then blanks that item, so a real server-emitted id silently
+        # disappears from both coverage checks. Verified: `#[cfg(test)] use
+        # foo::bar;` ate the emission after it.
+        brace = _attributed_item_body(text, i)
+        if brace is None:
+            # Brace-less item: the attribute and its item are stripped, and the
+            # scan resumes after the semicolon.
+            semi = text.find(";", i)
+            if semi == -1:
+                break
+            for k in range(i, semi + 1):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = semi + 1
+            continue
         depth, j, in_str, in_line_comment, in_block_comment, esc = 0, brace, False, False, False, False
         while j < len(text):
             c = text[j]
@@ -192,6 +209,16 @@ def _without_test_modules(text: str) -> str:
                     in_str = False
             elif c == '"':
                 in_str = True
+            elif c == "r" and (raw := _raw_string_end(text, j)) is not None:
+                # A RAW string (`r"..."`, `r#"..."#`). Its content may hold bare
+                # quotes AND braces, and the ordinary string state machine flips
+                # out of the string at the first inner quote and then counts the
+                # braces after it as syntax. Measured both ways: `r#"a" } "#`
+                # stops the matcher early (phantom survives) and `r#"a" { "#`
+                # runs it past the module and eats the production emission
+                # after it. Skipped whole.
+                j = raw + 1
+                continue
             elif c == "'":
                 # A CHAR LITERAL or a LIFETIME, and they must be told apart.
                 #
@@ -227,6 +254,71 @@ def _without_test_modules(text: str) -> str:
                 out[k] = " "
         i = j + 1
     return "".join(out)
+
+
+def _attributed_item_body(text: str, attr_start: int) -> "int | None":
+    """Index of the `{` opening the body of the item attributed at `attr_start`.
+
+    `None` when the item has NO body (`use`, `const`, `static`, a type alias) —
+    those end at a top-level semicolon, and treating the next item's `{` as
+    theirs is how a production emission site gets blanked.
+
+    Decided by which comes first at NESTING DEPTH ZERO, skipping the attribute's
+    own brackets and any string content, so `#[cfg(test)] const S: &str = "a {";`
+    is still recognised as brace-less.
+    """
+    j = attr_start
+    depth_brack = 0
+    in_str = False
+    esc = False
+    while j < len(text):
+        c = text[j]
+        if esc:
+            esc = False
+        elif c == "\\" and in_str:
+            esc = True
+        elif in_str:
+            if c == '"':
+                in_str = False
+        elif c == "r" and _raw_string_end(text, j) is not None:
+            j = _raw_string_end(text, j) + 1
+            continue
+        elif c == '"':
+            in_str = True
+        elif c == "[":
+            depth_brack += 1
+        elif c == "]":
+            depth_brack -= 1
+        elif depth_brack == 0:
+            if c == "{":
+                return j
+            if c == ";":
+                return None
+        j += 1
+    return None
+
+
+def _raw_string_end(text: str, start: int) -> "int | None":
+    """Index of the final `"` of a Rust raw string starting at `text[start]`.
+
+    `None` if `text[start]` does not begin one. Recognises `r"..."` and
+    `r#*"..."#*`, matching the closing delimiter to the SAME number of hashes —
+    which is what lets a raw string legally contain `"#` sequences.
+    """
+    if text[start] != "r":
+        return None
+    k = start + 1
+    hashes = 0
+    while k < len(text) and text[k] == "#":
+        hashes += 1
+        k += 1
+    if k >= len(text) or text[k] != '"':
+        return None
+    closer = '"' + "#" * hashes
+    end = text.find(closer, k + 1)
+    if end == -1:
+        return None
+    return end + len(closer) - 1
 
 
 def _char_literal_end(text: str, start: int) -> "int | None":

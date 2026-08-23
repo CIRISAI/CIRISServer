@@ -303,11 +303,46 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
             " […truncated by this node: the agent's warning exceeded the size this \
                       payload carries. Read the agent's own /v1/system/health for it in full.]",
         );
+        // EVERY retained string is bounded, not just `message` (codex review,
+        // PR #483). The first cut copied `code` and `severity` verbatim on the
+        // reduction path — so a brain whose size came from a multi-megabyte
+        // CODE sailed straight through the entry bound this reducer exists to
+        // enforce, and got re-serialized on every public health request. A cap
+        // with an exempt field is not a cap.
+        //
+        // An unrecognised severity is NORMALISED rather than clipped: it is a
+        // closed vocabulary the client switches on, and a truncated token would
+        // be neither valid nor obviously wrong.
+        const MAX_CODE_BYTES: usize = 256;
+        //
+        // Enumerated rather than `unwrap_or`, which is what clippy suggests and
+        // would be WRONG: `unwrap_or` passes an unrecognised value through, and
+        // an unrecognised value here is exactly the multi-megabyte string this
+        // guard exists to stop. The arms are the closed vocabulary; everything
+        // else — absent, oversized, or simply unknown — becomes `warning`.
+        let severity = match w.get("severity").and_then(serde_json::Value::as_str) {
+            Some("info") => "info",
+            Some("error") => "error",
+            Some("critical") => "critical",
+            _ => "warning",
+        };
         serde_json::json!({
-            "code": code,
+            "code": clip(code, MAX_CODE_BYTES),
             "message": msg,
-            "severity": w.get("severity").and_then(serde_json::Value::as_str).unwrap_or("warning"),
+            "severity": severity,
         })
+    }
+
+    /// Clip to at most `max` BYTES on a character boundary.
+    ///
+    /// Bytes because the bound is about bytes; on a boundary because slicing a
+    /// UTF-8 string at an arbitrary offset panics, and this is a public,
+    /// unauthenticated path fed by a remote process.
+    fn clip(s: &str, max: usize) -> &str {
+        match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
+            Some((i, _)) => &s[..i],
+            None => s,
+        }
     }
 
     let brain_degraded = bd

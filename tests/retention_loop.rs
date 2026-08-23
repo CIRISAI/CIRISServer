@@ -579,3 +579,77 @@ fn only_a_measured_verdict_clears_the_bound_alarm_never_a_plan() {
         other => panic!("fixture: expected Relieving, got {other:?}"),
     }
 }
+
+/// **A relieving plan that freed NOTHING is an unenforceable bound**
+/// (codex review, PR #483 — the second half of this defect).
+///
+/// The first fix stopped `Relieving` from CLEARING a standing alarm. That is
+/// only half: on the FIRST such pass there is no alarm to preserve, so an
+/// over-cap store fell through to the zero-action branch, reported
+/// `WithinBounds`, and health stayed `ok` forever — the silence #476 exists to
+/// end, restored through the other side of the same arm.
+///
+/// The reproducing case is not exotic: with `audit_log_max_age_days` the only
+/// configured lever, lens-core plans an archive range and returns `Relieving`
+/// on every pass while its executor leaves `archived_audit_entries` at zero,
+/// because archival is not implemented.
+///
+/// Pinned on the OUTCOME contract — a plan is a claim about what a lever could
+/// do, and the action counts are what happened — because that is the
+/// distinction the code now turns on.
+#[test]
+fn a_plan_is_not_an_outcome_and_only_the_outcome_can_be_trusted() {
+    use ciris_lens_core::retention::DiskPressure;
+
+    // `Relieving` and `Unreachable` describe the SAME over-cap store. They
+    // differ only in whether a lever was planned — not in whether bytes moved.
+    let relieving = DiskPressure::Relieving {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+    };
+    let unreachable = DiskPressure::Unreachable {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+        evictable_rows: 0,
+    };
+    let bytes = |p: &DiskPressure| match p {
+        DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        }
+        | DiskPressure::Unreachable {
+            used_bytes,
+            cap_bytes,
+            ..
+        } => (*used_bytes, *cap_bytes),
+        other => panic!("fixture: {other:?}"),
+    };
+    assert_eq!(
+        bytes(&relieving),
+        bytes(&unreachable),
+        "these two verdicts describe an identically over-cap store. Treating one as recovery \
+         and the other as a fault, on the strength of a PLAN, is the defect."
+    );
+
+    // And the outcome the loop returns for a planned-but-inert pass must be the
+    // fault, not the healthy zero.
+    assert!(
+        RetentionOutcome::BoundUnenforceable {
+            used_bytes: 2_000_000_000,
+            cap_bytes: 1_000_000_000,
+            evictable_rows: 0,
+        }
+        .is_fault(),
+        "a pass that planned to free bytes and freed none must alarm — it reports the same \
+         zero as a healthy sweep and is not one"
+    );
+    assert!(
+        !RetentionOutcome::WithinBounds {
+            trace_rows: 0,
+            oldest_trace: None,
+            total_disk_bytes: 2_000_000_000,
+        }
+        .is_fault(),
+        "fixture: WithinBounds is the healthy zero the inert pass used to report"
+    );
+}

@@ -284,6 +284,7 @@ pub async fn run_pass(
     // classifies from a FRESH summary — `Within` if the bytes really went, or
     // `Unreachable` again if they did not — which uses lens-core's own verdict
     // rather than re-deriving the decision here.
+    let acted = summary.evicted_traces > 0 || summary.archived_audit_entries > 0;
     match summary.disk_pressure {
         // Genuinely under the trigger. A pass only removes bytes, so the
         // post-state is under it too.
@@ -293,6 +294,59 @@ pub async fn run_pass(
         | ciris_lens_core::retention::DiskPressure::Unbounded => {
             crate::degradation::clear(RETENTION_BOUND_CODE);
         }
+        // **A RELIEVING PLAN THAT MOVED NOTHING IS AN UNENFORCEABLE BOUND**
+        // (codex review, PR #483 — the second half of this defect).
+        //
+        // The first fix stopped `Relieving` from CLEARING a standing alarm, and
+        // that is only half: on the FIRST such pass there is no alarm to
+        // preserve, so an over-cap store fell straight through to the
+        // zero-action branch below, reported `WithinBounds`, and stayed `ok`
+        // forever. Silence restored through the other side of the same arm.
+        //
+        // The reproducing case is not exotic. With `audit_log_max_age_days` the
+        // only configured lever, lens-core plans an archive range and returns
+        // `Relieving` on EVERY pass, while its executor leaves
+        // `archived_audit_entries` at zero because archival is not implemented.
+        // The plan is a claim about what a lever COULD do; `acted` is what
+        // happened.
+        ciris_lens_core::retention::DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        } if !acted => {
+            // Rows the levers CAN reach — the whole diagnosis, exactly as for
+            // `Unreachable`, and read from the PRE-pass summary because the
+            // pass removed nothing.
+            let evictable_rows = before.trace_events.rows + before.audit_log.rows;
+            tracing::error!(
+                used_bytes,
+                cap_bytes,
+                evictable_rows,
+                %bounds,
+                "retention BOUND EXCEEDED AND UNENFORCEABLE — the plan named a lever and the \
+                 pass freed NOTHING. A planned-but-inert lever reports the same zero as a \
+                 healthy sweep; it is not one. Narrow what this node ACCEPTS (consent \
+                 prefixes / replication planes) or give the node more disk."
+            );
+            crate::degradation::raise(crate::degradation::Warning::error(
+                RETENTION_BOUND_CODE,
+                format!(
+                    "the configured disk cap cannot be enforced: {used} of {cap} used. This \
+                     pass PLANNED to free bytes and freed none, so no future pass changes \
+                     this on its own. Narrow what this node accepts, or give it more disk; \
+                     raising max_disk_gb silences this without freeing a byte.",
+                    used = human_bytes(used_bytes),
+                    cap = human_bytes(cap_bytes),
+                ),
+            ));
+            return Ok(RetentionOutcome::BoundUnenforceable {
+                used_bytes,
+                cap_bytes,
+                evictable_rows,
+            });
+        }
+        // Planned AND acted. Bytes moved, but whether that was enough is a
+        // question about the POST state, which this pass has not measured — the
+        // next one classifies from a fresh summary and will clear or raise.
         ciris_lens_core::retention::DiskPressure::Relieving { .. } => {
             crate::degradation::no_evidence(RETENTION_BOUND_CODE);
         }

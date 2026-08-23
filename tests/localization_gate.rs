@@ -146,6 +146,86 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// **Must stay behaviourally identical to `_char_literal_end` in
 /// `client/tools/check_localization_sync.py`.**
+/// Index of the `{` opening the body of the item attributed at `attr_start`.
+///
+/// `None` when the item has NO body (`use`, `const`, `static`, a type alias) —
+/// those end at a top-level semicolon, and treating the next item's `{` as
+/// theirs is how a production emission site gets blanked.
+///
+/// Decided by which comes first at NESTING DEPTH ZERO, skipping the attribute's
+/// own brackets and any string content, so `#[cfg(test)] const S: &str = "a {";`
+/// is still recognised as brace-less.
+///
+/// **Must stay behaviourally identical to `_attributed_item_body` in
+/// `client/tools/check_localization_sync.py`.**
+fn attributed_item_body(c: &[char], attr_start: usize) -> Option<usize> {
+    let mut j = attr_start;
+    let mut depth_brack = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    while j < c.len() {
+        let ch = c[j];
+        if esc {
+            esc = false;
+        } else if ch == '\\' && in_str {
+            esc = true;
+        } else if in_str {
+            if ch == '"' {
+                in_str = false;
+            }
+        } else if ch == 'r' && raw_string_end(c, j).is_some() {
+            j = raw_string_end(c, j).unwrap_or(j) + 1;
+            continue;
+        } else if ch == '"' {
+            in_str = true;
+        } else if ch == '[' {
+            depth_brack += 1;
+        } else if ch == ']' {
+            depth_brack -= 1;
+        } else if depth_brack == 0 {
+            if ch == '{' {
+                return Some(j);
+            }
+            if ch == ';' {
+                return None;
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Index of the final `"` of a Rust raw string starting at `c[start]`.
+///
+/// `None` if it does not begin one. Recognises `r"..."` and `r#*"..."#*`,
+/// matching the closer to the SAME number of hashes — which is what lets a raw
+/// string legally contain `"#` sequences.
+///
+/// **Must stay behaviourally identical to `_raw_string_end` in the Python
+/// guard.**
+fn raw_string_end(c: &[char], start: usize) -> Option<usize> {
+    if c.get(start) != Some(&'r') {
+        return None;
+    }
+    let mut k = start + 1;
+    let mut hashes = 0usize;
+    while c.get(k) == Some(&'#') {
+        hashes += 1;
+        k += 1;
+    }
+    if c.get(k) != Some(&'"') {
+        return None;
+    }
+    let mut j = k + 1;
+    while j < c.len() {
+        if c[j] == '"' && (1..=hashes).all(|h| c.get(j + h) == Some(&'#')) {
+            return Some(j + hashes);
+        }
+        j += 1;
+    }
+    None
+}
+
 fn char_literal_end(c: &[char], start: usize) -> Option<usize> {
     if c.get(start) != Some(&'\'') {
         return None;
@@ -176,8 +256,21 @@ fn without_test_modules(text: &str) -> String {
         }
         // Find this item's opening brace, then its match. Anything before the
         // brace (`mod tests`, further attributes) is inert either way.
-        let Some(brace) = (i..out.len()).find(|&k| out[k] == '{') else {
-            break;
+        // A BRACE-LESS item (`use`, `const`, `static`, a type alias) ends at
+        // its semicolon. Searching blindly for `{` adopts the opening brace of
+        // the NEXT — production — item and blanks it. See
+        // `attributed_item_body`.
+        let Some(brace) = attributed_item_body(&out, i) else {
+            let Some(semi) = (i..out.len()).find(|&k| out[k] == ';') else {
+                break;
+            };
+            for slot in out.iter_mut().take(semi + 1).skip(i) {
+                if *slot != '\n' {
+                    *slot = ' ';
+                }
+            }
+            i = semi + 1;
+            continue;
         };
         let mut depth = 0i32;
         let mut j = brace;
@@ -205,6 +298,15 @@ fn without_test_modules(text: &str) -> String {
                 }
             } else if ch == '"' {
                 in_str = true;
+            } else if ch == 'r' && raw_string_end(&out, j).is_some() {
+                // A RAW string. Its content may hold bare quotes AND braces,
+                // and the ordinary state machine flips out of the string at the
+                // first inner quote, then counts what follows as syntax.
+                // Measured both ways: `r#"a" } "#` stops early (phantom
+                // survives) and `r#"a" { "#` eats the production emission after
+                // the module.
+                j = raw_string_end(&out, j).unwrap_or(j) + 1;
+                continue;
             } else if ch == '\'' {
                 // CHAR LITERAL or LIFETIME — see `char_literal_end`. `'{'`
                 // inside a test module would otherwise run this matcher past
@@ -653,7 +755,7 @@ fn a_cfg_test_module_contributes_no_message_ids() {
     // And the production emission sites bracket the test module on BOTH sides:
     // appended at EOF, over-eating is invisible, because blanking to
     // end-of-file destroys nothing.
-    let cases: [(&str, &str); 7] = [
+    let cases: [(&str, &str); 10] = [
         ("open brace char literal", "fn f() -> char { '{' }"),
         ("close brace char literal", "fn f() -> char { '}' }"),
         ("escaped quote char literal", r"fn f() -> char { '\'' }"),
@@ -666,6 +768,21 @@ fn a_cfg_test_module_contributes_no_message_ids() {
         (
             "unbalanced brace in a block comment",
             "/* a stray { here */",
+        ),
+        // Raw strings: the content may hold BARE quotes and braces, and the
+        // ordinary string state machine flips out at the first inner quote and
+        // then counts what follows as syntax. Both directions measured.
+        (
+            "raw string, bare quote then close",
+            "const S: &str = r#\"a\" } \"#;",
+        ),
+        (
+            "raw string, bare quote then open",
+            "const S: &str = r#\"a\" { \"#;",
+        ),
+        (
+            "raw string with a hash inside",
+            "const S: &str = r##\"a \"# } \"##;",
         ),
     ];
 
@@ -702,6 +819,44 @@ fn a_cfg_test_module_contributes_no_message_ids() {
             src.lines().count(),
             "[{label}] the stripper must replace with spaces, never delete — byte offsets and \
              every line number derived from them have to stay honest"
+        );
+    }
+}
+
+/// **A brace-less `#[cfg(test)]` item ends at its SEMICOLON.**
+///
+/// `use`, `const`, `static` and type aliases are all valid attribute targets
+/// and have no body. Searching blindly for the next `{` adopts the opening
+/// brace of the following — production — item and blanks it, so a real
+/// server-emitted id silently disappears from both coverage checks. Measured:
+/// `#[cfg(test)] use foo::bar;` ate the emission after it.
+#[test]
+fn a_brace_less_cfg_test_item_does_not_swallow_the_next_item() {
+    let items: [(&str, &str); 6] = [
+        ("use", "use foo::bar;"),
+        ("const", "const N: usize = 3;"),
+        ("static", "static S: u8 = 1;"),
+        (
+            "type alias",
+            "type T = std::collections::HashMap<String, u8>;",
+        ),
+        // The semicolon search must not be fooled by a brace inside a literal.
+        ("const holding a brace", "const S: &str = \"a { brace\";"),
+        (
+            "const holding a raw brace",
+            "const S: &str = r#\"a { brace\"#;",
+        ),
+    ];
+    for (label, item) in items {
+        let src = format!(
+            "#[cfg(test)]\n{item}\n\
+             fn after() -> Value {{ m(\"nav.away\", \"Away, the other operator surface.\") }}\n"
+        );
+        let stripped = without_test_modules(&src);
+        assert!(
+            stripped.contains("nav.away"),
+            "[{label}] a brace-less #[cfg(test)] item swallowed the production item after it. \
+             The emission disappears from the scan, which reads as a clean file:\n{stripped}"
         );
     }
 }

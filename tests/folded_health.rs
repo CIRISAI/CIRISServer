@@ -594,3 +594,47 @@ async fn folding_still_behaves_when_the_node_itself_is_degraded() {
         "a healthy brain cleared a degraded node's verdict: {v:#}"
     );
 }
+
+/// **A cap with an exempt field is not a cap** (codex review, PR #483).
+///
+/// The reducer bounded `message` and copied `code` and `severity` verbatim, so
+/// a brain whose size came from a multi-megabyte CODE sailed straight through
+/// the entry bound the reducer exists to enforce — and got re-serialized on
+/// every public health request.
+#[tokio::test]
+async fn an_enormous_code_or_severity_cannot_bypass_the_entry_bound() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "warnings": [{
+            "code": "c".repeat(3 * 1024 * 1024),
+            "message": "short",
+            "severity": "s".repeat(1024 * 1024),
+        }]}
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    let body = serde_json::to_string(&v).expect("serialize");
+    assert!(
+        body.len() < 64 * 1024,
+        "a 3 MiB `code` produced a {} byte health response — the size cap was applied to \
+         `message` alone, so the field carrying the bytes was the one exempt from it.",
+        body.len()
+    );
+    let w = &v["data"]["warnings"][0];
+    assert!(
+        w["code"].as_str().unwrap_or_default().len() <= 300,
+        "the code was not clipped: {} bytes",
+        w["code"].as_str().unwrap_or_default().len()
+    );
+    assert!(
+        matches!(
+            w["severity"].as_str(),
+            Some("info" | "warning" | "error" | "critical")
+        ),
+        "severity must be normalised to the closed vocabulary the client switches on — a \
+         clipped token would be neither valid nor obviously wrong: {:?}",
+        w["severity"].as_str().map(|s| &s[..s.len().min(40)])
+    );
+}

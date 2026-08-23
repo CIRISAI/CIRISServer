@@ -316,6 +316,29 @@ fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
     None
 }
 
+/// This process's cgroup directory and every visible ancestor, leaf-first.
+///
+/// Leaf-first because the walk reports the level CLOSEST to its limit and ties
+/// should resolve toward the most specific one. The hierarchy root is always
+/// included and is the correct answer inside a cgroup namespace, where
+/// `/proc/self/cgroup` names a path the mount does not expose.
+fn ancestor_dirs(mount: &str, relative: Option<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(rel) = relative {
+        let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+        for depth in (1..=parts.len()).rev() {
+            out.push(format!("{mount}/{}", parts[..depth].join("/")));
+        }
+    }
+    out.push(mount.to_string());
+    out
+}
+
+/// Whether `dir/probe` exists — the test for "this level accounts for us".
+fn readable(dir: &str, probe: &str) -> bool {
+    std::path::Path::new(&format!("{dir}/{probe}")).exists()
+}
+
 /// The first of `candidates` that contains `probe`, else `None`.
 fn first_dir_with(candidates: &[String], probe: &str) -> Option<String> {
     candidates
@@ -324,67 +347,102 @@ fn first_dir_with(candidates: &[String], probe: &str) -> Option<String> {
         .cloned()
 }
 
+fn num(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 #[must_use]
 pub fn read_memory() -> MemoryReading {
-    fn num(path: &str) -> Option<u64> {
-        std::fs::read_to_string(path).ok()?.trim().parse().ok()
-    }
+    // ── cgroup v2: WALK THE ANCESTORS ───────────────────────────────────────
+    //
+    // **A leaf that says `max` is not an unbounded process** (codex review,
+    // PR #483). Limits are routinely applied one or more levels UP — a systemd
+    // slice with `MemoryMax=`, a pod-level limit, a delegated subtree — and any
+    // ancestor with a finite limit can OOM-kill this process while its own
+    // `memory.max` reads `max`. Reporting `Unlimited` there defeats the alarm
+    // in precisely the deployment it exists for, which is the #480/#482 box one
+    // level further up than the first fix reached.
+    //
+    // Each level is judged on ITS OWN usage against ITS OWN limit — an
+    // ancestor's `memory.current` includes siblings, and that is the number
+    // that will trip its limit, so mixing this process's usage with an
+    // ancestor's ceiling would understate the danger.
+    //
+    // The BINDING level is the one closest to its limit, and that is what gets
+    // reported: it is the one that kills first.
+    let v2_dirs = ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None));
+    if v2_dirs.iter().any(|d| readable(d, "memory.current")) {
+        let mut binding: Option<MemoryReading> = None;
+        let mut unreadable_limit: Option<String> = None;
+        let mut leaf_usage: Option<u64> = None;
 
-    // ── cgroup v2 ────────────────────────────────────────────────────────────
-    // This process's own directory first, the root only as the fallback that is
-    // correct inside a cgroup namespace.
-    let mut v2: Vec<String> = Vec::new();
-    if let Some(rel) = cgroup_relative_path(None) {
-        if !rel.is_empty() {
-            v2.push(format!("/sys/fs/cgroup/{rel}"));
-        }
-    }
-    v2.push("/sys/fs/cgroup".to_string());
-
-    if let Some(dir) = first_dir_with(&v2, "memory.current") {
-        if let Some(usage) = num(&format!("{dir}/memory.current")) {
+        for dir in &v2_dirs {
+            let Some(usage) = num(&format!("{dir}/memory.current")) else {
+                continue;
+            };
+            if leaf_usage.is_none() {
+                leaf_usage = Some(usage);
+            }
             let max_path = format!("{dir}/memory.max");
-            return match std::fs::read_to_string(&max_path) {
+            match std::fs::read_to_string(&max_path) {
                 Ok(raw) => {
                     let raw = raw.trim();
                     if raw == "max" {
-                        // POSITIVELY unlimited: the kernel said so in words.
-                        MemoryReading::Unlimited { usage_bytes: usage }
-                    } else if let Ok(limit) = raw.parse::<u64>() {
-                        bounded(usage, limit)
-                    } else {
-                        // Readable but not parsable. NOT unlimited — we do not
-                        // know, and saying "unlimited" would be a fact invented
-                        // from a failed read.
-                        MemoryReading::Unavailable {
-                            reason: format!(
-                                "{max_path} is readable but holds {raw:?}, which is neither \
-                                 `max` nor a byte count — the limit is unknown, which is not \
-                                 the same as absent"
-                            ),
-                        }
+                        // POSITIVELY unlimited AT THIS LEVEL. Keep walking: an
+                        // ancestor may still bound us.
+                        continue;
+                    }
+                    let Ok(limit) = raw.parse::<u64>() else {
+                        unreadable_limit.get_or_insert(format!(
+                            "{max_path} is readable but holds {raw:?}, which is neither `max` \
+                             nor a byte count — the limit is unknown, which is not the same as \
+                             absent"
+                        ));
+                        continue;
+                    };
+                    let candidate = bounded(usage, limit);
+                    // Closest to its ceiling wins: that level kills first.
+                    let take = match (&binding, &candidate) {
+                        (None, _) => true,
+                        (
+                            Some(MemoryReading::Limited { used_pct: best, .. }),
+                            MemoryReading::Limited { used_pct: new, .. },
+                        ) => new > best,
+                        _ => false,
+                    };
+                    if take {
+                        binding = Some(candidate);
                     }
                 }
-                Err(e) => MemoryReading::Unavailable {
-                    reason: format!(
-                        "{max_path} could not be read ({e}) — usage is {usage} bytes but the \
-                         LIMIT is unknown. Reporting this as unlimited would assert that no \
-                         ceiling is configured on the evidence of a failed read."
-                    ),
-                },
-            };
+                Err(e) => {
+                    unreadable_limit.get_or_insert(format!(
+                        "{max_path} could not be read ({e}) — a limit at this level is unknown, \
+                         which is not the same as absent"
+                    ));
+                }
+            }
+        }
+
+        if let Some(reading) = binding {
+            return reading;
+        }
+        // No finite limit found anywhere. If ANY level's limit could not be
+        // read, we cannot say "unlimited" — that would assert no ceiling on the
+        // evidence of a failed read, which is the collapse this module exists
+        // to prevent.
+        if let Some(reason) = unreadable_limit {
+            return MemoryReading::Unavailable { reason };
+        }
+        if let Some(usage_bytes) = leaf_usage {
+            return MemoryReading::Unlimited { usage_bytes };
         }
     }
 
     // ── cgroup v1 ────────────────────────────────────────────────────────────
-    let mut v1: Vec<String> = Vec::new();
-    if let Some(rel) = cgroup_relative_path(Some("memory")) {
-        if !rel.is_empty() {
-            v1.push(format!("/sys/fs/cgroup/memory/{rel}"));
-        }
-    }
-    v1.push("/sys/fs/cgroup/memory".to_string());
-
+    let v1 = ancestor_dirs(
+        "/sys/fs/cgroup/memory",
+        cgroup_relative_path(Some("memory")),
+    );
     if let Some(dir) = first_dir_with(&v1, "memory.usage_in_bytes") {
         if let Some(usage) = num(&format!("{dir}/memory.usage_in_bytes")) {
             let limit_path = format!("{dir}/memory.limit_in_bytes");
@@ -564,17 +622,45 @@ pub fn read_pressure(resource: &str) -> Pressure {
     // a host reading wearing a container reading's name, which is worse than
     // the honest `Host` fallback because `judge` trusts the label and escalates
     // it to a degradation.
-    let scoped = cgroup_relative_path(None)
-        .filter(|rel| !rel.is_empty())
-        .map(|rel| format!("/sys/fs/cgroup/{rel}/{resource}.pressure"));
-    let cgroup = scoped.unwrap_or_else(|| format!("/sys/fs/cgroup/{resource}.pressure"));
+    // Resolved directory FIRST, then the hierarchy ROOT, then the host — the
+    // same ladder the memory probe walks, which this read was missing (codex
+    // review, PR #483).
+    //
+    // The middle rung is the one that matters and is easy to skip: inside a
+    // cgroup NAMESPACE, `/proc/self/cgroup` reports a host-relative path while
+    // the mount exposes only the delegated subtree at `/sys/fs/cgroup`. The
+    // resolved path is then unreadable even though the root file IS this
+    // process's own reading. Falling straight to `/proc/pressure` there trades
+    // a correct node-scoped measurement for a host-wide one, and — since a host
+    // reading can never degrade — pressure isolated to this container could
+    // never raise at all.
+    let mut candidates: Vec<String> = ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None))
+        .into_iter()
+        .map(|d| format!("{d}/{resource}.pressure"))
+        .collect();
+    candidates.dedup();
     let host = format!("/proc/pressure/{resource}");
-    let (text, scope) = match std::fs::read_to_string(&cgroup) {
-        Ok(t) => (Some(t), PressureScope::Cgroup),
+
+    let mut found: Option<(String, String)> = None;
+    for path in &candidates {
+        if let Ok(t) = std::fs::read_to_string(path) {
+            found = Some((t, path.clone()));
+            break;
+        }
+    }
+    let (text, scope, cgroup) = match found {
+        Some((t, path)) => (Some(t), PressureScope::Cgroup, path),
         // The fallback answers a DIFFERENT question — "is this box stalling?"
         // rather than "is this node stalling?" — so the scope travels with the
         // number instead of being forgotten at the read.
-        Err(_) => (std::fs::read_to_string(&host).ok(), PressureScope::Host),
+        None => (
+            std::fs::read_to_string(&host).ok(),
+            PressureScope::Host,
+            candidates
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("/sys/fs/cgroup/{resource}.pressure")),
+        ),
     };
     let Some(text) = text else {
         return Pressure::Unavailable {
@@ -1237,6 +1323,43 @@ mod tests {
             degraded_mode(),
             "the same stall measured on THIS node's cgroup must degrade it: {:?}",
             snapshot()
+        );
+    }
+
+    /// An ancestor cgroup's limit binds this process even when its own says
+    /// `max` (codex review, PR #483).
+    ///
+    /// Pins the SELECTION rule rather than the filesystem: the level reported
+    /// is the one closest to its own ceiling, because that is the one that
+    /// OOM-kills first. A leaf at `max` under a slice at 95% must report 95%,
+    /// not "unlimited".
+    #[test]
+    fn the_binding_cgroup_level_is_the_one_closest_to_its_ceiling() {
+        // `ancestor_dirs` is the walk order the reading depends on: leaf first,
+        // every ancestor, then the mount root — which is the correct answer
+        // inside a cgroup namespace, where /proc/self/cgroup names a path the
+        // mount does not expose.
+        let dirs = ancestor_dirs(
+            "/sys/fs/cgroup",
+            Some("system.slice/ciris-server.service".to_string()),
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                "/sys/fs/cgroup/system.slice/ciris-server.service".to_string(),
+                "/sys/fs/cgroup/system.slice".to_string(),
+                "/sys/fs/cgroup".to_string(),
+            ],
+            "the walk must go leaf -> ancestors -> root. Stopping at the leaf is what let a \
+             `MemoryMax=` on the containing slice be invisible while the process it kills \
+             reported `unlimited`."
+        );
+
+        // A namespaced container reports a host-relative path its mount does
+        // not expose; the root must still be reachable.
+        assert!(
+            ancestor_dirs("/sys/fs/cgroup", None).contains(&"/sys/fs/cgroup".to_string()),
+            "the hierarchy root must always be a candidate"
         );
     }
 
