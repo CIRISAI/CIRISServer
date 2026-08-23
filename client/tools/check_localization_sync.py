@@ -172,26 +172,49 @@ def _without_test_modules(text: str) -> str:
         brace = text.find("{", i)
         if brace == -1:
             break
-        depth, j, in_str, in_char, esc, in_line_comment = 0, brace, False, False, False, False
+        depth, j, in_str, in_line_comment, in_block_comment, esc = 0, brace, False, False, False, False
         while j < len(text):
             c = text[j]
             if esc:
                 esc = False
-            elif c == "\\" and (in_str or in_char):
+            elif c == "\\" and in_str:
                 esc = True
             elif in_line_comment:
                 if c == "\n":
                     in_line_comment = False
+            elif in_block_comment:
+                if text[j : j + 2] == "*/":
+                    in_block_comment = False
+                    j += 2
+                    continue
             elif in_str:
                 if c == '"':
                     in_str = False
-            elif in_char:
-                if c == "'":
-                    in_char = False
             elif c == '"':
                 in_str = True
-            elif c == "/" and text[j : j + 2] == "//":
+            elif c == "'":
+                # A CHAR LITERAL or a LIFETIME, and they must be told apart.
+                #
+                # `'{'` and `'}'` are braces that must NOT count, and getting
+                # this wrong is not cosmetic: `'{'` inside a test module runs
+                # the matcher past the module's real end and blanks every
+                # production emission site after it — which reads as "no
+                # findings" and is indistinguishable from a clean file.
+                #
+                # A lifetime (`&'static str`, `MutexGuard<'static, ()>`) has no
+                # closing quote, so treating every apostrophe as opening a char
+                # literal is the mirror failure. Only a genuine literal is
+                # skipped; a lifetime tick is simply ignored.
+                end = _char_literal_end(text, j)
+                if end is not None:
+                    j = end + 1
+                    continue
+            elif text[j : j + 2] == "//":
                 in_line_comment = True
+            elif text[j : j + 2] == "/*":
+                in_block_comment = True
+                j += 2
+                continue
             elif c == "{":
                 depth += 1
             elif c == "}":
@@ -204,6 +227,36 @@ def _without_test_modules(text: str) -> str:
                 out[k] = " "
         i = j + 1
     return "".join(out)
+
+
+def _char_literal_end(text: str, start: int) -> "int | None":
+    r"""Index of the closing quote if `text[start]` opens a Rust char literal.
+
+    `None` means the apostrophe is a LIFETIME or label tick, which closes
+    nothing and must be stepped over rather than tracked.
+
+    Handles the escape forms whose payload can itself contain braces —
+    `'\u{7d}'` is a right brace written three ways from Sunday — by scanning to
+    the terminating quote rather than assuming a fixed width. Bounded, so a
+    malformed literal cannot send the scan to EOF.
+    """
+    if text[start] != "'":
+        return None
+    k = start + 1
+    if k >= len(text):
+        return None
+    if text[k] == "\\":
+        limit = min(len(text), start + 12)
+        k += 1
+        while k < limit:
+            if text[k] == "'":
+                return k
+            k += 1
+        return None
+    # A plain char literal is exactly one character wide.
+    if k + 1 < len(text) and text[k + 1] == "'":
+        return k + 1
+    return None
 
 
 def _rust_unescape(raw: str) -> str:
@@ -1058,14 +1111,27 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
     before = run_checks(root)
     before_ids = len(server_message_ids(root))
 
-    rs.write_text(
-        rs.read_text(encoding="utf-8")
-        + "\n#[cfg(test)]\nmod tests {\n"
-        + '    fn brace_and_quote_in_a_literal() -> &\'static str { "a } and a \\" inside" }\n'
-        + '    fn t() { raise(m("t.phantom", "an id no server will ever emit")); }\n'
-        + "}\n",
-        encoding="utf-8",
+    # The test module is inserted BEFORE the file's production emission site,
+    # not appended. Appended at EOF, over-eating is invisible: blanking to
+    # end-of-file destroys nothing, so a matcher that runs past the module's
+    # real close still passes. Every construct here made an earlier version do
+    # exactly that — `'{'` in particular ran the matcher to EOF.
+    hostile = (
+        "#[cfg(test)]\nmod tests {\n"
+        "    // a comment with an unbalanced } brace\n"
+        "    /* and a block comment with an unbalanced { one */\n"
+        '    fn lit() -> &\'static str { "a } and a \\" inside" }\n'
+        # UNBALANCED on purpose. An earlier fixture carried both '{' and '}',
+        # which cancel — so deleting the char-literal handling outright still
+        # passed. A fixture whose hazards balance tests nothing.
+        "    fn open_brace() -> char { '{' }\n"
+        "    fn quote() -> char { '\\'' }\n"
+        "    fn unicode_close() -> char { '\\u{7d}' }\n"
+        "    mod nested { fn d() { raise(m(\"t.nested\", \"a phantom one level down\")); } }\n"
+        '    fn t() { raise(m("t.phantom", "an id no server will ever emit")); }\n'
+        "}\n\n"
     )
+    rs.write_text(hostile + rs.read_text(encoding="utf-8"), encoding="utf-8")
     after = run_checks(root)
     after_ids = len(server_message_ids(root))
 

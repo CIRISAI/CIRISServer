@@ -131,8 +131,42 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// the literals inside it carry braces, quotes and comment markers of their
 /// own. Replaced with spaces rather than deleted, so byte offsets — and every
 /// line number reported from them — stay honest.
+/// Index of the closing quote if `c[start]` opens a Rust char literal.
+///
+/// `None` means the apostrophe is a LIFETIME or label tick, which closes
+/// nothing and must be stepped over rather than tracked. Both directions are
+/// load-bearing and they fail oppositely: treating `'{'` as two ordinary
+/// characters runs the brace matcher past a test module's end and eats the
+/// production emission sites after it, while treating `&'static str` as an
+/// open char literal swallows the rest of the file the same way.
+///
+/// Escapes whose payload can itself contain braces (`'\u{7d}'`) are handled by
+/// scanning to the terminating quote rather than assuming a fixed width, and
+/// the scan is bounded so a malformed literal cannot run to EOF.
+///
+/// **Must stay behaviourally identical to `_char_literal_end` in
+/// `client/tools/check_localization_sync.py`.**
+fn char_literal_end(c: &[char], start: usize) -> Option<usize> {
+    if c.get(start) != Some(&'\'') {
+        return None;
+    }
+    let k = start + 1;
+    if k >= c.len() {
+        return None;
+    }
+    if c[k] == '\\' {
+        let limit = c.len().min(start + 12);
+        return (k + 1..limit).find(|&x| c[x] == '\'');
+    }
+    if c.get(k + 1) == Some(&'\'') {
+        return Some(k + 1);
+    }
+    None
+}
+
 fn without_test_modules(text: &str) -> String {
     let mut out: Vec<char> = text.chars().collect();
+    let len = out.len();
     let marker: Vec<char> = "#[cfg(test)]".chars().collect();
     let mut i = 0usize;
     while i < out.len() {
@@ -147,29 +181,45 @@ fn without_test_modules(text: &str) -> String {
         };
         let mut depth = 0i32;
         let mut j = brace;
-        let (mut in_str, mut in_char, mut esc, mut in_line_comment) = (false, false, false, false);
+        let (mut in_str, mut esc, mut in_line_comment, mut in_block_comment) =
+            (false, false, false, false);
         while j < out.len() {
             let ch = out[j];
             if esc {
                 esc = false;
-            } else if ch == '\\' && (in_str || in_char) {
+            } else if ch == '\\' && in_str {
                 esc = true;
             } else if in_line_comment {
                 if ch == '\n' {
                     in_line_comment = false;
                 }
+            } else if in_block_comment {
+                if ch == '*' && out.get(j + 1) == Some(&'/') {
+                    in_block_comment = false;
+                    j += 2;
+                    continue;
+                }
             } else if in_str {
                 if ch == '"' {
                     in_str = false;
                 }
-            } else if in_char {
-                if ch == '\'' {
-                    in_char = false;
-                }
             } else if ch == '"' {
                 in_str = true;
+            } else if ch == '\'' {
+                // CHAR LITERAL or LIFETIME — see `char_literal_end`. `'{'`
+                // inside a test module would otherwise run this matcher past
+                // the module's real end and blank every production emission
+                // site after it.
+                if let Some(e) = char_literal_end(&out, j) {
+                    j = e + 1;
+                    continue;
+                }
             } else if ch == '/' && out.get(j + 1) == Some(&'/') {
                 in_line_comment = true;
+            } else if ch == '/' && out.get(j + 1) == Some(&'*') {
+                in_block_comment = true;
+                j += 2;
+                continue;
             } else if ch == '{' {
                 depth += 1;
             } else if ch == '}' {
@@ -180,11 +230,7 @@ fn without_test_modules(text: &str) -> String {
             }
             j += 1;
         }
-        for slot in out
-            .iter_mut()
-            .take((j + 1).min(text.chars().count()))
-            .skip(i)
-        {
+        for slot in out.iter_mut().take((j + 1).min(len)).skip(i) {
             if *slot != '\n' {
                 *slot = ' ';
             }
@@ -599,44 +645,84 @@ fn rust_and_python_resolvers_agree_on_the_bundle() {
 /// for a gate to fail.
 #[test]
 fn a_cfg_test_module_contributes_no_message_ids() {
-    let src = r###"
-fn real() -> Value { m("nav.home", "Home, the operator landing surface.") }
+    // Each case carries ONE hostile construct, UNBALANCED. The first cut put
+    // `'{'` and `'}'` in the same fixture, where they cancel — so removing the
+    // char-literal handling entirely still passed. A fixture whose hazards
+    // balance is not a test of anything.
+    //
+    // And the production emission sites bracket the test module on BOTH sides:
+    // appended at EOF, over-eating is invisible, because blanking to
+    // end-of-file destroys nothing.
+    let cases: [(&str, &str); 7] = [
+        ("open brace char literal", "fn f() -> char { '{' }"),
+        ("close brace char literal", "fn f() -> char { '}' }"),
+        ("escaped quote char literal", r"fn f() -> char { '\'' }"),
+        ("unicode close brace", r"fn f() -> char { '\u{7d}' }"),
+        (
+            "lifetime, which closes nothing",
+            "fn f() -> &'static str { \"x\" }",
+        ),
+        ("unbalanced brace in a line comment", "// a stray } here"),
+        (
+            "unbalanced brace in a block comment",
+            "/* a stray { here */",
+        ),
+    ];
 
-#[cfg(test)]
-mod tests {
-    // a comment with an unbalanced } brace in it
-    fn awkward() -> &'static str { "a } and an escaped \" inside" }
-    fn phantom() { raise(m("t.phantom", "an id no server will ever emit")); }
+    for (label, hostile) in cases {
+        let src = format!(
+            "fn before() -> Value {{ m(\"nav.home\", \"Home, the operator landing surface.\") }}\n\
+             \n\
+             #[cfg(test)]\n\
+             mod tests {{\n    {hostile}\n    \
+             fn phantom() {{ raise(m(\"t.phantom\", \"an id no server will ever emit\")); }}\n\
+             }}\n\
+             \n\
+             fn after() -> Value {{ m(\"nav.away\", \"Away, the other operator surface.\") }}\n"
+        );
+        let stripped = without_test_modules(&src);
 
-    mod nested {
-        fn deeper() { raise(m("t.deeper", "another phantom, one level down")); }
+        assert!(
+            stripped.contains("nav.home"),
+            "[{label}] the stripper ate a production emission site BEFORE the test module"
+        );
+        assert!(
+            stripped.contains("nav.away"),
+            "[{label}] the stripper ran past the test module's real end and ate the production \
+             emission site AFTER it. That reads as 'no findings', which is indistinguishable \
+             from a clean file — the most expensive way for this gate to fail:\n{stripped}"
+        );
+        assert!(
+            !stripped.contains("t.phantom"),
+            "[{label}] the matcher stopped early and left the fixture in the scan, so a test \
+             string will be demanded in en.json in 29 languages:\n{stripped}"
+        );
+        assert_eq!(
+            stripped.lines().count(),
+            src.lines().count(),
+            "[{label}] the stripper must replace with spaces, never delete — byte offsets and \
+             every line number derived from them have to stay honest"
+        );
     }
 }
 
-fn also_real() -> Value { m("nav.away", "Away, the other operator surface.") }
-"###;
-
+/// A NESTED test module must go too — a matcher that stops at the first inner
+/// `}` leaves the deeper fixture in the scan.
+#[test]
+fn a_nested_test_module_is_stripped_with_its_parent() {
+    let src = "fn before() -> Value { m(\"nav.home\", \"Home, the operator landing surface.\") }\n\
+               #[cfg(test)]\n\
+               mod tests {\n\
+                   mod nested { fn d() { raise(m(\"t.deeper\", \"a phantom one level down\")); } }\n\
+               }\n\
+               fn after() -> Value { m(\"nav.away\", \"Away, the other operator surface.\") }\n";
     let stripped = without_test_modules(src);
     assert!(
-        stripped.contains("nav.home") && stripped.contains("nav.away"),
-        "the stripper ate real emission sites. A scraper that silently drops ids reports \
-         'no findings', which is indistinguishable from a clean tree and is the most \
-         expensive way for this gate to fail:\n{stripped}"
-    );
-    assert!(
-        !stripped.contains("t.phantom"),
-        "a #[cfg(test)] fixture was left in the scan — it will demand an en.json entry, \
-         putting test strings into the shipped product bundle in 29 languages:\n{stripped}"
-    );
-    assert!(
         !stripped.contains("t.deeper"),
-        "the brace matcher stopped at the first inner `}}` and left a NESTED test module \
-         in the scan:\n{stripped}"
+        "a nested module survived the strip:\n{stripped}"
     );
-    assert_eq!(
-        stripped.lines().count(),
-        src.lines().count(),
-        "the stripper must replace with spaces, never delete — byte offsets and every line \
-         number derived from them have to stay honest"
+    assert!(
+        stripped.contains("nav.home") && stripped.contains("nav.away"),
+        "the nested strip ate production emission sites:\n{stripped}"
     );
 }

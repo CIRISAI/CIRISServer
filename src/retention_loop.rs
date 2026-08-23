@@ -266,11 +266,40 @@ pub async fn run_pass(
         });
     }
 
-    // Past this point the bound is enforceable, so a previously-raised alarm is
-    // STALE and must come down. A warning that only ever goes up is a warning
-    // operators learn to ignore, which is the same silence #446 set out to fix
-    // approached from the other side.
-    crate::degradation::clear(RETENTION_BOUND_CODE);
+    // A STALE alarm must come down — a warning that only ever goes up is one
+    // operators learn to ignore, which is the same silence #476 set out to fix
+    // approached from the other side. But only POSITIVE EVIDENCE takes it down,
+    // and `Relieving` is not that (codex review, PR #483).
+    //
+    // `Relieving` means "the plan CAN act" — a claim made from the PRE-pass
+    // summary, before anything executed. It is an intention, not an outcome, and
+    // two things routinely make it a false one: an `audit_log_max_age_days`
+    // range flips `Unreachable` to `Relieving` while the lens executor does not
+    // execute audit archival at all, and a SQLite delete need not reduce
+    // `total_disk_bytes` because freed pages go on the freelist. An over-cap
+    // store could therefore clear its own alarm every hour, forever, on the
+    // strength of a plan that frees nothing.
+    //
+    // So `Relieving` leaves a standing alarm standing and waits. The NEXT pass
+    // classifies from a FRESH summary — `Within` if the bytes really went, or
+    // `Unreachable` again if they did not — which uses lens-core's own verdict
+    // rather than re-deriving the decision here.
+    match summary.disk_pressure {
+        // Genuinely under the trigger. A pass only removes bytes, so the
+        // post-state is under it too.
+        ciris_lens_core::retention::DiskPressure::Within { .. }
+        // No disk bound is configured, so "the configured bound cannot bite" is
+        // not a claim this node can make.
+        | ciris_lens_core::retention::DiskPressure::Unbounded => {
+            crate::degradation::clear(RETENTION_BOUND_CODE);
+        }
+        ciris_lens_core::retention::DiskPressure::Relieving { .. } => {
+            crate::degradation::no_evidence(RETENTION_BOUND_CODE);
+        }
+        // Handled above, and returned from — listed so a new variant is a
+        // compile error rather than a silent fall-through to "cleared".
+        ciris_lens_core::retention::DiskPressure::Unreachable { .. } => {}
+    }
 
     if summary.evicted_traces == 0 && summary.archived_audit_entries == 0 {
         let outcome = RetentionOutcome::WithinBounds {

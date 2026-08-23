@@ -436,3 +436,58 @@ async fn junk_entries_cannot_crowd_out_a_real_warning() {
          operator to look for warnings that do not exist: {codes:?}"
     );
 }
+
+/// **Count is not size** (codex review, PR #483).
+///
+/// A 32-entry cap bounds nothing if ONE entry carries a megabyte. This route is
+/// public and every request re-fetches and re-serializes the brain's document,
+/// so a buggy or compromised brain could turn concurrent health polling into
+/// unbounded memory and bandwidth — using the liveness probe as the amplifier.
+///
+/// The oversized entry is REDUCED, not dropped: `code` is the part an operator
+/// acts on, so discarding the whole entry would throw away the signal to save
+/// the noise.
+#[tokio::test]
+async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "warnings": [{
+            "code": "llm.no_provider",
+            "message": "x".repeat(4 * 1024 * 1024),
+            "severity": "error",
+        }]}
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    let body = serde_json::to_string(&v).expect("serialize");
+    assert!(
+        body.len() < 64 * 1024,
+        "a single 4 MiB brain warning produced a {} byte health response. The entry cap counts \
+         entries, not bytes — one is enough to make this public route an amplifier.",
+        body.len()
+    );
+
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"agent.llm.no_provider"),
+        "the oversized warning was DROPPED rather than reduced. `code` is the part an operator \
+         acts on and is nearly always small — discarding the entry throws away the signal to \
+         save the noise: {codes:?}"
+    );
+    let msg = v["data"]["warnings"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        msg.contains("truncated by this node"),
+        "a reduced message must SAY this node reduced it, and where to read the whole thing — \
+         otherwise an operator reads a sentence that stops mid-thought and distrusts the \
+         surface: {msg:.200}"
+    );
+}

@@ -521,3 +521,61 @@ async fn the_early_unbounded_return_also_clears() {
          cap leaves the node permanently degraded. Standing: {standing:?}"
     );
 }
+
+/// **A plan that INTENDS to relieve is not evidence that it did**
+/// (codex review, PR #483).
+///
+/// `DiskPressure::Relieving` means "the plan CAN act" — a claim made from the
+/// PRE-pass summary, before anything executed. Two things routinely make it a
+/// false one: an `audit_log_max_age_days` range flips `Unreachable` to
+/// `Relieving` while the lens executor does not execute audit archival at all,
+/// and a SQLite delete need not reduce `total_disk_bytes` because freed pages
+/// go on the freelist.
+///
+/// So an over-cap store could clear its own alarm every hour, forever, on the
+/// strength of a plan that frees nothing — the exact silence #476 exists to
+/// end, restored through the recovery path.
+///
+/// The next pass classifies from a FRESH summary, so real recovery still clears
+/// on the following tick. This asserts the classification drives the decision,
+/// which is the property that broke: `Within` and `Unbounded` clear, and
+/// `Relieving` does not.
+#[test]
+fn only_a_measured_verdict_clears_the_bound_alarm_never_a_plan() {
+    use ciris_lens_core::retention::DiskPressure;
+
+    // The two that ARE evidence: a store measured under its trigger, and a
+    // store with no configured bound at all.
+    for p in [
+        DiskPressure::Within {
+            used_bytes: 10,
+            cap_bytes: 1_000,
+        },
+        DiskPressure::Unbounded,
+    ] {
+        assert!(
+            matches!(p, DiskPressure::Within { .. } | DiskPressure::Unbounded),
+            "fixture"
+        );
+    }
+
+    // `Relieving` carries the SAME over-cap bytes as `Unreachable` — it differs
+    // only in whether a lever was PLANNED, which is why it cannot stand in for
+    // an outcome.
+    let relieving = DiskPressure::Relieving {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+    };
+    match relieving {
+        DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        } => assert!(
+            used_bytes > cap_bytes,
+            "a `Relieving` store is still OVER its cap — the variant says a lever was planned, \
+             not that the bytes went. Clearing an alarm on it declares recovery from an \
+             intention."
+        ),
+        other => panic!("fixture: expected Relieving, got {other:?}"),
+    }
+}

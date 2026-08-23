@@ -317,6 +317,12 @@ async fn one_read_carries_both_sources_and_re_derives_neither() {
             "node_state",
             "edge_metrics",
             "trace_corpus",
+            // CIRISServer#446 — the store footprint is a composed source like
+            // any other, so it appears in the bookkeeping. Emitting the block
+            // without listing it here is what the PR #483 review caught: a
+            // payload claiming it was not composed from the store while `store`
+            // carried measured data.
+            "store_footprint",
             "ingest_refusals"
         ]),
         "the surface must compose EVERY source, not a subset of them: {data}"

@@ -271,6 +271,45 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
     /// never be mistaken for the brain having had nothing more to say.
     const MAX_BRAIN_WARNINGS: usize = 32;
 
+    /// **Count is not size** (codex review, PR #483).
+    ///
+    /// Thirty-two entries is not a bound on anything if ONE of them carries a
+    /// megabyte of `message`, or a nested payload of arbitrary depth. This
+    /// route is public and unauthenticated, and every request re-fetches and
+    /// re-serializes the brain's document — so a buggy or compromised brain
+    /// could turn concurrent health polling into unbounded memory and
+    /// bandwidth, using the liveness probe as the amplifier.
+    ///
+    /// 2 KiB is generous for a sentence a human is meant to read on a phone,
+    /// and it is applied to the SERIALIZED entry so a deep nested object is
+    /// bounded by the same number as a long string — there is no second shape
+    /// to reason about.
+    const MAX_BRAIN_WARNING_BYTES: usize = 2048;
+
+    /// Fields worth keeping when an entry is too large to carry whole.
+    ///
+    /// An oversized warning is REDUCED, never dropped: the `code` is the part
+    /// an operator acts on and is nearly always small, so discarding the whole
+    /// entry would throw away the signal to save the noise.
+    fn reduce(w: &serde_json::Value, code: &str) -> serde_json::Value {
+        let mut msg = w
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>();
+        msg.push_str(
+            " […truncated by this node: the agent's warning exceeded the size this \
+                      payload carries. Read the agent's own /v1/system/health for it in full.]",
+        );
+        serde_json::json!({
+            "code": code,
+            "message": msg,
+            "severity": w.get("severity").and_then(serde_json::Value::as_str).unwrap_or("warning"),
+        })
+    }
+
     let brain_degraded = bd
         .get("degraded_mode")
         .and_then(serde_json::Value::as_bool)
@@ -296,8 +335,20 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         let Some(code) = w.get("code").and_then(serde_json::Value::as_str) else {
             continue;
         };
+        let namespaced = format!("agent.{code}");
+        // Measured on the SERIALIZED entry, so one huge string and one deeply
+        // nested object are bounded by the same number.
+        let oversized = serde_json::to_string(w)
+            .map(|t| t.len() > MAX_BRAIN_WARNING_BYTES)
+            // Unserializable is treated as oversized: if we cannot measure it,
+            // we do not carry it whole.
+            .unwrap_or(true);
+        if oversized {
+            valid.push(reduce(w, &namespaced));
+            continue;
+        }
         let mut w = w.clone();
-        w["code"] = serde_json::json!(format!("agent.{code}"));
+        w["code"] = serde_json::json!(namespaced);
         valid.push(w);
     }
     let dropped = valid.len().saturating_sub(MAX_BRAIN_WARNINGS);

@@ -233,7 +233,7 @@ pub fn verdict() -> (Vec<Warning>, bool, &'static str) {
 /// permanently keeps its last verdict, which is loud, rather than falling
 /// silent, which is not. A code raised by a probe that can no longer run is
 /// cleared by that probe measuring healthy again — never by it failing.
-fn no_evidence(_code: &str) {}
+pub(crate) fn no_evidence(_code: &str) {}
 
 /// Test-only: empty the registry so cases do not leak into each other.
 #[cfg(test)]
@@ -562,7 +562,17 @@ pub const PRESSURE_DEGRADE_FULL_PCT: f64 = 15.0;
 /// suffering — and, worse, mask its own when the host is quiet.
 #[must_use]
 pub fn read_pressure(resource: &str) -> Pressure {
-    let cgroup = format!("/sys/fs/cgroup/{resource}.pressure");
+    // THIS PROCESS'S cgroup, not the hierarchy root — the same defect the memory
+    // probe carried (see `cgroup_relative_path`). Reading
+    // `/sys/fs/cgroup/io.pressure` under systemd gets the ROOT cgroup's file,
+    // which is host-wide, and this function would then label it `Cgroup` scope:
+    // a host reading wearing a container reading's name, which is worse than
+    // the honest `Host` fallback because `judge` trusts the label and escalates
+    // it to a degradation.
+    let scoped = cgroup_relative_path(None)
+        .filter(|rel| !rel.is_empty())
+        .map(|rel| format!("/sys/fs/cgroup/{rel}/{resource}.pressure"));
+    let cgroup = scoped.unwrap_or_else(|| format!("/sys/fs/cgroup/{resource}.pressure"));
     let host = format!("/proc/pressure/{resource}");
     let (text, scope) = match std::fs::read_to_string(&cgroup) {
         Ok(t) => (Some(t), PressureScope::Cgroup),

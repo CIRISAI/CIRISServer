@@ -1315,6 +1315,10 @@ pub struct Sources<'a> {
 
 /// The producer of each half, named on the wire so an operator chasing a value
 /// knows which repo computes it.
+/// CIRISServer#446 — the store footprint's producer. The SAME
+/// `storage_summary` read as [`TRACE_SOURCE`], named separately because the two
+/// readings can be asked about independently even though one call answers both.
+const STORE_SOURCE: &str = "ciris_persist::Engine::storage_summary()";
 const NODE_SOURCE: &str = "ciris_persist::federation::node_state::resolve_node_state";
 const EDGE_SOURCE: &str = "ciris_edge::observability::EdgeMetrics::snapshot";
 
@@ -1997,11 +2001,24 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
     if ingest_band_v == StateBand::Unknown {
         unknown.push("ingest".into());
     }
+    // An unreadable store is an unknown like any other. Reported in
+    // `store.unreadable` but absent from `unknown`, it was invisible to every
+    // consumer that scans the one list built to name what this payload could
+    // not answer.
+    if sources.store.is_err() {
+        unknown.push("store".into());
+    }
 
     let composed_from: Vec<&str> = [
         node.map(|_| "node_state"),
         edge.map(|_| "edge_metrics"),
         sources.trace.as_ref().ok().map(|_| "trace_corpus"),
+        // CIRISServer#446 (codex review, PR #483). The store block was emitted
+        // without appearing in ANY of the three bookkeeping mechanisms, so the
+        // payload said it was not composed from the store while `store` carried
+        // measured data — and a consumer keying on `composed_from` could not
+        // see a reading that was right there.
+        sources.store.as_ref().ok().map(|_| "store_footprint"),
         // A ledger that is HELD but could not be READ contributed nothing, so
         // it is not composed from — the same `readable` test `present` below
         // applies. Listing it here off `is_some()` alone would put the two
@@ -2037,6 +2054,25 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         trace_source.insert("unavailable".into(), msg(TRACE_UNAVAILABLE));
         trace_source.insert("detail".into(), json!(detail));
     }
+    let mut store_source = Map::new();
+    store_source.insert("produced_by".into(), json!(STORE_SOURCE));
+    store_source.insert("present".into(), json!(sources.store.is_ok()));
+    if let Err(detail) = &sources.store {
+        // `present: false` + `detail`, and DELIBERATELY no localized
+        // `unavailable` Msg like its siblings carry.
+        //
+        // A `Msg` is an (id, text) pair that the localization guard scrapes and
+        // then requires in en.json and all 29 locales. Adding one here would
+        // mean either inventing 29 translations or shipping a key the guard
+        // reports as uncovered — and the store's failure reason is the SAME
+        // `storage_summary` error the trace half already renders, so the
+        // information is not lost, only the translated framing.
+        //
+        // Named rather than left to look like an oversight; it belongs with the
+        // structured-params work in CIRISServer#484, where these strings get
+        // localized properly instead of one at a time.
+        store_source.insert("detail".into(), json!(detail));
+    }
     let mut ingest_source = Map::new();
     ingest_source.insert("produced_by".into(), json!(INGEST_SOURCE));
     ingest_source.insert(
@@ -2058,6 +2094,7 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
             "node_state": node_source,
             "edge_metrics": edge_source,
             "trace_corpus": trace_source,
+            "store_footprint": store_source,
             "ingest_refusals": ingest_source,
         },
         "node": node,
