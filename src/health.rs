@@ -218,8 +218,108 @@ async fn folded_health(State(st): State<BrainState>) -> Json<serde_json::Value> 
             out["data"][key] = v.clone();
         }
     }
+    fold_brain_degradation(&mut out, bd);
     out["data"]["agent"] = serde_json::json!({ "folded": true, "reachable": true });
     Json(out)
+}
+
+/// **A folded pair is degraded if EITHER half is** (CIRISServer#446).
+///
+/// The allow-list above is correct and is not what this fixes: it stops a brain
+/// from renaming the node or overwriting the substrate fields. But by naming
+/// only the cognitive keys it also DROPPED the brain's own health verdict, and
+/// the node then answered for both halves using only its own.
+///
+/// The client has been reading `degraded_mode` off THIS route all along, where
+/// its comment says the flag means "no working LLM provider" — a brain-tier
+/// condition. So an agent with every provider dead, folded into a node with a
+/// healthy store and plenty of memory, reported `degraded_mode: false` and
+/// `status: "ok"`. Nothing lied; the node answered a question about the pair
+/// while looking at half of it.
+///
+/// # Escalate only, never lower
+///
+/// The node's own verdict is the FLOOR. A brain can move this payload from `ok`
+/// toward `degraded` and never the other way — otherwise a cheerful agent would
+/// be able to clear a memory-critical node's alarm, which is the #480 defect
+/// with an extra hop in it. Concretely: `degraded_mode` is an OR, `status`
+/// leaves an already-degraded node degraded, and the node's own warnings are
+/// never removed.
+///
+/// # Codes are namespaced, because the tier is part of the fix
+///
+/// Brain warnings arrive as `agent.<code>`. A dashboard groups on `code`, and
+/// the same code from two tiers means two different things to go and do — so
+/// within this payload the code has to identify the condition AND whose it is.
+/// The original is preserved verbatim after the prefix.
+///
+/// # Hostile input
+///
+/// This is a remote, unauthenticated-shaped document from another process.
+/// Every field is optional and every shape is tolerated: a non-array
+/// `warnings`, a non-object entry, a missing `code`. Malformed entries are
+/// skipped rather than defaulted, and the list is capped — a brain that offers
+/// ten thousand warnings must not be able to make the node's health response
+/// unservable, which would be a denial of service through the liveness probe.
+fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
+    /// Enough to diagnose, bounded so a runaway brain cannot bloat the node's
+    /// liveness answer. The count is reported when it bites, so the cap can
+    /// never be mistaken for the brain having had nothing more to say.
+    const MAX_BRAIN_WARNINGS: usize = 32;
+
+    let brain_degraded = bd
+        .get("degraded_mode")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let offered = bd
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let mut folded: Vec<serde_json::Value> = Vec::new();
+    for w in offered.iter().take(MAX_BRAIN_WARNINGS) {
+        // No `code` means nothing to group on and nothing to act on; skipping
+        // beats inventing an empty-string code that collides with every other
+        // malformed entry.
+        let Some(code) = w.get("code").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let mut w = w.clone();
+        w["code"] = serde_json::json!(format!("agent.{code}"));
+        folded.push(w);
+    }
+    if offered.len() > MAX_BRAIN_WARNINGS {
+        tracing::warn!(
+            offered = offered.len(),
+            cap = MAX_BRAIN_WARNINGS,
+            "the folded brain offered more warnings than this payload carries — truncated"
+        );
+        folded.push(serde_json::json!({
+            "code": "agent.warnings_truncated",
+            "message": format!(
+                "the folded agent reported {} warnings; {MAX_BRAIN_WARNINGS} are shown here. \
+                 Read the agent's own /v1/system/health for the rest.",
+                offered.len()
+            ),
+            "severity": "warning",
+        }));
+    }
+
+    if !folded.is_empty() {
+        match out["data"]["warnings"].as_array_mut() {
+            Some(existing) => existing.extend(folded),
+            // The node's own health always emits an array; this arm exists so a
+            // future shape change cannot silently drop the brain's half.
+            None => out["data"]["warnings"] = serde_json::Value::Array(folded),
+        }
+    }
+
+    if brain_degraded {
+        out["data"]["degraded_mode"] = serde_json::json!(true);
+        out["data"]["status"] = serde_json::json!("degraded");
+    }
 }
 
 /// The server-health routes, merged onto the read API. Stateless (liveness only).

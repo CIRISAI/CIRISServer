@@ -19,6 +19,16 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt as _;
 
+/// The degradation registry is a PROCESS-GLOBAL, and libtest runs these cases
+/// in parallel threads of one process. Exactly one case below raises into it —
+/// and the moment it does, every OTHER case asserting `status == "ok"` can read
+/// `"degraded"` instead and fail for a reason that has nothing to do with what
+/// it is testing. So every case that reads `status` or `degraded_mode` takes
+/// this lock. `src/degradation.rs` and `tests/retention_loop.rs` carry the same
+/// lock for the same reason; `oauth_state_matrix.rs` records the first time
+/// this repo paid for a leaked process-global.
+static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Serve a fake brain on a loopback port and return its base URL.
 async fn spawn_brain(body: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
     let app = axum::Router::new().route(
@@ -59,6 +69,7 @@ async fn get_health(router: axum::Router) -> serde_json::Value {
 /// than by omission.
 #[tokio::test]
 async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
+    let _registry = REGISTRY_LOCK.lock().await;
     let v = get_health(ciris_server::health::router()).await;
     assert_eq!(v["data"]["status"], "ok");
     assert_eq!(v["data"]["role"], "fabric-node");
@@ -74,6 +85,7 @@ async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
 /// the client through the NODE's port, so `clientModeFrom` resolves AGENT.
 #[tokio::test]
 async fn a_folded_brain_enriches_the_nodes_own_health() {
+    let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
             "status": "ok",
@@ -111,6 +123,7 @@ async fn a_folded_brain_enriches_the_nodes_own_health() {
 /// exactly the failure. The node stays up and says which case it is.
 #[tokio::test]
 async fn an_unreachable_brain_is_distinguished_from_no_brain() {
+    let _registry = REGISTRY_LOCK.lock().await;
     // A port nobody is listening on: bind then drop, so the address is dead.
     let dead = {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -146,6 +159,7 @@ async fn an_unreachable_brain_is_distinguished_from_no_brain() {
 /// cognitive fields; this pins that `node` never joins it.
 #[tokio::test]
 async fn a_folded_brain_cannot_overwrite_the_nodes_own_name() {
+    let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
             "status": "ok",
@@ -186,6 +200,7 @@ async fn a_folded_brain_cannot_overwrite_the_nodes_own_name() {
 /// a real agent rendered as a bare node — over a shape difference.
 #[tokio::test]
 async fn a_brain_answering_without_the_data_envelope_still_contributes() {
+    let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "status": "ok",
         "cognitive_state": "DREAM",
@@ -195,4 +210,141 @@ async fn a_brain_answering_without_the_data_envelope_still_contributes() {
     assert_eq!(v["data"]["cognitive_state"], "DREAM", "{v}");
     assert_eq!(v["data"]["agent"]["reachable"], true);
     h.abort();
+}
+
+// ── The pair's health is the union of both halves (CIRISServer#446) ──────────
+
+/// **A folded pair is degraded if EITHER half is.**
+///
+/// The allow-list that keeps a brain from renaming the node also dropped the
+/// brain's own verdict, and the node then answered for the pair using half the
+/// evidence. The client reads `degraded_mode` off exactly this route, and its
+/// own comment says the flag means "no working LLM provider" — a brain-tier
+/// condition the node had no way to report.
+#[tokio::test]
+async fn a_degraded_brain_degrades_the_folded_pair() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": {
+            "status": "degraded",
+            "cognitive_state": "WORK",
+            "degraded_mode": true,
+            "warnings": [{
+                "code": "llm.no_provider",
+                "message": "every configured LLM provider failed its last probe",
+                "severity": "error",
+            }],
+        }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["degraded_mode"], true,
+        "the brain reported itself degraded and the pair still answered `false`. The node \
+         answered a question about the pair while looking at half of it: {v:#}"
+    );
+    assert_eq!(v["data"]["status"], "degraded");
+
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings must be an array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"agent.llm.no_provider"),
+        "the brain's warning must ride through NAMESPACED. A dashboard groups on `code`, and \
+         the same code from two tiers means two different things to go and do: {codes:?}"
+    );
+    assert!(
+        !codes.contains(&"llm.no_provider"),
+        "an un-namespaced brain code can collide with a node code of the same name, and then \
+         the operator cannot tell which tier to fix: {codes:?}"
+    );
+}
+
+/// **Escalate only.** A cheerful brain must not be able to clear the node's own
+/// alarm — that would be #480 with an extra hop in it.
+#[tokio::test]
+async fn a_healthy_brain_cannot_clear_the_nodes_own_degradation() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
+        "test.node_tier_fault",
+        "a node-tier fault the brain knows nothing about",
+    ));
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": {
+            "status": "ok",
+            "cognitive_state": "WORK",
+            "degraded_mode": false,
+            "warnings": [],
+        }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+    ciris_server::degradation::clear("test.node_tier_fault");
+
+    assert_eq!(
+        v["data"]["degraded_mode"], true,
+        "a healthy brain LOWERED the node's own verdict. The node's reading is the floor: a \
+         brain can move this payload toward `degraded` and never the other way: {v:#}"
+    );
+    assert_eq!(v["data"]["status"], "degraded");
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"test.node_tier_fault"),
+        "the node's own warning was dropped by the fold: {codes:?}"
+    );
+}
+
+/// The brain is a remote process and its document is hostile input.
+///
+/// A malformed or enormous `warnings` payload must not be able to make the
+/// node's liveness answer unservable — that would be a denial of service
+/// through the health probe, caused by the thing watching for one.
+#[tokio::test]
+async fn a_malformed_or_flooding_brain_cannot_break_the_nodes_liveness_answer() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let mut flood: Vec<serde_json::Value> = (0..500)
+        .map(|i| serde_json::json!({"code": format!("flood.{i}"), "message": "x"}))
+        .collect();
+    // Entries with nothing to group on, and entries that are not objects at all.
+    flood.push(serde_json::json!({"message": "no code at all"}));
+    flood.push(serde_json::json!("not even an object"));
+    flood.push(serde_json::Value::Null);
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "degraded_mode": "not-a-bool", "warnings": flood }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    let warnings = v["data"]["warnings"]
+        .as_array()
+        .expect("the payload must still be well-formed after hostile input");
+    assert!(
+        warnings.len() <= 40,
+        "the brain's 503 warnings were carried whole — a runaway brain can bloat the node's \
+         liveness response, which every watcher in the mesh polls on a timer: {}",
+        warnings.len()
+    );
+    let codes: Vec<&str> = warnings.iter().filter_map(|w| w["code"].as_str()).collect();
+    assert!(
+        codes.contains(&"agent.warnings_truncated"),
+        "truncation must SAY it truncated. A silent cap reads as 'the brain had nothing more \
+         to say', which is the collapsed zero this repo has paid for five times: {codes:?}"
+    );
+    // A non-bool `degraded_mode` is not a degradation claim — and not a panic.
+    assert_eq!(v["data"]["degraded_mode"], false);
+    assert_eq!(v["data"]["agent"]["reachable"], true);
 }
