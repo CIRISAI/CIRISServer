@@ -348,3 +348,91 @@ async fn a_malformed_or_flooding_brain_cannot_break_the_nodes_liveness_answer() 
     assert_eq!(v["data"]["degraded_mode"], false);
     assert_eq!(v["data"]["agent"]["reachable"], true);
 }
+
+/// **A non-`ok` brain STATUS is its own degradation signal** (codex review,
+/// PR #483).
+///
+/// The client's contract is `status != "ok" || degradedMode ||
+/// warnings.isNotEmpty()` — three independent signals. The fold said every
+/// field was optional and every shape tolerated, then keyed solely on the
+/// boolean, so an older or partially-compatible brain reporting
+/// `status: "degraded"` with no `degraded_mode` had a valid verdict discarded.
+#[tokio::test]
+async fn a_brain_that_reports_only_a_bad_status_still_degrades_the_pair() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "status": "degraded", "cognitive_state": "WORK" }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["degraded_mode"], true,
+        "the brain said `status: degraded` and the pair reported healthy. The boolean is not \
+         the only signal — the client reads all three: {v:#}"
+    );
+    assert_eq!(v["data"]["status"], "degraded");
+}
+
+/// An ABSENT status is not a claim of health — a brain that omits the field
+/// entirely must change nothing, or every bare-object brain degrades the node.
+#[tokio::test]
+async fn a_brain_that_omits_status_entirely_changes_nothing() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK" }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["status"], "ok",
+        "a missing `status` was treated as a bad one: {v:#}"
+    );
+    assert_eq!(v["data"]["degraded_mode"], false);
+}
+
+/// **Malformed entries must not consume the warning budget** (codex review).
+///
+/// The cap was applied to the first 32 RAW entries. A brain emitting 32 junk
+/// objects followed by one real `llm.no_provider` would have the real one
+/// silently dropped, and the response would carry nothing but a truncation
+/// notice — the one actionable warning lost to noise.
+#[tokio::test]
+async fn junk_entries_cannot_crowd_out_a_real_warning() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let mut ws: Vec<serde_json::Value> = (0..40)
+        .map(|_| serde_json::json!({"message": "no code, nothing to act on"}))
+        .collect();
+    ws.push(serde_json::json!({
+        "code": "llm.no_provider",
+        "message": "every configured LLM provider failed its last probe",
+        "severity": "error",
+    }));
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "warnings": ws }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"agent.llm.no_provider"),
+        "40 junk entries ate the budget and the ONE actionable warning was dropped. The cap is \
+         a question about valid warnings, so it has to be applied to those: {codes:?}"
+    );
+    assert!(
+        !codes.contains(&"agent.warnings_truncated"),
+        "only one warning was valid — nothing was truncated, so claiming truncation sends an \
+         operator to look for warnings that do not exist: {codes:?}"
+    );
+}

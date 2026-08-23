@@ -96,11 +96,15 @@ fn node_health() -> serde_json::Value {
     // from the kernel's pressure interface, and `io` is the disk half of the
     // same question.
     let (cpu, io) = crate::degradation::probe_contention();
-    let warnings = crate::degradation::snapshot();
-    let degraded_mode = crate::degradation::degraded_mode();
+    // ONE registry read for all three verdict fields. Three separate reads let a
+    // reporter raise or clear between them and produce a torn response —
+    // `degraded` with an empty reason list, or an error warning beside
+    // `degraded_mode: false` (PR #483 review). Producers tick on their own
+    // cadences with no relationship to when this request arrives.
+    let (warnings, degraded_mode, status) = crate::degradation::verdict();
     serde_json::json!({
         "data": {
-            "status": crate::degradation::status_word(),
+            "status": status,
             // The shape the client has parsed all along (`CIRISApiClient`:
             // `status != "ok" || degradedMode || warnings.isNotEmpty()`), which
             // this node simply never populated. Producer meets waiting consumer.
@@ -278,8 +282,14 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         .map(Vec::as_slice)
         .unwrap_or_default();
 
-    let mut folded: Vec<serde_json::Value> = Vec::new();
-    for w in offered.iter().take(MAX_BRAIN_WARNINGS) {
+    // FILTER FIRST, THEN CAP (codex review, PR #483). Capping the raw array
+    // lets malformed entries consume the whole budget: a brain that emits 32
+    // junk objects followed by one real `llm.no_provider` would have the real
+    // one silently dropped, and the response would carry nothing but a
+    // truncation notice. Which entries are worth carrying is a question about
+    // VALID warnings, so the cap has to be applied to those.
+    let mut valid: Vec<serde_json::Value> = Vec::new();
+    for w in offered {
         // No `code` means nothing to group on and nothing to act on; skipping
         // beats inventing an empty-string code that collides with every other
         // malformed entry.
@@ -288,20 +298,27 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         };
         let mut w = w.clone();
         w["code"] = serde_json::json!(format!("agent.{code}"));
-        folded.push(w);
+        valid.push(w);
     }
-    if offered.len() > MAX_BRAIN_WARNINGS {
+    let dropped = valid.len().saturating_sub(MAX_BRAIN_WARNINGS);
+    valid.truncate(MAX_BRAIN_WARNINGS);
+    let mut folded = valid;
+    if dropped > 0 {
         tracing::warn!(
-            offered = offered.len(),
+            valid = dropped + MAX_BRAIN_WARNINGS,
             cap = MAX_BRAIN_WARNINGS,
-            "the folded brain offered more warnings than this payload carries — truncated"
+            "the folded brain offered more valid warnings than this payload carries — truncated"
         );
+        // The count is of VALID warnings omitted, not raw array entries — an
+        // operator chasing "how many am I not seeing" needs the number of real
+        // ones, and malformed junk is not something they can go and read.
         folded.push(serde_json::json!({
             "code": "agent.warnings_truncated",
             "message": format!(
-                "the folded agent reported {} warnings; {MAX_BRAIN_WARNINGS} are shown here. \
-                 Read the agent's own /v1/system/health for the rest.",
-                offered.len()
+                "the folded agent reported {} valid warnings; {MAX_BRAIN_WARNINGS} are shown \
+                 here and {dropped} are omitted. Read the agent's own /v1/system/health for \
+                 the rest.",
+                dropped + MAX_BRAIN_WARNINGS
             ),
             "severity": "warning",
         }));
@@ -316,7 +333,22 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         }
     }
 
-    if brain_degraded {
+    // A non-`ok` STATUS is an independent degradation signal, not a decoration
+    // on the boolean (codex review, PR #483). The client's own contract is
+    // `status != "ok" || degradedMode || warnings.isNotEmpty()` — three
+    // independent signals — and this fold said every field was optional and
+    // every shape tolerated, then keyed solely on the boolean. An older or
+    // partially-compatible brain that reports `status: "degraded"` and no
+    // `degraded_mode` would have had a valid verdict silently discarded.
+    //
+    // Absent status is NOT a claim of health: only a present, non-`ok` value
+    // escalates, so a brain that omits the field entirely changes nothing.
+    let brain_status_bad = bd
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s != "ok");
+
+    if brain_degraded || brain_status_bad {
         out["data"]["degraded_mode"] = serde_json::json!(true);
         out["data"]["status"] = serde_json::json!("degraded");
     }

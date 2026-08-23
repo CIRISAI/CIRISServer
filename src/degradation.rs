@@ -189,6 +189,52 @@ pub fn status_word() -> &'static str {
     }
 }
 
+/// The three verdict fields, derived from ONE read of the registry.
+///
+/// `snapshot()`, `degraded_mode()` and `status_word()` each take their own read
+/// lock. A reporter raising or clearing between them produces a torn response —
+/// `degraded` with an empty `warnings` list, or an error warning sitting beside
+/// `degraded_mode: false` (codex review, PR #483). Both are worse than either
+/// truth: a watcher cannot act on the first and will not act on the second.
+///
+/// Producers run on their own cadences (the retention loop, the reconcile tick)
+/// with no relationship to when a health request arrives, so the interleaving
+/// is ordinary rather than exotic.
+///
+/// One lock, one instant, three fields that agree by construction.
+#[must_use]
+pub fn verdict() -> (Vec<Warning>, bool, &'static str) {
+    let guard = read_registry();
+    let degraded = guard.iter().any(Warning::is_degrading);
+    let warnings = guard.clone();
+    drop(guard);
+    (warnings, degraded, if degraded { "degraded" } else { "ok" })
+}
+
+/// **Absence of evidence is not evidence of recovery** (codex review, PR #483).
+///
+/// `clear` is for a SUCCESSFUL measurement that came back healthy. When a probe
+/// cannot measure at all — the cgroup file vanished, PSI was turned off, no
+/// replication round ran in the window — there is nothing to clear WITH, and
+/// calling `clear` there converts "we stopped being able to look" into "the
+/// problem is gone".
+///
+/// That is the worst possible moment to go quiet: observability is lost exactly
+/// when something is going wrong, and a transient permission or mount failure
+/// would turn a known degradation into `status: "ok"`.
+///
+/// So a no-evidence path calls THIS, which leaves any standing warning
+/// standing. It is a deliberate no-op with a name, so the call site reads as a
+/// decision rather than an omission — an empty statement here would be
+/// indistinguishable from a forgotten one, and the reviewer of the next change
+/// could not tell them apart.
+///
+/// The trade-off is real and is the right way round: a node whose probe breaks
+/// permanently keeps its last verdict, which is loud, rather than falling
+/// silent, which is not. A code raised by a probe that can no longer run is
+/// cleared by that probe measuring healthy again — never by it failing.
+fn no_evidence(_code: &str) {}
+
 /// Test-only: empty the registry so cases do not leak into each other.
 #[cfg(test)]
 pub fn reset_for_test() {
@@ -240,31 +286,127 @@ const WARNING_CODE_MEMORY: &str = "resource.memory_pressure";
 /// a sentinel near `u64::MAX` rather than a keyword, so an implausibly large
 /// limit is read as unlimited — treating that sentinel as a real ceiling would
 /// compute a reassuring 0.0% forever.
+/// Resolve the accounting directory for THIS process, not the hierarchy root.
+///
+/// **The defect this closes (codex review, PR #483).** Reading
+/// `/sys/fs/cgroup/memory.current` directly is correct only when the process
+/// has a private cgroup namespace — a container. Under systemd, which is how
+/// #480 and #482 describe the box that actually died, the process lives at
+/// `/system.slice/ciris-server.service` while the root files still exist and
+/// describe the WHOLE HOST. The probe then reported host-wide usage against a
+/// root `memory.max` of `max`, so a `MemoryMax=` on the unit was invisible and
+/// the alarm this module exists to raise could never fire on the deployment
+/// that needed it most.
+///
+/// `/proc/self/cgroup` names the path; v2 emits a single `0::/<path>` line, v1
+/// a `N:memory:/<path>` line. The mount point is the conventional
+/// `/sys/fs/cgroup` — and when the resolved directory is not readable (a
+/// namespaced container reports a path it cannot see), the ROOT is the correct
+/// fallback, because in that case the root files really are this process's.
+fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
+    let text = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    for line in text.lines() {
+        let mut parts = line.splitn(3, ':');
+        let (_id, ctrls, path) = (parts.next()?, parts.next()?, parts.next()?);
+        let matches = match controller {
+            // v2: the unified line has an empty controller field.
+            None => ctrls.is_empty(),
+            Some(c) => ctrls.split(',').any(|x| x == c),
+        };
+        if matches {
+            let p = path.trim_start_matches('/');
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+/// The first of `candidates` that contains `probe`, else `None`.
+fn first_dir_with(candidates: &[String], probe: &str) -> Option<String> {
+    candidates
+        .iter()
+        .find(|d| std::path::Path::new(&format!("{d}/{probe}")).exists())
+        .cloned()
+}
+
 #[must_use]
 pub fn read_memory() -> MemoryReading {
     fn num(path: &str) -> Option<u64> {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
     }
 
-    // cgroup v2
-    if let Some(usage) = num("/sys/fs/cgroup/memory.current") {
-        let raw = std::fs::read_to_string("/sys/fs/cgroup/memory.max").unwrap_or_default();
-        let raw = raw.trim();
-        if raw == "max" {
-            return MemoryReading::Unlimited { usage_bytes: usage };
+    // ── cgroup v2 ────────────────────────────────────────────────────────────
+    // This process's own directory first, the root only as the fallback that is
+    // correct inside a cgroup namespace.
+    let mut v2: Vec<String> = Vec::new();
+    if let Some(rel) = cgroup_relative_path(None) {
+        if !rel.is_empty() {
+            v2.push(format!("/sys/fs/cgroup/{rel}"));
         }
-        if let Ok(limit) = raw.parse::<u64>() {
-            return bounded(usage, limit);
+    }
+    v2.push("/sys/fs/cgroup".to_string());
+
+    if let Some(dir) = first_dir_with(&v2, "memory.current") {
+        if let Some(usage) = num(&format!("{dir}/memory.current")) {
+            let max_path = format!("{dir}/memory.max");
+            return match std::fs::read_to_string(&max_path) {
+                Ok(raw) => {
+                    let raw = raw.trim();
+                    if raw == "max" {
+                        // POSITIVELY unlimited: the kernel said so in words.
+                        MemoryReading::Unlimited { usage_bytes: usage }
+                    } else if let Ok(limit) = raw.parse::<u64>() {
+                        bounded(usage, limit)
+                    } else {
+                        // Readable but not parsable. NOT unlimited — we do not
+                        // know, and saying "unlimited" would be a fact invented
+                        // from a failed read.
+                        MemoryReading::Unavailable {
+                            reason: format!(
+                                "{max_path} is readable but holds {raw:?}, which is neither \
+                                 `max` nor a byte count — the limit is unknown, which is not \
+                                 the same as absent"
+                            ),
+                        }
+                    }
+                }
+                Err(e) => MemoryReading::Unavailable {
+                    reason: format!(
+                        "{max_path} could not be read ({e}) — usage is {usage} bytes but the \
+                         LIMIT is unknown. Reporting this as unlimited would assert that no \
+                         ceiling is configured on the evidence of a failed read."
+                    ),
+                },
+            };
         }
-        return MemoryReading::Unlimited { usage_bytes: usage };
     }
 
-    // cgroup v1
-    if let Some(usage) = num("/sys/fs/cgroup/memory/memory.usage_in_bytes") {
-        match num("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-            // v1's "unlimited" is a huge sentinel, not a word.
-            Some(limit) if limit < (1u64 << 62) => return bounded(usage, limit),
-            _ => return MemoryReading::Unlimited { usage_bytes: usage },
+    // ── cgroup v1 ────────────────────────────────────────────────────────────
+    let mut v1: Vec<String> = Vec::new();
+    if let Some(rel) = cgroup_relative_path(Some("memory")) {
+        if !rel.is_empty() {
+            v1.push(format!("/sys/fs/cgroup/memory/{rel}"));
+        }
+    }
+    v1.push("/sys/fs/cgroup/memory".to_string());
+
+    if let Some(dir) = first_dir_with(&v1, "memory.usage_in_bytes") {
+        if let Some(usage) = num(&format!("{dir}/memory.usage_in_bytes")) {
+            let limit_path = format!("{dir}/memory.limit_in_bytes");
+            return match num(&limit_path) {
+                // v1's "unlimited" is a huge sentinel, not a word — and it IS a
+                // positive answer, so it stays `Unlimited`.
+                Some(limit) if limit >= (1u64 << 62) => {
+                    MemoryReading::Unlimited { usage_bytes: usage }
+                }
+                Some(limit) => bounded(usage, limit),
+                None => MemoryReading::Unavailable {
+                    reason: format!(
+                        "{limit_path} could not be read or parsed — usage is {usage} bytes but \
+                         the LIMIT is unknown, which is not the same as unlimited"
+                    ),
+                },
+            };
         }
     }
 
@@ -330,18 +472,41 @@ pub fn probe_memory() -> MemoryReading {
                 clear(WARNING_CODE_MEMORY);
             }
         }
-        // Unlimited and Unavailable raise nothing: neither is a pressure
-        // reading. Both are REPORTED in the stats block, which is where the
-        // absence belongs — an alarm on every dev laptop would train the
-        // channel to be ignored.
-        MemoryReading::Unlimited { .. } | MemoryReading::Unavailable { .. } => {
+        // Unlimited raises nothing AND clears: a process with no ceiling
+        // cannot be at a percentage of one, and that is a real measurement —
+        // the kernel said `max` in words (or v1's sentinel). Positive evidence,
+        // so a stale alarm from a previously-limited run comes down.
+        MemoryReading::Unlimited { .. } => {
             clear(WARNING_CODE_MEMORY);
+        }
+        // Unavailable is NOT that. We could not measure, so we have learned
+        // nothing about whether the earlier pressure went away — see
+        // `no_evidence`. Both states are REPORTED in the resources block, which
+        // is where the absence belongs; an alarm for "this laptop has no
+        // cgroup" would train the channel to be ignored.
+        MemoryReading::Unavailable { .. } => {
+            no_evidence(WARNING_CODE_MEMORY);
         }
     }
     reading
 }
 
 // ─── Contention: CPU, disk, and the kernel's own answer ──────────────────────
+
+/// Where a PSI reading came from — and therefore what it is a statement ABOUT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureScope {
+    /// Read from this process's own cgroup — the reading describes THIS node.
+    Cgroup,
+    /// Read from `/proc/pressure/*`, which describes the WHOLE HOST.
+    ///
+    /// A noisy neighbour shows up here. The verdict must not be worded as, or
+    /// escalated to, a statement about this node (codex review, PR #483): a
+    /// responsive node would otherwise advertise degradation and advise
+    /// reducing its own workload because something else on the box is thrashing.
+    Host,
+}
 
 /// Pressure Stall Information for one resource — the fraction of the last ten
 /// seconds during which work was BLOCKED on it.
@@ -372,6 +537,9 @@ pub enum Pressure {
     /// Read successfully. `full_avg10` is `None` on kernels that do not report a
     /// `full` line for that resource (commonly CPU) — absent, never zero.
     Measured {
+        /// WHOSE stall this is. Host-scoped readings describe the box, not this
+        /// node, and are never escalated to a degradation (PR #483 review).
+        scope: PressureScope,
         some_avg10: f64,
         full_avg10: Option<f64>,
     },
@@ -396,9 +564,13 @@ pub const PRESSURE_DEGRADE_FULL_PCT: f64 = 15.0;
 pub fn read_pressure(resource: &str) -> Pressure {
     let cgroup = format!("/sys/fs/cgroup/{resource}.pressure");
     let host = format!("/proc/pressure/{resource}");
-    let text = std::fs::read_to_string(&cgroup)
-        .or_else(|_| std::fs::read_to_string(&host))
-        .ok();
+    let (text, scope) = match std::fs::read_to_string(&cgroup) {
+        Ok(t) => (Some(t), PressureScope::Cgroup),
+        // The fallback answers a DIFFERENT question — "is this box stalling?"
+        // rather than "is this node stalling?" — so the scope travels with the
+        // number instead of being forgotten at the read.
+        Err(_) => (std::fs::read_to_string(&host).ok(), PressureScope::Host),
+    };
     let Some(text) = text else {
         return Pressure::Unavailable {
             reason: format!(
@@ -416,6 +588,7 @@ pub fn read_pressure(resource: &str) -> Pressure {
     };
     match avg10("some") {
         Some(some_avg10) => Pressure::Measured {
+            scope,
             some_avg10,
             full_avg10: avg10("full"),
         },
@@ -455,16 +628,46 @@ pub fn probe_contention() -> (Pressure, Pressure) {
 
 fn judge(resource: &str, code: &'static str, p: &Pressure, remedy: &str) {
     let Pressure::Measured {
+        scope,
         some_avg10,
         full_avg10,
     } = p
     else {
-        // Unavailable raises nothing — it is reported in the resources block.
-        // An alarm for "this kernel has no PSI" would fire on every dev box.
-        clear(code);
+        // Unavailable raises nothing — it is reported in the resources block,
+        // and an alarm for "this kernel has no PSI" would fire on every dev
+        // box. But it does not CLEAR either: PSI going away tells us nothing
+        // about whether the stall went away. See `no_evidence`.
+        no_evidence(code);
         return;
     };
     let full = full_avg10.unwrap_or(0.0);
+
+    // HOST-SCOPED READINGS ARE NEVER A DEGRADATION (codex review, PR #483).
+    //
+    // `/proc/pressure/*` describes the whole box. On a cgroup-v1 container —
+    // or anywhere the scoped file is missing — a noisy neighbour would
+    // otherwise make a perfectly responsive node report itself degraded and
+    // advise reducing ITS OWN workload, which is both false and actively
+    // misleading. So a host reading is reported, attributed, and capped at
+    // advisory; only a cgroup-scoped reading can say "this node".
+    if *scope == PressureScope::Host {
+        if full >= PRESSURE_DEGRADE_FULL_PCT || *some_avg10 >= PRESSURE_WARN_SOME_PCT {
+            raise(Warning::advisory(
+                code,
+                format!(
+                    "{resource} contention ON THIS HOST: work somewhere on the box was blocked \
+                     on {resource} {some_avg10:.1}% of the last 10s (full {full:.1}%). This is \
+                     the HOST-WIDE reading — no per-cgroup {resource}.pressure was available — \
+                     so it may be a neighbour rather than this node, and it is reported without \
+                     degrading this node. {remedy}"
+                ),
+            ));
+        } else {
+            clear(code);
+        }
+        return;
+    }
+
     if full >= PRESSURE_DEGRADE_FULL_PCT {
         raise(Warning::error(
             code,
@@ -507,9 +710,19 @@ pub fn report_network_rounds(timed_out: u64, total: u64) {
     const CODE: &str = "network.rounds_timing_out";
     if total == 0 {
         // No rounds ran. That is NOT "no timeouts" — it is a different fact,
-        // and one this function must not launder into health. The caller that
-        // knows why no rounds ran should say so with its own warning.
-        clear(CODE);
+        // and one this function must not launder into health.
+        //
+        // The first cut CLEARED here, and the doc two lines up already said why
+        // that was wrong: the comment and the code disagreed, and the code won.
+        // Replication rounds can be slower than the reconcile cadence that
+        // samples them, so a genuinely failing node produces empty windows
+        // routinely — and every one of them would have taken the alarm down
+        // before an operator ever polled health.
+        //
+        // The caller that knows WHY no rounds ran should say so with its own
+        // warning; this one keeps its last verdict until a non-empty window
+        // demonstrates recovery.
+        no_evidence(CODE);
         return;
     }
     let pct = (timed_out as f64 / total as f64) * 100.0;
@@ -557,12 +770,30 @@ struct EdgeCounters {
     backpressure_drops: u64,
 }
 
-/// Saturating difference. A counter that went BACKWARDS means the edge runtime
-/// restarted and reset its metrics — the honest window is then "everything
-/// since the restart", which is what a saturating subtract against a zeroed
-/// baseline gives once the baseline is replaced below.
+/// The window between two reads of one counter.
+///
+/// A counter that went BACKWARDS means the edge runtime restarted and zeroed
+/// its metrics. The honest window is then "everything since the restart" —
+/// i.e. `now` itself, measured from zero.
+///
+/// **The first cut wrote `now.saturating_sub(then)` and a doc claiming exactly
+/// the behaviour above** (codex review, PR #483). Saturating returns 0 for any
+/// counter that moved backwards, so a runtime that restarted and then failed
+/// before the next sample had those failures silently discarded — permanently,
+/// because the post-restart snapshot becomes the new baseline. The comment
+/// described the right rule and the code did the opposite, which is worse than
+/// either alone: it reads as considered.
+///
+/// The saturation still matters for the ordinary case, where it prevents an
+/// underflow panic on a 32-bit debug build.
 const fn window(now: u64, then: u64) -> u64 {
-    now.saturating_sub(then)
+    if now < then {
+        // Reset detected: everything the counter holds was accumulated after
+        // the restart, so all of it belongs to this window.
+        now
+    } else {
+        now - then
+    }
 }
 
 /// Read edge's own round + back-pressure counters and raise what they say.
@@ -634,6 +865,9 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
 pub fn report_backpressure_drops(dropped_in_window: u64) {
     const CODE: &str = "network.inbound_frames_dropped";
     if dropped_in_window == 0 {
+        // Unlike the rounds ratio, a zero here IS a measurement: the counter was
+        // read at both ends of the window and did not move. Nothing was
+        // dropped, so the alarm comes down.
         clear(CODE);
         return;
     }
@@ -773,6 +1007,208 @@ mod tests {
         );
     }
 
+    /// **An empty window must not clear a standing timeout alarm**
+    /// (codex review, PR #483).
+    ///
+    /// Replication rounds can be slower than the reconcile cadence that samples
+    /// them, so a genuinely failing node produces empty windows routinely. If
+    /// `(0, 0)` cleared, every one of them would take the alarm down before an
+    /// operator ever polled health — the alarm would be least visible exactly
+    /// when it was most true.
+    #[test]
+    fn an_empty_window_neither_raises_nor_clears() {
+        let _g = exclusive();
+
+        report_network_rounds(9, 10);
+        assert!(degraded_mode(), "fixture: 9/10 timing out must degrade");
+
+        report_network_rounds(0, 0);
+        assert!(
+            degraded_mode(),
+            "an EMPTY window cleared a standing timeout alarm. No rounds ran, so nothing was \
+             learned about recovery — and this function's own doc says so two lines above the \
+             code that did it: {:?}",
+            snapshot()
+        );
+
+        // Only a real, healthy window takes it down.
+        report_network_rounds(0, 10);
+        assert!(
+            !degraded_mode(),
+            "10 rounds with no timeouts is positive evidence of recovery and must clear: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **A probe that cannot measure must not clear what it previously found.**
+    ///
+    /// A transient permission, mount, or kernel-interface failure would
+    /// otherwise turn a known degradation into `status: "ok"` at precisely the
+    /// moment observability is lost.
+    #[test]
+    fn an_unavailable_probe_leaves_a_standing_alarm_standing() {
+        let _g = exclusive();
+
+        raise(Warning::critical("resource.cpu_stall", "measured, and bad"));
+        judge(
+            "cpu",
+            "resource.cpu_stall",
+            &Pressure::Unavailable {
+                reason: "PSI turned off mid-flight".to_string(),
+            },
+            "remedy",
+        );
+        assert!(
+            degraded_mode(),
+            "losing the ability to measure was reported as the problem going away: {:?}",
+            snapshot()
+        );
+
+        // A healthy MEASUREMENT is what clears it.
+        judge(
+            "cpu",
+            "resource.cpu_stall",
+            &Pressure::Measured {
+                scope: PressureScope::Cgroup,
+                some_avg10: 0.0,
+                full_avg10: Some(0.0),
+            },
+            "remedy",
+        );
+        assert!(
+            !degraded_mode(),
+            "a healthy measurement must clear: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **Host-wide PSI is never this node's degradation.**
+    ///
+    /// A noisy neighbour on a cgroup-v1 container would otherwise make a
+    /// perfectly responsive node advertise degradation and advise reducing its
+    /// own workload.
+    #[test]
+    fn host_scoped_pressure_is_reported_but_never_degrades_this_node() {
+        let _g = exclusive();
+
+        let brutal = |scope| Pressure::Measured {
+            scope,
+            some_avg10: 99.0,
+            full_avg10: Some(99.0),
+        };
+
+        judge(
+            "io",
+            "resource.io_stall",
+            &brutal(PressureScope::Host),
+            "remedy",
+        );
+        let raised = snapshot();
+        assert_eq!(
+            raised.len(),
+            1,
+            "the host reading must still be REPORTED: {raised:?}"
+        );
+        assert!(
+            !degraded_mode(),
+            "a HOST-WIDE reading degraded this node. It may be a neighbour, and the node would \
+             be advising an operator to reduce a workload that is not the cause: {raised:?}"
+        );
+        assert!(
+            raised[0].message.contains("HOST"),
+            "a host reading must say so in the message, or an operator reads it as this \
+             container's: {:?}",
+            raised[0].message
+        );
+
+        // The identical numbers, cgroup-scoped, DO degrade.
+        judge(
+            "io",
+            "resource.io_stall",
+            &brutal(PressureScope::Cgroup),
+            "remedy",
+        );
+        assert!(
+            degraded_mode(),
+            "the same stall measured on THIS node's cgroup must degrade it: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **A counter reset means "everything since the restart", as documented.**
+    ///
+    /// Saturating subtraction returned 0 for any counter that moved backwards,
+    /// so a runtime that restarted and then failed before the next sample had
+    /// those failures discarded permanently — the post-restart snapshot becomes
+    /// the new baseline. The doc described the right rule; the code did the
+    /// opposite.
+    #[test]
+    fn a_reset_counter_reports_everything_since_the_restart() {
+        use ciris_edge::observability::{EdgeMetrics, RoundOutcome};
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut bundle = EdgeMetrics::new().snapshot();
+        bundle
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 5_000);
+        bundle.replication_inbound_backpressure_drops = 0;
+        report_edge_metrics(&bundle); // baseline
+
+        // Edge restarts, and immediately drops frames + times out rounds.
+        let mut after = EdgeMetrics::new().snapshot();
+        after
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 8);
+        after
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 2);
+        after.replication_inbound_backpressure_drops = 17;
+        report_edge_metrics(&after);
+
+        let codes: Vec<String> = snapshot().into_iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&"network.inbound_frames_dropped".to_string()),
+            "17 frames were dropped after an edge restart and the window reported ZERO — those \
+             drops are now permanently invisible, because this snapshot becomes the baseline: \
+             {codes:?}"
+        );
+        assert!(
+            codes.contains(&"network.rounds_timing_out".to_string()),
+            "8 of 10 post-restart rounds timed out and the window reported nothing: {codes:?}"
+        );
+    }
+
+    /// The three verdict fields come from ONE registry read and cannot disagree.
+    #[test]
+    fn the_verdict_fields_agree_by_construction() {
+        let _g = exclusive();
+
+        let (w, d, s) = verdict();
+        assert!(
+            w.is_empty() && !d && s == "ok",
+            "a clean registry: {w:?} {d} {s}"
+        );
+
+        raise(Warning::error("t.v", "a reason"));
+        let (w, d, s) = verdict();
+        assert_eq!(
+            (d, s),
+            (true, "degraded"),
+            "degraded_mode and status must move together"
+        );
+        assert!(
+            !w.is_empty(),
+            "`degraded` with an EMPTY reason list is the torn read this exists to prevent"
+        );
+
+        raise(Warning::advisory("t.v2", "worth knowing"));
+        let (w, d, _) = verdict();
+        assert!(
+            d && w.len() == 2,
+            "an advisory rides along without changing the flag"
+        );
+    }
     /// The registry's contract, and the reason `degraded_mode` is not "any
     /// warning": an advisory must not flip the flag, or the flag stops meaning
     /// "this node is not doing its whole job" within a week of shipping.
