@@ -106,6 +106,94 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Blank out every `#[cfg(test)]` item, so a test fixture cannot be mistaken
+/// for a server-emitted message id.
+///
+/// A test has exactly the shape this file hunts for:
+///
+/// ```ignore
+/// raise(Warning::error("t.reduced", "a plane is shed"));
+/// ```
+///
+/// `src/degradation.rs` produced three such phantoms on first contact — ids no
+/// server will ever emit, each demanding an en.json entry that would put test
+/// strings into the shipped product bundle in 29 languages. Failing in the
+/// direction of MORE findings is what made it look like diligence.
+///
+/// **This must stay byte-for-byte equivalent in behaviour to
+/// `_without_test_modules` in `client/tools/check_localization_sync.py`.** The
+/// two scrapers exist to disagree — that is the whole point of
+/// `rust_and_python_resolvers_agree_on_the_bundle` — so a rule added to one and
+/// not the other is a red gate, and was: this fix landed on the Python side
+/// first and the counts went 244 vs 241 within the hour.
+///
+/// Brace-matched rather than pattern-matched, because a test module nests and
+/// the literals inside it carry braces, quotes and comment markers of their
+/// own. Replaced with spaces rather than deleted, so byte offsets — and every
+/// line number reported from them — stay honest.
+fn without_test_modules(text: &str) -> String {
+    let mut out: Vec<char> = text.chars().collect();
+    let marker: Vec<char> = "#[cfg(test)]".chars().collect();
+    let mut i = 0usize;
+    while i < out.len() {
+        if !out[i..].starts_with(&marker[..]) {
+            i += 1;
+            continue;
+        }
+        // Find this item's opening brace, then its match. Anything before the
+        // brace (`mod tests`, further attributes) is inert either way.
+        let Some(brace) = (i..out.len()).find(|&k| out[k] == '{') else {
+            break;
+        };
+        let mut depth = 0i32;
+        let mut j = brace;
+        let (mut in_str, mut in_char, mut esc, mut in_line_comment) = (false, false, false, false);
+        while j < out.len() {
+            let ch = out[j];
+            if esc {
+                esc = false;
+            } else if ch == '\\' && (in_str || in_char) {
+                esc = true;
+            } else if in_line_comment {
+                if ch == '\n' {
+                    in_line_comment = false;
+                }
+            } else if in_str {
+                if ch == '"' {
+                    in_str = false;
+                }
+            } else if in_char {
+                if ch == '\'' {
+                    in_char = false;
+                }
+            } else if ch == '"' {
+                in_str = true;
+            } else if ch == '/' && out.get(j + 1) == Some(&'/') {
+                in_line_comment = true;
+            } else if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            j += 1;
+        }
+        for slot in out
+            .iter_mut()
+            .take((j + 1).min(text.chars().count()))
+            .skip(i)
+        {
+            if *slot != '\n' {
+                *slot = ' ';
+            }
+        }
+        i = j + 1;
+    }
+    out.into_iter().collect()
+}
+
 /// Scrape the server's localizable strings: an `(id, english_text)` literal
 /// pair, whatever helper wraps it — `m(id, text)`, `refusal(code, token, id,
 /// text)`, or a bare `Msg` tuple. Matching the PAIR rather than one helper name
@@ -123,6 +211,8 @@ fn server_message_ids() -> BTreeMap<String, String> {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
+        // Same rule as the Python guard, or the cross-check below goes red.
+        let text = without_test_modules(&text);
         let rel = file
             .strip_prefix(&root)
             .unwrap_or(&file)
@@ -489,5 +579,64 @@ fn rust_and_python_resolvers_agree_on_the_bundle() {
         "the Rust scraper in this file sees {rust_ids} server-emitted ids and the Python guard \
          sees {python_ids}. One of them has drifted, and whichever sees fewer is silently \
          exempting emission sites from its gate."
+    );
+}
+
+/// **A `#[cfg(test)]` fixture is not a server emission** — pinned HERE, not
+/// only through the Python cross-check.
+///
+/// `rust_and_python_resolvers_agree_on_the_bundle` compares the two scrapers
+/// and is what caught this rule landing on the Python side alone (244 vs 241).
+/// But agreement is not correctness: if both scrapers drifted the same way,
+/// that check would stay green over two identically-wrong answers. So each side
+/// pins the RULE directly — this test, and
+/// `_prove_test_fixtures_are_not_server_emissions` in the Python guard.
+///
+/// The fixture below is deliberately awkward: a literal containing a brace and
+/// an escaped quote, a `//` comment holding an unbalanced brace, and a nested
+/// module. A naive brace-counter walks off the end of any one of them and eats
+/// the rest of the file — which reads as "no findings", the most expensive way
+/// for a gate to fail.
+#[test]
+fn a_cfg_test_module_contributes_no_message_ids() {
+    let src = r###"
+fn real() -> Value { m("nav.home", "Home, the operator landing surface.") }
+
+#[cfg(test)]
+mod tests {
+    // a comment with an unbalanced } brace in it
+    fn awkward() -> &'static str { "a } and an escaped \" inside" }
+    fn phantom() { raise(m("t.phantom", "an id no server will ever emit")); }
+
+    mod nested {
+        fn deeper() { raise(m("t.deeper", "another phantom, one level down")); }
+    }
+}
+
+fn also_real() -> Value { m("nav.away", "Away, the other operator surface.") }
+"###;
+
+    let stripped = without_test_modules(src);
+    assert!(
+        stripped.contains("nav.home") && stripped.contains("nav.away"),
+        "the stripper ate real emission sites. A scraper that silently drops ids reports \
+         'no findings', which is indistinguishable from a clean tree and is the most \
+         expensive way for this gate to fail:\n{stripped}"
+    );
+    assert!(
+        !stripped.contains("t.phantom"),
+        "a #[cfg(test)] fixture was left in the scan — it will demand an en.json entry, \
+         putting test strings into the shipped product bundle in 29 languages:\n{stripped}"
+    );
+    assert!(
+        !stripped.contains("t.deeper"),
+        "the brace matcher stopped at the first inner `}}` and left a NESTED test module \
+         in the scan:\n{stripped}"
+    );
+    assert_eq!(
+        stripped.lines().count(),
+        src.lines().count(),
+        "the stripper must replace with spaces, never delete — byte offsets and every line \
+         number derived from them have to stay honest"
     );
 }
