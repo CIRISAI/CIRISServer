@@ -744,8 +744,9 @@ fn judge(resource: &str, code: &'static str, host_code: &'static str, p: &Pressu
 ///
 /// `timed_out` / `total` are the round-outcome counters for the window; the
 /// caller decides the window.
-pub fn report_network_rounds(timed_out: u64, total: u64) {
+pub fn report_network_rounds(w: RoundWindow) {
     const CODE: &str = "network.rounds_timing_out";
+    let total = w.total;
     if total == 0 {
         // No rounds ran. That is NOT "no timeouts" — it is a different fact,
         // and one this function must not launder into health.
@@ -763,25 +764,65 @@ pub fn report_network_rounds(timed_out: u64, total: u64) {
         no_evidence(CODE);
         return;
     }
-    let pct = (timed_out as f64 / total as f64) * 100.0;
+
+    // **FAILURE IS `total - completed`, NOT `timed_out`** (codex review,
+    // PR #483). The first cut keyed solely on the timeout counter while
+    // dividing by every outcome, so a window of pure `Error` rounds — a
+    // transport or protocol abort, nothing reaching the wire — computed 0% and
+    // CLEARED the alarm. A node where no round completes at all would have read
+    // healthy, which is the worst possible reading of that state.
+    //
+    // Derived by subtraction rather than by summing the failure variants on
+    // purpose: a RoundOutcome added to edge tomorrow lands in the failure count
+    // by default and shows up, instead of being silently treated as success by
+    // a match arm nobody remembered to extend.
+    let failed = total.saturating_sub(w.completed);
+    let pct = (failed as f64 / total as f64) * 100.0;
+    // Named per-outcome so the remedy differs: timeouts point at the path or a
+    // stalled runtime, errors at transport/protocol, refusals at peer state.
+    let breakdown = format!(
+        "timed_out={} refused={} error={} completed={}",
+        w.timed_out, w.refused, w.error, w.completed
+    );
     if pct >= 50.0 {
         raise(Warning::error(
             CODE,
             format!(
-                "{timed_out} of {total} replication rounds timed out ({pct:.0}%) — this \
-                 node is not converging with its peers. Check link churn and the \
-                 withhold ledger before assuming the network: a stalled runtime \
-                 expires its own timeouts against a healthy path."
+                "{failed} of {total} replication rounds did not complete ({pct:.0}%; \
+                 {breakdown}) — this node is not converging with its peers. Check link \
+                 churn and the withhold ledger before assuming the network: a stalled \
+                 runtime expires its own timeouts against a healthy path, and an `error` \
+                 round aborted on transport or protocol before it could."
             ),
         ));
     } else if pct >= 20.0 {
         raise(Warning::advisory(
             CODE,
-            format!("{timed_out} of {total} replication rounds timed out ({pct:.0}%)."),
+            format!(
+                "{failed} of {total} replication rounds did not complete ({pct:.0}%; \
+                 {breakdown})."
+            ),
         ));
     } else {
         clear(CODE);
     }
+}
+
+/// One window's replication-round outcomes.
+///
+/// Carried as a struct rather than two numbers because the VERDICT and the
+/// REMEDY need different things from it: convergence is `completed` against
+/// `total`, but what an operator should go and do differs per outcome —
+/// timeouts point at the path or a stalled runtime, `error` at transport or
+/// protocol, `refused` at peer state. Collapsing them at the call site threw
+/// that away before the message could use it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoundWindow {
+    pub completed: u64,
+    pub timed_out: u64,
+    pub refused: u64,
+    pub error: u64,
+    pub total: u64,
 }
 
 /// **Cumulative counters are not a health reading.** This is the bridge.
@@ -803,7 +844,10 @@ static LAST_EDGE_COUNTERS: std::sync::Mutex<Option<EdgeCounters>> = std::sync::M
 
 #[derive(Clone, Copy, Default)]
 struct EdgeCounters {
+    completed: u64,
     timed_out: u64,
+    refused: u64,
+    error: u64,
     rounds_total: u64,
     backpressure_drops: u64,
 }
@@ -850,12 +894,18 @@ const fn window(now: u64, then: u64) -> u64 {
 pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle) {
     use ciris_edge::observability::RoundOutcome;
 
-    let now = EdgeCounters {
-        timed_out: bundle
+    let at = |o: RoundOutcome| -> u64 {
+        bundle
             .replication_round_outcomes_total
-            .get(&RoundOutcome::TimedOut)
+            .get(&o)
             .copied()
-            .unwrap_or(0),
+            .unwrap_or(0)
+    };
+    let now = EdgeCounters {
+        completed: at(RoundOutcome::Completed),
+        timed_out: at(RoundOutcome::TimedOut),
+        refused: at(RoundOutcome::Refused),
+        error: at(RoundOutcome::Error),
         // `sum()` would panic on overflow in a debug build. These are
         // free-running counters read on a health path that must not be able to
         // take a node down — on a 32-bit target (arm32, some Home Assistant
@@ -882,10 +932,13 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
         return;
     };
 
-    report_network_rounds(
-        window(now.timed_out, previous.timed_out),
-        window(now.rounds_total, previous.rounds_total),
-    );
+    report_network_rounds(RoundWindow {
+        completed: window(now.completed, previous.completed),
+        timed_out: window(now.timed_out, previous.timed_out),
+        refused: window(now.refused, previous.refused),
+        error: window(now.error, previous.error),
+        total: window(now.rounds_total, previous.rounds_total),
+    });
     report_backpressure_drops(window(now.backpressure_drops, previous.backpressure_drops));
 }
 
@@ -1057,10 +1110,20 @@ mod tests {
     fn an_empty_window_neither_raises_nor_clears() {
         let _g = exclusive();
 
-        report_network_rounds(9, 10);
+        report_network_rounds(RoundWindow {
+            timed_out: 9,
+            completed: 1,
+            total: 10,
+            ..Default::default()
+        });
         assert!(degraded_mode(), "fixture: 9/10 timing out must degrade");
 
-        report_network_rounds(0, 0);
+        report_network_rounds(RoundWindow {
+            timed_out: 0,
+            completed: 0,
+            total: 0,
+            ..Default::default()
+        });
         assert!(
             degraded_mode(),
             "an EMPTY window cleared a standing timeout alarm. No rounds ran, so nothing was \
@@ -1070,7 +1133,12 @@ mod tests {
         );
 
         // Only a real, healthy window takes it down.
-        report_network_rounds(0, 10);
+        report_network_rounds(RoundWindow {
+            timed_out: 0,
+            completed: 10,
+            total: 10,
+            ..Default::default()
+        });
         assert!(
             !degraded_mode(),
             "10 rounds with no timeouts is positive evidence of recovery and must clear: {:?}",
@@ -1173,6 +1241,76 @@ mod tests {
         assert!(
             degraded_mode(),
             "the same stall measured on THIS node's cgroup must degrade it: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **A window of pure ERRORS is not a healthy window** (codex review,
+    /// PR #483).
+    ///
+    /// The first cut keyed on the timeout counter alone while dividing by every
+    /// outcome, so rounds that aborted on transport or protocol counted in the
+    /// denominator and nowhere else. A node where NOTHING completed computed 0%
+    /// and cleared its alarm — the worst possible reading of that state.
+    #[test]
+    fn rounds_that_error_or_are_refused_count_as_failures_not_successes() {
+        let _g = exclusive();
+
+        // Ten rounds, none completed, none timed out.
+        report_network_rounds(RoundWindow {
+            error: 7,
+            refused: 3,
+            total: 10,
+            ..Default::default()
+        });
+        let standing = snapshot();
+        assert!(
+            degraded_mode(),
+            "not one round completed and the node reported healthy, because none of them \
+             happened to TIME OUT: {standing:?}"
+        );
+        assert!(
+            standing[0].message.contains("error=7") && standing[0].message.contains("refused=3"),
+            "the verdict must name the outcomes — a timeout points at the path, an error at \
+             transport, a refusal at peer state, and the operator does different things: {:?}",
+            standing[0].message
+        );
+
+        // Every round completing is the only thing that clears it.
+        report_network_rounds(RoundWindow {
+            completed: 10,
+            total: 10,
+            ..Default::default()
+        });
+        assert!(
+            !degraded_mode(),
+            "a fully converged window must clear: {:?}",
+            snapshot()
+        );
+    }
+
+    /// A future `RoundOutcome` must land in the FAILURE count by default.
+    ///
+    /// Failure is derived as `total - completed` rather than by summing the
+    /// failure variants, precisely so an outcome edge adds tomorrow shows up
+    /// instead of being silently treated as success by a match arm nobody
+    /// remembered to extend.
+    #[test]
+    fn an_unknown_future_outcome_counts_as_a_failure_not_a_success() {
+        let _g = exclusive();
+        // `total` exceeds the sum of the named variants: the excess stands in
+        // for an outcome this build does not know about.
+        report_network_rounds(RoundWindow {
+            completed: 1,
+            timed_out: 0,
+            refused: 0,
+            error: 0,
+            total: 10,
+        });
+        assert!(
+            degraded_mode(),
+            "nine rounds resolved as something this build cannot name, and they were counted \
+             as successes: {:?}",
             snapshot()
         );
     }
@@ -1445,8 +1583,19 @@ mod tests {
         let (_cpu, _io) = probe_contention();
 
         // Degenerate inputs that would divide by zero if unguarded.
-        report_network_rounds(0, 0);
-        report_network_rounds(5, 0);
+        report_network_rounds(RoundWindow {
+            timed_out: 0,
+            completed: 0,
+            total: 0,
+            ..Default::default()
+        });
+        // Failures reported with a ZERO denominator: nonsense input that must
+        // not divide by zero, and must not be laundered into a verdict either.
+        report_network_rounds(RoundWindow {
+            timed_out: 5,
+            total: 0,
+            ..Default::default()
+        });
         assert!(
             !snapshot()
                 .iter()

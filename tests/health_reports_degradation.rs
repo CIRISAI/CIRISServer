@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt as _; // for `oneshot`
 
-use ciris_server::degradation::{self, Warning};
+use ciris_server::degradation::{self, RoundWindow, Warning};
 use ciris_server::health;
 
 static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -263,8 +263,17 @@ async fn the_instrument_survives_saturated_counters_and_a_hostile_host() {
     degradation::report_edge_metrics(&EdgeMetrics::new().snapshot());
 
     // The raise points, driven directly at their edges.
-    degradation::report_network_rounds(0, 0);
-    degradation::report_network_rounds(u64::MAX, 1);
+    degradation::report_network_rounds(RoundWindow {
+        timed_out: 0,
+        completed: 0,
+        total: 0,
+        ..Default::default()
+    });
+    degradation::report_network_rounds(RoundWindow {
+        timed_out: u64::MAX,
+        total: 1,
+        ..Default::default()
+    });
     degradation::report_backpressure_drops(u64::MAX);
 
     // The probes, on whatever this host is. On CI that is Linux with cgroup v2
@@ -281,6 +290,21 @@ async fn the_instrument_survives_saturated_counters_and_a_hostile_host() {
         "the health payload did not survive the hostile pass intact: {data:#}"
     );
 
+    // CLEAN UP WITH A MEASURED HEALTHY WINDOW, not an empty one (codex review,
+    // PR #483). `(0, 0)` is deliberately no-evidence now, so it does NOT take
+    // down the alarm this case raised — and because the registry is
+    // process-global and libtest does not run cases in source order, leaving it
+    // standing makes every case that reads `degraded_mode` nondeterministic.
+    // The lock serialises access; it cannot undo state left behind.
     degradation::report_backpressure_drops(0);
-    degradation::report_network_rounds(0, 0);
+    degradation::report_network_rounds(RoundWindow {
+        completed: 1,
+        total: 1,
+        ..Default::default()
+    });
+    assert!(
+        !degradation::degraded_mode(),
+        "this case must hand the registry back clean, or it poisons whichever case libtest          happens to run next: {:?}",
+        degradation::snapshot()
+    );
 }

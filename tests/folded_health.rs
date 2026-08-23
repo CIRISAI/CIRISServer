@@ -48,6 +48,25 @@ async fn spawn_brain(body: serde_json::Value) -> (String, tokio::task::JoinHandl
     (format!("http://{addr}"), h)
 }
 
+/// The node's OWN verdict on this host, right now, with no brain folded.
+///
+/// **The baseline every status assertion here is measured against** (codex
+/// review, PR #483). `node_health` runs the real memory and PSI probes, so on a
+/// loaded CI worker `status` is legitimately `degraded` and an unconditional
+/// `assert_eq!(status, "ok")` fails for host load rather than for a regression.
+/// The registry mutex serialises the tests; it cannot quiet the kernel.
+///
+/// So these cases assert what they are actually about — that folding a brain
+/// does or does not MOVE the node's own verdict — which holds however loud the
+/// runner is.
+async fn bare_node_verdict() -> (String, bool) {
+    let v = get_health(ciris_server::health::router()).await;
+    (
+        v["data"]["status"].as_str().unwrap_or_default().to_string(),
+        v["data"]["degraded_mode"].as_bool().unwrap_or(false),
+    )
+}
+
 async fn get_health(router: axum::Router) -> serde_json::Value {
     let resp = router
         .oneshot(
@@ -71,7 +90,13 @@ async fn get_health(router: axum::Router) -> serde_json::Value {
 async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
     let _registry = REGISTRY_LOCK.lock().await;
     let v = get_health(ciris_server::health::router()).await;
-    assert_eq!(v["data"]["status"], "ok");
+    // Not `== "ok"`: this node's own probes decide that, and a loaded runner is
+    // entitled to say `degraded`. What a BARE node must never do is claim an
+    // agent — which is what this case is about.
+    assert!(
+        matches!(v["data"]["status"].as_str(), Some("ok" | "degraded")),
+        "the status word must be one of the derived values: {v}"
+    );
     assert_eq!(v["data"]["role"], "fabric-node");
     assert!(
         v["data"]["cognitive_state"].is_null(),
@@ -85,6 +110,7 @@ async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
 /// the client through the NODE's port, so `clientModeFrom` resolves AGENT.
 #[tokio::test]
 async fn a_folded_brain_enriches_the_nodes_own_health() {
+    let baseline = bare_node_verdict().await;
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
@@ -109,7 +135,18 @@ async fn a_folded_brain_enriches_the_nodes_own_health() {
     // ...and the NODE's own half survived. Proxying this path wholesale would
     // have answered the agent question and silently lost node liveness — the
     // endpoint has to be the union, not a redirect.
-    assert_eq!(v["data"]["status"], "ok");
+    // The brain reported healthy, so the pair's verdict must equal the node's
+    // OWN — not a hardcoded "ok", which the node's real probes may legitimately
+    // contradict on a loaded runner.
+    assert_eq!(
+        v["data"]["status"].as_str().unwrap_or_default(),
+        baseline.0,
+        "a healthy brain moved the node's own verdict: {v}"
+    );
+    assert_eq!(
+        v["data"]["degraded_mode"].as_bool().unwrap_or(false),
+        baseline.1
+    );
     assert_eq!(v["data"]["role"], "fabric-node");
     assert!(
         v["data"]["conformance"].is_object(),
@@ -123,6 +160,7 @@ async fn a_folded_brain_enriches_the_nodes_own_health() {
 /// exactly the failure. The node stays up and says which case it is.
 #[tokio::test]
 async fn an_unreachable_brain_is_distinguished_from_no_brain() {
+    let baseline = bare_node_verdict().await;
     let _registry = REGISTRY_LOCK.lock().await;
     // A port nobody is listening on: bind then drop, so the address is dead.
     let dead = {
@@ -138,7 +176,18 @@ async fn an_unreachable_brain_is_distinguished_from_no_brain() {
 
     // The node's own liveness is UNAFFECTED — a dead brain must not take the
     // node's health answer down with it.
-    assert_eq!(v["data"]["status"], "ok");
+    // The brain reported healthy, so the pair's verdict must equal the node's
+    // OWN — not a hardcoded "ok", which the node's real probes may legitimately
+    // contradict on a loaded runner.
+    assert_eq!(
+        v["data"]["status"].as_str().unwrap_or_default(),
+        baseline.0,
+        "a healthy brain moved the node's own verdict: {v}"
+    );
+    assert_eq!(
+        v["data"]["degraded_mode"].as_bool().unwrap_or(false),
+        baseline.1
+    );
     assert!(v["data"]["cognitive_state"].is_null());
 
     // And the distinction is on the wire: attached, but not answering.
@@ -380,6 +429,7 @@ async fn a_brain_that_reports_only_a_bad_status_still_degrades_the_pair() {
 #[tokio::test]
 async fn a_brain_that_omits_status_entirely_changes_nothing() {
     let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": { "cognitive_state": "WORK" }
     }))
@@ -388,10 +438,14 @@ async fn a_brain_that_omits_status_entirely_changes_nothing() {
     h.abort();
 
     assert_eq!(
-        v["data"]["status"], "ok",
-        "a missing `status` was treated as a bad one: {v:#}"
+        v["data"]["status"].as_str().unwrap_or_default(),
+        baseline.0,
+        "a missing brain `status` moved this node's own verdict — absent is not a claim: {v:#}"
     );
-    assert_eq!(v["data"]["degraded_mode"], false);
+    assert_eq!(
+        v["data"]["degraded_mode"].as_bool().unwrap_or(false),
+        baseline.1
+    );
 }
 
 /// **Malformed entries must not consume the warning budget** (codex review).
@@ -489,5 +543,54 @@ async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
         "a reduced message must SAY this node reduced it, and where to read the whole thing — \
          otherwise an operator reads a sentence that stops mid-thought and distrusts the \
          surface: {msg:.200}"
+    );
+}
+
+/// **The suite must pass on a node that is legitimately degraded** (codex
+/// review, PR #483).
+///
+/// `node_health` runs the real memory and PSI probes, so on a loaded CI worker
+/// `status` is genuinely `degraded` — and every case here that hardcoded
+/// `"ok"` failed for host load rather than for a regression. That is not a
+/// stricter test; it is a test asserting something it cannot control.
+///
+/// This forces the condition rather than waiting to meet it on a bad day: raise
+/// a real node-tier fault, then drive the whole fold and check the properties
+/// each case actually cares about still hold.
+#[tokio::test]
+async fn folding_still_behaves_when_the_node_itself_is_degraded() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
+        "test.forced_node_fault",
+        "a node-tier fault, to simulate a loaded runner",
+    ));
+
+    let baseline = bare_node_verdict().await;
+    assert_eq!(
+        baseline,
+        ("degraded".to_string(), true),
+        "fixture: the node must be degraded for this case to mean anything"
+    );
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "status": "ok", "cognitive_state": "WORK", "degraded_mode": false }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+    ciris_server::degradation::clear("test.forced_node_fault");
+
+    // The fold still does its job — the agent's cognitive state arrives, which
+    // is what `clientModeFrom` reads — and the node's own verdict is untouched.
+    assert_eq!(
+        v["data"]["cognitive_state"], "WORK",
+        "a degraded node stopped reporting its folded brain's cognitive state, so the client \
+         would resolve it as a bare NODE: {v:#}"
+    );
+    assert_eq!(v["data"]["agent"]["folded"], true);
+    assert_eq!(v["data"]["agent"]["reachable"], true);
+    assert_eq!(
+        v["data"]["status"], "degraded",
+        "a healthy brain cleared a degraded node's verdict: {v:#}"
     );
 }
