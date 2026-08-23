@@ -144,6 +144,68 @@ _SERVER_MSG = re.compile(
 )
 
 
+def _without_test_modules(text: str) -> str:
+    r"""Blank out every ``#[cfg(test)]`` item so test fixtures are not mistaken
+    for server-emitted message ids.
+
+    A test's ``Warning::error("t.reduced", "a plane is shed")`` has exactly the
+    shape this scanner hunts for, and the scanner had no idea it was reading a
+    fixture. `src/degradation.rs` produced FIVE such phantoms on first contact
+    — ids no server will ever emit, demanding en.json entries that would put
+    test strings into the shipped product bundle in 29 languages.
+
+    That is the sibling of the #461 class: the id set was wrong, and being
+    wrong in the direction of MORE findings is what made it look like
+    diligence. A check that invents work is trusted exactly as long as it takes
+    someone to look at one finding.
+
+    Brace-matched rather than regex'd, because a test module is nested and the
+    literals inside it contain braces of their own. Replaced with newlines, not
+    deleted, so reported line numbers elsewhere stay honest.
+    """
+    out = list(text)
+    i = 0
+    marker = "#[cfg(test)]"
+    while (i := text.find(marker, i)) != -1:
+        # Find this item's opening brace, then its matching close. Anything
+        # before the brace (`mod tests`, attributes) is inert either way.
+        brace = text.find("{", i)
+        if brace == -1:
+            break
+        depth, j, in_str, in_char, esc, in_line_comment = 0, brace, False, False, False, False
+        while j < len(text):
+            c = text[j]
+            if esc:
+                esc = False
+            elif c == "\\" and (in_str or in_char):
+                esc = True
+            elif in_line_comment:
+                if c == "\n":
+                    in_line_comment = False
+            elif in_str:
+                if c == '"':
+                    in_str = False
+            elif in_char:
+                if c == "'":
+                    in_char = False
+            elif c == '"':
+                in_str = True
+            elif c == "/" and text[j : j + 2] == "//":
+                in_line_comment = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        for k in range(i, min(j + 1, len(text))):
+            if out[k] != "\n":
+                out[k] = " "
+        i = j + 1
+    return "".join(out)
+
+
 def _rust_unescape(raw: str) -> str:
     r"""Resolve a Rust string literal body, including `\`-line-continuations.
 
@@ -367,7 +429,7 @@ def server_message_ids(root: Path) -> Dict[str, Path]:
     if not src.exists():
         return ids
     for rs in sorted(src.rglob("*.rs")):
-        text = rs.read_text(encoding="utf-8")
+        text = _without_test_modules(rs.read_text(encoding="utf-8"))
         for m in _SERVER_MSG.finditer(text):
             if " " not in m.group(2):
                 continue  # not an English sentence — not an (id, text) pair
@@ -398,7 +460,8 @@ def server_message_texts(root: Path) -> Dict[str, str]:
     if not src.exists():
         return out
     for rs in sorted(src.rglob("*.rs")):
-        for m in _SERVER_MSG.finditer(rs.read_text(encoding="utf-8")):
+        text = _without_test_modules(rs.read_text(encoding="utf-8"))
+        for m in _SERVER_MSG.finditer(text):
             txt = _rust_unescape(m.group(2))
             if " " in txt:
                 out.setdefault(m.group(1), txt)
@@ -968,6 +1031,67 @@ def _resync(root: Path) -> None:
             shutil.copy2(f, target / f.name)
 
 
+def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
+    """Assert that a `#[cfg(test)]` module cannot invent a server-emitted id.
+
+    The scanner hunts for the pair `"dotted.id", "an English sentence"`, and a
+    Rust TEST FIXTURE has exactly that shape:
+
+        raise(Warning::error("t.reduced", "a plane is shed"));
+
+    `src/degradation.rs` produced three such phantoms on first contact — ids no
+    server will ever emit, each demanding an en.json entry that would put test
+    strings into the shipped product bundle in 29 languages.
+
+    That is worth a prover of its own rather than a mutation entry, because the
+    failure direction is the dangerous one: the check invented work and *looked
+    like diligence while doing it*. A gate that manufactures findings is trusted
+    exactly as long as it takes someone to look at one — and then not at all,
+    including for the real findings sitting next to it.
+
+    So: add a test module emitting an id en.json never defines, and show that
+    (a) nothing fires, and (b) the emitted-id DENOMINATOR is unchanged — because
+    a stripper that silently ate real ids too would also produce a green run.
+    """
+    _build_fixture(root)
+    rs = root / SERVER_SRC / "fixture.rs"
+    before = run_checks(root)
+    before_ids = len(server_message_ids(root))
+
+    rs.write_text(
+        rs.read_text(encoding="utf-8")
+        + "\n#[cfg(test)]\nmod tests {\n"
+        + '    fn brace_and_quote_in_a_literal() -> &\'static str { "a } and a \\" inside" }\n'
+        + '    fn t() { raise(m("t.phantom", "an id no server will ever emit")); }\n'
+        + "}\n",
+        encoding="utf-8",
+    )
+    after = run_checks(root)
+    after_ids = len(server_message_ids(root))
+
+    failures = 0
+    if after.errors or after.warnings:
+        print("  FAIL  a #[cfg(test)] fixture was scanned as a server emission:")
+        for m in after.errors + after.warnings:
+            print(f"          {m}")
+        failures += 1
+    elif after_ids != before_ids:
+        print(
+            f"  FAIL  test-module stripping changed the emitted-id count "
+            f"({before_ids} -> {after_ids}); a stripper that eats REAL ids also runs green"
+        )
+        failures += 1
+    elif before.errors or before.warnings:
+        print("  FAIL  the fixture was not clean before the test module was added")
+        failures += 1
+    else:
+        print(
+            f"  ok    a #[cfg(test)] fixture emits nothing and moves no denominator "
+            f"({before_ids} id(s) before and after)"
+        )
+    return failures
+
+
 def _prove_keyset_comparison_is_blind(root: Path) -> int:
     """Assert, in code, the premise of CIRISServer#366.
 
@@ -1064,6 +1188,7 @@ def self_test() -> int:
                         print(f"          (also warned: {m})")
 
         failures += _prove_keyset_comparison_is_blind(Path(td) / "blind")
+        failures += _prove_test_fixtures_are_not_server_emissions(Path(td) / "cfgtest")
 
     print()
     if failures:
