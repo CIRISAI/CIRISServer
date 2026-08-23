@@ -618,6 +618,7 @@ pub fn probe_contention() -> (Pressure, Pressure) {
     judge(
         "cpu",
         "resource.cpu_stall",
+        "host.cpu_contention",
         &cpu,
         "work is waiting for CPU. On a 2-vCPU node the runtime has a two-slot budget \
          before HTTP becomes unschedulable (CIRISServer#446) — reduce concurrent work \
@@ -626,6 +627,7 @@ pub fn probe_contention() -> (Pressure, Pressure) {
     judge(
         "io",
         "resource.io_stall",
+        "host.io_contention",
         &io,
         "work is waiting for DISK. This is what parks runtime threads in \
          wait_on_page_bit_common: futures stop being polled, client timeouts expire \
@@ -636,7 +638,24 @@ pub fn probe_contention() -> (Pressure, Pressure) {
     (cpu, io)
 }
 
-fn judge(resource: &str, code: &'static str, p: &Pressure, remedy: &str) {
+/// Raise or clear the stall verdict for one resource.
+///
+/// **Two codes, because they are two different claims** (found in self-review
+/// after the PR #483 scope fix). `code` says "THIS NODE is stalling" and can
+/// degrade; `host_code` says "this BOX is contended" and never can.
+///
+/// One shared code had two failures, both in the dangerous direction, and both
+/// only reachable when the scoped file goes away mid-flight — a container
+/// reconfigured, a cgroup moved:
+///
+///   * the host fallback with a QUIET host called `clear`, taking down a
+///     cgroup-scoped degradation on evidence about a different subject;
+///   * a host ADVISORY raise replaced a standing cgroup ERROR on the same code,
+///     so a noisy neighbour could DOWNGRADE a genuinely stalling node.
+///
+/// Split, each scope owns its own code and can neither clear nor overwrite the
+/// other's. A scope we did not read this pass gets `no_evidence`, not a clear.
+fn judge(resource: &str, code: &'static str, host_code: &'static str, p: &Pressure, remedy: &str) {
     let Pressure::Measured {
         scope,
         some_avg10,
@@ -646,8 +665,10 @@ fn judge(resource: &str, code: &'static str, p: &Pressure, remedy: &str) {
         // Unavailable raises nothing — it is reported in the resources block,
         // and an alarm for "this kernel has no PSI" would fire on every dev
         // box. But it does not CLEAR either: PSI going away tells us nothing
-        // about whether the stall went away. See `no_evidence`.
+        // about whether the stall went away. See `no_evidence`. Neither scope
+        // was read, so neither verdict moves.
         no_evidence(code);
+        no_evidence(host_code);
         return;
     };
     let full = full_avg10.unwrap_or(0.0);
@@ -661,9 +682,13 @@ fn judge(resource: &str, code: &'static str, p: &Pressure, remedy: &str) {
     // misleading. So a host reading is reported, attributed, and capped at
     // advisory; only a cgroup-scoped reading can say "this node".
     if *scope == PressureScope::Host {
+        // We reached the host file only BECAUSE the scoped one was unreadable,
+        // so this pass has no evidence about this node — its verdict stands
+        // untouched rather than being cleared by a fact about the box.
+        no_evidence(code);
         if full >= PRESSURE_DEGRADE_FULL_PCT || *some_avg10 >= PRESSURE_WARN_SOME_PCT {
             raise(Warning::advisory(
-                code,
+                host_code,
                 format!(
                     "{resource} contention ON THIS HOST: work somewhere on the box was blocked \
                      on {resource} {some_avg10:.1}% of the last 10s (full {full:.1}%). This is \
@@ -673,10 +698,13 @@ fn judge(resource: &str, code: &'static str, p: &Pressure, remedy: &str) {
                 ),
             ));
         } else {
-            clear(code);
+            clear(host_code);
         }
         return;
     }
+
+    // A cgroup reading says nothing about the box, so the host verdict stands.
+    no_evidence(host_code);
 
     if full >= PRESSURE_DEGRADE_FULL_PCT {
         raise(Warning::error(
@@ -1063,6 +1091,7 @@ mod tests {
         judge(
             "cpu",
             "resource.cpu_stall",
+            "host.cpu_contention",
             &Pressure::Unavailable {
                 reason: "PSI turned off mid-flight".to_string(),
             },
@@ -1078,6 +1107,7 @@ mod tests {
         judge(
             "cpu",
             "resource.cpu_stall",
+            "host.cpu_contention",
             &Pressure::Measured {
                 scope: PressureScope::Cgroup,
                 some_avg10: 0.0,
@@ -1110,6 +1140,7 @@ mod tests {
         judge(
             "io",
             "resource.io_stall",
+            "host.io_contention",
             &brutal(PressureScope::Host),
             "remedy",
         );
@@ -1135,6 +1166,7 @@ mod tests {
         judge(
             "io",
             "resource.io_stall",
+            "host.io_contention",
             &brutal(PressureScope::Cgroup),
             "remedy",
         );
@@ -1142,6 +1174,80 @@ mod tests {
             degraded_mode(),
             "the same stall measured on THIS node's cgroup must degrade it: {:?}",
             snapshot()
+        );
+    }
+
+    /// **A quiet HOST must not clear a stalling NODE, and must not downgrade
+    /// it either** (self-review after the PR #483 scope fix).
+    ///
+    /// Reachable whenever the scoped file goes away mid-flight — a container
+    /// reconfigured, a cgroup moved. With one shared code, the host fallback
+    /// either cleared the cgroup verdict outright or replaced a standing ERROR
+    /// with its own ADVISORY, so a neighbour could downgrade a genuinely
+    /// stalling node. Both failures are in the dangerous direction.
+    #[test]
+    fn a_host_reading_can_neither_clear_nor_downgrade_a_node_scoped_stall() {
+        let _g = exclusive();
+
+        // The node is genuinely stalling, measured on its own cgroup.
+        judge(
+            "io",
+            "resource.io_stall",
+            "host.io_contention",
+            &Pressure::Measured {
+                scope: PressureScope::Cgroup,
+                some_avg10: 90.0,
+                full_avg10: Some(90.0),
+            },
+            "remedy",
+        );
+        assert!(
+            degraded_mode(),
+            "fixture: a cgroup-scoped stall must degrade"
+        );
+
+        // The scoped file vanishes; the host is calm.
+        judge(
+            "io",
+            "resource.io_stall",
+            "host.io_contention",
+            &Pressure::Measured {
+                scope: PressureScope::Host,
+                some_avg10: 0.0,
+                full_avg10: Some(0.0),
+            },
+            "remedy",
+        );
+        assert!(
+            degraded_mode(),
+            "a QUIET HOST cleared this node's stall. The host is a different subject — the \
+             node's verdict must stand until the node is measured again: {:?}",
+            snapshot()
+        );
+
+        // And a NOISY host must not replace the error with its own advisory.
+        judge(
+            "io",
+            "resource.io_stall",
+            "host.io_contention",
+            &Pressure::Measured {
+                scope: PressureScope::Host,
+                some_avg10: 99.0,
+                full_avg10: Some(99.0),
+            },
+            "remedy",
+        );
+        let standing = snapshot();
+        assert!(
+            standing
+                .iter()
+                .any(|w| w.code == "resource.io_stall" && w.severity == "error"),
+            "a host advisory DOWNGRADED a node-scoped error — a neighbour's noise made this \
+             node look healthier than it is: {standing:?}"
+        );
+        assert!(
+            standing.iter().any(|w| w.code == "host.io_contention"),
+            "the host reading must still be reported under its OWN code: {standing:?}"
         );
     }
 
