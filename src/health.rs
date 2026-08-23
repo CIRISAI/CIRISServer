@@ -79,9 +79,26 @@ async fn server_health() -> Json<serde_json::Value> {
 }
 
 fn node_health() -> serde_json::Value {
+    // CIRISServer#446/#480 — the status word is now DERIVED, not asserted.
+    // It read a hardcoded "ok" while the canonical was SIGKILLed 193 times at
+    // 93% of its memory limit; every watcher above it believed the node.
+    // `probe_memory` reads the cgroup on the way past, so asking how the node
+    // is IS the thing that notices it is running out of room.
+    let memory = crate::degradation::probe_memory();
+    let warnings = crate::degradation::snapshot();
+    let degraded_mode = crate::degradation::degraded_mode();
     serde_json::json!({
         "data": {
-            "status": "ok",
+            "status": crate::degradation::status_word(),
+            // The shape the client has parsed all along (`CIRISApiClient`:
+            // `status != "ok" || degradedMode || warnings.isNotEmpty()`), which
+            // this node simply never populated. Producer meets waiting consumer.
+            "warnings": warnings,
+            "degraded_mode": degraded_mode,
+            // What this process is using against what it is allowed — or why
+            // that cannot be read. Three distinct states, never a comfortable
+            // zero (see `MemoryReading`).
+            "resources": { "memory": memory },
             "role": "fabric-node",
             "version": env!("CARGO_PKG_VERSION"),
             "services": {},
