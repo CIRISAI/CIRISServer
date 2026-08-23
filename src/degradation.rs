@@ -165,6 +165,15 @@ pub fn clear(code: &str) -> bool {
 
 /// Every live warning, newest-raised last.
 #[must_use]
+// NOTE: `status_word()` used to live here, composed from `degraded_mode()`.
+// It was DELETED rather than kept for convenience: its only purpose was to be
+// put in a payload beside the other two, and doing that takes three separate
+// read locks — the torn read `verdict()` exists to prevent (PR #483 review).
+// A helper whose only correct use is the one thing you must not do is a trap,
+// not an API.
+//
+// The two below stay: asking ONE question is fine, and the tests do. Composing
+// them into one payload is not — use `verdict()`.
 pub fn snapshot() -> Vec<Warning> {
     read_registry().clone()
 }
@@ -175,23 +184,9 @@ pub fn degraded_mode() -> bool {
     read_registry().iter().any(Warning::is_degrading)
 }
 
-/// The single word for `data.status`: `"ok"` unless something is reduced.
-///
-/// Deliberately NOT "any warning makes it not-ok". A node with an advisory is
-/// still doing its job, and a `status` that flips on advisories would be
-/// ignored within a week.
-#[must_use]
-pub fn status_word() -> &'static str {
-    if degraded_mode() {
-        "degraded"
-    } else {
-        "ok"
-    }
-}
-
 /// The three verdict fields, derived from ONE read of the registry.
 ///
-/// `snapshot()`, `degraded_mode()` and `status_word()` each take their own read
+/// `snapshot()` and `degraded_mode()` each take their own read
 /// lock. A reporter raising or clearing between them produces a torn response —
 /// `degraded` with an empty `warnings` list, or an error warning sitting beside
 /// `degraded_mode: false` (codex review, PR #483). Both are worse than either
@@ -1469,21 +1464,21 @@ mod tests {
     #[test]
     fn advisories_do_not_degrade_but_errors_do() {
         let _g = exclusive();
-        assert_eq!(status_word(), "ok");
+        assert_eq!(verdict().2, "ok");
         assert!(!degraded_mode());
 
         raise(Warning::advisory("t.advisory", "look at this soon"));
         assert!(!degraded_mode(), "a `warning` severity must not degrade");
-        assert_eq!(status_word(), "ok");
+        assert_eq!(verdict().2, "ok");
         assert_eq!(snapshot().len(), 1, "but it IS reported");
 
         raise(Warning::error("t.reduced", "a plane is shed"));
         assert!(degraded_mode());
-        assert_eq!(status_word(), "degraded");
+        assert_eq!(verdict().2, "degraded");
 
         assert!(clear("t.reduced"));
         assert!(!degraded_mode(), "clearing the error restores ok");
-        assert_eq!(status_word(), "ok");
+        assert_eq!(verdict().2, "ok");
         reset_for_test();
     }
 
