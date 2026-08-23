@@ -84,7 +84,18 @@ fn node_health() -> serde_json::Value {
     // 93% of its memory limit; every watcher above it believed the node.
     // `probe_memory` reads the cgroup on the way past, so asking how the node
     // is IS the thing that notices it is running out of room.
+    //
+    // ORDER IS LOAD-BEARING. Every probe RAISES as a side effect of measuring,
+    // so all of them must run before `snapshot()` reads the registry — reversed,
+    // each health read reports the PREVIOUS read's findings and the first read
+    // after a node starts stalling says it is fine.
     let memory = crate::degradation::probe_memory();
+    // #446's own subject: a 2-vCPU canonical whose HTTP worker becomes
+    // unschedulable under contention. Utilisation cannot see this — a box at
+    // 100% CPU serving requests promptly is healthy — so the reading is STALL,
+    // from the kernel's pressure interface, and `io` is the disk half of the
+    // same question.
+    let (cpu, io) = crate::degradation::probe_contention();
     let warnings = crate::degradation::snapshot();
     let degraded_mode = crate::degradation::degraded_mode();
     serde_json::json!({
@@ -98,7 +109,17 @@ fn node_health() -> serde_json::Value {
             // What this process is using against what it is allowed — or why
             // that cannot be read. Three distinct states, never a comfortable
             // zero (see `MemoryReading`).
-            "resources": { "memory": memory },
+            // What this node is running out of, and what it could not measure.
+            //
+            // Deliberately the CHEAP readings only: three small file reads that
+            // cost the same on a Raspberry Pi as on the canonical. The store
+            // footprint (bytes, rows, per-plane counts) is NOT here and must
+            // not be added — it is six `count(*)`s plus two PRAGMAs, `count(*)`
+            // is a full scan on Postgres, and this route is polled by every
+            // watcher in the mesh on a timer. It lives on `GET /v1/node/state`,
+            // which is documented as not-for-seconds-cadence polling, and
+            // `operator_surface::corpus_and_store` says so at the reader.
+            "resources": { "memory": memory, "cpu": cpu, "io": io },
             "role": "fabric-node",
             "version": env!("CARGO_PKG_VERSION"),
             "services": {},
