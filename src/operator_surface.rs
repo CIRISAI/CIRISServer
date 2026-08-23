@@ -760,6 +760,85 @@ pub struct TraceCorpus {
     pub rows: u64,
 }
 
+/// **CIRISServer#446 — what this node is CARRYING**, from persist's own aggregate.
+///
+/// # Free information that was being thrown away
+///
+/// [`trace_corpus`] already reads `Engine::storage_summary` on every call and
+/// keeps two fields of one table. The aggregate answers for SIX tables plus the
+/// whole-database byte count, and the other five were discarded — so the cost
+/// was already being paid and the answer already computed. This carries it out.
+///
+/// # Why it is persist's numbers verbatim
+///
+/// Persist owns this measurement and exposes it; edge owns the carriage
+/// counters and exposes those. This module's rule is draw from both, re-derive
+/// neither — so nothing here counts a row. A hand-rolled `SELECT count(*)`
+/// would be a second implementation of a number the store already computes, and
+/// two lists that disagree is the #541 shape.
+///
+/// # What it deliberately does NOT include
+///
+/// The SQLite WAL — 218 MiB against a 1.26 GB store on the production canonical
+/// — is absent because `total_disk_bytes` is `page_count * page_size`, which
+/// does not count it, and persist exposes no reader for it. Stat-ing the file
+/// from here would mean this module guessing persist's on-disk layout: a second
+/// implementation of "how big is the store", which is the exact thing the rule
+/// above forbids. Asked for in CIRISPersist#768 instead.
+///
+/// Likewise absent: the attestation family. `StorageSummary` has no
+/// `TableUsage` for `federation_attestations` at all, which is why an operator
+/// could not see the 194.8 MiB that dominates this node's read path without
+/// opening the database by hand (CIRISPersist#767).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoreFootprint {
+    /// Whole-database bytes as persist reports them: `pg_database_size` on
+    /// Postgres, `page_count * page_size` on SQLite (WAL excluded — see above).
+    pub total_disk_bytes: u64,
+    /// `(table name, rows)` for every table the aggregate answers for, in a
+    /// stable order. Rows only: per-table BYTES are `0` on SQLite unless
+    /// `dbstat` is compiled in, and reporting a zero that means "not measured"
+    /// beside zeros that mean "empty" is the collapsed-zero defect this file
+    /// spends a section warning about.
+    pub tables: Vec<(&'static str, u64)>,
+}
+
+impl StoreFootprint {
+    fn from_summary(s: &ciris_persist::retention::StorageSummary) -> Self {
+        Self {
+            total_disk_bytes: s.total_disk_bytes,
+            tables: vec![
+                ("trace_events", s.trace_events.rows),
+                ("trace_llm_calls", s.trace_llm_calls.rows),
+                ("detection_events", s.detection_events.rows),
+                ("audit_log", s.audit_log.rows),
+                ("edge_outbound_queue", s.edge_outbound_queue.rows),
+                ("federation_keys", s.federation_keys.rows),
+            ],
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        let tables: serde_json::Map<String, Value> = self
+            .tables
+            .iter()
+            .map(|(name, rows)| ((*name).to_string(), serde_json::json!({ "rows": rows })))
+            .collect();
+        serde_json::json!({
+            "total_disk_bytes": self.total_disk_bytes,
+            "tables": tables,
+            // Named absences. An operator reading this must be able to tell
+            // "measured and small" from "not measured at all" WITHOUT knowing
+            // which tables persist's aggregate happens to cover.
+            "not_measured": {
+                "wal_bytes": "excluded from total_disk_bytes; persist exposes no reader (CIRISPersist#768)",
+                "federation_attestations": "no TableUsage in StorageSummary (CIRISPersist#767)",
+                "per_table_bytes": "0 on SQLite without dbstat; rows are reported instead",
+            },
+        })
+    }
+}
+
 /// Band the trace plane.
 ///
 /// `Result` rather than `Option` on the input for the reason this whole module
@@ -1223,6 +1302,11 @@ pub struct Sources<'a> {
     /// corpus: "we could not ask" and "nothing has ever arrived" are the pair
     /// this reading exists to keep apart.
     pub trace: Result<&'a TraceCorpus, String>,
+    /// CIRISServer#446 — what this node is carrying, from the SAME
+    /// `storage_summary` read the trace band uses. `Err` when that read failed,
+    /// for the same reason `trace` is: could-not-ask and nothing-there must not
+    /// render alike.
+    pub store: Result<&'a StoreFootprint, String>,
     /// CIRISServer#370 — this process's ingest refusal ledger, or `None` on a
     /// node with no HTTP ingest route mounted. Rendered `unreadable`, never as a
     /// clean zero.
@@ -1985,6 +2069,15 @@ pub fn compose(sources: Sources<'_>, as_of: DateTime<Utc>) -> Value {
         // CIRISServer#370 — a rate of CORRECT refusals, read as the fault
         // report about someone else that it is.
         "ingest": ingest,
+        // CIRISServer#446 — HOW BIG IS THIS NODE. persist's own aggregate,
+        // carried out instead of discarded: the same read the trace band
+        // already pays for answers for six tables and the whole-database byte
+        // count. A read failure is `unreadable` with the reason, never an empty
+        // store — the distinct-zeroes rule this file is built on.
+        "store": match sources.store {
+            Ok(f) => f.to_json(),
+            Err(ref e) => json!({ "unreadable": e }),
+        },
         "volatility": {
             // persist's own list, verbatim — bands that move on elapsed time
             // alone, with no state change and no new row.
@@ -2065,7 +2158,7 @@ pub async fn operator_state(
     )
     .await;
 
-    let trace = trace_corpus(engine).await;
+    let (trace, store) = corpus_and_store(engine).await;
     let bundle = metrics.map(ciris_edge::observability::EdgeMetrics::snapshot);
     let refusals = refusals.map(|r| r.snapshot_at(now));
     compose(
@@ -2073,6 +2166,7 @@ pub async fn operator_state(
             node: node.as_ref().map_err(std::string::ToString::to_string),
             edge: bundle.as_ref().map_err(Clone::clone),
             trace: trace.as_ref().map_err(Clone::clone),
+            store: store.as_ref().map_err(Clone::clone),
             ingest: refusals.as_ref(),
         },
         now,
@@ -2106,6 +2200,28 @@ pub async fn operator_state(
 /// are different facts, and #369's whole ask is that they never render alike.
 async fn trace_corpus(engine: &Engine) -> Result<TraceCorpus, String> {
     corpus_of(engine.storage_summary().await)
+}
+
+/// One `storage_summary` read, BOTH readings — the trace band and the footprint.
+///
+/// Deliberately not two calls. The aggregate is six `count(*)`s plus two
+/// PRAGMAs and the doc above already warns it is not free; reading it twice to
+/// answer two questions about the same store would double a cost this surface
+/// invites callers to pay on a poll, and would let the two answers describe
+/// different instants.
+async fn corpus_and_store(
+    engine: &Engine,
+) -> (Result<TraceCorpus, String>, Result<StoreFootprint, String>) {
+    match engine.storage_summary().await {
+        Ok(summary) => {
+            let store = StoreFootprint::from_summary(&summary);
+            (corpus_of(Ok(summary)), Ok(store))
+        }
+        Err(e) => {
+            let msg = format!("read the trace corpus aggregate: {e}");
+            (Err(msg.clone()), Err(msg))
+        }
+    }
 }
 
 /// The pure half of [`trace_corpus`]: pick the trace-plane fields out of
@@ -3376,6 +3492,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Err("sqlite: database is locked".into()),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&poisoned),
             },
             at("2026-08-05T13:55:00Z"),
@@ -3476,6 +3593,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Ok(&dark),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&stuck),
             },
             now,
@@ -3485,6 +3603,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Ok(&dark),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&silent),
             },
             now,
@@ -3518,6 +3637,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Ok(&dark),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&clean),
             },
             now,
@@ -3546,6 +3666,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Err("sqlite: database is locked".into()),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&stuck),
             },
             now,
@@ -3613,6 +3734,7 @@ mod tests {
                 node: Err("no node state in this fixture".into()),
                 edge: Err("no edge in this fixture".into()),
                 trace: Ok(&dark),
+                store: Err("not exercised by this case".to_string()),
                 ingest: Some(&stuck),
             },
             now,

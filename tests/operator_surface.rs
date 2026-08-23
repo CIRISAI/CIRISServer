@@ -912,3 +912,38 @@ async fn the_route_that_admits_and_the_route_that_reads_share_one_ledger() {
         "the fold accessor and the HTTP surface must read ONE ledger"
     );
 }
+
+/// **The store block reports persist's numbers, and names what it cannot see**
+/// (CIRISServer#446).
+///
+/// Two properties, and the second is the one that would have saved a day: an
+/// operator diagnosing the wedged canonical could not tell, from any endpoint,
+/// that `federation_attestations` held 194.8 MiB — because `StorageSummary` has
+/// no reading for it at all. A surface that silently omits the largest table on
+/// the node teaches its reader that the node is small.
+#[test]
+fn the_store_block_carries_persists_aggregate_and_names_its_blind_spots() {
+    let v = ciris_server::operator_surface::compose(
+        ciris_server::operator_surface::Sources {
+            node: Err("not exercised".to_string()),
+            edge: Err("not exercised".to_string()),
+            trace: Err("not exercised".to_string()),
+            store: Err("storage_summary refused".to_string()),
+            ingest: None,
+        },
+        chrono::Utc::now(),
+    );
+
+    // A failed read is `unreadable` WITH the reason — never an empty store.
+    // "We could not ask" and "there is nothing here" are the pair this whole
+    // surface exists to keep apart.
+    assert_eq!(
+        v["store"]["unreadable"], "storage_summary refused",
+        "a store read failure must carry its reason: {v:#}"
+    );
+    assert!(
+        v["store"].get("total_disk_bytes").is_none(),
+        "an unreadable store must not also report a byte count — that is the \
+         collapsed zero this file spends a section warning about: {v:#}"
+    );
+}
