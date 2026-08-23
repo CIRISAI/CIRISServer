@@ -130,6 +130,30 @@ fn every_ffi_symbol_survives_into_the_built_cdylib() {
         );
         return;
     }
+    // THE ARTIFACT MUST BE ATTRIBUTABLE TO THIS BUILD (CIRISServer#232 follow-up).
+    //
+    // CI restores `target/` from CIRISCache, so this path can hold a cdylib
+    // that some EARLIER job built under different features — one that never
+    // linked ciris-verify-ffi and therefore exports none of its symbols.
+    // Reading it produced "exports 0 symbols, expected at least 88": a
+    // catastrophic-sounding verdict about an artifact this build did not
+    // produce, while the real cdylib on the same commit exports all 88.
+    //
+    // A gate that cannot tell WHOSE artifact it is reading cannot speak for
+    // this build either way — the false alarm and the false pass are the same
+    // defect. If the library predates the newest source it claims to be built
+    // from, it is stale: skip, and say which file is newer.
+    if let Some((newer, src_time)) = newest_source_after(so) {
+        eprintln!(
+            "SKIP (not a pass): {} is OLDER than {} — this is a stale or \
+             cache-restored artifact, not this build's cdylib, and its symbol \
+             table says nothing about this commit. Rebuild with \
+             `cargo build --release --lib`. (src mtime {src_time:?})",
+            so.display(),
+            newer.display(),
+        );
+        return;
+    }
     let out = match std::process::Command::new("nm")
         .args(["-D", "--defined-only", so.to_str().expect("utf-8 path")])
         .output()
@@ -172,4 +196,40 @@ fn every_ffi_symbol_survives_into_the_built_cdylib() {
          submodule, which is worse — the one-wheel type identity in CIRISServer#4 depends on all \
          of them living in THIS cdylib)."
     );
+}
+
+/// The newest file under `src/` that is NEWER than `artifact`, if any — the
+/// evidence that a built artifact cannot speak for the current source.
+///
+/// Deliberately `src/` only: `tests/` and workflow files do not change what the
+/// linker emitted, and treating them as invalidating would make this skip on
+/// every test edit — a gate that always skips is the same silence it exists to
+/// break.
+fn newest_source_after(
+    artifact: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+    let art = std::fs::metadata(artifact).ok()?.modified().ok()?;
+    let mut stack = vec![std::path::PathBuf::from("src")];
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(t) = meta.modified() {
+                    if t > art && newest.as_ref().is_none_or(|(_, n)| t > *n) {
+                        newest = Some((path, t));
+                    }
+                }
+            }
+        }
+    }
+    newest
 }

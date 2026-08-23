@@ -377,3 +377,49 @@ async fn an_evicting_pass_reports_the_count_and_is_not_an_alarm() {
         "the aged rows must actually be gone from the store"
     );
 }
+
+/// **Exactly one outcome is a fault, and it is the one where a bound cannot
+/// bite** (CIRISServer#476).
+///
+/// The enum's doc used to promise `is_fault()` was constant `false` — a guard
+/// against someone adding alarm to a happy path. #476 found a state that arm
+/// list could not express: a configured disk cap, EXCEEDED, with no lever that
+/// reaches the bytes. Production reported that as "steady state, not a fault"
+/// every hour while the store grew.
+///
+/// This pins both halves of the corrected invariant, because a fault that
+/// spreads to the healthy arms is just as useless as one that never fires.
+#[test]
+fn only_an_unenforceable_bound_is_a_fault() {
+    use ciris_server::retention_loop::RetentionOutcome;
+
+    assert!(
+        !RetentionOutcome::Unbounded.is_fault(),
+        "an operator who configured no bound made a choice, not a mistake"
+    );
+    assert!(!RetentionOutcome::WithinBounds {
+        trace_rows: 96_265,
+        oldest_trace: None,
+        total_disk_bytes: 1_264_021_504,
+    }
+    .is_fault());
+    assert!(!RetentionOutcome::Evicted {
+        evicted_traces: 1_000,
+        archived_audit_entries: 0,
+        freed_bytes_estimate: 0,
+        total_disk_bytes: 1_000_000,
+    }
+    .is_fault());
+
+    // The measured shape: 389 MB over a 1 GB cap's trigger, nothing reachable.
+    assert!(
+        RetentionOutcome::BoundUnenforceable {
+            used_bytes: 2_000_000_000,
+            cap_bytes: 1_000_000_000,
+            evictable_rows: 0,
+        }
+        .is_fault(),
+        "a configured bound that cannot act MUST alarm — silence here is what \
+         let ciris-status pass its cap unnoticed"
+    );
+}

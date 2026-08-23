@@ -429,6 +429,11 @@ fun CIRISApp(
     var clientMode by remember { mutableStateOf<ai.ciris.mobile.shared.models.ClientMode?>(null) }
     var nodeVersion by remember { mutableStateOf<String?>(null) }
     val isAgentMode = clientMode?.isAgent ?: true  // default to agent wording until probed
+    // The landing surface, from the PROBE (CIRISServer#479). Deliberately NOT
+    // `isAgentMode`: that one defaults to agent so copy reads naturally before
+    // the probe lands, while the LANDING must default to the node surface —
+    // opening on a chat with no brain behind it is the worse wrong guess.
+    val homeTarget = homeScreen(hasAgent = clientMode?.isAgent ?: false)
 
     // Navigation state
     var currentScreen by remember { mutableStateOf<Screen>(Screen.Startup) }
@@ -455,10 +460,10 @@ fun CIRISApp(
 
 
     // Handle system back button - navigate back to appropriate parent screen
-    // HOME_SCREEN, not Screen.Interact: on the node client the landing surface is
+    // homeTarget (the probed landing), not Screen.Interact: on the node client the landing surface is
     // Contacts, and a back press there must fall through to the platform (leave
     // the app) rather than navigating to a screen that is not in the sidebar.
-    PlatformBackHandler(enabled = currentScreen !is Screen.Startup && currentScreen != HOME_SCREEN) {
+    PlatformBackHandler(enabled = currentScreen !is Screen.Startup && currentScreen != homeTarget) {
         currentScreen = when (currentScreen) {
             // Login/Setup flow - don't go back, let user complete the flow
             is Screen.Login, is Screen.Setup -> currentScreen
@@ -471,8 +476,8 @@ fun CIRISApp(
             is Screen.AddFederationId -> addFederationIdReturnScreen
 
             // DataManagement and LLMSettings go back to the landing screen
-            is Screen.DataManagement -> HOME_SCREEN
-            is Screen.LLMSettings -> HOME_SCREEN
+            is Screen.DataManagement -> homeTarget
+            is Screen.LLMSettings -> homeTarget
             is Screen.VizSettings -> Screen.Settings
 
             // Federation sub-screens (reached from Global Commons hub tiles) go
@@ -495,14 +500,14 @@ fun CIRISApp(
             is Screen.Contacts -> {
                 val src = contactsPickerSourceScreen
                 contactsPickerSourceScreen = null
-                src ?: HOME_SCREEN
+                src ?: homeTarget
             }
 
             // A chat goes back to the contact list it was opened from
             is Screen.UserChat -> Screen.Contacts
 
             // All other screens go back to the landing screen
-            else -> HOME_SCREEN
+            else -> homeTarget
         }
     }
 
@@ -680,7 +685,12 @@ fun CIRISApp(
     }
     // SetupViewModel needs to survive configuration changes and app backgrounding
     // Pass apiClient to ensure proper base URL (especially in HA addon mode)
-    val setupViewModel: SetupViewModel = viewModel { SetupViewModel(apiClient) }
+    // KEYED on the probe (CIRISServer#479): `viewModel {}` caches its instance,
+    // so a VM built before the mode landed would keep the pre-probe answer for
+    // the app's whole life — the exact staleness this conversion exists to end.
+    val setupHasAgent = clientMode?.isAgent ?: false
+    val setupViewModel: SetupViewModel =
+        viewModel(key = "setup-$setupHasAgent") { SetupViewModel(apiClient, setupHasAgent) }
     // Set HA addon mode if running in Home Assistant addon context
     if (isHAAddonMode) {
         setupViewModel.setHAAddonMode(true)
@@ -775,7 +785,7 @@ fun CIRISApp(
     // → fail-closed, don't prompt). One-shot via fedIdCatchupPrompted; naturally
     // false once a fed-ID exists.
     //
-    // KEYED ON [HOME_SCREEN], NOT ON Screen.Interact. This effect used to name
+    // KEYED ON THE PROBED LANDING, NOT ON Screen.Interact. This effect used to name
     // Interact literally, which was the landing screen for BOTH builds when it
     // was written. Moving node mode's home to Contacts silently made it
     // unreachable: node users never visit Interact (it is not even in their
@@ -789,7 +799,7 @@ fun CIRISApp(
     // HA legacy owners the guided Add Federation ID flow this effect exists
     // to provide.
     LaunchedEffect(currentScreen, currentAccessToken, isHAAddonMode) {
-        if (currentScreen != HOME_SCREEN) return@LaunchedEffect
+        if (currentScreen != homeTarget) return@LaunchedEffect
         val authenticated = currentAccessToken != null || isHAAddonMode
         if (!authenticated || fedIdCatchupPrompted) return@LaunchedEffect
         try {
@@ -799,7 +809,7 @@ fun CIRISApp(
         }
         if (nodeSwitcherViewModel.ownerHasFedId.value == false) {
             fedIdCatchupPrompted = true
-            addFederationIdReturnScreen = HOME_SCREEN
+            addFederationIdReturnScreen = homeTarget
             PlatformLogger.i(TAG, "[fed-id-catchup] legacy owner has no fed-ID — auto-presenting Add Federation ID")
             currentScreen = Screen.AddFederationId
         }
@@ -1176,7 +1186,7 @@ fun CIRISApp(
                 platformLog(TAG, "[INFO] Not first run in HA Addon mode - using ingress auth directly")
                 startupViewModel.setStatus(LocalizationHelper.getString("mobile.status_ready"))
                 interactViewModel.startPolling()
-                currentScreen = HOME_SCREEN
+                currentScreen = homeTarget
             } else {
                 // Not first run, normal mode - try to load stored token and check if valid/refresh if needed
                 platformLog(TAG, "[INFO] Not first run, attempting to load and validate stored token")
@@ -1386,7 +1396,7 @@ fun CIRISApp(
                                     }
                                 }
 
-                                currentScreen = HOME_SCREEN
+                                currentScreen = homeTarget
                             } else {
                                 // Token invalid and couldn't refresh - need interactive login
                                 PlatformLogger.i(TAG, " Token invalid/expired and silent refresh failed - redirecting to login")
@@ -1682,7 +1692,7 @@ fun CIRISApp(
                                                     isLoginLoading = false
                                                     loginStatusMessage = null
                                                     platformLog(TAG, "[INFO] Navigating to home (node) screen")
-                                                    currentScreen = HOME_SCREEN
+                                                    currentScreen = homeTarget
                                                 } catch (e: Exception) {
                                                     platformLog(TAG, "[ERROR] Token exchange failed: ${e::class.simpleName}: ${e.message}")
                                                     isLoginLoading = false
@@ -1841,7 +1851,7 @@ fun CIRISApp(
                                     currentScreen = Screen.Setup
                                 } else {
                                     interactViewModel.startPolling()
-                                    currentScreen = HOME_SCREEN
+                                    currentScreen = homeTarget
                                 }
                             }
                         }
@@ -1949,7 +1959,7 @@ fun CIRISApp(
 
                                 isLoginLoading = false
                                 loginStatusMessage = null
-                                currentScreen = HOME_SCREEN
+                                currentScreen = homeTarget
                             } catch (e: Exception) {
                                 platformLog(TAG, "[ERROR] Local login failed: ${e::class.simpleName}: ${e.message}")
                                 isLoginLoading = false
@@ -2057,6 +2067,7 @@ fun CIRISApp(
             Screen.Setup -> {
                 platformLog(TAG, "[DEBUG][Screen.Setup] Rendering setup screen")
                 SetupScreen(
+                    hasAgent = setupHasAgent,
                     viewModel = setupViewModel,
                     apiClient = apiClient,
                     // Provide the one-time ownership CLAIM PIN / NodeCode captured
@@ -3436,7 +3447,7 @@ fun CIRISApp(
                     onBack = {
                         val src = contactsPickerSourceScreen
                         contactsPickerSourceScreen = null
-                        currentScreen = src ?: HOME_SCREEN
+                        currentScreen = src ?: homeTarget
                     },
                     onOpenChat = { contact ->
                         currentScreen = Screen.UserChat(
@@ -4165,6 +4176,7 @@ fun CIRISApp(
 
                 val sidebarComposable: @Composable () -> Unit = {
                     ai.ciris.mobile.shared.ui.nav.EpistemicSidebar(
+                        hasAgent = clientMode?.isAgent ?: false,
                         activeSurface = activeSurface,
                         onSurfaceSelected = { surf ->
                             currentScreen = surfaceToScreen(surf)
@@ -4986,7 +4998,7 @@ private fun CIRISTopBar(
 /**
  * The default post-auth landing screen.
  *
- * - **Node client (CIRISBuild.HAS_AGENT == false):** the app opens on
+ * - **Node (the attached node carries NO brain):** the app opens on
  *   CONTACTS. A node client's reason to exist is the people its owner can
  *   reach, so the landing surface is the conversation list — and when that list
  *   is empty, ContactsScreen lands with the "Add a Contact" card as the primary
@@ -4994,15 +5006,23 @@ private fun CIRISTopBar(
  *   exactly one useful next move. (This replaces the old ManageNodes landing:
  *   node administration is a thing the owner does occasionally, not the thing
  *   they opened the app for. It stays first-class in the Manage group.)
- * - **Agent build (HAS_AGENT == true):** the full agent client — the agent chat
+ * - **Agent (the attached node carries a brain):** the full client — the chat
  *   (AGENT_GROUP → NavSurface.Interact) is a first-class surfaced card, so the
  *   app opens on the reasoning-stream chat. Contacts stays reachable from the
  *   Manage group.
  *
- * Gated on the flag so the agent's adoption is a single HAS_AGENT flip.
+ * **A FUNCTION OF THE PROBED MODE, not of the build** (CIRISServer#479). It
+ * was `CIRISBuild.HAS_AGENT`, decided at compile time, which forced two
+ * artifacts and meant a node that GAINED a brain kept the node landing until
+ * someone reinstalled it. `hasAgent` is the probed `ClientMode`, so the same
+ * installed client follows the node it is attached to.
+ *
+ * Defaults to the NODE landing while the probe is undetermined: opening on a
+ * chat that cannot answer (no brain) is a worse first impression than opening
+ * on contacts and revealing the chat a moment later.
  */
-private val HOME_SCREEN: Screen =
-    if (CIRISBuild.HAS_AGENT) Screen.Interact else Screen.Contacts
+private fun homeScreen(hasAgent: Boolean): Screen =
+    if (hasAgent) Screen.Interact else Screen.Contacts
 
 /**
  * Navigation screens

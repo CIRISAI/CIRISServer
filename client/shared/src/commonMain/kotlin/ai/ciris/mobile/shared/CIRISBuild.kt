@@ -1,27 +1,35 @@
 package ai.ciris.mobile.shared
 
 /**
- * Compile-time build flags for the CIRIS app.
+ * Build-time facts about the CIRIS app.
  *
- * This module ships in two flavors from the SAME codebase:
- *  - **Node client (default):** the AI-free CIRIS app. Drives a local fabric node
- *    (ciris-server). No brain, no LLM/assistant configuration.
- *  - **Agent build:** CIRIS-Agent = fabric node + brain. The agent team adopts this
- *    client by swapping lens-core → ciris-server and flipping [HAS_AGENT] to true,
- *    which surfaces the AI/assistant (LLM provider, template) configuration that the
- *    node client deliberately hides.
+ * # `HAS_AGENT` is gone — the gate is the PROBE now (CIRISServer#479)
  *
- * Keep agent-only surfaces gated on [HAS_AGENT] so the agent team's adoption is a
- * single flag flip rather than a re-merge.
+ * This object used to carry `const val HAS_AGENT`, and agent-only surfaces were
+ * eliminated at COMPILE time: the node client shipped without them, the agent
+ * repo vendored the same file and flipped the flag. That made the flavor a
+ * property of the ARTIFACT, and it was wrong in both directions:
+ *
+ *  - a node that later gained a brain kept the node UX until someone
+ *    reinstalled a different build (CIRISServer#479 is exactly this report);
+ *  - and the packaging had to ship two ~63 MiB desktop bundles to say one
+ *    thing, which does not fit in one wheel.
+ *
+ * An agent IS a node that has had a brain added, so the question "are the agent
+ * surfaces live?" is about the ATTACHED NODE and has to be asked at runtime.
+ * The answer is the probed [ai.ciris.mobile.shared.models.ClientMode] —
+ * `data.agent.{folded,reachable}` from the merged `/v1/system/health`
+ * (CIRISServer#390) — threaded as `hasAgent` into the surfaces that branch on
+ * it: the landing screen, the epistemic nav groups, and the setup step flow.
+ *
+ * The flag is DELETED rather than deprecated on purpose. A build constant that
+ * nothing reads is the CIRISServer#365 shape (nine `mesh_config` keys, zero
+ * consumers), and leaving this one in place would invite the next
+ * compile-time branch — which is the thing that has to stop being possible.
+ *
+ * Every default is NODE-first: a surface that has not yet learned the answer
+ * shows the node behaviour, because revealing agent affordances on a brainless
+ * node is the wrong guess that costs something, while the reverse merely
+ * arrives a moment late.
  */
-object CIRISBuild {
-    /**
-     * True only for the agent build (node + brain). When false (the node client),
-     * AI/assistant configuration is hidden from setup and the rest of the UX.
-     *
-     * This repo IS the node client (CIRISServer/client), so the flag stays false
-     * here. The agent repo vendors this same file and flips it true — that flip
-     * is the designed single-flag adoption, and it is the ONLY difference.
-     */
-    const val HAS_AGENT: Boolean = false
-}
+object CIRISBuild
