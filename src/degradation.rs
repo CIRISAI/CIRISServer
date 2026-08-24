@@ -255,6 +255,16 @@ pub enum MemoryReading {
         limit_bytes: u64,
         /// Usage as a percentage of the limit, one decimal.
         used_pct: f64,
+        /// The cgroup directory whose limit this is.
+        ///
+        /// **Carried because the binding level need not be this process's own**
+        /// (self-review after the PR #483 ancestor walk). A `MemoryMax=` on a
+        /// containing slice binds us, and the reading then describes a cgroup
+        /// that also accounts for our siblings — so wording it as "this
+        /// container's limit" would be the same misattribution the PSI scope
+        /// fix removed: a true number about the wrong subject, with a remedy
+        /// aimed at the wrong process.
+        limit_source: String,
     },
     /// Measured, but unbounded — no cgroup limit is set. NOT the same as
     /// healthy: an unlimited container is exactly how one process took the whole
@@ -314,6 +324,17 @@ fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
         }
     }
     None
+}
+
+/// This process's OWN cgroup v2 directory — the leaf, not an ancestor.
+///
+/// Used to word a verdict correctly: a limit found here is "this container's",
+/// a limit found above is somebody else's ceiling that happens to bind us.
+fn own_cgroup_dir() -> String {
+    match cgroup_relative_path(None) {
+        Some(rel) if !rel.is_empty() => format!("/sys/fs/cgroup/{rel}"),
+        _ => "/sys/fs/cgroup".to_string(),
+    }
 }
 
 /// This process's cgroup directory and every visible ancestor, leaf-first.
@@ -400,7 +421,7 @@ pub fn read_memory() -> MemoryReading {
                         ));
                         continue;
                     };
-                    let candidate = bounded(usage, limit);
+                    let candidate = bounded(usage, limit, dir);
                     // Closest to its ceiling wins: that level kills first.
                     let take = match (&binding, &candidate) {
                         (None, _) => true,
@@ -452,7 +473,7 @@ pub fn read_memory() -> MemoryReading {
                 Some(limit) if limit >= (1u64 << 62) => {
                     MemoryReading::Unlimited { usage_bytes: usage }
                 }
-                Some(limit) => bounded(usage, limit),
+                Some(limit) => bounded(usage, limit, &dir),
                 None => MemoryReading::Unavailable {
                     reason: format!(
                         "{limit_path} could not be read or parsed — usage is {usage} bytes but \
@@ -470,7 +491,7 @@ pub fn read_memory() -> MemoryReading {
     }
 }
 
-fn bounded(usage_bytes: u64, limit_bytes: u64) -> MemoryReading {
+fn bounded(usage_bytes: u64, limit_bytes: u64, limit_source: &str) -> MemoryReading {
     let used_pct = if limit_bytes == 0 {
         0.0
     } else {
@@ -480,6 +501,7 @@ fn bounded(usage_bytes: u64, limit_bytes: u64) -> MemoryReading {
         usage_bytes,
         limit_bytes,
         used_pct,
+        limit_source: limit_source.to_string(),
     }
 }
 
@@ -490,20 +512,43 @@ fn bounded(usage_bytes: u64, limit_bytes: u64) -> MemoryReading {
 /// without seeing the other.
 pub fn probe_memory() -> MemoryReading {
     let reading = read_memory();
-    match &reading {
+    probe_verdict_for(&reading);
+    reading
+}
+
+/// The JUDGEMENT half of [`probe_memory`], split from the READ half.
+///
+/// Separated so the verdict — which is the part with the thresholds, the
+/// wording and the attribution in it — can be exercised against constructed
+/// readings. The read half depends on this host's cgroup layout, and a test
+/// that needs a particular one can only skip or lie.
+pub(crate) fn probe_verdict_for(reading: &MemoryReading) {
+    match reading {
         MemoryReading::Limited {
             usage_bytes,
             limit_bytes,
             used_pct,
+            limit_source,
         } => {
             let mib = |b: &u64| *b as f64 / (1024.0 * 1024.0);
+            // NAME THE LEVEL, and say plainly when it is not ours. An ancestor's
+            // limit accounts for our SIBLINGS too, so "reduce what this node
+            // holds" may not be the remedy at all — and sending an operator to
+            // shrink the wrong process is worse than sending them nowhere.
+            let whose = if limit_source.trim_end_matches('/')
+                == own_cgroup_dir().trim_end_matches('/')
+            {
+                "this container's".to_string()
+            } else {
+                format!("an ANCESTOR cgroup's ({limit_source} — which also accounts for this process's siblings, so this node may not be the one to shrink)")
+            };
             if *used_pct >= MEMORY_CRITICAL_PCT {
                 raise(Warning::critical(
                     WARNING_CODE_MEMORY,
                     format!(
-                        "memory at {used_pct:.1}% of this container's limit \
-                         ({:.0} MiB of {:.0} MiB) — the cgroup will SIGKILL this \
-                         process, not slow it down. Reduce what this node holds \
+                        "memory at {used_pct:.1}% of {whose} limit \
+                         ({:.0} MiB of {:.0} MiB) — the cgroup will SIGKILL a process in \
+                         it, not slow anything down. Reduce what this node holds \
                          (replication planes/peers) or raise the limit; a restart \
                          only resets the clock.",
                         mib(usage_bytes),
@@ -514,7 +559,7 @@ pub fn probe_memory() -> MemoryReading {
                 raise(Warning::advisory(
                     WARNING_CODE_MEMORY,
                     format!(
-                        "memory at {used_pct:.1}% of this container's limit \
+                        "memory at {used_pct:.1}% of {whose} limit \
                          ({:.0} MiB of {:.0} MiB) — headroom is thinning; there \
                          is no back-pressure between here and a SIGKILL.",
                         mib(usage_bytes),
@@ -541,7 +586,6 @@ pub fn probe_memory() -> MemoryReading {
             no_evidence(WARNING_CODE_MEMORY);
         }
     }
-    reading
 }
 
 // ─── Contention: CPU, disk, and the kernel's own answer ──────────────────────
@@ -1326,6 +1370,58 @@ mod tests {
         );
     }
 
+    /// **A verdict must name WHOSE limit it is measuring against**
+    /// (self-review after the ancestor walk).
+    ///
+    /// The walk made the binding level possibly an ANCESTOR — a systemd slice,
+    /// a pod — whose `memory.current` accounts for this process's SIBLINGS as
+    /// well. The message still said "this container's limit", which is a true
+    /// number about the wrong subject: exactly the misattribution the PSI scope
+    /// fix removed, and worse here because the remedy ("reduce what this node
+    /// holds") may be aimed at the wrong process entirely.
+    #[test]
+    fn an_ancestor_limit_is_reported_as_an_ancestors_not_as_this_containers() {
+        let _g = exclusive();
+
+        // A limit that is NOT this process's own leaf directory.
+        probe_verdict_for(&MemoryReading::Limited {
+            usage_bytes: 95,
+            limit_bytes: 100,
+            used_pct: 95.0,
+            limit_source: "/sys/fs/cgroup/system.slice".to_string(),
+        });
+        let raised = snapshot();
+        assert_eq!(raised.len(), 1, "fixture: one warning expected");
+        assert!(
+            raised[0].message.contains("ANCESTOR")
+                && raised[0].message.contains("/sys/fs/cgroup/system.slice"),
+            "an ancestor's ceiling was reported as this container's, and the operator is told \
+             to shrink a node that may not be the cause: {:?}",
+            raised[0].message
+        );
+        assert!(
+            raised[0].message.contains("siblings"),
+            "an ancestor's usage includes this process's siblings, and a verdict that does not \
+             say so invites the wrong remedy: {:?}",
+            raised[0].message
+        );
+
+        // The process's own leaf reads as this container's.
+        reset_for_test();
+        probe_verdict_for(&MemoryReading::Limited {
+            usage_bytes: 95,
+            limit_bytes: 100,
+            used_pct: 95.0,
+            limit_source: own_cgroup_dir(),
+        });
+        let raised = snapshot();
+        assert!(
+            raised[0].message.contains("this container's"),
+            "our OWN limit must not be reported as somebody else's: {:?}",
+            raised[0].message
+        );
+    }
+
     /// An ancestor cgroup's limit binds this process even when its own says
     /// `max` (codex review, PR #483).
     ///
@@ -1633,6 +1729,7 @@ mod tests {
             usage_bytes: 1,
             limit_bytes: 2,
             used_pct: 50.0,
+            limit_source: "/sys/fs/cgroup".to_string(),
         };
         assert_ne!(unavailable, unlimited);
         assert_ne!(unlimited, limited);
