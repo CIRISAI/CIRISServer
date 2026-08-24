@@ -51,7 +51,18 @@ class MobileTestConfig:
     adb_path: Optional[str] = None
 
     # App settings
-    apk_path: str = "client/androidApp/build/outputs/apk/debug/androidApp-debug.apk"
+    # CIRISServer#471 — the APK is no longer built in this repo. `client/` is
+    # gone and CIRISClient publishes `androidApp-debug.apk` as a release asset,
+    # so this default names a LOCAL DROP POINT rather than a build output:
+    #
+    #   gh release download v0.5.188 -R CIRISAI/CIRISClient \
+    #     -p 'androidApp-debug.apk' -D artifacts/
+    #
+    # Deliberately not defaulted to a download. A QA runner that fetches a
+    # remote artifact when its input is missing turns "the APK was not staged"
+    # into a network dependency mid-run, and the failure then reads as a flaky
+    # test rather than as a setup step nobody performed.
+    apk_path: str = "artifacts/androidApp-debug.apk"
     package_name: str = "ai.ciris.mobile.debug"  # matches the default debug apk_path
     reinstall_app: bool = True
     clear_data: bool = True
@@ -528,7 +539,7 @@ def main():
     # App settings
     parser.add_argument(
         "--apk",
-        default="client/androidApp/build/outputs/apk/debug/androidApp-debug.apk",
+        default="artifacts/androidApp-debug.apk",
         help="Path to APK file",
     )
     parser.add_argument("--no-reinstall", action="store_true", help="Don't reinstall the app")

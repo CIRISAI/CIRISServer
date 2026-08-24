@@ -95,12 +95,14 @@ exclude = [
     # requires an explicit `format`, so it can't express "both" — the string can).
     "python/ciris_server/desktop_app/.gitignore",
 ]
-# Bundle the per-platform desktop JAR INTO THE WHEEL ONLY. CI stages exactly one
-# `CIRIS-<platform>-<ver>.jar` (gradle :desktopApp:packageUberJarForCurrentOS)
-# under python/ciris_server/desktop_app/ right before `maturin build`, so each
-# platform wheel carries only its own JAR (tens of MB; system Java, no JRE →
-# comfortably under PyPI's 100 MB cap). Never bundled into the sdist (the JAR is
-# a build output, and the sdist already excludes the client source it builds
-# from). The .jar is git-ignored; the empty desktop_app/ dir is tracked so the
-# package layout exists even on a headless/source build with no JAR staged.
-include = [{ path = "python/ciris_server/desktop_app/CIRIS-*.jar", format = "wheel" }]
+# THE DESKTOP JAR IS NO LONGER BUNDLED (CIRISServer#471).
+#
+# Every one of the nine published wheels carried its own copy of the Compose
+# uber-jar — ~46 MiB of each, nine near-identical copies of one artifact, in a
+# project with a 10 GB total quota whose largest wheel sat 3.4 MiB under PyPI's
+# 100 MiB per-file ceiling (CIRISServer#486).
+#
+# `ciris-client[node]` ships it once, and `desktop_launcher.find_desktop_jar`
+# resolves it through `ciris_client.artifact_path("desktop-uber-jar")`. The
+# launcher still checks the old in-wheel location FIRST, so a 0.5.188-or-earlier
+# install keeps working after an upgrade of everything around it.

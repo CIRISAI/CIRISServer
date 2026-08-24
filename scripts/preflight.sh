@@ -134,7 +134,6 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # preflight, because it teaches people to trust it.
      "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 43"
      "localization"        "python3 client/tools/check_localization_sync.py --strict"
-     "client-version"      "./scripts/sync-client-version.sh --check"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )
 
 if [ "$SEQUENTIAL" = "1" ]; then
