@@ -37,9 +37,14 @@ DIAG_seal() { compose logs agent 2>/dev/null | grep -E "TRACEFLOW.*(ERROR|error)
 # Splits the "nothing shipped" fork at its source: 0 here ⇒ the seal path never
 # authors the carrier, so no replication fix can help; >0 ⇒ authored but the
 # plane did not move it (scope / vocabulary / offer filter).
+# Matches the DIMENSION field, not the envelope anywhere. `LIKE '%trace:%'`
+# also matches a capacity row that REFERENCES a trace and a delegates_to row
+# that mentions one — measured 4 against a true 3 on the 2026-08-24 run. A
+# carrier count that counts non-carriers cannot split the fork it exists to
+# split.
 stage_trace_att() {
   harness_db_count agent federation_attestations \
-    "CAST(attestation_envelope AS TEXT) LIKE '%trace:%'"
+    "CAST(attestation_envelope AS TEXT) LIKE '%\"dimension\":\"trace:%'"
 }
 HINT_trace_att="the trace was sealed but no trace:* attestation exists on the agent — the carrier row is never authored. Fix the SOURCE, not the replication plane."
 EXIT_trace_att=11
@@ -65,7 +70,7 @@ EXIT_trace_att=11
 # evidence tail. This rung exists to SPLIT THE FORK cheaply and point at it.
 stage_offerable() {
   harness_db_count agent federation_attestations \
-    "CAST(attestation_envelope AS TEXT) LIKE '%trace:%' AND cohort_scope IS NOT NULL AND cohort_scope <> '' AND cohort_scope <> 'self'"
+    "CAST(attestation_envelope AS TEXT) LIKE '%\"dimension\":\"trace:%' AND cohort_scope IS NOT NULL AND cohort_scope <> '' AND cohort_scope <> 'self'"
 }
 HINT_offerable="ARMED BUT STRANDED: trace:* carrier rows EXIST on the agent but every one sits at cohort_scope='self' (or empty), so edge's offer filter never advertises them. This is NOT a serve-gate, consent, or transport problem — do not go looking there. Read trace_plane.rows_by_projection in the evidence tail for edge's own verdict per row, and note that trace_events.cohort_scope is a PROJECTION and can read 'federation' while the attestation that decides reads 'self'."
 EXIT_offerable=18
