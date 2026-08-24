@@ -678,7 +678,22 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 #   * an id that GETS covered must be removed from this list — the check below
 #     fails on a stale entry — so the list can only shrink.
 #
-# Do not add to this list to make a build green. Add the en.json entry.
+# WHEN ADDING HERE IS LEGITIMATE, AND WHEN IT IS NOT.
+#
+# Legitimate: an operator-facing sentence that was previously emitted as BARE
+# ENGLISH PROSE with no id at all is given one. That is strictly better for the
+# reader — the client can resolve the key the moment a translation lands, where
+# before there was nothing to resolve — and this list is the mechanism that
+# keeps it visible until then.
+#
+# Not legitimate: silencing a NEW uncovered id that could simply be translated,
+# or one whose only problem is that nobody has run `localize-ui`. Add the
+# en.json entry and the 29 bundles instead.
+#
+# The three `operator.store.*_not_measured` ids below are the first kind: they
+# replaced hardcoded English in the `not_measured` block of
+# `src/operator_surface.rs`, on a surface that advertises `source_locale` and
+# could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
@@ -688,6 +703,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "mesh_config.refusal.bad_ttl",
     "mesh_config.refusal.baseline_unreadable",
     "mesh_config.refusal.store_unavailable",
+    "operator.store.federation_attestations_not_measured",
+    "operator.store.per_table_bytes_not_measured",
+    "operator.store.wal_bytes_not_measured",
     "trust_root.bad_bundle",
     "trust_root.bad_request",
     "trust_root.bundle_refused",

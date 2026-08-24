@@ -1597,18 +1597,29 @@ private fun SystemWarningBanner(
     theme: InteractTheme,
     modifier: Modifier = Modifier
 ) {
+    // `critical` MUST reach the red path (CIRISServer#446, PR #483 review).
+    //
+    // The server's severity vocabulary is info | warning | error | critical,
+    // and only the first three were handled here — so `critical` fell through
+    // to the blue informational branch. The imminent-SIGKILL memory warning was
+    // therefore styled LESS urgent than the 80% advisory that precedes it,
+    // which inverts the one ordering this banner exists to convey.
+    //
+    // Critical is red at full strength: it is the only severity that means the
+    // process is about to be killed.
     val backgroundColor = when (warning.severity) {
+        "critical" -> Color(0xFFDC2626).copy(alpha = 0.28f)  // Red, strongest
         "error" -> Color(0xFFDC2626).copy(alpha = 0.15f)  // Red tint
         "warning" -> Color(0xFFF59E0B).copy(alpha = 0.15f)  // Amber tint
         else -> Color(0xFF2563EB).copy(alpha = 0.15f)  // Blue tint (info)
     }
     val textColor = when (warning.severity) {
-        "error" -> Color(0xFFDC2626)
+        "critical", "error" -> Color(0xFFDC2626)
         "warning" -> Color(0xFFF59E0B)
         else -> Color(0xFF2563EB)
     }
     val iconVector = when (warning.severity) {
-        "error" -> CIRISIcons.error
+        "critical", "error" -> CIRISIcons.error
         "warning" -> CIRISIcons.warning
         else -> CIRISIcons.info
     }

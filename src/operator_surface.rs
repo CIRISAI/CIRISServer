@@ -830,10 +830,21 @@ impl StoreFootprint {
             // Named absences. An operator reading this must be able to tell
             // "measured and small" from "not measured at all" WITHOUT knowing
             // which tables persist's aggregate happens to cover.
+            // Message PAIRS, not bare strings (codex review, PR #483). These
+            // are stable operator-facing sentences on a surface that advertises
+            // `source_locale`, so a client in any other language had no key to
+            // resolve and could only print English. Backend error DETAIL stays
+            // a bare string — that is genuinely opaque and per-incident — but a
+            // fixed explanation is not.
+            //
+            // Their ids are enumerated in the guard's `KNOWN_UNLOCALIZED` until
+            // the bundles carry them (#484): a resolvable key that is not yet
+            // translated is strictly better than prose with no key at all,
+            // because the client can start resolving it the moment it lands.
             "not_measured": {
-                "wal_bytes": "excluded from total_disk_bytes; persist exposes no reader (CIRISPersist#768)",
-                "federation_attestations": "no TableUsage in StorageSummary (CIRISPersist#767)",
-                "per_table_bytes": "0 on SQLite without dbstat; rows are reported instead",
+                "wal_bytes": msg(STORE_WAL_NOT_MEASURED),
+                "federation_attestations": msg(STORE_ATTESTATIONS_NOT_MEASURED),
+                "per_table_bytes": msg(STORE_PER_TABLE_BYTES_NOT_MEASURED),
             },
         })
     }
@@ -1318,6 +1329,31 @@ pub struct Sources<'a> {
 /// CIRISServer#446 — the store footprint's producer. The SAME
 /// `storage_summary` read as [`TRACE_SOURCE`], named separately because the two
 /// readings can be asked about independently even though one call answers both.
+/// CIRISServer#446 — the store footprint's NAMED ABSENCES, as message pairs.
+///
+/// A surface that silently omitted the largest table on the node would teach
+/// its reader the node is small; these say so out loud, and say it in a shape a
+/// non-English client can localize.
+const STORE_WAL_NOT_MEASURED: Msg = (
+    "operator.store.wal_bytes_not_measured",
+    "The write-ahead log is excluded from this total: `total_disk_bytes` is page_count times \
+     page_size, and persist exposes no reader for the WAL. On a busy node the WAL can be a \
+     large fraction of what the disk actually holds.",
+);
+
+const STORE_ATTESTATIONS_NOT_MEASURED: Msg = (
+    "operator.store.federation_attestations_not_measured",
+    "The federation attestation table is not reported here at all: persist's storage summary \
+     carries no reading for it. On this node it is routinely the largest table, so a small \
+     total above is not evidence of a small store.",
+);
+
+const STORE_PER_TABLE_BYTES_NOT_MEASURED: Msg = (
+    "operator.store.per_table_bytes_not_measured",
+    "Per-table BYTES read as 0 on SQLite builds without dbstat, so row counts are reported \
+     instead. A zero here means the size was not measured, never that the table is empty.",
+);
+
 const STORE_SOURCE: &str = "ciris_persist::Engine::storage_summary()";
 const NODE_SOURCE: &str = "ciris_persist::federation::node_state::resolve_node_state";
 const EDGE_SOURCE: &str = "ciris_edge::observability::EdgeMetrics::snapshot";

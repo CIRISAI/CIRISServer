@@ -365,9 +365,23 @@ fn own_cgroup_dir() -> String {
     //
     // Same selection rule as the read — the first directory that actually
     // accounts for us — so the two cannot drift.
+    // BOTH HIERARCHIES, in the same order the read tries them (codex review,
+    // PR #483). Resolving only v2 meant that on a v1 host `limit_source` was
+    // always `/sys/fs/cgroup/memory/...` while this returned a v2 path, so the
+    // comparison could NEVER match and EVERY limited v1 reading was
+    // misattributed as an ancestor's — telling operators that sibling services
+    // may be responsible for a limit that is entirely their own.
     ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None))
         .into_iter()
         .find(|d| readable(d, "memory.current"))
+        .or_else(|| {
+            ancestor_dirs(
+                "/sys/fs/cgroup/memory",
+                cgroup_relative_path(Some("memory")),
+            )
+            .into_iter()
+            .find(|d| readable(d, "memory.usage_in_bytes"))
+        })
         .unwrap_or_else(|| "/sys/fs/cgroup".to_string())
 }
 
@@ -766,23 +780,38 @@ pub fn read_pressure(resource: &str) -> Pressure {
     // `/sys/fs/cgroup` and there is nothing above it to confuse us with.
     // Anything strictly between leaf and root belongs to other processes as
     // much as to us: host-scope reasoning wearing a cgroup label.
+    // The LEAF is the only path that is unambiguously node-scoped.
+    //
+    // The hierarchy ROOT is the leaf's alias ONLY when namespace resolution
+    // says so — when `/proc/self/cgroup` reports no path, or reports one the
+    // mount does not expose, the subtree at `/sys/fs/cgroup` IS ours. On a
+    // non-namespaced host it is the whole box, and reading it after a
+    // momentarily-unreadable leaf would label sibling services' contention as
+    // this node's (codex review, PR #483).
+    //
+    // So the root is tried, but its SCOPE is decided by whether it was proven
+    // to be the delegated leaf — not by the fact that it answered.
     let own = own_cgroup_dir();
-    let mut candidates: Vec<String> = vec![format!("{own}/{resource}.pressure")];
-    if own.trim_end_matches('/') != "/sys/fs/cgroup" {
-        candidates.push(format!("/sys/fs/cgroup/{resource}.pressure"));
+    let leaf = format!("{own}/{resource}.pressure");
+    let root = format!("/sys/fs/cgroup/{resource}.pressure");
+    let root_is_our_leaf = own.trim_end_matches('/') == "/sys/fs/cgroup";
+    let mut candidates: Vec<(String, PressureScope)> = vec![(leaf, PressureScope::Cgroup)];
+    if !root_is_our_leaf {
+        // Readable, and worth reading — but it describes the box, so it is
+        // reported as `Host` and can never degrade this node.
+        candidates.push((root, PressureScope::Host));
     }
-    candidates.dedup();
     let host = format!("/proc/pressure/{resource}");
 
-    let mut found: Option<(String, String)> = None;
-    for path in &candidates {
+    let mut found: Option<(String, String, PressureScope)> = None;
+    for (path, sc) in &candidates {
         if let Ok(t) = std::fs::read_to_string(path) {
-            found = Some((t, path.clone()));
+            found = Some((t, path.clone(), *sc));
             break;
         }
     }
     let (text, scope, cgroup) = match found {
-        Some((t, path)) => (Some(t), PressureScope::Cgroup, path),
+        Some((t, path, sc)) => (Some(t), sc, path),
         // The fallback answers a DIFFERENT question — "is this box stalling?"
         // rather than "is this node stalling?" — so the scope travels with the
         // number instead of being forgotten at the read.
@@ -791,7 +820,7 @@ pub fn read_pressure(resource: &str) -> Pressure {
             PressureScope::Host,
             candidates
                 .first()
-                .cloned()
+                .map(|(p, _)| p.clone())
                 .unwrap_or_else(|| format!("/sys/fs/cgroup/{resource}.pressure")),
         ),
     };
@@ -1106,6 +1135,32 @@ const fn window(now: u64, then: u64) -> u64 {
 /// the only available window is "since process start", which is the lifetime
 /// total this function exists to avoid.
 pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle) {
+    report_edge_metrics_with_topology(bundle, None);
+}
+
+/// **An EMPTY TOPOLOGY is positive evidence; an idle one is not** (codex
+/// review, PR #483).
+///
+/// `report_network_rounds` keeps its verdict over an empty window, because "no
+/// rounds ran" says nothing about whether the failing ones recovered. That is
+/// right while there are peers to converge with — and it becomes a TRAP the
+/// moment there are none.
+///
+/// The recovery an operator actually performs is to remove or revoke the
+/// failing relationship. Every window after that has `total == 0` forever, so
+/// the alarm they just fixed stands permanently, and nothing they can do will
+/// clear it. A health surface with no path back to healthy is one people learn
+/// to ignore, which is the failure this module exists to prevent, reached from
+/// the direction of being too careful.
+///
+/// So the caller supplies what only it knows: how many peers this node is
+/// currently expected to converge with. ZERO is a real measurement — there is
+/// no one to fail with — and it clears. Any other count leaves the no-evidence
+/// rule intact. `None` means the caller could not say, which is neither.
+pub fn report_edge_metrics_with_topology(
+    bundle: &ciris_edge::observability::EdgeMetricsBundle,
+    consent_peers: Option<usize>,
+) {
     use ciris_edge::observability::RoundOutcome;
 
     let at = |o: RoundOutcome| -> u64 {
@@ -1186,6 +1241,15 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
     } else {
         previous
     };
+
+    if consent_peers == Some(0) {
+        // No peers: this node is not failing to converge with anyone, because
+        // there is no one. The distinction from an idle window is the whole
+        // point — an idle window has peers and simply did not run.
+        clear("network.rounds_timing_out");
+        report_backpressure_drops(window(now.backpressure_drops, baseline.backpressure_drops));
+        return;
+    }
 
     report_network_rounds(RoundWindow {
         completed: window(now.completed, baseline.completed),
@@ -1572,6 +1636,66 @@ mod tests {
                  `limit_source` against it can only ever say 'somebody else's'"
             );
         }
+    }
+
+    /// **An EMPTY TOPOLOGY clears; an IDLE window does not** (codex review,
+    /// PR #483).
+    ///
+    /// Keeping the verdict over an empty window is right while there are peers
+    /// to converge with, and becomes a TRAP the moment there are none: the
+    /// recovery an operator actually performs is to remove the failing
+    /// relationship, after which every window is empty forever and the alarm
+    /// they just fixed can never clear. A health surface with no path back to
+    /// healthy is one people learn to ignore.
+    #[test]
+    fn removing_every_peer_clears_a_timeout_alarm_but_going_idle_does_not() {
+        use ciris_edge::observability::{EdgeMetrics, RoundOutcome};
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut bad = EdgeMetrics::new().snapshot();
+        bad.replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 10);
+        report_edge_metrics_with_topology(&EdgeMetrics::new().snapshot(), Some(3));
+        report_edge_metrics_with_topology(&bad, Some(3));
+        assert!(degraded_mode(), "fixture: 10/10 timing out must degrade");
+
+        // IDLE: peers exist, no rounds ran. Nothing was learned, so the verdict
+        // stands.
+        report_edge_metrics_with_topology(&bad, Some(3));
+        assert!(
+            degraded_mode(),
+            "an idle window with peers still configured cleared the alarm — nothing about \
+             recovery was measured: {:?}",
+            snapshot()
+        );
+
+        // EMPTY: the operator removed the failing relationship. There is nobody
+        // to fail to converge WITH, which is a real measurement.
+        report_edge_metrics_with_topology(&bad, Some(0));
+        assert!(
+            !degraded_mode(),
+            "every peer was removed and the alarm stood anyway, so the operator's actual \
+             remedy could never restore health: {:?}",
+            snapshot()
+        );
+
+        // And "the caller could not say" is neither. Re-raise with counters
+        // that actually MOVED — re-reporting the same bundle is a zero window,
+        // which is the no-evidence case rather than a fresh failure.
+        let mut worse = EdgeMetrics::new().snapshot();
+        worse
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 20);
+        report_edge_metrics_with_topology(&worse, Some(3));
+        assert!(degraded_mode(), "fixture: re-raise on a moved counter");
+        report_edge_metrics_with_topology(&worse, None);
+        assert!(
+            degraded_mode(),
+            "an unknown topology was treated as an empty one — absence of an answer is not \
+             the answer zero: {:?}",
+            snapshot()
+        );
     }
 
     /// **A zero ceiling is EXHAUSTED, not zero-percent** (codex review,

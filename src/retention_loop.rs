@@ -376,7 +376,25 @@ pub async fn run_pass(
             let used_after = after
                 .as_ref()
                 .map_or(u64::MAX, |a| a.total_disk_bytes);
-            if used_after >= cap_bytes {
+            // **COMPARE AGAINST THE PLANNER'S TRIGGER, NOT THE HARD CAP**
+            // (codex review, PR #483).
+            //
+            // lens-core classifies disk pressure from
+            // `cap_bytes * DISK_EVICTION_THRESHOLD`, so a store that finishes a
+            // pass at 95% of its cap is BELOW the cap and still ABOVE the
+            // trigger: this arm would clear, and the very next planner pass
+            // would classify `Relieving` again. Under sustained ingestion or
+            // SQLite freelist behaviour that repeats every hour, and health
+            // reads `ok` while pressure never once falls below the line that
+            // defines it.
+            //
+            // Read from lens-core's own const rather than written as `0.9`
+            // here: a second literal is how the caller and the planner end up
+            // disagreeing about the same store.
+            #[allow(clippy::cast_precision_loss)]
+            let still_pressured =
+                (used_after as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD;
+            if still_pressured {
                 tracing::error!(
                     used_bytes = used_after,
                     cap_bytes,
@@ -384,7 +402,7 @@ pub async fn run_pass(
                     archived_audit_entries = summary.archived_audit_entries,
                     freed_bytes_estimate = summary.freed_bytes_estimate,
                     %bounds,
-                    "retention acted and the store is STILL OVER ITS CAP — the levers are \
+                    "retention acted and the store is STILL AT OR ABOVE ITS EVICTION TRIGGER — the levers are \
                      working and are not keeping up. On SQLite a delete need not shrink the \
                      file at all (freed pages go on the freelist), so 'evicted N rows' is not \
                      evidence the disk was relieved."
@@ -392,13 +410,15 @@ pub async fn run_pass(
                 crate::degradation::raise(crate::degradation::Warning::error(
                     RETENTION_BOUND_CODE,
                     format!(
-                        "the disk cap is still exceeded after a pass that DID evict: {used} of \
-                         {cap} used. The levers work but are not keeping up with what this node \
+                        "the store is still at or above its eviction trigger after a pass that DID \
+                         evict: {used} of {cap} used, and eviction starts at {pct:.0}% of the \
+                         cap. The levers work but are not keeping up with what this node \
                          accepts. Narrow the consent prefixes / replication planes, give the \
                          node more disk, or VACUUM — on SQLite a delete need not shrink the \
                          file.",
                         used = human_bytes(used_after),
                         cap = human_bytes(cap_bytes),
+                        pct = DISK_EVICTION_THRESHOLD * 100.0,
                     ),
                 ));
             } else {
