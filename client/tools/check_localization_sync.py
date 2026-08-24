@@ -601,6 +601,20 @@ def check_server_ids_resolvable(root: Path, en: dict, ids: Dict[str, Path]) -> R
 def server_message_texts(root: Path) -> Dict[str, str]:
     """Map each server-emitted message id -> its FULL English text from Rust."""
     out: Dict[str, str] = {}
+    for mid, texts in _server_message_texts_all(root).items():
+        out[mid] = texts[0]
+    return out
+
+
+def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
+    """Map each id -> EVERY distinct English text emitted under it, in file order.
+
+    Plural on purpose. `setdefault` kept only the first, so an id emitted with
+    two different texts passed `server-id-text` against whichever one happened
+    to come first in file order, while the OTHER endpoint rendered a
+    translation of a sentence it does not say (codex review, PR #483).
+    """
+    out: Dict[str, List[str]] = {}
     src = root / SERVER_SRC
     if not src.exists():
         return out
@@ -608,9 +622,44 @@ def server_message_texts(root: Path) -> Dict[str, str]:
         text = _without_test_modules(rs.read_text(encoding="utf-8"))
         for m in _SERVER_MSG.finditer(text):
             txt = _rust_unescape(m.group(2))
-            if " " in txt:
-                out.setdefault(m.group(1), txt)
+            if " " not in txt:
+                continue
+            seen = out.setdefault(m.group(1), [])
+            if txt not in seen:
+                seen.append(txt)
     return out
+
+
+def check_server_ids_are_single_valued(root: Path) -> Result:
+    """ERROR: one id must mean one sentence.
+
+    A localization id is a KEY: en.json holds exactly one English string for it,
+    and the 29 locales translate that one string. Emitting two different
+    sentences under it means at least one endpoint renders text it does not say,
+    in every language, and no other check can see it — the id set is right, the
+    key resolves, the placeholders match, and `server-id-text` compares en.json
+    against whichever emission the scanner happened to reach first.
+
+    Found live: `commons_surface.refusal.objection_absent` said "a ballot
+    answers a question about ONE objection" on the ballot path and "a dismissal
+    lifts ONE named objection" on the dismissal path, with en.json matching only
+    the first.
+    """
+    all_texts = _server_message_texts_all(root)
+    bad = sorted(mid for mid, texts in all_texts.items() if len(texts) > 1)
+    msgs = []
+    if bad:
+        detail = "; ".join(
+            f"{mid} -> {len(all_texts[mid])} different texts: "
+            + " | ".join(repr(t[:60]) for t in all_texts[mid])
+            for mid in bad[:2]
+        )
+        msgs = [
+            f"{len(bad)} server-emitted id(s) are emitted with CONFLICTING English text, so at "
+            f"least one endpoint renders a sentence it does not say, in every language "
+            f"({detail}{'…' if len(bad) > 2 else ''})"
+        ]
+    return msgs, len(all_texts)
 
 
 def check_server_id_text_matches_source(root: Path, en: dict) -> Result:
@@ -851,6 +900,8 @@ def run_checks(root: Path) -> Report:
 
     msgs, n = check_server_id_text_matches_source(root, en)
     rep.record("server-id-text", msgs, n, severity="error", unit="emitted id(s)")
+    msgs, n = check_server_ids_are_single_valued(root)
+    rep.record("server-id-single-valued", msgs, n, severity="error", unit="emitted id(s)")
 
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
@@ -1098,6 +1149,21 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         """Zero denominator on the server side: the scan finds no emission sites."""
         shutil.rmtree(root / SERVER_SRC)
 
+    def conflicting_server_id_text(root: Path) -> None:
+        """One id, two sentences — which every other check reads as clean.
+
+        The id set is right, the key resolves, the placeholders match, and
+        `server-id-text` compares en.json against whichever emission the
+        scanner reached first. Found live on
+        `commons_surface.refusal.objection_absent`.
+        """
+        rs = root / SERVER_SRC / "fixture.rs"
+        rs.write_text(
+            rs.read_text(encoding="utf-8")
+            + '\nfn other() -> Value { m("nav.home", "A DIFFERENT sentence under the same id.") }\n',
+            encoding="utf-8",
+        )
+
     def server_id_text_truncated(root: Path) -> None:
         r"""THE 2026-08-05 defect: en.json carries a PREFIX of what the server emits.
 
@@ -1132,6 +1198,7 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         ("androidApp bundle dir deleted", "error", missing_mirror_dir, "missing"),
         ("server emits an id en.json never defines", "warning", server_id_uncovered, "no en.json entry"),
         ("server id defined but flat (unreachable)", "error", server_id_defined_but_flat, "DEFINED in en.json"),
+        ("one id emitted with TWO different texts", "error", conflicting_server_id_text, "CONFLICTING English text"),
         ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
 def _truncate_nav_home(root: Path) -> None:

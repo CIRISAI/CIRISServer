@@ -110,8 +110,14 @@ async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
 /// the client through the NODE's port, so `clientModeFrom` resolves AGENT.
 #[tokio::test]
 async fn a_folded_brain_enriches_the_nodes_own_health() {
-    let baseline = bare_node_verdict().await;
+    // LOCK FIRST, then sample (codex review, PR #483). Taken the other way, the
+    // baseline request runs while another case is holding the lock with a
+    // synthetic critical raised — so this captures `degraded`, then waits, then
+    // compares that stale baseline against an `ok` folded response and fails
+    // nondeterministically. The lock has to span BOTH reads or it is not
+    // protecting the comparison, only one half of it.
     let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
             "status": "ok",
@@ -160,8 +166,14 @@ async fn a_folded_brain_enriches_the_nodes_own_health() {
 /// exactly the failure. The node stays up and says which case it is.
 #[tokio::test]
 async fn an_unreachable_brain_is_distinguished_from_no_brain() {
-    let baseline = bare_node_verdict().await;
+    // LOCK FIRST, then sample (codex review, PR #483). Taken the other way, the
+    // baseline request runs while another case is holding the lock with a
+    // synthetic critical raised — so this captures `degraded`, then waits, then
+    // compares that stale baseline against an `ok` folded response and fails
+    // nondeterministically. The lock has to span BOTH reads or it is not
+    // protecting the comparison, only one half of it.
     let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
     // A port nobody is listening on: bind then drop, so the address is dead.
     let dead = {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0")

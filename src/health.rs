@@ -89,6 +89,19 @@ fn node_health() -> serde_json::Value {
     // so all of them must run before `snapshot()` reads the registry — reversed,
     // each health read reports the PREVIOUS read's findings and the first read
     // after a node starts stalling says it is fine.
+    // ONE LOCK ACROSS PROBE **AND** VERDICT. `verdict()` made the three verdict
+    // fields agree with each other; it did not make them agree with the
+    // READINGS printed beside them. Every probe raises or clears as a side
+    // effect of measuring, so two concurrent requests interleave and one can
+    // return its own 94% memory reading beside the other's `status: "ok"` —
+    // numbers and judgement both real, and together a lie the reader can only
+    // resolve by distrusting the surface (PR #483 review).
+    //
+    // Poison-recovering like every other lock here: a panic in one request must
+    // not wedge the health route for the life of the process.
+    let _collect = crate::degradation::COLLECT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let memory = crate::degradation::probe_memory();
     // #446's own subject: a 2-vCPU canonical whose HTTP worker becomes
     // unschedulable under contention. Utilisation cannot see this — a box at

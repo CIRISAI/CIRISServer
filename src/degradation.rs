@@ -184,6 +184,28 @@ pub fn degraded_mode() -> bool {
     read_registry().iter().any(Warning::is_degrading)
 }
 
+/// Serialises PROBE-then-VERDICT so a health response's numbers and its
+/// judgement describe the same instant.
+///
+/// **`verdict()` alone was not enough** (codex review, PR #483). It made the
+/// three verdict FIELDS agree with each other; it did not make them agree with
+/// the READINGS printed beside them. Every probe raises or clears as a side
+/// effect of measuring, so two concurrent requests interleave as:
+///
+/// ```text
+///   A: probe_memory()  -> 94%, raises          B: probe_memory() -> 40%, clears
+///   A: verdict()       -> sees B's clear
+/// ```
+///
+/// and request A returns `resources.memory = 94%` beside `status: "ok"`. The
+/// numbers are real, the verdict is real, and together they are a lie — the
+/// reader's only way to reconcile them is to distrust the surface.
+///
+/// One lock across the whole collection. Health is a small, bounded amount of
+/// file reading; serialising it costs a few microseconds of contention and buys
+/// a payload that is internally consistent, which is the entire product here.
+pub(crate) static COLLECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The three verdict fields, derived from ONE read of the registry.
 ///
 /// `snapshot()` and `degraded_mode()` each take their own read
@@ -1057,14 +1079,38 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
         return;
     };
 
+    // **ONE RESET DECISION FOR THE WHOLE BUNDLE** (codex review, PR #483).
+    //
+    // Differencing each counter independently MIXES EPOCHS when a restart lands
+    // between samples. Worked example, and it is not a corner: previously
+    // `{completed: 1, timed_out: 9, total: 10}`; edge restarts; two rounds run
+    // and both COMPLETE, giving `{completed: 2, total: 2}`. Per-counter,
+    // `completed` did not go backwards (2 >= 1) so its window is 1, while
+    // `total` did (2 < 10) so its window is 2 — and the verdict reads 50%
+    // failure over a window in which everything succeeded.
+    //
+    // The counters move together or not at all, so the RESET is a property of
+    // the BUNDLE, not of any one field. Detected once on the aggregates that
+    // cannot decrease without a restart, and the whole window is then measured
+    // from zero.
+    let reset = now.rounds_total < previous.rounds_total
+        || now.backpressure_drops < previous.backpressure_drops;
+    let baseline = if reset {
+        // Everything the counters hold accumulated after the restart, so all of
+        // it belongs to this window.
+        EdgeCounters::default()
+    } else {
+        previous
+    };
+
     report_network_rounds(RoundWindow {
-        completed: window(now.completed, previous.completed),
-        timed_out: window(now.timed_out, previous.timed_out),
-        refused: window(now.refused, previous.refused),
-        error: window(now.error, previous.error),
-        total: window(now.rounds_total, previous.rounds_total),
+        completed: window(now.completed, baseline.completed),
+        timed_out: window(now.timed_out, baseline.timed_out),
+        refused: window(now.refused, baseline.refused),
+        error: window(now.error, baseline.error),
+        total: window(now.rounds_total, baseline.rounds_total),
     });
-    report_backpressure_drops(window(now.backpressure_drops, previous.backpressure_drops));
+    report_backpressure_drops(window(now.backpressure_drops, baseline.backpressure_drops));
 }
 
 /// **Back-pressure that DROPS is not back-pressure that holds** (CIRISEdge#373).
@@ -1366,6 +1412,46 @@ mod tests {
         assert!(
             degraded_mode(),
             "the same stall measured on THIS node's cgroup must degrade it: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **A restart rebases the WHOLE bundle, not each counter separately**
+    /// (codex review, PR #483).
+    ///
+    /// The worked case, and it is not a corner: previously
+    /// `{completed: 1, timed_out: 9, total: 10}`; edge restarts; two rounds run
+    /// and BOTH COMPLETE, giving `{completed: 2, total: 2}`. Differenced
+    /// per-counter, `completed` did not go backwards (2 >= 1) so its window is
+    /// 1, while `total` did (2 < 10) so its window is 2 — and the verdict reads
+    /// 50% failure over a window in which everything succeeded.
+    #[test]
+    fn a_restart_rebases_every_counter_together_not_one_at_a_time() {
+        use ciris_edge::observability::{EdgeMetrics, RoundOutcome};
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let mut before = EdgeMetrics::new().snapshot();
+        before
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 1);
+        before
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 9);
+        report_edge_metrics(&before); // baseline: 10 rounds, 9 bad
+
+        // Restart, then two rounds that BOTH COMPLETE.
+        let mut after = EdgeMetrics::new().snapshot();
+        after
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 2);
+        report_edge_metrics(&after);
+
+        assert!(
+            !degraded_mode(),
+            "both post-restart rounds COMPLETED and the node reported failure. `completed` did \
+             not appear to go backwards (2 >= 1) while `total` did, so the two counters were \
+             differenced against different epochs: {:?}",
             snapshot()
         );
     }
