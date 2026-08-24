@@ -340,6 +340,19 @@ pub async fn run_pass(
                         pct = DISK_EVICTION_THRESHOLD * 100.0,
                     ),
                 ));
+                // AND RETURN A FAULT, exactly as the `Relieving` arm does. The
+                // previous cut raised the alarm and then fell through to the
+                // ordinary `Evicted` outcome, whose `is_fault()` is false — so
+                // the registry and the returned verdict disagreed about one
+                // measured state for the SECOND time on this arm. Raising
+                // without returning is half a fix, and the half that a caller
+                // reading the outcome never sees.
+                return Ok(RetentionOutcome::BoundUnenforceable {
+                    used_bytes: used_after,
+                    cap_bytes,
+                    evictable_rows: summary.evicted_traces as u64
+                        + summary.archived_audit_entries as u64,
+                });
             } else {
                 crate::degradation::clear(RETENTION_BOUND_CODE);
             }

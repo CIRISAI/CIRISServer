@@ -365,13 +365,42 @@ fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
 /// reading is capped at advisory and merely under-reports, while a
 /// misidentified NODE reading degrades a healthy node on a neighbour's load.
 fn in_cgroup_namespace() -> bool {
-    match (
+    // **THE PID-1 COMPARISON IS ONLY EVER A POSITIVE SIGNAL** (codex review,
+    // PR #483). It assumes PID 1 is the HOST's init, and inside any container
+    // it is not: a server running as PID 1 compares itself with itself and gets
+    // `false`, and a sidecar compares itself with the CONTAINER's init and gets
+    // `false` too. Both are namespaced. Ours is the first case — this server IS
+    // pid 1 in its image — so the test was vacuous in precisely the deployment
+    // that needed it, capping severe container-local stalls at advisory.
+    //
+    // A difference still PROVES a namespace, so it is kept as a fast yes.
+    if let (Some(ours), Some(init)) = (
         std::fs::read_link("/proc/self/ns/cgroup").ok(),
         std::fs::read_link("/proc/1/ns/cgroup").ok(),
     ) {
-        (Some(ours), Some(init)) => ours != init,
-        _ => false,
+        if ours != init {
+            return true;
+        }
     }
+
+    // Otherwise, ask the hierarchy what it looks like. A host root carries the
+    // standard top-level cgroups; a delegated container root carries none of
+    // them.
+    //
+    // Heuristic, and the failure directions are deliberately asymmetric.
+    // Concluding "delegated" on a real host would let sibling contention
+    // degrade this node — the expensive error — so it requires the absence of
+    // EVERY marker. Concluding "host" inside a container merely caps the
+    // reading at advisory, which under-reports and cannot lie.
+    //
+    // A minimal-init host with none of these markers reads as delegated, and
+    // that is acceptable: a PID-1 process in the root cgroup of such a box IS
+    // substantially the whole of it, so node scope and host scope describe the
+    // same thing.
+    const HOST_ROOT_MARKERS: [&str; 3] = ["init.scope", "system.slice", "user.slice"];
+    !HOST_ROOT_MARKERS
+        .iter()
+        .any(|m| std::path::Path::new(&format!("/sys/fs/cgroup/{m}")).is_dir())
 }
 
 /// This process's OWN cgroup v2 directory — the leaf, not an ancestor.
@@ -1860,6 +1889,48 @@ mod tests {
              the answer zero: {:?}",
             snapshot()
         );
+    }
+
+    /// **This host is not namespaced, and the probe must say so.**
+    ///
+    /// Not a mock: it asserts the detector agrees with what this machine
+    /// actually is, which is the only claim a heuristic like this can make
+    /// honestly. A dev box and a CI runner both carry the systemd markers, so
+    /// both must read `false` — and reading `true` there is the EXPENSIVE
+    /// direction, because it would let sibling contention degrade the node.
+    ///
+    /// The PID-1 comparison this replaced could not make even this assertion
+    /// meaningfully: inside a container it compares a process with itself, or
+    /// with the container's own init, and answers `false` either way.
+    #[test]
+    fn the_namespace_detector_agrees_with_the_host_it_is_running_on() {
+        let markers_present = ["init.scope", "system.slice", "user.slice"]
+            .iter()
+            .any(|m| std::path::Path::new(&format!("/sys/fs/cgroup/{m}")).is_dir());
+        let ns_differs = match (
+            std::fs::read_link("/proc/self/ns/cgroup").ok(),
+            std::fs::read_link("/proc/1/ns/cgroup").ok(),
+        ) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+
+        let detected = in_cgroup_namespace();
+        if ns_differs {
+            assert!(
+                detected,
+                "a cgroup namespace inode that differs from PID 1's PROVES delegation, and \
+                 the detector said otherwise"
+            );
+        } else if markers_present {
+            assert!(
+                !detected,
+                "this host carries the systemd top-level cgroups, so `/sys/fs/cgroup` is the \
+                 real root — calling it a delegated leaf would let unrelated services' \
+                 contention degrade this node under a node-scoped label, which is the \
+                 expensive direction"
+            );
+        }
     }
 
     /// **A zero ceiling is EXHAUSTED, not zero-percent** (codex review,
