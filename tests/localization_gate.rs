@@ -348,6 +348,82 @@ fn without_test_modules(text: &str) -> String {
 /// is what makes this cover all three emitters.
 ///
 /// Returns id -> first emission site (repo-relative).
+/// Dotted-id literals appearing as ARGUMENTS to an emitter helper, whatever
+/// the remaining arguments look like.
+///
+/// The pair-matching scan above keys on the TEXT — a literal, or a `format!`.
+/// An emission whose text is any other expression matched neither, so its id
+/// was excluded from every server-id check and removing its bundle entry left
+/// the strict gate green. Live at the time: `auth.oauth.provider_unavailable`
+/// (followed by `&e.message()`) and `accord.duty.holder_custody` (followed by a
+/// bound `msg`).
+///
+/// The helper list is derived from the source, not guessed: these are the
+/// identifiers that actually enclose dotted-id literals in `src/`. "Any dotted
+/// literal followed by a comma" sweeps in hostnames (`accounts.google.com`),
+/// filenames (`libykcs11.dll`) and machine-only degradation CODES, which are a
+/// different contract entirely.
+///
+/// **Must stay behaviourally identical to `_emitter_call_ids` in
+/// `client/tools/check_localization_sync.py`.**
+fn emitter_call_ids(c: &[char], out: &mut Vec<String>) {
+    const EMITTERS: [&str; 6] = ["m", "err", "msg", "refuse", "refusal", "browser_refusal"];
+    let mut i = 0usize;
+    while i < c.len() {
+        if c[i] != '(' {
+            i += 1;
+            continue;
+        }
+        // The identifier immediately before this paren.
+        let mut k = i;
+        while k > 0 && c[k - 1].is_whitespace() {
+            k -= 1;
+        }
+        let end = k;
+        while k > 0
+            && (c[k - 1].is_ascii_lowercase() || c[k - 1] == '_' || c[k - 1].is_ascii_digit())
+        {
+            k -= 1;
+        }
+        let name: String = c[k..end].iter().collect();
+        // A QUALIFIED path is still an emitter call: `super::refusal::refuse(
+        // ..., "auth.oauth.native_token_invalid", ...)` is the real site that
+        // made these two scrapers disagree 302 vs 303. Only the final segment
+        // identifies the helper, and the Python guard's `\b` boundary treats it
+        // the same way — which is the behaviour of record, and what the
+        // cross-check is comparing against.
+        if EMITTERS.contains(&name.as_str()) {
+            let mut depth = 0i32;
+            let mut j = i;
+            while j < c.len() {
+                if c[j] == '(' {
+                    depth += 1;
+                } else if c[j] == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            let mut p = i + 1;
+            while p < j {
+                if c[p] == '"' {
+                    if let Some(lit) = read_plain_literal(c, p, 200) {
+                        if is_message_id(&lit.0) {
+                            out.push(lit.0);
+                        }
+                        p = lit.1;
+                        continue;
+                    }
+                }
+                p += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
 fn server_message_ids() -> BTreeMap<String, String> {
     let root = repo_root();
     let mut files = Vec::new();
@@ -367,6 +443,12 @@ fn server_message_ids() -> BTreeMap<String, String> {
             .to_string_lossy()
             .to_string();
         let c: Vec<char> = text.chars().collect();
+        // Ids in emitter-call argument position, whatever follows them.
+        let mut emitted: Vec<String> = Vec::new();
+        emitter_call_ids(&c, &mut emitted);
+        for mid in emitted {
+            ids.entry(mid).or_insert_with(|| rel.clone());
+        }
         // Scan for the PATTERN at every position, exactly as the Python guard's
         // regex does — deliberately NOT a string-state machine.
         //

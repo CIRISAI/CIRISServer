@@ -861,13 +861,34 @@ pub fn read_pressure(resource: &str) -> Pressure {
     };
     let leaf = format!("{own}/{resource}.pressure");
     let root = format!("/sys/fs/cgroup/{resource}.pressure");
-    let root_is_our_leaf = own.trim_end_matches('/') == "/sys/fs/cgroup";
+    // **IS THE ROOT OUR LEAF, OR IS IT THE BOX?** Two different situations that
+    // end at the same file, and the previous cut swung from calling them both
+    // `Cgroup` to calling them both `Host` (codex review, PR #483). The second
+    // is safer but not free: it made container-local CPU and IO pressure
+    // incapable of degrading a namespaced node AT ALL, which is the reading
+    // this probe exists to produce.
+    //
+    // They are distinguishable, and the tell is whether the mount EXPOSES the
+    // path `/proc/self/cgroup` reports:
+    //
+    //   * no path, or a path the mount does not expose -> we are inside a
+    //     cgroup NAMESPACE and the delegated subtree at `/sys/fs/cgroup` IS
+    //     ours. Node scope.
+    //   * a path the mount DOES expose (the leaf directory is right there) but
+    //     whose pressure file could not be read -> the root is the whole
+    //     hierarchy above us. Host scope.
+    let root_is_our_leaf =
+        own.trim_end_matches('/') == "/sys/fs/cgroup" || !std::path::Path::new(&own).is_dir();
     let mut candidates: Vec<(String, PressureScope)> = vec![(leaf, PressureScope::Cgroup)];
-    if !root_is_our_leaf {
-        // Readable, and worth reading — but it describes the box, so it is
-        // reported as `Host` and can never degrade this node.
-        candidates.push((root, PressureScope::Host));
-    }
+    candidates.push((
+        root,
+        if root_is_our_leaf {
+            PressureScope::Cgroup
+        } else {
+            PressureScope::Host
+        },
+    ));
+    candidates.dedup_by(|a, b| a.0 == b.0);
     let host = format!("/proc/pressure/{resource}");
 
     let mut found: Option<(String, String, PressureScope)> = None;

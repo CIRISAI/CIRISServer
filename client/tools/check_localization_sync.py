@@ -381,6 +381,44 @@ _SERVER_MSG_ID_FORMATTED = re.compile(
 )
 
 
+# **THE ID, WHATEVER FOLLOWS IT.**
+#
+# The two patterns above key on the TEXT — a literal, or a `format!`. An
+# emission whose text is any other expression matched neither, so its id was
+# excluded from every server-id check and removing its bundle entry left the
+# strict gate green (codex review, PR #483). Live at the time:
+# `auth.oauth.provider_unavailable` (followed by `&e.message()`) and
+# `accord.duty.holder_custody` (followed by a bound `msg`).
+#
+# So ids are also taken from ARGUMENT POSITION in a call to one of the emitter
+# helpers, whatever the remaining arguments look like. The helper list is
+# derived from the source rather than guessed — these are the five identifiers
+# that actually enclose dotted-id literals in `src/`, and the alternative,
+# "any dotted literal followed by a comma", sweeps in hostnames
+# (`accounts.google.com`), filenames (`libykcs11.dll`) and machine-only
+# degradation CODES, which are a different contract entirely.
+_SERVER_EMITTERS = re.compile(r"\b(?:m|err|msg|refuse|refusal|browser_refusal)\s*\(")
+_DOTTED_ID = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"')
+
+
+def _emitter_call_ids(text: str) -> List[str]:
+    """Dotted-id literals appearing as arguments to an emitter helper."""
+    out: List[str] = []
+    for call in _SERVER_EMITTERS.finditer(text):
+        depth, j = 0, call.end() - 1
+        while j < len(text):
+            c = text[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.extend(x.group(1) for x in _DOTTED_ID.finditer(text[call.end() : j]))
+    return out
+
+
 def _rust_unescape(raw: str) -> str:
     r"""Resolve a Rust string literal body, including `\`-line-continuations.
 
@@ -612,6 +650,9 @@ def server_message_ids(root: Path) -> Dict[str, Path]:
         # Same id position, computed text. See `_SERVER_MSG_ID_FORMATTED`.
         for m in _SERVER_MSG_ID_FORMATTED.finditer(text):
             ids.setdefault(m.group(1), rs.relative_to(root))
+        # Same id position, ANY following expression. See `_emitter_call_ids`.
+        for mid in _emitter_call_ids(text):
+            ids.setdefault(mid, rs.relative_to(root))
     return ids
 
 
@@ -699,9 +740,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",
     "chat.community_shape_conflict",
+    "mesh_config.refusal.bad_now",
     "mesh_config.refusal.bad_request",
+    "mesh_config.refusal.canonicalize_failed",
     "mesh_config.refusal.bad_ttl",
     "mesh_config.refusal.baseline_unreadable",
+    "mesh_config.refusal.sign_failed",
     "mesh_config.refusal.store_unavailable",
     "operator.store.federation_attestations_not_measured",
     "operator.store.per_table_bytes_not_measured",
