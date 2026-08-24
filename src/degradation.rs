@@ -484,15 +484,30 @@ pub fn read_memory() -> MemoryReading {
             }
         }
 
+        // **AN UNREADABLE LEVEL MAY BE THE BINDING ONE** (codex review,
+        // PR #483). Returning the best KNOWN candidate while a level's limit
+        // could not be read presents an incomplete hierarchy as authoritative:
+        // if the unreadable ancestor is closer to exhaustion, the verdict can
+        // CLEAR a memory alarm for a process that ancestor is about to kill.
+        //
+        // Uncertainty outranks a comfortable number, and this is the one place
+        // in this file where a real measurement is deliberately discarded — the
+        // reading is still reported in `resources`, so the operator sees the
+        // reason rather than nothing.
+        if let Some(reason) = unreadable_limit {
+            return MemoryReading::Unavailable {
+                reason: match &binding {
+                    Some(MemoryReading::Limited { used_pct, .. }) => format!(
+                        "{reason}. The best READABLE level reads {used_pct:.1}% of its limit, \
+                         but a level whose limit could not be read may be tighter, so this is \
+                         reported as unknown rather than as that number"
+                    ),
+                    _ => reason,
+                },
+            };
+        }
         if let Some(reading) = binding {
             return reading;
-        }
-        // No finite limit found anywhere. If ANY level's limit could not be
-        // read, we cannot say "unlimited" — that would assert no ceiling on the
-        // evidence of a failed read, which is the collapse this module exists
-        // to prevent.
-        if let Some(reason) = unreadable_limit {
-            return MemoryReading::Unavailable { reason };
         }
         if let Some(usage_bytes) = leaf_usage {
             return MemoryReading::Unlimited { usage_bytes };
@@ -506,10 +521,39 @@ pub fn read_memory() -> MemoryReading {
     // v1 has hierarchical accounting, so a leaf carrying the unlimited sentinel
     // under a parent slice with a finite limit is exactly as OOM-killable as
     // the v2 case, and `probe_memory` would have cleared the alarm.
-    let v1 = ancestor_dirs(
+    // **v1 ANCESTORS BIND ONLY WHEN `memory.use_hierarchy` SAYS SO** (codex
+    // review, PR #483).
+    //
+    // With hierarchical accounting DISABLED, a parent cgroup does not account
+    // its descendants: its `memory.usage_in_bytes` is its own tasks' usage, and
+    // its limit binds those tasks, not us. Walking it anyway and taking the
+    // highest percentage means a busy PARENT OR SIBLING GROUP produces a false
+    // memory warning — or a false CRITICAL — for a process whose own leaf has
+    // ample headroom.
+    //
+    // That is worse than the miss the walk was added to fix: a missed alarm is
+    // silence, and a false critical teaches an operator to distrust the one
+    // signal that means "about to be SIGKILLed". So the walk is conditional,
+    // and the leaf alone is the answer when hierarchy is off.
+    let v1_all = ancestor_dirs(
         "/sys/fs/cgroup/memory",
         cgroup_relative_path(Some("memory")),
     );
+    let v1_leaf = v1_all
+        .iter()
+        .find(|d| readable(d, "memory.usage_in_bytes"))
+        .cloned();
+    let v1_hierarchical = v1_leaf
+        .as_ref()
+        .and_then(|d| num(&format!("{d}/memory.use_hierarchy")))
+        .is_some_and(|v| v != 0);
+    let v1: Vec<String> = if v1_hierarchical {
+        v1_all
+    } else {
+        // Not hierarchical, or the switch could not be read: only this
+        // process's own leaf can be said to bind it.
+        v1_leaf.clone().into_iter().collect()
+    };
     if v1.iter().any(|d| readable(d, "memory.usage_in_bytes")) {
         let mut binding: Option<MemoryReading> = None;
         let mut unreadable_limit: Option<String> = None;
@@ -552,11 +596,20 @@ pub fn read_memory() -> MemoryReading {
             }
         }
 
+        // Same rule as v2 above: an unreadable level may be the binding one.
+        if let Some(reason) = unreadable_limit {
+            return MemoryReading::Unavailable {
+                reason: match &binding {
+                    Some(MemoryReading::Limited { used_pct, .. }) => format!(
+                        "{reason}. The best READABLE level reads {used_pct:.1}% of its limit, \
+                         but a level whose limit could not be read may be tighter"
+                    ),
+                    _ => reason,
+                },
+            };
+        }
         if let Some(reading) = binding {
             return reading;
-        }
-        if let Some(reason) = unreadable_limit {
-            return MemoryReading::Unavailable { reason };
         }
         if let Some(usage_bytes) = leaf_usage {
             return MemoryReading::Unlimited { usage_bytes };
@@ -791,7 +844,21 @@ pub fn read_pressure(resource: &str) -> Pressure {
     //
     // So the root is tried, but its SCOPE is decided by whether it was proven
     // to be the delegated leaf — not by the fact that it answered.
-    let own = own_cgroup_dir();
+    // **THE UNIFIED LEAF, NOT THE MEMORY-ACCOUNTING ONE** (codex review,
+    // PR #483). `own_cgroup_dir` finds the first directory exposing
+    // `memory.current`, which is the right question for the memory probe and
+    // the wrong one here: a v2 leaf can enable cpu and io WITHOUT memory, and
+    // this would then read an ANCESTOR's pressure file — sibling contention,
+    // labelled `Cgroup`, degrading this node — while a perfectly good
+    // leaf-level `{resource}.pressure` sat unread beside it.
+    //
+    // PSI's leaf is whatever `/proc/self/cgroup` names, full stop; whether that
+    // directory happens to account memory is a different question about a
+    // different controller.
+    let own = match cgroup_relative_path(None) {
+        Some(rel) if !rel.is_empty() => format!("/sys/fs/cgroup/{rel}"),
+        _ => "/sys/fs/cgroup".to_string(),
+    };
     let leaf = format!("{own}/{resource}.pressure");
     let root = format!("/sys/fs/cgroup/{resource}.pressure");
     let root_is_our_leaf = own.trim_end_matches('/') == "/sys/fs/cgroup";

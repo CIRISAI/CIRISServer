@@ -715,23 +715,39 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
 
 
 def check_known_unlocalized_list_is_current(root: Path, en: dict) -> Result:
-    """ERROR: an id on the debt list that is now covered must LEAVE the list.
+    """ERROR: every entry on the debt list must still be BOTH real and needed.
 
-    Without this the list is an exemption that outlives its reason — the shape
-    that lets "temporary" debt become permanent coverage loss. The list can only
-    shrink.
+    Two ways an entry goes stale, and both leave an exemption outliving its
+    reason — the shape that lets "temporary" debt become permanent coverage
+    loss:
+
+      * COVERED — the id now has an en.json entry, so the debt is paid and the
+        entry must go;
+      * GONE — the emission site was deleted or renamed, so the entry protects
+        nothing today AND would silently exempt a future re-introduction of the
+        same id, which is the more dangerous half (codex review, PR #483): a
+        dead exemption is invisible until it quietly covers for something new.
+
+    The list can therefore only shrink, and only for the right reason.
     """
     addrs = set(flat_values(en))
-    stale = sorted(i for i in KNOWN_UNLOCALIZED if i in addrs)
-    msgs = (
-        [
-            f"{len(stale)} id(s) on KNOWN_UNLOCALIZED now HAVE an en.json entry and must be "
-            f"removed from that list ({', '.join(stale[:3])}{'…' if len(stale) > 3 else ''}) — "
-            f"an allowlist that outlives its reason is how temporary debt becomes permanent"
-        ]
-        if stale
-        else []
-    )
+    emitted = set(server_message_ids(root))
+    covered = sorted(i for i in KNOWN_UNLOCALIZED if i in addrs)
+    gone = sorted(i for i in KNOWN_UNLOCALIZED if i not in emitted)
+    msgs = []
+    if covered:
+        msgs.append(
+            f"{len(covered)} id(s) on KNOWN_UNLOCALIZED now HAVE an en.json entry and must be "
+            f"removed from that list ({', '.join(covered[:3])}"
+            f"{'…' if len(covered) > 3 else ''}) — an allowlist that outlives its reason is "
+            f"how temporary debt becomes permanent"
+        )
+    if gone:
+        msgs.append(
+            f"{len(gone)} id(s) on KNOWN_UNLOCALIZED are NO LONGER EMITTED anywhere in src/ "
+            f"({', '.join(gone[:3])}{'…' if len(gone) > 3 else ''}) — the entry protects "
+            f"nothing now and would silently exempt a future re-introduction of the same id"
+        )
     return msgs, len(KNOWN_UNLOCALIZED)
 
 
@@ -974,7 +990,21 @@ class Report:
             self.lines.append(f"  OK    {name:<19}: 0 findings over {examined} {unit}")
 
 
-def run_checks(root: Path) -> Report:
+def run_checks_synthetic(root: Path) -> Report:
+    """`run_checks` over a fixture tree — see `debt_list_applies`."""
+    return run_checks(root, debt_list_applies=False)
+
+
+def run_checks(root: Path, *, debt_list_applies: bool = True) -> Report:
+    """`debt_list_applies=False` for SYNTHETIC trees.
+
+    `KNOWN_UNLOCALIZED` is a statement about THIS repository's sources. The
+    self-test builds a fixture tree containing one emission site, where every
+    entry on the list is trivially "no longer emitted" — so the freshness check
+    would fire on every mutation and drown out what each one is testing. The
+    list is proven separately, against real semantics, by
+    `_prove_the_debt_list_is_kept_honest`.
+    """
     rep = Report()
     canonical = root / CANONICAL_BUNDLE
 
@@ -1014,8 +1044,9 @@ def run_checks(root: Path) -> Report:
     rep.record("server-id-text", msgs, n, severity="error", unit="emitted id(s)")
     msgs, n = check_server_ids_are_single_valued(root)
     rep.record("server-id-single-valued", msgs, n, severity="error", unit="emitted id(s)")
-    msgs, n = check_known_unlocalized_list_is_current(root, en)
-    rep.record("unlocalized-debt-current", msgs, n, severity="error", unit="known id(s)")
+    if debt_list_applies:
+        msgs, n = check_known_unlocalized_list_is_current(root, en)
+        rep.record("unlocalized-debt-current", msgs, n, severity="error", unit="known id(s)")
 
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
@@ -1357,6 +1388,67 @@ def _resync(root: Path) -> None:
             shutil.copy2(f, target / f.name)
 
 
+def _prove_the_debt_list_is_kept_honest(root: Path) -> int:
+    """Both halves of `unlocalized-debt-current`, against the REAL tree.
+
+    Proven here rather than as a fixture mutation because the list is a
+    statement about this repository's sources: a synthetic tree emits none of
+    them, so every entry reads as stale and the check would fire on every other
+    mutation instead of on its own.
+
+      * COVERED — an entry that has since gained an en.json entry must fail, or
+        the debt is never actually paid down;
+      * GONE — an entry no longer emitted anywhere must fail, because a dead
+        exemption is invisible until it quietly covers for a future
+        re-introduction of the same id.
+    """
+    global KNOWN_UNLOCALIZED  # noqa: PLW0603 - restored in the finally below
+    failures = 0
+    en = load_json(root / CANONICAL_BUNDLE / "en.json")
+
+    clean, _ = check_known_unlocalized_list_is_current(root, en)
+    if clean:
+        print("  FAIL  the debt list is not currently honest:")
+        for m in clean:
+            print(f"          {m}")
+        failures += 1
+
+    # COVERED: pretend en.json defines the first entry.
+    if KNOWN_UNLOCALIZED:
+        doctored = json.loads(json.dumps(en))
+        node = doctored
+        parts = KNOWN_UNLOCALIZED[0].split(".")
+        for k in parts[:-1]:
+            node = node.setdefault(k, {})
+            if not isinstance(node, dict):
+                node = doctored
+                break
+        else:
+            node[parts[-1]] = "now covered"
+        msgs, _ = check_known_unlocalized_list_is_current(root, doctored)
+        if not any("HAVE an en.json entry" in m for m in msgs):
+            print("  FAIL  a COVERED debt entry did not fail the freshness check")
+            failures += 1
+
+    # GONE: an id nothing emits.
+    original = KNOWN_UNLOCALIZED
+    KNOWN_UNLOCALIZED = original + ("ghost.id.that.is.not.emitted",)
+    try:
+        msgs, _ = check_known_unlocalized_list_is_current(root, en)
+        if not any("NO LONGER EMITTED" in m for m in msgs):
+            print("  FAIL  a GONE debt entry did not fail the freshness check")
+            failures += 1
+    finally:
+        KNOWN_UNLOCALIZED = original
+
+    if failures == 0:
+        print(
+            f"  ok    the debt list is honest in both directions "
+            f"({len(KNOWN_UNLOCALIZED)} entry(ies): covered and gone both fail)"
+        )
+    return failures
+
+
 def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
     """Assert that a `#[cfg(test)]` module cannot invent a server-emitted id.
 
@@ -1381,7 +1473,7 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
     """
     _build_fixture(root)
     rs = root / SERVER_SRC / "fixture.rs"
-    before = run_checks(root)
+    before = run_checks_synthetic(root)
     before_ids = len(server_message_ids(root))
 
     # The test module is inserted BEFORE the file's production emission site,
@@ -1405,7 +1497,7 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
         "}\n\n"
     )
     rs.write_text(hostile + rs.read_text(encoding="utf-8"), encoding="utf-8")
-    after = run_checks(root)
+    after = run_checks_synthetic(root)
     after_ids = len(server_message_ids(root))
 
     failures = 0
@@ -1449,7 +1541,7 @@ def _prove_keyset_comparison_is_blind(root: Path) -> int:
     before = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
     _flatten_nav_home(root)
     after = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
-    rep = run_checks(root)
+    rep = run_checks_synthetic(root)
     resolvability = [e for e in rep.errors if e.startswith("key-resolvability")]
     other_errors = [e for e in rep.errors if not e.startswith("key-resolvability")]
     # reference-coverage and server-id-reachable also fire here — the Kotlin call
@@ -1486,7 +1578,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory(prefix="loc-guard-selftest-") as td:
         pristine = Path(td) / "pristine"
         _build_fixture(pristine)
-        rep = run_checks(pristine)
+        rep = run_checks_synthetic(pristine)
         if rep.errors or rep.warnings:
             print("  FAIL  pristine fixture is not clean:")
             for m in rep.errors + rep.warnings:
@@ -1501,7 +1593,7 @@ def self_test() -> int:
                 shutil.rmtree(work)
             _build_fixture(work)
             mutate(work)
-            rep = run_checks(work)
+            rep = run_checks_synthetic(work)
             bucket = rep.errors if severity == "error" else rep.warnings
             other = rep.warnings if severity == "error" else rep.errors
             hit = [m for m in bucket if needle in m]
@@ -1528,6 +1620,7 @@ def self_test() -> int:
 
         failures += _prove_keyset_comparison_is_blind(Path(td) / "blind")
         failures += _prove_test_fixtures_are_not_server_emissions(Path(td) / "cfgtest")
+        failures += _prove_the_debt_list_is_kept_honest(Path("."))
 
     print()
     if failures:

@@ -650,3 +650,76 @@ async fn an_enormous_code_or_severity_cannot_bypass_the_entry_bound() {
         w["severity"].as_str().map(|s| &s[..s.len().min(40)])
     );
 }
+
+/// **A degrading WARNING is the third signal** (codex review, PR #483).
+///
+/// The client's contract is `status != "ok" || degradedMode ||
+/// warnings.isNotEmpty()`. The fold honoured the first two, so a brain emitting
+/// an `error` or `critical` warning while omitting BOTH flags — an older or
+/// partially compatible one — had that warning appended to the payload while
+/// the outer verdict stayed `ok`. A status-only watcher then ignored a critical
+/// condition visible three lines below it in the same response.
+#[tokio::test]
+async fn a_brain_warning_alone_degrades_the_folded_pair() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
+    assert!(!baseline.1, "fixture: this case needs an undegraded node");
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": {
+            "cognitive_state": "WORK",
+            // Neither flag. Only the warning's own severity says anything.
+            "warnings": [{
+                "code": "llm.all_providers_down",
+                "message": "every configured provider failed its last probe",
+                "severity": "critical",
+            }],
+        }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["degraded_mode"], true,
+        "a CRITICAL brain warning rode through into the payload while the verdict stayed \
+         healthy. A watcher keying on status alone would ignore it, and the reason is right \
+         there in the same response: {v:#}"
+    );
+    assert_eq!(v["data"]["status"], "degraded");
+}
+
+/// An INFO-severity brain warning is reported and changes nothing — otherwise
+/// "the brain said something" and "the brain is in trouble" collapse, which is
+/// the distinction the severity field exists to carry.
+#[tokio::test]
+async fn an_informational_brain_warning_does_not_degrade_the_pair() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": {
+            "cognitive_state": "WORK",
+            "warnings": [{"code": "model.switched", "message": "now on the fallback model", "severity": "info"}],
+        }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["degraded_mode"].as_bool().unwrap_or(false),
+        baseline.1,
+        "an INFO warning moved the verdict: {v:#}"
+    );
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"agent.model.switched"),
+        "not degrading is not the same as not reporting: {codes:?}"
+    );
+}

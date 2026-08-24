@@ -326,7 +326,6 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         // An unrecognised severity is NORMALISED rather than clipped: it is a
         // closed vocabulary the client switches on, and a truncated token would
         // be neither valid nor obviously wrong.
-        const MAX_CODE_BYTES: usize = 256;
         //
         // Enumerated rather than `unwrap_or`, which is what clippy suggests and
         // would be WRONG: `unwrap_or` passes an unrecognised value through, and
@@ -344,6 +343,47 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
             "message": msg,
             "severity": severity,
         })
+    }
+
+    /// The most `code` bytes this payload will carry, on BOTH paths — the
+    /// namespacing above and the reduction below. One const, because a bound
+    /// that two call sites define separately is a bound one of them will lose.
+    const MAX_CODE_BYTES: usize = 256;
+
+    /// Whether `v` serializes to at most `limit` bytes, WITHOUT building the
+    /// string.
+    ///
+    /// `serde_json::to_string` on a hostile value allocates the whole thing
+    /// before anyone can look at its length, which makes the size check itself
+    /// the denial of service it was added to prevent. This writes into a sink
+    /// that counts and aborts past the limit, so the cost of rejecting a 4 MiB
+    /// warning is the limit, not the warning.
+    fn serializes_within(v: &serde_json::Value, limit: usize) -> bool {
+        struct Counter {
+            written: usize,
+            limit: usize,
+        }
+        impl std::io::Write for Counter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.written += buf.len();
+                if self.written > self.limit {
+                    // Any error stops serde; the distinction is carried by
+                    // `written` rather than by the error kind.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "over limit",
+                    ));
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut c = Counter { written: 0, limit };
+        // Unserializable is treated as oversized: if we cannot measure it, we
+        // do not carry it whole.
+        serde_json::to_writer(&mut c, v).is_ok() && c.written <= limit
     }
 
     /// Clip to at most `max` BYTES on a character boundary.
@@ -400,14 +440,17 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
             dropped += 1;
             continue;
         }
-        let namespaced = format!("agent.{code}");
-        // Measured on the SERIALIZED entry, so one huge string and one deeply
-        // nested object are bounded by the same number.
-        let oversized = serde_json::to_string(w)
-            .map(|t| t.len() > MAX_BRAIN_WARNING_BYTES)
-            // Unserializable is treated as oversized: if we cannot measure it,
-            // we do not carry it whole.
-            .unwrap_or(true);
+        // CLIP BEFORE ALLOCATING (codex review, PR #483). `format!` on a
+        // multi-megabyte code materialised a full namespaced copy before the
+        // size decision, so the RESPONSE was bounded while peak memory and
+        // per-request work stayed proportional to hostile input — and this
+        // route is public and polled concurrently.
+        let namespaced = format!("agent.{}", clip(code, MAX_CODE_BYTES));
+        // Measured with a COUNTING writer, so a huge entry is never
+        // materialised as a string just to learn that it is huge. One huge
+        // field and one deeply nested object are still bounded by the same
+        // number, which is why this measures the serialized form at all.
+        let oversized = !serializes_within(w, MAX_BRAIN_WARNING_BYTES);
         if oversized {
             valid.push(reduce(w, &namespaced));
             continue;
@@ -438,6 +481,25 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         }));
     }
 
+    // **A DEGRADING WARNING IS THE THIRD SIGNAL** (codex review, PR #483).
+    //
+    // The client's contract is `status != "ok" || degradedMode ||
+    // warnings.isNotEmpty()`, and this fold honoured the first two. A brain
+    // that emits an `error` or `critical` warning while omitting BOTH flags —
+    // an older or partially compatible one — had that warning appended to the
+    // payload while the outer verdict stayed `ok`, so a status-only watcher
+    // ignored a critical condition visible three lines below it in the same
+    // response.
+    //
+    // Read from the RETAINED warnings, after namespacing and the cap, so what
+    // is judged is exactly what is reported.
+    let brain_warning_degrades = folded.iter().any(|w| {
+        matches!(
+            w.get("severity").and_then(serde_json::Value::as_str),
+            Some("error" | "critical")
+        )
+    });
+
     if !folded.is_empty() {
         match out["data"]["warnings"].as_array_mut() {
             Some(existing) => existing.extend(folded),
@@ -462,7 +524,7 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         .and_then(serde_json::Value::as_str)
         .is_some_and(|s| s != "ok");
 
-    if brain_degraded || brain_status_bad {
+    if brain_degraded || brain_status_bad || brain_warning_degrades {
         out["data"]["degraded_mode"] = serde_json::json!(true);
         out["data"]["status"] = serde_json::json!("degraded");
     }
