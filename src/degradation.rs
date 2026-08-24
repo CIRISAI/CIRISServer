@@ -984,16 +984,28 @@ pub fn read_pressure(resource: &str) -> Pressure {
     //     hierarchy above us. Host scope.
     let root_is_our_leaf = in_cgroup_namespace()
         && (own.trim_end_matches('/') == "/sys/fs/cgroup" || !std::path::Path::new(&own).is_dir());
-    let mut candidates: Vec<(String, PressureScope)> = vec![(leaf, PressureScope::Cgroup)];
-    candidates.push((
-        root,
-        if root_is_our_leaf {
-            PressureScope::Cgroup
-        } else {
-            PressureScope::Host
-        },
-    ));
-    candidates.dedup_by(|a, b| a.0 == b.0);
+    let root_scope = if root_is_our_leaf {
+        PressureScope::Cgroup
+    } else {
+        PressureScope::Host
+    };
+    // **WHEN THE PATHS COLLAPSE, THE COMPUTED SCOPE WINS** (codex review,
+    // PR #483). On a non-namespaced host whose process is in the root cgroup
+    // (`0::/`), `leaf` and `root` are the SAME string — and a dedup that keeps
+    // the FIRST entry kept the optimistic `Cgroup` label and threw away the
+    // `Host` verdict that had just been computed correctly. The host reading
+    // was mislabelled node-scope for the third time on this branch, this time
+    // by the deduplication rather than by the resolution.
+    //
+    // One entry when they are the same path, and it carries the answer that was
+    // reasoned about rather than the one that happened to be pushed first.
+    let mut candidates: Vec<(String, PressureScope)> = Vec::with_capacity(2);
+    if leaf == root {
+        candidates.push((leaf, root_scope));
+    } else {
+        candidates.push((leaf, PressureScope::Cgroup));
+        candidates.push((root, root_scope));
+    }
     let host = format!("/proc/pressure/{resource}");
 
     let mut found: Option<(String, String, PressureScope)> = None;

@@ -653,3 +653,45 @@ fn a_plan_is_not_an_outcome_and_only_the_outcome_can_be_trusted() {
         "fixture: WithinBounds is the healthy zero the inert pass used to report"
     );
 }
+
+/// **Removing the disk cap must clear the disk alarm even if the store read
+/// fails** (codex review, PR #483).
+///
+/// An operator who removes `max_disk_gb` but keeps an age bound leaves
+/// `is_bounded()` true, so the unbounded early-return does not fire — and every
+/// path that could clear the alarm used to sit after a `storage_summary()` that
+/// can fail. One failing read then stranded a stale alarm about a bound that no
+/// longer exists, with no way back: they did the thing that should fix it and
+/// health kept saying otherwise.
+#[tokio::test]
+async fn removing_the_disk_cap_clears_its_alarm_before_any_fallible_read() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+
+    let engine = node().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "raised while a disk cap was configured; the operator has since removed it",
+    ));
+
+    // Age bound kept, disk cap removed — so the policy is still BOUNDED and the
+    // unbounded early-return does not fire.
+    let cfg = RetentionConfig::from_resolved(&retention_config(3600, 0));
+    assert!(
+        cfg.policy.max_disk_gb.is_none(),
+        "fixture: the disk cap must be gone"
+    );
+
+    let _ = retention_loop::run_pass(&engine, &cfg).await;
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the disk cap is GONE and the node still reports that it cannot be enforced. \
+         'The configured disk bound cannot bite' is not a claim a node without a disk bound \
+         can make: {standing:?}"
+    );
+}

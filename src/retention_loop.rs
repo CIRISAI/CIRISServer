@@ -199,6 +199,19 @@ pub async fn run_pass(
         return Ok(RetentionOutcome::Unbounded);
     }
 
+    // **NO DISK CAP MEANS THE DISK ALARM CANNOT BE TRUE** (codex review,
+    // PR #483), and this must happen BEFORE any fallible store work.
+    //
+    // An operator who removes `max_disk_gb` but keeps an age or audit bound
+    // leaves `is_bounded()` true, so the unbounded early-return above does not
+    // fire — and every path that could clear the disk alarm sits after a
+    // `storage_summary()` that can fail. One failing read then strands a stale
+    // alarm about a bound that no longer exists, with no way back: the operator
+    // did the thing that should fix it and health kept saying otherwise.
+    if cfg.policy.max_disk_gb.is_none() {
+        crate::degradation::clear(RETENTION_BOUND_CODE);
+    }
+
     // The pre-state, read BEFORE the sweep, so a zero pass can report what it
     // was looking at rather than only that it found nothing. `oldest_trace` is
     // the load-bearing field: it is the direct answer to "is there anything old
