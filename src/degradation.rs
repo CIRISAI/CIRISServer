@@ -751,10 +751,26 @@ pub fn read_pressure(resource: &str) -> Pressure {
     // a correct node-scoped measurement for a host-wide one, and — since a host
     // reading can never degrade — pressure isolated to this container could
     // never raise at all.
-    let mut candidates: Vec<String> = ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None))
-        .into_iter()
-        .map(|d| format!("{d}/{resource}.pressure"))
-        .collect();
+    // **LEAF, THEN THE DELEGATED ROOT — NOT THE ANCESTORS IN BETWEEN** (codex
+    // review, PR #483).
+    //
+    // Reusing `ancestor_dirs` here was wrong, and wrong in the direction this
+    // whole scope split exists to prevent: an intermediate parent's pressure
+    // file includes SIBLING SERVICES, so their contention would raise
+    // `resource.{cpu,io}_stall` and degrade THIS node — a true number about the
+    // wrong subject, which is exactly what `PressureScope::Host` was introduced
+    // to keep out. It also contradicted the ladder documented right here.
+    //
+    // The root is a legitimate rung, and it is the leaf's ALIAS only in the
+    // namespaced case, where the mount exposes the delegated subtree AT
+    // `/sys/fs/cgroup` and there is nothing above it to confuse us with.
+    // Anything strictly between leaf and root belongs to other processes as
+    // much as to us: host-scope reasoning wearing a cgroup label.
+    let own = own_cgroup_dir();
+    let mut candidates: Vec<String> = vec![format!("{own}/{resource}.pressure")];
+    if own.trim_end_matches('/') != "/sys/fs/cgroup" {
+        candidates.push(format!("/sys/fs/cgroup/{resource}.pressure"));
+    }
     candidates.dedup();
     let host = format!("/proc/pressure/{resource}");
 

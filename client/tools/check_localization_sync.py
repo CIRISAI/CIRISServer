@@ -285,6 +285,18 @@ def _attributed_item_body(text: str, attr_start: int) -> "int | None":
             continue
         elif c == '"':
             in_str = True
+        elif text[j : j + 2] == "//":
+            # A COMMENT between the attribute and its item. `#[cfg(test)]
+            # // uses { syntax` followed by a `const` made the comment's brace
+            # the item's body, and the matcher then blanked the following
+            # PRODUCTION function (codex review, PR #483).
+            nl = text.find("\n", j)
+            j = len(text) if nl == -1 else nl
+            continue
+        elif text[j : j + 2] == "/*":
+            close = text.find("*/", j + 2)
+            j = len(text) if close == -1 else close + 2
+            continue
         elif c == "[":
             depth_brack += 1
         elif c == "]":
@@ -349,6 +361,24 @@ def _char_literal_end(text: str, start: int) -> "int | None":
     if k + 1 < len(text) and text[k + 1] == "'":
         return k + 1
     return None
+
+
+# The SAME id position, but with a COMPUTED text — `format!(...)` rather than a
+# literal. `_SERVER_MSG` cannot see these, so every server-id check silently
+# excluded them and the denominator overstated coverage (codex review, PR #483).
+#
+# Observed live: `mesh_config.refusal.store_unavailable` is emitted as
+# `err(status, "store_unavailable", "mesh_config.refusal.store_unavailable",
+# format!("The substrate could not be read: {e}"))` and is ABSENT from en.json —
+# so it renders the server's English in all 29 languages while the guard
+# reported all 241 examined ids covered.
+#
+# The id is extracted from both shapes; the exact SOURCE-TEXT comparison stays
+# restricted to the literal shape, because a `format!` template is not a string
+# this checker can evaluate.
+_SERVER_MSG_ID_FORMATTED = re.compile(
+    r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*format!\s*\(', re.S
+)
 
 
 def _rust_unescape(raw: str) -> str:
@@ -579,6 +609,9 @@ def server_message_ids(root: Path) -> Dict[str, Path]:
             if " " not in m.group(2):
                 continue  # not an English sentence — not an (id, text) pair
             ids.setdefault(m.group(1), rs.relative_to(root))
+        # Same id position, computed text. See `_SERVER_MSG_ID_FORMATTED`.
+        for m in _SERVER_MSG_ID_FORMATTED.finditer(text):
+            ids.setdefault(m.group(1), rs.relative_to(root))
     return ids
 
 
@@ -628,6 +661,60 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
             if txt not in seen:
                 seen.append(txt)
     return out
+
+
+# **ENUMERATED DEBT, NOT AN EXEMPTION.**
+#
+# Broadening id extraction to the `format!`-texted shape (see
+# `_SERVER_MSG_ID_FORMATTED`) revealed 13 ids that have NEVER had an en.json
+# entry and therefore render the server's English in all 29 languages. They are
+# real, they predate this checker being able to see them, and fixing them means
+# writing 29 translations apiece — the `localize-ui` workflow, tracked in
+# CIRISServer#484.
+#
+# Listing them here rather than weakening the check keeps three properties:
+#   * a NEW uncovered id still fails, so the debt cannot grow;
+#   * the debt is enumerated in source, so it cannot be forgotten;
+#   * an id that GETS covered must be removed from this list — the check below
+#     fails on a stale entry — so the list can only shrink.
+#
+# Do not add to this list to make a build green. Add the en.json entry.
+KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    "accord.duty.assemble",
+    "accord.duty.holder_identity_mismatch",
+    "accord.duty.no_duty",
+    "chat.community_shape_conflict",
+    "mesh_config.refusal.bad_request",
+    "mesh_config.refusal.bad_ttl",
+    "mesh_config.refusal.baseline_unreadable",
+    "mesh_config.refusal.store_unavailable",
+    "trust_root.bad_bundle",
+    "trust_root.bad_request",
+    "trust_root.bundle_refused",
+    "trust_root.install_failed",
+    "trust_root.withdraw_failed",
+)
+
+
+def check_known_unlocalized_list_is_current(root: Path, en: dict) -> Result:
+    """ERROR: an id on the debt list that is now covered must LEAVE the list.
+
+    Without this the list is an exemption that outlives its reason — the shape
+    that lets "temporary" debt become permanent coverage loss. The list can only
+    shrink.
+    """
+    addrs = set(flat_values(en))
+    stale = sorted(i for i in KNOWN_UNLOCALIZED if i in addrs)
+    msgs = (
+        [
+            f"{len(stale)} id(s) on KNOWN_UNLOCALIZED now HAVE an en.json entry and must be "
+            f"removed from that list ({', '.join(stale[:3])}{'…' if len(stale) > 3 else ''}) — "
+            f"an allowlist that outlives its reason is how temporary debt becomes permanent"
+        ]
+        if stale
+        else []
+    )
+    return msgs, len(KNOWN_UNLOCALIZED)
 
 
 def check_server_ids_are_single_valued(root: Path) -> Result:
@@ -713,7 +800,14 @@ def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Resu
     lag. But it means the string cannot be localized into ANY of the 29
     languages, so it belongs on the localize-ui worklist rather than in silence.
     """
-    uncovered = sorted(i for i in ids if i not in set(flat_values(en)))
+    # Enumerated debt is excluded — see `KNOWN_UNLOCALIZED`. A NEW uncovered id
+    # still fails, which is the property that matters, and
+    # `check_known_unlocalized_list_is_current` makes the list shrink-only.
+    uncovered = sorted(
+        i
+        for i in ids
+        if i not in set(flat_values(en)) and i not in KNOWN_UNLOCALIZED
+    )
     if not uncovered:
         return [], len(ids)
     by_file: Dict[str, int] = {}
@@ -902,6 +996,8 @@ def run_checks(root: Path) -> Report:
     rep.record("server-id-text", msgs, n, severity="error", unit="emitted id(s)")
     msgs, n = check_server_ids_are_single_valued(root)
     rep.record("server-id-single-valued", msgs, n, severity="error", unit="emitted id(s)")
+    msgs, n = check_known_unlocalized_list_is_current(root, en)
+    rep.record("unlocalized-debt-current", msgs, n, severity="error", unit="known id(s)")
 
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")

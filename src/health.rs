@@ -375,7 +375,18 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
     // one silently dropped, and the response would carry nothing but a
     // truncation notice. Which entries are worth carrying is a question about
     // VALID warnings, so the cap has to be applied to those.
-    let mut valid: Vec<serde_json::Value> = Vec::new();
+    // **THE CAP BOUNDS THE WORK, NOT JUST THE OUTPUT** (codex review, PR #483).
+    //
+    // The first cut transformed EVERY entry into `valid` and truncated
+    // afterwards, so a brain returning hundreds of thousands of warnings made
+    // each public health request build a full transformed list before throwing
+    // most of it away. The advertised 32-entry cap bounded the response and
+    // nothing else, and concurrent polling on a public route is exactly how
+    // that becomes an outage.
+    //
+    // Retain at most the cap; count the rest.
+    let mut valid: Vec<serde_json::Value> = Vec::with_capacity(MAX_BRAIN_WARNINGS);
+    let mut dropped = 0usize;
     for w in offered {
         // No `code` means nothing to group on and nothing to act on; skipping
         // beats inventing an empty-string code that collides with every other
@@ -383,6 +394,12 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         let Some(code) = w.get("code").and_then(serde_json::Value::as_str) else {
             continue;
         };
+        if valid.len() >= MAX_BRAIN_WARNINGS {
+            // Past the cap: count it and do NO work on it — no clone, no
+            // serialize, no reduce. Counting is the whole cost from here.
+            dropped += 1;
+            continue;
+        }
         let namespaced = format!("agent.{code}");
         // Measured on the SERIALIZED entry, so one huge string and one deeply
         // nested object are bounded by the same number.
@@ -399,8 +416,6 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         w["code"] = serde_json::json!(namespaced);
         valid.push(w);
     }
-    let dropped = valid.len().saturating_sub(MAX_BRAIN_WARNINGS);
-    valid.truncate(MAX_BRAIN_WARNINGS);
     let mut folded = valid;
     if dropped > 0 {
         tracing::warn!(

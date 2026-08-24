@@ -405,6 +405,30 @@ fn server_message_ids() -> BTreeMap<String, String> {
                 j += 1;
             }
             if j >= c.len() || c[j] != '"' {
+                // **THE SAME ID POSITION WITH A COMPUTED TEXT** — `format!(...)`
+                // rather than a literal. Neither scraper could see these, so
+                // every server-id check silently excluded them and the
+                // denominator overstated coverage. Live example:
+                // `mesh_config.refusal.store_unavailable`, absent from en.json
+                // while the guard reported all 241 examined ids covered.
+                //
+                // The ID is taken from both shapes; the exact SOURCE-TEXT
+                // comparison stays restricted to the literal shape, because a
+                // `format!` template is not a string this checker can evaluate.
+                //
+                // Must stay behaviourally identical to
+                // `_SERVER_MSG_ID_FORMATTED` in the Python guard — the
+                // cross-check below is what caught this one mirrored and one
+                // not, within a single test run.
+                if c[j..].starts_with(&"format!".chars().collect::<Vec<_>>()[..]) {
+                    let mut k = j + "format!".len();
+                    while k < c.len() && c[k].is_whitespace() {
+                        k += 1;
+                    }
+                    if k < c.len() && c[k] == '(' {
+                        ids.entry(id.0.clone()).or_insert_with(|| rel.clone());
+                    }
+                }
                 i += 1;
                 continue;
             }

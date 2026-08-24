@@ -285,6 +285,14 @@ pub async fn run_pass(
     // `Unreachable` again if they did not — which uses lens-core's own verdict
     // rather than re-deriving the decision here.
     let acted = summary.evicted_traces > 0 || summary.archived_audit_entries > 0;
+    // The POST-pass state, read once and used for BOTH the verdict and the
+    // outcome. A pass that acted must be judged on what it achieved, not on
+    // what it set out to do — see the `Relieving` arm below.
+    let after = if acted {
+        Some(engine.storage_summary().await?)
+    } else {
+        None
+    };
     match summary.disk_pressure {
         // Genuinely under the trigger. A pass only removes bytes, so the
         // post-state is under it too.
@@ -344,11 +352,59 @@ pub async fn run_pass(
                 evictable_rows,
             });
         }
-        // Planned AND acted. Bytes moved, but whether that was enough is a
-        // question about the POST state, which this pass has not measured — the
-        // next one classifies from a fresh summary and will clear or raise.
-        ciris_lens_core::retention::DiskPressure::Relieving { .. } => {
-            crate::degradation::no_evidence(RETENTION_BOUND_CODE);
+        // **PLANNED, ACTED — AND STILL OVER CAP** (codex review, PR #483; the
+        // THIRD side of this one arm).
+        //
+        // Deferring to "the next pass will classify from a fresh summary" is
+        // only true if some pass eventually classifies differently, and under
+        // sustained ingestion none does: every hour there are rows to evict, so
+        // `acted` is true every hour, and the verdict is deferred forever while
+        // the file walks toward exhaustion reporting `ok`.
+        //
+        // Worse on SQLite, where evicting rows routinely leaves
+        // `total_disk_bytes` UNCHANGED — freed pages go on the freelist and
+        // `PRAGMA page_count` does not fall without a VACUUM. A pass can then
+        // act, report progress, and free nothing the operating system can see,
+        // every hour, indefinitely.
+        //
+        // So the post-pass BYTES decide, not the plan and not the action.
+        ciris_lens_core::retention::DiskPressure::Relieving {
+            cap_bytes,
+            ..
+        } => {
+            // `after` is Some here by construction: this arm requires `acted`.
+            let used_after = after
+                .as_ref()
+                .map_or(u64::MAX, |a| a.total_disk_bytes);
+            if used_after >= cap_bytes {
+                tracing::error!(
+                    used_bytes = used_after,
+                    cap_bytes,
+                    evicted_traces = summary.evicted_traces,
+                    archived_audit_entries = summary.archived_audit_entries,
+                    freed_bytes_estimate = summary.freed_bytes_estimate,
+                    %bounds,
+                    "retention acted and the store is STILL OVER ITS CAP — the levers are \
+                     working and are not keeping up. On SQLite a delete need not shrink the \
+                     file at all (freed pages go on the freelist), so 'evicted N rows' is not \
+                     evidence the disk was relieved."
+                );
+                crate::degradation::raise(crate::degradation::Warning::error(
+                    RETENTION_BOUND_CODE,
+                    format!(
+                        "the disk cap is still exceeded after a pass that DID evict: {used} of \
+                         {cap} used. The levers work but are not keeping up with what this node \
+                         accepts. Narrow the consent prefixes / replication planes, give the \
+                         node more disk, or VACUUM — on SQLite a delete need not shrink the \
+                         file.",
+                        used = human_bytes(used_after),
+                        cap = human_bytes(cap_bytes),
+                    ),
+                ));
+            } else {
+                // Measured, post-pass, under the cap. Real evidence of recovery.
+                crate::degradation::clear(RETENTION_BOUND_CODE);
+            }
         }
         // Handled above, and returned from — listed so a new variant is a
         // compile error rather than a silent fall-through to "cleared".
@@ -372,7 +428,9 @@ pub async fn run_pass(
         return Ok(outcome);
     }
 
-    let after = engine.storage_summary().await?;
+    // Read above, before the verdict, so the judgement and the report describe
+    // the same instant.
+    let after = after.expect("`acted` is true on this path, so `after` was read");
     tracing::info!(
         evicted_traces = summary.evicted_traces,
         archived_audit_entries = summary.archived_audit_entries,
