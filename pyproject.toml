@@ -25,6 +25,25 @@ readme = "README.md"
 # build-std lane (release.yml; CIRISVerify#67 pattern).
 requires-python = ">=3.10"
 
+# CIRISServer#471 — the KMP client is a PACKAGE now, not a vendored tree.
+#
+# `client/` held ~200k lines that were a hand-carried merge from CIRISAgent on
+# every re-vendor, with numbered drift markers (NODE VENDOR DRIFT #9-#33) as the
+# running cost of three copies. `ciris-client` is the tree of record; changes
+# travel by PR to CIRISClient instead of by re-vendor.
+#
+# `[node]` is the node-flavoured extra: the desktop uber-jar and the locale
+# bundle extracted from it. NOT `[web]`, which additionally pulls
+# `ciris-client-wasm` (7 MB) that a fabric node has no use for.
+#
+# PINNED EXACTLY, and to this cut. The locale bundle is a release GATE here —
+# `tools/check_server_localization.py` asserts that every id this server emits
+# resolves in it — so a floating version would let an upstream bundle change
+# turn a green tree red with no commit here to explain it.
+dependencies = [
+    "ciris-client[node]==0.5.188",
+]
+
 [project.urls]
 Repository = "https://github.com/CIRISAI/CIRISServer"
 

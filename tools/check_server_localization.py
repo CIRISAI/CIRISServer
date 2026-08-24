@@ -96,23 +96,54 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # so leaving them out of the guard let them ship stale and render raw keys
 # (Codex review, PR #40). The untracked iosApp/Resources/app copy is a build
 # artifact and is intentionally excluded.
-CANONICAL_BUNDLE = "client/shared/src/desktopMain/resources/localization"
-MIRROR_BUNDLES: Tuple[str, ...] = (
-    CANONICAL_BUNDLE,
-    "client/desktopApp/src/main/resources/localization",
-    "client/androidApp/src/main/assets/localization",
-    "client/iosApp/iosApp/localization",
-)
+# ── Where the bundle comes from now (CIRISServer#471) ───────────────────────
+#
+# It used to be `client/shared/src/desktopMain/resources/localization`, one of
+# FOUR byte-identical copies in a vendored tree this repo carried by hand. That
+# tree is gone; `ciris-client[node]` is the tree of record and ships the bundle
+# extracted from the desktop jar.
+#
+# Six checks retired with the tree, because they asked whether the CLIENT's
+# bundle is internally consistent and CIRISClient answers that before it
+# publishes:
+#
+#   bundle-mirror       — there is ONE bundle now. Nothing to mirror.
+#   reference-coverage  — Kotlin `commonMain` keys. That source is not here.
+#   key-resolvability   — same population, same reason.
+#   manifest-coverage   — the bundle's manifest against its own locales.
+#   placeholder-parity  — within-bundle, across locales.
+#   translation-drift   — within-bundle, across locales.
+#
+# What remains is the half that is irreducibly OURS and that no upstream check
+# can perform, because it needs THIS repo's source: every message id the SERVER
+# emits must resolve in the bundle the client will read. That is a contract
+# between two repos, and it is checked on the side that can see both.
+#
+# `json-validity` stays too, deliberately. It is not a re-verification of
+# CIRISClient's work — it is the guard that stops a corrupt or partial
+# extraction from surfacing as a confusing failure in the server-id checks
+# below, which would send the reader to their own source for a fault in the
+# artifact.
+def _locale_bundle() -> Path:
+    """The installed client's locale bundle.
 
-# Kotlin source set whose literal string keys must resolve against en.json.
-COMMON_MAIN = "client/shared/src/commonMain"
+    A missing package is a HARD failure, not a skip. The server-id checks are a
+    release gate; silently passing them because the artifact is absent is the
+    zero-denominator defect this file spends its self-test proving it does not
+    have.
+    """
+    try:
+        import ciris_client
+    except ImportError as e:  # pragma: no cover - environment failure
+        raise SystemExit(
+            "ciris-client is not installed, so the locale bundle cannot be read and the\n"
+            "server-id gates below would examine NOTHING and report clean.\n"
+            "  pip install 'ciris-client[node]==0.5.188'\n"
+            f"({e})"
+        ) from e
+    return Path(ciris_client.locale_bundle())
 
-# The OTHER emitter of localization keys: the Rust server. Operator surfaces
-# never send a sentence — they send ``{id, text}``, an id a UI resolves in the
-# reader's language plus the English source to fall back to (operator_surface.rs
-# SOURCE_LOCALE). Those ids are localization keys with no Kotlin call site, so
-# the commonMain scan below cannot see a single one of them; a guard that checks
-# only Kotlin has never looked at the surface #366 was actually about.
+
 SERVER_SRC = "src"
 
 # localizedString("key" …) / getString("key" …) — capture the literal first arg.
