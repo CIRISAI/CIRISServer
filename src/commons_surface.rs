@@ -1099,7 +1099,7 @@ async fn post_ballot(
         &req.objection_id,
         "objection_absent",
         "commons_surface.refusal.objection_absent",
-        "objection_id is required: this action addresses ONE named objection.",
+        "objection_id is required: a ballot answers a question about ONE objection.",
     ) {
         return r;
     }
@@ -1157,8 +1157,8 @@ async fn post_dismissal(
     if let Some(r) = require_nonblank(
         &req.objection_id,
         "objection_absent",
-        "commons_surface.refusal.objection_absent",
-        "objection_id is required: this action addresses ONE named objection.",
+        "commons_surface.refusal.objection_absent_dismissal",
+        "objection_id is required: a dismissal lifts ONE named objection.",
     ) {
         return r;
     }

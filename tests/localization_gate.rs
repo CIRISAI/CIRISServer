@@ -274,8 +274,8 @@ fn without_test_modules(text: &str) -> String {
         };
         let mut depth = 0i32;
         let mut j = brace;
-        let (mut in_str, mut esc, mut in_line_comment, mut in_block_comment) =
-            (false, false, false, false);
+        let (mut in_str, mut esc, mut in_line_comment) = (false, false, false);
+        let mut block_depth = 0i32;
         while j < out.len() {
             let ch = out[j];
             if esc {
@@ -286,9 +286,16 @@ fn without_test_modules(text: &str) -> String {
                 if ch == '\n' {
                     in_line_comment = false;
                 }
-            } else if in_block_comment {
+            } else if block_depth > 0 {
+                // NESTED: Rust block comments nest, so a boolean exits at the
+                // first `*/` and counts the braces after it as syntax.
+                if ch == '/' && out.get(j + 1) == Some(&'*') {
+                    block_depth += 1;
+                    j += 2;
+                    continue;
+                }
                 if ch == '*' && out.get(j + 1) == Some(&'/') {
-                    in_block_comment = false;
+                    block_depth -= 1;
                     j += 2;
                     continue;
                 }
@@ -319,7 +326,7 @@ fn without_test_modules(text: &str) -> String {
             } else if ch == '/' && out.get(j + 1) == Some(&'/') {
                 in_line_comment = true;
             } else if ch == '/' && out.get(j + 1) == Some(&'*') {
-                in_block_comment = true;
+                block_depth = 1;
                 j += 2;
                 continue;
             } else if ch == '{' {
@@ -861,7 +868,7 @@ fn a_cfg_test_module_contributes_no_message_ids() {
     // And the production emission sites bracket the test module on BOTH sides:
     // appended at EOF, over-eating is invisible, because blanking to
     // end-of-file destroys nothing.
-    let cases: [(&str, &str); 10] = [
+    let cases: [(&str, &str); 12] = [
         ("open brace char literal", "fn f() -> char { '{' }"),
         ("close brace char literal", "fn f() -> char { '}' }"),
         ("escaped quote char literal", r"fn f() -> char { '\'' }"),
@@ -874,6 +881,16 @@ fn a_cfg_test_module_contributes_no_message_ids() {
         (
             "unbalanced brace in a block comment",
             "/* a stray { here */",
+        ),
+        // Rust block comments NEST: a boolean exits at the first `*/` and
+        // counts what follows as syntax.
+        (
+            "nested block comment, close brace after inner",
+            "/* outer /* inner */ } still outer */",
+        ),
+        (
+            "nested block comment, open brace after inner",
+            "/* outer /* inner */ { still outer */",
         ),
         // Raw strings: the content may hold BARE quotes and braces, and the
         // ordinary string state machine flips out at the first inner quote and

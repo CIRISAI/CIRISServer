@@ -501,7 +501,7 @@
       "not_filed_against_actor": "The row is filed where the fold does not look for it, so it would be stored, durable and permanently inert. A marker nobody can find is not a marker.",
       "not_governed": "This community declares no reverse-quorum policy, so it has not adopted the objection plane. Refused rather than defaulted: inventing a window and a threshold for a group that declared neither is worse than saying no.",
       "not_owner": "The commons surface requires the owner (SYSTEM_ADMIN) role.",
-      "objection_absent": "objection_id is required: this action addresses ONE named objection.",
+      "objection_absent": "objection_id is required: a ballot answers a question about ONE objection.",
       "objection_unknown": "The named objection is not one this node holds against this action.",
       "session_absent": "No session token was presented. The commons surface is owner-only.",
       "session_invalid": "That session is invalid or expired.",

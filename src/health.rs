@@ -427,6 +427,8 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
     // Retain at most the cap; count the rest.
     let mut valid: Vec<serde_json::Value> = Vec::with_capacity(MAX_BRAIN_WARNINGS);
     let mut dropped = 0usize;
+    // Whether anything BEYOND the cap was degrading — see the cap branch below.
+    let mut dropped_degrading = false;
     for w in offered {
         // No `code` means nothing to group on and nothing to act on; skipping
         // beats inventing an empty-string code that collides with every other
@@ -437,7 +439,19 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         if valid.len() >= MAX_BRAIN_WARNINGS {
             // Past the cap: count it and do NO work on it — no clone, no
             // serialize, no reduce. Counting is the whole cost from here.
+            //
+            // EXCEPT its SEVERITY, which is one string comparison and is the
+            // difference between reporting a pair as healthy and not (codex
+            // review, PR #483). A brain with 33 warnings whose 33rd is
+            // `critical`, and which omits both flags, would otherwise have that
+            // condition counted and discarded while the verdict read `ok`.
             dropped += 1;
+            if matches!(
+                w.get("severity").and_then(serde_json::Value::as_str),
+                Some("error" | "critical")
+            ) {
+                dropped_degrading = true;
+            }
             continue;
         }
         // CLIP BEFORE ALLOCATING (codex review, PR #483). `format!` on a
@@ -493,12 +507,13 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
     //
     // Read from the RETAINED warnings, after namespacing and the cap, so what
     // is judged is exactly what is reported.
-    let brain_warning_degrades = folded.iter().any(|w| {
-        matches!(
-            w.get("severity").and_then(serde_json::Value::as_str),
-            Some("error" | "critical")
-        )
-    });
+    let brain_warning_degrades = dropped_degrading
+        || folded.iter().any(|w| {
+            matches!(
+                w.get("severity").and_then(serde_json::Value::as_str),
+                Some("error" | "critical")
+            )
+        });
 
     if !folded.is_empty() {
         match out["data"]["warnings"].as_array_mut() {

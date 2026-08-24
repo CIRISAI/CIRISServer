@@ -1343,9 +1343,11 @@ const STORE_WAL_NOT_MEASURED: Msg = (
 
 const STORE_ATTESTATIONS_NOT_MEASURED: Msg = (
     "operator.store.federation_attestations_not_measured",
-    "The federation attestation table is not reported here at all: persist's storage summary \
-     carries no reading for it. On this node it is routinely the largest table, so a small \
-     total above is not evidence of a small store.",
+    "The federation attestation table has no per-table line here: persist's storage summary \
+     carries no reading for it. Its bytes ARE inside `total_disk_bytes`, which is the whole \
+     database — what is missing is the ATTRIBUTION. On this node it is routinely the largest \
+     table, so a large total may be almost entirely this one table and nothing here would \
+     say so.",
 );
 
 const STORE_PER_TABLE_BYTES_NOT_MEASURED: Msg = (

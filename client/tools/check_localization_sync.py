@@ -189,7 +189,12 @@ def _without_test_modules(text: str) -> str:
                     out[k] = " "
             i = semi + 1
             continue
-        depth, j, in_str, in_line_comment, in_block_comment, esc = 0, brace, False, False, False, False
+        # `block_depth`, not a boolean: RUST BLOCK COMMENTS NEST (codex review,
+        # PR #483). `/* outer /* inner */ } still outer */` exits at the first
+        # `*/` with a flag, so the brace after it is counted as syntax — which
+        # terminates the matcher early (test ids survive) or, with `{`, runs it
+        # past the module and blanks production emissions.
+        depth, j, in_str, in_line_comment, block_depth, esc = 0, brace, False, False, 0, False
         while j < len(text):
             c = text[j]
             if esc:
@@ -199,9 +204,13 @@ def _without_test_modules(text: str) -> str:
             elif in_line_comment:
                 if c == "\n":
                     in_line_comment = False
-            elif in_block_comment:
+            elif block_depth:
+                if text[j : j + 2] == "/*":
+                    block_depth += 1
+                    j += 2
+                    continue
                 if text[j : j + 2] == "*/":
-                    in_block_comment = False
+                    block_depth -= 1
                     j += 2
                     continue
             elif in_str:
@@ -239,7 +248,7 @@ def _without_test_modules(text: str) -> str:
             elif text[j : j + 2] == "//":
                 in_line_comment = True
             elif text[j : j + 2] == "/*":
-                in_block_comment = True
+                block_depth = 1
                 j += 2
                 continue
             elif c == "{":
@@ -294,8 +303,19 @@ def _attributed_item_body(text: str, attr_start: int) -> "int | None":
             j = len(text) if nl == -1 else nl
             continue
         elif text[j : j + 2] == "/*":
-            close = text.find("*/", j + 2)
-            j = len(text) if close == -1 else close + 2
+            # Nested, same as above.
+            depth_c, k = 1, j + 2
+            while k < len(text) and depth_c:
+                if text[k : k + 2] == "/*":
+                    depth_c += 1
+                    k += 2
+                    continue
+                if text[k : k + 2] == "*/":
+                    depth_c -= 1
+                    k += 2
+                    continue
+                k += 1
+            j = k
             continue
         elif c == "[":
             depth_brack += 1
@@ -740,6 +760,14 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",
     "chat.community_shape_conflict",
+    # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
+    # dismissal path used to share `commons_surface.refusal.objection_absent`,
+    # whose 29 locales all translate the BALLOT sentence — so a non-English
+    # dismissal rendered "a ballot answers…". Unifying the English alone left
+    # 28 languages saying it anyway; giving the dismissal its own id keeps the
+    # ballot path's correct translations intact and makes the dismissal
+    # English-but-RIGHT rather than translated-but-WRONG, pending #484.
+    "commons_surface.refusal.objection_absent_dismissal",
     "mesh_config.refusal.bad_now",
     "mesh_config.refusal.bad_request",
     "mesh_config.refusal.canonicalize_failed",

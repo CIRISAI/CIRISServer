@@ -439,6 +439,18 @@ pub fn read_memory() -> MemoryReading {
 
         for dir in &v2_dirs {
             let Some(usage) = num(&format!("{dir}/memory.current")) else {
+                // **AN UNMEASURABLE LEVEL IS UNCERTAINTY, NOT ABSENCE** (codex
+                // review, PR #483). The limit-read failure was already
+                // preserved; the USAGE-read failure was skipped silently, so a
+                // level that exists but would not answer could be the binding
+                // one and another level would still be returned as
+                // authoritative.
+                if readable(dir, "memory.current") {
+                    unreadable_limit.get_or_insert(format!(
+                        "{dir}/memory.current exists but could not be read or parsed — this \
+                         level accounts for us and its pressure is unknown"
+                    ));
+                }
                 continue;
             };
             if leaf_usage.is_none() {
@@ -539,20 +551,42 @@ pub fn read_memory() -> MemoryReading {
         "/sys/fs/cgroup/memory",
         cgroup_relative_path(Some("memory")),
     );
-    let v1_leaf = v1_all
-        .iter()
-        .find(|d| readable(d, "memory.usage_in_bytes"))
-        .cloned();
-    let v1_hierarchical = v1_leaf
-        .as_ref()
-        .and_then(|d| num(&format!("{d}/memory.use_hierarchy")))
-        .is_some_and(|v| v != 0);
-    let v1: Vec<String> = if v1_hierarchical {
-        v1_all
-    } else {
-        // Not hierarchical, or the switch could not be read: only this
-        // process's own leaf can be said to bind it.
-        v1_leaf.clone().into_iter().collect()
+    // **THE SWITCH THAT MATTERS IS THE PARENT'S, PER LEVEL** (codex review,
+    // PR #483). `memory.use_hierarchy` controls whether THAT cgroup accounts
+    // its descendants, so whether an ancestor binds us is that ancestor's
+    // question — not the leaf's, and not one all-or-nothing answer for the
+    // whole chain. Mixed levels are legal, and reading only the leaf let a
+    // non-hierarchical parent's unrelated usage raise a false critical.
+    //
+    // Walk outward and STOP at the first level that does not account its
+    // descendants: nothing above it can see us either, so nothing above it
+    // binds us.
+    let v1: Vec<String> = {
+        let mut keep: Vec<String> = Vec::new();
+        for (depth, dir) in v1_all.iter().enumerate() {
+            if depth == 0 {
+                // The leaf always binds us — it IS us.
+                keep.push(dir.clone());
+                continue;
+            }
+            if keep.is_empty() {
+                // Nothing below has accounted for us yet, so this level is
+                // still a candidate leaf rather than an ancestor.
+                keep.push(dir.clone());
+                continue;
+            }
+            let accounts_descendants =
+                num(&format!("{dir}/memory.use_hierarchy")).is_some_and(|v| v != 0);
+            if !accounts_descendants {
+                // Unreadable counts as "does not account": attributing a level's
+                // usage to us on an unreadable switch is the false-critical
+                // direction, and this is the probe whose whole purpose is to be
+                // believed.
+                break;
+            }
+            keep.push(dir.clone());
+        }
+        keep
     };
     if v1.iter().any(|d| readable(d, "memory.usage_in_bytes")) {
         let mut binding: Option<MemoryReading> = None;
@@ -561,6 +595,14 @@ pub fn read_memory() -> MemoryReading {
 
         for dir in &v1 {
             let Some(usage) = num(&format!("{dir}/memory.usage_in_bytes")) else {
+                // Same rule as v2: a level that exists but will not answer is
+                // unknown pressure, not absent pressure.
+                if readable(dir, "memory.usage_in_bytes") {
+                    unreadable_limit.get_or_insert(format!(
+                        "{dir}/memory.usage_in_bytes exists but could not be read or parsed — \
+                         this level accounts for us and its pressure is unknown"
+                    ));
+                }
                 continue;
             };
             if leaf_usage.is_none() {

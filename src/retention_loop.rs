@@ -296,10 +296,31 @@ pub async fn run_pass(
     match summary.disk_pressure {
         // Genuinely under the trigger. A pass only removes bytes, so the
         // post-state is under it too.
-        ciris_lens_core::retention::DiskPressure::Within { .. }
+        // **`Within` IS A PRE-PASS READING TOO** (codex review, PR #483).
+        //
+        // When the pass ACTED — a long `max_age_days` deletion, say — ingestion
+        // continues throughout it, and the post-pass byte count already in hand
+        // can be ABOVE the trigger even though the pre-pass classification said
+        // `Within`. Clearing on the older reading reports `ok` until the next
+        // cadence over a store that is pressured right now.
+        //
+        // So when there IS a disk cap and the pass acted, this arm judges from
+        // the same post-pass number the `Relieving` arm does. Without a cap
+        // there is no trigger to be above, and `Within` is the whole answer.
+        ciris_lens_core::retention::DiskPressure::Within { cap_bytes, .. } => {
+            #[allow(clippy::cast_precision_loss)]
+            let still_pressured = after.as_ref().is_some_and(|a| {
+                (a.total_disk_bytes as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD
+            });
+            if still_pressured {
+                crate::degradation::no_evidence(RETENTION_BOUND_CODE);
+            } else {
+                crate::degradation::clear(RETENTION_BOUND_CODE);
+            }
+        }
         // No disk bound is configured, so "the configured bound cannot bite" is
         // not a claim this node can make.
-        | ciris_lens_core::retention::DiskPressure::Unbounded => {
+        ciris_lens_core::retention::DiskPressure::Unbounded => {
             crate::degradation::clear(RETENTION_BOUND_CODE);
         }
         // **A RELIEVING PLAN THAT MOVED NOTHING IS AN UNENFORCEABLE BOUND**
@@ -368,14 +389,9 @@ pub async fn run_pass(
         // every hour, indefinitely.
         //
         // So the post-pass BYTES decide, not the plan and not the action.
-        ciris_lens_core::retention::DiskPressure::Relieving {
-            cap_bytes,
-            ..
-        } => {
+        ciris_lens_core::retention::DiskPressure::Relieving { cap_bytes, .. } => {
             // `after` is Some here by construction: this arm requires `acted`.
-            let used_after = after
-                .as_ref()
-                .map_or(u64::MAX, |a| a.total_disk_bytes);
+            let used_after = after.as_ref().map_or(u64::MAX, |a| a.total_disk_bytes);
             // **COMPARE AGAINST THE PLANNER'S TRIGGER, NOT THE HARD CAP**
             // (codex review, PR #483).
             //
@@ -421,8 +437,26 @@ pub async fn run_pass(
                         pct = DISK_EVICTION_THRESHOLD * 100.0,
                     ),
                 ));
+                // **AND THE RETURNED OUTCOME MUST AGREE WITH THE REGISTRY**
+                // (codex review, PR #483). Falling through to `Evicted` — whose
+                // `is_fault()` is explicitly false — left this function saying
+                // "recovered" about the same measured state the alarm above
+                // calls a fault. Two answers to one question, from one pass,
+                // eight lines apart; a caller or test reading the public
+                // outcome would classify a still-pressured store as healthy.
+                //
+                // `evictable_rows` is what the levers reached THIS pass: the
+                // bound is unenforceable in the sense that matters — the levers
+                // ran, and the store is still over the line.
+                return Ok(RetentionOutcome::BoundUnenforceable {
+                    used_bytes: used_after,
+                    cap_bytes,
+                    evictable_rows: summary.evicted_traces as u64
+                        + summary.archived_audit_entries as u64,
+                });
             } else {
-                // Measured, post-pass, under the cap. Real evidence of recovery.
+                // Measured, post-pass, under the trigger. Real evidence of
+                // recovery.
                 crate::degradation::clear(RETENTION_BOUND_CODE);
             }
         }

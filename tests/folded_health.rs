@@ -723,3 +723,43 @@ async fn an_informational_brain_warning_does_not_degrade_the_pair() {
         "not degrading is not the same as not reporting: {codes:?}"
     );
 }
+
+/// **A degrading warning BEYOND the cap still degrades the pair** (codex
+/// review, PR #483).
+///
+/// The cap deliberately does no work past its limit — no clone, no serialize,
+/// no reduce — but severity is one string comparison, and it is the difference
+/// between reporting a pair healthy and not. A brain with 33 warnings whose
+/// 33rd is `critical`, and which omits both flags, would otherwise have that
+/// condition counted and discarded while the verdict read `ok`.
+#[tokio::test]
+async fn a_critical_warning_past_the_cap_still_degrades_the_pair() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let baseline = bare_node_verdict().await;
+    assert!(!baseline.1, "fixture: this case needs an undegraded node");
+
+    let mut ws: Vec<serde_json::Value> = (0..40)
+        .map(|i| serde_json::json!({"code": format!("noise.{i}"), "message": "x", "severity": "info"}))
+        .collect();
+    // Well past the 32-entry cap.
+    ws.push(serde_json::json!({
+        "code": "llm.all_providers_down",
+        "message": "every configured provider failed its last probe",
+        "severity": "critical",
+    }));
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "warnings": ws }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    assert_eq!(
+        v["data"]["degraded_mode"], true,
+        "a CRITICAL warning past the retained prefix was counted and discarded without \
+         examining its severity, so the pair reported healthy over a critical condition it \
+         had literally just looked at: {v:#}"
+    );
+    assert_eq!(v["data"]["status"], "degraded");
+}
