@@ -353,10 +353,22 @@ fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
 /// Used to word a verdict correctly: a limit found here is "this container's",
 /// a limit found above is somebody else's ceiling that happens to bind us.
 fn own_cgroup_dir() -> String {
-    match cgroup_relative_path(None) {
-        Some(rel) if !rel.is_empty() => format!("/sys/fs/cgroup/{rel}"),
-        _ => "/sys/fs/cgroup".to_string(),
-    }
+    // **THE DIRECTORY THE PROBE ACTUALLY SELECTED**, not the path
+    // `/proc/self/cgroup` names (codex review, PR #483).
+    //
+    // Inside a cgroup namespace the two differ: `/proc/self/cgroup` reports a
+    // host-relative path the mount does not expose, and the probe correctly
+    // falls back to the delegated root. Constructing that invisible path here
+    // meant the comparison could never match, so a CONTAINER'S OWN LIMIT was
+    // labelled an ancestor's and the operator was told this node might not be
+    // responsible for its own memory.
+    //
+    // Same selection rule as the read — the first directory that actually
+    // accounts for us — so the two cannot drift.
+    ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None))
+        .into_iter()
+        .find(|d| readable(d, "memory.current"))
+        .unwrap_or_else(|| "/sys/fs/cgroup".to_string())
 }
 
 /// This process's cgroup directory and every visible ancestor, leaf-first.
@@ -380,14 +392,6 @@ fn ancestor_dirs(mount: &str, relative: Option<String>) -> Vec<String> {
 /// Whether `dir/probe` exists — the test for "this level accounts for us".
 fn readable(dir: &str, probe: &str) -> bool {
     std::path::Path::new(&format!("{dir}/{probe}")).exists()
-}
-
-/// The first of `candidates` that contains `probe`, else `None`.
-fn first_dir_with(candidates: &[String], probe: &str) -> Option<String> {
-    candidates
-        .iter()
-        .find(|d| std::path::Path::new(&format!("{d}/{probe}")).exists())
-        .cloned()
 }
 
 fn num(path: &str) -> Option<u64> {
@@ -482,27 +486,66 @@ pub fn read_memory() -> MemoryReading {
     }
 
     // ── cgroup v1 ────────────────────────────────────────────────────────────
+    // v1 WALKS THE ANCESTORS TOO (codex review, PR #483). The first cut fixed
+    // the v2 branch and left this one returning from the first readable
+    // directory — the same defect, in the branch that did not get the fix.
+    // v1 has hierarchical accounting, so a leaf carrying the unlimited sentinel
+    // under a parent slice with a finite limit is exactly as OOM-killable as
+    // the v2 case, and `probe_memory` would have cleared the alarm.
     let v1 = ancestor_dirs(
         "/sys/fs/cgroup/memory",
         cgroup_relative_path(Some("memory")),
     );
-    if let Some(dir) = first_dir_with(&v1, "memory.usage_in_bytes") {
-        if let Some(usage) = num(&format!("{dir}/memory.usage_in_bytes")) {
-            let limit_path = format!("{dir}/memory.limit_in_bytes");
-            return match num(&limit_path) {
-                // v1's "unlimited" is a huge sentinel, not a word — and it IS a
-                // positive answer, so it stays `Unlimited`.
-                Some(limit) if limit >= (1u64 << 62) => {
-                    MemoryReading::Unlimited { usage_bytes: usage }
-                }
-                Some(limit) => bounded(usage, limit, &dir),
-                None => MemoryReading::Unavailable {
-                    reason: format!(
-                        "{limit_path} could not be read or parsed — usage is {usage} bytes but \
-                         the LIMIT is unknown, which is not the same as unlimited"
-                    ),
-                },
+    if v1.iter().any(|d| readable(d, "memory.usage_in_bytes")) {
+        let mut binding: Option<MemoryReading> = None;
+        let mut unreadable_limit: Option<String> = None;
+        let mut leaf_usage: Option<u64> = None;
+
+        for dir in &v1 {
+            let Some(usage) = num(&format!("{dir}/memory.usage_in_bytes")) else {
+                continue;
             };
+            if leaf_usage.is_none() {
+                leaf_usage = Some(usage);
+            }
+            let limit_path = format!("{dir}/memory.limit_in_bytes");
+            match num(&limit_path) {
+                // v1's "unlimited" is a huge sentinel, not a word — and it IS a
+                // positive answer at THIS level. Keep walking: an ancestor may
+                // still bound us.
+                Some(limit) if limit >= (1u64 << 62) => continue,
+                Some(limit) => {
+                    let candidate = bounded(usage, limit, dir);
+                    // Closest to its ceiling wins: that level kills first.
+                    let take = match (&binding, &candidate) {
+                        (None, _) => true,
+                        (
+                            Some(MemoryReading::Limited { used_pct: best, .. }),
+                            MemoryReading::Limited { used_pct: new, .. },
+                        ) => new > best,
+                        _ => false,
+                    };
+                    if take {
+                        binding = Some(candidate);
+                    }
+                }
+                None => {
+                    unreadable_limit.get_or_insert(format!(
+                        "{limit_path} could not be read or parsed — a limit at this level is \
+                         unknown, which is not the same as unlimited"
+                    ));
+                }
+            }
+        }
+
+        if let Some(reading) = binding {
+            return reading;
+        }
+        if let Some(reason) = unreadable_limit {
+            return MemoryReading::Unavailable { reason };
+        }
+        if let Some(usage_bytes) = leaf_usage {
+            return MemoryReading::Unlimited { usage_bytes };
         }
     }
 
@@ -514,8 +557,16 @@ pub fn read_memory() -> MemoryReading {
 }
 
 fn bounded(usage_bytes: u64, limit_bytes: u64, limit_source: &str) -> MemoryReading {
+    // **A ZERO CEILING IS EXHAUSTED HEADROOM, NOT ZERO USAGE** (codex review,
+    // PR #483). `memory.max = 0` is a valid finite setting — it forces
+    // immediate reclaim/OOM — and the divide-by-zero guard here reported it as
+    // `0.0%`, which cleared any standing alarm and called the node healthy
+    // while it had room for nothing.
+    //
+    // A guard added to avoid a panic, producing the comfortable number this
+    // whole module exists to prevent. There is no headroom at any usage.
     let used_pct = if limit_bytes == 0 {
-        0.0
+        100.0
     } else {
         ((usage_bytes as f64 / limit_bytes as f64) * 1000.0).round() / 10.0
     };
@@ -1469,6 +1520,69 @@ mod tests {
             "both post-restart rounds COMPLETED and the node reported failure. `completed` did \
              not appear to go backwards (2 >= 1) while `total` did, so the two counters were \
              differenced against different epochs: {:?}",
+            snapshot()
+        );
+    }
+
+    /// **The attribution check must use the directory the PROBE selected**
+    /// (codex review, PR #483).
+    ///
+    /// Inside a cgroup namespace `/proc/self/cgroup` names a host-relative path
+    /// the mount does not expose, so the probe falls back to the delegated root
+    /// and records THAT as `limit_source`. Building the invisible path for the
+    /// comparison meant it could never match — and a container's OWN limit was
+    /// then reported as an ancestor's, telling the operator this node might not
+    /// be responsible for its own memory.
+    ///
+    /// Pinned on the shared selection rule: whatever `own_cgroup_dir` returns
+    /// must be a directory the read would also have chosen, on this host,
+    /// whatever its layout.
+    #[test]
+    fn the_attribution_check_and_the_read_select_the_same_directory() {
+        let own = own_cgroup_dir();
+        let candidates = ancestor_dirs("/sys/fs/cgroup", cgroup_relative_path(None));
+        assert!(
+            candidates.contains(&own),
+            "`own_cgroup_dir` returned {own:?}, which is not among the directories the read \
+             considers ({candidates:?}). Two different resolutions of 'this process's cgroup' \
+             is exactly how a container's own limit gets labelled an ancestor's."
+        );
+        // And on a host with v2 accounting, it must be one that actually
+        // accounts for us — not merely a plausible path.
+        if candidates.iter().any(|d| readable(d, "memory.current")) {
+            assert!(
+                readable(&own, "memory.current"),
+                "{own:?} does not account for this process, so comparing a real \
+                 `limit_source` against it can only ever say 'somebody else's'"
+            );
+        }
+    }
+
+    /// **A zero ceiling is EXHAUSTED, not zero-percent** (codex review,
+    /// PR #483).
+    ///
+    /// `memory.max = 0` is a valid finite setting that forces immediate
+    /// reclaim/OOM. The divide-by-zero guard reported it as `0.0%`, so
+    /// `probe_verdict_for` cleared any standing alarm and called the node
+    /// healthy while it had room for nothing — a guard added to avoid a panic,
+    /// producing the comfortable number this module exists to prevent.
+    #[test]
+    fn a_zero_memory_ceiling_reads_as_exhausted_and_alarms() {
+        let _g = exclusive();
+
+        let MemoryReading::Limited { used_pct, .. } = bounded(4096, 0, "/sys/fs/cgroup") else {
+            panic!("a zero limit is still a LIMIT — it must not become Unlimited");
+        };
+        assert!(
+            used_pct >= MEMORY_CRITICAL_PCT,
+            "a ceiling of zero was reported as {used_pct}% used. There is no headroom at any \
+             usage, so this is the most exhausted a process can be, not the least."
+        );
+
+        probe_verdict_for(&bounded(4096, 0, "/sys/fs/cgroup"));
+        assert!(
+            degraded_mode(),
+            "a node with a zero memory ceiling reported healthy: {:?}",
             snapshot()
         );
     }
