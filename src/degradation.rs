@@ -348,6 +348,32 @@ fn cgroup_relative_path(controller: Option<&str>) -> Option<String> {
     None
 }
 
+/// Are we in a cgroup NAMESPACE — i.e. is `/sys/fs/cgroup` a delegated subtree
+/// rather than the real host root?
+///
+/// **`0::/` is BOTH answers** (codex review, PR #483). It is what a namespaced
+/// process reports, and equally what a process genuinely sitting in the host's
+/// root cgroup reports. The previous cut read an empty path as proof of
+/// delegation, so on a non-namespaced host the root pressure file — which
+/// includes every unrelated descendant service — was labelled NODE scope, and
+/// their contention could degrade this node.
+///
+/// The path cannot tell them apart; the NAMESPACE can. PID 1 is in the host's
+/// cgroup namespace by definition, so a different inode means ours is not.
+///
+/// Unreadable answers `false`, the conservative direction: a misidentified HOST
+/// reading is capped at advisory and merely under-reports, while a
+/// misidentified NODE reading degrades a healthy node on a neighbour's load.
+fn in_cgroup_namespace() -> bool {
+    match (
+        std::fs::read_link("/proc/self/ns/cgroup").ok(),
+        std::fs::read_link("/proc/1/ns/cgroup").ok(),
+    ) {
+        (Some(ours), Some(init)) => ours != init,
+        _ => false,
+    }
+}
+
 /// This process's OWN cgroup v2 directory — the leaf, not an ancestor.
 ///
 /// Used to word a verdict correctly: a limit found here is "this container's",
@@ -563,15 +589,23 @@ pub fn read_memory() -> MemoryReading {
     // binds us.
     let v1: Vec<String> = {
         let mut keep: Vec<String> = Vec::new();
-        for (depth, dir) in v1_all.iter().enumerate() {
-            if depth == 0 {
-                // The leaf always binds us — it IS us.
-                keep.push(dir.clone());
+        for dir in &v1_all {
+            // **SKIP PATHS THAT DO NOT EXIST** (codex review, PR #483). In a v1
+            // namespace `/proc/self/cgroup` reports a HOST-relative leaf the
+            // delegated mount does not expose, so `v1_all` opens with
+            // nonexistent directories. Recording the first of those as the leaf
+            // and then reading `memory.use_hierarchy` from the next one — also
+            // nonexistent, so "does not account" — broke the walk before it
+            // ever reached the MOUNTED root, whose usage and limit are
+            // perfectly readable. `read_memory` then returned `Unavailable` and
+            // could not warn before an OOM: the probe disabled by its own
+            // hardening.
+            if !readable(dir, "memory.usage_in_bytes") {
                 continue;
             }
             if keep.is_empty() {
-                // Nothing below has accounted for us yet, so this level is
-                // still a candidate leaf rather than an ancestor.
+                // The first directory that actually accounts for us IS the
+                // effective leaf, whatever `/proc/self/cgroup` called it.
                 keep.push(dir.clone());
                 continue;
             }
@@ -919,8 +953,8 @@ pub fn read_pressure(resource: &str) -> Pressure {
     //   * a path the mount DOES expose (the leaf directory is right there) but
     //     whose pressure file could not be read -> the root is the whole
     //     hierarchy above us. Host scope.
-    let root_is_our_leaf =
-        own.trim_end_matches('/') == "/sys/fs/cgroup" || !std::path::Path::new(&own).is_dir();
+    let root_is_our_leaf = in_cgroup_namespace()
+        && (own.trim_end_matches('/') == "/sys/fs/cgroup" || !std::path::Path::new(&own).is_dir());
     let mut candidates: Vec<(String, PressureScope)> = vec![(leaf, PressureScope::Cgroup)];
     candidates.push((
         root,

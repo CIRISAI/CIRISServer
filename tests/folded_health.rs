@@ -763,3 +763,47 @@ async fn a_critical_warning_past_the_cap_still_degrades_the_pair() {
     );
     assert_eq!(v["data"]["status"], "degraded");
 }
+
+/// **An empty `code` is not a code** (codex review, PR #483).
+///
+/// `Some("")` passed the presence test, namespaced to the identical `agent.`
+/// for every entry, and 32 of them consumed the whole cap — pushing the
+/// actionable warning out while the truncation notice claimed only valid
+/// entries had been retained. "Has a code field" and "has something to group
+/// on" are different questions.
+#[tokio::test]
+async fn empty_codes_are_not_valid_and_cannot_consume_the_cap() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    let mut ws: Vec<serde_json::Value> = (0..40)
+        .map(|_| serde_json::json!({"code": "", "message": "nothing to group on", "severity": "info"}))
+        .collect();
+    ws.push(serde_json::json!({
+        "code": "llm.no_provider",
+        "message": "every configured provider failed its last probe",
+        "severity": "error",
+    }));
+
+    let (base, h) = spawn_brain(serde_json::json!({
+        "data": { "cognitive_state": "WORK", "warnings": ws }
+    }))
+    .await;
+    let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
+    h.abort();
+
+    let codes: Vec<&str> = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|w| w["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"agent.llm.no_provider"),
+        "40 empty-coded entries ate the cap and the one actionable warning was dropped: \
+         {codes:?}"
+    );
+    assert!(
+        !codes.contains(&"agent."),
+        "an empty code was namespaced into `agent.` and carried — every such entry collides \
+         on one meaningless key: {codes:?}"
+    );
+}

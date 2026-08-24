@@ -433,7 +433,18 @@ fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
         // No `code` means nothing to group on and nothing to act on; skipping
         // beats inventing an empty-string code that collides with every other
         // malformed entry.
-        let Some(code) = w.get("code").and_then(serde_json::Value::as_str) else {
+        // A code must be present AND USABLE (codex review, PR #483). An empty
+        // string passed the `Some(..)` test, namespaced to the identical
+        // `agent.` for every entry, and 32 of them consumed the whole cap —
+        // pushing the actionable warnings out while the truncation notice
+        // claimed only valid entries had been retained. "Has a code field" and
+        // "has something to group on" are different questions.
+        let Some(code) = w
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
             continue;
         };
         if valid.len() >= MAX_BRAIN_WARNINGS {

@@ -1401,10 +1401,11 @@ pub struct Sources<'a> {
 /// non-English client can localize.
 const STORE_WAL_NOT_MEASURED: Msg = (
     "operator.store.wal_bytes_not_measured",
-    "The write-ahead log is excluded from this total: `total_disk_bytes` is page_count times \
-     page_size, and persist exposes no reader for the WAL. It is now BOUNDED (persist v38.4.0 \
-     sets a checkpoint threshold; before that it reached 218 MB against a 1.26 GB store), so \
-     this is a known small remainder rather than an open-ended one — but it is still not a \
+    "The write-ahead log is excluded from this total on BOTH backends — SQLite\'s figure \
+     counts database pages and PostgreSQL\'s counts the database, and the WAL is neither — \
+     and persist exposes no reader for it. On SQLite it is now BOUNDED (persist v38.4.0 sets \
+     a checkpoint threshold; before that it reached 218 MB against a 1.26 GB store), so it is \
+     a known small remainder there rather than an open-ended one. Either way it is not a \
      number this surface can show you.",
 );
 

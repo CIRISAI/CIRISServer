@@ -313,7 +313,33 @@ pub async fn run_pass(
                 (a.total_disk_bytes as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD
             });
             if still_pressured {
-                crate::degradation::no_evidence(RETENTION_BOUND_CODE);
+                // **RAISE, not merely preserve** (codex review, PR #483; the
+                // same third side as the `Relieving` arm). `no_evidence` keeps
+                // a standing alarm — and on the FIRST pass that crosses the
+                // trigger there is none to keep, so health read `ok` over a
+                // store that is pressured right now. The measurement is in
+                // hand; it is evidence, not an absence of it.
+                let used_after = after.as_ref().map_or(0, |a| a.total_disk_bytes);
+                tracing::error!(
+                    used_bytes = used_after,
+                    cap_bytes,
+                    %bounds,
+                    "retention pass finished ABOVE the eviction trigger — the pre-pass reading \
+                     was inside bounds and ingestion outran the pass. The next cadence will \
+                     plan against the new state; this is the node saying so now rather than \
+                     in an hour."
+                );
+                crate::degradation::raise(crate::degradation::Warning::error(
+                    RETENTION_BOUND_CODE,
+                    format!(
+                        "the store crossed its eviction trigger DURING this pass: {used} of \
+                         {cap} used, and eviction starts at {pct:.0}% of the cap. Ingestion is \
+                         outrunning retention.",
+                        used = human_bytes(used_after),
+                        cap = human_bytes(cap_bytes),
+                        pct = DISK_EVICTION_THRESHOLD * 100.0,
+                    ),
+                ));
             } else {
                 crate::degradation::clear(RETENTION_BOUND_CODE);
             }
