@@ -79,9 +79,64 @@ async fn server_health() -> Json<serde_json::Value> {
 }
 
 fn node_health() -> serde_json::Value {
+    // CIRISServer#446/#480 — the status word is now DERIVED, not asserted.
+    // It read a hardcoded "ok" while the canonical was SIGKILLed 193 times at
+    // 93% of its memory limit; every watcher above it believed the node.
+    // `probe_memory` reads the cgroup on the way past, so asking how the node
+    // is IS the thing that notices it is running out of room.
+    //
+    // ORDER IS LOAD-BEARING. Every probe RAISES as a side effect of measuring,
+    // so all of them must run before `snapshot()` reads the registry — reversed,
+    // each health read reports the PREVIOUS read's findings and the first read
+    // after a node starts stalling says it is fine.
+    // ONE LOCK ACROSS PROBE **AND** VERDICT. `verdict()` made the three verdict
+    // fields agree with each other; it did not make them agree with the
+    // READINGS printed beside them. Every probe raises or clears as a side
+    // effect of measuring, so two concurrent requests interleave and one can
+    // return its own 94% memory reading beside the other's `status: "ok"` —
+    // numbers and judgement both real, and together a lie the reader can only
+    // resolve by distrusting the surface (PR #483 review).
+    //
+    // Poison-recovering like every other lock here: a panic in one request must
+    // not wedge the health route for the life of the process.
+    let _collect = crate::degradation::COLLECT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let memory = crate::degradation::probe_memory();
+    // #446's own subject: a 2-vCPU canonical whose HTTP worker becomes
+    // unschedulable under contention. Utilisation cannot see this — a box at
+    // 100% CPU serving requests promptly is healthy — so the reading is STALL,
+    // from the kernel's pressure interface, and `io` is the disk half of the
+    // same question.
+    let (cpu, io) = crate::degradation::probe_contention();
+    // ONE registry read for all three verdict fields. Three separate reads let a
+    // reporter raise or clear between them and produce a torn response —
+    // `degraded` with an empty reason list, or an error warning beside
+    // `degraded_mode: false` (PR #483 review). Producers tick on their own
+    // cadences with no relationship to when this request arrives.
+    let (warnings, degraded_mode, status) = crate::degradation::verdict();
     serde_json::json!({
         "data": {
-            "status": "ok",
+            "status": status,
+            // The shape the client has parsed all along (`CIRISApiClient`:
+            // `status != "ok" || degradedMode || warnings.isNotEmpty()`), which
+            // this node simply never populated. Producer meets waiting consumer.
+            "warnings": warnings,
+            "degraded_mode": degraded_mode,
+            // What this process is using against what it is allowed — or why
+            // that cannot be read. Three distinct states, never a comfortable
+            // zero (see `MemoryReading`).
+            // What this node is running out of, and what it could not measure.
+            //
+            // Deliberately the CHEAP readings only: three small file reads that
+            // cost the same on a Raspberry Pi as on the canonical. The store
+            // footprint (bytes, rows, per-plane counts) is NOT here and must
+            // not be added — it is six `count(*)`s plus two PRAGMAs, `count(*)`
+            // is a full scan on Postgres, and this route is polled by every
+            // watcher in the mesh on a timer. It lives on `GET /v1/node/state`,
+            // which is documented as not-for-seconds-cadence polling, and
+            // `operator_surface::corpus_and_store` says so at the reader.
+            "resources": { "memory": memory, "cpu": cpu, "io": io },
             "role": "fabric-node",
             "version": env!("CARGO_PKG_VERSION"),
             "services": {},
@@ -180,8 +235,325 @@ async fn folded_health(State(st): State<BrainState>) -> Json<serde_json::Value> 
             out["data"][key] = v.clone();
         }
     }
+    fold_brain_degradation(&mut out, bd);
     out["data"]["agent"] = serde_json::json!({ "folded": true, "reachable": true });
     Json(out)
+}
+
+/// **A folded pair is degraded if EITHER half is** (CIRISServer#446).
+///
+/// The allow-list above is correct and is not what this fixes: it stops a brain
+/// from renaming the node or overwriting the substrate fields. But by naming
+/// only the cognitive keys it also DROPPED the brain's own health verdict, and
+/// the node then answered for both halves using only its own.
+///
+/// The client has been reading `degraded_mode` off THIS route all along, where
+/// its comment says the flag means "no working LLM provider" — a brain-tier
+/// condition. So an agent with every provider dead, folded into a node with a
+/// healthy store and plenty of memory, reported `degraded_mode: false` and
+/// `status: "ok"`. Nothing lied; the node answered a question about the pair
+/// while looking at half of it.
+///
+/// # Escalate only, never lower
+///
+/// The node's own verdict is the FLOOR. A brain can move this payload from `ok`
+/// toward `degraded` and never the other way — otherwise a cheerful agent would
+/// be able to clear a memory-critical node's alarm, which is the #480 defect
+/// with an extra hop in it. Concretely: `degraded_mode` is an OR, `status`
+/// leaves an already-degraded node degraded, and the node's own warnings are
+/// never removed.
+///
+/// # Codes are namespaced, because the tier is part of the fix
+///
+/// Brain warnings arrive as `agent.<code>`. A dashboard groups on `code`, and
+/// the same code from two tiers means two different things to go and do — so
+/// within this payload the code has to identify the condition AND whose it is.
+/// The original is preserved verbatim after the prefix.
+///
+/// # Hostile input
+///
+/// This is a remote, unauthenticated-shaped document from another process.
+/// Every field is optional and every shape is tolerated: a non-array
+/// `warnings`, a non-object entry, a missing `code`. Malformed entries are
+/// skipped rather than defaulted, and the list is capped — a brain that offers
+/// ten thousand warnings must not be able to make the node's health response
+/// unservable, which would be a denial of service through the liveness probe.
+fn fold_brain_degradation(out: &mut serde_json::Value, bd: &serde_json::Value) {
+    /// Enough to diagnose, bounded so a runaway brain cannot bloat the node's
+    /// liveness answer. The count is reported when it bites, so the cap can
+    /// never be mistaken for the brain having had nothing more to say.
+    const MAX_BRAIN_WARNINGS: usize = 32;
+
+    /// **Count is not size** (codex review, PR #483).
+    ///
+    /// Thirty-two entries is not a bound on anything if ONE of them carries a
+    /// megabyte of `message`, or a nested payload of arbitrary depth. This
+    /// route is public and unauthenticated, and every request re-fetches and
+    /// re-serializes the brain's document — so a buggy or compromised brain
+    /// could turn concurrent health polling into unbounded memory and
+    /// bandwidth, using the liveness probe as the amplifier.
+    ///
+    /// 2 KiB is generous for a sentence a human is meant to read on a phone,
+    /// and it is applied to the SERIALIZED entry so a deep nested object is
+    /// bounded by the same number as a long string — there is no second shape
+    /// to reason about.
+    const MAX_BRAIN_WARNING_BYTES: usize = 2048;
+
+    /// Fields worth keeping when an entry is too large to carry whole.
+    ///
+    /// An oversized warning is REDUCED, never dropped: the `code` is the part
+    /// an operator acts on and is nearly always small, so discarding the whole
+    /// entry would throw away the signal to save the noise.
+    fn reduce(w: &serde_json::Value, code: &str) -> serde_json::Value {
+        let mut msg = w
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>();
+        msg.push_str(
+            " […truncated by this node: the agent's warning exceeded the size this \
+                      payload carries. Read the agent's own /v1/system/health for it in full.]",
+        );
+        // EVERY retained string is bounded, not just `message` (codex review,
+        // PR #483). The first cut copied `code` and `severity` verbatim on the
+        // reduction path — so a brain whose size came from a multi-megabyte
+        // CODE sailed straight through the entry bound this reducer exists to
+        // enforce, and got re-serialized on every public health request. A cap
+        // with an exempt field is not a cap.
+        //
+        // An unrecognised severity is NORMALISED rather than clipped: it is a
+        // closed vocabulary the client switches on, and a truncated token would
+        // be neither valid nor obviously wrong.
+        //
+        // Enumerated rather than `unwrap_or`, which is what clippy suggests and
+        // would be WRONG: `unwrap_or` passes an unrecognised value through, and
+        // an unrecognised value here is exactly the multi-megabyte string this
+        // guard exists to stop. The arms are the closed vocabulary; everything
+        // else — absent, oversized, or simply unknown — becomes `warning`.
+        let severity = match w.get("severity").and_then(serde_json::Value::as_str) {
+            Some("info") => "info",
+            Some("error") => "error",
+            Some("critical") => "critical",
+            _ => "warning",
+        };
+        serde_json::json!({
+            "code": clip(code, MAX_CODE_BYTES),
+            "message": msg,
+            "severity": severity,
+        })
+    }
+
+    /// The most `code` bytes this payload will carry, on BOTH paths — the
+    /// namespacing above and the reduction below. One const, because a bound
+    /// that two call sites define separately is a bound one of them will lose.
+    const MAX_CODE_BYTES: usize = 256;
+
+    /// Whether `v` serializes to at most `limit` bytes, WITHOUT building the
+    /// string.
+    ///
+    /// `serde_json::to_string` on a hostile value allocates the whole thing
+    /// before anyone can look at its length, which makes the size check itself
+    /// the denial of service it was added to prevent. This writes into a sink
+    /// that counts and aborts past the limit, so the cost of rejecting a 4 MiB
+    /// warning is the limit, not the warning.
+    fn serializes_within(v: &serde_json::Value, limit: usize) -> bool {
+        struct Counter {
+            written: usize,
+            limit: usize,
+        }
+        impl std::io::Write for Counter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.written += buf.len();
+                if self.written > self.limit {
+                    // Any error stops serde; the distinction is carried by
+                    // `written` rather than by the error kind.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "over limit",
+                    ));
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut c = Counter { written: 0, limit };
+        // Unserializable is treated as oversized: if we cannot measure it, we
+        // do not carry it whole.
+        serde_json::to_writer(&mut c, v).is_ok() && c.written <= limit
+    }
+
+    /// Clip to at most `max` BYTES on a character boundary.
+    ///
+    /// Bytes because the bound is about bytes; on a boundary because slicing a
+    /// UTF-8 string at an arbitrary offset panics, and this is a public,
+    /// unauthenticated path fed by a remote process.
+    fn clip(s: &str, max: usize) -> &str {
+        match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
+            Some((i, _)) => &s[..i],
+            None => s,
+        }
+    }
+
+    let brain_degraded = bd
+        .get("degraded_mode")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let offered = bd
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    // FILTER FIRST, THEN CAP (codex review, PR #483). Capping the raw array
+    // lets malformed entries consume the whole budget: a brain that emits 32
+    // junk objects followed by one real `llm.no_provider` would have the real
+    // one silently dropped, and the response would carry nothing but a
+    // truncation notice. Which entries are worth carrying is a question about
+    // VALID warnings, so the cap has to be applied to those.
+    // **THE CAP BOUNDS THE WORK, NOT JUST THE OUTPUT** (codex review, PR #483).
+    //
+    // The first cut transformed EVERY entry into `valid` and truncated
+    // afterwards, so a brain returning hundreds of thousands of warnings made
+    // each public health request build a full transformed list before throwing
+    // most of it away. The advertised 32-entry cap bounded the response and
+    // nothing else, and concurrent polling on a public route is exactly how
+    // that becomes an outage.
+    //
+    // Retain at most the cap; count the rest.
+    let mut valid: Vec<serde_json::Value> = Vec::with_capacity(MAX_BRAIN_WARNINGS);
+    let mut dropped = 0usize;
+    // Whether anything BEYOND the cap was degrading — see the cap branch below.
+    let mut dropped_degrading = false;
+    for w in offered {
+        // No `code` means nothing to group on and nothing to act on; skipping
+        // beats inventing an empty-string code that collides with every other
+        // malformed entry.
+        // A code must be present AND USABLE (codex review, PR #483). An empty
+        // string passed the `Some(..)` test, namespaced to the identical
+        // `agent.` for every entry, and 32 of them consumed the whole cap —
+        // pushing the actionable warnings out while the truncation notice
+        // claimed only valid entries had been retained. "Has a code field" and
+        // "has something to group on" are different questions.
+        let Some(code) = w
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            continue;
+        };
+        if valid.len() >= MAX_BRAIN_WARNINGS {
+            // Past the cap: count it and do NO work on it — no clone, no
+            // serialize, no reduce. Counting is the whole cost from here.
+            //
+            // EXCEPT its SEVERITY, which is one string comparison and is the
+            // difference between reporting a pair as healthy and not (codex
+            // review, PR #483). A brain with 33 warnings whose 33rd is
+            // `critical`, and which omits both flags, would otherwise have that
+            // condition counted and discarded while the verdict read `ok`.
+            dropped += 1;
+            if matches!(
+                w.get("severity").and_then(serde_json::Value::as_str),
+                Some("error" | "critical")
+            ) {
+                dropped_degrading = true;
+            }
+            continue;
+        }
+        // CLIP BEFORE ALLOCATING (codex review, PR #483). `format!` on a
+        // multi-megabyte code materialised a full namespaced copy before the
+        // size decision, so the RESPONSE was bounded while peak memory and
+        // per-request work stayed proportional to hostile input — and this
+        // route is public and polled concurrently.
+        let namespaced = format!("agent.{}", clip(code, MAX_CODE_BYTES));
+        // Measured with a COUNTING writer, so a huge entry is never
+        // materialised as a string just to learn that it is huge. One huge
+        // field and one deeply nested object are still bounded by the same
+        // number, which is why this measures the serialized form at all.
+        let oversized = !serializes_within(w, MAX_BRAIN_WARNING_BYTES);
+        if oversized {
+            valid.push(reduce(w, &namespaced));
+            continue;
+        }
+        let mut w = w.clone();
+        w["code"] = serde_json::json!(namespaced);
+        valid.push(w);
+    }
+    let mut folded = valid;
+    if dropped > 0 {
+        tracing::warn!(
+            valid = dropped + MAX_BRAIN_WARNINGS,
+            cap = MAX_BRAIN_WARNINGS,
+            "the folded brain offered more valid warnings than this payload carries — truncated"
+        );
+        // The count is of VALID warnings omitted, not raw array entries — an
+        // operator chasing "how many am I not seeing" needs the number of real
+        // ones, and malformed junk is not something they can go and read.
+        folded.push(serde_json::json!({
+            "code": "agent.warnings_truncated",
+            "message": format!(
+                "the folded agent reported {} valid warnings; {MAX_BRAIN_WARNINGS} are shown \
+                 here and {dropped} are omitted. Read the agent's own /v1/system/health for \
+                 the rest.",
+                dropped + MAX_BRAIN_WARNINGS
+            ),
+            "severity": "warning",
+        }));
+    }
+
+    // **A DEGRADING WARNING IS THE THIRD SIGNAL** (codex review, PR #483).
+    //
+    // The client's contract is `status != "ok" || degradedMode ||
+    // warnings.isNotEmpty()`, and this fold honoured the first two. A brain
+    // that emits an `error` or `critical` warning while omitting BOTH flags —
+    // an older or partially compatible one — had that warning appended to the
+    // payload while the outer verdict stayed `ok`, so a status-only watcher
+    // ignored a critical condition visible three lines below it in the same
+    // response.
+    //
+    // Read from the RETAINED warnings, after namespacing and the cap, so what
+    // is judged is exactly what is reported.
+    let brain_warning_degrades = dropped_degrading
+        || folded.iter().any(|w| {
+            matches!(
+                w.get("severity").and_then(serde_json::Value::as_str),
+                Some("error" | "critical")
+            )
+        });
+
+    if !folded.is_empty() {
+        match out["data"]["warnings"].as_array_mut() {
+            Some(existing) => existing.extend(folded),
+            // The node's own health always emits an array; this arm exists so a
+            // future shape change cannot silently drop the brain's half.
+            None => out["data"]["warnings"] = serde_json::Value::Array(folded),
+        }
+    }
+
+    // A non-`ok` STATUS is an independent degradation signal, not a decoration
+    // on the boolean (codex review, PR #483). The client's own contract is
+    // `status != "ok" || degradedMode || warnings.isNotEmpty()` — three
+    // independent signals — and this fold said every field was optional and
+    // every shape tolerated, then keyed solely on the boolean. An older or
+    // partially-compatible brain that reports `status: "degraded"` and no
+    // `degraded_mode` would have had a valid verdict silently discarded.
+    //
+    // Absent status is NOT a claim of health: only a present, non-`ok` value
+    // escalates, so a brain that omits the field entirely changes nothing.
+    let brain_status_bad = bd
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s != "ok");
+
+    if brain_degraded || brain_status_bad || brain_warning_degrades {
+        out["data"]["degraded_mode"] = serde_json::json!(true);
+        out["data"]["status"] = serde_json::json!("degraded");
+    }
 }
 
 /// The server-health routes, merged onto the read API. Stateless (liveness only).

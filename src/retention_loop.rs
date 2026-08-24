@@ -191,7 +191,25 @@ pub async fn run_pass(
              is unbounded and will grow until the disk does. Legitimate for an archive node; set \
              `retention.max_age_days` via POST /v1/config if it is not deliberate."
         );
+        // No bound is configured, so "the configured bound cannot bite" is not
+        // a claim this node can make. Clearing is NOT reassurance — an
+        // unbounded store still grows, and the INFO above says so; it is
+        // refusing to leave a warning standing that has stopped being true.
+        crate::degradation::clear(RETENTION_BOUND_CODE);
         return Ok(RetentionOutcome::Unbounded);
+    }
+
+    // **NO DISK CAP MEANS THE DISK ALARM CANNOT BE TRUE** (codex review,
+    // PR #483), and this must happen BEFORE any fallible store work.
+    //
+    // An operator who removes `max_disk_gb` but keeps an age or audit bound
+    // leaves `is_bounded()` true, so the unbounded early-return above does not
+    // fire — and every path that could clear the disk alarm sits after a
+    // `storage_summary()` that can fail. One failing read then strands a stale
+    // alarm about a bound that no longer exists, with no way back: the operator
+    // did the thing that should fix it and health kept saying otherwise.
+    if cfg.policy.max_disk_gb.is_none() {
+        crate::degradation::clear(RETENTION_BOUND_CODE);
     }
 
     // The pre-state, read BEFORE the sweep, so a zero pass can report what it
@@ -239,11 +257,264 @@ pub async fn run_pass(
              planes) or give the node more disk. Raising max_disk_gb silences the \
              alarm without freeing a byte."
         );
+        // The ERROR above goes to a log nobody is tailing. This puts the same
+        // fact on `GET /v1/node/health`, where the client already renders it —
+        // which is the whole point of #446: ciris-status carried an
+        // unenforceable cap for weeks and every surface it had said "ok".
+        crate::degradation::raise(crate::degradation::Warning::error(
+            RETENTION_BOUND_CODE,
+            format!(
+                "the configured disk cap cannot be enforced: {used} of {cap} used, and only \
+                 {evictable_rows} rows are reachable by any configured lever. Narrow what this \
+                 node ACCEPTS (consent prefixes / replication planes) or give it more disk. \
+                 Raising max_disk_gb silences this without freeing a byte.",
+                used = human_bytes(used_bytes),
+                cap = human_bytes(cap_bytes),
+            ),
+        ));
         return Ok(RetentionOutcome::BoundUnenforceable {
             used_bytes,
             cap_bytes,
             evictable_rows,
         });
+    }
+
+    // A STALE alarm must come down — a warning that only ever goes up is one
+    // operators learn to ignore, which is the same silence #476 set out to fix
+    // approached from the other side. But only POSITIVE EVIDENCE takes it down,
+    // and `Relieving` is not that (codex review, PR #483).
+    //
+    // `Relieving` means "the plan CAN act" — a claim made from the PRE-pass
+    // summary, before anything executed. It is an intention, not an outcome, and
+    // two things routinely make it a false one: an `audit_log_max_age_days`
+    // range flips `Unreachable` to `Relieving` while the lens executor does not
+    // execute audit archival at all, and a SQLite delete need not reduce
+    // `total_disk_bytes` because freed pages go on the freelist. An over-cap
+    // store could therefore clear its own alarm every hour, forever, on the
+    // strength of a plan that frees nothing.
+    //
+    // So `Relieving` leaves a standing alarm standing and waits. The NEXT pass
+    // classifies from a FRESH summary — `Within` if the bytes really went, or
+    // `Unreachable` again if they did not — which uses lens-core's own verdict
+    // rather than re-deriving the decision here.
+    let acted = summary.evicted_traces > 0 || summary.archived_audit_entries > 0;
+    // The POST-pass state, read once and used for BOTH the verdict and the
+    // outcome. A pass that acted must be judged on what it achieved, not on
+    // what it set out to do — see the `Relieving` arm below.
+    let after = if acted {
+        Some(engine.storage_summary().await?)
+    } else {
+        None
+    };
+    match summary.disk_pressure {
+        // Genuinely under the trigger. A pass only removes bytes, so the
+        // post-state is under it too.
+        // **`Within` IS A PRE-PASS READING TOO** (codex review, PR #483).
+        //
+        // When the pass ACTED — a long `max_age_days` deletion, say — ingestion
+        // continues throughout it, and the post-pass byte count already in hand
+        // can be ABOVE the trigger even though the pre-pass classification said
+        // `Within`. Clearing on the older reading reports `ok` until the next
+        // cadence over a store that is pressured right now.
+        //
+        // So when there IS a disk cap and the pass acted, this arm judges from
+        // the same post-pass number the `Relieving` arm does. Without a cap
+        // there is no trigger to be above, and `Within` is the whole answer.
+        ciris_lens_core::retention::DiskPressure::Within { cap_bytes, .. } => {
+            #[allow(clippy::cast_precision_loss)]
+            let still_pressured = after.as_ref().is_some_and(|a| {
+                (a.total_disk_bytes as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD
+            });
+            if still_pressured {
+                // **RAISE, not merely preserve** (codex review, PR #483; the
+                // same third side as the `Relieving` arm). `no_evidence` keeps
+                // a standing alarm — and on the FIRST pass that crosses the
+                // trigger there is none to keep, so health read `ok` over a
+                // store that is pressured right now. The measurement is in
+                // hand; it is evidence, not an absence of it.
+                let used_after = after.as_ref().map_or(0, |a| a.total_disk_bytes);
+                tracing::error!(
+                    used_bytes = used_after,
+                    cap_bytes,
+                    %bounds,
+                    "retention pass finished ABOVE the eviction trigger — the pre-pass reading \
+                     was inside bounds and ingestion outran the pass. The next cadence will \
+                     plan against the new state; this is the node saying so now rather than \
+                     in an hour."
+                );
+                crate::degradation::raise(crate::degradation::Warning::error(
+                    RETENTION_BOUND_CODE,
+                    format!(
+                        "the store crossed its eviction trigger DURING this pass: {used} of \
+                         {cap} used, and eviction starts at {pct:.0}% of the cap. Ingestion is \
+                         outrunning retention.",
+                        used = human_bytes(used_after),
+                        cap = human_bytes(cap_bytes),
+                        pct = DISK_EVICTION_THRESHOLD * 100.0,
+                    ),
+                ));
+                // AND RETURN A FAULT, exactly as the `Relieving` arm does. The
+                // previous cut raised the alarm and then fell through to the
+                // ordinary `Evicted` outcome, whose `is_fault()` is false — so
+                // the registry and the returned verdict disagreed about one
+                // measured state for the SECOND time on this arm. Raising
+                // without returning is half a fix, and the half that a caller
+                // reading the outcome never sees.
+                return Ok(RetentionOutcome::BoundUnenforceable {
+                    used_bytes: used_after,
+                    cap_bytes,
+                    evictable_rows: summary.evicted_traces as u64
+                        + summary.archived_audit_entries as u64,
+                });
+            } else {
+                crate::degradation::clear(RETENTION_BOUND_CODE);
+            }
+        }
+        // No disk bound is configured, so "the configured bound cannot bite" is
+        // not a claim this node can make.
+        ciris_lens_core::retention::DiskPressure::Unbounded => {
+            crate::degradation::clear(RETENTION_BOUND_CODE);
+        }
+        // **A RELIEVING PLAN THAT MOVED NOTHING IS AN UNENFORCEABLE BOUND**
+        // (codex review, PR #483 — the second half of this defect).
+        //
+        // The first fix stopped `Relieving` from CLEARING a standing alarm, and
+        // that is only half: on the FIRST such pass there is no alarm to
+        // preserve, so an over-cap store fell straight through to the
+        // zero-action branch below, reported `WithinBounds`, and stayed `ok`
+        // forever. Silence restored through the other side of the same arm.
+        //
+        // The reproducing case is not exotic. With `audit_log_max_age_days` the
+        // only configured lever, lens-core plans an archive range and returns
+        // `Relieving` on EVERY pass, while its executor leaves
+        // `archived_audit_entries` at zero because archival is not implemented.
+        // The plan is a claim about what a lever COULD do; `acted` is what
+        // happened.
+        ciris_lens_core::retention::DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        } if !acted => {
+            // Rows the levers CAN reach — the whole diagnosis, exactly as for
+            // `Unreachable`, and read from the PRE-pass summary because the
+            // pass removed nothing.
+            let evictable_rows = before.trace_events.rows + before.audit_log.rows;
+            tracing::error!(
+                used_bytes,
+                cap_bytes,
+                evictable_rows,
+                %bounds,
+                "retention BOUND EXCEEDED AND UNENFORCEABLE — the plan named a lever and the \
+                 pass freed NOTHING. A planned-but-inert lever reports the same zero as a \
+                 healthy sweep; it is not one. Narrow what this node ACCEPTS (consent \
+                 prefixes / replication planes) or give the node more disk."
+            );
+            crate::degradation::raise(crate::degradation::Warning::error(
+                RETENTION_BOUND_CODE,
+                format!(
+                    "the configured disk cap cannot be enforced: {used} of {cap} used. This \
+                     pass PLANNED to free bytes and freed none, so no future pass changes \
+                     this on its own. Narrow what this node accepts, or give it more disk; \
+                     raising max_disk_gb silences this without freeing a byte.",
+                    used = human_bytes(used_bytes),
+                    cap = human_bytes(cap_bytes),
+                ),
+            ));
+            return Ok(RetentionOutcome::BoundUnenforceable {
+                used_bytes,
+                cap_bytes,
+                evictable_rows,
+            });
+        }
+        // **PLANNED, ACTED — AND STILL OVER CAP** (codex review, PR #483; the
+        // THIRD side of this one arm).
+        //
+        // Deferring to "the next pass will classify from a fresh summary" is
+        // only true if some pass eventually classifies differently, and under
+        // sustained ingestion none does: every hour there are rows to evict, so
+        // `acted` is true every hour, and the verdict is deferred forever while
+        // the file walks toward exhaustion reporting `ok`.
+        //
+        // Worse on SQLite, where evicting rows routinely leaves
+        // `total_disk_bytes` UNCHANGED — freed pages go on the freelist and
+        // `PRAGMA page_count` does not fall without a VACUUM. A pass can then
+        // act, report progress, and free nothing the operating system can see,
+        // every hour, indefinitely.
+        //
+        // So the post-pass BYTES decide, not the plan and not the action.
+        ciris_lens_core::retention::DiskPressure::Relieving { cap_bytes, .. } => {
+            // `after` is Some here by construction: this arm requires `acted`.
+            let used_after = after.as_ref().map_or(u64::MAX, |a| a.total_disk_bytes);
+            // **COMPARE AGAINST THE PLANNER'S TRIGGER, NOT THE HARD CAP**
+            // (codex review, PR #483).
+            //
+            // lens-core classifies disk pressure from
+            // `cap_bytes * DISK_EVICTION_THRESHOLD`, so a store that finishes a
+            // pass at 95% of its cap is BELOW the cap and still ABOVE the
+            // trigger: this arm would clear, and the very next planner pass
+            // would classify `Relieving` again. Under sustained ingestion or
+            // SQLite freelist behaviour that repeats every hour, and health
+            // reads `ok` while pressure never once falls below the line that
+            // defines it.
+            //
+            // Read from lens-core's own const rather than written as `0.9`
+            // here: a second literal is how the caller and the planner end up
+            // disagreeing about the same store.
+            #[allow(clippy::cast_precision_loss)]
+            let still_pressured =
+                (used_after as f64) >= (cap_bytes as f64) * DISK_EVICTION_THRESHOLD;
+            if still_pressured {
+                tracing::error!(
+                    used_bytes = used_after,
+                    cap_bytes,
+                    evicted_traces = summary.evicted_traces,
+                    archived_audit_entries = summary.archived_audit_entries,
+                    freed_bytes_estimate = summary.freed_bytes_estimate,
+                    %bounds,
+                    "retention acted and the store is STILL AT OR ABOVE ITS EVICTION TRIGGER — the levers are \
+                     working and are not keeping up. On SQLite a delete need not shrink the \
+                     file at all (freed pages go on the freelist), so 'evicted N rows' is not \
+                     evidence the disk was relieved."
+                );
+                crate::degradation::raise(crate::degradation::Warning::error(
+                    RETENTION_BOUND_CODE,
+                    format!(
+                        "the store is still at or above its eviction trigger after a pass that DID \
+                         evict: {used} of {cap} used, and eviction starts at {pct:.0}% of the \
+                         cap. The levers work but are not keeping up with what this node \
+                         accepts. Narrow the consent prefixes / replication planes, give the \
+                         node more disk, or VACUUM — on SQLite a delete need not shrink the \
+                         file.",
+                        used = human_bytes(used_after),
+                        cap = human_bytes(cap_bytes),
+                        pct = DISK_EVICTION_THRESHOLD * 100.0,
+                    ),
+                ));
+                // **AND THE RETURNED OUTCOME MUST AGREE WITH THE REGISTRY**
+                // (codex review, PR #483). Falling through to `Evicted` — whose
+                // `is_fault()` is explicitly false — left this function saying
+                // "recovered" about the same measured state the alarm above
+                // calls a fault. Two answers to one question, from one pass,
+                // eight lines apart; a caller or test reading the public
+                // outcome would classify a still-pressured store as healthy.
+                //
+                // `evictable_rows` is what the levers reached THIS pass: the
+                // bound is unenforceable in the sense that matters — the levers
+                // ran, and the store is still over the line.
+                return Ok(RetentionOutcome::BoundUnenforceable {
+                    used_bytes: used_after,
+                    cap_bytes,
+                    evictable_rows: summary.evicted_traces as u64
+                        + summary.archived_audit_entries as u64,
+                });
+            } else {
+                // Measured, post-pass, under the trigger. Real evidence of
+                // recovery.
+                crate::degradation::clear(RETENTION_BOUND_CODE);
+            }
+        }
+        // Handled above, and returned from — listed so a new variant is a
+        // compile error rather than a silent fall-through to "cleared".
+        ciris_lens_core::retention::DiskPressure::Unreachable { .. } => {}
     }
 
     if summary.evicted_traces == 0 && summary.archived_audit_entries == 0 {
@@ -263,7 +534,9 @@ pub async fn run_pass(
         return Ok(outcome);
     }
 
-    let after = engine.storage_summary().await?;
+    // Read above, before the verdict, so the judgement and the report describe
+    // the same instant.
+    let after = after.expect("`acted` is true on this path, so `after` was read");
     tracing::info!(
         evicted_traces = summary.evicted_traces,
         archived_audit_entries = summary.archived_audit_entries,
@@ -284,6 +557,30 @@ pub async fn run_pass(
         freed_bytes_estimate: summary.freed_bytes_estimate,
         total_disk_bytes: after.total_disk_bytes,
     })
+}
+
+/// The degradation code for an unenforceable bound. One constant, because the
+/// raise site and BOTH clear sites must agree on the string or a stale alarm
+/// never comes down.
+const RETENTION_BOUND_CODE: &str = "retention.bound_unenforceable";
+
+/// Bytes as an operator reads them. The log line beside this raise carries the
+/// exact integers; the warning goes to a phone screen, where `202135808` and
+/// `209715200` are the same number at a glance and `192.8 MiB of 200.0 MiB` is
+/// the sentence that makes someone act.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }
 
 /// One operator-readable line naming the live bounds — so a zero pass says what

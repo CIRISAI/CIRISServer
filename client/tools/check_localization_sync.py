@@ -144,6 +144,301 @@ _SERVER_MSG = re.compile(
 )
 
 
+def _without_test_modules(text: str) -> str:
+    r"""Blank out every ``#[cfg(test)]`` item so test fixtures are not mistaken
+    for server-emitted message ids.
+
+    A test's ``Warning::error("t.reduced", "a plane is shed")`` has exactly the
+    shape this scanner hunts for, and the scanner had no idea it was reading a
+    fixture. `src/degradation.rs` produced FIVE such phantoms on first contact
+    — ids no server will ever emit, demanding en.json entries that would put
+    test strings into the shipped product bundle in 29 languages.
+
+    That is the sibling of the #461 class: the id set was wrong, and being
+    wrong in the direction of MORE findings is what made it look like
+    diligence. A check that invents work is trusted exactly as long as it takes
+    someone to look at one finding.
+
+    Brace-matched rather than regex'd, because a test module is nested and the
+    literals inside it contain braces of their own. Replaced with newlines, not
+    deleted, so reported line numbers elsewhere stay honest.
+    """
+    out = list(text)
+    i = 0
+    marker = "#[cfg(test)]"
+    while (i := text.find(marker, i)) != -1:
+        # Find this item's opening brace, then its matching close. Anything
+        # before the brace (`mod tests`, attributes) is inert either way.
+        # **A brace-less item ends at its SEMICOLON, not at the next `{`.**
+        #
+        # `#[cfg(test)] use foo::bar;` / `const N: usize = 3;` / a type alias
+        # are all valid, and searching blindly for `{` skips the semicolon and
+        # adopts the opening brace of the NEXT — production — item. The matcher
+        # then blanks that item, so a real server-emitted id silently
+        # disappears from both coverage checks. Verified: `#[cfg(test)] use
+        # foo::bar;` ate the emission after it.
+        brace = _attributed_item_body(text, i)
+        if brace is None:
+            # Brace-less item: the attribute and its item are stripped, and the
+            # scan resumes after the semicolon.
+            semi = text.find(";", i)
+            if semi == -1:
+                break
+            for k in range(i, semi + 1):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = semi + 1
+            continue
+        # `block_depth`, not a boolean: RUST BLOCK COMMENTS NEST (codex review,
+        # PR #483). `/* outer /* inner */ } still outer */` exits at the first
+        # `*/` with a flag, so the brace after it is counted as syntax — which
+        # terminates the matcher early (test ids survive) or, with `{`, runs it
+        # past the module and blanks production emissions.
+        depth, j, in_str, in_line_comment, block_depth, esc = 0, brace, False, False, 0, False
+        while j < len(text):
+            c = text[j]
+            if esc:
+                esc = False
+            elif c == "\\" and in_str:
+                esc = True
+            elif in_line_comment:
+                if c == "\n":
+                    in_line_comment = False
+            elif block_depth:
+                if text[j : j + 2] == "/*":
+                    block_depth += 1
+                    j += 2
+                    continue
+                if text[j : j + 2] == "*/":
+                    block_depth -= 1
+                    j += 2
+                    continue
+            elif in_str:
+                if c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "r" and (raw := _raw_string_end(text, j)) is not None:
+                # A RAW string (`r"..."`, `r#"..."#`). Its content may hold bare
+                # quotes AND braces, and the ordinary string state machine flips
+                # out of the string at the first inner quote and then counts the
+                # braces after it as syntax. Measured both ways: `r#"a" } "#`
+                # stops the matcher early (phantom survives) and `r#"a" { "#`
+                # runs it past the module and eats the production emission
+                # after it. Skipped whole.
+                j = raw + 1
+                continue
+            elif c == "'":
+                # A CHAR LITERAL or a LIFETIME, and they must be told apart.
+                #
+                # `'{'` and `'}'` are braces that must NOT count, and getting
+                # this wrong is not cosmetic: `'{'` inside a test module runs
+                # the matcher past the module's real end and blanks every
+                # production emission site after it — which reads as "no
+                # findings" and is indistinguishable from a clean file.
+                #
+                # A lifetime (`&'static str`, `MutexGuard<'static, ()>`) has no
+                # closing quote, so treating every apostrophe as opening a char
+                # literal is the mirror failure. Only a genuine literal is
+                # skipped; a lifetime tick is simply ignored.
+                end = _char_literal_end(text, j)
+                if end is not None:
+                    j = end + 1
+                    continue
+            elif text[j : j + 2] == "//":
+                in_line_comment = True
+            elif text[j : j + 2] == "/*":
+                block_depth = 1
+                j += 2
+                continue
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        for k in range(i, min(j + 1, len(text))):
+            if out[k] != "\n":
+                out[k] = " "
+        i = j + 1
+    return "".join(out)
+
+
+def _attributed_item_body(text: str, attr_start: int) -> "int | None":
+    """Index of the `{` opening the body of the item attributed at `attr_start`.
+
+    `None` when the item has NO body (`use`, `const`, `static`, a type alias) —
+    those end at a top-level semicolon, and treating the next item's `{` as
+    theirs is how a production emission site gets blanked.
+
+    Decided by which comes first at NESTING DEPTH ZERO, skipping the attribute's
+    own brackets and any string content, so `#[cfg(test)] const S: &str = "a {";`
+    is still recognised as brace-less.
+    """
+    j = attr_start
+    depth_brack = 0
+    in_str = False
+    esc = False
+    while j < len(text):
+        c = text[j]
+        if esc:
+            esc = False
+        elif c == "\\" and in_str:
+            esc = True
+        elif in_str:
+            if c == '"':
+                in_str = False
+        elif c == "r" and _raw_string_end(text, j) is not None:
+            j = _raw_string_end(text, j) + 1
+            continue
+        elif c == '"':
+            in_str = True
+        elif text[j : j + 2] == "//":
+            # A COMMENT between the attribute and its item. `#[cfg(test)]
+            # // uses { syntax` followed by a `const` made the comment's brace
+            # the item's body, and the matcher then blanked the following
+            # PRODUCTION function (codex review, PR #483).
+            nl = text.find("\n", j)
+            j = len(text) if nl == -1 else nl
+            continue
+        elif text[j : j + 2] == "/*":
+            # Nested, same as above.
+            depth_c, k = 1, j + 2
+            while k < len(text) and depth_c:
+                if text[k : k + 2] == "/*":
+                    depth_c += 1
+                    k += 2
+                    continue
+                if text[k : k + 2] == "*/":
+                    depth_c -= 1
+                    k += 2
+                    continue
+                k += 1
+            j = k
+            continue
+        elif c == "[":
+            depth_brack += 1
+        elif c == "]":
+            depth_brack -= 1
+        elif depth_brack == 0:
+            if c == "{":
+                return j
+            if c == ";":
+                return None
+        j += 1
+    return None
+
+
+def _raw_string_end(text: str, start: int) -> "int | None":
+    """Index of the final `"` of a Rust raw string starting at `text[start]`.
+
+    `None` if `text[start]` does not begin one. Recognises `r"..."` and
+    `r#*"..."#*`, matching the closing delimiter to the SAME number of hashes —
+    which is what lets a raw string legally contain `"#` sequences.
+    """
+    if text[start] != "r":
+        return None
+    k = start + 1
+    hashes = 0
+    while k < len(text) and text[k] == "#":
+        hashes += 1
+        k += 1
+    if k >= len(text) or text[k] != '"':
+        return None
+    closer = '"' + "#" * hashes
+    end = text.find(closer, k + 1)
+    if end == -1:
+        return None
+    return end + len(closer) - 1
+
+
+def _char_literal_end(text: str, start: int) -> "int | None":
+    r"""Index of the closing quote if `text[start]` opens a Rust char literal.
+
+    `None` means the apostrophe is a LIFETIME or label tick, which closes
+    nothing and must be stepped over rather than tracked.
+
+    Handles the escape forms whose payload can itself contain braces —
+    `'\u{7d}'` is a right brace written three ways from Sunday — by scanning to
+    the terminating quote rather than assuming a fixed width. Bounded, so a
+    malformed literal cannot send the scan to EOF.
+    """
+    if text[start] != "'":
+        return None
+    k = start + 1
+    if k >= len(text):
+        return None
+    if text[k] == "\\":
+        limit = min(len(text), start + 12)
+        k += 1
+        while k < limit:
+            if text[k] == "'":
+                return k
+            k += 1
+        return None
+    # A plain char literal is exactly one character wide.
+    if k + 1 < len(text) and text[k + 1] == "'":
+        return k + 1
+    return None
+
+
+# The SAME id position, but with a COMPUTED text — `format!(...)` rather than a
+# literal. `_SERVER_MSG` cannot see these, so every server-id check silently
+# excluded them and the denominator overstated coverage (codex review, PR #483).
+#
+# Observed live: `mesh_config.refusal.store_unavailable` is emitted as
+# `err(status, "store_unavailable", "mesh_config.refusal.store_unavailable",
+# format!("The substrate could not be read: {e}"))` and is ABSENT from en.json —
+# so it renders the server's English in all 29 languages while the guard
+# reported all 241 examined ids covered.
+#
+# The id is extracted from both shapes; the exact SOURCE-TEXT comparison stays
+# restricted to the literal shape, because a `format!` template is not a string
+# this checker can evaluate.
+_SERVER_MSG_ID_FORMATTED = re.compile(
+    r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*format!\s*\(', re.S
+)
+
+
+# **THE ID, WHATEVER FOLLOWS IT.**
+#
+# The two patterns above key on the TEXT — a literal, or a `format!`. An
+# emission whose text is any other expression matched neither, so its id was
+# excluded from every server-id check and removing its bundle entry left the
+# strict gate green (codex review, PR #483). Live at the time:
+# `auth.oauth.provider_unavailable` (followed by `&e.message()`) and
+# `accord.duty.holder_custody` (followed by a bound `msg`).
+#
+# So ids are also taken from ARGUMENT POSITION in a call to one of the emitter
+# helpers, whatever the remaining arguments look like. The helper list is
+# derived from the source rather than guessed — these are the five identifiers
+# that actually enclose dotted-id literals in `src/`, and the alternative,
+# "any dotted literal followed by a comma", sweeps in hostnames
+# (`accounts.google.com`), filenames (`libykcs11.dll`) and machine-only
+# degradation CODES, which are a different contract entirely.
+_SERVER_EMITTERS = re.compile(r"\b(?:m|err|msg|refuse|refusal|browser_refusal)\s*\(")
+_DOTTED_ID = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"')
+
+
+def _emitter_call_ids(text: str) -> List[str]:
+    """Dotted-id literals appearing as arguments to an emitter helper."""
+    out: List[str] = []
+    for call in _SERVER_EMITTERS.finditer(text):
+        depth, j = 0, call.end() - 1
+        while j < len(text):
+            c = text[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.extend(x.group(1) for x in _DOTTED_ID.finditer(text[call.end() : j]))
+    return out
+
+
 def _rust_unescape(raw: str) -> str:
     r"""Resolve a Rust string literal body, including `\`-line-continuations.
 
@@ -367,11 +662,17 @@ def server_message_ids(root: Path) -> Dict[str, Path]:
     if not src.exists():
         return ids
     for rs in sorted(src.rglob("*.rs")):
-        text = rs.read_text(encoding="utf-8")
+        text = _without_test_modules(rs.read_text(encoding="utf-8"))
         for m in _SERVER_MSG.finditer(text):
             if " " not in m.group(2):
                 continue  # not an English sentence — not an (id, text) pair
             ids.setdefault(m.group(1), rs.relative_to(root))
+        # Same id position, computed text. See `_SERVER_MSG_ID_FORMATTED`.
+        for m in _SERVER_MSG_ID_FORMATTED.finditer(text):
+            ids.setdefault(m.group(1), rs.relative_to(root))
+        # Same id position, ANY following expression. See `_emitter_call_ids`.
+        for mid in _emitter_call_ids(text):
+            ids.setdefault(mid, rs.relative_to(root))
     return ids
 
 
@@ -394,15 +695,163 @@ def check_server_ids_resolvable(root: Path, en: dict, ids: Dict[str, Path]) -> R
 def server_message_texts(root: Path) -> Dict[str, str]:
     """Map each server-emitted message id -> its FULL English text from Rust."""
     out: Dict[str, str] = {}
+    for mid, texts in _server_message_texts_all(root).items():
+        out[mid] = texts[0]
+    return out
+
+
+def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
+    """Map each id -> EVERY distinct English text emitted under it, in file order.
+
+    Plural on purpose. `setdefault` kept only the first, so an id emitted with
+    two different texts passed `server-id-text` against whichever one happened
+    to come first in file order, while the OTHER endpoint rendered a
+    translation of a sentence it does not say (codex review, PR #483).
+    """
+    out: Dict[str, List[str]] = {}
     src = root / SERVER_SRC
     if not src.exists():
         return out
     for rs in sorted(src.rglob("*.rs")):
-        for m in _SERVER_MSG.finditer(rs.read_text(encoding="utf-8")):
+        text = _without_test_modules(rs.read_text(encoding="utf-8"))
+        for m in _SERVER_MSG.finditer(text):
             txt = _rust_unescape(m.group(2))
-            if " " in txt:
-                out.setdefault(m.group(1), txt)
+            if " " not in txt:
+                continue
+            seen = out.setdefault(m.group(1), [])
+            if txt not in seen:
+                seen.append(txt)
     return out
+
+
+# **ENUMERATED DEBT, NOT AN EXEMPTION.**
+#
+# Broadening id extraction to the `format!`-texted shape (see
+# `_SERVER_MSG_ID_FORMATTED`) revealed 13 ids that have NEVER had an en.json
+# entry and therefore render the server's English in all 29 languages. They are
+# real, they predate this checker being able to see them, and fixing them means
+# writing 29 translations apiece — the `localize-ui` workflow, tracked in
+# CIRISServer#484.
+#
+# Listing them here rather than weakening the check keeps three properties:
+#   * a NEW uncovered id still fails, so the debt cannot grow;
+#   * the debt is enumerated in source, so it cannot be forgotten;
+#   * an id that GETS covered must be removed from this list — the check below
+#     fails on a stale entry — so the list can only shrink.
+#
+# WHEN ADDING HERE IS LEGITIMATE, AND WHEN IT IS NOT.
+#
+# Legitimate: an operator-facing sentence that was previously emitted as BARE
+# ENGLISH PROSE with no id at all is given one. That is strictly better for the
+# reader — the client can resolve the key the moment a translation lands, where
+# before there was nothing to resolve — and this list is the mechanism that
+# keeps it visible until then.
+#
+# Not legitimate: silencing a NEW uncovered id that could simply be translated,
+# or one whose only problem is that nobody has run `localize-ui`. Add the
+# en.json entry and the 29 bundles instead.
+#
+# The three `operator.store.*_not_measured` ids below are the first kind: they
+# replaced hardcoded English in the `not_measured` block of
+# `src/operator_surface.rs`, on a surface that advertises `source_locale` and
+# could not honour it.
+KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    "accord.duty.assemble",
+    "accord.duty.holder_identity_mismatch",
+    "accord.duty.no_duty",
+    "chat.community_shape_conflict",
+    # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
+    # dismissal path used to share `commons_surface.refusal.objection_absent`,
+    # whose 29 locales all translate the BALLOT sentence — so a non-English
+    # dismissal rendered "a ballot answers…". Unifying the English alone left
+    # 28 languages saying it anyway; giving the dismissal its own id keeps the
+    # ballot path's correct translations intact and makes the dismissal
+    # English-but-RIGHT rather than translated-but-WRONG, pending #484.
+    "commons_surface.refusal.objection_absent_dismissal",
+    "mesh_config.refusal.bad_now",
+    "mesh_config.refusal.bad_request",
+    "mesh_config.refusal.canonicalize_failed",
+    "mesh_config.refusal.bad_ttl",
+    "mesh_config.refusal.baseline_unreadable",
+    "mesh_config.refusal.sign_failed",
+    "mesh_config.refusal.store_unavailable",
+    "operator.store.per_table_bytes_not_measured",
+    "operator.store.wal_bytes_not_measured",
+    "trust_root.bad_bundle",
+    "trust_root.bad_request",
+    "trust_root.bundle_refused",
+    "trust_root.install_failed",
+    "trust_root.withdraw_failed",
+)
+
+
+def check_known_unlocalized_list_is_current(root: Path, en: dict) -> Result:
+    """ERROR: every entry on the debt list must still be BOTH real and needed.
+
+    Two ways an entry goes stale, and both leave an exemption outliving its
+    reason — the shape that lets "temporary" debt become permanent coverage
+    loss:
+
+      * COVERED — the id now has an en.json entry, so the debt is paid and the
+        entry must go;
+      * GONE — the emission site was deleted or renamed, so the entry protects
+        nothing today AND would silently exempt a future re-introduction of the
+        same id, which is the more dangerous half (codex review, PR #483): a
+        dead exemption is invisible until it quietly covers for something new.
+
+    The list can therefore only shrink, and only for the right reason.
+    """
+    addrs = set(flat_values(en))
+    emitted = set(server_message_ids(root))
+    covered = sorted(i for i in KNOWN_UNLOCALIZED if i in addrs)
+    gone = sorted(i for i in KNOWN_UNLOCALIZED if i not in emitted)
+    msgs = []
+    if covered:
+        msgs.append(
+            f"{len(covered)} id(s) on KNOWN_UNLOCALIZED now HAVE an en.json entry and must be "
+            f"removed from that list ({', '.join(covered[:3])}"
+            f"{'…' if len(covered) > 3 else ''}) — an allowlist that outlives its reason is "
+            f"how temporary debt becomes permanent"
+        )
+    if gone:
+        msgs.append(
+            f"{len(gone)} id(s) on KNOWN_UNLOCALIZED are NO LONGER EMITTED anywhere in src/ "
+            f"({', '.join(gone[:3])}{'…' if len(gone) > 3 else ''}) — the entry protects "
+            f"nothing now and would silently exempt a future re-introduction of the same id"
+        )
+    return msgs, len(KNOWN_UNLOCALIZED)
+
+
+def check_server_ids_are_single_valued(root: Path) -> Result:
+    """ERROR: one id must mean one sentence.
+
+    A localization id is a KEY: en.json holds exactly one English string for it,
+    and the 29 locales translate that one string. Emitting two different
+    sentences under it means at least one endpoint renders text it does not say,
+    in every language, and no other check can see it — the id set is right, the
+    key resolves, the placeholders match, and `server-id-text` compares en.json
+    against whichever emission the scanner happened to reach first.
+
+    Found live: `commons_surface.refusal.objection_absent` said "a ballot
+    answers a question about ONE objection" on the ballot path and "a dismissal
+    lifts ONE named objection" on the dismissal path, with en.json matching only
+    the first.
+    """
+    all_texts = _server_message_texts_all(root)
+    bad = sorted(mid for mid, texts in all_texts.items() if len(texts) > 1)
+    msgs = []
+    if bad:
+        detail = "; ".join(
+            f"{mid} -> {len(all_texts[mid])} different texts: "
+            + " | ".join(repr(t[:60]) for t in all_texts[mid])
+            for mid in bad[:2]
+        )
+        msgs = [
+            f"{len(bad)} server-emitted id(s) are emitted with CONFLICTING English text, so at "
+            f"least one endpoint renders a sentence it does not say, in every language "
+            f"({detail}{'…' if len(bad) > 2 else ''})"
+        ]
+    return msgs, len(all_texts)
 
 
 def check_server_id_text_matches_source(root: Path, en: dict) -> Result:
@@ -456,7 +905,14 @@ def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Resu
     lag. But it means the string cannot be localized into ANY of the 29
     languages, so it belongs on the localize-ui worklist rather than in silence.
     """
-    uncovered = sorted(i for i in ids if i not in set(flat_values(en)))
+    # Enumerated debt is excluded — see `KNOWN_UNLOCALIZED`. A NEW uncovered id
+    # still fails, which is the property that matters, and
+    # `check_known_unlocalized_list_is_current` makes the list shrink-only.
+    uncovered = sorted(
+        i
+        for i in ids
+        if i not in set(flat_values(en)) and i not in KNOWN_UNLOCALIZED
+    )
     if not uncovered:
         return [], len(ids)
     by_file: Dict[str, int] = {}
@@ -605,7 +1061,21 @@ class Report:
             self.lines.append(f"  OK    {name:<19}: 0 findings over {examined} {unit}")
 
 
-def run_checks(root: Path) -> Report:
+def run_checks_synthetic(root: Path) -> Report:
+    """`run_checks` over a fixture tree — see `debt_list_applies`."""
+    return run_checks(root, debt_list_applies=False)
+
+
+def run_checks(root: Path, *, debt_list_applies: bool = True) -> Report:
+    """`debt_list_applies=False` for SYNTHETIC trees.
+
+    `KNOWN_UNLOCALIZED` is a statement about THIS repository's sources. The
+    self-test builds a fixture tree containing one emission site, where every
+    entry on the list is trivially "no longer emitted" — so the freshness check
+    would fire on every mutation and drown out what each one is testing. The
+    list is proven separately, against real semantics, by
+    `_prove_the_debt_list_is_kept_honest`.
+    """
     rep = Report()
     canonical = root / CANONICAL_BUNDLE
 
@@ -643,6 +1113,11 @@ def run_checks(root: Path) -> Report:
 
     msgs, n = check_server_id_text_matches_source(root, en)
     rep.record("server-id-text", msgs, n, severity="error", unit="emitted id(s)")
+    msgs, n = check_server_ids_are_single_valued(root)
+    rep.record("server-id-single-valued", msgs, n, severity="error", unit="emitted id(s)")
+    if debt_list_applies:
+        msgs, n = check_known_unlocalized_list_is_current(root, en)
+        rep.record("unlocalized-debt-current", msgs, n, severity="error", unit="known id(s)")
 
     msgs, n = check_placeholder_parity(root, langs, en)
     rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
@@ -890,6 +1365,21 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         """Zero denominator on the server side: the scan finds no emission sites."""
         shutil.rmtree(root / SERVER_SRC)
 
+    def conflicting_server_id_text(root: Path) -> None:
+        """One id, two sentences — which every other check reads as clean.
+
+        The id set is right, the key resolves, the placeholders match, and
+        `server-id-text` compares en.json against whichever emission the
+        scanner reached first. Found live on
+        `commons_surface.refusal.objection_absent`.
+        """
+        rs = root / SERVER_SRC / "fixture.rs"
+        rs.write_text(
+            rs.read_text(encoding="utf-8")
+            + '\nfn other() -> Value { m("nav.home", "A DIFFERENT sentence under the same id.") }\n',
+            encoding="utf-8",
+        )
+
     def server_id_text_truncated(root: Path) -> None:
         r"""THE 2026-08-05 defect: en.json carries a PREFIX of what the server emits.
 
@@ -924,6 +1414,7 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         ("androidApp bundle dir deleted", "error", missing_mirror_dir, "missing"),
         ("server emits an id en.json never defines", "warning", server_id_uncovered, "no en.json entry"),
         ("server id defined but flat (unreachable)", "error", server_id_defined_but_flat, "DEFINED in en.json"),
+        ("one id emitted with TWO different texts", "error", conflicting_server_id_text, "CONFLICTING English text"),
         ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
 def _truncate_nav_home(root: Path) -> None:
@@ -968,6 +1459,141 @@ def _resync(root: Path) -> None:
             shutil.copy2(f, target / f.name)
 
 
+def _prove_the_debt_list_is_kept_honest(root: Path) -> int:
+    """Both halves of `unlocalized-debt-current`, against the REAL tree.
+
+    Proven here rather than as a fixture mutation because the list is a
+    statement about this repository's sources: a synthetic tree emits none of
+    them, so every entry reads as stale and the check would fire on every other
+    mutation instead of on its own.
+
+      * COVERED — an entry that has since gained an en.json entry must fail, or
+        the debt is never actually paid down;
+      * GONE — an entry no longer emitted anywhere must fail, because a dead
+        exemption is invisible until it quietly covers for a future
+        re-introduction of the same id.
+    """
+    global KNOWN_UNLOCALIZED  # noqa: PLW0603 - restored in the finally below
+    failures = 0
+    en = load_json(root / CANONICAL_BUNDLE / "en.json")
+
+    clean, _ = check_known_unlocalized_list_is_current(root, en)
+    if clean:
+        print("  FAIL  the debt list is not currently honest:")
+        for m in clean:
+            print(f"          {m}")
+        failures += 1
+
+    # COVERED: pretend en.json defines the first entry.
+    if KNOWN_UNLOCALIZED:
+        doctored = json.loads(json.dumps(en))
+        node = doctored
+        parts = KNOWN_UNLOCALIZED[0].split(".")
+        for k in parts[:-1]:
+            node = node.setdefault(k, {})
+            if not isinstance(node, dict):
+                node = doctored
+                break
+        else:
+            node[parts[-1]] = "now covered"
+        msgs, _ = check_known_unlocalized_list_is_current(root, doctored)
+        if not any("HAVE an en.json entry" in m for m in msgs):
+            print("  FAIL  a COVERED debt entry did not fail the freshness check")
+            failures += 1
+
+    # GONE: an id nothing emits.
+    original = KNOWN_UNLOCALIZED
+    KNOWN_UNLOCALIZED = original + ("ghost.id.that.is.not.emitted",)
+    try:
+        msgs, _ = check_known_unlocalized_list_is_current(root, en)
+        if not any("NO LONGER EMITTED" in m for m in msgs):
+            print("  FAIL  a GONE debt entry did not fail the freshness check")
+            failures += 1
+    finally:
+        KNOWN_UNLOCALIZED = original
+
+    if failures == 0:
+        print(
+            f"  ok    the debt list is honest in both directions "
+            f"({len(KNOWN_UNLOCALIZED)} entry(ies): covered and gone both fail)"
+        )
+    return failures
+
+
+def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
+    """Assert that a `#[cfg(test)]` module cannot invent a server-emitted id.
+
+    The scanner hunts for the pair `"dotted.id", "an English sentence"`, and a
+    Rust TEST FIXTURE has exactly that shape:
+
+        raise(Warning::error("t.reduced", "a plane is shed"));
+
+    `src/degradation.rs` produced three such phantoms on first contact — ids no
+    server will ever emit, each demanding an en.json entry that would put test
+    strings into the shipped product bundle in 29 languages.
+
+    That is worth a prover of its own rather than a mutation entry, because the
+    failure direction is the dangerous one: the check invented work and *looked
+    like diligence while doing it*. A gate that manufactures findings is trusted
+    exactly as long as it takes someone to look at one — and then not at all,
+    including for the real findings sitting next to it.
+
+    So: add a test module emitting an id en.json never defines, and show that
+    (a) nothing fires, and (b) the emitted-id DENOMINATOR is unchanged — because
+    a stripper that silently ate real ids too would also produce a green run.
+    """
+    _build_fixture(root)
+    rs = root / SERVER_SRC / "fixture.rs"
+    before = run_checks_synthetic(root)
+    before_ids = len(server_message_ids(root))
+
+    # The test module is inserted BEFORE the file's production emission site,
+    # not appended. Appended at EOF, over-eating is invisible: blanking to
+    # end-of-file destroys nothing, so a matcher that runs past the module's
+    # real close still passes. Every construct here made an earlier version do
+    # exactly that — `'{'` in particular ran the matcher to EOF.
+    hostile = (
+        "#[cfg(test)]\nmod tests {\n"
+        "    // a comment with an unbalanced } brace\n"
+        "    /* and a block comment with an unbalanced { one */\n"
+        '    fn lit() -> &\'static str { "a } and a \\" inside" }\n'
+        # UNBALANCED on purpose. An earlier fixture carried both '{' and '}',
+        # which cancel — so deleting the char-literal handling outright still
+        # passed. A fixture whose hazards balance tests nothing.
+        "    fn open_brace() -> char { '{' }\n"
+        "    fn quote() -> char { '\\'' }\n"
+        "    fn unicode_close() -> char { '\\u{7d}' }\n"
+        "    mod nested { fn d() { raise(m(\"t.nested\", \"a phantom one level down\")); } }\n"
+        '    fn t() { raise(m("t.phantom", "an id no server will ever emit")); }\n'
+        "}\n\n"
+    )
+    rs.write_text(hostile + rs.read_text(encoding="utf-8"), encoding="utf-8")
+    after = run_checks_synthetic(root)
+    after_ids = len(server_message_ids(root))
+
+    failures = 0
+    if after.errors or after.warnings:
+        print("  FAIL  a #[cfg(test)] fixture was scanned as a server emission:")
+        for m in after.errors + after.warnings:
+            print(f"          {m}")
+        failures += 1
+    elif after_ids != before_ids:
+        print(
+            f"  FAIL  test-module stripping changed the emitted-id count "
+            f"({before_ids} -> {after_ids}); a stripper that eats REAL ids also runs green"
+        )
+        failures += 1
+    elif before.errors or before.warnings:
+        print("  FAIL  the fixture was not clean before the test module was added")
+        failures += 1
+    else:
+        print(
+            f"  ok    a #[cfg(test)] fixture emits nothing and moves no denominator "
+            f"({before_ids} id(s) before and after)"
+        )
+    return failures
+
+
 def _prove_keyset_comparison_is_blind(root: Path) -> int:
     """Assert, in code, the premise of CIRISServer#366.
 
@@ -986,7 +1612,7 @@ def _prove_keyset_comparison_is_blind(root: Path) -> int:
     before = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
     _flatten_nav_home(root)
     after = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
-    rep = run_checks(root)
+    rep = run_checks_synthetic(root)
     resolvability = [e for e in rep.errors if e.startswith("key-resolvability")]
     other_errors = [e for e in rep.errors if not e.startswith("key-resolvability")]
     # reference-coverage and server-id-reachable also fire here — the Kotlin call
@@ -1023,7 +1649,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory(prefix="loc-guard-selftest-") as td:
         pristine = Path(td) / "pristine"
         _build_fixture(pristine)
-        rep = run_checks(pristine)
+        rep = run_checks_synthetic(pristine)
         if rep.errors or rep.warnings:
             print("  FAIL  pristine fixture is not clean:")
             for m in rep.errors + rep.warnings:
@@ -1038,7 +1664,7 @@ def self_test() -> int:
                 shutil.rmtree(work)
             _build_fixture(work)
             mutate(work)
-            rep = run_checks(work)
+            rep = run_checks_synthetic(work)
             bucket = rep.errors if severity == "error" else rep.warnings
             other = rep.warnings if severity == "error" else rep.errors
             hit = [m for m in bucket if needle in m]
@@ -1064,6 +1690,8 @@ def self_test() -> int:
                         print(f"          (also warned: {m})")
 
         failures += _prove_keyset_comparison_is_blind(Path(td) / "blind")
+        failures += _prove_test_fixtures_are_not_server_emissions(Path(td) / "cfgtest")
+        failures += _prove_the_debt_list_is_kept_honest(Path("."))
 
     print()
     if failures:

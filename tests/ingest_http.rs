@@ -584,6 +584,7 @@ async fn the_2026_08_05_incident_would_have_fired_on_the_operator_surface() {
             node: Err("not read in this fixture".to_owned()),
             edge: Err("no edge in this fixture".to_owned()),
             trace: Err("sqlite: database is locked".to_owned()),
+            store: Err("not exercised by this case".to_string()),
             ingest: Some(&bundle),
         },
         found_at,

@@ -244,6 +244,13 @@ mod tests {
             edge_outbound_queue: TableUsage::default(),
             federation_keys: TableUsage::default(),
             total_disk_bytes: 0,
+            // persist v38.4.0 (#767): catalogue-enumerated tables, the
+            // byte residual, and whether per-table bytes were measurable
+            // at all. Fixtures leave the catalogue empty — these tests are
+            // about the PLAN, and the planner reads the named fields.
+            tables: Default::default(),
+            dark_bytes: 0,
+            bytes_measurable: true,
         }
     }
 
@@ -439,6 +446,13 @@ mod disk_bound_honesty {
             edge_outbound_queue: TableUsage::default(),
             federation_keys: TableUsage::default(),
             total_disk_bytes: bytes,
+            // persist v38.4.0 (#767): catalogue-enumerated tables, the
+            // byte residual, and whether per-table bytes were measurable
+            // at all. Fixtures leave the catalogue empty — these tests are
+            // about the PLAN, and the planner reads the named fields.
+            tables: Default::default(),
+            dark_bytes: 0,
+            bytes_measurable: true,
         }
     }
 

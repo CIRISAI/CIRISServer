@@ -1157,7 +1157,7 @@ async fn post_dismissal(
     if let Some(r) = require_nonblank(
         &req.objection_id,
         "objection_absent",
-        "commons_surface.refusal.objection_absent",
+        "commons_surface.refusal.objection_absent_dismissal",
         "objection_id is required: a dismissal lifts ONE named objection.",
     ) {
         return r;

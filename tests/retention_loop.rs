@@ -423,3 +423,275 @@ fn only_an_unenforceable_bound_is_a_fault() {
          let ciris-status pass its cap unnoticed"
     );
 }
+
+// ── 5. The alarm reaches health, and comes back down ─────────────────────────
+
+/// The degradation registry is a PROCESS-GLOBAL and libtest runs these cases in
+/// parallel threads of one process, so one case's `raise` lands inside another's
+/// window. Caught by construction here rather than by a flake: both cases below
+/// raise the SAME code and then assert it is gone, which is exactly the pair
+/// that interleaves into a false failure. `src/degradation.rs` carries the same
+/// lock for the same reason, and `oauth_state_matrix.rs` records the first time
+/// this repo paid for a leaked global.
+static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// **A retention fault must be visible where someone is looking**, and a
+/// recovered node must stop shouting (CIRISServer#446).
+///
+/// The ERROR line `run_pass` emits goes to a log nobody tails. The half that
+/// matters for an operator on a phone is `GET /v1/node/health`, and the half
+/// that matters for whether they ever trust it again is that a fixed node
+/// clears. A warning that only ever goes up is one people learn to skip — the
+/// same silence #476 set out to fix, approached from the other side.
+///
+/// Driven through the real `run_pass` rather than by calling `clear` directly,
+/// because the defect this guards against is a future arm that returns early
+/// and skips the clear.
+#[tokio::test]
+async fn a_healthy_pass_takes_a_standing_retention_alarm_down() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    // Start from a known state for THIS code specifically — `reset_for_test`
+    // is deliberately not public, so a test clears exactly what it asserts on
+    // rather than being handed a lever that empties a live node's health.
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+    let engine = node().await;
+    ingest_aged_traces(&engine, 3, 0).await;
+
+    // Pretend a previous pass found the bound unenforceable.
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "a bound from a previous pass that has since been fixed",
+    ));
+    assert!(
+        ciris_server::degradation::degraded_mode(),
+        "fixture: the node must start this test degraded"
+    );
+
+    let cfg = RetentionConfig::from_resolved(&ResolvedConfig::default());
+    let outcome = retention_loop::run_pass(&engine, &cfg)
+        .await
+        .expect("a healthy pass must not error");
+    assert!(!outcome.is_fault(), "fixture: {outcome:?} must be healthy");
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the store is inside every bound and the node is STILL reporting an unenforceable \
+         cap. A stale alarm is worse than no alarm: it trains the operator to ignore the \
+         real one. Standing: {standing:?}"
+    );
+}
+
+/// The unbounded arm returns EARLY, before the store is even read — so it needs
+/// its own clear, and this is the test that would catch its absence.
+///
+/// Clearing here is not reassurance. An unbounded store still grows and the
+/// INFO line says so; it is refusing to leave standing a claim ("the configured
+/// bound cannot bite") that stops being true the moment there is no configured
+/// bound.
+#[tokio::test]
+async fn the_early_unbounded_return_also_clears() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    // Start from a known state for THIS code specifically — `reset_for_test`
+    // is deliberately not public, so a test clears exactly what it asserts on
+    // rather than being handed a lever that empties a live node's health.
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+    let engine = node().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "raised while a cap was configured; the operator has since removed it",
+    ));
+
+    let cfg = RetentionConfig::from_resolved(&retention_config(3600, 0));
+    let outcome = retention_loop::run_pass(&engine, &cfg)
+        .await
+        .expect("an unbounded pass must not error");
+    assert_eq!(outcome, RetentionOutcome::Unbounded, "fixture");
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the unbounded path returns before the sweep and skipped the clear, so removing a \
+         cap leaves the node permanently degraded. Standing: {standing:?}"
+    );
+}
+
+/// **A plan that INTENDS to relieve is not evidence that it did**
+/// (codex review, PR #483).
+///
+/// `DiskPressure::Relieving` means "the plan CAN act" — a claim made from the
+/// PRE-pass summary, before anything executed. Two things routinely make it a
+/// false one: an `audit_log_max_age_days` range flips `Unreachable` to
+/// `Relieving` while the lens executor does not execute audit archival at all,
+/// and a SQLite delete need not reduce `total_disk_bytes` because freed pages
+/// go on the freelist.
+///
+/// So an over-cap store could clear its own alarm every hour, forever, on the
+/// strength of a plan that frees nothing — the exact silence #476 exists to
+/// end, restored through the recovery path.
+///
+/// The next pass classifies from a FRESH summary, so real recovery still clears
+/// on the following tick. This asserts the classification drives the decision,
+/// which is the property that broke: `Within` and `Unbounded` clear, and
+/// `Relieving` does not.
+#[test]
+fn only_a_measured_verdict_clears_the_bound_alarm_never_a_plan() {
+    use ciris_lens_core::retention::DiskPressure;
+
+    // The two that ARE evidence: a store measured under its trigger, and a
+    // store with no configured bound at all.
+    for p in [
+        DiskPressure::Within {
+            used_bytes: 10,
+            cap_bytes: 1_000,
+        },
+        DiskPressure::Unbounded,
+    ] {
+        assert!(
+            matches!(p, DiskPressure::Within { .. } | DiskPressure::Unbounded),
+            "fixture"
+        );
+    }
+
+    // `Relieving` carries the SAME over-cap bytes as `Unreachable` — it differs
+    // only in whether a lever was PLANNED, which is why it cannot stand in for
+    // an outcome.
+    let relieving = DiskPressure::Relieving {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+    };
+    match relieving {
+        DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        } => assert!(
+            used_bytes > cap_bytes,
+            "a `Relieving` store is still OVER its cap — the variant says a lever was planned, \
+             not that the bytes went. Clearing an alarm on it declares recovery from an \
+             intention."
+        ),
+        other => panic!("fixture: expected Relieving, got {other:?}"),
+    }
+}
+
+/// **A relieving plan that freed NOTHING is an unenforceable bound**
+/// (codex review, PR #483 — the second half of this defect).
+///
+/// The first fix stopped `Relieving` from CLEARING a standing alarm. That is
+/// only half: on the FIRST such pass there is no alarm to preserve, so an
+/// over-cap store fell through to the zero-action branch, reported
+/// `WithinBounds`, and health stayed `ok` forever — the silence #476 exists to
+/// end, restored through the other side of the same arm.
+///
+/// The reproducing case is not exotic: with `audit_log_max_age_days` the only
+/// configured lever, lens-core plans an archive range and returns `Relieving`
+/// on every pass while its executor leaves `archived_audit_entries` at zero,
+/// because archival is not implemented.
+///
+/// Pinned on the OUTCOME contract — a plan is a claim about what a lever could
+/// do, and the action counts are what happened — because that is the
+/// distinction the code now turns on.
+#[test]
+fn a_plan_is_not_an_outcome_and_only_the_outcome_can_be_trusted() {
+    use ciris_lens_core::retention::DiskPressure;
+
+    // `Relieving` and `Unreachable` describe the SAME over-cap store. They
+    // differ only in whether a lever was planned — not in whether bytes moved.
+    let relieving = DiskPressure::Relieving {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+    };
+    let unreachable = DiskPressure::Unreachable {
+        used_bytes: 2_000_000_000,
+        cap_bytes: 1_000_000_000,
+        evictable_rows: 0,
+    };
+    let bytes = |p: &DiskPressure| match p {
+        DiskPressure::Relieving {
+            used_bytes,
+            cap_bytes,
+        }
+        | DiskPressure::Unreachable {
+            used_bytes,
+            cap_bytes,
+            ..
+        } => (*used_bytes, *cap_bytes),
+        other => panic!("fixture: {other:?}"),
+    };
+    assert_eq!(
+        bytes(&relieving),
+        bytes(&unreachable),
+        "these two verdicts describe an identically over-cap store. Treating one as recovery \
+         and the other as a fault, on the strength of a PLAN, is the defect."
+    );
+
+    // And the outcome the loop returns for a planned-but-inert pass must be the
+    // fault, not the healthy zero.
+    assert!(
+        RetentionOutcome::BoundUnenforceable {
+            used_bytes: 2_000_000_000,
+            cap_bytes: 1_000_000_000,
+            evictable_rows: 0,
+        }
+        .is_fault(),
+        "a pass that planned to free bytes and freed none must alarm — it reports the same \
+         zero as a healthy sweep and is not one"
+    );
+    assert!(
+        !RetentionOutcome::WithinBounds {
+            trace_rows: 0,
+            oldest_trace: None,
+            total_disk_bytes: 2_000_000_000,
+        }
+        .is_fault(),
+        "fixture: WithinBounds is the healthy zero the inert pass used to report"
+    );
+}
+
+/// **Removing the disk cap must clear the disk alarm even if the store read
+/// fails** (codex review, PR #483).
+///
+/// An operator who removes `max_disk_gb` but keeps an age bound leaves
+/// `is_bounded()` true, so the unbounded early-return does not fire — and every
+/// path that could clear the alarm used to sit after a `storage_summary()` that
+/// can fail. One failing read then stranded a stale alarm about a bound that no
+/// longer exists, with no way back: they did the thing that should fix it and
+/// health kept saying otherwise.
+#[tokio::test]
+async fn removing_the_disk_cap_clears_its_alarm_before_any_fallible_read() {
+    let _registry = REGISTRY_LOCK.lock().await;
+    ciris_server::degradation::clear("retention.bound_unenforceable");
+
+    let engine = node().await;
+    ciris_server::degradation::raise(ciris_server::degradation::Warning::error(
+        "retention.bound_unenforceable",
+        "raised while a disk cap was configured; the operator has since removed it",
+    ));
+
+    // Age bound kept, disk cap removed — so the policy is still BOUNDED and the
+    // unbounded early-return does not fire.
+    let cfg = RetentionConfig::from_resolved(&retention_config(3600, 0));
+    assert!(
+        cfg.policy.max_disk_gb.is_none(),
+        "fixture: the disk cap must be gone"
+    );
+
+    let _ = retention_loop::run_pass(&engine, &cfg).await;
+
+    let standing: Vec<String> = ciris_server::degradation::snapshot()
+        .into_iter()
+        .map(|w| w.code)
+        .collect();
+    assert!(
+        !standing.contains(&"retention.bound_unenforceable".to_string()),
+        "the disk cap is GONE and the node still reports that it cannot be enforced. \
+         'The configured disk bound cannot bite' is not a claim a node without a disk bound \
+         can make: {standing:?}"
+    );
+}

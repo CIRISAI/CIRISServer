@@ -180,6 +180,10 @@ pub mod config_reconcile;
 /// Both fail closed. Public so the integration test (`tests/conformance_gate.rs`)
 /// can drive the gate + the negotiation directly.
 pub mod conformance;
+/// Server health — the fabric node's own liveness endpoint (`/health`,
+/// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
+/// `/v1/system/health` with optional cognitive health.
+pub mod degradation;
 /// Delegation-transparency middleware — stamps a `dgrant:` caller's full grant
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
@@ -242,9 +246,6 @@ pub mod graph_config;
 /// as software-class. `register_attested_federation_key` is the chokepoint every
 /// `register_federation_key` call site in this crate goes through.
 pub mod hardware_attestation;
-/// Server health — the fabric node's own liveness endpoint (`/health`,
-/// `/v1/health`, `/v1/system/health`). Mandatory base health; the agent enriches
-/// `/v1/system/health` with optional cognitive health.
 pub mod health;
 /// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
 /// (the publisher + converger that advertise this node's held fountain

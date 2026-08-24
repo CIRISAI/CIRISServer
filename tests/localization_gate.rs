@@ -106,12 +106,331 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Blank out every `#[cfg(test)]` item, so a test fixture cannot be mistaken
+/// for a server-emitted message id.
+///
+/// A test has exactly the shape this file hunts for:
+///
+/// ```ignore
+/// raise(Warning::error("t.reduced", "a plane is shed"));
+/// ```
+///
+/// `src/degradation.rs` produced three such phantoms on first contact — ids no
+/// server will ever emit, each demanding an en.json entry that would put test
+/// strings into the shipped product bundle in 29 languages. Failing in the
+/// direction of MORE findings is what made it look like diligence.
+///
+/// **This must stay byte-for-byte equivalent in behaviour to
+/// `_without_test_modules` in `client/tools/check_localization_sync.py`.** The
+/// two scrapers exist to disagree — that is the whole point of
+/// `rust_and_python_resolvers_agree_on_the_bundle` — so a rule added to one and
+/// not the other is a red gate, and was: this fix landed on the Python side
+/// first and the counts went 244 vs 241 within the hour.
+///
+/// Brace-matched rather than pattern-matched, because a test module nests and
+/// the literals inside it carry braces, quotes and comment markers of their
+/// own. Replaced with spaces rather than deleted, so byte offsets — and every
+/// line number reported from them — stay honest.
+/// Index of the closing quote if `c[start]` opens a Rust char literal.
+///
+/// `None` means the apostrophe is a LIFETIME or label tick, which closes
+/// nothing and must be stepped over rather than tracked. Both directions are
+/// load-bearing and they fail oppositely: treating `'{'` as two ordinary
+/// characters runs the brace matcher past a test module's end and eats the
+/// production emission sites after it, while treating `&'static str` as an
+/// open char literal swallows the rest of the file the same way.
+///
+/// Escapes whose payload can itself contain braces (`'\u{7d}'`) are handled by
+/// scanning to the terminating quote rather than assuming a fixed width, and
+/// the scan is bounded so a malformed literal cannot run to EOF.
+///
+/// **Must stay behaviourally identical to `_char_literal_end` in
+/// `client/tools/check_localization_sync.py`.**
+/// Index of the `{` opening the body of the item attributed at `attr_start`.
+///
+/// `None` when the item has NO body (`use`, `const`, `static`, a type alias) —
+/// those end at a top-level semicolon, and treating the next item's `{` as
+/// theirs is how a production emission site gets blanked.
+///
+/// Decided by which comes first at NESTING DEPTH ZERO, skipping the attribute's
+/// own brackets and any string content, so `#[cfg(test)] const S: &str = "a {";`
+/// is still recognised as brace-less.
+///
+/// **Must stay behaviourally identical to `_attributed_item_body` in
+/// `client/tools/check_localization_sync.py`.**
+fn attributed_item_body(c: &[char], attr_start: usize) -> Option<usize> {
+    let mut j = attr_start;
+    let mut depth_brack = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    while j < c.len() {
+        let ch = c[j];
+        if esc {
+            esc = false;
+        } else if ch == '\\' && in_str {
+            esc = true;
+        } else if in_str {
+            if ch == '"' {
+                in_str = false;
+            }
+        } else if ch == 'r' && raw_string_end(c, j).is_some() {
+            j = raw_string_end(c, j).unwrap_or(j) + 1;
+            continue;
+        } else if ch == '"' {
+            in_str = true;
+        } else if ch == '[' {
+            depth_brack += 1;
+        } else if ch == ']' {
+            depth_brack -= 1;
+        } else if depth_brack == 0 {
+            if ch == '{' {
+                return Some(j);
+            }
+            if ch == ';' {
+                return None;
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Index of the final `"` of a Rust raw string starting at `c[start]`.
+///
+/// `None` if it does not begin one. Recognises `r"..."` and `r#*"..."#*`,
+/// matching the closer to the SAME number of hashes — which is what lets a raw
+/// string legally contain `"#` sequences.
+///
+/// **Must stay behaviourally identical to `_raw_string_end` in the Python
+/// guard.**
+fn raw_string_end(c: &[char], start: usize) -> Option<usize> {
+    if c.get(start) != Some(&'r') {
+        return None;
+    }
+    let mut k = start + 1;
+    let mut hashes = 0usize;
+    while c.get(k) == Some(&'#') {
+        hashes += 1;
+        k += 1;
+    }
+    if c.get(k) != Some(&'"') {
+        return None;
+    }
+    let mut j = k + 1;
+    while j < c.len() {
+        if c[j] == '"' && (1..=hashes).all(|h| c.get(j + h) == Some(&'#')) {
+            return Some(j + hashes);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn char_literal_end(c: &[char], start: usize) -> Option<usize> {
+    if c.get(start) != Some(&'\'') {
+        return None;
+    }
+    let k = start + 1;
+    if k >= c.len() {
+        return None;
+    }
+    if c[k] == '\\' {
+        let limit = c.len().min(start + 12);
+        return (k + 1..limit).find(|&x| c[x] == '\'');
+    }
+    if c.get(k + 1) == Some(&'\'') {
+        return Some(k + 1);
+    }
+    None
+}
+
+fn without_test_modules(text: &str) -> String {
+    let mut out: Vec<char> = text.chars().collect();
+    let len = out.len();
+    let marker: Vec<char> = "#[cfg(test)]".chars().collect();
+    let mut i = 0usize;
+    while i < out.len() {
+        if !out[i..].starts_with(&marker[..]) {
+            i += 1;
+            continue;
+        }
+        // Find this item's opening brace, then its match. Anything before the
+        // brace (`mod tests`, further attributes) is inert either way.
+        // A BRACE-LESS item (`use`, `const`, `static`, a type alias) ends at
+        // its semicolon. Searching blindly for `{` adopts the opening brace of
+        // the NEXT — production — item and blanks it. See
+        // `attributed_item_body`.
+        let Some(brace) = attributed_item_body(&out, i) else {
+            let Some(semi) = (i..out.len()).find(|&k| out[k] == ';') else {
+                break;
+            };
+            for slot in out.iter_mut().take(semi + 1).skip(i) {
+                if *slot != '\n' {
+                    *slot = ' ';
+                }
+            }
+            i = semi + 1;
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut j = brace;
+        let (mut in_str, mut esc, mut in_line_comment) = (false, false, false);
+        let mut block_depth = 0i32;
+        while j < out.len() {
+            let ch = out[j];
+            if esc {
+                esc = false;
+            } else if ch == '\\' && in_str {
+                esc = true;
+            } else if in_line_comment {
+                if ch == '\n' {
+                    in_line_comment = false;
+                }
+            } else if block_depth > 0 {
+                // NESTED: Rust block comments nest, so a boolean exits at the
+                // first `*/` and counts the braces after it as syntax.
+                if ch == '/' && out.get(j + 1) == Some(&'*') {
+                    block_depth += 1;
+                    j += 2;
+                    continue;
+                }
+                if ch == '*' && out.get(j + 1) == Some(&'/') {
+                    block_depth -= 1;
+                    j += 2;
+                    continue;
+                }
+            } else if in_str {
+                if ch == '"' {
+                    in_str = false;
+                }
+            } else if ch == '"' {
+                in_str = true;
+            } else if ch == 'r' && raw_string_end(&out, j).is_some() {
+                // A RAW string. Its content may hold bare quotes AND braces,
+                // and the ordinary state machine flips out of the string at the
+                // first inner quote, then counts what follows as syntax.
+                // Measured both ways: `r#"a" } "#` stops early (phantom
+                // survives) and `r#"a" { "#` eats the production emission after
+                // the module.
+                j = raw_string_end(&out, j).unwrap_or(j) + 1;
+                continue;
+            } else if ch == '\'' {
+                // CHAR LITERAL or LIFETIME — see `char_literal_end`. `'{'`
+                // inside a test module would otherwise run this matcher past
+                // the module's real end and blank every production emission
+                // site after it.
+                if let Some(e) = char_literal_end(&out, j) {
+                    j = e + 1;
+                    continue;
+                }
+            } else if ch == '/' && out.get(j + 1) == Some(&'/') {
+                in_line_comment = true;
+            } else if ch == '/' && out.get(j + 1) == Some(&'*') {
+                block_depth = 1;
+                j += 2;
+                continue;
+            } else if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            j += 1;
+        }
+        for slot in out.iter_mut().take((j + 1).min(len)).skip(i) {
+            if *slot != '\n' {
+                *slot = ' ';
+            }
+        }
+        i = j + 1;
+    }
+    out.into_iter().collect()
+}
+
 /// Scrape the server's localizable strings: an `(id, english_text)` literal
 /// pair, whatever helper wraps it — `m(id, text)`, `refusal(code, token, id,
 /// text)`, or a bare `Msg` tuple. Matching the PAIR rather than one helper name
 /// is what makes this cover all three emitters.
 ///
 /// Returns id -> first emission site (repo-relative).
+/// Dotted-id literals appearing as ARGUMENTS to an emitter helper, whatever
+/// the remaining arguments look like.
+///
+/// The pair-matching scan above keys on the TEXT — a literal, or a `format!`.
+/// An emission whose text is any other expression matched neither, so its id
+/// was excluded from every server-id check and removing its bundle entry left
+/// the strict gate green. Live at the time: `auth.oauth.provider_unavailable`
+/// (followed by `&e.message()`) and `accord.duty.holder_custody` (followed by a
+/// bound `msg`).
+///
+/// The helper list is derived from the source, not guessed: these are the
+/// identifiers that actually enclose dotted-id literals in `src/`. "Any dotted
+/// literal followed by a comma" sweeps in hostnames (`accounts.google.com`),
+/// filenames (`libykcs11.dll`) and machine-only degradation CODES, which are a
+/// different contract entirely.
+///
+/// **Must stay behaviourally identical to `_emitter_call_ids` in
+/// `client/tools/check_localization_sync.py`.**
+fn emitter_call_ids(c: &[char], out: &mut Vec<String>) {
+    const EMITTERS: [&str; 6] = ["m", "err", "msg", "refuse", "refusal", "browser_refusal"];
+    let mut i = 0usize;
+    while i < c.len() {
+        if c[i] != '(' {
+            i += 1;
+            continue;
+        }
+        // The identifier immediately before this paren.
+        let mut k = i;
+        while k > 0 && c[k - 1].is_whitespace() {
+            k -= 1;
+        }
+        let end = k;
+        while k > 0
+            && (c[k - 1].is_ascii_lowercase() || c[k - 1] == '_' || c[k - 1].is_ascii_digit())
+        {
+            k -= 1;
+        }
+        let name: String = c[k..end].iter().collect();
+        // A QUALIFIED path is still an emitter call: `super::refusal::refuse(
+        // ..., "auth.oauth.native_token_invalid", ...)` is the real site that
+        // made these two scrapers disagree 302 vs 303. Only the final segment
+        // identifies the helper, and the Python guard's `\b` boundary treats it
+        // the same way — which is the behaviour of record, and what the
+        // cross-check is comparing against.
+        if EMITTERS.contains(&name.as_str()) {
+            let mut depth = 0i32;
+            let mut j = i;
+            while j < c.len() {
+                if c[j] == '(' {
+                    depth += 1;
+                } else if c[j] == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            let mut p = i + 1;
+            while p < j {
+                if c[p] == '"' {
+                    if let Some(lit) = read_plain_literal(c, p, 200) {
+                        if is_message_id(&lit.0) {
+                            out.push(lit.0);
+                        }
+                        p = lit.1;
+                        continue;
+                    }
+                }
+                p += 1;
+            }
+        }
+        i += 1;
+    }
+}
+
 fn server_message_ids() -> BTreeMap<String, String> {
     let root = repo_root();
     let mut files = Vec::new();
@@ -123,12 +442,20 @@ fn server_message_ids() -> BTreeMap<String, String> {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
+        // Same rule as the Python guard, or the cross-check below goes red.
+        let text = without_test_modules(&text);
         let rel = file
             .strip_prefix(&root)
             .unwrap_or(&file)
             .to_string_lossy()
             .to_string();
         let c: Vec<char> = text.chars().collect();
+        // Ids in emitter-call argument position, whatever follows them.
+        let mut emitted: Vec<String> = Vec::new();
+        emitter_call_ids(&c, &mut emitted);
+        for mid in emitted {
+            ids.entry(mid).or_insert_with(|| rel.clone());
+        }
         // Scan for the PATTERN at every position, exactly as the Python guard's
         // regex does — deliberately NOT a string-state machine.
         //
@@ -167,6 +494,30 @@ fn server_message_ids() -> BTreeMap<String, String> {
                 j += 1;
             }
             if j >= c.len() || c[j] != '"' {
+                // **THE SAME ID POSITION WITH A COMPUTED TEXT** — `format!(...)`
+                // rather than a literal. Neither scraper could see these, so
+                // every server-id check silently excluded them and the
+                // denominator overstated coverage. Live example:
+                // `mesh_config.refusal.store_unavailable`, absent from en.json
+                // while the guard reported all 241 examined ids covered.
+                //
+                // The ID is taken from both shapes; the exact SOURCE-TEXT
+                // comparison stays restricted to the literal shape, because a
+                // `format!` template is not a string this checker can evaluate.
+                //
+                // Must stay behaviourally identical to
+                // `_SERVER_MSG_ID_FORMATTED` in the Python guard — the
+                // cross-check below is what caught this one mirrored and one
+                // not, within a single test run.
+                if c[j..].starts_with(&"format!".chars().collect::<Vec<_>>()[..]) {
+                    let mut k = j + "format!".len();
+                    while k < c.len() && c[k].is_whitespace() {
+                        k += 1;
+                    }
+                    if k < c.len() && c[k] == '(' {
+                        ids.entry(id.0.clone()).or_insert_with(|| rel.clone());
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -489,5 +840,167 @@ fn rust_and_python_resolvers_agree_on_the_bundle() {
         "the Rust scraper in this file sees {rust_ids} server-emitted ids and the Python guard \
          sees {python_ids}. One of them has drifted, and whichever sees fewer is silently \
          exempting emission sites from its gate."
+    );
+}
+
+/// **A `#[cfg(test)]` fixture is not a server emission** — pinned HERE, not
+/// only through the Python cross-check.
+///
+/// `rust_and_python_resolvers_agree_on_the_bundle` compares the two scrapers
+/// and is what caught this rule landing on the Python side alone (244 vs 241).
+/// But agreement is not correctness: if both scrapers drifted the same way,
+/// that check would stay green over two identically-wrong answers. So each side
+/// pins the RULE directly — this test, and
+/// `_prove_test_fixtures_are_not_server_emissions` in the Python guard.
+///
+/// The fixture below is deliberately awkward: a literal containing a brace and
+/// an escaped quote, a `//` comment holding an unbalanced brace, and a nested
+/// module. A naive brace-counter walks off the end of any one of them and eats
+/// the rest of the file — which reads as "no findings", the most expensive way
+/// for a gate to fail.
+#[test]
+fn a_cfg_test_module_contributes_no_message_ids() {
+    // Each case carries ONE hostile construct, UNBALANCED. The first cut put
+    // `'{'` and `'}'` in the same fixture, where they cancel — so removing the
+    // char-literal handling entirely still passed. A fixture whose hazards
+    // balance is not a test of anything.
+    //
+    // And the production emission sites bracket the test module on BOTH sides:
+    // appended at EOF, over-eating is invisible, because blanking to
+    // end-of-file destroys nothing.
+    let cases: [(&str, &str); 12] = [
+        ("open brace char literal", "fn f() -> char { '{' }"),
+        ("close brace char literal", "fn f() -> char { '}' }"),
+        ("escaped quote char literal", r"fn f() -> char { '\'' }"),
+        ("unicode close brace", r"fn f() -> char { '\u{7d}' }"),
+        (
+            "lifetime, which closes nothing",
+            "fn f() -> &'static str { \"x\" }",
+        ),
+        ("unbalanced brace in a line comment", "// a stray } here"),
+        (
+            "unbalanced brace in a block comment",
+            "/* a stray { here */",
+        ),
+        // Rust block comments NEST: a boolean exits at the first `*/` and
+        // counts what follows as syntax.
+        (
+            "nested block comment, close brace after inner",
+            "/* outer /* inner */ } still outer */",
+        ),
+        (
+            "nested block comment, open brace after inner",
+            "/* outer /* inner */ { still outer */",
+        ),
+        // Raw strings: the content may hold BARE quotes and braces, and the
+        // ordinary string state machine flips out at the first inner quote and
+        // then counts what follows as syntax. Both directions measured.
+        (
+            "raw string, bare quote then close",
+            "const S: &str = r#\"a\" } \"#;",
+        ),
+        (
+            "raw string, bare quote then open",
+            "const S: &str = r#\"a\" { \"#;",
+        ),
+        (
+            "raw string with a hash inside",
+            "const S: &str = r##\"a \"# } \"##;",
+        ),
+    ];
+
+    for (label, hostile) in cases {
+        let src = format!(
+            "fn before() -> Value {{ m(\"nav.home\", \"Home, the operator landing surface.\") }}\n\
+             \n\
+             #[cfg(test)]\n\
+             mod tests {{\n    {hostile}\n    \
+             fn phantom() {{ raise(m(\"t.phantom\", \"an id no server will ever emit\")); }}\n\
+             }}\n\
+             \n\
+             fn after() -> Value {{ m(\"nav.away\", \"Away, the other operator surface.\") }}\n"
+        );
+        let stripped = without_test_modules(&src);
+
+        assert!(
+            stripped.contains("nav.home"),
+            "[{label}] the stripper ate a production emission site BEFORE the test module"
+        );
+        assert!(
+            stripped.contains("nav.away"),
+            "[{label}] the stripper ran past the test module's real end and ate the production \
+             emission site AFTER it. That reads as 'no findings', which is indistinguishable \
+             from a clean file — the most expensive way for this gate to fail:\n{stripped}"
+        );
+        assert!(
+            !stripped.contains("t.phantom"),
+            "[{label}] the matcher stopped early and left the fixture in the scan, so a test \
+             string will be demanded in en.json in 29 languages:\n{stripped}"
+        );
+        assert_eq!(
+            stripped.lines().count(),
+            src.lines().count(),
+            "[{label}] the stripper must replace with spaces, never delete — byte offsets and \
+             every line number derived from them have to stay honest"
+        );
+    }
+}
+
+/// **A brace-less `#[cfg(test)]` item ends at its SEMICOLON.**
+///
+/// `use`, `const`, `static` and type aliases are all valid attribute targets
+/// and have no body. Searching blindly for the next `{` adopts the opening
+/// brace of the following — production — item and blanks it, so a real
+/// server-emitted id silently disappears from both coverage checks. Measured:
+/// `#[cfg(test)] use foo::bar;` ate the emission after it.
+#[test]
+fn a_brace_less_cfg_test_item_does_not_swallow_the_next_item() {
+    let items: [(&str, &str); 6] = [
+        ("use", "use foo::bar;"),
+        ("const", "const N: usize = 3;"),
+        ("static", "static S: u8 = 1;"),
+        (
+            "type alias",
+            "type T = std::collections::HashMap<String, u8>;",
+        ),
+        // The semicolon search must not be fooled by a brace inside a literal.
+        ("const holding a brace", "const S: &str = \"a { brace\";"),
+        (
+            "const holding a raw brace",
+            "const S: &str = r#\"a { brace\"#;",
+        ),
+    ];
+    for (label, item) in items {
+        let src = format!(
+            "#[cfg(test)]\n{item}\n\
+             fn after() -> Value {{ m(\"nav.away\", \"Away, the other operator surface.\") }}\n"
+        );
+        let stripped = without_test_modules(&src);
+        assert!(
+            stripped.contains("nav.away"),
+            "[{label}] a brace-less #[cfg(test)] item swallowed the production item after it. \
+             The emission disappears from the scan, which reads as a clean file:\n{stripped}"
+        );
+    }
+}
+
+/// A NESTED test module must go too — a matcher that stops at the first inner
+/// `}` leaves the deeper fixture in the scan.
+#[test]
+fn a_nested_test_module_is_stripped_with_its_parent() {
+    let src = "fn before() -> Value { m(\"nav.home\", \"Home, the operator landing surface.\") }\n\
+               #[cfg(test)]\n\
+               mod tests {\n\
+                   mod nested { fn d() { raise(m(\"t.deeper\", \"a phantom one level down\")); } }\n\
+               }\n\
+               fn after() -> Value { m(\"nav.away\", \"Away, the other operator surface.\") }\n";
+    let stripped = without_test_modules(src);
+    assert!(
+        !stripped.contains("t.deeper"),
+        "a nested module survived the strip:\n{stripped}"
+    );
+    assert!(
+        stripped.contains("nav.home") && stripped.contains("nav.away"),
+        "the nested strip ate production emission sites:\n{stripped}"
     );
 }
