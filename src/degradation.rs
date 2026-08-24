@@ -1093,8 +1093,25 @@ pub fn report_edge_metrics(bundle: &ciris_edge::observability::EdgeMetricsBundle
     // the BUNDLE, not of any one field. Detected once on the aggregates that
     // cannot decrease without a restart, and the whole window is then measured
     // from zero.
+    // ANY counter going backwards is a reset — not just the aggregates.
+    //
+    // The first cut of this fix checked `rounds_total` and
+    // `backpressure_drops` only, which is the SAME defect it was fixing, one
+    // level in: a short-lived pre-restart total can be EXCEEDED by the
+    // post-restart one inside a single 30s window. Previously
+    // `{completed: 1, timed_out: 1, total: 2}`; restart; five rounds all
+    // complete, giving `{completed: 5, total: 5}`. `total` did not go backwards
+    // (5 > 2), so no reset was detected — while `timed_out` went 1 -> 0, which
+    // it cannot do without one.
+    //
+    // Every counter here is monotonic within an epoch, so a decrease ANYWHERE
+    // is proof of a new epoch, and that is the whole test.
     let reset = now.rounds_total < previous.rounds_total
-        || now.backpressure_drops < previous.backpressure_drops;
+        || now.backpressure_drops < previous.backpressure_drops
+        || now.completed < previous.completed
+        || now.timed_out < previous.timed_out
+        || now.refused < previous.refused
+        || now.error < previous.error;
     let baseline = if reset {
         // Everything the counters hold accumulated after the restart, so all of
         // it belongs to this window.
@@ -1452,6 +1469,59 @@ mod tests {
             "both post-restart rounds COMPLETED and the node reported failure. `completed` did \
              not appear to go backwards (2 >= 1) while `total` did, so the two counters were \
              differenced against different epochs: {:?}",
+            snapshot()
+        );
+    }
+
+    /// The reset detector must not have the defect it was written to fix.
+    ///
+    /// A busy pre-restart process can have its total EXCEEDED by the
+    /// post-restart one inside a single window, so watching the AGGREGATES
+    /// alone misses the epoch change — while an individual counter that went
+    /// backwards proves it. Every counter is monotonic within an epoch, so a
+    /// decrease anywhere is the test.
+    ///
+    /// The numbers below are chosen so the two detectors give OPPOSITE
+    /// VERDICTS, not merely different bookkeeping: an aggregate-only check
+    /// computes a tiny `total` window against a large `completed` one, the
+    /// subtraction saturates to zero failures, and a window that is genuinely
+    /// half-failing reads CLEAN.
+    #[test]
+    fn a_reset_is_detected_even_when_the_aggregate_grew_through_it() {
+        use ciris_edge::observability::{EdgeMetrics, RoundOutcome};
+        let _g = exclusive();
+        *LAST_EDGE_COUNTERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        // A healthy, busy process: 10 rounds, 9 of them fine.
+        let mut before = EdgeMetrics::new().snapshot();
+        before
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 9);
+        before
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 1);
+        report_edge_metrics(&before);
+
+        // Restart, then 12 rounds of which HALF time out. `total` went 10 -> 12,
+        // so the aggregate never decreased; `completed` went 9 -> 6, which it
+        // cannot do without a restart.
+        let mut after = EdgeMetrics::new().snapshot();
+        after
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::Completed, 6);
+        after
+            .replication_round_outcomes_total
+            .insert(RoundOutcome::TimedOut, 6);
+        report_edge_metrics(&after);
+
+        assert!(
+            degraded_mode(),
+            "half of the post-restart rounds timed out and the node reported CLEAN. The \
+             aggregate grew THROUGH the restart, so watching it alone missed the epoch \
+             change: the `total` window (2) came out smaller than the `completed` window \
+             (6), the subtraction saturated to zero failures, and a half-failing window \
+             read healthy. That is the defect this detector exists to prevent, one level \
+             in: {:?}",
             snapshot()
         );
     }
