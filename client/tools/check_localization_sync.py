@@ -775,7 +775,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "mesh_config.refusal.baseline_unreadable",
     "mesh_config.refusal.sign_failed",
     "mesh_config.refusal.store_unavailable",
-    "operator.store.federation_attestations_not_measured",
     "operator.store.per_table_bytes_not_measured",
     "operator.store.wal_bytes_not_measured",
     "trust_root.bad_bundle",

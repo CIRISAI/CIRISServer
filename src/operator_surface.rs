@@ -795,26 +795,66 @@ pub struct StoreFootprint {
     /// Whole-database bytes as persist reports them: `pg_database_size` on
     /// Postgres, `page_count * page_size` on SQLite (WAL excluded — see above).
     pub total_disk_bytes: u64,
-    /// `(table name, rows)` for every table the aggregate answers for, in a
-    /// stable order. Rows only: per-table BYTES are `0` on SQLite unless
-    /// `dbstat` is compiled in, and reporting a zero that means "not measured"
-    /// beside zeros that mean "empty" is the collapsed-zero defect this file
-    /// spends a section warning about.
-    pub tables: Vec<(&'static str, u64)>,
+    /// Every table in the store, from persist's CATALOGUE walk (v38.4.0 /
+    /// CIRISPersist#767) — not a hand-maintained list, which is what this used
+    /// to be and what let a node fill up while the surface named six tables and
+    /// missed the five holding the bytes.
+    pub tables: Vec<TableFootprint>,
+    /// Bytes `total_disk_bytes` holds that no table accounts for: freelist,
+    /// WAL-adjacent pages, indexes attributed elsewhere.
+    ///
+    /// Small is normal. LARGE is the reading that says the weight is somewhere
+    /// even the catalogue cannot see — a question that could not be ASKED
+    /// before v38.4.0.
+    pub dark_bytes: u64,
+    /// Were per-table bytes actually measurable?
+    ///
+    /// SQLite needs `dbstat`; persist's bundled build HAS it (measured, after
+    /// six releases of a doc comment asserting the opposite). A build without
+    /// it degrades to zeros, and this flag is what stops that degradation from
+    /// being indistinguishable from an empty store — the collapsed zero this
+    /// file spends a section warning about, carried on the wire rather than
+    /// apologised for in prose.
+    pub bytes_measurable: bool,
+}
+
+/// One table's footprint, as persist's catalogue reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableFootprint {
+    pub name: String,
+    pub rows: u64,
+    /// Meaningless unless [`StoreFootprint::bytes_measurable`]; omitted from
+    /// the wire in that case rather than rendered as a zero.
+    pub bytes: u64,
 }
 
 impl StoreFootprint {
     fn from_summary(s: &ciris_persist::retention::StorageSummary) -> Self {
         Self {
             total_disk_bytes: s.total_disk_bytes,
-            tables: vec![
-                ("trace_events", s.trace_events.rows),
-                ("trace_llm_calls", s.trace_llm_calls.rows),
-                ("detection_events", s.detection_events.rows),
-                ("audit_log", s.audit_log.rows),
-                ("edge_outbound_queue", s.edge_outbound_queue.rows),
-                ("federation_keys", s.federation_keys.rows),
-            ],
+            // **THE CATALOGUE, NOT A HAND-MAINTAINED LIST** (persist v38.4.0 /
+            // CIRISPersist#767). The six named fields were exactly the blind
+            // spot this surface used to have to apologise for: a production
+            // node filled up while they reported a healthy, near-empty set and
+            // 389 MB sat in `federation_attestations`, `signed_wire_index`,
+            // `attestation_subjects`, `transport_destinations` and
+            // `announced_peers` — none of which they named.
+            //
+            // `tables` is enumerated from the database catalogue, so a table
+            // cannot enter the schema without appearing here. The apology is
+            // deleted rather than reworded, which is the whole point of having
+            // written it as a named absence.
+            tables: s
+                .tables
+                .iter()
+                .map(|(name, u)| TableFootprint {
+                    name: name.clone(),
+                    rows: u.rows,
+                    bytes: u.bytes,
+                })
+                .collect(),
+            dark_bytes: s.dark_bytes,
+            bytes_measurable: s.bytes_measurable,
         }
     }
 
@@ -822,31 +862,56 @@ impl StoreFootprint {
         let tables: serde_json::Map<String, Value> = self
             .tables
             .iter()
-            .map(|(name, rows)| ((*name).to_string(), serde_json::json!({ "rows": rows })))
+            .map(|t| {
+                let mut v = serde_json::Map::new();
+                v.insert("rows".into(), serde_json::json!(t.rows));
+                // Bytes only when they MEAN something. A zero from a build
+                // without `dbstat` and a genuinely empty table render
+                // identically, and `bytes_measurable` is what stops that
+                // degradation from looking like a small store.
+                if self.bytes_measurable {
+                    v.insert("bytes".into(), serde_json::json!(t.bytes));
+                }
+                (t.name.clone(), Value::Object(v))
+            })
             .collect();
-        serde_json::json!({
-            "total_disk_bytes": self.total_disk_bytes,
-            "tables": tables,
-            // Named absences. An operator reading this must be able to tell
-            // "measured and small" from "not measured at all" WITHOUT knowing
-            // which tables persist's aggregate happens to cover.
-            // Message PAIRS, not bare strings (codex review, PR #483). These
-            // are stable operator-facing sentences on a surface that advertises
-            // `source_locale`, so a client in any other language had no key to
-            // resolve and could only print English. Backend error DETAIL stays
-            // a bare string — that is genuinely opaque and per-incident — but a
-            // fixed explanation is not.
-            //
-            // Their ids are enumerated in the guard's `KNOWN_UNLOCALIZED` until
-            // the bundles carry them (#484): a resolvable key that is not yet
-            // translated is strictly better than prose with no key at all,
-            // because the client can start resolving it the moment it lands.
-            "not_measured": {
-                "wal_bytes": msg(STORE_WAL_NOT_MEASURED),
-                "federation_attestations": msg(STORE_ATTESTATIONS_NOT_MEASURED),
-                "per_table_bytes": msg(STORE_PER_TABLE_BYTES_NOT_MEASURED),
-            },
-        })
+
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "total_disk_bytes".into(),
+            serde_json::json!(self.total_disk_bytes),
+        );
+        out.insert("tables".into(), Value::Object(tables));
+        out.insert(
+            "bytes_measurable".into(),
+            serde_json::json!(self.bytes_measurable),
+        );
+        // The residual: bytes the catalogue does not account for (freelist,
+        // WAL-adjacent pages, indexes attributed elsewhere). Small is normal.
+        // LARGE is the reading that says the weight is somewhere even the
+        // catalogue cannot see — a question that could not be ASKED before
+        // v38.4.0. Meaningless when bytes are not measurable, since every table
+        // then reports zero and the residual is simply the whole database.
+        if self.bytes_measurable {
+            out.insert("dark_bytes".into(), serde_json::json!(self.dark_bytes));
+        }
+
+        // Named absences — now only the ones that are still absent.
+        //
+        // `federation_attestations` and the per-table-bytes caveat are GONE:
+        // v38.4.0 enumerates the catalogue and measures real bytes on SQLite.
+        // Deleting them is the adoption working as designed; they were written
+        // to name exactly the two gaps that release closed.
+        let mut not_measured = serde_json::Map::new();
+        not_measured.insert("wal_bytes".into(), msg(STORE_WAL_NOT_MEASURED));
+        if !self.bytes_measurable {
+            not_measured.insert(
+                "per_table_bytes".into(),
+                msg(STORE_PER_TABLE_BYTES_NOT_MEASURED),
+            );
+        }
+        out.insert("not_measured".into(), Value::Object(not_measured));
+        Value::Object(out)
     }
 }
 
@@ -1337,17 +1402,10 @@ pub struct Sources<'a> {
 const STORE_WAL_NOT_MEASURED: Msg = (
     "operator.store.wal_bytes_not_measured",
     "The write-ahead log is excluded from this total: `total_disk_bytes` is page_count times \
-     page_size, and persist exposes no reader for the WAL. On a busy node the WAL can be a \
-     large fraction of what the disk actually holds.",
-);
-
-const STORE_ATTESTATIONS_NOT_MEASURED: Msg = (
-    "operator.store.federation_attestations_not_measured",
-    "The federation attestation table has no per-table line here: persist's storage summary \
-     carries no reading for it. Its bytes ARE inside `total_disk_bytes`, which is the whole \
-     database — what is missing is the ATTRIBUTION. On this node it is routinely the largest \
-     table, so a large total may be almost entirely this one table and nothing here would \
-     say so.",
+     page_size, and persist exposes no reader for the WAL. It is now BOUNDED (persist v38.4.0 \
+     sets a checkpoint threshold; before that it reached 218 MB against a 1.26 GB store), so \
+     this is a known small remainder rather than an open-ended one — but it is still not a \
+     number this surface can show you.",
 );
 
 const STORE_PER_TABLE_BYTES_NOT_MEASURED: Msg = (
@@ -3229,6 +3287,9 @@ mod tests {
             edge_outbound_queue: TableUsage::default(),
             federation_keys: TableUsage::default(),
             total_disk_bytes: 101 * 1024 * 1024,
+            tables: Default::default(),
+            dark_bytes: 0,
+            bytes_measurable: true,
         };
         let ok = corpus_of(Ok(summary)).expect("a readable summary is a readable corpus");
         assert_eq!(

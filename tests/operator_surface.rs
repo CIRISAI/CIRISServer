@@ -953,3 +953,56 @@ fn the_store_block_carries_persists_aggregate_and_names_its_blind_spots() {
          collapsed zero this file spends a section warning about: {v:#}"
     );
 }
+
+/// **The store block reports persist's CATALOGUE, and its blind spots shrank
+/// with the substrate** (persist v38.4.0 / CIRISPersist#767).
+///
+/// Two properties, and the second is the reason `not_measured` was written as
+/// named absences rather than as prose in a doc comment: the adoption that
+/// closes a gap DELETES the entry naming it. `federation_attestations` — the
+/// 194.8 MiB that dominated this node's read path and had no `TableUsage` at
+/// all — is now enumerated from the database catalogue, so a table cannot enter
+/// the schema without appearing.
+#[test]
+fn the_store_block_names_only_the_absences_that_are_still_absent() {
+    let v = ciris_server::operator_surface::compose(
+        ciris_server::operator_surface::Sources {
+            node: Err("not exercised".to_string()),
+            edge: Err("not exercised".to_string()),
+            trace: Err("not exercised".to_string()),
+            store: Err("storage_summary refused".to_string()),
+            ingest: None,
+        },
+        chrono::Utc::now(),
+    );
+    assert_eq!(
+        v["store"]["unreadable"], "storage_summary refused",
+        "a failed store read must carry its reason: {v:#}"
+    );
+    assert!(
+        v["store"].get("total_disk_bytes").is_none(),
+        "an unreadable store must not also report a byte count: {v:#}"
+    );
+
+    // The named absences that persist v38.4.0 CLOSED must be gone from the
+    // vocabulary entirely — not merely unreported on this path. A stale
+    // "we cannot see the biggest table" would now be a lie, and the loudest
+    // possible one: it tells an operator to distrust a reading that is correct.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operator_surface.rs"),
+    )
+    .expect("read operator_surface.rs");
+    assert!(
+        !src.contains("federation_attestations_not_measured"),
+        "persist v38.4.0 enumerates the catalogue, so `federation_attestations` HAS a reading \
+         now. The named absence must be DELETED with the adoption — that is what writing it \
+         as a named absence was for, and a surface that keeps apologising for a gap that \
+         closed teaches its reader to distrust a correct number."
+    );
+    assert!(
+        src.contains("wal_bytes"),
+        "the WAL is still not readable (`total_disk_bytes` is page_count * page_size), so \
+         that absence must still be named — v38.4.0 BOUNDED it, which is a different fact \
+         from measuring it"
+    );
+}
