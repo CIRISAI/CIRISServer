@@ -308,3 +308,74 @@ harness_verdict() {
   echo "  → INCONCLUSIVE: every stage reported non-zero but the success stage did not."
   exit 4
 }
+
+
+# ── CIRISServer#487 — printing the diagnostic that actually decides ──────────
+#
+# The old inline probe was `grep -oE '"trace_plane":\{[^}]*\}'`, which stops at
+# the FIRST `}`. `trace_plane` contains `rows_by_projection`, a nested object —
+# and that nested object is the authoritative reading, because it is computed
+# with edge's own advertise predicate rather than a paraphrase of it. So the
+# grep printed the fields that cannot settle the question and truncated the one
+# that can.
+#
+# That is the whole shape of #487: the diagnostic was present, the printer lost
+# it, and the investigation went to the serve gate instead.
+harness_trace_plane() {
+  compose logs agent 2>/dev/null \
+    | grep -o '"trace_plane":.*' \
+    | tail -1 \
+    | python3 -c 'import sys,json
+raw = sys.stdin.read()
+i = raw.find("{", raw.find("\"trace_plane\""))
+if i < 0:
+    print("  (no trace_plane diagnostic in the agent log yet)"); raise SystemExit
+d, depth, j, instr, esc = None, 0, i, False, False
+while j < len(raw):
+    c = raw[j]
+    if esc: esc = False
+    elif c == "\\": esc = True
+    elif instr:
+        if c == chr(34): instr = False
+    elif c == chr(34): instr = True
+    elif c == "{": depth += 1
+    elif c == "}":
+        depth -= 1
+        if depth == 0:
+            d = raw[i:j+1]; break
+    j += 1
+if not d:
+    print("  (trace_plane object truncated in the log line)"); raise SystemExit
+try: o = json.loads(d)
+except Exception: print("  " + d[:400]); raise SystemExit
+for k in ("covers_trace","covered_rows","stranded_covered_rows","promotion_audiences","live_self_grants"):
+    if k in o: print(f"    {k}: {o[k]}")
+if "rows_by_projection" in o:
+    print("    rows_by_projection (Projection/cohort_scope/verdict — EDGE OWN PREDICATE):")
+    rbp = o["rows_by_projection"]
+    items = rbp.items() if isinstance(rbp, dict) else [(x, "") for x in rbp]
+    for k, v in items: print(f"      {k}: {v}")
+if "hint" in o: print(f"    hint: {o[chr(104)+chr(105)+chr(110)+chr(116)]}")
+' 2>/dev/null || echo "  (trace_plane not parseable)"
+}
+
+# The agent's trace:* carrier rows grouped by the column the offer filter reads.
+# `trace_events.cohort_scope` is a PROJECTION of these rows and can disagree —
+# same column name, two tables, and the projection is downstream of the row that
+# decides (CIRISServer#487).
+harness_trace_scopes() {
+  compose exec -T agent python -c 'import glob,sqlite3
+best=[]
+for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
+    if d.endswith(("-wal","-shm")): continue
+    try:
+        r=sqlite3.connect(d).execute(
+          "SELECT COALESCE(NULLIF(cohort_scope,\"\"),\"<empty>\"), count(*) "
+          "FROM federation_attestations "
+          "WHERE CAST(attestation_envelope AS TEXT) LIKE \"%trace:%\" "
+          "GROUP BY 1 ORDER BY 2 DESC").fetchall()
+        if sum(x[1] for x in r) > sum(x[1] for x in best): best=r
+    except Exception: pass
+print("    (none)" if not best else "\n".join(f"    {s}: {n}" for s,n in best))' 2>/dev/null \
+    || echo "    (unreadable)"
+}

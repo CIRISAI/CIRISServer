@@ -58,10 +58,30 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 15
   AGENT_LOG=$(compose logs agent 2>/dev/null || true)
   CANON_LOG=$(compose logs canonical 2>/dev/null || true)
+  # STRIP ANSI ONCE, HERE. Rust's tracing writer colorises, so a field renders
+  # as `n_summaries<ESC>[2m=<ESC>[0m3` and a literal `n_summaries=[1-9]` pattern
+  # matches NOTHING — the probe reports 0 against a perfectly healthy run, and a
+  # probe that matches nothing reads exactly like a probe that matches zero.
+  #
+  # Measured on the 2026-08-24 run: raw 0, stripped 192. This runner reported
+  # "canonical saw summaries: 0" inside a SUCCESS verdict whose own log showed
+  # n_summaries=3.
+  #
+  # `lib/harness.sh`'s `harness_log_count` has stripped ANSI for exactly this
+  # reason for some time — with a comment saying the fix belongs there so no
+  # scenario has to remember it. This runner does not go through it, so it
+  # remembered nothing. Fixed at the source of the text rather than at each
+  # probe, for the same reason.
+  AGENT_LOG=$(printf '%s' "$AGENT_LOG" | sed -E 's/\x1b\[[0-9;]*m//g')
+  CANON_LOG=$(printf '%s' "$CANON_LOG" | sed -E 's/\x1b\[[0-9;]*m//g')
   SEALED=$(echo "$AGENT_LOG" | grep -c "sealed_and_persisted" || true)
   # the canonical has NO brain: any n_summaries>0 on its scorer = agent traces ARRIVED
   ARRIVED=$(echo "$CANON_LOG" | grep -cE "n_summaries=[1-9]" || true)
-  SCORED=$(echo "$CANON_LOG" | grep -c "capacity scorer pass complete" || true)
+  # `emitted=[1-9]`, not "a pass completed": the scorer logs a completed pass in
+  # BOTH directions, so matching the pass alone reports success for a pass that
+  # authored nothing. scenarios/traceflow.sh already carries this lesson in
+  # `stage_score`; this runner did not.
+  SCORED=$(echo "$CANON_LOG" | grep -cE "capacity scorer pass complete.*emitted=[1-9]" || true)
   SELFSKIP=$(echo "$AGENT_LOG" | grep -c "anti-Goodhart" || true)
   SEALERR=$(echo "$AGENT_LOG" | grep -c "TRACEFLOW: capture_event.*ERROR" || true)
   echo "  sealed=$SEALED arrived_pass=$ARRIVED canonical_scored=$SCORED agent_selfskip=$SELFSKIP sealerr=$SEALERR"
