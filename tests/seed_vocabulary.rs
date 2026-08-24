@@ -75,11 +75,10 @@ fn seed_names_only_the_genesis_bundle() {
     let root = repo_root();
     let mut files = Vec::new();
     collect(&root.join("src"), &["rs"], &mut files);
-    collect(
-        &root.join("client/shared/src/commonMain/kotlin"),
-        &["kt"],
-        &mut files,
-    );
+    // The Kotlin half went with `client/` (CIRISServer#471). The denominator
+    // guard below still bites on `src` alone — it scans hundreds of files — so
+    // this gate did not go blind when the tree shrank; it narrowed to the
+    // source this repo actually owns, which is the only source it can fix.
 
     assert!(
         files.len() > 20,

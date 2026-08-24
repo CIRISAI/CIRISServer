@@ -47,8 +47,13 @@ jobs:
       # invalid JSON, …) and asserts every check fires with a true message.
       # It is a required step: if the guard has lost the ability to fail, the
       # job is red BEFORE the real bundle is ever looked at. See CIRISServer#366.
+      - name: Install ciris-client (the guard reads its locale bundle)
+        # The bundle is an installed ARTIFACT since #471, not a tree. The guard
+        # fails HARD when it is absent rather than skipping, so this step is
+        # load-bearing: without it the gate cannot run at all.
+        run: pip install 'ciris-client[node]==0.5.188'
       - name: Prove the guard can fail (mutation self-test)
-        run: python3 client/tools/check_localization_sync.py --self-test
+        run: python3 tools/check_server_localization.py --self-test
 
       # Stdlib-only guard, no deps required. ERROR-level checks block:
       #   - every *.json in all FOUR runtime bundles parses,
@@ -78,5 +83,11 @@ jobs:
       #
       # The flag goes in only when the tree passes it. If it ever blocks
       # inconveniently, dropping it is one word.
-      - name: Localization guard (mirror, resolvability, placeholders, drift, coverage)
-        run: python3 client/tools/check_localization_sync.py --strict
+      - name: Install ciris-client (the guard reads its locale bundle)
+        # Load-bearing: the bundle is an installed ARTIFACT since #471 and the
+        # guard fails HARD when it is absent rather than skipping, so without
+        # this step the gate cannot run at all.
+        run: pip install 'ciris-client[node]==0.5.188'
+
+      - name: Server localization guard (server-emitted ids vs the client bundle)
+        run: python3 tools/check_server_localization.py --strict

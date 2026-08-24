@@ -311,7 +311,8 @@ jobs:
   #
   # ── THE PUBLISHED CONTRACT (the consumer is in ANOTHER REPO) ──────────────
   # Consumer: CIRISAgent `tools/update_substrate_libs.py` (its CIRISServer
-  # entry) + `client/iosApp/scripts/embed_native_frameworks.sh`. Tracking
+  # entry) + CIRISClient's `iosApp/scripts/embed_native_frameworks.sh` (that
+  # path moved out of this repo with CIRISServer#471). Tracking
   # issue for the client half: CIRISAI/CIRISAgent#1011. Everything below is
   # load-bearing on the OTHER side of that repo boundary — change one, change
   # both:

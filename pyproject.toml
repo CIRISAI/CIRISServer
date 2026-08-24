@@ -86,7 +86,6 @@ python-source = "python"
 # None are needed to build the abi3 extension — the wheel carries the compiled
 # artifact, the sdist carries buildable Rust source. (Wheels never bundled these.)
 exclude = [
-    { path = "client/**/*", format = "sdist" },
     { path = "qa/**/*", format = "sdist" },
     { path = "app/**/*", format = "sdist" },
     { path = "FSD/**/*", format = "sdist" },

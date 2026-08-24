@@ -5,10 +5,14 @@ The client UI strings live in FOUR committed runtime bundles that MUST stay
 byte-identical — one per platform loader (any that goes stale ships raw keys at
 runtime):
 
-  - client/shared/src/desktopMain/resources/localization/*.json   (CANONICAL)
-  - client/desktopApp/src/main/resources/localization/*.json      (desktop pkg)
-  - client/androidApp/src/main/assets/localization/*.json         (Android)
-  - client/iosApp/iosApp/localization/*.json                      (iOS)
+  the locale bundle shipped by `ciris-client[node]` (one artifact, resolved at
+  runtime by `ciris_client.locale_bundle()` — see `_locale_bundle`).
+
+  Until CIRISServer#471 this repo vendored FOUR byte-identical copies of that
+  bundle under `client/`, and half this file's checks existed to keep them in
+  step. Those retired with the tree; what remains is the half that needs THIS
+  repo's source and so can only be checked here: every message id the SERVER
+  emits must resolve in the bundle the CLIENT reads.
 
 ``en.json`` is the source of truth. The supported-language list is read from the
 bundle ``manifest.json`` (never hardcoded).
@@ -87,7 +91,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Repo root: this file lives at <root>/client/tools/check_localization_sync.py
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# `parents[1]`, not `[2]`: this script lives in `tools/` now, not
+# `client/tools/` (CIRISServer#471). The move silently made every server-id
+# check examine the wrong tree — and the denominator guard caught it on the
+# first run, reporting DEAD over 0 emitted ids rather than clean over none.
+# That is the whole reason those guards exist, working on their author.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Every COMMITTED runtime localization bundle. The first is canonical; ALL the
 # others are platform packaging/runtime copies that must mirror it byte-for-byte
@@ -149,7 +158,6 @@ SERVER_SRC = "src"
 # localizedString("key" …) / getString("key" …) — capture the literal first arg.
 # ``[^"$\\]`` rejects interpolated keys ("mobile.foo_${x}") which can't be
 # checked statically; those are skipped, not failed.
-_KEY_CALL = re.compile(r'(?:localizedString|getString)\(\s*"([^"$\\]+)"')
 
 # A server-emitted localizable string is an ``(id, english_text)`` literal pair,
 # whatever helper wraps it — ``m(id, text)`` (admin_ops.rs, mesh_config_surface.rs),
@@ -598,92 +606,29 @@ def locale_files(bundle: Path) -> List[Path]:
 Result = Tuple[List[str], int]
 
 
-def check_json_validity(root: Path) -> Result:
+def check_json_validity(bundle: Path) -> Result:
+    """ERROR: every locale file in the bundle must parse.
+
+    Not a re-verification of CIRISClient's work. It is the guard that stops a
+    corrupt or PARTIAL extraction surfacing as a confusing failure in the
+    server-id checks below — which would send a reader to their own source for
+    a fault in the artifact.
+    """
     msgs: List[str] = []
-    examined = 0
-    for b in MIRROR_BUNDLES:
-        bundle = root / b
-        if not bundle.exists():
-            msgs.append(f"bundle dir missing: {b}")
-            continue
-        for f in sorted(bundle.glob("*.json")):
-            examined += 1
-            try:
-                doc = load_json(f)
-            except Exception as e:  # noqa: BLE001 - report any parse failure
-                msgs.append(f"invalid JSON: {f.relative_to(root)}: {e}")
-                continue
-            if not isinstance(doc, dict):
-                msgs.append(f"not a JSON object: {f.relative_to(root)}")
-    return msgs, examined
-
-
-def check_bundle_mirror(root: Path) -> Result:
-    """Every one of the four runtime bundles must be byte-identical to canonical."""
-    msgs: List[str] = []
-    canonical = root / MIRROR_BUNDLES[0]
-    if not canonical.exists():
-        return [f"canonical bundle missing: {MIRROR_BUNDLES[0]}"], 0
-    canonical_files = {p.name for p in canonical.glob("*.json")}
-    examined = 0
-
-    for b in MIRROR_BUNDLES[1:]:
-        other = root / b
-        if not other.exists():
-            msgs.append(f"mirror bundle missing: {b}")
-            continue
-        other_files = {p.name for p in other.glob("*.json")}
-        for f in sorted(canonical_files - other_files):
-            msgs.append(f"{b}: missing file present in canonical: {f}")
-        for f in sorted(other_files - canonical_files):
-            msgs.append(f"{b}: extra file not in canonical: {f}")
-        for f in sorted(canonical_files & other_files):
-            examined += 1
-            if (canonical / f).read_bytes() != (other / f).read_bytes():
-                msgs.append(
-                    f"{b}/{f} differs from {MIRROR_BUNDLES[0]}/{f} "
-                    f"(all {len(MIRROR_BUNDLES)} runtime bundles must be byte-identical)"
-                )
-    return msgs, examined
-
-
-def check_manifest_coverage(root: Path, langs: Sequence[str]) -> Result:
-    """The manifest and the shipped locale files must name the same set."""
-    canonical = root / MIRROR_BUNDLES[0]
-    present = {p.stem for p in locale_files(canonical)}
-    listed = set(langs)
-    msgs = [f"manifest lists '{c}' but {c}.json is missing from canonical" for c in sorted(listed - present)]
-    msgs += [f"{c}.json ships in canonical but the manifest does not list '{c}'" for c in sorted(present - listed)]
-    return msgs, len(listed | present)
-
-
-def referenced_keys(root: Path) -> Dict[str, Path]:
-    """Map each statically-extractable localization key -> first Kotlin call site."""
-    keys: Dict[str, Path] = {}
-    common = root / COMMON_MAIN
-    if not common.exists():
-        return keys
-    for kt in sorted(common.rglob("*.kt")):
-        text = kt.read_text(encoding="utf-8")
-        for m in _KEY_CALL.finditer(text):
-            keys.setdefault(m.group(1), kt.relative_to(root))
-    return keys
-
-
-def check_reference_coverage(root: Path, en: dict) -> Result:
-    """Every literal key in commonMain must RESOLVE in en.json (not merely exist
-    in its flattened address space — see the module docstring)."""
-    msgs: List[str] = []
-    refs = referenced_keys(root)
-    unresolved = sorted((k, p) for k, p in refs.items() if resolve_key(en, k) is None)
-    if unresolved:
-        msgs.append(
-            f"{len(unresolved)} key(s) referenced in commonMain do not resolve in "
-            f"en.json (they render RAW on every platform):"
-        )
-        for key, site in unresolved:
-            msgs.append(f"    - {key}    ({site})")
-    return msgs, len(refs)
+    if not bundle.is_dir():
+        return [f"locale bundle missing: {bundle}"], 0
+    files = sorted(bundle.glob("*.json"))
+    for f in files:
+        try:
+            load_json(f)
+        except Exception as e:  # noqa: BLE001
+            msgs.append(f"invalid JSON: {f.name} ({e})")
+    if not files:
+        return [
+            f"examined 0 file(s) in {bundle} — the check found nothing because it "
+            f"looked at nothing"
+        ], 0
+    return msgs, len(files)
 
 
 def server_message_ids(root: Path) -> Dict[str, Path]:
@@ -707,7 +652,7 @@ def server_message_ids(root: Path) -> Dict[str, Path]:
     return ids
 
 
-def check_server_ids_resolvable(root: Path, en: dict, ids: Dict[str, Path]) -> Result:
+def check_server_ids_resolvable(en: dict, ids: Dict[str, Path]) -> Result:
     """ERROR: a server-emitted id that en.json DEFINES must be reachable.
 
     Present-but-unreachable is strictly worse than absent: the bundle claims the
@@ -928,7 +873,7 @@ def check_server_id_text_matches_source(root: Path, en: dict) -> Result:
     return msgs, len(src_texts)
 
 
-def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Result:
+def check_server_ids_covered(en: dict, ids: Dict[str, Path]) -> Result:
     """WARNING: a server-emitted id with no en.json entry at all.
 
     The wire carries ``{id, text}``, so an uncovered id degrades to the server's
@@ -960,115 +905,6 @@ def check_server_ids_covered(root: Path, en: dict, ids: Dict[str, Path]) -> Resu
     )
 
 
-def check_key_resolvability(root: Path) -> Result:
-    """THE #366 check: every leaf address a locale file carries must be reachable
-    by :func:`resolve_key` — the faithful port of the Kotlin resolver.
-
-    A key-set comparison cannot see this: flattening collapses
-    ``{"nav": {"home": …}}`` and ``{"nav.home": …}`` onto the same address. Only
-    the resolver's own walk tells them apart, and only the first one works.
-
-    This is checked per FILE, in the file's own address space, so it fires in
-    both directions — a flat key in en.json (dead for everyone, since the English
-    fallback fails identically) and a flat key in one locale (dead for that
-    locale's readers) are each an error against that file.
-    """
-    msgs: List[str] = []
-    canonical = root / MIRROR_BUNDLES[0]
-    examined = 0
-    for f in locale_files(canonical):
-        try:
-            doc = load_json(f)
-        except Exception:  # json-validity already reported it
-            continue
-        addrs = flat_values(doc)
-        examined += len(addrs)
-        bad = [a for a in sorted(addrs) if resolve_key(doc, a) is None]
-        if bad:
-            msgs.append(
-                f"{f.name}: {len(bad)} key(s) UNREACHABLE by LocalizationManager.resolveKey "
-                f"— stored as a flat dotted key (or a non-primitive leaf), so the lookup "
-                f"returns null and the id renders raw "
-                f"({', '.join(bad[:3])}{'…' if len(bad) > 3 else ''})"
-            )
-    return msgs, examined
-
-
-def check_placeholder_parity(root: Path, langs: Sequence[str], en: dict) -> Result:
-    """A translated value must carry the SAME multiset of interpolation
-    placeholders as its en.json source — a dropped or misspelled ``{count}``
-    renders unsubstituted at runtime. Corruption, not translation lag: ERROR."""
-    msgs: List[str] = []
-    canonical = root / MIRROR_BUNDLES[0]
-    en_vals = {k: v for k, v in flat_values(en).items() if isinstance(v, str)}
-    examined = 0
-    for lang in langs:
-        if lang == "en":
-            continue
-        f = canonical / f"{lang}.json"
-        if not f.exists():
-            continue  # manifest-coverage's job
-        try:
-            vals = flat_values(load_json(f))
-        except Exception:  # json-validity already reported it
-            continue
-        bad: List[str] = []
-        for key, ev in en_vals.items():
-            tv = vals.get(key)
-            if not isinstance(tv, str) or tv.strip() == "":
-                continue  # missing/empty is translation-drift's job
-            examined += 1
-            if sorted(_PLACEHOLDER.findall(ev)) != sorted(_PLACEHOLDER.findall(tv)):
-                bad.append(
-                    f"{key} [en {sorted(_PLACEHOLDER.findall(ev))} != "
-                    f"{lang} {sorted(_PLACEHOLDER.findall(tv))}]"
-                )
-        if bad:
-            msgs.append(
-                f"{lang}.json: {len(bad)} value(s) with placeholder drift — "
-                f"{'; '.join(bad[:3])}{'…' if len(bad) > 3 else ''}"
-            )
-    return msgs, examined
-
-
-def check_translation_drift(root: Path, langs: Sequence[str], en: dict) -> Result:
-    """WARNING: each locale should carry en.json's full key set, non-empty."""
-    msgs: List[str] = []
-    canonical = root / MIRROR_BUNDLES[0]
-    en_vals = flat_values(en)
-    en_keys = set(en_vals)
-    examined = 0
-    for lang in langs:
-        if lang == "en":
-            continue
-        f = canonical / f"{lang}.json"
-        if not f.exists():
-            continue  # manifest-coverage's job (an ERROR there)
-        try:
-            vals = flat_values(load_json(f))
-        except Exception:  # json-validity already reported it
-            continue
-        examined += len(en_keys)
-        missing = sorted(en_keys - set(vals))
-        empty = sorted(k for k in en_keys & set(vals) if isinstance(vals[k], str) and vals[k].strip() == "")
-        extra = sorted(set(vals) - en_keys)
-        detail: List[str] = []
-        if missing:
-            detail.append(f"missing {len(missing)} ({', '.join(missing[:3])}…)")
-        if empty:
-            detail.append(f"empty {len(empty)} ({', '.join(empty[:3])}…)")
-        if extra:
-            detail.append(f"extra {len(extra)} ({', '.join(extra[:3])}…)")
-        if detail:
-            msgs.append(f"{lang}.json: {'; '.join(detail)}")
-    return msgs, examined
-
-
-# ===========================================================================
-# Driver
-# ===========================================================================
-
-
 class Report:
     def __init__(self) -> None:
         self.errors: List[str] = []
@@ -1092,54 +928,56 @@ class Report:
             self.lines.append(f"  OK    {name:<19}: 0 findings over {examined} {unit}")
 
 
-def run_checks_synthetic(root: Path) -> Report:
-    """`run_checks` over a fixture tree — see `debt_list_applies`."""
-    return run_checks(root, debt_list_applies=False)
+def run_checks_synthetic(root: Path, bundle: Path) -> Report:
+    """`run_checks` over a fixture tree and a fixture BUNDLE.
+
+    The self-test proves each check can fire by mutating what the check reads.
+    Since #471 the bundle is an installed ARTIFACT, not a tree the fixture
+    builds — so the path has to be injectable or the self-test can only mutate
+    things the guard no longer looks at, and every mutation would pass for the
+    wrong reason.
+
+    That injection is the ONLY reason `bundle` is a parameter. Production never
+    passes it; see `run_checks`.
+    """
+    return run_checks(root, bundle=bundle, debt_list_applies=False)
 
 
-def run_checks(root: Path, *, debt_list_applies: bool = True) -> Report:
-    """`debt_list_applies=False` for SYNTHETIC trees.
+def run_checks(
+    root: Path,
+    *,
+    bundle: Optional[Path] = None,
+    debt_list_applies: bool = True,
+) -> Report:
+    """`bundle=None` means the INSTALLED client's bundle — the production path.
 
-    `KNOWN_UNLOCALIZED` is a statement about THIS repository's sources. The
-    self-test builds a fixture tree containing one emission site, where every
-    entry on the list is trivially "no longer emitted" — so the freshness check
-    would fire on every mutation and drown out what each one is testing. The
-    list is proven separately, against real semantics, by
+    `debt_list_applies=False` for SYNTHETIC trees: `KNOWN_UNLOCALIZED` is a
+    statement about THIS repository's sources, and a fixture tree with one
+    emission site makes every entry read as "no longer emitted", which would
+    fire on every mutation and drown out what each is testing. The list is
+    proven separately, against real semantics, by
     `_prove_the_debt_list_is_kept_honest`.
     """
     rep = Report()
-    canonical = root / CANONICAL_BUNDLE
+    canonical = bundle if bundle is not None else _locale_bundle()
 
-    msgs, n = check_json_validity(root)
+    msgs, n = check_json_validity(canonical)
     rep.record("json-validity", msgs, n, severity="error", unit="file(s)")
 
-    msgs, n = check_bundle_mirror(root)
-    rep.record("bundle-mirror", msgs, n, severity="error", unit="file compare(s)")
-
-    # Everything below needs canonical en.json + manifest.json to parse. If they
-    # do not, json-validity has already errored — say so and stop, rather than
-    # dying with a traceback (or, worse, reporting the remaining checks as OK).
+    # Everything below needs en.json to parse. If it does not, json-validity has
+    # already errored — say so and stop, rather than dying with a traceback or,
+    # worse, reporting the remaining checks as OK.
     try:
         en = load_json(canonical / "en.json")
-        langs = manifest_languages(canonical)
     except Exception as e:  # noqa: BLE001
-        rep.errors.append(f"canonical bundle unreadable ({e}) — remaining checks could not run")
-        rep.lines.append("  SKIP  <remaining checks>  : canonical en.json/manifest.json unreadable")
+        rep.errors.append(f"locale bundle unreadable ({e}) — remaining checks could not run")
+        rep.lines.append("  SKIP  <remaining checks>  : bundle en.json unreadable")
         return rep
 
-    msgs, n = check_manifest_coverage(root, langs)
-    rep.record("manifest-coverage", msgs, n, severity="error", unit="language(s)")
-
-    msgs, n = check_reference_coverage(root, en)
-    rep.record("reference-coverage", msgs, n, severity="error", unit="commonMain key(s)")
-
-    msgs, n = check_key_resolvability(root)
-    rep.record("key-resolvability", msgs, n, severity="error", unit="address(es)")
-
     server_ids = server_message_ids(root)
-    msgs, n = check_server_ids_resolvable(root, en, server_ids)
+    msgs, n = check_server_ids_resolvable(en, server_ids)
     rep.record("server-id-reachable", msgs, n, severity="error", unit="emitted id(s)")
-    msgs, n = check_server_ids_covered(root, en, server_ids)
+    msgs, n = check_server_ids_covered(en, server_ids)
     rep.record("server-id-coverage", msgs, n, severity="warning", unit="emitted id(s)")
 
     msgs, n = check_server_id_text_matches_source(root, en)
@@ -1150,27 +988,28 @@ def run_checks(root: Path, *, debt_list_applies: bool = True) -> Report:
         msgs, n = check_known_unlocalized_list_is_current(root, en)
         rep.record("unlocalized-debt-current", msgs, n, severity="error", unit="known id(s)")
 
-    msgs, n = check_placeholder_parity(root, langs, en)
-    rep.record("placeholder-parity", msgs, n, severity="error", unit="value compare(s)")
-
-    msgs, n = check_translation_drift(root, langs, en)
-    rep.record("translation-drift", msgs, n, severity="warning", unit="key compare(s)")
-
     return rep
 
 
-def _print_report(root: Path, rep: Report, strict: bool) -> int:
-    canonical = root / CANONICAL_BUNDLE
-    print("Localization guard (CIRISServer vendored client)")
+def _print_report(root: Path, rep: Report, strict: bool, bundle: Optional[Path] = None) -> int:
+    canonical = bundle if bundle is not None else _locale_bundle()
+    print("Server localization guard — server-emitted ids against the client's bundle")
+    # NAME THE ARTIFACT AND ITS VERSION. The bundle is an installed dependency
+    # now, so "which bundle did this pass examine" is a real question with a
+    # real answer, and a run that does not say cannot be reproduced later.
+    try:
+        import ciris_client
+
+        ver = getattr(ciris_client, "__version__", "?")
+    except Exception:  # noqa: BLE001
+        ver = "?"
     try:
         en_keys = len(flat_values(load_json(canonical / "en.json")))
-        langs = len(manifest_languages(canonical))
-        print(
-            f"   canonical: {CANONICAL_BUNDLE}  "
-            f"({en_keys} keys, {langs} languages, {len(MIRROR_BUNDLES)} runtime bundles)"
-        )
+        langs = len(sorted(canonical.glob("*.json"))) - 1  # minus manifest.json
+        print(f"   bundle: ciris-client {ver}  ({en_keys} keys, {langs} languages)")
+        print(f"           {canonical}")
     except Exception:  # noqa: BLE001 - reported as an error below
-        print(f"   canonical: {CANONICAL_BUNDLE}  (unreadable)")
+        print(f"   bundle: {canonical}  (unreadable)")
     print()
     print("Checks (each line reports what it examined — a zero finding over a zero denominator is not evidence):")
     for line in rep.lines:
@@ -1221,11 +1060,15 @@ _FIXTURE_DE = {
     "nav": {"home": "Startseite"},
 }
 _FIXTURE_MANIFEST = {"version": "test", "languages": {"en": {}, "de": {}}}
-_FIXTURE_KT = (
-    "package fixture\n"
-    'val a = localizedString("mobile.greeting")\n'
-    'val b = getString("nav.home")\n'
-)
+
+def _write_json(path: Path, doc: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+FIXTURE_BUNDLE = "bundle"
+
+
 # One server emission site, in the (id, english_text) pair shape every operator
 # surface uses. Gives server-id-* a non-zero denominator in the fixture.
 _FIXTURE_RS = (
@@ -1234,23 +1077,40 @@ _FIXTURE_RS = (
 )
 
 
-def _write_json(path: Path, doc: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def _truncate_nav_home(root: Path) -> None:
+    r"""The 2026-08-05 defect, reproduced: en.json carries a PREFIX of the text the
+    server actually emits. Key sets, resolvability, placeholders and mirroring all
+    stay green — 55 real ids shipped this way, cut mid-word at ~80 chars, because
+    the extractor's regex stopped at the first `\` of a continued Rust literal."""
+    canonical = root / FIXTURE_BUNDLE
+    path = canonical / "en.json"
+    doc = load_json(path)
+    doc["nav"]["home"] = doc["nav"]["home"][:4]
+    _write_json(path, doc)
+    _resync(root)
+
+
+def _resync(root: Path) -> None:
+    """No-op since #471: there is ONE bundle, so nothing to mirror into.
+
+    Kept as a named no-op rather than deleted with its call sites, because the
+    mutations that call it are about the CONTENT of a locale file and read the
+    same whether or not a mirror step exists. Removing the calls would have
+    meant touching six unrelated mutations to express "nothing to do here".
+    """
 
 
 def _build_fixture(root: Path) -> None:
-    canonical = root / MIRROR_BUNDLES[0]
-    _write_json(canonical / "en.json", _FIXTURE_EN)
-    _write_json(canonical / "de.json", _FIXTURE_DE)
-    _write_json(canonical / "manifest.json", _FIXTURE_MANIFEST)
-    for b in MIRROR_BUNDLES[1:]:
-        (root / b).mkdir(parents=True, exist_ok=True)
-        for f in canonical.glob("*.json"):
-            shutil.copy2(f, root / b / f.name)
-    kt = root / COMMON_MAIN / "kotlin" / "Fixture.kt"
-    kt.parent.mkdir(parents=True, exist_ok=True)
-    kt.write_text(_FIXTURE_KT, encoding="utf-8")
+    """One tree, one bundle. The mirrors and the Kotlin source went with #471.
+
+    The bundle is written INTO the fixture tree and handed to
+    `run_checks_synthetic` explicitly — production resolves it from the
+    installed wheel, which a self-test cannot mutate.
+    """
+    b = root / FIXTURE_BUNDLE
+    _write_json(b / "en.json", _FIXTURE_EN)
+    _write_json(b / "de.json", _FIXTURE_DE)
+    _write_json(b / "manifest.json", _FIXTURE_MANIFEST)
     rs = root / SERVER_SRC / "fixture.rs"
     rs.parent.mkdir(parents=True, exist_ok=True)
     rs.write_text(_FIXTURE_RS, encoding="utf-8")
@@ -1259,125 +1119,8 @@ def _build_fixture(root: Path) -> None:
 def _mutations() -> List[Tuple[str, str, Any, str]]:
     """(label, expected severity, mutate(root), substring the message must contain)."""
 
-    def del_key(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        del doc["nav"]["home"]
-        _write_json(p, doc)
-        _resync(root)
-
-    def blank_value(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        doc["nav"]["home"] = "   "
-        _write_json(p, doc)
-        _resync(root)
-
-    def corrupt_named_placeholder(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        doc["mobile"]["greeting"] = "Hallo {nmae}"
-        _write_json(p, doc)
-        _resync(root)
-
-    def corrupt_printf_placeholder(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        doc["mobile"]["count"] = "%s Elemente"
-        _write_json(p, doc)
-        _resync(root)
-
-    def drop_placeholder(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        doc["mobile"]["greeting"] = "Hallo"
-        _write_json(p, doc)
-        _resync(root)
-
-    def desync(idx: int):
-        def go(root: Path) -> None:
-            p = root / MIRROR_BUNDLES[idx] / "de.json"
-            doc = load_json(p)
-            doc["nav"]["home"] = "STALE"
-            _write_json(p, doc)
-
-        return go
-
-    def extra_file_in_mirror(root: Path) -> None:
-        _write_json(root / MIRROR_BUNDLES[2] / "zz.json", {"app_name": "x"})
-
-    def invalid_json_mirror(root: Path) -> None:
-        (root / MIRROR_BUNDLES[3] / "de.json").write_text("{ not json", encoding="utf-8")
-
     def invalid_json_canonical_en(root: Path) -> None:
-        (root / MIRROR_BUNDLES[0] / "en.json").write_text("{ not json", encoding="utf-8")
-
-    def new_flat_dotted_key(root: Path) -> None:
-        """A newly-added key in the flat shape — how 0c728b1 introduced the bug."""
-        p = root / MIRROR_BUNDLES[0] / "en.json"
-        doc = load_json(p)
-        doc["mesh.brand_new_flat_key"] = "unreachable at runtime"
-        _write_json(p, doc)
-        # de gets it nested — the exact #366 shape divergence between two files
-        pd = root / MIRROR_BUNDLES[0] / "de.json"
-        dd = load_json(pd)
-        dd["mesh"] = {"brand_new_flat_key": "zur Laufzeit unerreichbar"}
-        _write_json(pd, dd)
-        _resync(root)
-
-    def unknown_kotlin_key(root: Path) -> None:
-        kt = root / COMMON_MAIN / "kotlin" / "Fixture.kt"
-        kt.write_text(_FIXTURE_KT + 'val c = getString("nav.nonexistent")\n', encoding="utf-8")
-
-    def flatten_a_nested_key(root: Path) -> None:
-        """THE mutation that matters — the exact shape that shipped in 0c728b1.
-
-        Take a CORRECTLY NESTED key and store it as a literal dotted top-level
-        key instead, in every language. Afterwards the bundle is still valid
-        JSON, still byte-identical across all four runtime bundles, still
-        carries the identical flattened key set — and the string is dead in
-        every language including English. A key-set comparison sees nothing;
-        key-resolvability must go red. (Asserted explicitly in self_test().)
-        """
-        _flatten_nav_home(root)
-
-    def kotlin_key_flat_only(root: Path) -> None:
-        """The blind spot that shipped: en.json HAS the address, flattened, but
-        resolveKey cannot reach it. The old checker called this OK."""
-        p = root / MIRROR_BUNDLES[0] / "en.json"
-        doc = load_json(p)
-        doc["settings.theme"] = "Theme"
-        _write_json(p, doc)
-        _resync(root)
-        kt = root / COMMON_MAIN / "kotlin" / "Fixture.kt"
-        kt.write_text(_FIXTURE_KT + 'val c = getString("settings.theme")\n', encoding="utf-8")
-
-    def manifest_lists_missing_lang(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "manifest.json"
-        doc = load_json(p)
-        doc["languages"]["fr"] = {}
-        _write_json(p, doc)
-        _resync(root)
-
-    def unlisted_locale_file(root: Path) -> None:
-        for b in MIRROR_BUNDLES:
-            _write_json(root / b / "xx.json", _FIXTURE_DE)
-
-    def extra_key(root: Path) -> None:
-        p = root / MIRROR_BUNDLES[0] / "de.json"
-        doc = load_json(p)
-        doc["nav"]["ghost"] = "Geist"  # no such key in en.json
-        _write_json(p, doc)
-        _resync(root)
-
-    def empty_bundle(root: Path) -> None:
-        """Denominator zero: the instrument looks at nothing."""
-        for b in MIRROR_BUNDLES:
-            for f in (root / b).glob("*.json"):
-                f.unlink()
-
-    def missing_mirror_dir(root: Path) -> None:
-        shutil.rmtree(root / MIRROR_BUNDLES[2])
+        (root / FIXTURE_BUNDLE / "en.json").write_text("{ not json", encoding="utf-8")
 
     def server_id_uncovered(root: Path) -> None:
         """A new operator sentence emitted with an id en.json never defines."""
@@ -1422,50 +1165,18 @@ def _mutations() -> List[Tuple[str, str, Any, str]]:
         _truncate_nav_home(root)
 
     return [
-        ("nested key -> flat dotted key (THE 0c728b1 bug)", "error", flatten_a_nested_key, "resolveKey"),
         ("en.json value is a PREFIX of the emitted text (THE 80-char truncation)", "error", server_id_text_truncated, "TRUNCATED"),
-        ("delete a key from de.json", "warning", del_key, "missing 1"),
-        ("blank a value in de.json", "warning", blank_value, "empty 1"),
-        ("extra key in de.json (not in en.json)", "warning", extra_key, "extra 1"),
-        ("locale file the manifest never lists", "error", unlisted_locale_file, "manifest does not list"),
-        ("corrupt {name} -> {nmae}", "error", corrupt_named_placeholder, "placeholder drift"),
-        ("corrupt %d -> %s", "error", corrupt_printf_placeholder, "placeholder drift"),
-        ("drop {name} entirely", "error", drop_placeholder, "placeholder drift"),
-        ("desync desktopApp bundle", "error", desync(1), "desktopApp"),
-        ("desync androidApp bundle", "error", desync(2), "androidApp"),
-        ("desync iosApp bundle", "error", desync(3), "iosApp"),
-        ("extra file in androidApp bundle", "error", extra_file_in_mirror, "extra file"),
-        ("invalid JSON in iosApp bundle", "error", invalid_json_mirror, "invalid JSON"),
         ("invalid JSON in canonical en.json", "error", invalid_json_canonical_en, "invalid JSON"),
-        ("new flat dotted key (unreachable)", "error", new_flat_dotted_key, "resolveKey"),
-        ("Kotlin key absent from en.json", "error", unknown_kotlin_key, "do not resolve"),
-        ("Kotlin key present but flat-only", "error", kotlin_key_flat_only, "do not resolve"),
-        ("manifest lists a language with no file", "error", manifest_lists_missing_lang, "fr.json is missing"),
-        ("every bundle emptied (zero denominator)", "error", empty_bundle, "looked at nothing"),
-        ("androidApp bundle dir deleted", "error", missing_mirror_dir, "missing"),
         ("server emits an id en.json never defines", "warning", server_id_uncovered, "no en.json entry"),
         ("server id defined but flat (unreachable)", "error", server_id_defined_but_flat, "DEFINED in en.json"),
         ("one id emitted with TWO different texts", "error", conflicting_server_id_text, "CONFLICTING English text"),
         ("no server emission sites (zero denominator)", "error", no_server_sources, "looked at nothing"),
     ]
-def _truncate_nav_home(root: Path) -> None:
-    r"""The 2026-08-05 defect, reproduced: en.json carries a PREFIX of the text the
-    server actually emits. Key sets, resolvability, placeholders and mirroring all
-    stay green — 55 real ids shipped this way, cut mid-word at ~80 chars, because
-    the extractor's regex stopped at the first `\` of a continued Rust literal."""
-    canonical = root / MIRROR_BUNDLES[0]
-    path = canonical / "en.json"
-    doc = load_json(path)
-    doc["nav"]["home"] = doc["nav"]["home"][:4]
-    _write_json(path, doc)
-    _resync(root)
-
-
 
 def _flatten_nav_home(root: Path) -> None:
     """Re-store the nested ``nav.home`` as a literal dotted top-level key in every
     locale, then re-mirror. Nothing else about the bundle changes."""
-    canonical = root / MIRROR_BUNDLES[0]
+    canonical = root / FIXTURE_BUNDLE
     for f in locale_files(canonical):
         doc = load_json(f)
         if "nav" not in doc or not isinstance(doc["nav"], dict) or "home" not in doc["nav"]:
@@ -1477,17 +1188,6 @@ def _flatten_nav_home(root: Path) -> None:
         _write_json(f, doc)
     _resync(root)
 
-
-def _resync(root: Path) -> None:
-    """Re-mirror canonical into the other three bundles (so a mutation aimed at
-    one check doesn't trip bundle-mirror as a side effect)."""
-    canonical = root / MIRROR_BUNDLES[0]
-    for b in MIRROR_BUNDLES[1:]:
-        target = root / b
-        for f in target.glob("*.json"):
-            f.unlink()
-        for f in canonical.glob("*.json"):
-            shutil.copy2(f, target / f.name)
 
 
 def _prove_the_debt_list_is_kept_honest(root: Path) -> int:
@@ -1506,7 +1206,10 @@ def _prove_the_debt_list_is_kept_honest(root: Path) -> int:
     """
     global KNOWN_UNLOCALIZED  # noqa: PLW0603 - restored in the finally below
     failures = 0
-    en = load_json(root / CANONICAL_BUNDLE / "en.json")
+    # The REAL bundle, not a fixture: this prover asks whether the debt list
+    # matches what this repo emits and what the SHIPPED bundle covers, and both
+    # halves have to be the real ones for the answer to mean anything.
+    en = load_json(_locale_bundle() / "en.json")
 
     clean, _ = check_known_unlocalized_list_is_current(root, en)
     if clean:
@@ -1575,7 +1278,7 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
     """
     _build_fixture(root)
     rs = root / SERVER_SRC / "fixture.rs"
-    before = run_checks_synthetic(root)
+    before = run_checks_synthetic(root, root / FIXTURE_BUNDLE)
     before_ids = len(server_message_ids(root))
 
     # The test module is inserted BEFORE the file's production emission site,
@@ -1599,7 +1302,7 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
         "}\n\n"
     )
     rs.write_text(hostile + rs.read_text(encoding="utf-8"), encoding="utf-8")
-    after = run_checks_synthetic(root)
+    after = run_checks_synthetic(root, root / FIXTURE_BUNDLE)
     after_ids = len(server_message_ids(root))
 
     failures = 0
@@ -1625,54 +1328,6 @@ def _prove_test_fixtures_are_not_server_emissions(root: Path) -> int:
     return failures
 
 
-def _prove_keyset_comparison_is_blind(root: Path) -> int:
-    """Assert, in code, the premise of CIRISServer#366.
-
-    Flatten a nested key into a dotted top-level key and show that:
-      * the flattened key set is IDENTICAL before and after (so the old
-        key-parity check could not have failed, and did not),
-      * every other check is still green (valid JSON, four bundles byte-identical,
-        no drift, no placeholder change),
-      * key-resolvability alone goes red.
-
-    If this ever stops holding, the mutation above has stopped reproducing the
-    bug it claims to reproduce, and the self-test says so.
-    """
-    _build_fixture(root)
-    canonical = root / MIRROR_BUNDLES[0]
-    before = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
-    _flatten_nav_home(root)
-    after = {f.name: set(flat_values(load_json(f))) for f in locale_files(canonical)}
-    rep = run_checks_synthetic(root)
-    resolvability = [e for e in rep.errors if e.startswith("key-resolvability")]
-    other_errors = [e for e in rep.errors if not e.startswith("key-resolvability")]
-    # reference-coverage and server-id-reachable also fire here — the Kotlin call
-    # site and the Rust emission site for nav.home both stop resolving. Both are
-    # correct: the same defect seen from the two consumer sides.
-    other_errors = [
-        e for e in other_errors if not e.startswith(("reference-coverage", "server-id-reachable"))
-    ]
-    problems: List[str] = []
-    if before != after:
-        problems.append("the flattened key set CHANGED — the mutation is not the #366 shape")
-    if not resolvability:
-        problems.append("key-resolvability did not fire")
-    if other_errors:
-        problems.append(f"unexpected extra errors: {other_errors}")
-    if rep.warnings:
-        problems.append(f"unexpected drift warnings: {rep.warnings}")
-    if problems:
-        print("  FAIL  key-set comparison blindness proof:")
-        for p in problems:
-            print(f"          {p}")
-        return 1
-    print(
-        "  ok    key-set comparison blindness proof: flattening a nested key leaves the key set "
-        "BYTE-FOR-BYTE identical (old check: green) while key-resolvability goes red"
-    )
-    return 0
-
-
 def self_test() -> int:
     print("Localization guard SELF-TEST — every check is broken on purpose and must fire")
     print()
@@ -1680,7 +1335,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory(prefix="loc-guard-selftest-") as td:
         pristine = Path(td) / "pristine"
         _build_fixture(pristine)
-        rep = run_checks_synthetic(pristine)
+        rep = run_checks_synthetic(pristine, pristine / FIXTURE_BUNDLE)
         if rep.errors or rep.warnings:
             print("  FAIL  pristine fixture is not clean:")
             for m in rep.errors + rep.warnings:
@@ -1695,7 +1350,7 @@ def self_test() -> int:
                 shutil.rmtree(work)
             _build_fixture(work)
             mutate(work)
-            rep = run_checks_synthetic(work)
+            rep = run_checks_synthetic(work, work / FIXTURE_BUNDLE)
             bucket = rep.errors if severity == "error" else rep.warnings
             other = rep.warnings if severity == "error" else rep.errors
             hit = [m for m in bucket if needle in m]
@@ -1719,8 +1374,6 @@ def self_test() -> int:
                 if severity == "error" and other:
                     for m in other:
                         print(f"          (also warned: {m})")
-
-        failures += _prove_keyset_comparison_is_blind(Path(td) / "blind")
         failures += _prove_test_fixtures_are_not_server_emissions(Path(td) / "cfgtest")
         failures += _prove_the_debt_list_is_kept_honest(Path("."))
 
@@ -1755,9 +1408,9 @@ def main() -> int:
         return self_test()
 
     root = Path(args.root).resolve()
-    if not (root / CANONICAL_BUNDLE).exists():
-        print(f"ERROR: canonical bundle not found at {root / CANONICAL_BUNDLE}")
-        return 1
+    # The bundle is resolved (and its absence made fatal) inside
+    # `_locale_bundle`. Checking a tree path here would be checking for
+    # something that no longer exists in this repo.
     return _print_report(root, run_checks(root), args.strict)
 
 

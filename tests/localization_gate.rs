@@ -37,8 +37,31 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-const CANONICAL_BUNDLE: &str = "client/shared/src/desktopMain/resources/localization";
-const GUARD: &str = "client/tools/check_localization_sync.py";
+/// The client's locale bundle, resolved from the INSTALLED package.
+///
+/// It used to be `client/shared/src/desktopMain/resources/localization`, one of
+/// four byte-identical copies this repo carried by hand. `ciris-client[node]`
+/// is the tree of record now (CIRISServer#471); the bundle is an artifact, and
+/// where it lands is the package's business rather than a path we can hardcode.
+fn locale_bundle() -> std::path::PathBuf {
+    let out = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import ciris_client;print(ciris_client.locale_bundle())",
+        ])
+        .output()
+        .expect("resolve the ciris-client locale bundle");
+    assert!(
+        out.status.success(),
+        "ciris-client is not importable, so this gate would examine NOTHING and \
+         report clean — the zero-denominator failure it exists to prevent.\n\
+         install it with: pip install 'ciris-client[node]==0.5.188'\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+const GUARD: &str = "tools/check_server_localization.py";
 
 /// **Faithful port of `LocalizationManager.resolveKey`.** Keep in step with the
 /// Kotlin; it is the definition of "this id works at runtime".
@@ -121,7 +144,7 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// direction of MORE findings is what made it look like diligence.
 ///
 /// **This must stay byte-for-byte equivalent in behaviour to
-/// `_without_test_modules` in `client/tools/check_localization_sync.py`.** The
+/// `_without_test_modules` in `tools/check_server_localization.py`.** The
 /// two scrapers exist to disagree — that is the whole point of
 /// `rust_and_python_resolvers_agree_on_the_bundle` — so a rule added to one and
 /// not the other is a red gate, and was: this fix landed on the Python side
@@ -145,7 +168,7 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// the scan is bounded so a malformed literal cannot run to EOF.
 ///
 /// **Must stay behaviourally identical to `_char_literal_end` in
-/// `client/tools/check_localization_sync.py`.**
+/// `tools/check_server_localization.py`.**
 /// Index of the `{` opening the body of the item attributed at `attr_start`.
 ///
 /// `None` when the item has NO body (`use`, `const`, `static`, a type alias) —
@@ -157,7 +180,7 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// is still recognised as brace-less.
 ///
 /// **Must stay behaviourally identical to `_attributed_item_body` in
-/// `client/tools/check_localization_sync.py`.**
+/// `tools/check_server_localization.py`.**
 fn attributed_item_body(c: &[char], attr_start: usize) -> Option<usize> {
     let mut j = attr_start;
     let mut depth_brack = 0i32;
@@ -372,7 +395,7 @@ fn without_test_modules(text: &str) -> String {
 /// different contract entirely.
 ///
 /// **Must stay behaviourally identical to `_emitter_call_ids` in
-/// `client/tools/check_localization_sync.py`.**
+/// `tools/check_server_localization.py`.**
 fn emitter_call_ids(c: &[char], out: &mut Vec<String>) {
     const EMITTERS: [&str; 6] = ["m", "err", "msg", "refuse", "refusal", "browser_refusal"];
     let mut i = 0usize;
@@ -596,7 +619,7 @@ fn scraped_server_ids() -> BTreeMap<String, String> {
 }
 
 fn load_en() -> Value {
-    let path = repo_root().join(CANONICAL_BUNDLE).join("en.json");
+    let path = locale_bundle().join("en.json");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("canonical en.json unreadable at {}: {e}", path.display()));
     serde_json::from_str(&raw).expect("canonical en.json is not valid JSON")
