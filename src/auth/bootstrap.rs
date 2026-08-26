@@ -1306,24 +1306,8 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
 #[derive(Debug, Serialize)]
 struct SetupStatusData {
     is_first_run: bool,
-    /// **Derived from [`steps`](Self::steps), not an alias for `is_first_run`.**
-    ///
-    /// It used to be the same bit. That was correct while claiming a root was the
-    /// only thing an operator could owe; it stopped being correct when CC 3.4.7.3
-    /// made "this node runs on an actor's key" a second obligation. A claimed
-    /// node that owes a key split is not first-run, and reporting
-    /// `setup_required: false` would tell the wizard there is nothing to do while
-    /// the node runs on an identity the constitution forbids.
     setup_required: bool,
     config_exists: bool,
-    /// Every outstanding obligation, in prerequisite order — the ONE model both
-    /// the first-run and the catch-up wizard read.
-    ///
-    /// Additive: a client that only knows `is_first_run` / `setup_required` keeps
-    /// working unchanged. Tokens, never prose — the client renders its own
-    /// localized text from `code`, the same discipline the degradation `Warning`
-    /// contract uses.
-    steps: Vec<crate::setup_steps::SetupStep>,
     /// **Where this node wrote its one-time claim PIN** (`<home>/claim_pin`,
     /// `0600`) — the PATH only, never the PIN (CIRISServer#395).
     ///
@@ -1406,26 +1390,6 @@ async fn owned_nodes(State(st): State<SetupState>) -> Response {
 /// it instead of inferring first-run from a 404 (the prior fast-degrade path).
 async fn setup_status(State(st): State<SetupState>) -> Response {
     let first_run = is_first_run(&st.engine).await;
-    // The node's own key, classified against the directory. A read failure is
-    // NOT reported as "fine": `Unregistered` is the ordinary first-boot state and
-    // must not be conflated with "we could not look", so an error degrades to the
-    // conservative reading — no split is claimed, and the failure is logged.
-    let node_verdict =
-        match crate::node_key::classify(st.engine.federation_directory().as_ref(), &st.node_key_id)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "setup/status: could not classify the node key — reporting no split \
-                     obligation rather than guessing one. This is a degraded reading, not a \
-                     clean one."
-                );
-                crate::node_key::IdentityVerdict::Unregistered
-            }
-        };
-    let steps = crate::setup_steps::outstanding(first_run, &node_verdict, false);
     // Publish the PIN FILE PATH (never the PIN) only while a PIN is actually
     // armed, so a claimed node reports `None` rather than a path to a file it has
     // already consumed — "look here and find nothing" is the confusing shape this
@@ -1446,10 +1410,9 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
         Json(SetupStatusResponse {
             data: SetupStatusData {
                 is_first_run: first_run,
-                setup_required: !steps.is_empty(),
+                setup_required: first_run,
                 config_exists: !first_run,
                 claim_pin_file,
-                steps,
             },
         }),
     )

@@ -430,3 +430,98 @@ impl NodeIdentityResolution {
         self.split_from.is_some()
     }
 }
+
+/// **Move the owner-binding from the actor key onto the node key — unattended.**
+///
+/// The split itself needs no operator, and neither does this. A node that has
+/// been claimed already HOLDS its owner's fed-ID: claiming is what put the seed
+/// at `<seed_dir>/<owner>.ed25519.seed`, and installing the app is the claim. So
+/// the same key that authored the original binding is available to author the
+/// corrected one, and asking a human to re-state ownership they already
+/// established would be ceremony, not security.
+///
+/// What this authors is deliberately the narrowest possible act: **the same
+/// owner, the same `infra:*` scope set, the same cohort — pointed at the node's
+/// own key instead of the actor's.** No new authority is created. If the owner
+/// resolved from the actor binding is not the owner this node holds a signer
+/// for, nothing is written.
+///
+/// Idempotent: if `owner_of(node_key)` already resolves, there is nothing to do.
+///
+/// # Errors
+/// Directory reads, binding construction, or the apply. A failure here leaves
+/// the node unowned and therefore fail-closed under CC 3.4.7.3 Clause D — which
+/// is the correct outcome for "we could not establish who owns this", and why
+/// this returns the error rather than swallowing it.
+pub async fn move_owner_binding_to_node_key(
+    engine: &ciris_persist::prelude::Engine,
+    owner_signer: &ciris_persist::prelude::LocalSigner,
+    actor_key_id: &str,
+    node_key_id: &str,
+) -> Result<Option<OwnerBindingMove>> {
+    use ciris_persist::federation::admission::owner_of;
+
+    let dir = engine.federation_directory();
+
+    // Already owned ⇒ nothing to move. Checked FIRST so a re-boot after a
+    // successful migration is a cheap no-op rather than a re-emit.
+    if owner_of(dir.as_ref(), node_key_id).await?.is_some() {
+        return Ok(None);
+    }
+
+    let Some(owner_key_id) = owner_of(dir.as_ref(), actor_key_id).await? else {
+        // The actor key is not owned either, so there is no binding to move and
+        // nothing to infer. Not an error: an unclaimed node is a real state.
+        return Ok(None);
+    };
+
+    // The signer must BE that owner. Anything else would be this node asserting
+    // an ownership claim on behalf of a party whose key it does not hold.
+    if owner_signer.key_id() != owner_key_id {
+        anyhow::bail!(
+            "refusing to move the owner-binding: the actor key is owned by {owner_key_id:?} \
+             but this node holds a signer for {:?}. Moving it would mean authoring an \
+             ownership claim as a party whose key we do not have.",
+            owner_signer.key_id()
+        );
+    }
+
+    let infra_scopes: Vec<String> = crate::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let cohort = ciris_persist::federation::types::cohort_scope::SELF;
+
+    let binding = crate::auth::ownership::build_signed_owner_binding(
+        owner_signer,
+        node_key_id,
+        &infra_scopes,
+        cohort,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("build owner-binding for the node key: {e}"))?;
+
+    crate::auth::ownership::apply_signed_owner_binding(
+        engine,
+        node_key_id,
+        cohort,
+        ciris_persist::prelude::HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("apply owner-binding for the node key: {e}"))?;
+
+    tracing::info!(
+        owner_key_id = %owner_key_id,
+        from_key_id = %actor_key_id,
+        to_key_id = %node_key_id,
+        "owner-binding moved onto the node key — the same owner, the same infra scopes, \
+         a different subject. `owner_of(node)` now resolves, so CC 3.4.7.3 Clause D can be \
+         answered for agents acting through this node."
+    );
+    Ok(Some(OwnerBindingMove {
+        owner_key_id,
+        from_key_id: actor_key_id.to_owned(),
+        to_key_id: node_key_id.to_owned(),
+    }))
+}

@@ -281,3 +281,96 @@ fn the_node_alias_is_distinct_from_the_actor_alias() {
         "ciris-agent-bootstrap-node"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  The owner-binding follows the node key, unattended
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An unclaimed node has no binding to move, and that is not an error — an
+/// unclaimed node is an ordinary state, not a failure.
+#[tokio::test]
+async fn nothing_to_move_when_the_actor_key_is_unowned() {
+    let engine = engine_for(AGENT_KEY).await;
+    let signer = signer_for(AGENT_KEY);
+    register(&engine, &signer, AGENT_KEY, identity_type::AGENT).await;
+
+    let moved = ciris_server::node_key::move_owner_binding_to_node_key(
+        &engine,
+        &signer,
+        AGENT_KEY,
+        "some-node-key",
+    )
+    .await
+    .expect("an unowned actor key is not an error");
+    assert!(moved.is_none(), "no binding exists, so nothing moves");
+}
+
+/// **The refusal that matters.** If the node holds a signer for someone OTHER
+/// than the actor key's owner, moving the binding would mean authoring an
+/// ownership claim as a party whose key we do not have. That must fail loudly
+/// rather than write a binding signed by the wrong person.
+#[tokio::test]
+async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
+    const OWNER: &str = "the-real-owner";
+    const IMPOSTOR: &str = "some-other-user";
+    let engine = engine_for(AGENT_KEY).await;
+
+    register(
+        &engine,
+        &signer_for(AGENT_KEY),
+        AGENT_KEY,
+        identity_type::AGENT,
+    )
+    .await;
+    register(&engine, &signer_for(OWNER), OWNER, identity_type::USER).await;
+    register(
+        &engine,
+        &signer_for(IMPOSTOR),
+        IMPOSTOR,
+        identity_type::USER,
+    )
+    .await;
+
+    // The real owner claims the actor key.
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let cohort = ciris_persist::federation::types::cohort_scope::SELF;
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        &signer_for(OWNER),
+        AGENT_KEY,
+        &scopes,
+        cohort,
+    )
+    .await
+    .expect("build the original owner-binding");
+    ciris_server::auth::ownership::apply_signed_owner_binding(
+        &engine,
+        AGENT_KEY,
+        cohort,
+        ciris_persist::prelude::HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("apply the original owner-binding");
+
+    // Now attempt the move holding the WRONG signer.
+    let err = ciris_server::node_key::move_owner_binding_to_node_key(
+        &engine,
+        &signer_for(IMPOSTOR),
+        AGENT_KEY,
+        "node-key-for-this-node",
+    )
+    .await
+    .expect_err(
+        "a node holding a signer for someone other than the owner must NOT author an \
+         ownership claim — the whole point of moving the binding is that it stays the \
+         SAME owner's claim",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("refusing to move the owner-binding"),
+        "the refusal must name itself, got: {msg}"
+    );
+}

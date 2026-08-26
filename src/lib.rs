@@ -407,7 +407,6 @@ pub mod self_identity;
 /// the opt-in per-group watchlist config + duty/authority gate + publish-seam
 /// hook (the matcher defers to the NodeCore content seam). Public so the
 /// integration test (`tests/safety.rs`) can drive the modules + routers directly.
-pub mod setup_steps;
 /// The capacity score→emit pipeline — a periodic task that derives per-agent
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
