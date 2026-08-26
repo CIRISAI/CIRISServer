@@ -174,6 +174,20 @@ jobs:
       # tpm are Linux-only (per-target). NOT --all-features: that drags
       # `extension-module` (libpython-no-link) into the test binary.
       - run: cargo clippy --all-targets -- -D warnings
+      # `cargo test` below runs `admin_ops` and `mesh_config_consumers`, which
+      # resolve the localization bundle through the INSTALLED `ciris-client`
+      # (CIRISServer#471 — the bundle is a package artifact now, not a path in
+      # this tree). Those suites fail HARD when the package is missing rather
+      # than skipping, which is the point: a localization gate that silently
+      # examines nothing reports clean. So the install is load-bearing for
+      # `cargo test`, not just for the dedicated localization job.
+      - name: Set up Python (the bundle resolver runs python3)
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ciris-client (two test suites read its locale bundle)
+        shell: bash
+        run: python3 tools/client_pin.py --install
       - run: cargo test
       # CIRISServer#373 — `cargo test` above tests the ROOT PACKAGE ONLY. With a
       # root package present and no `default-members`, the workspace member is

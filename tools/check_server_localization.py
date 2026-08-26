@@ -147,7 +147,8 @@ def _locale_bundle() -> Path:
         raise SystemExit(
             "ciris-client is not installed, so the locale bundle cannot be read and the\n"
             "server-id gates below would examine NOTHING and report clean.\n"
-            "  pip install 'ciris-client[node]==0.5.188'\n"
+            "  python3 tools/client_pin.py --install\n"
+            "  (PEP 668 distro? python3 -m venv .venv && . .venv/bin/activate first)\n"
             f"({e})"
         ) from e
     return Path(ciris_client.locale_bundle())

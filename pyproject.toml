@@ -32,16 +32,22 @@ requires-python = ">=3.10"
 # running cost of three copies. `ciris-client` is the tree of record; changes
 # travel by PR to CIRISClient instead of by re-vendor.
 #
-# `[node]` is the node-flavoured extra: the desktop uber-jar and the locale
-# bundle extracted from it. NOT `[web]`, which additionally pulls
-# `ciris-client-wasm` (7 MB) that a fabric node has no use for.
+# NO EXTRA, deliberately. The BASE package is the node package: it carries the
+# desktop uber-jar and the locale bundle extracted from it, which is everything
+# a fabric node wants. The published extras are `web` (adds `ciris-client-wasm`,
+# 7 MB a node has no use for) and `readiness` (adds `ciris-grace`); we want
+# neither. This said `[node]` until 0.5.189 — an extra CIRISClient does not
+# publish. pip WARNS on an unknown extra and installs the base anyway, so it
+# worked, silently, and the pin documented a flavour that did not exist. That is
+# the failure mode this repo keeps meeting: a request that is quietly downgraded
+# rather than refused. `tools/client_pin.py --install` now fails on that warning.
 #
 # PINNED EXACTLY, and to this cut. The locale bundle is a release GATE here —
 # `tools/check_server_localization.py` asserts that every id this server emits
 # resolves in it — so a floating version would let an upstream bundle change
 # turn a green tree red with no commit here to explain it.
 dependencies = [
-    "ciris-client[node]==0.5.188",
+    "ciris-client==0.5.188",
 ]
 
 [project.urls]

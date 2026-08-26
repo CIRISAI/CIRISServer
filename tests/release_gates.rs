@@ -90,3 +90,6 @@ mod boundary;
 
 #[path = "release_gates/ffi_symbols.rs"]
 mod ffi_symbols;
+
+#[path = "release_gates/workflows.rs"]
+mod workflows;

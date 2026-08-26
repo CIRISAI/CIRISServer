@@ -51,7 +51,7 @@ jobs:
         # The bundle is an installed ARTIFACT since #471, not a tree. The guard
         # fails HARD when it is absent rather than skipping, so this step is
         # load-bearing: without it the gate cannot run at all.
-        run: pip install 'ciris-client[node]==0.5.188'
+        run: python3 tools/client_pin.py --install
       - name: Prove the guard can fail (mutation self-test)
         run: python3 tools/check_server_localization.py --self-test
 
@@ -87,7 +87,7 @@ jobs:
         # Load-bearing: the bundle is an installed ARTIFACT since #471 and the
         # guard fails HARD when it is absent rather than skipping, so without
         # this step the gate cannot run at all.
-        run: pip install 'ciris-client[node]==0.5.188'
+        run: python3 tools/client_pin.py --install
 
       - name: Server localization guard (server-emitted ids vs the client bundle)
         run: python3 tools/check_server_localization.py --strict

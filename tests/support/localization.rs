@@ -55,7 +55,8 @@ pub fn canonical_bundle() -> serde_json::Value {
         out.status.success(),
         "ciris-client is not importable, so this gate would examine NOTHING and \
          report clean — the zero-denominator failure it exists to prevent.\n\
-         install it with: pip install 'ciris-client[node]==0.5.188'\n{}",
+         install it with: python3 tools/client_pin.py --install\n\
+         (on a PEP 668 distro, from a venv: python3 -m venv .venv && . .venv/bin/activate)\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let dir = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
