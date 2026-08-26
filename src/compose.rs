@@ -267,6 +267,72 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
+
+    // ── CC 3.4.7.3: the node's identity must not be an ACTOR's ────────────────
+    //
+    // `register_self_key` above asserts `identity_type = node` for `cfg.key_id`
+    // and CANNOT make it true when an actor row already occupies that id: persist
+    // refuses with a typed `Conflict`, and we log it at debug as benign. Benign is
+    // right when the differing row is an identical trust-root row. It is exactly
+    // wrong when the differing row says `agent`, which is how a node ran on the
+    // brain's key with every gate reporting green.
+    //
+    // So classify it, and mint the node its own `<alias>-node` key when the
+    // configured one belongs to an actor. Unattended by design — see
+    // `node_key::move_owner_binding_to_node_key` for why the ownership half needs
+    // no operator either.
+    let node_resolution = crate::node_key::resolve_node_identity(
+        &engine,
+        &cfg.key_id,
+        &cfg.keystore_alias,
+        &cfg.identity_dir,
+    )
+    .await?;
+    if node_resolution.did_split() {
+        // The owner-binding named the ACTOR key. Re-subject it to the node key
+        // using the owner's own signer, which a claimed node holds — installing
+        // the app IS the claim. Same owner, same infra scopes, same cohort.
+        let actor_key_id = node_resolution
+            .split_from
+            .clone()
+            .expect("did_split() implies split_from");
+        // The owner's alias, resolved the way every other caller does: the
+        // active-alias pointer the mint wrote, falling back to the boot default.
+        let user_seed_dir = crate::user_seed_dir(&cfg);
+        let owner_alias =
+            crate::active_user_alias(&user_seed_dir, &format!("{}-user", cfg.keystore_alias));
+        match resolve_user_signer(
+            &engine,
+            FedIdUse::OwnerSession,
+            &owner_alias,
+            user_seed_dir.clone(),
+        )
+        .await
+        {
+            Ok(Some(owner_signer)) => {
+                crate::node_key::move_owner_binding_to_node_key(
+                    &engine,
+                    &owner_signer,
+                    &actor_key_id,
+                    &node_resolution.node_key_id,
+                )
+                .await?;
+            }
+            Ok(None) => tracing::warn!(
+                node_key_id = %node_resolution.node_key_id,
+                "the node key was minted but no owner signer is on disk, so its \
+                 owner-binding could not follow. `owner_of(node)` does not resolve and \
+                 CC 3.4.7.3 Clause D is fail-closed: nothing may act through this node \
+                 until ownership is established."
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not resolve the owner signer to move the owner-binding onto the \
+                 node key — the node stays unowned, which is the fail-closed reading"
+            ),
+        }
+    }
+
     // STAGE 1 (FSD/GENESIS_TO_SCORE.md) — install the baked trust root and accept
     // it. Two acts on purpose: installing records makes the root KNOWN; accepting
     // it is this node's own signed `trust:accepts` edge, and the one row an
