@@ -104,7 +104,13 @@ lane() {
 
 echo "preflight: 4 lanes, $( [ "$SEQUENTIAL" = 1 ] && echo sequential || echo parallel )"
 
-L1=( "clippy"              "cargo clippy --all-targets -- -D warnings"
+# `cargo test` runs `admin_ops` and `mesh_config_consumers`, which resolve the
+# localization bundle through the INSTALLED `ciris-client` (CIRISServer#471 —
+# the bundle is a package artifact now, not a path in this tree) and fail HARD
+# when it is absent rather than skipping. Same step, same reason, as ci.yml's
+# clippy-test job; gate0 asserts the two lists agree.
+L1=( "client-pin"          "python3 tools/client_pin.py --install"
+     "clippy"              "cargo clippy --all-targets -- -D warnings"
      "tests"               "cargo test"
      "tests-lens-core"     "cargo test -p ciris-lens-core --lib"
      "noise-floor"         "cargo test --test noise_floor -- --nocapture" )
@@ -133,7 +139,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # match ci.yml — a preflight that passes what CI fails is worse than no
      # preflight, because it teaches people to trust it.
      "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 43"
-     "localization"        "python3 client/tools/check_localization_sync.py --strict"
+     "localization"        "python3 tools/check_server_localization.py --strict"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )
 
 if [ "$SEQUENTIAL" = "1" ]; then
