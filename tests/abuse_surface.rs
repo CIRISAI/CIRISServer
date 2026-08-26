@@ -200,10 +200,15 @@ fn scores_envelope(dimension: &str, subject: &str, score: f64) -> serde_json::Va
 }
 
 async fn put(engine: &Engine, row: Attestation) -> Result<(), FedError> {
+    // persist v38.6.0 returns `AttestationOutcome`; these tests assert on the
+    // REFUSAL, so Inserted-vs-AlreadyHeld is genuinely not their question.
+    // Discarded explicitly so it reads as a decision, not an oversight — the
+    // outcome is not `#[must_use]`, which is how one slipped past upstream.
     engine
         .federation_directory()
         .put_attestation(SignedAttestation { attestation: row })
         .await
+        .map(|_| ())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

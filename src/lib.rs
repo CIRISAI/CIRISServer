@@ -331,6 +331,7 @@ pub mod node_control;
 /// rides the wire; the in-process accessor (`ciris_server.node_identity()`)
 /// carries the superset.
 pub mod node_identity;
+pub mod node_key;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the

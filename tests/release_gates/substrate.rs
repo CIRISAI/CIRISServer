@@ -13,8 +13,8 @@ use crate::ladder::{
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
 pub const TARGET_VERIFY: &str = "v13.6.1";
-pub const TARGET_PERSIST: &str = "v38.4.0";
-pub const TARGET_EDGE: &str = "v18.7.0";
+pub const TARGET_PERSIST: &str = "v38.6.0";
+pub const TARGET_EDGE: &str = "f3949db7bddf961cf783be6a036eac3d16ea2954";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -219,4 +219,48 @@ fn gate_vocabulary_stays_single_sourced() {
     let _: &str = paths::DELIVERY_MODE;
     let _: &str = paths::DELETION_WINDOW;
     assert_proven(&VOCABULARY_SINGLE_SOURCED);
+}
+
+/// **A rev pin is an adoption in flight, and it is not taggable.**
+///
+/// `tag_on_line` accepts `rev` so the pin gates can EVALUATE a tree mid-adopt —
+/// otherwise they report "no pinned crate found at all", which diagnoses an
+/// absence where there is a pin. But evaluating it is not the same as blessing
+/// it: a rev names an unmerged commit, so nothing upstream guarantees it still
+/// exists or still means what it meant. Shipping one publishes a wheel whose
+/// substrate cannot be resolved from a tag by anybody else.
+///
+/// So this gate is RED for exactly as long as the tree rides a rev, and it
+/// clears itself the moment the pin flips to the tag. It is the difference
+/// between "we are adopting" and "we are ready", which is a distinction the
+/// ladder exists to make.
+#[test]
+fn gate_no_substrate_rev_pin_at_release() {
+    let mut revs: Vec<String> = Vec::new();
+    for (path, toml) in crate::ladder::workspace_manifests() {
+        for line in toml.lines() {
+            let t = line.trim_start();
+            if t.starts_with('#') || !t.contains("rev = \"") {
+                continue;
+            }
+            if let Some(repo) = REPOS.iter().find(|(r, _)| line.contains(r)) {
+                revs.push(format!("  {path}: {} on a rev", repo.0));
+            }
+        }
+    }
+    assert!(
+        revs.is_empty(),
+        "\n\
+         🚫 RELEASE GATE [substrate-rev-pin] — DO NOT TAG (adoption in flight).\n\
+         \n\
+         {}\n\
+         \n\
+         A rev pin names an unmerged commit. It is correct DURING an adopt and is\n\
+         never a release state: a consumer cannot resolve it from a tag, and the\n\
+         branch it points at can be force-pushed out from under the wheel.\n\
+         \n\
+         Flip to the tag once upstream cuts it, in the same commit that updates\n\
+         TARGET_* — then this gate clears itself.\n",
+        revs.join("\n")
+    );
 }

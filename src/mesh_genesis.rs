@@ -1077,19 +1077,54 @@ where
     // trace:* row" — a consequence it never checked. Observed on the production
     // canonical, whose charter, grant, trust edge and heartbeat were all present
     // and correct. It sent people hunting a delivery bug that did not exist.
-    let mut attestation_conflicts: Vec<String> = Vec::new();
+    // persist v38.6.0 (CIRISPersist#771) SPLIT what used to arrive on one channel.
+    // A byte-identical re-apply is now `Ok(AlreadyHeld)` — not an error at all —
+    // and the ONLY thing still reaching the `is_already_exists` arm is a same-id
+    // row with DIFFERENT bytes, which persist raises as a typed `Error::Conflict`
+    // because "two rows claiming one identity is a real disagreement".
+    //
+    // So these must be two lists. Left fused, the benign case would have gone
+    // silent (its arm can no longer fire) while a genuine bundle fork would have
+    // kept reporting itself as "normal on any boot after the first" — the exact
+    // reading that, per the comment above, once sent people hunting a delivery
+    // bug that did not exist.
+    let mut already_held: Vec<String> = Vec::new();
+    let mut forked: Vec<String> = Vec::new();
     for a in &bundle.attestations {
         match dir.put_attestation(a.clone()).await {
-            Ok(()) => {}
+            Ok(ciris_persist::federation::AttestationOutcome::Inserted) => {}
+            Ok(ciris_persist::federation::AttestationOutcome::AlreadyHeld) => {
+                already_held.push(a.attestation.attestation_id.clone());
+            }
+            // `AttestationOutcome` is `#[non_exhaustive]`. A variant this build
+            // does not model is NOT filed as benign — "cannot classify" and
+            // "already held" are different states and must not share a bucket.
+            Ok(other) => {
+                tracing::warn!(
+                    outcome = ?other,
+                    attestation = %a.attestation.attestation_id,
+                    "genesis install: persist returned an AttestationOutcome this build does \
+                     not model. Counted as neither installed nor already-held — extend this \
+                     match rather than letting a new outcome read as routine."
+                );
+            }
             Err(e) if is_already_exists(&e) => {
-                attestation_conflicts.push(a.attestation.attestation_id.clone());
+                forked.push(a.attestation.attestation_id.clone());
             }
             Err(e) => return Err(GenesisError::Directory(e.to_string())),
         }
     }
-    if !attestation_conflicts.is_empty() {
+    if !forked.is_empty() {
+        tracing::warn!(
+            attestations = ?forked,
+            "genesis install: this node holds rows with these attestation_ids but DIFFERENT \
+             bytes than the bundle. Not a re-apply — a fork. The stored rows win (persist \
+             refuses to overwrite); the bundle's version of these facts is NOT installed."
+        );
+    }
+    if !already_held.is_empty() {
         tracing::debug!(
-            attestations = ?attestation_conflicts,
+            attestations = ?already_held,
             "genesis install: already present (normal on any boot after the first — genesis \
              attestation ids are stable). Not replaced; persist refuses to overwrite. If this \
              bundle SUPERSEDES an older bake, the node keeps the older rows until superseded."

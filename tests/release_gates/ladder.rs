@@ -703,10 +703,21 @@ pub fn tag_on_line(line: &str, crate_name: &str) -> Option<String> {
     if !rest.trim_start().starts_with('=') {
         return None;
     }
-    let i = line.find("tag = \"")?;
-    let after = &line[i + "tag = \"".len()..];
-    let end = after.find('"')?;
-    Some(after[..end].to_string())
+    // tag OR rev. A `rev` is part of the cargo source ID exactly as a `tag` is,
+    // so the two-graphs property these gates protect is identical either way —
+    // and an adoption branch legitimately rides a rev until upstream tags.
+    // Reading only `tag` made a rev-pinned tree report "no pinned crate found at
+    // all", which is the 0.5.181 disease in a GATE: a grep matching nothing
+    // reported as an absence rather than as the thing it actually found.
+    for key in ["tag = \"", "rev = \""] {
+        if let Some(i) = line.find(key) {
+            let after = &line[i + key.len()..];
+            if let Some(end) = after.find('"') {
+                return Some(after[..end].to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Is this proof file gated behind a crate feature (`#![cfg(feature = "…")]`)?

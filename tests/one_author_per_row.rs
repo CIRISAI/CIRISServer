@@ -464,10 +464,13 @@ async fn fresh_row(user: &LocalSigner) -> Attestation {
 }
 
 async fn put(engine: &Engine, row: Attestation) -> Result<(), String> {
+    // See the note in `abuse_surface.rs`: this suite asserts on authorship
+    // refusals, so the success variant is deliberately dropped.
     engine
         .federation_directory()
         .put_attestation(SignedAttestation { attestation: row })
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
