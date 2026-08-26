@@ -61,9 +61,11 @@
 //! Clause D derives it: an agent may act through a node iff the node's single
 //! owner appears in the agent's steward set.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use ciris_keyring::{HardwareSigner, MlDsa65SoftwareSigner, PqcSigner, SealedEd25519Signer};
 use ciris_persist::federation::types::identity_type;
 use ciris_persist::federation::FederationDirectory;
+use std::sync::Arc;
 
 /// The keystore-alias suffix for the node's own key. Parallel to `-substrate`.
 pub const NODE_ALIAS_SUFFIX: &str = "-node";
@@ -236,5 +238,195 @@ mod tests {
             node_alias("ciris-agent-bootstrap-node"),
             "ciris-agent-bootstrap-node"
         );
+    }
+}
+
+/// Mint (or re-open) the node's OWN hybrid signer under `<alias>-node`.
+///
+/// Byte-for-byte the shape of [`crate::compose::substrate_persist_signer`],
+/// because it is the same move for the same reason: an authority the host key
+/// may not hold gets its own key rather than another role on a shared one.
+/// Sealed Ed25519 + a software ML-DSA-65 seed, both open-or-mint, so the
+/// identity is stable across restarts.
+///
+/// # Errors
+/// Keystore open/mint failure, seed IO, or signer composition failure.
+pub async fn node_signer(
+    keystore_alias: &str,
+    identity_dir: &std::path::Path,
+) -> Result<(
+    Arc<ciris_persist::prelude::LocalSigner>,
+    ciris_verify_core::self_at_login::HardwareRootedIdentity,
+)> {
+    let alias = node_alias(keystore_alias);
+
+    let ed: Arc<dyn HardwareSigner> = Arc::from(
+        SealedEd25519Signer::open_or_create(alias.clone(), identity_dir.to_path_buf(), None)
+            .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+            .map_err(|e| anyhow::anyhow!("open-or-mint node Ed25519 signer: {e}"))?,
+    );
+
+    let pqc_alias = format!("{alias}-pqc");
+    let pqc_path = identity_dir.join("node_ml_dsa_65.seed");
+    let pqc = if pqc_path.exists() {
+        MlDsa65SoftwareSigner::from_seed_file(&pqc_path, pqc_alias.clone())
+            .map_err(|e| anyhow::anyhow!("adopt node ML-DSA-65 seed: {e}"))?
+    } else {
+        let mut seed = [0u8; 32];
+        ciris_crypto::random::fill(&mut seed)
+            .map_err(|e| anyhow::anyhow!("mint node ML-DSA-65 seed: {e}"))?;
+        std::fs::write(&pqc_path, seed).with_context(|| format!("write {}", pqc_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&pqc_path, std::fs::Permissions::from_mode(0o600));
+        }
+        MlDsa65SoftwareSigner::from_seed_bytes(&seed, pqc_alias.clone())
+            .map_err(|e| anyhow::anyhow!("load minted node ML-DSA-65 seed: {e}"))?
+    };
+    let pqc: Arc<dyn PqcSigner> = Arc::new(pqc);
+
+    let signer = Arc::new(
+        ciris_persist::prelude::LocalSigner::from_hardware_parts(
+            ed.clone(),
+            alias.clone(),
+            Some(pqc.clone()),
+            Some(pqc_alias),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("compose node LocalSigner: {e}"))?,
+    );
+    let identity = ciris_verify_core::self_at_login::HardwareRootedIdentity::new(
+        signer.derived_key_id(),
+        ed,
+        pqc,
+    )
+    .map_err(|e| anyhow::anyhow!("build node self-signer identity: {e}"))?;
+    Ok((signer, identity))
+}
+
+/// Register the node's own key as `identity_type = node`.
+///
+/// Self-signed proof-of-possession through the canonical
+/// `register_federation_key` gate — the same fail-secure hybrid-verify the host
+/// key and the substrate key both take. Idempotent: a matching row is `Ok`, and a
+/// benign `Conflict` (the row is already there) is `Ok`.
+///
+/// The envelope is verify's RICH producer, so it binds `key_id` + BOTH pubkeys +
+/// `identity_type` (CIRISPersist#659). That matters more here than anywhere: this
+/// key's whole purpose is to assert `node` and nothing else, and an envelope that
+/// did not NAME `node` would stand for any record it was pasted onto.
+///
+/// # Errors
+/// Producer, bridge, or a non-conflict registration failure.
+pub async fn register_node_key(
+    engine: &ciris_persist::prelude::Engine,
+    identity: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+) -> Result<String> {
+    use ciris_persist::federation::{Error as FederationError, SignedKeyRecord};
+    use ciris_verify_core::federation_self_record::produce_self_key_record;
+
+    let valid_from = chrono::Utc::now().to_rfc3339();
+    let v_rec = produce_self_key_record(identity, identity_type::NODE, &valid_from, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("produce node self key record: {e}"))?;
+    let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
+        .map_err(|e| anyhow::anyhow!("bridge verify→persist node SignedKeyRecord: {e}"))?;
+    let key_id = signed.record.key_id.clone();
+
+    match engine.register_federation_key(signed).await {
+        Ok(()) => {
+            tracing::info!(node_key_id = %key_id, "node key registered (identity_type=node)");
+        }
+        Err(FederationError::Conflict(_)) => {
+            tracing::debug!(node_key_id = %key_id, "node key already registered — idempotent");
+        }
+        Err(e) => return Err(anyhow::anyhow!("register node key {key_id}: {e}")),
+    }
+    Ok(key_id)
+}
+
+/// **The structural gate: resolve the key this node will BE, and refuse an actor.**
+///
+/// Called at boot with whatever `key_id` the host configured. Three outcomes,
+/// and the middle one is the whole point:
+///
+/// - the configured key is `node`-only ⇒ use it (CIRISServer standalone; nothing
+///   changes for an operator who was already correct);
+/// - the configured key is an ACTOR or is FUSED ⇒ the node mints and uses its own
+///   `<alias>-node` key instead, and says so loudly. The actor key is left
+///   untouched — it keeps its type, its signatures, and every row it authored;
+/// - the configured key is unregistered ⇒ the node registers it as `node`
+///   itself, which is the pre-existing first-boot path.
+///
+/// Returns the key_id the node will operate as.
+///
+/// # Why this cannot be a warning
+///
+/// A node running on an actor key is not cosmetically wrong. Its transport
+/// identity, its `self_key_id` and its de-admission self all name a key that
+/// holds agency, and CC 3.4.7.3 Clause A exists because a key holding both is the
+/// composition that switches the agency gate off. Continuing on it would keep the
+/// property nominally true and actually unenforced — the state this whole change
+/// exists to end.
+///
+/// # Errors
+/// Directory read failure, or mint/registration failure for the node key.
+pub async fn resolve_node_identity(
+    engine: &ciris_persist::prelude::Engine,
+    configured_key_id: &str,
+    keystore_alias: &str,
+    identity_dir: &std::path::Path,
+) -> Result<NodeIdentityResolution> {
+    let dir = engine.federation_directory();
+    let verdict = classify(dir.as_ref(), configured_key_id).await?;
+
+    match &verdict {
+        IdentityVerdict::SubstrateOnly | IdentityVerdict::Unregistered => {
+            Ok(NodeIdentityResolution {
+                node_key_id: configured_key_id.to_owned(),
+                split_from: None,
+                verdict,
+            })
+        }
+        IdentityVerdict::Actor { roles } | IdentityVerdict::Fused { roles } => {
+            let (_signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+            let node_key_id = register_node_key(engine, &identity).await?;
+            tracing::warn!(
+                configured_key_id = %configured_key_id,
+                configured_roles = ?roles,
+                node_key_id = %node_key_id,
+                "the configured key is an ACTOR, so it is not this node's identity. Minted and \
+                 registered a separate node key (CC 3.4.7.3 Clause A: `node` is non-cohabitable \
+                 with `agent`/`user`). The actor key is UNCHANGED and keeps everything it \
+                 authored. The node's owner-binding must be re-issued onto the node key — see \
+                 `plan_owner_binding_move`."
+            );
+            Ok(NodeIdentityResolution {
+                node_key_id,
+                split_from: Some(configured_key_id.to_owned()),
+                verdict,
+            })
+        }
+    }
+}
+
+/// What [`resolve_node_identity`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeIdentityResolution {
+    /// The key this node operates as.
+    pub node_key_id: String,
+    /// `Some` when the configured key was an actor and a node key was minted —
+    /// i.e. this boot performed a split.
+    pub split_from: Option<String>,
+    /// How the configured key classified.
+    pub verdict: IdentityVerdict,
+}
+
+impl NodeIdentityResolution {
+    /// Did this boot split an actor key away from the node identity?
+    #[must_use]
+    pub fn did_split(&self) -> bool {
+        self.split_from.is_some()
     }
 }
