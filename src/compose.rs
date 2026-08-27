@@ -288,6 +288,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         &cfg.identity_dir,
     )
     .await?;
+    // Every transport-plane caller reads this rather than `cfg.key_id`, which is
+    // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
+    // coinciding only until the identities diverge).
+    crate::node_key::set_wire_identity(&node_resolution.node_key_id);
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
@@ -658,7 +662,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Best-effort; a node with no Reticulum transport is a no-op. This is why
     // delivery converges with ZERO operator action: restarting the node IS the
     // publish (the directory row replicates, peers resolve + prime it).
-    publish_self_transport_destination(&engine, &edge, &cfg.key_id).await;
+    // The WIRE identity, not `cfg.key_id`. Under `use_node_identity` edge announces
+    // on the NODE key's destination; publishing a route that names the actor would
+    // hand every peer a signed binding whose key is not the one it is talking to —
+    // CIRISEdge#393 item 2 fails, and the route never roots (the exact defect
+    // CIRISEdge#541's review found on the edge side).
+    let wire_id = crate::node_key::wire_identity()
+        .unwrap_or(&cfg.key_id)
+        .to_owned();
+    publish_self_transport_destination(&engine, &edge, &wire_id).await;
 
     // ── Sealability twin (#227 S1): publish this node's SIGNED identity occurrence
     // (content-enc pubkeys from sealed custody) so peers can resolve + SEAL to it —
@@ -2776,10 +2788,25 @@ fn is_ignored_announce(message: &str) -> bool {
 }
 
 pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
-    let key_id = engine
-        .local_derived_key_id()
-        .await
-        .context("resolve the node's derived federation key_id to arm the AV-77 gate")?;
+    // THE WIRE IDENTITY, not the engine's signer (CIRISEdge#541 review).
+    //
+    // The de-admission self is a TRANSPORT-plane fact: the refusal predicate
+    // compares an inbound writer against `self_key_id()`, and the writer arrives
+    // over a link whose identity is the NODE key on a split node. Arming the
+    // ACTOR here would leave this node advertising an identity a sanction can
+    // name while being un-de-admittable through it — a gate that reports armed
+    // and refuses nothing, which is worse than one that is plainly off.
+    //
+    // Falls back to the engine's derived id when no split has happened, which is
+    // every standalone node and every pre-split boot — byte-identical to the
+    // previous behaviour there.
+    let key_id = match crate::node_key::wire_identity() {
+        Some(id) => id.to_owned(),
+        None => engine
+            .local_derived_key_id()
+            .await
+            .context("resolve the node's derived federation key_id to arm the AV-77 gate")?,
+    };
     engine.set_self_key_id(Some(key_id.clone()));
     // Prove it, do not assume it — this readback is the whole point.
     match engine.self_key_id() {

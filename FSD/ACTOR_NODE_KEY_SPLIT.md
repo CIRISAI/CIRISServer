@@ -230,6 +230,37 @@ The consent proofs are the #312 regression surface and are written **first**.
 
 ---
 
+## The wire identity — one binding, several jobs
+
+CIRISEdge#541's review found three defects from ONE root cause: a single
+`reticulum_identity_signer` binding serving three jobs that coincided only while
+the transport identity and the actor were the same key. **The same shape existed
+on this side**, found by auditing for it rather than by it failing:
+
+| site | read | should read | consequence |
+|---|---|---|---|
+| `publish_self_transport_destination` | `cfg.key_id` (ACTOR) | wire identity | the signed route names a key that is not on the link — CIRISEdge#393 item 2 fails and the route **never roots** |
+| `arm_peer_deadmission_gate` | `engine.local_derived_key_id()` (ACTOR) | wire identity | the node advertises an identity a sanction can name while being **un-de-admittable through it** — a gate that reports armed and refuses nothing |
+
+Both are the same mistake in the same direction: reaching for "the node's key"
+and getting whichever key was at hand.
+
+`node_key::wire_identity()` is the one binding transport-plane callers read. It
+is a `OnceLock` rather than a threaded parameter because these callers are
+reached from **two entry points** — `compose::serve_with_adapter` and
+`federation_delivery::start_and_hold` — and a parameter added to one of them is
+exactly how they drift apart.
+
+It is recorded at **provisioning**, not only in compose: the embedded path arms
+de-admission from `federation_delivery` and never runs `serve_with_adapter`, so a
+value set only in compose would be unset there and the gate would arm the actor.
+That is the ordering half of the same defect edge hit (`set_self_key_id` running
+before the node identity was resolved).
+
+Absent — every standalone node, every pre-split boot — callers fall back to the
+previous value, byte-identically.
+---
+
 ## Provisioning is a readiness gate — edge must not start on a half state
 
 `init_edge_runtime(use_node_identity=True)` resolves the node key by

@@ -515,3 +515,49 @@ async fn provisioning_twice_is_the_same_identity() {
     assert_eq!(a, b, "the identity must be stable across boots");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **The wire identity is what transport-plane callers must read.**
+///
+/// CIRISEdge#541's review found three defects from one root cause: a binding
+/// serving several jobs that coincided only while the transport identity and the
+/// actor were the same key. The same shape existed here — the signed route and
+/// the de-admission self both reached for "the node's key" and got the actor's.
+///
+/// Provisioning records it, so the EMBEDDED path (which arms de-admission from
+/// `federation_delivery` and never runs `serve_with_adapter`) sees it too.
+#[tokio::test]
+async fn provisioning_records_the_wire_identity() {
+    let tmp = std::env::temp_dir().join(format!("ciris-wire-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("wire").await;
+
+    let key_id = ciris_server::node_key::provision_node_identity(&engine, "prov-wire", &tmp, None)
+        .await
+        .expect("provision");
+
+    // `WIRE_IDENTITY` is a process-global `OnceLock` — correct for production (one
+    // node per process) and shared across tests in this binary, so whichever test
+    // provisions first wins the race. Asserting `== key_id` would pass or fail on
+    // test ORDER, which is worse than not asserting.
+    //
+    // So assert the order-independent property that actually catches the defect:
+    // the wire identity is set, and it is a NODE alias. An actor key carries no
+    // `-node` suffix, so this fails exactly when the bug is present.
+    let wire = ciris_server::node_key::wire_identity().expect(
+        "provisioning must record the wire identity — the EMBEDDED path arms \
+                 de-admission from `federation_delivery` and never runs \
+                 `serve_with_adapter`, so a value set only in compose is unset there",
+    );
+    assert!(
+        wire.contains("-node-") || wire.ends_with("-node"),
+        "the wire identity must be a NODE key, got {wire:?}. A transport-plane caller \
+         reading `cfg.key_id` or the engine's derived id gets the ACTOR on a split \
+         node: it publishes a route naming a key that is not on the link (CIRISEdge#393 \
+         item 2 fails, the route never roots) and arms a sanction against the wrong self"
+    );
+    assert!(
+        key_id.contains("-node-") || key_id.ends_with("-node"),
+        "sanity: this test's own provisioned key is a node alias ({key_id})"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

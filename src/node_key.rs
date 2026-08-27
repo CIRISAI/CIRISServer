@@ -689,6 +689,17 @@ pub async fn provision_node_identity(
     // from the first packet, claimed or not. Ownership is a separate readiness
     // question, answered by `owner_of` at the point that needs it — fail-closed,
     // per CC 3.4.7.3 Clause D.
+    // Record the wire identity HERE, not only in compose.
+    //
+    // `federation_delivery::start_and_hold` arms the de-admission gate on the
+    // EMBEDDED path and never runs `serve_with_adapter`, so a wire identity set
+    // only in compose would be unset there and the gate would arm the ACTOR —
+    // the node advertising an identity a sanction can name while being
+    // un-de-admittable through it. Provisioning is the earliest point the node
+    // key is known and it runs on every path that reaches edge, which makes it
+    // the right place. compose sets the same value later; first-writer-wins.
+    set_wire_identity(&key_id);
+
     tracing::info!(
         node_key_id = %key_id,
         alias = %node_alias(keystore_alias),
@@ -698,4 +709,58 @@ pub async fn provision_node_identity(
          open_existing (CIRISEdge#541). Ownership is deliberately not gated here."
     );
     Ok(key_id)
+}
+
+// ─── The WIRE identity — one binding, read by every transport-plane caller ────
+
+/// The key this node presents ON THE WIRE, once resolved at boot.
+///
+/// Set by [`resolve_node_identity`]; read by the transport-plane callers that
+/// must agree with edge's Reticulum identity. A `OnceLock` rather than a
+/// threaded parameter because the callers are reached from two entry points
+/// (`compose::serve_with_adapter` and `federation_delivery::start_and_hold`) and
+/// a parameter added to one of them is exactly how these drift apart.
+///
+/// # Why this exists at all
+///
+/// CIRISEdge#541's review found three defects from ONE root cause: a single
+/// binding serving several jobs that coincided only while the transport identity
+/// and the actor were the same key. Under the split they are not, and the same
+/// shape existed here — `publish_self_transport_destination` bound `cfg.key_id`
+/// (the ACTOR's derived id) to edge's `local_named_dest_hash()` (the NODE's
+/// destination under `use_node_identity`), so a peer evaluating CIRISEdge#393
+/// item 2 would find the signed route naming a key that is not the one it is
+/// talking to, and never root. `arm_peer_deadmission_gate` had the twin: it armed
+/// the ACTOR as the de-admission self, so this node would advertise an identity a
+/// sanction can name while being un-de-admittable through it.
+///
+/// Both are the same mistake in the same direction — reaching for "the node's
+/// key" and getting whichever key happened to be at hand.
+static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the wire identity. First writer wins; a second call with a DIFFERENT
+/// value is a bug worth shouting about rather than silently ignoring.
+pub fn set_wire_identity(key_id: &str) {
+    if let Err(existing) = WIRE_IDENTITY.set(key_id.to_owned()) {
+        if existing != key_id {
+            tracing::error!(
+                already = %WIRE_IDENTITY.get().map(String::as_str).unwrap_or("<unset>"),
+                attempted = %key_id,
+                "wire identity RESET attempted with a different key — the transport plane \
+                 would be split across two identities. The first value stands; this is a \
+                 bug in boot ordering, not a recoverable condition."
+            );
+        }
+    }
+}
+
+/// The wire identity, or `None` before boot has resolved it.
+///
+/// Callers on the transport plane MUST prefer this over `cfg.key_id` or
+/// `engine.local_derived_key_id()`: those are the ACTOR on a split node, and
+/// using them publishes routes and arms sanctions against a key that is not the
+/// one on the link.
+#[must_use]
+pub fn wire_identity() -> Option<&'static str> {
+    WIRE_IDENTITY.get().map(String::as_str)
 }
