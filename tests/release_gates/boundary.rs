@@ -283,3 +283,140 @@ fn gate0_no_gate_depends_on_an_operator_dropped_evidence_file() {
         readers.join("\n"),
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The index must offer a wheel a NON-DESKTOP consumer can resolve
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The `ciris-client` requirement pinned in `pyproject.toml`, as `(name, version)`.
+fn pinned_client() -> Option<(String, String)> {
+    let py = std::fs::read_to_string(repo().join("pyproject.toml")).ok()?;
+    let line = py
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"ciris-client=="))?;
+    let req = line
+        .trim()
+        .trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let (name, ver) = req.split_once("==")?;
+    Some((name.to_owned(), ver.to_owned()))
+}
+
+/// **The pinned client must publish a wheel a non-desktop consumer can resolve.**
+///
+/// CIRISServer#493: 0.5.189 could not be installed on Android at all. The
+/// unconditional `ciris-client==` pin met a wheel matrix of four PLATFORM wheels
+/// and no `py3-none-any`, so a pip targeting Android matched no tag, fell back to
+/// the last version that had one, and the `==` pin rejected it.
+///
+/// Nothing on this side could see that. The pin gate compares version STRINGS,
+/// and pip on a desktop CI runner resolves the manylinux wheel and is happy. The
+/// universal wheel had silently vanished at 0.5.188 and went unnoticed for two
+/// releases, because nothing depended on the client until #471 made it a hard
+/// requirement.
+///
+/// # The lag this is written around
+///
+/// This gate's own first run was a FALSE NEGATIVE. Checking the JSON API moments
+/// after a publish reported four files when five had been uploaded — the
+/// universal wheel was still propagating — and I concluded from that snapshot
+/// that the fix had not landed. It had.
+///
+/// So: retry with backoff, and read the **simple index** rather than the JSON
+/// API. They are separately cached, and the simple index is the surface `pip`
+/// itself resolves against — which is the actual question ("can a consumer get a
+/// wheel?"), not a proxy for it. A gate that answers a different question from
+/// the one it claims is the shape this ladder exists to refuse.
+///
+/// Absence reads **BLOCKED, never PASSED**: an unreachable index means the
+/// question was not answered, and this repo has paid six times for a gate that
+/// passed because it could not look.
+#[test]
+#[ignore = "RED BY DESIGN — external fact: reads the PyPI simple index for the pinned ciris-client. BLOCKED, never passed, when the index is unreachable. Run with --include-ignored."]
+fn gate_pinned_client_offers_a_non_desktop_wheel() {
+    let Some((name, version)) = pinned_client() else {
+        blocked(
+            "client-wheel-resolvable",
+            "no `ciris-client==` requirement found in pyproject.toml — this gate cannot \
+             pass by finding nothing to check",
+        );
+    };
+    let url = format!("https://pypi.org/simple/{name}/");
+
+    // Backoff across the publish window. A tag's wheels land over tens of
+    // seconds, and a gate that samples once during that window reports a real
+    // release as broken.
+    let mut last_err = String::new();
+    for (attempt, wait) in [0u64, 5, 15, 30].into_iter().enumerate() {
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+        }
+        match http_get(&url) {
+            Ok((200, body)) => {
+                let dist = name.replace('-', "_");
+                let want = format!("{dist}-{version}-py3-none-any.whl");
+                if body.contains(&want) {
+                    return;
+                }
+                // NOT-PUBLISHED and PUBLISHED-WITHOUT-THE-UNIVERSAL-WHEEL are
+                // different states and must not share a message. My own mutation
+                // test caught this: pinning a version that does not exist reported
+                // "publishes no py3-none-any wheel", which sends a reader to
+                // CIRISClient's wheel matrix for a version that was never cut.
+                let any_file_for_version = format!("{dist}-{version}-");
+                last_err = if body.contains(&any_file_for_version) {
+                    format!("published-without-universal (attempt {})", attempt + 1)
+                } else {
+                    format!("not-published (attempt {})", attempt + 1)
+                };
+            }
+            Ok((code, _)) => last_err = format!("HTTP {code} from {url}"),
+            Err(e) => last_err = format!("{url}: {e}"),
+        }
+    }
+
+    if last_err.starts_with("not-published") {
+        panic!(
+            "\n\
+             🚫 RELEASE GATE [client-wheel-resolvable] — DO NOT TAG.\n\
+             \n\
+             `{name}=={version}` is not on the index at all. The pin names a version\n\
+             CIRISClient has not published, so EVERY consumer fails to resolve it, not\n\
+             just the off-desktop ones.\n\
+             \n\
+             This is the expected state while a paired cut is in flight — the server\n\
+             pins the version it will ship with and the client publishes it — and it\n\
+             clears itself the moment they cut. It is a true red, not a broken gate.\n"
+        );
+    }
+    if last_err.starts_with("published-without-universal") {
+        panic!(
+            "\n\
+             🚫 RELEASE GATE [client-wheel-resolvable] — DO NOT TAG.\n\
+             \n\
+             The pinned `{name}=={version}` publishes no `py3-none-any` wheel, so a pip\n\
+             targeting a platform you do not build for — Android via Chaquopy, iOS —\n\
+             matches NO tag. It then falls back to the newest version that has one, and\n\
+             the `==` pin rejects that, so the install fails outright rather than\n\
+             degrading (CIRISServer#493).\n\
+             \n\
+             Nothing else here can see this: the pin gate compares version strings, and\n\
+             pip on a desktop runner resolves the platform wheel and is happy.\n\
+             \n\
+             {last_err}\n\
+             \n\
+             Fix in CIRISClient by splitting the ARTIFACT, not the dependency: platform\n\
+             wheels carry the desktop uber-jar, `py3-none-any` carries none. Wheel-tag\n\
+             preference is evaluated by the INSTALLING pip against its own target tags,\n\
+             so desktop takes its platform wheel and never sees `any` — no environment\n\
+             marker, and nothing evaluated on the build host.\n"
+        );
+    }
+    blocked(
+        "client-wheel-resolvable",
+        &format!(
+            "could not read the PyPI simple index after 4 attempts over ~50s, so whether \
+             {name}=={version} is installable off-desktop is UNKNOWN — which is not the \
+             same as fine. Last: {last_err}"
+        ),
+    );
+}
