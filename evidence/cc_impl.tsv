@@ -51,7 +51,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.1.1	CLM-anti-pattern-delegation	—	—	open
 4.1.4	CLM-withdraws-arbitrage	CIRISServer	src/withdraws_arbitrage.rs#enforce	ciris-server@main
 4.2.1.1	CLM-invocation	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#Invocation::canonical_bytes	ciris-verify-core@v10.1.1
-4.2.1.2	CLM-notify	CIRISClient	client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/ui/screens/AccordScreen.kt#invocationBadge	ciris-client@0.5.188
+4.2.1.2	CLM-notify	CIRISClient	client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/ui/screens/AccordScreen.kt#invocationBadge	ciris-client@0.5.189
 4.2.1.3	CLM-lifecycle	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#verify_invocation	ciris-verify-core@v10.1.1
 4.2.2	CLM-hardware-class	CIRISVerify	src/ciris-keyring/src/hw_token.rs#hardware_class_table	ciris-keyring@v10.1.1
 4.2.2.1	CLM-hardware-class-hardware	CIRISServer	src/hardware_attestation.rs#admit_hardware_class	ciris-server@main

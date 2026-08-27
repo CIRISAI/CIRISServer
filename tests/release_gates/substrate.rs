@@ -264,3 +264,51 @@ fn gate_no_substrate_rev_pin_at_release() {
         revs.join("\n")
     );
 }
+
+/// **The client pin tracks this cut's own version.**
+///
+/// The desktop app compares its `CLIENT_VERSION` against the node's reported
+/// version on the full leading semver (`isVersionMismatch`), so a 0.5.189 node
+/// shipping a 0.5.188 client greets its own operator with "Update recommended"
+/// against the dependency it was deliberately built with.
+///
+/// Nothing asserted this before, and nothing had to: a wheel-build lane kept the
+/// two in step, and it went away with `client/`. The obligation did not go away
+/// with it — it just stopped having a keeper. Found by review (Codex on #489),
+/// not by a gate, which is why there is now a gate.
+///
+/// Deliberately a RELEASE gate rather than a build error: an adoption branch may
+/// legitimately sit on the previous client for a commit or two while upstream
+/// cuts. What must not happen is TAGGING that way.
+#[test]
+fn gate_client_pin_matches_this_release() {
+    let pyproject = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pyproject.toml"),
+    )
+    .expect("pyproject.toml must be readable");
+    let pin = pyproject
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("\"ciris-client==")
+                .and_then(|r| r.split('"').next())
+                .map(str::to_owned)
+        })
+        .expect(
+            "no `ciris-client==` requirement in pyproject.toml — this gate cannot pass by \
+             finding nothing",
+        );
+    let server = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        pin, server,
+        "\n\
+         🚫 RELEASE GATE [client-pin] — DO NOT TAG.\n\
+         \n\
+         The node is {server} and pins ciris-client {pin}. The desktop app compares\n\
+         its CLIENT_VERSION against the node's on the full leading semver, so this\n\
+         ships an \"Update recommended\" prompt against the client the release was\n\
+         deliberately built with.\n\
+         \n\
+         Move the pin in pyproject.toml, in the same commit that bumps the version.\n"
+    );
+}
