@@ -374,3 +374,144 @@ async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
         "the refusal must name itself, got: {msg}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Provisioning is a readiness gate — edge must not start on a half state
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A plain node provisions with no actor, and the node key reads back `node`-only.
+///
+/// The read-back is the point: `register_federation_key` treats a benign Conflict
+/// as `Ok`, which is exactly how a node once ran for months on a key that never
+/// said `node` — the write reported success and the row said otherwise.
+#[tokio::test]
+async fn provisioning_verifies_by_reading_the_directory_back() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("plain-node").await;
+
+    let key_id = ciris_server::node_key::provision_node_identity(&engine, "prov-plain", &tmp, None)
+        .await
+        .expect("a plain node provisions with no actor");
+
+    assert_eq!(
+        classify(engine.federation_directory().as_ref(), &key_id)
+            .await
+            .expect("classify"),
+        IdentityVerdict::SubstrateOnly,
+        "the provisioned key must read back as pure substrate"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **An agent-carrying node whose actor key is unregistered is REFUSED.**
+///
+/// This is the state that produced 3,404 refusals on one key in production:
+/// every row the brain authors is rejected at every peer with
+/// `attesting_key_id … does not exist in federation_keys`. Failing here puts it
+/// in front of whoever is starting the node, rather than in a peer's log they
+/// cannot read.
+#[tokio::test]
+async fn an_agent_carrying_node_with_an_unregistered_actor_is_refused() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-noactor-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("carrier").await;
+
+    let err = ciris_server::node_key::provision_node_identity(
+        &engine,
+        "prov-carrier",
+        &tmp,
+        Some("an-actor-nobody-registered"),
+    )
+    .await
+    .expect_err("an unregistered actor must refuse provisioning, so edge does not start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("absent from `federation_keys`"),
+        "the refusal must name the missing registration, got: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// An agent-carrying node whose "actor" is itself `node`-typed is refused — that
+/// is the fusion this split removes, arriving from the other direction.
+#[tokio::test]
+async fn an_actor_that_is_not_an_actor_is_refused() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-fused-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    const NOT_AN_ACTOR: &str = "claims-to-be-the-brain-but-is-a-node";
+    let engine = engine_for("carrier2").await;
+    register(
+        &engine,
+        &signer_for(NOT_AN_ACTOR),
+        NOT_AN_ACTOR,
+        identity_type::NODE,
+    )
+    .await;
+
+    let err = ciris_server::node_key::provision_node_identity(
+        &engine,
+        "prov-carrier2",
+        &tmp,
+        Some(NOT_AN_ACTOR),
+    )
+    .await
+    .expect_err("a node-typed 'actor' must refuse");
+    assert!(
+        err.to_string().contains("needs a key that IS an actor"),
+        "got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **Ownership is deliberately NOT gated**, and this pins the decision.
+///
+/// A fresh node has no owner until someone completes OAuth and claims it — that
+/// is what first-run is for. Requiring a human here would mean a node cannot
+/// start its transport until it is claimed, and the claim path reaches edge only
+/// through a fire-and-forget `pull_owner_testimony` whose own comment says the
+/// response "must not wait on a peer being reachable".
+///
+/// The defect still closes: the lightnet door is walked by a `node`-typed key
+/// from the first packet, claimed or not.
+#[tokio::test]
+async fn provisioning_does_not_require_an_owner() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-unowned-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("unowned").await;
+
+    let key_id =
+        ciris_server::node_key::provision_node_identity(&engine, "prov-unowned", &tmp, None)
+            .await
+            .expect(
+                "an UNCLAIMED node must still provision — first-run is what produces the owner",
+            );
+
+    assert!(
+        ciris_persist::federation::admission::owner_of(
+            engine.federation_directory().as_ref(),
+            &key_id
+        )
+        .await
+        .expect("owner_of")
+        .is_none(),
+        "premise: this node is genuinely unowned, and provisioning succeeded anyway"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Idempotent: provisioning twice yields the same key and does not fail.
+#[tokio::test]
+async fn provisioning_twice_is_the_same_identity() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-idem-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("idem").await;
+    let a = ciris_server::node_key::provision_node_identity(&engine, "prov-idem", &tmp, None)
+        .await
+        .expect("first");
+    let b = ciris_server::node_key::provision_node_identity(&engine, "prov-idem", &tmp, None)
+        .await
+        .expect("second — every boot after the first is a no-op");
+    assert_eq!(a, b, "the identity must be stable across boots");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

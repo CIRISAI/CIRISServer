@@ -599,3 +599,103 @@ pub async fn reauthor_consent_as_node(
     }
     Ok(moved)
 }
+
+/// **Provision the node identity — mint + register, ahead of edge init.**
+///
+/// The ordering the split needs and did not have. CIRISEdge#541 gives
+/// `init_edge_runtime` a `use_node_identity` flag which resolves the node key by
+/// `open_existing` and REFUSES if it is absent — correct, because a key edge
+/// minted would be registered by no directory and owner-bound by nobody
+/// (CIRISAgent#1009's shape). But in the embedded fold edge inits BEFORE
+/// CIRISServer's compose folds on, so on a first boot the key it needs does not
+/// exist yet and the flag would refuse forever.
+///
+/// Softening edge's refusal would be the wrong cure — it puts the node-identity
+/// lifecycle in the party that does not own it. So the mint moves EARLIER
+/// instead: the host calls this after building its engine and before edge init.
+///
+/// Both halves are minted here, and they are separate files on purpose:
+/// `<alias>-node` sealed Ed25519, and **`node_ml_dsa_65.seed`** — NOT the
+/// engine's `ml_dsa_65.seed`. Handing the node key the actor's PQC half would
+/// split the classical axis only, hybrid-sign with the wrong post-quantum key,
+/// and report green throughout.
+///
+/// Idempotent: `node_signer` is open-or-mint and registration treats a matching
+/// row as `Ok`, so every boot after the first is a no-op.
+///
+/// Returns the registered node `key_id`.
+///
+/// # Errors
+/// Keystore/seed IO, or a registration failure that is not a benign conflict.
+pub async fn provision_node_identity(
+    engine: &ciris_persist::prelude::Engine,
+    keystore_alias: &str,
+    identity_dir: &std::path::Path,
+    actor_key_id: Option<&str>,
+) -> Result<String> {
+    let (_signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+    let key_id = register_node_key(engine, &identity).await?;
+
+    // ── The readiness gate: edge must not start on a half-provisioned identity ──
+    //
+    // Verified by READING THE DIRECTORY BACK, not by trusting the register call
+    // above. `register_federation_key` treats a benign Conflict as Ok, which is
+    // exactly how a node once ran for months on a key that never said `node` —
+    // the write reported success and the row said something else.
+    let dir = engine.federation_directory();
+    match classify(dir.as_ref(), &key_id).await? {
+        IdentityVerdict::SubstrateOnly => {}
+        other => anyhow::bail!(
+            "node identity NOT provisioned: {key_id:?} classifies as {other:?}, not a \
+             pure `node`. Edge must not start on this — the transport identity is the \
+             key that walks the lightnet door (bootstrap kinds are exempt from \
+             `Rooted ∧ owns_key` and attributed by the link's identity), and CC 3.4.7.3 \
+             Clause A exists because a key carrying both roles makes persist's agency \
+             gate stop firing."
+        ),
+    }
+
+    // An agent-carrying node owes its ACTOR key too: the brain signs authorship
+    // with it, and an unregistered attester has every row refused
+    // (`attesting_key_id … does not exist in federation_keys` — 3,404 refusals on
+    // one key in production). Checked here so the failure lands at provisioning,
+    // in front of whoever is starting the node, rather than as a refusal storm at
+    // a peer whose logs they cannot read.
+    if let Some(actor) = actor_key_id {
+        match classify(dir.as_ref(), actor).await? {
+            IdentityVerdict::Actor { .. } => {}
+            IdentityVerdict::Unregistered => anyhow::bail!(
+                "node identity NOT provisioned: this node carries an agent, but its actor \
+                 key {actor:?} is absent from `federation_keys`. Every row it authors \
+                 would be refused at every peer."
+            ),
+            other => anyhow::bail!(
+                "node identity NOT provisioned: the actor key {actor:?} classifies as \
+                 {other:?}. An agent-carrying node needs a key that IS an actor — a \
+                 `node`-typed or fused key here is the fusion this split removes."
+            ),
+        }
+    }
+
+    // NOT gated: the owner-binding. A fresh node has no owner until someone
+    // completes OAuth and claims it, and that is what first-run is FOR. Requiring
+    // a human here would mean a node cannot start its transport until it is
+    // claimed — and the claim path reaches edge only through a fire-and-forget
+    // `pull_owner_testimony` whose own comment says the response "must not wait on
+    // a peer being reachable". Gating would make that permanently dead on first
+    // run and deadlock any future claim path that does want a peer.
+    //
+    // The defect still closes: the lightnet door is walked by a `node`-typed key
+    // from the first packet, claimed or not. Ownership is a separate readiness
+    // question, answered by `owner_of` at the point that needs it — fail-closed,
+    // per CC 3.4.7.3 Clause D.
+    tracing::info!(
+        node_key_id = %key_id,
+        alias = %node_alias(keystore_alias),
+        actor_key_id = actor_key_id.unwrap_or("<none — not agent-carrying>"),
+        "node identity provisioned and VERIFIED (CC 3.4.7.3) — minted, registered and \
+         read back ahead of edge init, so `use_node_identity` resolves it by \
+         open_existing (CIRISEdge#541). Ownership is deliberately not gated here."
+    );
+    Ok(key_id)
+}

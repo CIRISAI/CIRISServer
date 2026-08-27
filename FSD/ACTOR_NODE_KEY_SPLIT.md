@@ -224,14 +224,48 @@ The consent proofs are the #312 regression surface and are written **first**.
 
 ## Open
 
-- **The wire identity.** Edge takes its Reticulum transport identity from
-  `engine.local_signer_capsule()`, and in the embedded fold the edge is ALREADY
-  RUNNING when compose folds onto it (`current_edge()`, not `build_edge()`), so
-  the transport identity is set by whoever calls `init_edge_runtime`. Every CEG
-  row — ownership, consent, attestations — is authored by the correct key as of
-  this cut; the transport LAYER identity is the one thing that still follows the
-  engine, and it is set outside this process. `node_key::node_signer` is public
-  for exactly that caller.
+- **The wire identity** — closed by CIRISEdge#541 (`use_node_identity`, edge
+  v18.10.0) plus provisioning below. Edge resolves the node key itself; no signer
+  crosses FFI.
+
+---
+
+## Provisioning is a readiness gate — edge must not start on a half state
+
+`init_edge_runtime(use_node_identity=True)` resolves the node key by
+`open_existing` and **refuses** when it is absent. Correct: a key edge minted
+would be registered by no directory and owner-bound by nobody. But edge inits
+BEFORE compose folds on, so on a first boot there is nothing to open.
+
+Softening edge's refusal would put the node-identity lifecycle in the party that
+does not own it. The mint moves earlier instead —
+`ciris_server.provision_node_identity(keystore_alias, identity_dir,
+actor_key_id=None)`, called after the engine is built and before edge init. A
+`key_id` comes back; the signer stays in Rust, the same property
+`resolve_user_signer` and `ConsentGrantOptions::author_signer` hold.
+
+It **verifies by reading the directory back**, never by trusting the write —
+`register_federation_key` treats a benign `Conflict` as `Ok`, which is precisely
+how a node once ran for months on a key that never said `node`.
+
+| requirement | gated? | why |
+|---|---|---|
+| node key registered `node`-only | **yes** | local, always satisfiable, and it is the key that walks the lightnet door |
+| actor key registered `agent` (agent-carrying node) | **yes** | an unregistered attester has every row refused — 3,404 on one key in production |
+| owner-binding present | **no** | see below |
+
+**Ownership is deliberately not gated.** A fresh node has no owner until someone
+completes OAuth and claims it — that is what first-run is FOR. Requiring a human
+would mean a node cannot start its transport until it is claimed. Verified that
+this is safe: `oauth.rs` has zero edge references, the claim path touches edge
+exactly once via a **fire-and-forget** `pull_owner_testimony` whose own comment
+says the response "must not wait on a peer being reachable", and LLM checks are
+outbound HTTPS. Gating on an owner would make that pull permanently dead on first
+run and deadlock any future claim path that does want a peer.
+
+The defect still closes: the lightnet door is walked by a `node`-typed key from
+the first packet, claimed or not. Ownership is a separate readiness question,
+answered by `owner_of` at the point that needs it — fail-closed, per Clause D.
 - **Existing fused deployments** re-author on next boot. Mesh is in development;
   a break-and-repair-on-update is the accepted cost (operator decision, recorded
   here so it is not re-litigated as an oversight).
