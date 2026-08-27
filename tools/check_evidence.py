@@ -120,13 +120,20 @@ def client_checkout(pin: str) -> Path | None:
     if not (CLIENT_SIBLING / ".git").exists():
         return None
     try:
+        # `--exact-match` — NOT the nearest tag. `describe --tags --abbrev=0` walks
+        # BACK to the closest ancestor tag, so a sibling checked out ten commits
+        # PAST v0.5.188 still answers "v0.5.188" and we would resolve symbols
+        # against source the pinned release never shipped. git's own help draws
+        # the distinction: --exact-match "only output exact matches".
         tag = subprocess.run(
-            ["git", "-C", str(CLIENT_SIBLING), "describe", "--tags", "--abbrev=0"],
+            ["git", "-C", str(CLIENT_SIBLING), "describe", "--tags", "--exact-match"],
             capture_output=True,
             text=True,
             check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
+        # Not ON a tag at all (mid-development, a branch, a descendant) — deferred,
+        # never silently accepted.
         return None
     return CLIENT_SIBLING if tag.lstrip("v") == pin.lstrip("v") else None
 

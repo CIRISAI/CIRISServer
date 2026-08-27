@@ -80,6 +80,14 @@ pub enum IdentityVerdict {
     /// Carries `node` AND an actor role — the CC 3.4.7.3 Clause A violation, and
     /// the one that silently disables the agency gate.
     Fused { roles: Vec<String> },
+    /// Registered, but carries neither `node` nor an actor role —
+    /// `substrate_persist`, `witness`, `canonical`, `steward`, or an empty set.
+    ///
+    /// Not usable as the node identity (it does not say `node`) and not usable as
+    /// an actor (it says nothing this split recognises as one). Folding it into
+    /// either neighbour is what let a `witness` key pass the readiness gate as a
+    /// brain.
+    OtherInfrastructure { roles: Vec<String> },
     /// No row for this key_id in the directory.
     Unregistered,
 }
@@ -127,7 +135,18 @@ pub async fn classify(dir: &dyn FederationDirectory, key_id: &str) -> Result<Ide
     Ok(match (has_node, actors.is_empty()) {
         (true, false) => IdentityVerdict::Fused { roles },
         (false, false) => IdentityVerdict::Actor { roles },
-        _ => IdentityVerdict::SubstrateOnly,
+        (true, true) => IdentityVerdict::SubstrateOnly,
+        // NEITHER `node` nor an actor role: `substrate_persist`, `witness`,
+        // `canonical`, `steward`, an empty set… (Codex P2 on #489).
+        //
+        // This used to fall into `SubstrateOnly`, which made the readiness gate
+        // accept a `witness` key as the brain's actor identity — `is_actor_role`
+        // explicitly rejects those, so the gate passed while every downstream
+        // agency and authorship check operated on a key that is neither.
+        //
+        // It is its own verdict because it is genuinely a third thing: not the
+        // node, not an actor, and not unknown. Distinct-zeroes again.
+        (false, true) => IdentityVerdict::OtherInfrastructure { roles },
     })
 }
 
@@ -390,7 +409,12 @@ pub async fn resolve_node_identity(
                 signer: None,
             })
         }
-        IdentityVerdict::Actor { roles } | IdentityVerdict::Fused { roles } => {
+        // All three are "the configured key is not this node": an actor, a fused
+        // key, or some other infrastructure role that simply does not say `node`.
+        // Each gets its own node key; none of them is mutated.
+        IdentityVerdict::Actor { roles }
+        | IdentityVerdict::Fused { roles }
+        | IdentityVerdict::OtherInfrastructure { roles } => {
             let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
             let node_key_id = register_node_key(engine, &identity).await?;
             tracing::warn!(
@@ -555,28 +579,39 @@ pub async fn reauthor_consent_as_node(
     actor_key_id: &str,
     node_key_id: &str,
 ) -> Result<Vec<String>> {
-    let actor_peers = crate::peer::replication_peers_from_consent(engine, actor_key_id).await?;
-    if actor_peers.is_empty() {
+    let grants = engine
+        .federation_directory()
+        .list_live_consent_grants_by(actor_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("list live consent grants by {actor_key_id}: {e}"))?;
+    if grants.is_empty() {
         return Ok(Vec::new());
     }
     // Read ONCE before the loop so the skip set cannot drift as we write into it.
-    // This is what makes a second boot a no-op instead of a re-emit.
     let already: std::collections::BTreeSet<String> =
         crate::peer::replication_peers_from_consent(engine, node_key_id)
             .await?
             .into_iter()
             .collect();
 
-    let opts = crate::peer::ConsentGrantOptions {
-        author_signer: Some(node_signer),
-        ..Default::default()
-    };
-    let prefixes = crate::peer::default_attestation_prefixes();
     let mut moved = Vec::new();
-    for peer in actor_peers {
+    for grant in &grants {
+        let Some(peer) = grant.subject_key_ids.first().cloned() else {
+            continue;
+        };
         if already.contains(&peer) {
             continue;
         }
+        // **Carry the POLICY, never the defaults** (Codex P1 on #489).
+        //
+        // The first version rebuilt each grant from `ConsentGrantOptions::default()`
+        // plus the global default prefixes, keeping only the peer id. An operator
+        // grant with a narrowed prefix set, an expiry, an audience or a restriction
+        // would have come back UNRESTRICTED — the migration authorizing data the
+        // owner never consented to share. Widening consent silently is the worst
+        // outcome available here, so the original policy is read off the live row
+        // and reproduced.
+        let (opts, prefixes) = policy_of(grant, &node_signer)?;
         crate::peer::emit_replication_consent_with_policy(
             engine,
             node_key_id,
@@ -593,11 +628,124 @@ pub async fn reauthor_consent_as_node(
             from_key_id = %actor_key_id,
             to_key_id = %node_key_id,
             peers = ?moved,
-            "consent re-authored as the node key — the replication topology now resolves \
-             for the identity that reads it (CIRISServer#312)"
+            "consent re-authored as the node key, policy preserved — the replication \
+             topology now resolves for the identity that reads it (CIRISServer#312)"
         );
     }
     Ok(moved)
+}
+
+/// Every payload member `emit_replication_consent_with_policy` can reproduce.
+/// A grant carrying anything else is REFUSED rather than migrated with that
+/// member dropped — see [`policy_of`].
+const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[
+    "grants",
+    "direction",
+    "kinds",
+    "attestation_prefixes",
+    "principle",
+    "audience",
+    "restrictions",
+    "purpose",
+    "valid_until",
+];
+
+/// Read a live grant's policy back into the options that reproduce it.
+///
+/// **Fail-closed on anything unrecognised.** A payload member this build cannot
+/// carry means the re-authored grant would differ from the one the operator
+/// authored, in a direction nobody reviewed. Refusing leaves the node's topology
+/// unmigrated and visible; dropping the member silently widens a consent grant,
+/// which is the failure this function exists to prevent.
+fn policy_of(
+    grant: &ciris_persist::federation::types::Attestation,
+    node_signer: &std::sync::Arc<ciris_persist::prelude::LocalSigner>,
+) -> Result<(crate::peer::ConsentGrantOptions, Vec<String>)> {
+    let payload = grant
+        .attestation_envelope
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "consent grant {} carries no payload object — refusing to re-author a \
+                 grant whose policy cannot be read",
+                grant.attestation_id
+            )
+        })?;
+
+    let unknown: Vec<&str> = payload
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !REPRODUCIBLE_PAYLOAD_MEMBERS.contains(k))
+        .collect();
+    anyhow::ensure!(
+        unknown.is_empty(),
+        "consent grant {} carries payload member(s) {unknown:?} this build cannot \
+         reproduce. Refusing to re-author it: migrating with those dropped would \
+         author a grant the owner never made, and a widened consent is worse than an \
+         unmigrated one. Extend REPRODUCIBLE_PAYLOAD_MEMBERS (and the options it maps \
+         to) rather than relaxing this check.",
+        grant.attestation_id
+    );
+
+    let strs = |k: &str| -> Option<Vec<String>> {
+        payload.get(k)?.as_array().map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+    };
+    let s =
+        |k: &str| -> Option<String> { payload.get(k).and_then(|v| v.as_str()).map(str::to_owned) };
+
+    let prefixes = strs("attestation_prefixes").unwrap_or_default();
+    anyhow::ensure!(
+        !prefixes.is_empty(),
+        "consent grant {} declares no attestation prefixes — refusing rather than \
+         substituting the defaults, which is exactly how a narrowed grant becomes a \
+         broad one",
+        grant.attestation_id
+    );
+
+    let restrictions = match payload.get("restrictions") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            anyhow::anyhow!(
+                "consent grant {} has restrictions this build cannot parse ({e}) — \
+                 refusing rather than re-authoring without them",
+                grant.attestation_id
+            )
+        })?,
+    };
+    let valid_until = match payload.get("valid_until") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "consent grant {} has an unparseable valid_until — refusing \
+                         rather than re-authoring WITHOUT an expiry the owner set",
+                        grant.attestation_id
+                    )
+                })?,
+        ),
+    };
+
+    Ok((
+        crate::peer::ConsentGrantOptions {
+            author_signer: Some(node_signer.clone()),
+            audience: s("audience"),
+            valid_until,
+            restrictions,
+            kinds: strs("kinds"),
+            direction: s("direction"),
+            principle: s("principle"),
+            purpose: s("purpose"),
+        },
+        prefixes,
+    ))
 }
 
 /// **Provision the node identity — mint + register, ahead of edge init.**

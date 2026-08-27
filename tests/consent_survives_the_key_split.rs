@@ -314,3 +314,125 @@ async fn an_author_signer_for_a_different_key_is_still_refused() {
         "got: {err}"
     );
 }
+
+/// **A restricted grant must survive migration RESTRICTED** (Codex P1 on #489).
+///
+/// The first version rebuilt each grant from `ConsentGrantOptions::default()` +
+/// the global default prefixes, keeping only the peer id. An operator grant with
+/// a narrowed prefix set or an expiry would have come back unrestricted — the
+/// migration authorizing data the owner never consented to share.
+///
+/// Widening a consent grant silently is the worst outcome available here, so this
+/// pins the narrow shape end to end.
+#[tokio::test]
+async fn a_narrowed_grant_is_not_widened_by_the_migration() {
+    let engine = fixture().await;
+    let author = engine.local_derived_key_id().await.expect("derived");
+
+    // Deliberately NARROWER than the defaults, plus an expiry.
+    let narrow = vec!["trace:".to_string()];
+    let expiry = chrono::Utc::now() + chrono::Duration::days(30);
+    ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        &author,
+        PEER,
+        &narrow,
+        &ciris_server::peer::ConsentGrantOptions {
+            valid_until: Some(expiry),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the operator authors a narrowed, expiring grant");
+
+    let moved = ciris_server::node_key::reauthor_consent_as_node(
+        &engine,
+        Arc::new(signer_for(NODE)),
+        &author,
+        NODE,
+    )
+    .await
+    .expect("re-author");
+    assert_eq!(moved, vec![PEER.to_string()]);
+
+    // Read the NODE's grant back and compare its policy to what was authored.
+    let grants = engine
+        .federation_directory()
+        .list_live_consent_grants_by(NODE)
+        .await
+        .expect("list the node's grants");
+    let g = grants.first().expect("the node holds a grant");
+    let payload = g
+        .attestation_envelope
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .expect("payload");
+
+    let prefixes: Vec<String> = payload["attestation_prefixes"]
+        .as_array()
+        .expect("prefixes")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        prefixes, narrow,
+        "the migrated grant must carry the OPERATOR'S prefixes, not the defaults. \
+         Got {prefixes:?} — if this is the default set, the migration just widened a \
+         consent the owner deliberately narrowed"
+    );
+    assert!(
+        payload.get("valid_until").is_some_and(|v| !v.is_null()),
+        "and it must keep the expiry — dropping one turns a time-boxed grant into a \
+         permanent one"
+    );
+}
+
+/// A grant carrying a payload member this build cannot reproduce is REFUSED, not
+/// migrated with the member dropped.
+#[tokio::test]
+async fn an_unreproducible_payload_member_refuses_rather_than_dropping_it() {
+    let engine = fixture().await;
+    let author = engine.local_derived_key_id().await.expect("derived");
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &author,
+        PEER,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("a grant");
+
+    // Simulate a future/unknown member by asserting the guard's own list is what
+    // the emitter writes — if the emitter grows a member and the list does not,
+    // migration must refuse rather than silently drop it.
+    let grants = engine
+        .federation_directory()
+        .list_live_consent_grants_by(&author)
+        .await
+        .expect("list");
+    let payload = grants[0]
+        .attestation_envelope
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .expect("payload");
+    for k in payload.keys() {
+        assert!(
+            [
+                "grants",
+                "direction",
+                "kinds",
+                "attestation_prefixes",
+                "principle",
+                "audience",
+                "restrictions",
+                "purpose",
+                "valid_until"
+            ]
+            .contains(&k.as_str()),
+            "the emitter writes payload member {k:?} which the migration guard does not \
+             know how to reproduce. Add it to REPRODUCIBLE_PAYLOAD_MEMBERS *and* map it \
+             into ConsentGrantOptions — leaving it out means a migrated grant silently \
+             differs from the one the operator authored"
+        );
+    }
+}

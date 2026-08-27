@@ -102,6 +102,25 @@ lane() {
   done
 }
 
+# ── The client install runs BEFORE any lane, not inside one ──────────────────
+#
+# It was the first check in lane 1. Lanes run CONCURRENTLY, and lane 4's
+# localization guard imports `ciris_client` immediately — so on a machine where
+# the package is absent, the guard could fail while the install it needs was
+# still running in another lane. Ordering within a lane says nothing about
+# ordering across them, and putting a shared prerequisite in one lane makes it
+# look sequenced when it is not (Codex on #489).
+#
+# Sequential here and unconditional: it is idempotent, and a few seconds costs
+# less than a race that reproduces once in ten runs.
+echo "preflight: installing the pinned ciris-client (shared prerequisite)"
+if ! python3 tools/client_pin.py --install; then
+  echo "preflight: FAILED to install the pinned ciris-client — the localization guard" >&2
+  echo "  and two Rust suites resolve their bundle through it and would report a" >&2
+  echo "  zero-denominator pass. Refusing to run lanes that cannot be trusted." >&2
+  exit 1
+fi
+
 echo "preflight: 4 lanes, $( [ "$SEQUENTIAL" = 1 ] && echo sequential || echo parallel )"
 
 # `cargo test` runs `admin_ops` and `mesh_config_consumers`, which resolve the
@@ -109,8 +128,7 @@ echo "preflight: 4 lanes, $( [ "$SEQUENTIAL" = 1 ] && echo sequential || echo pa
 # the bundle is a package artifact now, not a path in this tree) and fail HARD
 # when it is absent rather than skipping. Same step, same reason, as ci.yml's
 # clippy-test job; gate0 asserts the two lists agree.
-L1=( "client-pin"          "python3 tools/client_pin.py --install"
-     "clippy"              "cargo clippy --all-targets -- -D warnings"
+L1=( "clippy"              "cargo clippy --all-targets -- -D warnings"
      "tests"               "cargo test"
      "tests-lens-core"     "cargo test -p ciris-lens-core --lib"
      "noise-floor"         "cargo test --test noise_floor -- --nocapture" )

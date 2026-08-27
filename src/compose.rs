@@ -321,19 +321,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     &node_resolution.node_key_id,
                 )
                 .await?;
-                // And the replication topology follows the identity that reads
-                // it (CIRISServer#312). Authored with the NODE's own signer, so
-                // the engine keeps signing as the actor and the embedded fold
-                // keeps its one engine (#221).
-                if let Some(node_signer) = node_resolution.signer.clone() {
-                    crate::node_key::reauthor_consent_as_node(
-                        &engine,
-                        node_signer,
-                        &actor_key_id,
-                        &node_resolution.node_key_id,
-                    )
-                    .await?;
-                }
             }
             Ok(None) => tracing::warn!(
                 node_key_id = %node_resolution.node_key_id,
@@ -347,6 +334,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 "could not resolve the owner signer to move the owner-binding onto the \
                  node key — the node stays unowned, which is the fail-closed reading"
             ),
+        }
+
+        // The topology follows the identity that reads it (CIRISServer#312), and
+        // it needs only the NODE's signer — NOT the owner's.
+        //
+        // This was nested inside the owner-signer arm above, so a split node with
+        // existing actor-authored grants and no owner seed on disk skipped it
+        // entirely: the wire identity moved to the node key while the grants
+        // stayed under the actor, and consent lookup returned zero peers under a
+        // healthy transport. Boot-environment peering can create grants before a
+        // node is ever claimed, so that is a reachable state, not a hypothetical
+        // (Codex on #489).
+        if let Some(node_signer) = node_resolution.signer.clone() {
+            crate::node_key::reauthor_consent_as_node(
+                &engine,
+                node_signer,
+                &actor_key_id,
+                &node_resolution.node_key_id,
+            )
+            .await?;
         }
     }
 

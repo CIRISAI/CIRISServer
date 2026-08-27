@@ -561,3 +561,47 @@ async fn provisioning_records_the_wire_identity() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **A `witness` key is not an actor** (Codex P2 on #489).
+///
+/// `classify` used to return `Actor` for ANY registered key without `node` —
+/// `substrate_persist`, `witness`, `canonical`, even an empty role set. The
+/// readiness gate would then accept a `witness` key as the brain's actor
+/// identity, passing while every downstream agency and authorship check operated
+/// on a key that `is_actor_role` explicitly rejects.
+#[tokio::test]
+async fn a_non_actor_infrastructure_role_is_neither_actor_nor_substrate() {
+    const W: &str = "a-witness-not-a-brain";
+    let engine = engine_for("witness-host").await;
+    register(&engine, &signer_for(W), W, "witness").await;
+
+    let v = classify(engine.federation_directory().as_ref(), W)
+        .await
+        .expect("classify");
+    assert!(
+        matches!(v, IdentityVerdict::OtherInfrastructure { .. }),
+        "expected OtherInfrastructure, got {v:?} — folding this into `Actor` is what \
+         let a witness key pass the readiness gate as a brain"
+    );
+    assert!(!v.usable_as_node(), "and it still may not BE the node");
+}
+
+/// …and the readiness gate refuses it as an agent-carrying node's actor.
+#[tokio::test]
+async fn provisioning_refuses_a_witness_as_the_brains_actor() {
+    const W: &str = "witness-claiming-to-be-a-brain";
+    let tmp = std::env::temp_dir().join(format!("ciris-witness-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("witness-carrier").await;
+    register(&engine, &signer_for(W), W, "witness").await;
+
+    let err =
+        ciris_server::node_key::provision_node_identity(&engine, "prov-witness", &tmp, Some(W))
+            .await
+            .expect_err("a witness key must not be accepted as the brain's actor identity");
+    assert!(
+        err.to_string().contains("needs a key that IS an actor"),
+        "got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
