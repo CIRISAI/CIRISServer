@@ -87,15 +87,57 @@ def find_desktop_jar() -> Optional[Path]:
         if jar.exists():
             return jar
     except ImportError:
-        # `ciris-client` is a hard dependency, so this means a broken install
-        # rather than an optional feature being absent. The caller reports "no
-        # desktop jar" either way; saying which is the launcher's job, not this
-        # resolver's.
-        pass
-    except Exception:  # noqa: BLE001 - artifact resolution is best-effort here
-        pass
+        # `ciris-client` is an UNCONDITIONAL dependency, so a failed import is a
+        # broken install rather than an optional feature being absent.
+        return None
+    except Exception as exc:  # noqa: BLE001 - see the two states below
+        # THE JAR-FREE WHEEL IS A SUPPORTED CONFIGURATION, NOT A FAULT.
+        #
+        # CIRISClient splits its artifact by wheel tag: the platform wheels
+        # (`macosx_*`, `manylinux_*`, `win_amd64`) carry the uber-jar, and
+        # `py3-none-any` is pure Python with no jar. A more specific tag beats
+        # `any`, so a desktop pip takes the platform wheel and Android/iOS — which
+        # match no platform tag — take the universal one. No environment marker is
+        # involved: the installing pip evaluates tags against its OWN target, so
+        # nothing depends on what the build host looked like.
+        #
+        # That means `ciris_client` imports fine here and `artifact_path` raises,
+        # on exactly the platforms where a desktop jar could never have run. It is
+        # the designed outcome, and it must not read as the same thing as a real
+        # resolution failure — "there is deliberately no jar on this platform" and
+        # "we could not find out" are different facts, and the launcher's advice
+        # to the operator differs for each (CIRISServer#493).
+        _record_jar_absence(exc)
+        return None
 
     return None
+
+
+#: Why the last :func:`find_desktop_jar` came back empty — read by the launcher
+#: so its advice matches the cause. `None` means it was never asked.
+_JAR_ABSENCE: Optional[str] = None
+
+
+def _record_jar_absence(exc: BaseException) -> None:
+    """Classify why the client package yielded no jar."""
+    global _JAR_ABSENCE
+    name = type(exc).__name__
+    # `ciris_client` publishes `ArtifactUnavailable` for "this build does not
+    # carry that artifact" and `ArtifactError` for a resolution fault. Matched by
+    # NAME rather than imported, so this file keeps working against a client that
+    # renames or reorganises them — the classification degrades to "unknown",
+    # which is honest, instead of an ImportError at module scope.
+    if name == "ArtifactUnavailable":
+        _JAR_ABSENCE = "no-jar-in-this-wheel"
+    elif name == "ArtifactError":
+        _JAR_ABSENCE = f"artifact-resolution-failed: {exc}"
+    else:
+        _JAR_ABSENCE = f"unexpected: {name}: {exc}"
+
+
+def jar_absence_reason() -> Optional[str]:
+    """Why the jar is missing, or `None` if the question was never asked."""
+    return _JAR_ABSENCE
 
 
 def _check_java_version(java_path: str) -> Tuple[bool, str]:
@@ -158,7 +200,24 @@ def launch_desktop_app(server_url: str = DEFAULT_SERVER_URL) -> int:
     """
     jar_path = find_desktop_jar()
     if not jar_path:
+        reason = jar_absence_reason()
+        if reason == "no-jar-in-this-wheel":
+            # Expected on Android / iOS / any tag with no platform wheel. Telling
+            # this operator to "reinstall the platform-specific wheel" would send
+            # them after a wheel that does not exist for their platform.
+            print("The desktop app is not available on this platform.", file=sys.stderr)
+            print(
+                "\nThe installed `ciris-client` is the pure-Python build, which "
+                "carries no\ndesktop JAR — that is deliberate: the desktop app is "
+                "packaged only for\nmacOS, Linux and Windows.\n",
+                file=sys.stderr,
+            )
+            print("Run the node headless instead:", file=sys.stderr)
+            print("  ciris-server serve", file=sys.stderr)
+            return 1
         print("ERROR: Desktop app JAR not found.", file=sys.stderr)
+        if reason:
+            print(f"\nReason: {reason}", file=sys.stderr)
         print("\nThe desktop JAR was not included in this installation.", file=sys.stderr)
         print("This happens if you installed a wheel built without the JAR", file=sys.stderr)
         print("(e.g. a headless server build).\n", file=sys.stderr)
