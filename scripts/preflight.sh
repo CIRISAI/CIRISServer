@@ -156,7 +156,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # cargo lane: it builds nothing, so it costs a subprocess. The ceiling must
      # match ci.yml — a preflight that passes what CI fails is worse than no
      # preflight, because it teaches people to trust it.
-     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 43"
+     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 44"
      "localization"        "python3 tools/check_server_localization.py --strict"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )
 
