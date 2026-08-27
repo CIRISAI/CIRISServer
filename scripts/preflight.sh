@@ -158,7 +158,15 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # preflight, because it teaches people to trust it.
      "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 44"
      "localization"        "python3 tools/check_server_localization.py --strict"
-     "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates" )
+     "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates"
+     # The boundary gates are `#[ignore]`d — correctly, since they reach the
+     # network — so `cargo test` skips them and nothing ran them until CI grew a
+     # step. A gate nothing runs is a gate that cannot fail, which is the defect
+     # this ladder was rebuilt to end. Advisory here as in CI: they answer
+     # questions about the WORLD, and each reports BLOCKED rather than passing
+     # when it cannot be evaluated.
+     "client-wheel"        "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_pinned_client_offers_a_non_desktop_wheel"
+     "boundary-advisory"   "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_registry_surface_present gate_peer_nodes_on_the_shipping_floor || true" )
 
 if [ "$SEQUENTIAL" = "1" ]; then
   lane target/pf-default "${L1[@]}"
