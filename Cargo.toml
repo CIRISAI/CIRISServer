@@ -136,7 +136,7 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
 ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v38.6.0", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", rev = "f3949db7bddf961cf783be6a036eac3d16ea2954", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v18.9.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -349,7 +349,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v13.6.1
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", rev = "f3949db7bddf961cf783be6a036eac3d16ea2954", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v18.9.0", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN

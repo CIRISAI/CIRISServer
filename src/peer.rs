@@ -763,6 +763,38 @@ async fn emit_grant_row<S: AsRef<str>>(
     //   - valid_until = optional payload-declared expiry
     //   - restrictions = strip_field / recipient_capability ops (persist's OWN
     //     closed RestrictionOp enum — an unknown op is unrepresentable)
+    // ── The documented invariant, now ENFORCED (found by TDD on CC 3.4.7.3) ──
+    //
+    // The comment below the emit says the attester "== `node_key_id` here —
+    // wire-preserving". It was true of every caller and checked by none. Passing
+    // any other id SUCCEEDED and produced a grant authored by the ENGINE, so a
+    // caller asking for a grant under key X got one under key Y with no error:
+    //
+    //     emit(node_key_id = NODE) -> Ok
+    //     read as NODE   -> []
+    //     read as ENGINE -> [peer]
+    //
+    // Zero peers under a green transport — the CIRISServer#312 shape, reachable
+    // by a one-argument mistake. It is also the class this repo keeps meeting:
+    // a request quietly downgraded instead of refused.
+    //
+    // Consent is SELF-attested by construction (CEG 1.0-RC29 §5.6.8.15 forecloses
+    // third-party authorship so a grant cannot be produced on your behalf), so
+    // "author this as someone else" has no valid reading. Refuse it.
+    let engine_author = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    if engine_author != node_key_id {
+        anyhow::bail!(
+            "refusing to emit a consent grant naming {node_key_id:?}: this engine signs as \
+             {engine_author:?}, and a consent grant is self-attested (CEG 1.0-RC29 §5.6.8.15). \
+             The row would be authored by the engine and invisible to {node_key_id:?} — a \
+             topology that reads empty under a healthy transport (CIRISServer#312). To author \
+             as another identity, the ENGINE must sign as it."
+        );
+    }
+
     let prefixes = normalize_prefixes(attestation_prefixes);
     if prefixes.is_empty() {
         return Err(anyhow::anyhow!(
