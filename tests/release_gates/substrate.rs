@@ -13,8 +13,8 @@ use crate::ladder::{
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
 pub const TARGET_VERIFY: &str = "v13.6.1";
-pub const TARGET_PERSIST: &str = "v38.4.0";
-pub const TARGET_EDGE: &str = "v18.7.0";
+pub const TARGET_PERSIST: &str = "v38.6.0";
+pub const TARGET_EDGE: &str = "v18.10.0";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -219,4 +219,96 @@ fn gate_vocabulary_stays_single_sourced() {
     let _: &str = paths::DELIVERY_MODE;
     let _: &str = paths::DELETION_WINDOW;
     assert_proven(&VOCABULARY_SINGLE_SOURCED);
+}
+
+/// **A rev pin is an adoption in flight, and it is not taggable.**
+///
+/// `tag_on_line` accepts `rev` so the pin gates can EVALUATE a tree mid-adopt —
+/// otherwise they report "no pinned crate found at all", which diagnoses an
+/// absence where there is a pin. But evaluating it is not the same as blessing
+/// it: a rev names an unmerged commit, so nothing upstream guarantees it still
+/// exists or still means what it meant. Shipping one publishes a wheel whose
+/// substrate cannot be resolved from a tag by anybody else.
+///
+/// So this gate is RED for exactly as long as the tree rides a rev, and it
+/// clears itself the moment the pin flips to the tag. It is the difference
+/// between "we are adopting" and "we are ready", which is a distinction the
+/// ladder exists to make.
+#[test]
+fn gate_no_substrate_rev_pin_at_release() {
+    let mut revs: Vec<String> = Vec::new();
+    for (path, toml) in crate::ladder::workspace_manifests() {
+        for line in toml.lines() {
+            let t = line.trim_start();
+            if t.starts_with('#') || !t.contains("rev = \"") {
+                continue;
+            }
+            if let Some(repo) = REPOS.iter().find(|(r, _)| line.contains(r)) {
+                revs.push(format!("  {path}: {} on a rev", repo.0));
+            }
+        }
+    }
+    assert!(
+        revs.is_empty(),
+        "\n\
+         🚫 RELEASE GATE [substrate-rev-pin] — DO NOT TAG (adoption in flight).\n\
+         \n\
+         {}\n\
+         \n\
+         A rev pin names an unmerged commit. It is correct DURING an adopt and is\n\
+         never a release state: a consumer cannot resolve it from a tag, and the\n\
+         branch it points at can be force-pushed out from under the wheel.\n\
+         \n\
+         Flip to the tag once upstream cuts it, in the same commit that updates\n\
+         TARGET_* — then this gate clears itself.\n",
+        revs.join("\n")
+    );
+}
+
+/// **The client pin tracks this cut's own version.**
+///
+/// The desktop app compares its `CLIENT_VERSION` against the node's reported
+/// version on the full leading semver (`isVersionMismatch`), so a 0.5.189 node
+/// shipping a 0.5.188 client greets its own operator with "Update recommended"
+/// against the dependency it was deliberately built with.
+///
+/// Nothing asserted this before, and nothing had to: a wheel-build lane kept the
+/// two in step, and it went away with `client/`. The obligation did not go away
+/// with it — it just stopped having a keeper. Found by review (Codex on #489),
+/// not by a gate, which is why there is now a gate.
+///
+/// Deliberately a RELEASE gate rather than a build error: an adoption branch may
+/// legitimately sit on the previous client for a commit or two while upstream
+/// cuts. What must not happen is TAGGING that way.
+#[test]
+fn gate_client_pin_matches_this_release() {
+    let pyproject = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pyproject.toml"),
+    )
+    .expect("pyproject.toml must be readable");
+    let pin = pyproject
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("\"ciris-client==")
+                .and_then(|r| r.split('"').next())
+                .map(str::to_owned)
+        })
+        .expect(
+            "no `ciris-client==` requirement in pyproject.toml — this gate cannot pass by \
+             finding nothing",
+        );
+    let server = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        pin, server,
+        "\n\
+         🚫 RELEASE GATE [client-pin] — DO NOT TAG.\n\
+         \n\
+         The node is {server} and pins ciris-client {pin}. The desktop app compares\n\
+         its CLIENT_VERSION against the node's on the full leading semver, so this\n\
+         ships an \"Update recommended\" prompt against the client the release was\n\
+         deliberately built with.\n\
+         \n\
+         Move the pin in pyproject.toml, in the same commit that bumps the version.\n"
+    );
 }

@@ -331,6 +331,7 @@ pub mod node_control;
 /// rides the wire; the in-process accessor (`ciris_server.node_identity()`)
 /// carries the superset.
 pub mod node_identity;
+pub mod node_key;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the
@@ -388,14 +389,6 @@ pub mod replication_reconcile;
 /// Public so the integration test (`tests/retention_loop.rs`) can drive a single
 /// deterministic pass.
 pub mod retention_loop;
-/// The substrate **safety foundation** (CIRISServer#20) — moderation +
-/// child-safety as first-class fabric primitives, built AHEAD of content
-/// features: age-assurance + the protective age-gate, moderation as a delegable
-/// DUTY (composing persist v9.0.0's §11.10 admit-iff gate), the CC 4.5.4
-/// named-moderator existence invariant (fail-secure + merit auto-promotion), and
-/// the opt-in per-group watchlist config + duty/authority gate + publish-seam
-/// hook (the matcher defers to the NodeCore content seam). Public so the
-/// integration test (`tests/safety.rs`) can drive the modules + routers directly.
 pub mod safety;
 pub mod scorer;
 pub mod scrub;
@@ -406,6 +399,14 @@ pub mod scrub;
 /// acts or signs as this node asks [`self_identity::resolve`] instead of taking
 /// a `node_key_id` argument a caller could disagree with.
 pub mod self_identity;
+/// The substrate **safety foundation** (CIRISServer#20) — moderation +
+/// child-safety as first-class fabric primitives, built AHEAD of content
+/// features: age-assurance + the protective age-gate, moderation as a delegable
+/// DUTY (composing persist v9.0.0's §11.10 admit-iff gate), the CC 4.5.4
+/// named-moderator existence invariant (fail-secure + merit auto-promotion), and
+/// the opt-in per-group watchlist config + duty/authority gate + publish-seam
+/// hook (the matcher defers to the NodeCore content seam). Public so the
+/// integration test (`tests/safety.rs`) can drive the modules + routers directly.
 /// The capacity score→emit pipeline — a periodic task that derives per-agent
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
@@ -1610,6 +1611,78 @@ mod python {
         Ok(d.into())
     }
 
+    /// **Provision this node's own federation identity** (CC 3.4.7.3) — mint
+    /// `<alias>-node` and register it as `identity_type = node`. Returns the
+    /// registered `key_id`.
+    ///
+    /// CALL THIS AFTER BUILDING THE ENGINE AND BEFORE `init_edge_runtime(...,
+    /// use_node_identity=True)`. Edge resolves the node key by `open_existing`
+    /// and refuses when it is absent (CIRISEdge#541) — correct, because a key
+    /// edge minted would be registered by no directory and owner-bound by
+    /// nobody. In the embedded fold edge inits before CIRISServer's compose
+    /// folds on, so without this call a first boot has nothing to open.
+    ///
+    /// No key material crosses this boundary: a `key_id` comes back, the signer
+    /// stays in Rust. Same property `resolve_user_signer` and
+    /// `ConsentGrantOptions::author_signer` hold.
+    ///
+    /// Idempotent — every boot after the first re-opens and re-registers to the
+    /// same row, so it is safe to call unconditionally.
+    #[pyfunction]
+    #[pyo3(name = "provision_node_identity", signature = (keystore_alias, identity_dir, actor_key_id=None))]
+    fn py_provision_node_identity(
+        py: Python<'_>,
+        keystore_alias: String,
+        identity_dir: String,
+        actor_key_id: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(move || {
+            let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "provision_node_identity: no in-process persist Engine — build the \
+                     Engine before provisioning the node identity",
+                )
+            })?;
+            let dir = std::path::PathBuf::from(identity_dir);
+            // This runs BEFORE federation delivery is started, so there is no
+            // held runtime to borrow — and the calling thread may carry an
+            // ambient tokio context through pyo3, where `Runtime::new()` panics
+            // `Cannot start a runtime from within a runtime` (#264). Same shield
+            // as the serve entry: when a handle is current, hop to a fresh OS
+            // thread that has none.
+            let work = move || -> anyhow::Result<String> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(crate::node_key::provision_node_identity(
+                    &engine,
+                    &keystore_alias,
+                    &dir,
+                    actor_key_id.as_deref(),
+                ))
+            };
+            let out = if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::Builder::new()
+                    .name("ciris-provision-node".into())
+                    .spawn(work)
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "spawn provisioning thread: {e}"
+                        ))
+                    })?
+                    .join()
+                    .map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "provision_node_identity: worker thread panicked",
+                        )
+                    })?
+            } else {
+                work()
+            };
+            out.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
     #[pyfunction]
     /// `ciris_server.sign_object(path, label="")` — hybrid-sign any file with
     /// this node's key. Returns the detached signature document as a JSON
@@ -2292,6 +2365,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_state, m)?)?;
         m.add_function(wrap_pyfunction!(py_sign_object, m)?)?;
+        m.add_function(wrap_pyfunction!(py_provision_node_identity, m)?)?;
         m.add_function(wrap_pyfunction!(py_verify_object, m)?)?;
         m.add_function(wrap_pyfunction!(py_mint_location_proof, m)?)?;
         m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;

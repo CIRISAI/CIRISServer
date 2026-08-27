@@ -33,16 +33,38 @@
 
 #![allow(dead_code)]
 
-/// The canonical bundle every runtime bundle mirrors.
+/// The client's `en.json`, from the INSTALLED `ciris-client` package.
+///
+/// It used to be `client/shared/src/desktopMain/resources/localization/en.json`
+/// — one of four byte-identical copies this repo carried by hand. CIRISServer#471
+/// made the client a dependency; the bundle is an artifact now, and where it
+/// lands is the package's business rather than a path a test can spell.
+///
+/// The comment above about one resolver in one file applies doubly here: this
+/// is the ONE place that answers "where is the bundle" for every Rust suite, so
+/// the adoption changed one function rather than N hardcoded paths.
 pub fn canonical_bundle() -> serde_json::Value {
+    let out = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import ciris_client;print(ciris_client.locale_bundle())",
+        ])
+        .output()
+        .expect("run python3 to resolve the ciris-client locale bundle");
+    assert!(
+        out.status.success(),
+        "ciris-client is not importable, so this gate would examine NOTHING and \
+         report clean — the zero-denominator failure it exists to prevent.\n\
+         install it with: python3 tools/client_pin.py --install\n\
+         (on a PEP 668 distro, from a venv: python3 -m venv .venv && . .venv/bin/activate)\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
     serde_json::from_str(
-        &std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/client/shared/src/desktopMain/resources/localization/en.json"
-        ))
-        .expect("read the canonical localization bundle"),
+        &std::fs::read_to_string(dir.join("en.json"))
+            .expect("read en.json from the ciris-client locale bundle"),
     )
-    .expect("the canonical bundle is JSON")
+    .expect("the client bundle is JSON")
 }
 
 /// Resolve a dotted id the way the loader does: **nested traversal only**.

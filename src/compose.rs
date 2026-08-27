@@ -267,6 +267,96 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self-signed SignedKeyRecord as JSON (info) so an operator can hand it to
     // peer B as CIRIS_PEER_B_KEY_RECORD (the symmetric cross-repo contract).
     register_self_key(&engine, &cfg).await?;
+
+    // ── CC 3.4.7.3: the node's identity must not be an ACTOR's ────────────────
+    //
+    // `register_self_key` above asserts `identity_type = node` for `cfg.key_id`
+    // and CANNOT make it true when an actor row already occupies that id: persist
+    // refuses with a typed `Conflict`, and we log it at debug as benign. Benign is
+    // right when the differing row is an identical trust-root row. It is exactly
+    // wrong when the differing row says `agent`, which is how a node ran on the
+    // brain's key with every gate reporting green.
+    //
+    // So classify it, and mint the node its own `<alias>-node` key when the
+    // configured one belongs to an actor. Unattended by design — see
+    // `node_key::move_owner_binding_to_node_key` for why the ownership half needs
+    // no operator either.
+    let node_resolution = crate::node_key::resolve_node_identity(
+        &engine,
+        &cfg.key_id,
+        &cfg.keystore_alias,
+        &cfg.identity_dir,
+    )
+    .await?;
+    // Every transport-plane caller reads this rather than `cfg.key_id`, which is
+    // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
+    // coinciding only until the identities diverge).
+    crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    if node_resolution.did_split() {
+        // The owner-binding named the ACTOR key. Re-subject it to the node key
+        // using the owner's own signer, which a claimed node holds — installing
+        // the app IS the claim. Same owner, same infra scopes, same cohort.
+        let actor_key_id = node_resolution
+            .split_from
+            .clone()
+            .expect("did_split() implies split_from");
+        // The owner's alias, resolved the way every other caller does: the
+        // active-alias pointer the mint wrote, falling back to the boot default.
+        let user_seed_dir = crate::user_seed_dir(&cfg);
+        let owner_alias =
+            crate::active_user_alias(&user_seed_dir, &format!("{}-user", cfg.keystore_alias));
+        match resolve_user_signer(
+            &engine,
+            FedIdUse::OwnerSession,
+            &owner_alias,
+            user_seed_dir.clone(),
+        )
+        .await
+        {
+            Ok(Some(owner_signer)) => {
+                crate::node_key::move_owner_binding_to_node_key(
+                    &engine,
+                    &owner_signer,
+                    &actor_key_id,
+                    &node_resolution.node_key_id,
+                )
+                .await?;
+            }
+            Ok(None) => tracing::warn!(
+                node_key_id = %node_resolution.node_key_id,
+                "the node key was minted but no owner signer is on disk, so its \
+                 owner-binding could not follow. `owner_of(node)` does not resolve and \
+                 CC 3.4.7.3 Clause D is fail-closed: nothing may act through this node \
+                 until ownership is established."
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not resolve the owner signer to move the owner-binding onto the \
+                 node key — the node stays unowned, which is the fail-closed reading"
+            ),
+        }
+
+        // The topology follows the identity that reads it (CIRISServer#312), and
+        // it needs only the NODE's signer — NOT the owner's.
+        //
+        // This was nested inside the owner-signer arm above, so a split node with
+        // existing actor-authored grants and no owner seed on disk skipped it
+        // entirely: the wire identity moved to the node key while the grants
+        // stayed under the actor, and consent lookup returned zero peers under a
+        // healthy transport. Boot-environment peering can create grants before a
+        // node is ever claimed, so that is a reachable state, not a hypothetical
+        // (Codex on #489).
+        if let Some(node_signer) = node_resolution.signer.clone() {
+            crate::node_key::reauthor_consent_as_node(
+                &engine,
+                node_signer,
+                &actor_key_id,
+                &node_resolution.node_key_id,
+            )
+            .await?;
+        }
+    }
+
     // STAGE 1 (FSD/GENESIS_TO_SCORE.md) — install the baked trust root and accept
     // it. Two acts on purpose: installing records makes the root KNOWN; accepting
     // it is this node's own signed `trust:accepts` edge, and the one row an
@@ -579,7 +669,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Best-effort; a node with no Reticulum transport is a no-op. This is why
     // delivery converges with ZERO operator action: restarting the node IS the
     // publish (the directory row replicates, peers resolve + prime it).
-    publish_self_transport_destination(&engine, &edge, &cfg.key_id).await;
+    // The WIRE identity, not `cfg.key_id`. Under `use_node_identity` edge announces
+    // on the NODE key's destination; publishing a route that names the actor would
+    // hand every peer a signed binding whose key is not the one it is talking to —
+    // CIRISEdge#393 item 2 fails, and the route never roots (the exact defect
+    // CIRISEdge#541's review found on the edge side).
+    let wire_id = crate::node_key::wire_identity()
+        .unwrap_or(&cfg.key_id)
+        .to_owned();
+    publish_self_transport_destination(&engine, &edge, &wire_id).await;
 
     // ── Sealability twin (#227 S1): publish this node's SIGNED identity occurrence
     // (content-enc pubkeys from sealed custody) so peers can resolve + SEAL to it —
@@ -2697,10 +2795,25 @@ fn is_ignored_announce(message: &str) -> bool {
 }
 
 pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
-    let key_id = engine
-        .local_derived_key_id()
-        .await
-        .context("resolve the node's derived federation key_id to arm the AV-77 gate")?;
+    // THE WIRE IDENTITY, not the engine's signer (CIRISEdge#541 review).
+    //
+    // The de-admission self is a TRANSPORT-plane fact: the refusal predicate
+    // compares an inbound writer against `self_key_id()`, and the writer arrives
+    // over a link whose identity is the NODE key on a split node. Arming the
+    // ACTOR here would leave this node advertising an identity a sanction can
+    // name while being un-de-admittable through it — a gate that reports armed
+    // and refuses nothing, which is worse than one that is plainly off.
+    //
+    // Falls back to the engine's derived id when no split has happened, which is
+    // every standalone node and every pre-split boot — byte-identical to the
+    // previous behaviour there.
+    let key_id = match crate::node_key::wire_identity() {
+        Some(id) => id.to_owned(),
+        None => engine
+            .local_derived_key_id()
+            .await
+            .context("resolve the node's derived federation key_id to arm the AV-77 gate")?,
+    };
     engine.set_self_key_id(Some(key_id.clone()));
     // Prove it, do not assume it — this readback is the whole point.
     match engine.self_key_id() {
@@ -3498,7 +3611,27 @@ async fn build_edge(
         bootstrap_peers: cfg.bootstrap_peers.clone(),
         identity_path: cfg.ret_identity_path(),
         announce_interval: announce_interval(),
-        local_key_id: cfg.key_id.clone(),
+        // ADVERTISE the wire identity — what peers are told this node is. On a
+        // split node that is the NODE key; everywhere else it is `cfg.key_id`
+        // and this is byte-identical to before.
+        local_key_id: crate::node_key::wire_identity()
+            .unwrap_or(&cfg.key_id)
+            .to_owned(),
+        // STORE under the original id (CIRISEdge#541, edge v18.10.0). These were
+        // one value because they had always been the same value, and they are not
+        // the same job: one is what peers are told, the other is where a 64-byte
+        // Reticulum keypair lives on local disk.
+        //
+        // Coupling them across a split is a silent, unrecoverable break: an
+        // existing keystore-backed node would MISS its stored entry under the new
+        // advertised id, fall through to generate-and-store, and change its
+        // destination hash — invalidating every saved peer route, with no error
+        // anywhere. The node would come up healthy and unreachable.
+        //
+        // `None` when nothing moved, so a node that never split is untouched.
+        transport_identity_storage_key: (crate::node_key::wire_identity()
+            .is_some_and(|w| w != cfg.key_id))
+        .then(|| cfg.key_id.clone()),
         local_epoch: 0,
         interfaces: vec![],
         enable_transport: transport_node,

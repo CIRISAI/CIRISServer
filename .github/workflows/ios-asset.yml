@@ -43,9 +43,11 @@ jobs:
           - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir }
     env:
       # 3.10 is not arbitrary: the client's iOS app embeds CPython 3.10
-      # (client/iosApp Resources carry `python3.10` +
+      # (CIRISClient's `iosApp` Resources carry `python3.10` +
       # `_sysconfigdata__ios_arm64-iphoneos.py`, and its native modules are
-      # `*.cpython-310-iphoneos.so`). Same pin as persist's lane.
+      # `*.cpython-310-iphoneos.so`). Same pin as persist's lane. That tree left
+      # this repo with CIRISServer#471; the PIN did not, because it is a
+      # property of the artifact this job builds FOR it.
       PYTHON_IOS_VER: "3.10"
       PYTHON_IOS_BUILD: "b13"
       # DEVIATION from persist, deliberate: persist passes a long explicit

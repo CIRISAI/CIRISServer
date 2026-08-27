@@ -174,6 +174,20 @@ jobs:
       # tpm are Linux-only (per-target). NOT --all-features: that drags
       # `extension-module` (libpython-no-link) into the test binary.
       - run: cargo clippy --all-targets -- -D warnings
+      # `cargo test` below runs `admin_ops` and `mesh_config_consumers`, which
+      # resolve the localization bundle through the INSTALLED `ciris-client`
+      # (CIRISServer#471 — the bundle is a package artifact now, not a path in
+      # this tree). Those suites fail HARD when the package is missing rather
+      # than skipping, which is the point: a localization gate that silently
+      # examines nothing reports clean. So the install is load-bearing for
+      # `cargo test`, not just for the dedicated localization job.
+      - name: Set up Python (the bundle resolver runs python3)
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ciris-client (two test suites read its locale bundle)
+        shell: bash
+        run: python3 tools/client_pin.py --install
       - run: cargo test
       # CIRISServer#373 — `cargo test` above tests the ROOT PACKAGE ONLY. With a
       # root package present and no `default-members`, the workspace member is
@@ -215,7 +229,15 @@ jobs:
       # RAISING THIS NUMBER IS THE REVIEW. Do it in the same commit as the new
       # site, never after, and never by dropping the flag.
       - name: cohort_scope emit-site ratchet (CIRISServer#38)
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 43
+        # 43 -> 44 (0.5.189): `peer.rs` gained an explicit-signer branch for
+        # `consent:replication:v1`, the twin of the federation emit ten lines above
+        # it. Same grant, same envelope, same MANDATORY federation scope — the
+        # grant must be readable by the peer it names — authored with the NODE's
+        # key instead of the engine's (CC 3.4.7.3, CIRISServer#489). Not a
+        # widening: it is the same audience reached by a different pen, and the
+        # alternative was leaving a split node's topology unreadable by the
+        # identity that reads it (CIRISServer#312).
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 44
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
@@ -311,7 +333,8 @@ jobs:
   #
   # ── THE PUBLISHED CONTRACT (the consumer is in ANOTHER REPO) ──────────────
   # Consumer: CIRISAgent `tools/update_substrate_libs.py` (its CIRISServer
-  # entry) + `client/iosApp/scripts/embed_native_frameworks.sh`. Tracking
+  # entry) + CIRISClient's `iosApp/scripts/embed_native_frameworks.sh` (that
+  # path moved out of this repo with CIRISServer#471). Tracking
   # issue for the client half: CIRISAI/CIRISAgent#1011. Everything below is
   # load-bearing on the OTHER side of that repo boundary — change one, change
   # both:

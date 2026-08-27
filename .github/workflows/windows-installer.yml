@@ -1,0 +1,248 @@
+name: windows-installer
+
+# The SERVER's Windows installer — PyInstaller spec + Inno Setup + a trimmed JRE,
+# packaging the `ciris-server` wheel for operators who install a node on Windows.
+#
+# It lived in `client-artifacts.yml` and was deleted with that file in the #471
+# client sweep. That was wrong twice over, and this is the THIRD time the same
+# mistake has been made in this cut: `ios-asset.yml` (a substrate builder) and
+# now this (a server packager) were both removed because they sat in a
+# client-named file. A workflow's NAME is not its subject.
+#
+# `installers/windows/` — `ciris-server.spec`, `ciris-server-installer.iss`,
+# `bundle-jre.ps1`, `ciris-server-entry.py` — survived the deletion with nothing
+# left to build them. Found by review (Codex on #489), not by any gate: the
+# `uses:` link check added in this same cut asks whether a REFERENCE resolves,
+# and a deleted job that nobody references is invisible to it.
+#
+# Triggers preserved from the original: it ran on `push` (main + tags) and on a
+# PR only under `ci:full`, because it occupies a scarce Windows slot.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    name: Windows desktop installer
+    # jpackage/MSI packaging only — the Kotlin compile it depends on is already
+    # proven by `android-apk` on ubuntu in this same workflow. On a PR this
+    # occupies a scarce Windows slot to re-check packaging that changes far less
+    # often than the code. Runs on main and on the tag (both `push`).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: windows-latest
+    # 0.5.166 raised this from 40. `lto = "thin"` + `codegen-units = 1`
+    # (CIRISServer#378) roughly doubles the final ciris-server link, and this
+    # job timed out mid-link at exactly 40:00 on the first LTO run. A timeout
+    # reports as `cancelled`, not `failure`, which reads like someone stopped
+    # it — so it is worth saying plainly here that LTO is what costs the time.
+    timeout-minutes: 75
+    # NON-GATING (same rationale as publish-pypi.yml's windows wheel job): the
+    # installer must first build the ciris-server abi3 wheel on Windows, which
+    # fails today because the substrate (persist/edge) pulls openssl-src + has
+    # Unix-only paths that don't build on windows-msvc (CIRISPersist#200 /
+    # CIRISEdge#90). The installer machinery (PyInstaller spec, Inno Setup, jlink
+    # JRE) is complete and correct; this job will start producing an artifact the
+    # moment the upstream Windows wheel goes green. Remove continue-on-error then.
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust (maturin builds the abi3 wheel)
+        uses: dtolnay/rust-toolchain@1.97.0
+
+      # NOTE (CIRISServer#274): the maturin compile below is warmed by
+      # maturin-action's OWN sccache (`sccache: true`), the SAME mechanism +
+      # GHA-cache namespace publish-pypi's windows wheel uses — so this now shares
+      # its entries (the substrate repos' CI writes the deps layers). The old raw-maturin
+      # + mozilla-actions/sccache-action wiring wrote to a DIFFERENT sccache pool
+      # and got 0.00% hits here while the publish wheel got 88% on the same commit.
+
+      # CIRISCache 4-layer centipede (CIRISServer#99) — restores the substrate
+      # SOURCE (registry/git).
+      # PLAT=windows-x64 (matches the wheel leg).
+      - name: Compute CIRISCache keys (4-layer centipede, CIRISServer#99)
+        id: cachekey
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUSTC=$(rustc -V | awk '{print $2}')
+          S=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          P=$(grep -m1 'CIRISPersist.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          V=$(grep -m1 'CIRISVerify.*tag = "v'  Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/')
+          EDGE=$(grep -m1 'CIRISEdge.*tag = "v' Cargo.toml | sed -E 's/.*tag = "v([0-9.]+)".*/\1/' || true)
+          if [ -z "$EDGE" ]; then
+            EDGE=$(grep -m1 'CIRISEdge.*rev = "' Cargo.toml | sed -E 's/.*rev = "([0-9a-f]+)".*/r\1/' || true)
+          fi
+          PLAT="windows-x64"
+          BASE="ciris-substrate-v1-${PLAT}-release-rustc${RUSTC}"
+          {
+            echo "key-verify=${BASE}-pnone-enone-v${V:-none}"
+            echo "key-persist=${BASE}-p${P:-none}-enone-v${V:-none}"
+            echo "key-edge=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}"
+            echo "key=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s${S:-none}"
+            echo "key-server-prefix=${BASE}-p${P:-none}-e${EDGE:-none}-v${V:-none}-s"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::CIRISCache (${PLAT}): S=${S:-NONE} P=${P:-NONE} V=${V:-NONE} EDGE=${EDGE:-NONE} RUSTC=${RUSTC}"
+      # Deepest-first, first-hit-wins (CIRISCache restore@v2): one extraction.
+      - uses: CIRISAI/CIRISCache/restore@v2
+        continue-on-error: true
+        with:
+          keys: |
+            ${{ steps.cachekey.outputs.key }}
+            ${{ steps.cachekey.outputs.key-server-prefix }}*
+            ${{ steps.cachekey.outputs.key-edge }}
+            ${{ steps.cachekey.outputs.key-persist }}
+            ${{ steps.cachekey.outputs.key-verify }}
+
+      - name: Set up Java 17 (Liberica)
+        # Liberica 17 provides the trimmed jlink runtime bundled into the
+        # installer. Modern Windows floor (Win10+/Server 2016+) since 0.5.65 —
+        # the Win7 support that drove this distro choice is no longer a
+        # requirement, but Liberica stays (stable jlink source).
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'liberica'
+          java-version: '17'
+
+      - name: Set up Gradle (distribution + dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Get version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python -c "import sys,json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='ciris-server'))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ciris-server version: $VERSION"
+
+      - name: Build CIRIS Desktop UberJar
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: bash
+          command: |
+            cd client
+            ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
+            ls -lh desktopApp/build/compose/jars/
+
+      - name: Stage the desktop JAR into the wheel tree
+        shell: bash
+        run: |
+          mkdir -p python/ciris_server/desktop_app
+          cp client/desktopApp/build/compose/jars/CIRIS-windows-*.jar \
+             python/ciris_server/desktop_app/
+          ls -lh python/ciris_server/desktop_app/
+
+      # Build the wheel via maturin-action — IDENTICAL to build-wheels.yml's
+      # windows leg (target x64, rust 1.97.0, sccache: true), so it shares that
+      # job's warmed sccache pool (CIRISServer#274). The wheel carries the staged
+      # JAR (pyproject [tool.maturin] include). `--strip` matches the publish
+      # wheel's compile flags for pool-identity; `--out dist-wheel` only sets the
+      # output dir (does not affect the sccache compile keys).
+      - name: Build the ciris-server wheel (maturin-action, shared sccache)
+        uses: PyO3/maturin-action@v1
+        # The desktop installer IS the Google desktop client, so of all the
+        # wheels this repo builds, this is the one that most needs the built-in
+        # credential — and it had none (CIRISServer#387). Missed for the same
+        # reason macOS and Windows were: the injection and the gate enforcing it
+        # both keyed on `maturin build --release`, and this is a maturin-ACTION
+        # step. option_env! reads the compile-time environment, so it goes here,
+        # on the step that compiles.
+        env:
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_MOBILE_GOOGLE_OAUTH_CLIENT_SECRET }}
+        with:
+          target: x64
+          rust-toolchain: "1.97.0"
+          args: --release --strip --out dist-wheel
+          sccache: true
+      - name: Install the wheel for PyInstaller
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          WHL=$(ls dist-wheel/*.whl | head -1)
+          echo "installing $WHL"
+          pip install "$WHL"
+          python -c "import ciris_server; from ciris_server.cli import main; print('ciris_server import OK')"
+
+      - name: CIRISCache save (windows-x64 server layer)
+        if: github.ref == 'refs/heads/main'
+        uses: CIRISAI/CIRISCache/save@v1
+        continue-on-error: true
+        with:
+          key: ${{ steps.cachekey.outputs.key }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build PyInstaller bundle
+        shell: bash
+        run: |
+          cd installers/windows
+          pyinstaller ciris-server.spec --noconfirm
+          ls dist/ciris-server/ | head -20
+
+      - name: Stage bundle for Inno Setup
+        shell: bash
+        run: |
+          mkdir -p dist
+          mv installers/windows/dist/ciris-server dist/
+          # confirm the desktop JAR rode into the bundle
+          ls dist/ciris-server/_internal/ciris_server/desktop_app/ || \
+            echo "WARN: desktop JAR not found in bundle (launcher will fall back to system layout)"
+
+      - name: Trim JRE via jlink (Liberica)
+        shell: pwsh
+        run: |
+          $jar = Get-ChildItem -Path 'client\desktopApp\build\compose\jars' -Filter 'CIRIS-windows-*.jar' | Select-Object -First 1
+          if (-not $jar) { Write-Error "No CIRIS-windows-*.jar found"; exit 1 }
+          .\installers\windows\bundle-jre.ps1 -JarPath $jar.FullName -OutputDir dist\runtime
+
+      # (Removed in 0.5.65: the Universal CRT redist fetch was a Win7 SP1
+      # prerequisite — Win10+/Server 2016+ ship the UCRT in-box.)
+
+      - name: Install Inno Setup
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          shell: pwsh
+          command: choco install innosetup -y --no-progress
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          Write-Host "Building installer for ciris-server $version"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+              "/DCirisVersion=$version" `
+              installers\windows\ciris-server-installer.iss
+          Get-ChildItem dist\*.exe
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-windows-installer
+          path: dist/CIRIS-Server-Setup-*.exe
+          retention-days: 14

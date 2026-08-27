@@ -25,6 +25,38 @@ readme = "README.md"
 # build-std lane (release.yml; CIRISVerify#67 pattern).
 requires-python = ">=3.10"
 
+# CIRISServer#471 — the KMP client is a PACKAGE now, not a vendored tree.
+#
+# `client/` held ~200k lines that were a hand-carried merge from CIRISAgent on
+# every re-vendor, with numbered drift markers (NODE VENDOR DRIFT #9-#33) as the
+# running cost of three copies. `ciris-client` is the tree of record; changes
+# travel by PR to CIRISClient instead of by re-vendor.
+#
+# NO EXTRA, deliberately. The BASE package is the node package: it carries the
+# desktop uber-jar and the locale bundle extracted from it, which is everything
+# a fabric node wants. The published extras are `web` (adds `ciris-client-wasm`,
+# 7 MB a node has no use for) and `readiness` (adds `ciris-grace`); we want
+# neither. This said `[node]` until 0.5.189 — an extra CIRISClient does not
+# publish. pip WARNS on an unknown extra and installs the base anyway, so it
+# worked, silently, and the pin documented a flavour that did not exist. That is
+# the failure mode this repo keeps meeting: a request that is quietly downgraded
+# rather than refused. `tools/client_pin.py --install` now fails on that warning.
+#
+# PINNED TO THIS CUT'S OWN VERSION, deliberately. The desktop app compares its
+# `CLIENT_VERSION` against the node's reported version on the full leading
+# semver (`isVersionMismatch`), so a 0.5.189 node shipping a 0.5.188 client
+# greets its own operator with "Update recommended" against the dependency it was
+# deliberately built with. The wheel-build lane that used to keep the two in step
+# went away with `client/`; the pin carries that obligation now.
+#
+# PINNED EXACTLY. The locale bundle is a release GATE here —
+# `tools/check_server_localization.py` asserts that every id this server emits
+# resolves in it — so a floating version would let an upstream bundle change
+# turn a green tree red with no commit here to explain it.
+dependencies = [
+    "ciris-client==0.5.189",
+]
+
 [project.urls]
 Repository = "https://github.com/CIRISAI/CIRISServer"
 
@@ -67,7 +99,6 @@ python-source = "python"
 # None are needed to build the abi3 extension — the wheel carries the compiled
 # artifact, the sdist carries buildable Rust source. (Wheels never bundled these.)
 exclude = [
-    { path = "client/**/*", format = "sdist" },
     { path = "qa/**/*", format = "sdist" },
     { path = "app/**/*", format = "sdist" },
     { path = "FSD/**/*", format = "sdist" },
@@ -77,12 +108,14 @@ exclude = [
     # requires an explicit `format`, so it can't express "both" — the string can).
     "python/ciris_server/desktop_app/.gitignore",
 ]
-# Bundle the per-platform desktop JAR INTO THE WHEEL ONLY. CI stages exactly one
-# `CIRIS-<platform>-<ver>.jar` (gradle :desktopApp:packageUberJarForCurrentOS)
-# under python/ciris_server/desktop_app/ right before `maturin build`, so each
-# platform wheel carries only its own JAR (tens of MB; system Java, no JRE →
-# comfortably under PyPI's 100 MB cap). Never bundled into the sdist (the JAR is
-# a build output, and the sdist already excludes the client source it builds
-# from). The .jar is git-ignored; the empty desktop_app/ dir is tracked so the
-# package layout exists even on a headless/source build with no JAR staged.
-include = [{ path = "python/ciris_server/desktop_app/CIRIS-*.jar", format = "wheel" }]
+# THE DESKTOP JAR IS NO LONGER BUNDLED (CIRISServer#471).
+#
+# Every one of the nine published wheels carried its own copy of the Compose
+# uber-jar — ~46 MiB of each, nine near-identical copies of one artifact, in a
+# project with a 10 GB total quota whose largest wheel sat 3.4 MiB under PyPI's
+# 100 MiB per-file ceiling (CIRISServer#486).
+#
+# `ciris-client[node]` ships it once, and `desktop_launcher.find_desktop_jar`
+# resolves it through `ciris_client.artifact_path("desktop-uber-jar")`. The
+# launcher still checks the old in-wheel location FIRST, so a 0.5.188-or-earlier
+# install keeps working after an upgrade of everything around it.

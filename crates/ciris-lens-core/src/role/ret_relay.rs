@@ -133,6 +133,17 @@ impl LensCore {
             identity_path: ret_identity_path,
             announce_interval: DEFAULT_ANNOUNCE_INTERVAL,
             local_key_id: key_id.clone(),
+            // CIRISEdge#541 (edge v18.10.0) split the ADVERTISED id from the key
+            // the RNS transport identity is STORED under. `None` = they are the
+            // same, which is this relay's case and its previous behaviour
+            // byte-for-byte: a lens relay never moves its advertised id, so
+            // there is nothing for a storage key to differ from.
+            //
+            // Setting it to anything else here would make an existing
+            // keystore-backed relay miss its stored entry, fall through to
+            // generate-and-store, and silently change its destination hash —
+            // invalidating every saved peer route with no error anywhere.
+            transport_identity_storage_key: None,
             local_epoch: 0,
             interfaces: vec![], // legacy TCP path: listen_addr + bootstrap_peers
             // CIRISEdge#168 (v5.0) — leaf relay role: do NOT forward packets

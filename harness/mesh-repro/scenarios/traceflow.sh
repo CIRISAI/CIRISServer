@@ -25,7 +25,7 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml"
 SUCCESS_STAGE="score"
 SUCCESS_MESSAGE="full chain — trace sealed, consented, shipped, arrived, materialized, summarized, and SCORED by a distinct identity."
 
-STAGES=(seal trace_att consent converge ship arrive summarize score)
+STAGES=(seal trace_att offerable consent converge ship arrive summarize score)
 
 # ── 1. seal — the agent's LensClient sealed and persisted a trace ────────────
 stage_seal() { harness_log_count agent "sealed_and_persisted"; }
@@ -37,12 +37,43 @@ DIAG_seal() { compose logs agent 2>/dev/null | grep -E "TRACEFLOW.*(ERROR|error)
 # Splits the "nothing shipped" fork at its source: 0 here ⇒ the seal path never
 # authors the carrier, so no replication fix can help; >0 ⇒ authored but the
 # plane did not move it (scope / vocabulary / offer filter).
+# Matches the DIMENSION field, not the envelope anywhere. `LIKE '%trace:%'`
+# also matches a capacity row that REFERENCES a trace and a delegates_to row
+# that mentions one — measured 4 against a true 3 on the 2026-08-24 run. A
+# carrier count that counts non-carriers cannot split the fork it exists to
+# split.
 stage_trace_att() {
   harness_db_count agent federation_attestations \
-    "CAST(attestation_envelope AS TEXT) LIKE '%trace:%'"
+    "CAST(attestation_envelope AS TEXT) LIKE '%\"dimension\":\"trace:%'"
 }
 HINT_trace_att="the trace was sealed but no trace:* attestation exists on the agent — the carrier row is never authored. Fix the SOURCE, not the replication plane."
 EXIT_trace_att=11
+
+# ── 1c. offerable — is the carrier row OFFERABLE, or authored-and-stranded? ──
+# CIRISServer#487. `trace_att` proves the carrier EXISTS; it says nothing about
+# whether edge will offer it, and those are the two halves of the same "nothing
+# shipped" report. A row can be authored, covered by the grant, past the tier
+# gate, and still never leave — because the replication offer filter keys on
+# `cohort_scope`, and a row sealed or promoted before the grant existed sits at
+# `self`.
+#
+# Without this rung, armed-but-stranded passes `trace_att` and fails `ship`,
+# where the hint points at the SERVE gate and the withhold ledger — i.e. at the
+# receiving end of a row that was never offered. That is a long way to walk in
+# the wrong direction, and #487 walked it.
+#
+# This is a PROXY, deliberately named as one: `cohort_scope != 'self'` is not
+# edge's predicate, and writing a second copy of edge's predicate here is the
+# exact parallel-predicate defect the server's own diagnostic was rewritten to
+# avoid (it now calls the same persist fns `attestation_is_advertised` calls).
+# The authoritative reading is `trace_plane.rows_by_projection`, printed in the
+# evidence tail. This rung exists to SPLIT THE FORK cheaply and point at it.
+stage_offerable() {
+  harness_db_count agent federation_attestations \
+    "CAST(attestation_envelope AS TEXT) LIKE '%\"dimension\":\"trace:%' AND cohort_scope IS NOT NULL AND cohort_scope <> '' AND cohort_scope <> 'self'"
+}
+HINT_offerable="ARMED BUT STRANDED: trace:* carrier rows EXIST on the agent but every one sits at cohort_scope='self' (or empty), so edge's offer filter never advertises them. This is NOT a serve-gate, consent, or transport problem — do not go looking there. Read trace_plane.rows_by_projection in the evidence tail for edge's own verdict per row, and note that trace_events.cohort_scope is a PROJECTION and can read 'federation' while the attestation that decides reads 'self'."
+EXIT_offerable=18
 
 # ── 2. consent — the agent authored consent:replication toward the canonical ─
 stage_consent() { harness_log_count agent "CONSENT: consent:replication authored"; }
@@ -78,7 +109,7 @@ stage_ship() { harness_log_count agent '"envelopes_served_total":[1-9]'; }
 HINT_ship="rounds ran but carried nothing. Read round_diagnostics.replication_plane: carriage.standing separates 'idle' (nothing owed) from 'not_exercised' (no round finished) from 'withholding' (this node REFUSED — withholds.by_reason names the branch). If withholding, check the serve gate (#379/#386 legs A+B: role on the key record AND the delegates_to trust-root walk) and covers_trace in the trace_plane diagnostic."
 EXIT_ship=14
 DIAG_ship() {
-  compose logs agent 2>/dev/null | grep -oE '"trace_plane":\{[^}]*\}' | tail -1
+  harness_trace_plane
   compose logs agent 2>/dev/null | grep -oE '"carriage":\{[^{}]*(\{[^{}]*\})?[^{}]*\}' | tail -1
   compose logs agent 2>/dev/null | grep -oE '"withholds":\{[^{}]*(\{[^{}]*\})?[^{}]*\}' | tail -1
   compose logs agent 2>/dev/null | grep -oE "trace attestation (withheld|permitted)[^\"]{0,110}" | sort | uniq -c | tail -5
@@ -116,8 +147,10 @@ harness_scenario_evidence() {
   compose logs canonical 2>/dev/null | grep -oE "emitted capacity:[^ ]+ attestation[^\"]{0,80}" | tail -2
   echo "· canonical trace_events rows: $(harness_db_count canonical trace_events)"
   echo "· agent trace:* attestations:  $(stage_trace_att)"
-  echo "· trace_plane diagnostic:"
-  compose logs agent 2>/dev/null | grep -oE '"trace_plane":\{[^}]*\}' | tail -1
+  echo "· trace_plane diagnostic (authoritative — edge's OWN predicate):"
+  harness_trace_plane
+  echo "· agent trace:* attestations by cohort_scope:"
+  harness_trace_scopes
   # CIRISServer#377 — the agent's own carriage reading, with the standing token
   # that says what its zero (if any) MEANS.
   echo "· agent carriage (replication plane):"

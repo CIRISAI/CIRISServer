@@ -2114,7 +2114,7 @@ async fn native_login(st: &OAuthState, provider: &str, body: &[u8]) -> Response 
 }
 
 /// The native token-exchange response body — the shape
-/// `client/openapi.json#/components/schemas/NativeTokenResponse` publishes,
+/// `openapi.json#/components/schemas/NativeTokenResponse` publishes,
 /// pinned by `the_native_response_carries_every_field_the_published_spec_requires`.
 ///
 /// `token_type` MUST serialize: the Apple client's hand-rolled decoder declares
@@ -3569,18 +3569,19 @@ mod tests {
     }
 
     /// **THE GATE THAT WOULD HAVE CAUGHT #429**: every field the PUBLISHED spec
-    /// (`client/openapi.json` — the file the client generator consumes) marks
+    /// (`openapi.json` — the file the client generator consumes; it moved to the
+    /// repo root when `client/` was deleted for #471, since the spec is the
+    /// SERVER's contract and only happened to live beside its consumer) marks
     /// required is present and non-null in what the native path serializes,
     /// plus `token_type`, which the Apple client's hand-rolled decoder declares
     /// non-null despite the spec leaving it defaulted.
     #[test]
     fn the_native_response_carries_every_field_the_published_spec_requires() {
-        let spec_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("client/openapi.json");
+        let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("openapi.json");
         let spec: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&spec_path).expect("client/openapi.json unreadable"),
+            &std::fs::read_to_string(&spec_path).expect("openapi.json unreadable"),
         )
-        .expect("client/openapi.json is not valid JSON");
+        .expect("openapi.json is not valid JSON");
         let mut required: Vec<String> = spec
             .pointer("/components/schemas/NativeTokenResponse/required")
             .and_then(|v| v.as_array())

@@ -17,6 +17,15 @@ Resolution:
     cargo-vendored checkout for the pinned git rev (present after `cargo fetch`);
     if that checkout is absent, resolution is a WARNING (deferred, like the
     Constitution checker), not a failure.
+  - repo=CIRISClient -> the KMP client is a published PACKAGE since CIRISServer#471,
+    not a tree in this repo, and the wheel carries only built artifacts (a jar and
+    the locale bundle) — there is no `.kt` in it to resolve against. So: (a) the
+    row's `ciris-client@version` MUST equal the pin in `pyproject.toml` (drift =
+    FAIL — that pin is exact by design); (b) the symbol resolves against a SIBLING
+    `../CIRISClient` checkout when one exists AND is at that exact tag; otherwise
+    resolution is a WARNING (deferred), never a silent pass. Same shape as the
+    substrate rule above, and the same reason: a gate that cannot be evaluated
+    must not be indistinguishable from one that passed.
   - repo=—  (an `open`/unimplemented row) -> skipped (informational).
 
 Exit non-zero on any FAIL. `--strict` also fails on WARN.
@@ -53,6 +62,15 @@ CHECKOUT_DIR_GLOB = {
     "CIRISEdge": "cirisedge-*",
 }
 
+# CIRISServer#471 — the client is a pip package, so its pin lives in
+# pyproject.toml rather than Cargo.toml and its source is not vendored anywhere
+# a cargo checkout would be. `tools/client_pin.py` is the ONE home of that
+# version string; this asks it rather than re-spelling the regex (five copies of
+# that pin is exactly the drift that script was written to end).
+CLIENT_REPO = "CIRISClient"
+CLIENT_CRATE = "ciris-client"
+CLIENT_SIBLING = ROOT.parent / "CIRISClient"
+
 
 def cargo_pin(repo: str) -> str | None:
     """The `tag = "vX"` the workspace pins for a CIRIS* git repo (first match)."""
@@ -74,6 +92,50 @@ def lock_rev(pkg: str, tag: str) -> str | None:
             if m:
                 return m.group(1)
     return None
+
+
+def client_pin() -> str | None:
+    """The exact `ciris-client` version pyproject.toml pins, via the one resolver."""
+    try:
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "client_pin.py")],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    # `ciris-client==0.5.188` -> `0.5.188`
+    return out.split("==", 1)[1] if "==" in out else None
+
+
+def client_checkout(pin: str) -> Path | None:
+    """A sibling `../CIRISClient` AT the pinned tag, or None.
+
+    The tag check is the whole point: resolving a symbol against whatever happens
+    to be checked out next door would answer a question about the developer's
+    working tree, not about the version this repo ships. Wrong tag ⇒ deferred,
+    the same as no checkout at all.
+    """
+    if not (CLIENT_SIBLING / ".git").exists():
+        return None
+    try:
+        # `--exact-match` — NOT the nearest tag. `describe --tags --abbrev=0` walks
+        # BACK to the closest ancestor tag, so a sibling checked out ten commits
+        # PAST v0.5.188 still answers "v0.5.188" and we would resolve symbols
+        # against source the pinned release never shipped. git's own help draws
+        # the distinction: --exact-match "only output exact matches".
+        tag = subprocess.run(
+            ["git", "-C", str(CLIENT_SIBLING), "describe", "--tags", "--exact-match"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        # Not ON a tag at all (mid-development, a branch, a descendant) — deferred,
+        # never silently accepted.
+        return None
+    return CLIENT_SIBLING if tag.lstrip("v") == pin.lstrip("v") else None
 
 
 def checkout_dir(repo: str, rev: str) -> Path | None:
@@ -153,6 +215,36 @@ def main() -> int:
                 ok += 1
             else:
                 fails.append(f"L{ln} [{claim} {decimal}]: unresolved in-repo -> {pathsym}")
+            continue
+
+        if repo == CLIENT_REPO:
+            row_tag = cratever.split("@", 1)[1] if "@" in cratever else ""
+            pin = client_pin()
+            if pin is None:
+                fails.append(f"L{ln} [{claim}]: no pyproject pin found for {CLIENT_REPO}")
+                continue
+            # The client pin is EXACT by design (the locale bundle is a release
+            # gate here), so a drifted annotation is a FAIL, not the substrate's
+            # WARN: there is no floating version for it to be merely stale against.
+            if row_tag != pin:
+                fails.append(
+                    f"L{ln} [{claim}]: ciris-client@'{row_tag}' does not match the "
+                    f"pyproject pin '{pin}' — the client pin is exact, so this is drift"
+                )
+                continue
+            base = client_checkout(pin)
+            if base is None:
+                warns.append(
+                    f"L{ln} [{claim} {decimal}]: {CLIENT_REPO}@{pin} has no sibling "
+                    f"checkout at {CLIENT_SIBLING} on that tag — deferred: {pathsym}"
+                )
+                continue
+            if symbol_resolves(base, path, symbol):
+                ok += 1
+            else:
+                fails.append(
+                    f"L{ln} [{claim} {decimal}]: unresolved in {CLIENT_REPO}@{pin} -> {pathsym}"
+                )
             continue
 
         # --- substrate crate ---

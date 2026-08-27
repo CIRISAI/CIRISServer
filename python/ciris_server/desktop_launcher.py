@@ -1,7 +1,7 @@
 """CIRIS Desktop launcher (ciris-server wheel).
 
 Locates the per-platform CIRIS Desktop JAR that the wheel bundles under
-``ciris_server/desktop_app/CIRIS-*.jar`` and runs it with the *system* Java
+``ciris-client``'s desktop uber-jar and runs it with the *system* Java
 (Java 17+; no JRE is bundled, to keep each platform wheel under PyPI's 100MB
 cap — same decision as CIRISAgent's setup.py).
 
@@ -52,35 +52,48 @@ def find_java() -> Optional[str]:
 
 
 def find_desktop_jar() -> Optional[Path]:
-    """Find the bundled per-platform desktop JAR.
+    """Find the desktop JAR, from the ``ciris-client`` package.
 
-    Primary: ``ciris_server/desktop_app/CIRIS-*.jar`` shipped in the wheel.
-    Fallback: a local gradle dev build under
-    ``<repo>/client/desktopApp/build/compose/jars/CIRIS-*.jar``.
+    **It used to be bundled INTO this wheel** — gradle built it from the
+    vendored ``client/`` tree and CI copied it to
+    ``ciris_server/desktop_app/CIRIS-*.jar``. CIRISServer#471 deleted that tree,
+    and the jar comes from ``ciris-client[node]`` now.
+
+    That is not only a source change: the embedded jar was ~46 MiB of every one
+    of the nine published wheels, against PyPI's 100 MiB per-file ceiling that
+    the largest was within 3.4 MiB of (CIRISServer#486). Nine copies of one
+    artifact, in a project that also has a 10 GB total quota. It is one
+    dependency now.
+
+    The legacy in-wheel location is still checked FIRST, and deliberately: a
+    0.5.188-or-earlier wheel already installed somewhere still carries its jar,
+    and an upgrade that made the desktop command stop working would be a worse
+    failure than a redundant stat.
     """
     package_dir = Path(__file__).parent
 
+    # Legacy: bundled in the wheel (<= 0.5.188).
     jar_dir = package_dir / "desktop_app"
     if jar_dir.exists():
         jars = sorted(jar_dir.glob("CIRIS-*.jar"))
         if jars:
             return jars[0]
 
-    # Dev fallback: gradle output when running from a source checkout. The
-    # launcher package lives at <repo>/python/ciris_server/, so the client tree
-    # is two levels up.
-    dev_jar = (
-        package_dir.parent.parent
-        / "client"
-        / "desktopApp"
-        / "build"
-        / "compose"
-        / "jars"
-    )
-    if dev_jar.exists():
-        jars = sorted(dev_jar.glob("CIRIS-*.jar"))
-        if jars:
-            return jars[0]
+    # The package that owns it.
+    try:
+        import ciris_client
+
+        jar = Path(ciris_client.artifact_path("desktop-uber-jar"))
+        if jar.exists():
+            return jar
+    except ImportError:
+        # `ciris-client` is a hard dependency, so this means a broken install
+        # rather than an optional feature being absent. The caller reports "no
+        # desktop jar" either way; saying which is the launcher's job, not this
+        # resolver's.
+        pass
+    except Exception:  # noqa: BLE001 - artifact resolution is best-effort here
+        pass
 
     return None
 
