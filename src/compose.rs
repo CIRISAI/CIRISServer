@@ -317,6 +317,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     &node_resolution.node_key_id,
                 )
                 .await?;
+                // And the replication topology follows the identity that reads
+                // it (CIRISServer#312). Authored with the NODE's own signer, so
+                // the engine keeps signing as the actor and the embedded fold
+                // keeps its one engine (#221).
+                if let Some(node_signer) = node_resolution.signer.clone() {
+                    crate::node_key::reauthor_consent_as_node(
+                        &engine,
+                        node_signer,
+                        &actor_key_id,
+                        &node_resolution.node_key_id,
+                    )
+                    .await?;
+                }
             }
             Ok(None) => tracing::warn!(
                 node_key_id = %node_resolution.node_key_id,

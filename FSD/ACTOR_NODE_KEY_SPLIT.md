@@ -129,26 +129,29 @@ So the three roles move **together**, and all three are carriage:
 **Grants authored by the actor key become unreadable the moment the node reads as
 NodeID.** That is #312 exactly. The migration therefore re-authors them.
 
-### Consent cannot be re-authored ahead of the engine — the tests found this
+### Consent moves WITHOUT an engine swap — the substrate signs with either
 
-An earlier draft of this document had the migration re-author grants as the node
-while the engine still signed as the actor. **The substrate does not permit
-that, and is right not to.**
+An earlier draft staged consent behind an engine-signer swap, on the reading that
+a grant can only be self-attested by the engine. Half right: it must be
+self-attested, and the engine is not the only key we hold.
 
-`emit_replication_consent` takes a `node_key_id` that reads like a selector and
-is not one. The row is written by `emit_attestation_self`, which signs with the
-engine's own composed signer; `peer.rs` documents the parameter as an assertion
-that it EQUALS the engine's derived id ("wire-preserving"). Consent is
-self-attested by construction — CEG 1.0-RC29 §5.6.8.15 forecloses third-party
-authorship precisely so a grant cannot be produced on your behalf.
+`emit_replication_consent` defaults to `emit_attestation_self` — the engine's own
+signer — which is correct for every ordinary caller. `ConsentGrantOptions::author_signer`
+supplies a key we hold instead, and the row is stamped, signed and put through
+the same door (`attest::Emit` → `KeySigner::Local` → `attest::put`) that
+`build_signed_owner_binding` already uses. **Self-attestation is preserved: the
+signature really is the named author's.** What is refused is signing *silently*
+as someone else.
 
-So the ordering inverts: **the engine-signer swap is a PREREQUISITE for moving
-consent, not a follow-on.** They are one indivisible change, and this cut ships
-the key split without them.
+That matters because the embedded fold cannot swap engines at all —
+CIRISServer#221 is explicit that there is one pool, one sweeper, no second
+writer, and `serve_with_adapter` folds onto `current_rust_engine()` rather than
+building one. A design requiring the engine to become the node key would have
+been undeliverable there, which is the case that actually needs it.
 
-The invariant was documented and unchecked, which the TDD pass surfaced as a live
-defect: passing any other id SUCCEEDED and produced a grant authored by the
-engine —
+The invariant was also documented and unchecked, which the TDD pass surfaced as a
+live defect: any mismatched `node_key_id` SUCCEEDED and produced a grant authored
+by the engine —
 
 ```
 emit(node_key_id = NODE) -> Ok
@@ -159,12 +162,12 @@ read as ENGINE -> [peer]
 — zero peers under a green transport, the #312 shape, reachable by a
 one-argument mistake, and the same "quietly downgraded rather than refused" class
 as the phantom `[node]` extra and the `Conflict`-at-debug. `emit_grant_row` now
-refuses a mismatch and says why.
+refuses a mismatch unless a signer for the named author is supplied.
 
-The owner-binding moves fine, and the asymmetry is principled:
+The owner-binding moves the same way, and the asymmetry is principled:
 `build_signed_owner_binding` takes an explicit signer because an owner-binding is
 authored BY THE OWNER about a node; a consent grant is authored BY THE GRANTING
-PARTY about itself.
+PARTY about itself — so the grant's signer must BE the author, and is checked.
 
 ---
 
@@ -179,10 +182,9 @@ fed-ID and no operator step exists. In order:
 4. **Move the owner-binding** onto the node key — same owner, same `infra:*`
    scopes, same cohort. Refuses if this node holds a signer for anyone other than
    the actor key's owner.
-5. **STAGED — not in this cut.** The engine's signer becomes the node key, and
-   only then can consent grants be re-authored. One indivisible change (see
-   above); until it lands the node keeps the actor's transport identity and its
-   existing topology, which is the pre-split behaviour and therefore safe.
+5. **Re-author consent** as the node, using the node's own signer. Same peers,
+   same prefixes, a new author — and the engine keeps signing as the actor, so the
+   embedded fold keeps its one engine.
 
 Every step is idempotent: a re-boot after a successful migration writes nothing.
 
@@ -222,12 +224,14 @@ The consent proofs are the #312 regression surface and are written **first**.
 
 ## Open
 
-- **The engine's signer + consent, together.** Edge takes its transport identity
-  from `engine.local_signer_capsule()`, and consent can only follow the engine.
-  These move as ONE change; `tests/consent_survives_the_key_split.rs` already
-  pins the post-swap property
-  (`an_engine_signing_as_the_node_authors_and_reads_its_own_topology`), so the
-  check that proves it landed exists before the change does.
+- **The wire identity.** Edge takes its Reticulum transport identity from
+  `engine.local_signer_capsule()`, and in the embedded fold the edge is ALREADY
+  RUNNING when compose folds onto it (`current_edge()`, not `build_edge()`), so
+  the transport identity is set by whoever calls `init_edge_runtime`. Every CEG
+  row — ownership, consent, attestations — is authored by the correct key as of
+  this cut; the transport LAYER identity is the one thing that still follows the
+  engine, and it is set outside this process. `node_key::node_signer` is public
+  for exactly that caller.
 - **Existing fused deployments** re-author on next boot. Mesh is in development;
   a break-and-repair-on-update is the accepted cost (operator decision, recorded
   here so it is not re-litigated as an oversight).

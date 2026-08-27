@@ -387,10 +387,11 @@ pub async fn resolve_node_identity(
                 node_key_id: configured_key_id.to_owned(),
                 split_from: None,
                 verdict,
+                signer: None,
             })
         }
         IdentityVerdict::Actor { roles } | IdentityVerdict::Fused { roles } => {
-            let (_signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+            let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
             let node_key_id = register_node_key(engine, &identity).await?;
             tracing::warn!(
                 configured_key_id = %configured_key_id,
@@ -406,13 +407,16 @@ pub async fn resolve_node_identity(
                 node_key_id,
                 split_from: Some(configured_key_id.to_owned()),
                 verdict,
+                signer: Some(signer),
             })
         }
     }
 }
 
 /// What [`resolve_node_identity`] decided.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `PartialEq`/`Eq`: a `LocalSigner` has no meaningful equality, and deriving
+// one over a key would invite comparing signers instead of key ids.
+#[derive(Clone)]
 pub struct NodeIdentityResolution {
     /// The key this node operates as.
     pub node_key_id: String,
@@ -421,6 +425,9 @@ pub struct NodeIdentityResolution {
     pub split_from: Option<String>,
     /// How the configured key classified.
     pub verdict: IdentityVerdict,
+    /// The node key's signer, present exactly when a split happened. Needed to
+    /// author rows AS the node while the engine signs as the actor.
+    pub signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
 }
 
 impl NodeIdentityResolution {
@@ -524,4 +531,71 @@ pub async fn move_owner_binding_to_node_key(
         from_key_id: actor_key_id.to_owned(),
         to_key_id: node_key_id.to_owned(),
     }))
+}
+
+/// **Re-author the actor's replication consent as the node.**
+///
+/// The half CIRISServer#312 makes mandatory: `compose` reads the topology by ONE
+/// identity, so when that becomes the node key every grant the actor authored
+/// goes invisible — zero peers, zero envelopes, fully green transport, no error.
+///
+/// Authored with the node's OWN signer via
+/// [`crate::peer::ConsentGrantOptions::author_signer`], so this works with the
+/// engine still signing as the actor (CIRISServer#221 keeps one engine in the
+/// embedded fold). Self-attestation is preserved — the signature really is the
+/// node's — which is the property CEG 1.0-RC29 §5.6.8.15 protects.
+///
+/// Returns the peers moved THIS pass; empty on a second boot.
+///
+/// # Errors
+/// Directory reads, or a grant emission that is not a benign duplicate.
+pub async fn reauthor_consent_as_node(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    node_signer: std::sync::Arc<ciris_persist::prelude::LocalSigner>,
+    actor_key_id: &str,
+    node_key_id: &str,
+) -> Result<Vec<String>> {
+    let actor_peers = crate::peer::replication_peers_from_consent(engine, actor_key_id).await?;
+    if actor_peers.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Read ONCE before the loop so the skip set cannot drift as we write into it.
+    // This is what makes a second boot a no-op instead of a re-emit.
+    let already: std::collections::BTreeSet<String> =
+        crate::peer::replication_peers_from_consent(engine, node_key_id)
+            .await?
+            .into_iter()
+            .collect();
+
+    let opts = crate::peer::ConsentGrantOptions {
+        author_signer: Some(node_signer),
+        ..Default::default()
+    };
+    let prefixes = crate::peer::default_attestation_prefixes();
+    let mut moved = Vec::new();
+    for peer in actor_peers {
+        if already.contains(&peer) {
+            continue;
+        }
+        crate::peer::emit_replication_consent_with_policy(
+            engine,
+            node_key_id,
+            &peer,
+            &prefixes,
+            &opts,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("re-author consent {node_key_id} -> {peer}: {e}"))?;
+        moved.push(peer);
+    }
+    if !moved.is_empty() {
+        tracing::info!(
+            from_key_id = %actor_key_id,
+            to_key_id = %node_key_id,
+            peers = ?moved,
+            "consent re-authored as the node key — the replication topology now resolves \
+             for the identity that reads it (CIRISServer#312)"
+        );
+    }
+    Ok(moved)
 }

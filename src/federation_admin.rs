@@ -671,6 +671,7 @@ async fn consent(
     // `emit_replication_consent_with_policy`. Restrictions are already typed
     // through persist's closed `RestrictionOp` (an unknown op 400'd at parse).
     let opts = crate::peer::ConsentGrantOptions {
+        author_signer: None,
         audience: req.audience.clone(),
         valid_until: req.valid_until,
         restrictions: req.restrictions.clone(),

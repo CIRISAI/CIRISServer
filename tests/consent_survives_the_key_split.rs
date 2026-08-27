@@ -237,3 +237,80 @@ async fn an_engine_signing_as_the_node_authors_and_reads_its_own_topology() {
          is one identity again, and it is the node's"
     );
 }
+
+/// **The split, complete: the engine signs as the ACTOR and the node still owns
+/// its own replication topology.**
+///
+/// This is what an embedded node looks like after CC 3.4.7.3 — the agent's
+/// engine is unchanged (CIRISServer#221: one pool, one sweeper, no second
+/// writer), and the node authors its consent with the key it actually is.
+///
+/// Self-attestation is preserved, which is the property that made the naive
+/// version impossible: the signature really is the named author's. What is
+/// refused is signing *silently* as someone else.
+#[tokio::test]
+async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
+    let engine = fixture().await;
+    let engine_author = engine.local_derived_key_id().await.expect("derived");
+    assert_ne!(
+        engine_author, NODE,
+        "premise: the engine is NOT the node key — this is the embedded fold"
+    );
+
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(Arc::new(signer_for(NODE))),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        NODE,
+        PEER,
+        &ciris_server::peer::default_attestation_prefixes(),
+        &opts,
+    )
+    .await
+    .expect("the node authors its own grant with the key it holds");
+
+    assert_eq!(
+        ciris_server::peer::replication_peers_from_consent(&engine, NODE)
+            .await
+            .expect("read as the node"),
+        vec![PEER.to_string()],
+        "THE POINT: the node reads a live topology it authored, with the engine still \
+         signing as the actor. No engine swap, no second writer, no #312."
+    );
+
+    assert!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &engine_author)
+            .await
+            .expect("read as the engine")
+            .is_empty(),
+        "and the grant did NOT land under the engine's identity — the author is the \
+         node, not whoever happened to hold the pen"
+    );
+}
+
+/// A signer that is not the named author is still refused. The escape hatch is
+/// "I hold this key", never "sign as anyone".
+#[tokio::test]
+async fn an_author_signer_for_a_different_key_is_still_refused() {
+    let engine = fixture().await;
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(Arc::new(signer_for(PEER))), // holds PEER, claims NODE
+        ..Default::default()
+    };
+    let err = ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        NODE,
+        PEER,
+        &ciris_server::peer::default_attestation_prefixes(),
+        &opts,
+    )
+    .await
+    .expect_err("a signer that is not the named author must be refused");
+    assert!(
+        err.to_string()
+            .contains("refusing to emit a consent grant naming"),
+        "got: {err}"
+    );
+}

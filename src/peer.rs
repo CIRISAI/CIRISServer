@@ -410,6 +410,23 @@ pub struct ConsentGrant {
 /// (CIRISServer#327 §2 / #510 P2).
 #[derive(Debug, Clone, Default)]
 pub struct ConsentGrantOptions {
+    /// **Author this grant with a key the ENGINE does not sign as** (CC 3.4.7.3).
+    ///
+    /// A consent grant is self-attested — CEG 1.0-RC29 §5.6.8.15 forecloses
+    /// third-party authorship so a grant cannot be produced on your behalf — and
+    /// the default path honours that by signing with the engine's own composed
+    /// signer. That is right for every ordinary caller.
+    ///
+    /// The actor/node key split needs one more thing: a node whose engine signs
+    /// as the ACTOR must still author the replication topology as the NODE, or the
+    /// topology reads empty for the identity that reads it (CIRISServer#312).
+    /// Supplying a signer here says "I hold this key" — self-attestation is
+    /// preserved, because the signature really is the named author's. The
+    /// substrate signs with either; what it must never do is sign silently with
+    /// the wrong one, which is what the unchecked `node_key_id` used to allow.
+    ///
+    /// `None` ⇒ the engine signs, and `node_key_id` MUST equal its derived id.
+    pub author_signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
     /// The recipient cohort — one of the 7 closed
     /// [`cohort_scope`](ciris_persist::federation::types::cohort_scope) values.
     /// `None` ⇒ persist's `default_audience()` (`federation`). A supplied value
@@ -785,7 +802,11 @@ async fn emit_grant_row<S: AsRef<str>>(
         .local_derived_key_id()
         .await
         .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
-    if engine_author != node_key_id {
+    let signs_as_node = opts
+        .author_signer
+        .as_ref()
+        .is_some_and(|s| s.key_id() == node_key_id);
+    if engine_author != node_key_id && !signs_as_node {
         anyhow::bail!(
             "refusing to emit a consent grant naming {node_key_id:?}: this engine signs as \
              {engine_author:?}, and a consent grant is self-attested (CEG 1.0-RC29 §5.6.8.15). \
@@ -899,6 +920,10 @@ async fn emit_grant_row<S: AsRef<str>>(
     })?;
     let content_hash = hex::encode(Sha256::digest(&canonical));
 
+    // Kept for the explicit-signer branch below, which re-stamps the SAME
+    // envelope rather than reaching into the built input.
+    let envelope_for_author = envelope.clone();
+
     let mut input = EmitAttestationInput::with_envelope(
         attestation_type::SCORES,
         ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
@@ -909,10 +934,35 @@ async fn emit_grant_row<S: AsRef<str>>(
     input.attested_key_id = Some(peer_key_id.to_owned());
     input.subject_key_ids = vec![peer_key_id.to_owned()];
     input.weight = Some(1.0);
-    let attestation_id = engine
-        .emit_attestation_self(input)
-        .await
-        .map_err(|e| anyhow::anyhow!("emit_attestation_self(consent:replication:v1): {e}"))?;
+    let attestation_id = match opts.author_signer.as_ref() {
+        // The ordinary path: the engine self-attests. Unchanged.
+        None => engine
+            .emit_attestation_self(input)
+            .await
+            .map_err(|e| anyhow::anyhow!("emit_attestation_self(consent:replication:v1): {e}"))?,
+        // CC 3.4.7.3: author as a key we HOLD but the engine does not sign as.
+        // Same canonical bytes, same envelope, same put door — a different pen.
+        // Self-attestation is preserved: the signature really is the named
+        // author's, which is the property §5.6.8.15 protects.
+        Some(signer) => {
+            let row = crate::attest::Emit::stamp(
+                node_key_id,
+                crate::attest::Spec::new(
+                    attestation_type::SCORES,
+                    cohort_scope::FEDERATION,
+                    envelope_for_author,
+                )
+                .about(peer_key_id),
+            )
+            .map_err(|e| anyhow::anyhow!("stamp consent grant for {node_key_id}: {e}"))?
+            .sign_and_assemble(crate::attest::KeySigner::Local(signer))
+            .await
+            .map_err(|e| anyhow::anyhow!("sign consent grant as {node_key_id}: {e}"))?;
+            crate::attest::put(engine, row)
+                .await
+                .map_err(|e| anyhow::anyhow!("put consent grant authored by {node_key_id}: {e}"))?
+        }
+    };
 
     tracing::info!(
         peer_key_id,
@@ -1222,6 +1272,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
         // policy axes below need the whole parsed struct, so this arm keeps it.
         Ok(policy) => {
             let opts = ConsentGrantOptions {
+                author_signer: None,
                 audience: Some(policy.audience.clone()),
                 valid_until: policy.valid_until,
                 restrictions: policy.restrictions.clone(),
