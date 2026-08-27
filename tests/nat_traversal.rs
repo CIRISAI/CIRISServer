@@ -52,6 +52,9 @@ fn transport_and_saf_default_on_in_resolved_config() {
 #[test]
 fn transport_node_flag_maps_into_reticulum_config() {
     let mk = |enabled: bool| ReticulumTransportConfig {
+        // NAT traversal is orthogonal to the #541 identity split; the storage key
+        // is the advertised id here, as it is for any unsplit node.
+        transport_identity_storage_key: None,
         listen_addr: "0.0.0.0:4242".parse().unwrap(),
         bootstrap_peers: vec![],
         identity_path: std::path::PathBuf::from("/tmp/does-not-matter.rid"),

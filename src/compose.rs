@@ -3611,7 +3611,27 @@ async fn build_edge(
         bootstrap_peers: cfg.bootstrap_peers.clone(),
         identity_path: cfg.ret_identity_path(),
         announce_interval: announce_interval(),
-        local_key_id: cfg.key_id.clone(),
+        // ADVERTISE the wire identity — what peers are told this node is. On a
+        // split node that is the NODE key; everywhere else it is `cfg.key_id`
+        // and this is byte-identical to before.
+        local_key_id: crate::node_key::wire_identity()
+            .unwrap_or(&cfg.key_id)
+            .to_owned(),
+        // STORE under the original id (CIRISEdge#541, edge v18.10.0). These were
+        // one value because they had always been the same value, and they are not
+        // the same job: one is what peers are told, the other is where a 64-byte
+        // Reticulum keypair lives on local disk.
+        //
+        // Coupling them across a split is a silent, unrecoverable break: an
+        // existing keystore-backed node would MISS its stored entry under the new
+        // advertised id, fall through to generate-and-store, and change its
+        // destination hash — invalidating every saved peer route, with no error
+        // anywhere. The node would come up healthy and unreachable.
+        //
+        // `None` when nothing moved, so a node that never split is untouched.
+        transport_identity_storage_key: (crate::node_key::wire_identity()
+            .is_some_and(|w| w != cfg.key_id))
+        .then(|| cfg.key_id.clone()),
         local_epoch: 0,
         interfaces: vec![],
         enable_transport: transport_node,
