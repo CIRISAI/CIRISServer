@@ -192,6 +192,24 @@ const FEDERATION_CHURN_MAX_AGE_DAYS: i64 = 30;
 /// a few passes and then idles at steady state.
 const FEDERATION_CHURN_MAX_ROWS: usize = 2_000;
 
+// Pinned at COMPILE time, not by a test: these are constants, so a test asserting
+// them can only ever restate what the compiler already knows. As `const` assertions
+// they fail the BUILD the moment someone edits a value past its bound, which is the
+// actual guarantee wanted — and it is what clippy's `assertions_on_constants` is
+// pointing at.
+//
+// Re-derivable rows must age out FASTER than the corpus: losing a transport row
+// costs a round-trip, losing a trace costs the trace.
+const _: () = assert!(
+    FEDERATION_CHURN_MAX_AGE_DAYS < 90 && FEDERATION_CHURN_MAX_AGE_DAYS > 0,
+    "transport/announce rows are re-derivable and must not be kept as long as traces"
+);
+// An unbounded prune reintroduces CIRISServer#501 from the hygiene side.
+const _: () = assert!(
+    FEDERATION_CHURN_MAX_ROWS > 0 && FEDERATION_CHURN_MAX_ROWS <= 10_000,
+    "the prune must stay bounded per pass or it becomes the task that starves accept"
+);
+
 /// **Bound the re-derivable federation tables.**
 ///
 /// `transport_destinations` is what boot prime iterates, and nothing has ever
@@ -768,27 +786,6 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
 
-    /// Re-derivable rows age out FASTER than the corpus. Losing a transport row
-    /// costs a round-trip; losing a trace costs the trace.
-    #[test]
-    fn churn_ages_out_faster_than_the_corpus() {
-        assert!(
-            FEDERATION_CHURN_MAX_AGE_DAYS < 90,
-            "transport/announce rows are re-derivable and must not be kept as long as traces"
-        );
-        assert!(FEDERATION_CHURN_MAX_AGE_DAYS > 0);
-    }
-
-    /// The prune is bounded per pass, so hygiene can never become the long-running
-    /// task that starves the accept loop — the failure it exists to prevent.
-    #[test]
-    fn the_prune_is_bounded_per_pass() {
-        assert!(FEDERATION_CHURN_MAX_ROWS > 0);
-        assert!(
-            FEDERATION_CHURN_MAX_ROWS <= 10_000,
-            "an unbounded prune reintroduces CIRISServer#501 from the hygiene side"
-        );
-    }
     use super::*;
     use crate::config_reconcile::{
         DEFAULT_RETENTION_AUDIT_LOG_MAX_AGE_DAYS, DEFAULT_RETENTION_MAX_AGE_DAYS,
