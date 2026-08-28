@@ -926,6 +926,11 @@ pub const IGNORE_ALLOWLIST: &[(&str, &str)] = &[
         "external fact — needs a reachable peer; BLOCKED, never passed, without one",
     ),
     (
+        "gate_client_floor_resolves_every_id",
+        "external fact — installs the client floor from PyPI; BLOCKED, never passed, \
+         when the index is unreachable (0.5.192 range decoupling)",
+    ),
+    (
         "gate_pinned_client_offers_a_non_desktop_wheel",
         "external fact — reads the PyPI simple index; BLOCKED, never passed, when it is \
          unreachable (CIRISServer#493)",

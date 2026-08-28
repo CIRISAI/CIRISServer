@@ -265,50 +265,56 @@ fn gate_no_substrate_rev_pin_at_release() {
     );
 }
 
-/// **The client pin tracks this cut's own version.**
+/// **The client requirement is a RANGE with a floor this repo has verified.**
 ///
-/// The desktop app compares its `CLIENT_VERSION` against the node's reported
-/// version on the full leading semver (`isVersionMismatch`), so a 0.5.189 node
-/// shipping a 0.5.188 client greets its own operator with "Update recommended"
-/// against the dependency it was deliberately built with.
+/// Replaces `gate_client_pin_matches_this_release`, which asserted
+/// `pin == CARGO_PKG_VERSION`. That equality forced a paired release every time
+/// either side moved — a client change CIRISAgent wanted could not reach them
+/// without a server cut that had no other reason to exist. 0.5.192 gives that up
+/// deliberately (CIRISClient#9).
 ///
-/// Nothing asserted this before, and nothing had to: a wheel-build lane kept the
-/// two in step, and it went away with `client/`. The obligation did not go away
-/// with it — it just stopped having a keeper. Found by review (Codex on #489),
-/// not by a gate, which is why there is now a gate.
+/// What survives is the part that was doing real work: **a floor, and a bound.**
 ///
-/// Deliberately a RELEASE gate rather than a build error: an adoption branch may
-/// legitimately sit on the previous client for a commit or two while upstream
-/// cuts. What must not happen is TAGGING that way.
+/// - a floor, because `>=` with nothing under it is not a claim anyone can check;
+/// - a bound, because `<0.6` is where the API may move and an unbounded
+///   dependency resolves into a future nobody tested.
+///
+/// The floor's CONTENT is verified separately by
+/// `gate_client_floor_resolves_every_id`, which installs it and runs the
+/// localization guard. This gate only asserts the requirement has the shape that
+/// makes verification possible.
 #[test]
-fn gate_client_pin_matches_this_release() {
+fn gate_client_requirement_is_a_bounded_range() {
     let pyproject = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pyproject.toml"),
     )
     .expect("pyproject.toml must be readable");
-    let pin = pyproject
+    let req = pyproject
         .lines()
-        .find_map(|l| {
-            let l = l.trim();
-            l.strip_prefix("\"ciris-client==")
-                .and_then(|r| r.split('"').next())
-                .map(str::to_owned)
-        })
+        .map(str::trim)
+        .find(|l| l.starts_with("\"ciris-client"))
+        .map(|l| l.trim_matches(|c| c == '"' || c == ',').to_owned())
         .expect(
-            "no `ciris-client==` requirement in pyproject.toml — this gate cannot pass by \
+            "no `ciris-client` requirement in pyproject.toml — this gate cannot pass by \
              finding nothing",
         );
-    let server = env!("CARGO_PKG_VERSION");
-    assert_eq!(
-        pin, server,
+    assert!(
+        req.contains(">="),
         "\n\
-         🚫 RELEASE GATE [client-pin] — DO NOT TAG.\n\
+         🚫 RELEASE GATE [client-range] — DO NOT TAG.\n\
          \n\
-         The node is {server} and pins ciris-client {pin}. The desktop app compares\n\
-         its CLIENT_VERSION against the node's on the full leading semver, so this\n\
-         ships an \"Update recommended\" prompt against the client the release was\n\
-         deliberately built with.\n\
+         The ciris-client requirement is {req:?}, which has no lower bound. A floor is\n\
+         what makes the range checkable: `gate_client_floor_resolves_every_id` installs\n\
+         it and proves the guard passes there. Without one there is nothing to verify\n\
+         and the range is a hope with a version number on it.\n"
+    );
+    assert!(
+        req.contains('<'),
+        "\n\
+         🚫 RELEASE GATE [client-range] — DO NOT TAG.\n\
          \n\
-         Move the pin in pyproject.toml, in the same commit that bumps the version.\n"
+         The ciris-client requirement is {req:?}, which is unbounded above. An\n\
+         unbounded dependency resolves into versions nobody tested, and the failure\n\
+         lands on a user's fresh install rather than in CI.\n"
     );
 }

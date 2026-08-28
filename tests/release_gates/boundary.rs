@@ -289,16 +289,28 @@ fn gate0_no_gate_depends_on_an_operator_dropped_evidence_file() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The `ciris-client` requirement pinned in `pyproject.toml`, as `(name, version)`.
+/// The client requirement's name and FLOOR version.
+///
+/// 0.5.192 moved this from `==X` to `>=FLOOR,<BOUND`. The floor is what matters
+/// to every gate here: it is the oldest version a consumer may resolve, so it is
+/// the one whose wheel matrix and whose bundle must both be checked. The upper
+/// end of the range is exercised by CI, which installs the range and gets the
+/// latest.
+///
+/// Reads through `tools/client_pin.py --floor` rather than re-parsing the
+/// requirement here — that script is the ONE home of this version string, and
+/// re-spelling the parse is how five copies accumulated the first time.
 fn pinned_client() -> Option<(String, String)> {
-    let py = std::fs::read_to_string(repo().join("pyproject.toml")).ok()?;
-    let line = py
-        .lines()
-        .find(|l| l.trim_start().starts_with("\"ciris-client=="))?;
-    let req = line
-        .trim()
-        .trim_matches(|c| c == '"' || c == ',' || c == ' ');
-    let (name, ver) = req.split_once("==")?;
-    Some((name.to_owned(), ver.to_owned()))
+    let out = std::process::Command::new("python3")
+        .arg(repo().join("tools/client_pin.py"))
+        .arg("--floor")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let floor = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!floor.is_empty()).then(|| ("ciris-client".to_owned(), floor))
 }
 
 /// **The pinned client must publish a wheel a non-desktop consumer can resolve.**
@@ -418,5 +430,96 @@ fn gate_pinned_client_offers_a_non_desktop_wheel() {
              {name}=={version} is installable off-desktop is UNKNOWN — which is not the \
              same as fine. Last: {last_err}"
         ),
+    );
+}
+
+/// **The floor must resolve every id this server emits.**
+///
+/// The gate that makes `>=` an honest claim rather than a hope. It installs the
+/// FLOOR version into a throwaway venv and runs the localization guard against
+/// its bundle — the same guard CI runs against whatever the range resolves to,
+/// pointed at the other end of the range.
+///
+/// # Why this exists at all
+///
+/// The exact pin it replaces had one genuine virtue, written into pyproject at
+/// the time: an upstream bundle change could not turn a green tree red with no
+/// commit here to explain it. A range gives that up in the other direction — a
+/// version inside the range could be missing an id this server emits, and the
+/// failure would land on a user's fresh install while CI stayed green against a
+/// different version.
+///
+/// So the range is tested at BOTH ends. An untested bound is a guess with a
+/// version number on it.
+///
+/// Measured before it was claimed: the floor is 0.5.190, and the guard passes
+/// against 0.5.188 too — the ids resolve three versions below where the equality
+/// pin sat. The floor is 0.5.190 rather than 0.5.188 because 0.5.188 publishes no
+/// `py3-none-any`, so a lower floor would let Android resolve it and reproduce
+/// CIRISServer#493. THE WHEEL MATRIX SETS THE FLOOR, NOT THE API.
+#[test]
+#[ignore = "RED BY DESIGN — external fact: installs the client floor from PyPI into a temp venv. BLOCKED, never passed, when the index or python3 is unavailable. Run with --include-ignored."]
+fn gate_client_floor_resolves_every_id() {
+    let Some((name, floor)) = pinned_client() else {
+        blocked(
+            "client-floor-ids",
+            "could not read the client floor from tools/client_pin.py — the range's lower \
+             bound is what this gate exists to verify, so not knowing it is BLOCKED, not \
+             a pass",
+        );
+    };
+    let venv = std::env::temp_dir().join(format!("ciris-floor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&venv);
+
+    let mk = std::process::Command::new("python3")
+        .args(["-m", "venv"])
+        .arg(&venv)
+        .output();
+    match mk {
+        Ok(o) if o.status.success() => {}
+        other => blocked(
+            "client-floor-ids",
+            &format!("could not create a venv to install the floor into: {other:?}"),
+        ),
+    }
+    let pip = venv.join("bin/pip");
+    let install = std::process::Command::new(&pip)
+        .args(["install", "-q", &format!("{name}=={floor}")])
+        .output();
+    match install {
+        Ok(o) if o.status.success() => {}
+        other => blocked(
+            "client-floor-ids",
+            &format!(
+                "could not install {name}=={floor} — whether the floor resolves every id \
+                 is UNKNOWN, which is not the same as fine: {other:?}"
+            ),
+        ),
+    }
+
+    let guard = std::process::Command::new(venv.join("bin/python3"))
+        .arg(repo().join("tools/check_server_localization.py"))
+        .current_dir(repo())
+        .output()
+        .expect("run the localization guard against the floor bundle");
+    let _ = std::fs::remove_dir_all(&venv);
+
+    assert!(
+        guard.status.success(),
+        "\n\
+         🚫 RELEASE GATE [client-floor-ids] — DO NOT TAG.\n\
+         \n\
+         The declared floor {name}=={floor} does NOT resolve every id this server emits.\n\
+         A consumer resolving the bottom of the range would install a client whose\n\
+         bundle is missing strings this node sends, and the failure would surface as\n\
+         untranslated or absent UI on their machine rather than here.\n\
+         \n\
+         Raise the floor in pyproject.toml to the oldest client that passes, and say in\n\
+         the comment WHY that version — the floor is a claim about compatibility and it\n\
+         should be traceable to the thing that made it true.\n\
+         \n\
+         {}\n{}\n",
+        String::from_utf8_lossy(&guard.stdout),
+        String::from_utf8_lossy(&guard.stderr)
     );
 }
