@@ -7,12 +7,53 @@
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Worker threads for the node runtime — **never fewer than [`MIN_WORKER_THREADS`]**.
+///
+/// A bare `#[tokio::main]` sizes the runtime to core count, so a 2-vCPU host gets
+/// TWO workers. That is a two-slot budget for everything the node does at once, and
+/// any sustained blocking inside a worker leaves exactly one slot for the accept
+/// loop, the replication runtime, the scorer and every request in flight. When the
+/// second slot goes too, HTTP is simply unschedulable: the socket stays LISTEN,
+/// `Recv-Q` climbs as the kernel completes handshakes, and userspace never calls
+/// `accept()` — a node that looks alive in every other respect and answers nothing
+/// (CIRISServer#446, hit hard in #501).
+///
+/// A floor is not a fix for blocking work — the blocking read that exposed this is
+/// fixed where it lives, on a blocking thread. It is the margin that keeps ONE such
+/// mistake from taking the read API down, instead of the node having no headroom at
+/// all on the smallest host it supports.
+///
+/// `max`, never a fixed count: a 32-core canonical must still get 32.
+const MIN_WORKER_THREADS: usize = 4;
+
+fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(MIN_WORKER_THREADS)
+        .max(MIN_WORKER_THREADS)
+}
+
+fn main() -> Result<()> {
+    let workers = worker_threads();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .thread_name("ciris-node")
+        .build()?;
+    runtime.block_on(async_main(workers))
+}
+
+async fn async_main(worker_threads: usize) -> Result<()> {
     // File logging to <home>/logs (resolved from --home, else the default data
     // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     ciris_server::init_tracing_with(Some(&ciris_server::log_dir_from_args(&argv)));
+    tracing::info!(
+        worker_threads,
+        available_parallelism = ?std::thread::available_parallelism().map(std::num::NonZeroUsize::get),
+        min_worker_threads = MIN_WORKER_THREADS,
+        "node runtime sized (floored so a small host keeps scheduling headroom — CIRISServer#446)"
+    );
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         // `ciris-server import-traces <dump-dir>` — one-shot legacy-trace import
@@ -561,4 +602,27 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
 /// overridable so a CI run can stamp the exact build date).
 fn current_utc_date() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The floor is the point: a 2-vCPU host must not get a 2-slot runtime.
+    #[test]
+    fn the_worker_count_never_falls_below_the_floor() {
+        assert!(worker_threads() >= MIN_WORKER_THREADS);
+    }
+
+    /// …and it is a FLOOR, not a cap. A 32-core canonical must still get 32, or
+    /// fixing the small host would throttle the large one.
+    #[test]
+    fn the_floor_never_caps_a_large_host() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(MIN_WORKER_THREADS);
+        if cores > MIN_WORKER_THREADS {
+            assert_eq!(worker_threads(), cores);
+        }
+    }
 }

@@ -708,7 +708,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // node-composed runtime (the agent fold, serve_with_python_adapter) needs the
     // same, or the canonical stays knows_peer=false → coordinator error → 0
     // envelopes. Runs in BOTH the standalone node and the fold (edge is shared).
-    prime_trusted_peers(&engine, &edge).await;
+    // ── OFF the critical path (CIRISServer#501) ───────────────────────────────
+    //
+    // This is O(registered peers) — 385 primes against 715 directory keys on the
+    // canonical — and `read_api_bind` is ~180 lines below, so awaiting it here made
+    // time-to-serving scale with directory size. On a 2-vCPU host that was 33s of
+    // boot during which the socket was bound and nothing was ever accepted.
+    //
+    // A worker floor alone would NOT have closed that: more workers shortens the
+    // window but the read API still cannot bind until this returns. Spawning is
+    // what makes time-to-serving independent of how large the directory grows.
+    //
+    // No new race: peers also become dialable progressively via announces in steady
+    // state, so "some peers not yet rooted" is a condition every later stage
+    // already tolerates. Priming only makes a peer dialable sooner.
+    {
+        let engine = Arc::clone(&engine);
+        let edge = Arc::clone(&edge);
+        tokio::spawn(async move { prime_trusted_peers(&engine, &edge).await });
+    }
 
     // ── Canonical bootstrap boot prime (CIRISServer#238) ──────────────────────
     // `prime_trusted_peers` primes from Rooted `transport_destination` ROWS — but
@@ -1522,13 +1540,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    keep. Gating the disk-protector on having enough disk would disable it
     //    exactly when it matters — the shape of gate that produced #279's
     //    silently-absent listener. ────────────────────────────────────────────
-    // ── Public mesh-status snapshot, warmed on a cadence ──────────────────────
-    // The endpoint is public and its figures are COUNT(*)-class reads, so no
-    // caller may ever pay for one. Spawned here, after the engine is live and
-    // beside the other cadence loops.
-    crate::compose_status::phase("mesh_status_loop");
-    let _mesh_status_join = crate::mesh_status::spawn_refresh_loop(Arc::clone(&engine));
-
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {
@@ -2145,6 +2156,13 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
 /// directory rather than a delivery-controller target list — so the node-composed
 /// runtime (the agent fold) roots its trusted peers too. Best-effort: a
 /// missing/undecodable binding or a transport-less build warns + skips, never fatal.
+/// Peers primed between scheduler yields.
+///
+/// Small enough that a saturated worker frees up promptly, large enough that the
+/// yields themselves are not the cost. The loop is O(directory), so this is what
+/// keeps a growing directory from turning into a growing starvation window.
+const PRIME_YIELD_EVERY: usize = 16;
+
 async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     use ciris_persist::federation::self_at_login::BindingProvenance;
     let Some(transport) = edge.reticulum_transport() else {
@@ -2180,7 +2198,16 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     let mut primed = 0usize;
     let mut refused = 0usize;
     let directory = engine.federation_directory();
-    for (key_id, peer_dests) in &trusted {
+    for (i, (key_id, peer_dests)) in trusted.iter().enumerate() {
+        // Tokio only reschedules at an await that actually PENDS. Every await in
+        // this loop can resolve ready (cached lookup, in-memory transport), so
+        // without an explicit yield the loop owns its worker until the last peer —
+        // which is how one saturated worker starved the accept loop on a 2-vCPU
+        // host. Yielding hands the scheduler a gap per batch; boot prime is
+        // background work and can afford to be interleaved.
+        if i > 0 && i % PRIME_YIELD_EVERY == 0 {
+            tokio::task::yield_now().await;
+        }
         // ── E6 hardening (CIRISServer#318) — do NOT dial-trust on the stored
         //    `binding_provenance == Rooted` flag ALONE. `Rooted` is the
         //    back-compat DEFAULT (an untagged / NULL-provenance row reads as
@@ -2219,18 +2246,19 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
         }
         match crate::federation_delivery::resolve_reticulum_prime_binding(peer_dests) {
             Ok(Some((dest_hash, ed25519))) => {
-                let before = transport.knows_peer(key_id).await;
                 transport
                     .inject_rooted_peer_for_test(key_id, dest_hash, ed25519)
                     .await;
-                let after = transport.knows_peer(key_id).await;
                 primed += 1;
-                tracing::info!(
+                // DEBUG, not INFO, and one transport call rather than three. The
+                // pair of `knows_peer` probes existed only to fill two log fields,
+                // so per peer this paid two extra transport round-trips and an INFO
+                // line with a hex allocation — 385 of each on the canonical, which
+                // is the bulk of a 68 MB/day log. The SUMMARY below stays INFO: the
+                // count is the operational fact, not each peer.
+                tracing::debug!(
                     peer = %key_id,
-                    dest_hash = %hex::encode(dest_hash),
-                    knows_peer_before = before,
-                    knows_peer_after = after,
-                    "trusted-peer boot prime: rooted {key_id} (provenance=Rooted + admitted key)"
+                    "trusted-peer boot prime: rooted (provenance=Rooted + admitted key)"
                 );
             }
             Ok(None) => tracing::debug!(
