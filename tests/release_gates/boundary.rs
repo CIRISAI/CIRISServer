@@ -523,3 +523,66 @@ fn gate_client_floor_resolves_every_id() {
         String::from_utf8_lossy(&guard.stderr)
     );
 }
+
+#[cfg(test)]
+mod semver_ordering {
+    use super::parse_semver;
+
+    /// **Version order is NUMERIC per component, never lexical.**
+    ///
+    /// Contributed by CIRISClient's review of the 0.5.192 range decoupling
+    /// (CIRISClient#17): equality never ordered anything, so it could not be
+    /// wrong about order — a floor is nothing BUT order, and string comparison
+    /// is wrong at exactly the versions this project ships. `"0.5.9" > "0.5.190"`
+    /// lexically, because `'9' > '1'`, and three-digit patch numbers make that
+    /// the common case rather than an edge.
+    ///
+    /// This gate's own `parse_semver` was already numeric, but nothing said so
+    /// and nothing would have caught a later rewrite that reached for
+    /// `str::cmp`. The pairs below are the ones that actually bite.
+    #[test]
+    fn a_two_digit_patch_never_outranks_a_three_digit_one() {
+        for (lo, hi) in [
+            ("0.5.9", "0.5.190"),
+            ("0.5.99", "0.5.190"),
+            ("0.5.9", "0.5.10"),
+            ("0.5.189", "0.5.190"),
+            ("0.9.0", "0.10.0"),
+            ("1.0.0", "10.0.0"),
+        ] {
+            let (l, h) = (parse_semver(lo).unwrap(), parse_semver(hi).unwrap());
+            assert!(
+                l < h,
+                "{lo} must order BELOW {hi}; got {l:?} vs {h:?}. Lexically {lo:?} > {hi:?}, \
+                 which is the trap: a floor check written with string comparison decides a \
+                 {lo} node clears a {hi} floor."
+            );
+            // and the string comparison really is wrong here, so the test is
+            // proving something rather than restating `<`
+            if lo.len() < hi.len() {
+                assert!(
+                    lo > hi || l < h,
+                    "sanity: this pair was chosen because string order disagrees"
+                );
+            }
+        }
+    }
+
+    /// A `v` prefix and a pre-release suffix must not change the ordering.
+    #[test]
+    fn decoration_does_not_change_order() {
+        assert_eq!(parse_semver("v0.5.190"), parse_semver("0.5.190"));
+        assert_eq!(parse_semver("0.5.190-rc1"), parse_semver("0.5.190"));
+        assert_eq!(parse_semver("0.5.190+ciris.1"), parse_semver("0.5.190"));
+        assert!(parse_semver("v0.5.9").unwrap() < parse_semver("0.5.190").unwrap());
+    }
+
+    /// Unparseable input is `None`, never a silent zero — a version we cannot
+    /// read must not order as older than everything.
+    #[test]
+    fn an_unreadable_version_is_none_not_zero() {
+        for bad in ["", "latest", "0.5", "x.y.z", "0.5.abc"] {
+            assert_eq!(parse_semver(bad), None, "{bad:?} must not parse");
+        }
+    }
+}
