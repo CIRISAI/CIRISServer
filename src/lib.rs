@@ -84,6 +84,8 @@ pub mod attest;
 /// consumes as a delegate (the single-authority contract).
 pub mod auth;
 pub mod backend;
+/// Retry backoff — decay a failing operation instead of running it flat out.
+pub mod backoff;
 /// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
 pub mod benchmarks;
 /// Claim remote ownership — the SUBSTRATE-NATIVE, node-to-node claiming side of
@@ -292,6 +294,9 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+
+/// Repetition-collapsing log layer — "event X occurred Y times in past Z".
+pub mod log_dedup;
 /// **Memory READ surface** — agent-compat Memory + GraphMemory card endpoints
 /// (`GET /v1/memory/stats`, `GET /v1/memory/timeline`, `POST /v1/memory/query`,
 /// `GET /v1/memory/{node_id}`, `GET /v1/memory/{node_id}/edges`). Projects the
@@ -312,6 +317,7 @@ pub mod mesh_config_effect;
 /// restated here.
 pub mod mesh_config_surface;
 pub mod mesh_genesis;
+
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
 /// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
@@ -320,6 +326,8 @@ pub mod mesh_genesis;
 /// (`FSD/RNS_CONTROL_RELAY.md` + `FSD/EDGE_8_0_OPAQUE_MIGRATION.md` §6). Public
 /// so the mesh-seed TDD gate (`tests/mesh_seed_e2e.rs`) can drive both halves.
 pub mod mesh_relay;
+/// Public mesh status — counts, cached, with an `as_of`.
+pub mod mesh_status;
 /// In-process node lifecycle control — the `shutdown_node()` stop handle that
 /// frees `:4243` deterministically on an embedded-fold restart (CIRISServer#276).
 pub mod node_control;
@@ -948,11 +956,19 @@ fn install_or_reattach_tracing(
     let layer = build_file_layer(log_dir);
     let built = layer.is_some();
     let (reload_layer, handle) = tracing_subscriber::reload::Layer::new(layer);
+    // Collapse repetition BEFORE the sinks see it. `event_enabled` is consulted
+    // for the whole subscriber, so this covers `ciris_edge` / `ciris_persist`
+    // output too — which is the point: the storms that drown the log originate in
+    // the substrate and reach the operator through this process's subscriber
+    // (2,253 identical-after-normalization refusals in one 30-minute window on the
+    // canonical). The first `log_dedup::BURST` of anything still prints.
+    let (dedup_layer, dedup_state) = crate::log_dedup::DedupLayer::new();
     let fresh = tracing_subscriber::registry()
         // reload(file) sits closest to the Registry so the handle's type is
         // nameable; the EnvFilter above it still gates ALL layers globally.
         .with(reload_layer)
         .with(filter)
+        .with(dedup_layer)
         .with(fmt::layer()) // stdout/console
         // CIRISServer#264 — MUST NOT panic when a subscriber is already set:
         // `.init()`'s panic crossed pyo3 as PanicException and killed
@@ -960,6 +976,10 @@ fn install_or_reattach_tracing(
         .try_init()
         .is_ok();
     if fresh {
+        // Only when this call actually installed the subscriber — a foreign owner
+        // means our layer never ran, and a flusher for an empty map would print
+        // nothing forever.
+        crate::log_dedup::spawn_flusher(dedup_state, crate::log_dedup::DEFAULT_WINDOW);
         let _ = FILE_RELOAD.set(handle);
         return probe_first_write(true, built, log_dir);
     }

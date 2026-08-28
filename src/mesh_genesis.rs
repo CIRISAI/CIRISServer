@@ -177,6 +177,79 @@ pub fn carries_scope(rec: &SignedKeyRecord, scope: &str) -> bool {
         || rec.record.capability_roles.iter().any(|r| r == scope)
 }
 
+/// **Enumerate** the scopes a record confers — the counterpart to
+/// [`carries_scope`], which only ANSWERS about one.
+///
+/// A client cannot render what a node can do by probing: a 404 cannot distinguish
+/// *not implemented* from *not permitted for this caller* from *wrong path*, so it
+/// hides features an operator merely lacks a role for (CIRISServer#499). Absence
+/// has to be a positive statement, and that needs the list.
+///
+/// # Why it must read all three surfaces
+///
+/// [`carries_scope`] reads the scrub-signed `registration_envelope["roles"]`, the
+/// `identity_type` set, AND `capability_roles`, because an accord-conferred
+/// capability lives in the envelope while persist does not yet lift it into the
+/// top-level field (CIRISPersist#486). An enumeration that read fewer surfaces
+/// would return a list the gate disagrees with — reporting a capability as absent
+/// while the server happily serves it, or the reverse. The agreement is pinned by
+/// test rather than left to inspection.
+///
+/// # What counts as a scope
+///
+/// A NAMESPACED token (`infra:serve`, `registry:lookup`). The `identity_type` cell
+/// is a set that also carries identity types — `canonical,node` — and those are
+/// what a node IS, not what it may do. Reporting `node` as a capability would
+/// invite a client to gate a feature on an identity.
+///
+/// This is the **conferred** half only. A locally-detected capability (free disk
+/// enabling the lens store) is a different authority and must not be laundered
+/// through the same list — conferring is the trust root's act, detecting is the
+/// node's own.
+///
+/// Returned sorted and deduplicated so the wire form is stable across calls.
+#[must_use]
+pub fn conferred_scopes(rec: &SignedKeyRecord) -> Vec<String> {
+    fn is_scope(t: &str) -> bool {
+        t.contains(':') && !t.is_empty()
+    }
+
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(a) = rec
+        .record
+        .registration_envelope
+        .get("roles")
+        .and_then(|v| v.as_array())
+    {
+        out.extend(
+            a.iter()
+                .filter_map(|r| r.as_str())
+                .filter(|t| is_scope(t))
+                .map(ToOwned::to_owned),
+        );
+    }
+    out.extend(
+        rec.record
+            .identity_type
+            .split(',')
+            .map(str::trim)
+            .filter(|t| is_scope(t))
+            .map(ToOwned::to_owned),
+    );
+    out.extend(
+        rec.record
+            .capability_roles
+            .iter()
+            .filter(|t| is_scope(t))
+            .cloned(),
+    );
+
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Does this record already confer EVERY scope a canonical needs?
 ///
 /// The re-bless predicate. It must ask about the whole set, not one member:
@@ -1283,6 +1356,93 @@ mod tests {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
+
+    // ── conferred_scopes: the enumeration must agree with the gate ─────────────
+
+    /// **Both directions.** An enumeration that read fewer surfaces than
+    /// [`carries_scope`] would hand a client a list the server disagrees with —
+    /// hiding a feature the node will happily serve, or advertising one it refuses.
+    #[test]
+    fn enumeration_agrees_with_the_gate_in_both_directions() {
+        // One scope on each of the three surfaces the predicate reads.
+        let rec = record(
+            "k",
+            "canonical,node,infra:attest",
+            serde_json::json!({
+                "registration_envelope": { "roles": ["infra:serve"] },
+                "roles": ["registry:lookup"],
+            }),
+        );
+        let listed = conferred_scopes(&rec);
+
+        for scope in &listed {
+            assert!(
+                carries_scope(&rec, scope),
+                "enumerated {scope:?} but the gate denies it"
+            );
+        }
+        for scope in ["infra:serve", "infra:attest", "registry:lookup"] {
+            assert!(carries_scope(&rec, scope), "fixture precondition: {scope}");
+            assert!(
+                listed.iter().any(|s| s == scope),
+                "the gate grants {scope:?} but the enumeration omits it"
+            );
+        }
+        assert!(!carries_scope(&rec, "lens:store"));
+        assert!(!listed.iter().any(|s| s == "lens:store"));
+    }
+
+    /// An envelope-attested role is enumerated even though the top-level field is
+    /// empty — CIRISPersist#486, where accord-conferred capability lives only in
+    /// the scrub-signed envelope. Reading the top-level field alone would report a
+    /// serve-capable canonical as having no capabilities at all.
+    #[test]
+    fn an_envelope_attested_role_is_enumerated_though_the_top_level_is_empty() {
+        let mut rec = record(
+            "k",
+            "node",
+            serde_json::json!({ "registration_envelope": { "roles": ["infra:serve"] } }),
+        );
+        rec.record.capability_roles.clear();
+        assert_eq!(conferred_scopes(&rec), vec!["infra:serve".to_string()]);
+    }
+
+    /// What a node IS is not what it may DO. `canonical` and `node` are identity
+    /// types sharing the `identity_type` cell with real scopes; reporting them as
+    /// capabilities would invite a client to gate a feature on an identity.
+    #[test]
+    fn identity_types_are_not_capabilities() {
+        let rec = record("k", "canonical,node", serde_json::json!({}));
+        assert!(
+            conferred_scopes(&rec).is_empty(),
+            "got {:?}",
+            conferred_scopes(&rec)
+        );
+    }
+
+    /// Stable on the wire: sorted, and a scope conferred on two surfaces at once
+    /// is reported once.
+    #[test]
+    fn the_wire_form_is_sorted_and_deduplicated() {
+        let rec = record(
+            "k",
+            "node,infra:serve",
+            serde_json::json!({
+                "registration_envelope": { "roles": ["infra:serve", "zz:last"] },
+                "roles": ["infra:serve", "aa:first"],
+            }),
+        );
+        let listed = conferred_scopes(&rec);
+        assert_eq!(
+            listed,
+            vec![
+                "aa:first".to_string(),
+                "infra:serve".to_string(),
+                "zz:last".to_string()
+            ],
+        );
+    }
+
     use ciris_persist::federation::types::attestation_type;
 
     /// Build records/attestations through serde rather than enumerating every

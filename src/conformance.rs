@@ -471,6 +471,46 @@ pub struct DeclaredConformance {
     /// it is the [`BUILD_PROFILES`] default (nothing declared) — so an operator can
     /// tell "I meant this" from "nobody has said anything".
     pub declared_by_config: bool,
+    /// The **conferred** capability scopes this node holds (CIRISServer#499), so a
+    /// client can render what the node can actually do instead of probing for it.
+    ///
+    /// `null` when this node could not read its own key record, which is NOT the
+    /// same fact as `[]` — "no capabilities" and "could not determine" must not
+    /// collapse into one answer, or a client renders a transient directory error as
+    /// a node with no authority. Same distinct-zeroes discipline `node_state` uses.
+    ///
+    /// Informing, never binding: `TRUST_ROOT_CAPABILITY_GATE.md` §5 — "the server
+    /// enforces the reality whether or not the client showed it". A client that
+    /// reads this wrong gets refused by the gate anyway.
+    ///
+    /// Conferred only — a locally-detected capability (free disk enabling the lens
+    /// store) is a different authority and is not laundered through this list.
+    pub capabilities: Option<Vec<String>>,
+}
+
+/// The conferred scopes on the key this node OPERATES AS.
+///
+/// The node key, not the engine's — on an agent-carrying node those differ, and
+/// `infra:serve` is conferred on the node. Falls back to the engine's derived id
+/// when the wire identity was never pinned (the pure-Rust compose path does not
+/// run `provision_node_identity`).
+///
+/// `None` on any read failure, so the caller can say "unknown" rather than "none".
+async fn node_conferred_capabilities(engine: &Arc<Engine>) -> Option<Vec<String>> {
+    use ciris_persist::federation::SignedKeyRecord;
+
+    let key_id = match crate::node_key::wire_identity() {
+        Some(k) => k.to_string(),
+        None => engine.local_derived_key_id().await.ok()?,
+    };
+    let record = engine
+        .federation_directory()
+        .lookup_public_key(&key_id)
+        .await
+        .ok()??;
+    Some(crate::mesh_genesis::conferred_scopes(&SignedKeyRecord {
+        record,
+    }))
 }
 
 impl DeclaredConformance {
@@ -532,12 +572,14 @@ pub fn parse_declaration(tokens: &[String]) -> Result<Vec<ConformanceProfile>, S
 ///     the declaration. (Loud: the failure is logged at `error`.)
 pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
     let build: Vec<ConformanceProfile> = BUILD_PROFILES.to_vec();
+    let capabilities = node_conferred_capabilities(engine).await;
     let base = |profiles: Vec<ConformanceProfile>, declared_by_config: bool| DeclaredConformance {
         profiles,
         build_profiles: build.clone(),
         ceg_wire_version: CEG_WIRE_VERSION.to_string(),
         wire_vocabulary_sha256: wire_vocabulary_sha256(),
         declared_by_config,
+        capabilities: capabilities.clone(),
     };
     match crate::graph_config::get_config(engine, KEY_CONFORMANCE_PROFILES).await {
         Ok(None) => base(build.clone(), false),
@@ -863,6 +905,36 @@ pub fn wire_refusal_response(refusal: WireRefusal) -> axum::response::Response {
 mod tests {
     use super::*;
 
+    /// **`null` and `[]` are different facts.** A client that cannot tell "this
+    /// node holds no capabilities" from "this node could not read its own record"
+    /// renders a transient directory error as a node with no authority, and hides
+    /// working features. Distinct zeroes, on the wire.
+    #[test]
+    fn unknown_capabilities_are_null_not_an_empty_list() {
+        let mut d = decl(vec![]);
+        d.capabilities = None;
+        let v = serde_json::to_value(&d).expect("serialize");
+        assert!(v["capabilities"].is_null(), "unknown must be null: {v}");
+
+        d.capabilities = Some(Vec::new());
+        let v = serde_json::to_value(&d).expect("serialize");
+        assert!(
+            v["capabilities"].is_array() && v["capabilities"].as_array().unwrap().is_empty(),
+            "a genuine empty set must be [], not null: {v}"
+        );
+    }
+
+    /// The field is present on the public declaration under the name the client
+    /// agreed to read (CIRISServer#499). A rename is a wire break for a client
+    /// already shipping UI gated on it.
+    #[test]
+    fn the_capability_field_is_on_the_public_declaration() {
+        let mut d = decl(vec![]);
+        d.capabilities = Some(vec!["infra:serve".into()]);
+        let v = serde_json::to_value(&d).expect("serialize");
+        assert_eq!(v["capabilities"][0], "infra:serve");
+    }
+
     fn decl(profiles: Vec<ConformanceProfile>) -> DeclaredConformance {
         DeclaredConformance {
             profiles,
@@ -870,6 +942,7 @@ mod tests {
             ceg_wire_version: CEG_WIRE_VERSION.to_string(),
             wire_vocabulary_sha256: wire_vocabulary_sha256(),
             declared_by_config: true,
+            capabilities: None,
         }
     }
 

@@ -774,6 +774,20 @@ async fn conformance(State(st): State<FederationAdminState>) -> Response {
     (StatusCode::OK, Json(declared)).into_response()
 }
 
+/// `GET /v1/mesh/status` — public, cached counts with an `as_of` (CIRISServer#498).
+///
+/// Unauthenticated by design, like the conformance declaration beside it: the mesh
+/// being alive is public governance data. It carries COUNTS, never contents — a
+/// public surface that enumerates peers is a reconnaissance surface.
+///
+/// Served from cache and refreshed on a cadence, never computed per caller. The
+/// figures are `COUNT(*)`-class reads over the largest tables the node holds, and
+/// the canonical — the most-queried member of the mesh — is also the most loaded.
+async fn mesh_status(State(st): State<FederationAdminState>) -> Response {
+    let snap = crate::mesh_status::cached(&st.engine).await;
+    (StatusCode::OK, Json(snap)).into_response()
+}
+
 /// The owner-directed federation-operations router — merge onto the control API
 /// listener beside the other auth routers. `self_key_record_json` is THIS node's
 /// own self-signed `SignedKeyRecord` JSON, built once at boot.
@@ -898,6 +912,10 @@ pub fn router(
             "/v1/federation/conformance",
             axum::routing::get(conformance),
         )
+        // CIRISServer#498 — public mesh status. Unauthenticated for the same
+        // reason the declaration beside it is: the mesh being alive is public
+        // information, and it carries counts, never contents.
+        .route("/v1/mesh/status", axum::routing::get(mesh_status))
         .route(
             "/v1/federation/adopt-scrubbed",
             axum::routing::post(adopt_scrubbed),

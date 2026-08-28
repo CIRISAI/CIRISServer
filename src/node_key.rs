@@ -201,6 +201,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unclaimed_node_with_a_brain_waits() {
+        assert_eq!(
+            gate_for(Some("agent-k"), true),
+            StartupGate::WaitingForClaim {
+                actor_key_id: "agent-k".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_node_with_no_brain_starts_anyway() {
+        // A substrate node has nothing to attribute, and one that refused to
+        // federate until claimed could never carry the mesh it exists to serve.
+        assert_eq!(gate_for(None, true), StartupGate::Ready);
+    }
+
+    #[test]
+    fn a_claimed_node_with_a_brain_starts() {
+        assert_eq!(gate_for(Some("agent-k"), false), StartupGate::Ready);
+    }
+
+    #[test]
+    fn the_gate_holds_only_on_the_conjunction() {
+        // Both halves are required: neither an owner alone nor a brain alone holds
+        // the node. Pinned because dropping either turns a targeted hold into
+        // either a no-op or a mesh-wide outage on unclaimed substrate nodes.
+        assert_eq!(gate_for(None, false), StartupGate::Ready);
+        assert!(matches!(
+            gate_for(Some("a"), true),
+            StartupGate::WaitingForClaim { .. }
+        ));
+    }
+
+    #[test]
     fn a_comma_joined_cell_is_a_set() {
         assert_eq!(roles_of("canonical,node"), vec!["canonical", "node"]);
         assert_eq!(roles_of("agent"), vec!["agent"]);
@@ -775,6 +809,101 @@ fn policy_of(
 ///
 /// # Errors
 /// Keystore/seed IO, or a registration failure that is not a benign conflict.
+/// **Register an agent's ACTOR key as an occurrence, minting nothing.**
+///
+/// This is the cure for the refusal storm the `Unregistered` arm below used to
+/// merely announce: an actor key that never reached `federation_keys` has every
+/// row it authors refused at every peer, and the peer's log is not one the agent's
+/// operator can read. Measured on the canonical in one 30-minute window: **1,943
+/// refusals** reading `attesting_key_id … does not exist in federation_keys`,
+/// from four keys, retried without backoff.
+///
+/// # Why this needs no new key material
+///
+/// The actor key is the ENGINE's own identity — the one `emit_attestation_self`
+/// already signs with, and the one [`crate::attest::KeySigner::key_id`] derives.
+/// The node key is the newly-minted half of the split; the actor keeps the
+/// pre-existing keypair. So registering it is a proof-of-possession the node can
+/// already produce, and [`crate::attest::register_key`] reads both pubkeys off a
+/// live probe signature rather than a re-opened seed that might have diverged.
+///
+/// # Occurrences are INDEPENDENT by default
+///
+/// `root_identity_key_id` is `None` for every agent but one, and that default is
+/// load-bearing rather than a shortcut. Production holds nine `echo-core` keys,
+/// nine `datum`, eight `echo-speculative` — all deliberately unlinked, because an
+/// agent is hard-bound to the node that hosts it and separate occurrences are
+/// separate selves. `None` therefore binds the occurrence to ITSELF, reproducing
+/// exactly what the mesh already does (all 200 occurrence rows on the canonical
+/// are self-referential).
+///
+/// Passing `Some(root)` is for the genuine multi-occurrence agent — scout is the
+/// only one — where several occurrences ARE one self and `signer_acts_for` should
+/// treat any active one as acting for it. That path has never run in production
+/// (zero non-self-referential rows exist), so it is exercised by test here rather
+/// than trusted.
+///
+/// Idempotent: registration treats a matching row as success, and binding an
+/// occurrence that already exists is a no-op.
+///
+/// # Errors
+/// If the engine does not hold `actor_key_id` (we cannot prove possession of a key
+/// we do not have), or if registration or binding fails.
+pub async fn register_actor_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    actor_key_id: &str,
+    root_identity_key_id: Option<&str>,
+) -> Result<()> {
+    use ciris_persist::federation::types::{device_class, identity_type};
+
+    let signer = crate::attest::KeySigner::Engine(engine);
+    let derived = signer
+        .key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve this engine's derived actor key_id: {e}"))?;
+
+    // The honest boundary. We can self-register the key this node HOLDS; we cannot
+    // manufacture a proof of possession for someone else's. Bailing here is
+    // correct in a way the old blanket bail was not: it fires only when the caller
+    // named a key we genuinely cannot speak for.
+    if derived != actor_key_id {
+        anyhow::bail!(
+            "cannot register actor key {actor_key_id:?}: this engine signs as {derived:?}, so it              holds no proof of possession for it. An agent is hard-bound to its node — the actor              key must be the one this node's engine signs with."
+        );
+    }
+
+    crate::attest::register_key(
+        engine,
+        crate::attest::KeySigner::Engine(engine),
+        actor_key_id,
+        identity_type::AGENT,
+        serde_json::Value::Null,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("register actor key {actor_key_id}: {e}"))?;
+
+    let identity_key_id = root_identity_key_id.unwrap_or(actor_key_id);
+    crate::auth::occurrence::bind_occurrence_core(
+        engine,
+        identity_key_id,
+        actor_key_id,
+        device_class::AGENT,
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("bind actor occurrence {actor_key_id}: {e}"))?;
+
+    tracing::info!(
+        actor_key_id = %actor_key_id,
+        identity_key_id = %identity_key_id,
+        independent = root_identity_key_id.is_none(),
+        "actor key registered and bound as an agent occurrence"
+    );
+    Ok(())
+}
+
 pub async fn provision_node_identity(
     engine: &ciris_persist::prelude::Engine,
     keystore_alias: &str,
@@ -812,17 +941,40 @@ pub async fn provision_node_identity(
     if let Some(actor) = actor_key_id {
         match classify(dir.as_ref(), actor).await? {
             IdentityVerdict::Actor { .. } => {}
-            IdentityVerdict::Unregistered => anyhow::bail!(
-                "node identity NOT provisioned: this node carries an agent, but its actor \
-                 key {actor:?} is absent from `federation_keys`. Every row it authors \
-                 would be refused at every peer."
-            ),
+            // Absent ⇒ REGISTER it, do not refuse to start. An unregistered actor
+            // key is a first boot, exactly as it is for the node key a few hundred
+            // lines up (`resolve_node_identity` registers rather than bails on the
+            // same verdict). Refusing here only moved the agent team's failure from
+            // "a silent storm at a peer" to "your node will not boot" — better to
+            // read, but still a precondition we gave them no way to satisfy.
+            IdentityVerdict::Unregistered => {
+                tracing::info!(
+                    actor_key_id = %actor,
+                    "actor key is unregistered — registering it (first boot for this agent \
+                     occurrence)"
+                );
+                register_actor_occurrence(engine, actor, None).await?;
+                // Re-READ, do not trust the write: registration treats a benign
+                // conflict as success, which is exactly how a node once ran for
+                // months on a key whose row said something other than what the
+                // write reported.
+                match classify(dir.as_ref(), actor).await? {
+                    IdentityVerdict::Actor { .. } => {}
+                    other => anyhow::bail!(
+                        "node identity NOT provisioned: registered actor key {actor:?} reads back \
+                         as {other:?}, not an actor."
+                    ),
+                }
+            }
             other => anyhow::bail!(
                 "node identity NOT provisioned: the actor key {actor:?} classifies as \
                  {other:?}. An agent-carrying node needs a key that IS an actor — a \
                  `node`-typed or fused key here is the fusion this split removes."
             ),
         }
+        // Recorded only after the key is known-good, so the startup gate can never
+        // hold a node on the strength of an actor key we just refused.
+        set_actor_identity(actor);
     }
 
     // NOT gated: the owner-binding. A fresh node has no owner until someone
@@ -888,6 +1040,87 @@ static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Record the wire identity. First writer wins; a second call with a DIFFERENT
 /// value is a bug worth shouting about rather than silently ignoring.
+/// The ACTOR key this node carries, when it carries a brain at all.
+///
+/// Separate from [`wire_identity`] because they are different keys on exactly the
+/// node that matters here: an agent-carrying node operates as its `node` key and
+/// authors brain work under its `agent` key, and CC 3.4.7.3 Clause A exists to
+/// keep them apart.
+static ACTOR_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record that this node carries a brain, under `key_id`.
+pub fn set_actor_identity(key_id: &str) {
+    if let Err(existing) = ACTOR_IDENTITY.set(key_id.to_owned()) {
+        if existing != key_id {
+            tracing::error!(
+                already = %ACTOR_IDENTITY.get().map(String::as_str).unwrap_or("<unset>"),
+                attempted = %key_id,
+                "actor identity RESET attempted with a different key — authorship would be \
+                 split across two agent identities. The first value stands."
+            );
+        }
+    }
+}
+
+/// The actor key this node carries, or `None` on a node with no brain.
+#[must_use]
+pub fn actor_identity() -> Option<&'static str> {
+    ACTOR_IDENTITY.get().map(String::as_str)
+}
+
+/// Whether this node may begin joining the mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupGate {
+    /// Nothing is owed — start.
+    Ready,
+    /// This node carries a brain and nobody owns it yet.
+    WaitingForClaim {
+        /// The actor key whose work would otherwise be unattributable.
+        actor_key_id: String,
+    },
+}
+
+/// **Hold an agent-carrying node at "waiting for claim" until someone owns it.**
+///
+/// An agent acts *through* a node on behalf of a human: `may_act_through(agent,
+/// node)` requires an owner, and CC 3.4.7.3 Clause D is fail-closed, so an unowned
+/// node cannot answer it at all. Joining the mesh first means publishing brain work
+/// no owner stands behind — every row unattributable at the moment it is authored,
+/// which is not a state a peer can repair later.
+///
+/// This reuses the first-run machinery rather than inventing a second notion of
+/// "unclaimed": [`crate::auth::bootstrap::is_first_run`] is the same predicate the
+/// claim routes gate themselves on, so the node is waiting on exactly the condition
+/// `POST /v1/setup/root` clears, and the PIN + NodeCode banner an operator already
+/// sees at `claim_pin` is already the instruction for how to clear it.
+///
+/// Deliberately does NOT gate a node with no brain. A plain node has nothing to
+/// attribute, and a substrate node that refused to federate until claimed could
+/// never serve the mesh it is there to carry.
+///
+/// `is_first_run` fails CLOSED (a directory error reads as NOT first-run), so an
+/// unreadable directory lets the node start rather than stranding it unreachable —
+/// the same direction the claim routes chose.
+pub async fn startup_gate(engine: &ciris_persist::prelude::Engine) -> StartupGate {
+    let unclaimed = crate::auth::bootstrap::is_first_run(engine).await;
+    gate_for(actor_identity(), unclaimed)
+}
+
+/// The decision itself, separated from where its two inputs come from.
+///
+/// `actor_identity` is a process-global `OnceLock` and "first run" needs a live
+/// engine, so a gate that read both directly could only ever be exercised in one
+/// state per test process — and the three states are exactly what needs pinning.
+#[must_use]
+pub fn gate_for(actor: Option<&str>, unclaimed: bool) -> StartupGate {
+    match (actor, unclaimed) {
+        (Some(actor_key_id), true) => StartupGate::WaitingForClaim {
+            actor_key_id: actor_key_id.to_owned(),
+        },
+        _ => StartupGate::Ready,
+    }
+}
+
 pub fn set_wire_identity(key_id: &str) {
     if let Err(existing) = WIRE_IDENTITY.set(key_id.to_owned()) {
         if existing != key_id {

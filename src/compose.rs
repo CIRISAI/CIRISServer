@@ -1522,6 +1522,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    keep. Gating the disk-protector on having enough disk would disable it
     //    exactly when it matters — the shape of gate that produced #279's
     //    silently-absent listener. ────────────────────────────────────────────
+    // ── Public mesh-status snapshot, warmed on a cadence ──────────────────────
+    // The endpoint is public and its figures are COUNT(*)-class reads, so no
+    // caller may ever pay for one. Spawned here, after the engine is live and
+    // beside the other cadence loops.
+    crate::compose_status::phase("mesh_status_loop");
+    let _mesh_status_join = crate::mesh_status::spawn_refresh_loop(Arc::clone(&engine));
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {

@@ -199,6 +199,31 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     // ("no hybrid-verified TransportDestination binds this transport
     // identity") and traces can never ship. Same producer, every topology.
     let node_key_id = edge.signer_key_id().to_string();
+    // ── Waiting for claim ─────────────────────────────────────────────────────
+    //
+    // An agent-carrying node that nobody owns must not join the mesh. Held BEFORE
+    // the transport destination is published, because publishing is already
+    // joining: it is what makes this node dialable and what a peer's attribution
+    // gate reads. Holding after it would announce a node we then refuse to run.
+    //
+    // Not an error. The node is up, its claim surface is serving, and the PIN +
+    // NodeCode banner printed at `claim_pin` is the instruction for clearing it.
+    // `reprime_federation_delivery` is the resume once the claim lands.
+    if let crate::node_key::StartupGate::WaitingForClaim { actor_key_id } =
+        rt.block_on(crate::node_key::startup_gate(&engine))
+    {
+        WAITING_FOR_CLAIM.store(true, std::sync::atomic::Ordering::SeqCst);
+        tracing::warn!(
+            actor_key_id = %actor_key_id,
+            "waiting for claim to continue startup — this node carries an agent and has no \
+             owner, so `may_act_through` cannot be answered for anything the brain authors \
+             (CC 3.4.7.3 Clause D is fail-closed). Claim it with the NodeCode + PIN printed \
+             at boot (POST /v1/setup/root), then call reprime_federation_delivery."
+        );
+        return Ok(0);
+    }
+    WAITING_FOR_CLAIM.store(false, std::sync::atomic::Ordering::SeqCst);
+
     rt.block_on(crate::compose::publish_self_transport_destination(
         &engine,
         &edge,
@@ -602,6 +627,10 @@ async fn gather_delivery_status(
 
     json!({
         "delivery_started": started,
+        // Held-pending-claim is NOT "not started": the node is healthy and waiting
+        // on a human, which an operator must be able to tell from a crash or a
+        // missing transport.
+        "waiting_for_claim": crate::federation_delivery::is_waiting_for_claim(),
         "edge_up": true,
         "node_key_id": node_key_id,
         "transport_present": edge.reticulum_transport().is_some(),
@@ -1131,6 +1160,7 @@ pub fn delivery_status_json() -> String {
         Err(e) => {
             return serde_json::json!({
                 "delivery_started": started,
+                "waiting_for_claim": is_waiting_for_claim(),
                 "edge_up": false,
                 "error": e.to_string(),
             })
@@ -1151,6 +1181,7 @@ pub fn delivery_status_json() -> String {
             Ok(rt) => rt.block_on(fut),
             Err(e) => serde_json::json!({
                 "delivery_started": started,
+                "waiting_for_claim": is_waiting_for_claim(),
                 "error": format!("delivery_status runtime: {e}"),
             }),
         },
@@ -1296,6 +1327,26 @@ async fn prime_canonicals(
     Ok(admitted_targets)
 }
 
+/// Whether delivery is held at "waiting for claim".
+///
+/// Distinct from "not started": a held node is healthy and waiting on a human, and
+/// an operator reading `delivery_status_json` must be able to tell that from a
+/// crash or a missing transport.
+static WAITING_FOR_CLAIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when startup is held pending an ownership claim.
+#[must_use]
+pub fn is_waiting_for_claim() -> bool {
+    WAITING_FOR_CLAIM.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Ceiling for reconcile-failure backoff.
+///
+/// Five minutes: long enough that a sustained outage costs almost nothing, short
+/// enough that a recovered peer reconverges without an operator intervening. The
+/// floor is the configured cadence, so a healthy node's timing is unchanged.
+const MAX_RECONCILE_BACKOFF_SECS: u64 = 300;
+
 pub async fn run_federation_delivery(
     engine: Arc<Engine>,
     edge: Arc<Edge>,
@@ -1349,6 +1400,11 @@ pub async fn run_federation_delivery(
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
         let mut last_logged: Option<usize> = None;
+        // Decay a failing reconcile instead of re-running it at full cadence
+        // forever. Resets to the floor on the first success, so a peer that
+        // recovers is not still being punished for an earlier blip.
+        let mut backoff =
+            crate::backoff::Backoff::new(cadence, Duration::from_secs(MAX_RECONCILE_BACKOFF_SECS));
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
@@ -1368,6 +1424,7 @@ pub async fn run_federation_delivery(
             .await
             {
                 Ok(count) => {
+                    backoff.succeed();
                     if last_logged != Some(count) {
                         tracing::info!(
                             consent_peers = count,
@@ -1376,10 +1433,29 @@ pub async fn run_federation_delivery(
                         last_logged = Some(count);
                     }
                 }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "federation-delivery reconcile tick failed — skipping"
-                ),
+                Err(e) => {
+                    let wait = backoff.fail();
+                    tracing::warn!(
+                        error = %e,
+                        consecutive_failures = backoff.consecutive_failures(),
+                        backoff_secs = wait.as_secs(),
+                        at_ceiling = backoff.at_ceiling(),
+                        "federation-delivery reconcile tick failed — backing off"
+                    );
+                    // Stay interruptible while waiting: a node shutting down must
+                    // not have to sit through a ceiling-length backoff first.
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {}
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                tracing::info!(
+                                    "federation-delivery reconcile loop shutting down (during backoff)"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
     });
