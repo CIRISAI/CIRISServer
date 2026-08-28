@@ -178,6 +178,30 @@ pub fn snapshot() -> Vec<Warning> {
     read_registry().clone()
 }
 
+/// Stable codes for the two contention readings this node takes about ITSELF.
+pub const CODE_CPU_STALL: &str = "resource.cpu_stall";
+/// IO contention — see [`CODE_CPU_STALL`].
+pub const CODE_IO_STALL: &str = "resource.io_stall";
+
+/// **Is this node currently starving for CPU or IO?**
+///
+/// For self-protection ONLY: a node deciding how fast to do its own housekeeping.
+/// That is deliberately not a governance act — it declares nothing, is invisible to
+/// peers, and needs no authority, unlike `OP_SELF_SHED` / `OP_SELF_STOP_ACCEPTING`,
+/// which are attributed DECLARATIONS whose enforcement is cooperative ("the
+/// declaration is the artifact — and it is the one a peer reads to stop offering").
+/// Nothing here may grow into acting on a peer's behalf or refusing a peer's work;
+/// that requires an attributed act, by design.
+///
+/// Reads only the two contention codes. Memory pressure is excluded on purpose: it
+/// is relieved by evicting, and slowing the loops that evict would deepen it.
+#[must_use]
+pub fn under_resource_stall() -> bool {
+    snapshot()
+        .iter()
+        .any(|w| w.code == CODE_CPU_STALL || w.code == CODE_IO_STALL)
+}
+
 /// Is this node failing to do its whole job right now?
 #[must_use]
 pub fn degraded_mode() -> bool {
@@ -1516,6 +1540,34 @@ mod tests {
         let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         g
+    }
+
+    /// **Stall detection reads contention, and deliberately not memory.**
+    ///
+    /// One case covering every arm: the registry is a process-global, so separate
+    /// cases would need the lock anyway and could still interleave misleadingly.
+    #[test]
+    fn under_resource_stall_reads_contention_only() {
+        let _g = exclusive();
+        assert!(!under_resource_stall(), "a clean node is not stalling");
+
+        raise(Warning::critical(CODE_CPU_STALL, "measured"));
+        assert!(under_resource_stall(), "CPU stall counts");
+        clear(CODE_CPU_STALL);
+        assert!(!under_resource_stall(), "and clears");
+
+        raise(Warning::critical(CODE_IO_STALL, "measured"));
+        assert!(under_resource_stall(), "IO stall counts");
+        clear(CODE_IO_STALL);
+
+        // Memory is excluded ON PURPOSE. Memory pressure is relieved by evicting,
+        // and slowing the loops that evict would deepen it — pacing down on a
+        // memory alarm is the one response that makes the alarm worse.
+        raise(Warning::critical(WARNING_CODE_MEMORY, "measured"));
+        assert!(
+            !under_resource_stall(),
+            "memory pressure must NOT pace down the loops that relieve it"
+        );
     }
 
     /// **The first call must not alarm, and the second must.**

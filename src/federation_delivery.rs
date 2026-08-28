@@ -1425,6 +1425,30 @@ pub async fn run_federation_delivery(
             {
                 Ok(count) => {
                     backoff.succeed();
+                    // SELF-PROTECTION, not shedding. Reconcile is this node's own
+                    // optional housekeeping; the accept loop and the read API are
+                    // not. #501 was a node that measured its own CPU stall, raised
+                    // the warning correctly, and kept doing background work at full
+                    // cadence until HTTP became unschedulable. When the node is
+                    // starving it now does less of what only it cares about.
+                    //
+                    // Deliberately NOT a load-shed declaration: this changes only
+                    // our own pacing, is invisible to peers, and asserts nothing on
+                    // anyone's behalf. Refusing a peer's work is an attributed act.
+                    if crate::degradation::under_resource_stall() {
+                        tracing::debug!(
+                            "federation-delivery: resource stall — pausing one reconcile cadence \
+                             to leave scheduling headroom"
+                        );
+                        tokio::select! {
+                            () = tokio::time::sleep(cadence) => {}
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     if last_logged != Some(count) {
                         tracing::info!(
                             consent_peers = count,
