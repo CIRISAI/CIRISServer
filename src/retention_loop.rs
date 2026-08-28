@@ -177,6 +177,73 @@ impl RetentionOutcome {
 ///
 /// Returns `Err` only when persist itself refused (a summary read or a delete);
 /// the caller logs + skips the tick.
+/// Days after which a transport binding or announce record is treated as dead.
+///
+/// Tighter than the trace bound (90d) on purpose: these rows are **re-derivable**.
+/// A peer that comes back announces again and is re-rooted, so ageing one out costs
+/// a round-trip, not a fact. A trace event that is deleted is gone.
+const FEDERATION_CHURN_MAX_AGE_DAYS: i64 = 30;
+
+/// Rows removed per table per pass.
+///
+/// Bounded so the prune can never become the long-running task that starves the
+/// accept loop — which is the very failure this hygiene exists to prevent
+/// (CIRISServer#501). At an hourly cadence this drains the canonical's backlog over
+/// a few passes and then idles at steady state.
+const FEDERATION_CHURN_MAX_ROWS: usize = 2_000;
+
+/// **Bound the re-derivable federation tables.**
+///
+/// `transport_destinations` is what boot prime iterates, and nothing has ever
+/// pruned it: 11,034 rows on the canonical against 748 federation keys, because a
+/// row is written per binding and removed never. That is what made boot prime
+/// O(directory churn) rather than O(peers) and put time-to-serving on a curve that
+/// grows forever. `announced_peers` (9,067 rows) is the same shape.
+///
+/// **Keys are deliberately NOT pruned.** A `federation_keys` row is an identity
+/// anchor: delete it and every row that key ever authored becomes unverifiable.
+/// Keys need EXPIRY, not deletion — and expiry is unreachable today because
+/// `produce_self_key_record` has no `valid_until` parameter (CIRISVerify#267). So
+/// this bounds what is safe to bound and leaves identity alone.
+///
+/// Best-effort: a failure here is logged and the retention pass continues. Hygiene
+/// must never be the reason the corpus bound stops being enforced.
+async fn prune_federation_churn(engine: &Engine) -> (usize, usize) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(FEDERATION_CHURN_MAX_AGE_DAYS);
+
+    let dests = match engine
+        .prune_transport_destinations_not_seen_since(cutoff, FEDERATION_CHURN_MAX_ROWS)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "retention: transport-destination prune failed — continuing");
+            0
+        }
+    };
+    let peers = match engine
+        .prune_announced_peers_not_seen_since(cutoff, FEDERATION_CHURN_MAX_ROWS)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "retention: announced-peer prune failed — continuing");
+            0
+        }
+    };
+
+    if dests > 0 || peers > 0 {
+        tracing::info!(
+            transport_destinations_pruned = dests,
+            announced_peers_pruned = peers,
+            cutoff_days = FEDERATION_CHURN_MAX_AGE_DAYS,
+            capped_at = FEDERATION_CHURN_MAX_ROWS,
+            "retention: pruned re-derivable federation rows (bounds boot prime; keys untouched)"
+        );
+    }
+    (dests, peers)
+}
+
 pub async fn run_pass(
     engine: &Engine,
     cfg: &RetentionConfig,
@@ -184,6 +251,13 @@ pub async fn run_pass(
     // Asked BEFORE the store is touched. An unbounded policy cannot produce a
     // plan that acts, so running the sweep to discover that would be three
     // table scans an hour to re-derive a fact already sitting in the config.
+    // Runs BEFORE the unbounded early-return below. Federation churn is a
+    // different concern from the corpus bound — an archive node that deliberately
+    // keeps every trace still must not accumulate dead transport rows forever, or
+    // its boot prime grows without limit while its retention policy reads as
+    // "working as configured".
+    prune_federation_churn(engine).await;
+
     if !cfg.policy.is_bounded() {
         tracing::info!(
             "retention pass: no enforceable bound configured (retention.max_age_days = 0, \
@@ -693,6 +767,28 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+
+    /// Re-derivable rows age out FASTER than the corpus. Losing a transport row
+    /// costs a round-trip; losing a trace costs the trace.
+    #[test]
+    fn churn_ages_out_faster_than_the_corpus() {
+        assert!(
+            FEDERATION_CHURN_MAX_AGE_DAYS < 90,
+            "transport/announce rows are re-derivable and must not be kept as long as traces"
+        );
+        assert!(FEDERATION_CHURN_MAX_AGE_DAYS > 0);
+    }
+
+    /// The prune is bounded per pass, so hygiene can never become the long-running
+    /// task that starves the accept loop — the failure it exists to prevent.
+    #[test]
+    fn the_prune_is_bounded_per_pass() {
+        assert!(FEDERATION_CHURN_MAX_ROWS > 0);
+        assert!(
+            FEDERATION_CHURN_MAX_ROWS <= 10_000,
+            "an unbounded prune reintroduces CIRISServer#501 from the hygiene side"
+        );
+    }
     use super::*;
     use crate::config_reconcile::{
         DEFAULT_RETENTION_AUDIT_LOG_MAX_AGE_DAYS, DEFAULT_RETENTION_MAX_AGE_DAYS,
