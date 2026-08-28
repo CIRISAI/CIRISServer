@@ -1545,6 +1545,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the previous node's observer id and counts (Codex, PR #502).
     crate::mesh_status::invalidate();
 
+    // The node vouches about ITSELF on `infra:attest` — a `config:load`
+    // self-attestation (CC 3.1, CC 3.4.5 self-or-owner), short-lived, replicated.
+    // Under the NODE key, not the engine's: on an agent-carrying node those differ
+    // and this is a statement about the infrastructure. It declares; enforcement
+    // stays cooperative. It is not `mesh_config` — that plane is the root's.
+    crate::compose_status::phase("load_observer");
+    let load_observer_key = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_else(|| cfg.key_id.clone());
+    let _load_observer_join = crate::load_shed::spawn(Arc::clone(&engine), load_observer_key);
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {
