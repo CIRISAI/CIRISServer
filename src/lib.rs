@@ -292,6 +292,9 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+
+/// Repetition-collapsing log layer — "event X occurred Y times in past Z".
+pub mod log_dedup;
 /// **Memory READ surface** — agent-compat Memory + GraphMemory card endpoints
 /// (`GET /v1/memory/stats`, `GET /v1/memory/timeline`, `POST /v1/memory/query`,
 /// `GET /v1/memory/{node_id}`, `GET /v1/memory/{node_id}/edges`). Projects the
@@ -948,11 +951,19 @@ fn install_or_reattach_tracing(
     let layer = build_file_layer(log_dir);
     let built = layer.is_some();
     let (reload_layer, handle) = tracing_subscriber::reload::Layer::new(layer);
+    // Collapse repetition BEFORE the sinks see it. `event_enabled` is consulted
+    // for the whole subscriber, so this covers `ciris_edge` / `ciris_persist`
+    // output too — which is the point: the storms that drown the log originate in
+    // the substrate and reach the operator through this process's subscriber
+    // (2,253 identical-after-normalization refusals in one 30-minute window on the
+    // canonical). The first `log_dedup::BURST` of anything still prints.
+    let (dedup_layer, dedup_state) = crate::log_dedup::DedupLayer::new();
     let fresh = tracing_subscriber::registry()
         // reload(file) sits closest to the Registry so the handle's type is
         // nameable; the EnvFilter above it still gates ALL layers globally.
         .with(reload_layer)
         .with(filter)
+        .with(dedup_layer)
         .with(fmt::layer()) // stdout/console
         // CIRISServer#264 — MUST NOT panic when a subscriber is already set:
         // `.init()`'s panic crossed pyo3 as PanicException and killed
@@ -960,6 +971,10 @@ fn install_or_reattach_tracing(
         .try_init()
         .is_ok();
     if fresh {
+        // Only when this call actually installed the subscriber — a foreign owner
+        // means our layer never ran, and a flusher for an empty map would print
+        // nothing forever.
+        crate::log_dedup::spawn_flusher(dedup_state, crate::log_dedup::DEFAULT_WINDOW);
         let _ = FILE_RELOAD.set(handle);
         return probe_first_write(true, built, log_dir);
     }
