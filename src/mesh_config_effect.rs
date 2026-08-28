@@ -254,7 +254,13 @@ pub const fn consumption(key: MeshConfigKey) -> Consumption {
         | MeshConfigKey::AntientropyPageLimit
         | MeshConfigKey::FeatureAvStreams => Consumption::Elsewhere {
             owner: "CIRISEdge",
-            tracked_by: "CIRISEdge#440",
+            // Was CIRISEdge#440, which is CLOSED while `ciris-edge` v18.11.0 still
+            // reads nothing from this plane. A closed tracker on unlanded work is
+            // the same failure this module exists to prevent, one level up: the
+            // surface said "tracked elsewhere" when nothing was tracking it, which
+            // reads as "someone is on it" exactly the way `effective: 10` read as
+            // "the setting took effect". Repointed at the live issue.
+            tracked_by: "CIRISEdge#546",
         },
         // persist's own admission backstop is a fixed rate, not policy-driven;
         // making it read this key is persist's change, not ours.

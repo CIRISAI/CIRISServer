@@ -7,12 +7,26 @@
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The floor lives in the library, not here: `main.rs` is one of THREE runtime
+    // construction sites, and the other two host the embedded agent/fold serve
+    // path on exactly the small hosts this exists for (CIRISServer#501).
+    let workers = ciris_server::node_runtime::worker_threads();
+    let runtime = ciris_server::node_runtime::build("ciris-node")?;
+    runtime.block_on(async_main(workers))
+}
+
+async fn async_main(worker_threads: usize) -> Result<()> {
     // File logging to <home>/logs (resolved from --home, else the default data
     // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     ciris_server::init_tracing_with(Some(&ciris_server::log_dir_from_args(&argv)));
+    tracing::info!(
+        worker_threads,
+        available_parallelism = ?std::thread::available_parallelism().map(std::num::NonZeroUsize::get),
+        min_worker_threads = ciris_server::node_runtime::MIN_WORKER_THREADS,
+        "node runtime sized (floored so a small host keeps scheduling headroom — CIRISServer#446)"
+    );
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         // `ciris-server import-traces <dump-dir>` — one-shot legacy-trace import

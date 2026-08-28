@@ -44,7 +44,34 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 /// How long a snapshot is served before a refresh is due.
-pub const CACHE_TTL: Duration = Duration::from_secs(60);
+///
+/// Fifteen minutes, not one. The read underneath is `storage_summary()`, whose
+/// SQLite path runs `SELECT COALESCE(SUM(pgsize),0) FROM dbstat` — a virtual table
+/// that walks EVERY PAGE of the database. On the canonical's 1.24 GiB store that
+/// is O(database size), not a cheap count, and it took the read API down at a
+/// 60-second cadence (CIRISServer#501). Mesh counts do not move meaningfully
+/// inside fifteen minutes; the read API does.
+pub const CACHE_TTL: Duration = Duration::from_secs(900);
+
+/// How long a FAILED snapshot is served before another attempt.
+///
+/// A failed read IS cached — its `unavailable` notes are the current truth, and
+/// discarding them would leave callers reading a healthy older snapshot while the
+/// store is unreadable. But caching it for the full TTL turns a transient database
+/// error into fifteen minutes of "mesh unavailable" on a public surface, with no
+/// periodic loop left to retry it (Codex, PR #502). Short enough to recover
+/// promptly, long enough that a persistent failure is not a retry storm against a
+/// store already in trouble.
+pub const FAILED_TTL: Duration = Duration::from_secs(30);
+
+/// The freshness window for a given snapshot — the short one when the read failed.
+fn ttl_for(snap: &MeshStatus) -> Duration {
+    if snap.unavailable.is_empty() {
+        CACHE_TTL
+    } else {
+        FAILED_TTL
+    }
+}
 
 /// A point-in-time, public view of the mesh as one observer has converged it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -67,6 +94,28 @@ pub struct MeshStatus {
 }
 
 impl MeshStatus {
+    /// A snapshot that reports nothing, because nothing could be read yet.
+    ///
+    /// Every figure `null` and the reason in words — never zeroes, which would say
+    /// the mesh is empty on the evidence of not having looked.
+    #[must_use]
+    pub fn unread(why: &str) -> Self {
+        Self {
+            as_of: Utc::now(),
+            // ZERO, not the TTL. This is a transient placeholder handed to a caller
+            // that lost the refresh race, and a real snapshot may land moments
+            // later. Stamping the full TTL would tell a consumer honouring the
+            // contract that an all-null mesh is current for fifteen minutes, so it
+            // would keep showing "unavailable" long after the winner populated the
+            // cache (Codex, PR #502). Already stale ⇒ retry at will.
+            stale_after_seconds: 0,
+            observer_key_id: None,
+            identities: None,
+            trace_events: None,
+            unavailable: vec![why.to_owned()],
+        }
+    }
+
     /// Is this snapshot still inside its TTL at `now`?
     #[must_use]
     pub fn is_fresh_at(taken: Instant, now: Instant, ttl: Duration) -> bool {
@@ -75,21 +124,101 @@ impl MeshStatus {
 }
 
 static CACHE: Mutex<Option<(Instant, MeshStatus)>> = Mutex::new(None);
+static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Serve the cached snapshot, refreshing only when it has aged past [`CACHE_TTL`].
 ///
 /// A poisoned lock recomputes rather than failing: a status surface that goes dark
 /// because of its own cache is worse than one that costs a query.
-pub async fn cached(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
-    let now = Instant::now();
-    if let Ok(guard) = CACHE.lock() {
-        if let Some((taken, snap)) = guard.as_ref() {
-            if MeshStatus::is_fresh_at(*taken, now, CACHE_TTL) {
-                return snap.clone();
-            }
-        }
+pub async fn cached(engine: &std::sync::Arc<ciris_persist::prelude::Engine>) -> MeshStatus {
+    if let Some(snap) = fresh_snapshot(Instant::now()) {
+        return snap;
     }
-    refresh_into_cache(engine).await
+
+    // SINGLE-FLIGHT. Without it, a burst arriving after expiry starts one page walk
+    // per request — and this endpoint is public, so a burst is the expected shape.
+    let Some(flight) = RefreshFlight::claim() else {
+        return last_snapshot().unwrap_or_else(|| {
+            MeshStatus::unread("a refresh is already in flight and no snapshot has been taken yet")
+        });
+    };
+
+    // RECHECK AFTER CLAIMING. The staleness test above and the claim are not one
+    // atomic step: a request can read "stale", be descheduled, and resume after
+    // another request has finished a refresh and released the flag. It would then
+    // claim a free slot and launch a redundant full page walk, and under a delayed
+    // burst those serialize (Codex, PR #502). Cheap to recheck, expensive not to.
+    if let Some(snap) = fresh_snapshot(Instant::now()) {
+        drop(flight);
+        return snap;
+    }
+
+    // NEVER MAKE A CALLER WAIT FOR THE WALK. Awaiting it here meant exactly one
+    // public request per TTL paid a full database scan and could time out — and
+    // with the periodic warmer gone, that cost landed on a user rather than on a
+    // background loop. The refresh runs detached; this request answers now with
+    // whatever is on hand, which is what `as_of` is for.
+    let stale = last_snapshot();
+    spawn_refresh(engine, flight);
+    stale.unwrap_or_else(|| MeshStatus::unread("the first snapshot is being taken now"))
+}
+
+/// Run a refresh detached, on a blocking thread, owning the claim.
+///
+/// The claim is MOVED INTO the task, and that placement is the protection: a
+/// started blocking task cannot be cancelled, but a request future can be. If the
+/// guard lived in the request it would release while the walk was still running,
+/// and the next request would start a second one — repeated cancellation against a
+/// public endpoint would then defeat single-flight entirely.
+fn spawn_refresh(engine: &std::sync::Arc<ciris_persist::prelude::Engine>, flight: RefreshFlight) {
+    let engine = std::sync::Arc::clone(engine);
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let _flight = flight;
+        handle.block_on(refresh_into_cache(&engine));
+    });
+}
+
+/// **Drop the cached snapshot.**
+///
+/// The cache is a process-global and the in-process
+/// `shutdown_node()` / `serve_with_adapter()` restart is supported, so a node that
+/// comes back on a different home, identity or reset store would otherwise serve
+/// the PREVIOUS node's observer id and counts for up to a full TTL (Codex, PR
+/// #502). Called at composition, so a new node never inherits an old node's view of
+/// the mesh.
+pub fn invalidate() {
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// The cached snapshot if it is still inside its TTL at `now`.
+fn fresh_snapshot(now: Instant) -> Option<MeshStatus> {
+    let guard = CACHE.lock().ok()?;
+    let (taken, snap) = guard.as_ref()?;
+    MeshStatus::is_fresh_at(*taken, now, ttl_for(snap)).then(|| snap.clone())
+}
+
+/// The cached snapshot regardless of age.
+fn last_snapshot() -> Option<MeshStatus> {
+    CACHE.lock().ok()?.as_ref().map(|(_, s)| s.clone())
+}
+
+/// Marks a refresh in flight and clears it on drop, so a panic in the read cannot
+/// wedge the flag and leave the surface permanently stale.
+struct RefreshFlight;
+
+impl RefreshFlight {
+    fn claim() -> Option<Self> {
+        (!REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(Self)
+    }
+}
+
+impl Drop for RefreshFlight {
+    fn drop(&mut self) {
+        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Take a new snapshot, reading each figure independently so one failure does not
@@ -121,14 +250,19 @@ pub async fn refresh(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
         },
     };
 
-    MeshStatus {
+    let mut snap = MeshStatus {
         as_of: Utc::now(),
         stale_after_seconds: CACHE_TTL.as_secs(),
         observer_key_id,
         identities,
         trace_events,
         unavailable,
-    }
+    };
+    // The advertised retry interval must match the one actually enforced, or a
+    // consumer honouring the contract waits fifteen minutes on a snapshot this node
+    // will itself replace in thirty seconds.
+    snap.stale_after_seconds = ttl_for(&snap).as_secs();
+    snap
 }
 
 /// Take a snapshot and store it, whatever its outcome.
@@ -142,40 +276,6 @@ async fn refresh_into_cache(engine: &ciris_persist::prelude::Engine) -> MeshStat
         *guard = Some((Instant::now(), fresh.clone()));
     }
     fresh
-}
-
-/// Warm the cache on a cadence so no caller ever pays for the read.
-///
-/// Without this the first request after each TTL expiry pays the full cost, and on
-/// a public endpoint that moment is the busiest by construction — the request that
-/// finds the cache cold is as likely to be the thousandth as the first. `cached`
-/// still falls back to computing, so a request arriving before the loop's first
-/// tick is answered rather than refused.
-///
-/// Refreshes at half the TTL, so a snapshot is replaced before it goes stale
-/// rather than exactly as it does.
-pub fn spawn_refresh_loop(
-    engine: std::sync::Arc<ciris_persist::prelude::Engine>,
-) -> tokio::task::JoinHandle<()> {
-    let cadence = CACHE_TTL / 2;
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(cadence);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        tracing::info!(
-            cadence_secs = cadence.as_secs(),
-            "mesh-status refresh loop started (public snapshot warmed on a cadence)"
-        );
-        loop {
-            interval.tick().await;
-            let snap = refresh_into_cache(&engine).await;
-            if !snap.unavailable.is_empty() {
-                tracing::debug!(
-                    unavailable = snap.unavailable.len(),
-                    "mesh-status refresh completed with unreadable figures"
-                );
-            }
-        }
-    })
 }
 
 #[cfg(test)]
@@ -224,7 +324,7 @@ mod tests {
             v["as_of"].is_string(),
             "a snapshot with no age reads as live"
         );
-        assert_eq!(v["stale_after_seconds"], serde_json::json!(60));
+        assert_eq!(v["stale_after_seconds"], serde_json::json!(900));
     }
 
     #[test]
@@ -232,19 +332,103 @@ mod tests {
         let t0 = Instant::now();
         assert!(MeshStatus::is_fresh_at(
             t0,
-            t0 + Duration::from_secs(59),
+            t0 + Duration::from_secs(899),
             CACHE_TTL
         ));
         assert!(!MeshStatus::is_fresh_at(
             t0,
-            t0 + Duration::from_secs(60),
+            t0 + Duration::from_secs(900),
             CACHE_TTL
         ));
-        assert!(!MeshStatus::is_fresh_at(
-            t0,
-            t0 + Duration::from_secs(3600),
-            CACHE_TTL
-        ));
+    }
+
+    /// The read underneath walks every page of the database. At a 60-second TTL
+    /// that took the read API down on a 2-vCPU canonical (CIRISServer#501), so the
+    /// interval is pinned: a future tightening should have to argue with this test.
+    #[test]
+    fn the_ttl_is_long_because_the_read_is_a_page_walk() {
+        assert!(
+            CACHE_TTL >= Duration::from_secs(600),
+            "storage_summary() runs SUM(pgsize) FROM dbstat — O(database size). \
+             A short TTL turns a status endpoint into a scheduled full scan."
+        );
+    }
+
+    /// A new node must not inherit the previous node's view of the mesh.
+    ///
+    /// The cache is a process-global and the in-process restart is supported, so
+    /// without this a node coming back on a different home, identity or reset store
+    /// would serve the OLD observer id and counts for up to a full TTL.
+    #[test]
+    fn invalidate_drops_the_previous_nodes_snapshot() {
+        {
+            let mut g = CACHE.lock().expect("lock");
+            *g = Some((Instant::now(), snap()));
+        }
+        assert!(
+            last_snapshot().is_some(),
+            "precondition: a snapshot is cached"
+        );
+        invalidate();
+        assert!(
+            last_snapshot().is_none(),
+            "composition must clear the prior node's view"
+        );
+    }
+
+    /// A failed read is served briefly, not for the full TTL — otherwise a
+    /// transient database error becomes fifteen minutes of "mesh unavailable" on a
+    /// public surface, with no periodic loop left to retry it.
+    #[test]
+    fn a_failed_snapshot_expires_fast_and_says_so() {
+        let mut failed = snap();
+        failed.unavailable.push("store unreadable".into());
+        assert_eq!(ttl_for(&failed), FAILED_TTL);
+        assert!(FAILED_TTL < CACHE_TTL);
+
+        let good = snap();
+        assert_eq!(
+            ttl_for(&good),
+            CACHE_TTL,
+            "a healthy snapshot keeps the long TTL"
+        );
+    }
+
+    /// Only ONE page walk in flight, ever — and the slot survives a panic.
+    ///
+    /// ONE test, not two: `REFRESHING` is a process-global and the harness runs
+    /// tests in parallel, so two tests each claiming it would fail each other
+    /// nondeterministically while the implementation was correct (Codex, PR #502).
+    /// Sequential assertions in one test cannot race themselves.
+    #[test]
+    fn the_refresh_slot_is_exclusive_and_panic_safe() {
+        let first = RefreshFlight::claim().expect("first wins");
+        assert!(
+            RefreshFlight::claim().is_none(),
+            "a second walk must not start while one is running"
+        );
+        drop(first);
+        assert!(RefreshFlight::claim().is_some(), "the slot is reusable");
+
+        let _ = std::panic::catch_unwind(|| {
+            let _f = RefreshFlight::claim().expect("claim");
+            panic!("read blew up");
+        });
+        assert!(
+            RefreshFlight::claim().is_some(),
+            "Drop releases the slot even when the read panics"
+        );
+    }
+
+    /// "Nothing read yet" reports nulls and a reason — never zeroes, which would
+    /// say the mesh is empty on the evidence of not having looked.
+    #[test]
+    fn an_unread_snapshot_is_null_everywhere_with_a_reason() {
+        let v = serde_json::to_value(MeshStatus::unread("no snapshot yet")).expect("serialize");
+        assert!(v["identities"].is_null());
+        assert!(v["trace_events"].is_null());
+        assert!(v["observer_key_id"].is_null());
+        assert_eq!(v["unavailable"][0], "no snapshot yet");
     }
 
     #[test]

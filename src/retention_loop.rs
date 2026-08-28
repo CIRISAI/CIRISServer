@@ -177,6 +177,104 @@ impl RetentionOutcome {
 ///
 /// Returns `Err` only when persist itself refused (a summary read or a delete);
 /// the caller logs + skips the tick.
+/// Days after which a transport binding or announce record is treated as dead.
+///
+/// Tighter than the trace bound (90d) on purpose: these rows are **re-derivable**.
+/// A peer that comes back announces again and is re-rooted, so ageing one out costs
+/// a round-trip, not a fact. A trace event that is deleted is gone.
+const FEDERATION_CHURN_MAX_AGE_DAYS: i64 = 30;
+
+/// Rows removed per table per pass.
+///
+/// Bounded so the prune can never become the long-running task that starves the
+/// accept loop — which is the very failure this hygiene exists to prevent
+/// (CIRISServer#501). At an hourly cadence this drains the canonical's backlog over
+/// a few passes and then idles at steady state.
+const FEDERATION_CHURN_MAX_ROWS: usize = 2_000;
+
+// Pinned at COMPILE time, not by a test: these are constants, so a test asserting
+// them can only ever restate what the compiler already knows. As `const` assertions
+// they fail the BUILD the moment someone edits a value past its bound, which is the
+// actual guarantee wanted — and it is what clippy's `assertions_on_constants` is
+// pointing at.
+//
+// Re-derivable rows must age out FASTER than the corpus: losing a transport row
+// costs a round-trip, losing a trace costs the trace.
+const _: () = assert!(
+    FEDERATION_CHURN_MAX_AGE_DAYS < 90 && FEDERATION_CHURN_MAX_AGE_DAYS > 0,
+    "transport/announce rows are re-derivable and must not be kept as long as traces"
+);
+// An unbounded prune reintroduces CIRISServer#501 from the hygiene side.
+const _: () = assert!(
+    FEDERATION_CHURN_MAX_ROWS > 0 && FEDERATION_CHURN_MAX_ROWS <= 10_000,
+    "the prune must stay bounded per pass or it becomes the task that starves accept"
+);
+
+/// **Bound the one federation table that is actually an observation log.**
+///
+/// `announced_peers` is a running note about who this node has heard from:
+/// `first_seen_at` / `last_seen_at` / `announce_count`, populated on all 9,067 rows
+/// on the canonical. A stale entry is RE-DERIVABLE — the peer announces again and
+/// the row comes back — so ageing one out costs a round-trip, not a fact.
+///
+/// # Why `transport_destinations` is NOT pruned, despite being the bigger table
+///
+/// It was, until the measurement contradicted the premise (Codex review, PR #502).
+/// That table holds 11,034 rows against 748 keys and is what boot prime iterates,
+/// so it looked like the obvious target. But:
+///
+/// ```text
+/// transport_destinations, all 11,034 rows:  last_seen_at IS NULL
+/// a 30-day prune would delete:               5,408
+/// of those, never-observed asserted routes:  5,408   (100%)
+/// ```
+///
+/// There are no observations in it. Every row is an ASSERTION, and persist ages
+/// them on `COALESCE(last_seen_at, asserted_at)`, so the fallback that exists to
+/// stop NULL rows being immortal is the only clock any of them ever runs on.
+///
+/// Its keep-predicate (`signature IS NULL AND retired_at IS NULL`) protects signed,
+/// epoch-versioned replicated routes — but `TransportDestination` carries no
+/// signature field at all, so `put_transport_destination` writes NULL for every
+/// locally-asserted row. That includes the accord-quorum-authorized canonical
+/// address update in `accord.rs::canonical_address_update`, which writes
+/// `last_seen_at: None` and is only ever recreated by another quorum. An
+/// explicit-hash canonical cannot announce itself back, so pruning that row strands
+/// the node on an obsolete bootstrap address with no path to relearn the route.
+///
+/// Bounding that table needs a predicate persist cannot currently express —
+/// "stale OBSERVATION" as distinct from "old assertion" — so it is left alone and
+/// asked for upstream. The boot-prime outage is closed by taking the prime off the
+/// critical path and yielding, which makes table size cost background work rather
+/// than availability; shrinking the table was the optimisation, not the fix.
+///
+/// Best-effort: a failure here is logged and the retention pass continues. Hygiene
+/// must never be the reason the corpus bound stops being enforced.
+async fn prune_federation_churn(engine: &Engine) -> usize {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(FEDERATION_CHURN_MAX_AGE_DAYS);
+
+    let peers = match engine
+        .prune_announced_peers_not_seen_since(cutoff, FEDERATION_CHURN_MAX_ROWS)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "retention: announced-peer prune failed — continuing");
+            0
+        }
+    };
+
+    if peers > 0 {
+        tracing::info!(
+            announced_peers_pruned = peers,
+            cutoff_days = FEDERATION_CHURN_MAX_AGE_DAYS,
+            capped_at = FEDERATION_CHURN_MAX_ROWS,
+            "retention: pruned stale peer announcements (re-derivable; routes and keys untouched)"
+        );
+    }
+    peers
+}
+
 pub async fn run_pass(
     engine: &Engine,
     cfg: &RetentionConfig,
@@ -184,6 +282,13 @@ pub async fn run_pass(
     // Asked BEFORE the store is touched. An unbounded policy cannot produce a
     // plan that acts, so running the sweep to discover that would be three
     // table scans an hour to re-derive a fact already sitting in the config.
+    // Runs BEFORE the unbounded early-return below. Federation churn is a
+    // different concern from the corpus bound — an archive node that deliberately
+    // keeps every trace still must not accumulate dead transport rows forever, or
+    // its boot prime grows without limit while its retention policy reads as
+    // "working as configured".
+    prune_federation_churn(engine).await;
+
     if !cfg.policy.is_bounded() {
         tracing::info!(
             "retention pass: no enforceable bound configured (retention.max_age_days = 0, \
@@ -693,6 +798,7 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::config_reconcile::{
         DEFAULT_RETENTION_AUDIT_LOG_MAX_AGE_DAYS, DEFAULT_RETENTION_MAX_AGE_DAYS,
