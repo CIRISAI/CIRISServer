@@ -318,3 +318,47 @@ fn gate_client_requirement_is_a_bounded_range() {
          lands on a user's fresh install rather than in CI.\n"
     );
 }
+
+/// **`pyproject.toml` must be valid TOML.**
+///
+/// Trivial, and it exists because the tree shipped to CI without it and the
+/// wheel build died on `maturin failed / pyproject.toml is invalid / TOML parse
+/// error at line 79` — a stray `]` left by an edit to the dependencies block.
+///
+/// Nothing local caught it, and the reason is worth stating: EVERY consumer of
+/// this file in this repo reads it as TEXT. `client_pin.py` matches a regex,
+/// `gate_client_requirement_is_a_bounded_range` scans lines, `check_evidence.py`
+/// shells out to the former. All of them found the requirement they were looking
+/// for and were satisfied, on a file no TOML parser would accept.
+///
+/// So the parse is the gate. It is cheap, it is total, and it catches a class
+/// that line-scanning cannot see by construction — a file can be locally
+/// well-formed on every line a grep looks at and still be structurally broken.
+#[test]
+fn gate_pyproject_is_valid_toml() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pyproject.toml");
+    let text = std::fs::read_to_string(&path).expect("pyproject.toml must be readable");
+    let out = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import sys,tomllib;tomllib.load(open(sys.argv[1],'rb'))",
+        ])
+        .arg(&path)
+        .output()
+        .expect("run python3 to parse pyproject.toml");
+    assert!(
+        out.status.success(),
+        "\n\
+         🚫 RELEASE GATE [pyproject-toml] — DO NOT TAG.\n\
+         \n\
+         pyproject.toml is not valid TOML, so `maturin` cannot build a wheel and every\n\
+         `pip install` of this project fails. The gates that read this file scan it as\n\
+         TEXT and will all still pass — that is why this one parses it.\n\
+         \n\
+         {}\n\
+         \n\
+         ({} lines)\n",
+        String::from_utf8_lossy(&out.stderr).trim(),
+        text.lines().count()
+    );
+}

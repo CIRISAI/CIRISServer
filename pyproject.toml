@@ -76,7 +76,6 @@ requires-python = ">=3.10"
 dependencies = [
     "ciris-client>=0.5.190,<0.6",
 ]
-]
 
 [project.urls]
 Repository = "https://github.com/CIRISAI/CIRISServer"
