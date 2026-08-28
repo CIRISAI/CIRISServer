@@ -1296,6 +1296,13 @@ async fn prime_canonicals(
     Ok(admitted_targets)
 }
 
+/// Ceiling for reconcile-failure backoff.
+///
+/// Five minutes: long enough that a sustained outage costs almost nothing, short
+/// enough that a recovered peer reconverges without an operator intervening. The
+/// floor is the configured cadence, so a healthy node's timing is unchanged.
+const MAX_RECONCILE_BACKOFF_SECS: u64 = 300;
+
 pub async fn run_federation_delivery(
     engine: Arc<Engine>,
     edge: Arc<Edge>,
@@ -1349,6 +1356,11 @@ pub async fn run_federation_delivery(
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
         let mut last_logged: Option<usize> = None;
+        // Decay a failing reconcile instead of re-running it at full cadence
+        // forever. Resets to the floor on the first success, so a peer that
+        // recovers is not still being punished for an earlier blip.
+        let mut backoff =
+            crate::backoff::Backoff::new(cadence, Duration::from_secs(MAX_RECONCILE_BACKOFF_SECS));
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
@@ -1368,6 +1380,7 @@ pub async fn run_federation_delivery(
             .await
             {
                 Ok(count) => {
+                    backoff.succeed();
                     if last_logged != Some(count) {
                         tracing::info!(
                             consent_peers = count,
@@ -1376,10 +1389,29 @@ pub async fn run_federation_delivery(
                         last_logged = Some(count);
                     }
                 }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "federation-delivery reconcile tick failed — skipping"
-                ),
+                Err(e) => {
+                    let wait = backoff.fail();
+                    tracing::warn!(
+                        error = %e,
+                        consecutive_failures = backoff.consecutive_failures(),
+                        backoff_secs = wait.as_secs(),
+                        at_ceiling = backoff.at_ceiling(),
+                        "federation-delivery reconcile tick failed — backing off"
+                    );
+                    // Stay interruptible while waiting: a node shutting down must
+                    // not have to sit through a ceiling-length backoff first.
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {}
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                tracing::info!(
+                                    "federation-delivery reconcile loop shutting down (during backoff)"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
     });

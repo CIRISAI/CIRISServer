@@ -84,6 +84,8 @@ pub mod attest;
 /// consumes as a delegate (the single-authority contract).
 pub mod auth;
 pub mod backend;
+/// Retry backoff — decay a failing operation instead of running it flat out.
+pub mod backoff;
 /// Operator-facing holonomic federation scoreboard (CIRISServer#12/#13).
 pub mod benchmarks;
 /// Claim remote ownership — the SUBSTRATE-NATIVE, node-to-node claiming side of
