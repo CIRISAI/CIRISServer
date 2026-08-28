@@ -189,6 +189,39 @@ jobs:
         shell: bash
         run: python3 tools/client_pin.py --install
       - run: cargo test
+      # ── The boundary gates, which `cargo test` does NOT run ─────────────────
+      #
+      # `tests/release_gates/boundary.rs` holds the ladder's whole non-hermetic
+      # surface, and every gate in it is `#[ignore]`d — correctly, because they
+      # reach the network and must not fail a developer's offline run. But
+      # `cargo test` skips ignored tests, so until these steps existed NOTHING
+      # ran them, and a gate nothing runs is a gate that cannot fail.
+      #
+      # That is precisely the defect this ladder was rebuilt to end — the
+      # previous suite's ignored gates "rotted because nothing watched them" —
+      # and `gate_pinned_client_offers_a_non_desktop_wheel` was added in this cut
+      # to prevent CIRISServer#493 while being unrunnable itself. Found by review
+      # (Codex on #496), not by a gate, because the gate that would have caught it
+      # was the one not running.
+      #
+      # TWO STEPS, NOT ONE. The first draft ran all of boundary under
+      # `continue-on-error`, which buries the only gate here that should normally
+      # be GREEN under two that are legitimately red:
+      #
+      #   gate_registry_surface_present         RED BY DESIGN on 0.5.x (the 0.6 boundary)
+      #   gate_peer_nodes_on_the_shipping_floor BLOCKED without CIRIS_GATE_NODE_A/_B
+      #   gate_pinned_client_offers_...         should PASS — a pinned client that
+      #                                         cannot be resolved off-desktop is a
+      #                                         release blocker, not a status line
+      #
+      # So the client-wheel gate BLOCKS and the other two are advisory. A single
+      # advisory step would have reported success on exactly the condition it was
+      # written to stop.
+      - name: Boundary — the pinned client must be resolvable off-desktop (BLOCKING)
+        run: 'cargo test --test release_gates -- --include-ignored gate_pinned_client_offers_a_non_desktop_wheel'
+      - name: Boundary — forward + external-fact gates (advisory; read before tagging)
+        continue-on-error: true
+        run: 'cargo test --test release_gates -- --include-ignored gate_registry_surface_present gate_peer_nodes_on_the_shipping_floor'
       # CIRISServer#373 — `cargo test` above tests the ROOT PACKAGE ONLY. With a
       # root package present and no `default-members`, the workspace member is
       # never built as a test target, so ciris-lens-core's 364 unit tests — the

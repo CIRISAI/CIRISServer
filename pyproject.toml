@@ -54,7 +54,7 @@ requires-python = ">=3.10"
 # resolves in it — so a floating version would let an upstream bundle change
 # turn a green tree red with no commit here to explain it.
 dependencies = [
-    "ciris-client==0.5.190",
+    "ciris-client==0.5.191",
 ]
 
 [project.urls]

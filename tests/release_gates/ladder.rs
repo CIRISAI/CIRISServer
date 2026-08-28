@@ -925,6 +925,11 @@ pub const IGNORE_ALLOWLIST: &[(&str, &str)] = &[
         "gate_peer_nodes_on_the_shipping_floor",
         "external fact — needs a reachable peer; BLOCKED, never passed, without one",
     ),
+    (
+        "gate_pinned_client_offers_a_non_desktop_wheel",
+        "external fact — reads the PyPI simple index; BLOCKED, never passed, when it is \
+         unreachable (CIRISServer#493)",
+    ),
 ];
 
 /// **The ratchet.** The previous ladder's fatal property was that its most
