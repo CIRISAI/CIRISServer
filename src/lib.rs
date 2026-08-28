@@ -317,6 +317,7 @@ pub mod mesh_config_effect;
 /// restated here.
 pub mod mesh_config_surface;
 pub mod mesh_genesis;
+
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
 /// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
@@ -325,6 +326,8 @@ pub mod mesh_genesis;
 /// (`FSD/RNS_CONTROL_RELAY.md` + `FSD/EDGE_8_0_OPAQUE_MIGRATION.md` §6). Public
 /// so the mesh-seed TDD gate (`tests/mesh_seed_e2e.rs`) can drive both halves.
 pub mod mesh_relay;
+/// Public mesh status — counts, cached, with an `as_of`.
+pub mod mesh_status;
 /// In-process node lifecycle control — the `shutdown_node()` stop handle that
 /// frees `:4243` deterministically on an embedded-fold restart (CIRISServer#276).
 pub mod node_control;
