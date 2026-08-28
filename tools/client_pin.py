@@ -25,6 +25,8 @@ import sys
 # tomllib is 3.11+; this must run on whatever python3 a runner happens to ship
 # before setup-python, so parse the one line we need rather than import it.
 PIN = re.compile(r'^\s*"(ciris-client(?:\[[^\]]+\])?[^"]*)"\s*,?\s*$', re.MULTILINE)
+#: The lower bound inside a requirement like `ciris-client>=0.5.190,<0.6`.
+FLOOR = re.compile(r">=\s*([0-9][0-9A-Za-z.\-]*)")
 
 
 def client_pin(root: pathlib.Path) -> str:
@@ -89,9 +91,42 @@ def install(pin: str) -> int:
     return 0
 
 
+def client_floor(req: str) -> str:
+    """The lower bound of the requirement, as a bare version.
+
+    0.5.192 moved this from `==X` to `>=FLOOR,<BOUND` so the client can iterate
+    for CIRISAgent without a paired server cut. The floor is the version the
+    localization guard is VERIFIED against (`gate_client_floor_resolves_every_id`)
+    — a claimed range with an untested bound is a guess with a version number on
+    it.
+    """
+    if "==" in req:
+        # Still an equality: the floor is that version. Kept working so a
+        # downstream consumer pinning exactly is not broken by this change.
+        return req.split("==", 1)[1].split(",")[0].strip()
+    m = FLOOR.search(req)
+    if not m:
+        raise SystemExit(
+            f"no lower bound in {req!r}. Every consumer of this script needs a "
+            "concrete floor to install and test against; an unbounded dependency "
+            "cannot be verified, only hoped for."
+        )
+    return m.group(1)
+
+
 if __name__ == "__main__":
-    pin = client_pin(pathlib.Path(__file__).resolve().parents[1])
-    if "--install" in sys.argv[1:]:
-        sys.exit(install(pin))
-    print(pin)
+    req = client_pin(pathlib.Path(__file__).resolve().parents[1])
+    args = sys.argv[1:]
+    if "--floor" in args:
+        print(client_floor(req))
+        sys.exit(0)
+    if "--install-floor" in args:
+        # The FLOOR exactly — for the gate that proves the bottom of the range is
+        # real. `--install` resolves the range and gets the latest, which tests
+        # the other end.
+        name = req.split("[")[0].split(">")[0].split("=")[0].strip()
+        sys.exit(install(f"{name}=={client_floor(req)}"))
+    if "--install" in args:
+        sys.exit(install(req))
+    print(req)
     sys.exit(0)

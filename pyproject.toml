@@ -33,28 +33,48 @@ requires-python = ">=3.10"
 # travel by PR to CIRISClient instead of by re-vendor.
 #
 # NO EXTRA, deliberately. The BASE package is the node package: it carries the
-# desktop uber-jar and the locale bundle extracted from it, which is everything
-# a fabric node wants. The published extras are `web` (adds `ciris-client-wasm`,
-# 7 MB a node has no use for) and `readiness` (adds `ciris-grace`); we want
-# neither. This said `[node]` until 0.5.189 — an extra CIRISClient does not
-# publish. pip WARNS on an unknown extra and installs the base anyway, so it
-# worked, silently, and the pin documented a flavour that did not exist. That is
-# the failure mode this repo keeps meeting: a request that is quietly downgraded
-# rather than refused. `tools/client_pin.py --install` now fails on that warning.
+# desktop uber-jar and the locale bundle extracted from it. The published extras
+# are `web` (adds `ciris-client-wasm`, 7 MB a node has no use for) and
+# `readiness`; we want neither.
 #
-# PINNED TO THIS CUT'S OWN VERSION, deliberately. The desktop app compares its
-# `CLIENT_VERSION` against the node's reported version on the full leading
-# semver (`isVersionMismatch`), so a 0.5.189 node shipping a 0.5.188 client
-# greets its own operator with "Update recommended" against the dependency it was
-# deliberately built with. The wheel-build lane that used to keep the two in step
-# went away with `client/`; the pin carries that obligation now.
+# ── A RANGE, NOT AN EQUALITY (0.5.192) ───────────────────────────────────────
 #
-# PINNED EXACTLY. The locale bundle is a release GATE here —
-# `tools/check_server_localization.py` asserts that every id this server emits
-# resolves in it — so a floating version would let an upstream bundle change
-# turn a green tree red with no commit here to explain it.
+# This was `==<this cut's version>` from 0.5.189 to 0.5.191, which forced a
+# paired release every time either side moved: a client change the agent wanted
+# could not reach them without a server cut it had no other reason to make. The
+# point of decoupling is to take the server OUT of the client↔agent iteration
+# loop.
+#
+# The equality was never protecting a content contract. Measured, not assumed:
+# this server's emitted ids all resolve in the 0.5.188 bundle — three versions
+# below the pin it carried. What the equality actually protected was the desktop
+# app's `isVersionMismatch`, which compares CLIENT_VERSION against the node's on
+# the FULL leading semver and shows "Update recommended" on any difference. That
+# is a client-side comparison, and it is fixed on the client side
+# (CIRISClient#9); a range here without that fix trades a release dance for a
+# permanent nag, which is worse.
+#
+# ── WHY THE FLOOR IS 0.5.190 AND NOT 0.5.188 ─────────────────────────────────
+#
+# The API floor is 0.5.188 — `locale_bundle()` does not exist at 0.5.186, so the
+# guard cannot even run. But 0.5.188 publishes no `py3-none-any`, so a
+# `>=0.5.188` range lets a pip targeting Android resolve 0.5.188 and reproduce
+# CIRISServer#493 exactly. THE WHEEL MATRIX SETS THE FLOOR, NOT THE API. 0.5.190
+# is the first version with the split matrix.
+#
+# ── THE RISK THIS TAKES ON, AND WHAT PAYS FOR IT ─────────────────────────────
+#
+# An exact pin meant an upstream bundle change could not turn a green tree red
+# with no commit here to explain it. A range gives that up in the other
+# direction: a NEWER client could drop an id this server emits, breaking a fresh
+# install while CI stays green against whatever it happened to install.
+#
+# So the range is TESTED AT BOTH ENDS — `gate_client_floor_resolves_every_id`
+# runs the localization guard against the FLOOR, and CI runs it against the
+# latest. The range we claim is the range we check; an untested bound is a
+# guess with a version number on it.
 dependencies = [
-    "ciris-client==0.5.191",
+    "ciris-client>=0.5.190,<0.6",
 ]
 
 [project.urls]

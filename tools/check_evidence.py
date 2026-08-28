@@ -95,18 +95,25 @@ def lock_rev(pkg: str, tag: str) -> str | None:
 
 
 def client_pin() -> str | None:
-    """The exact `ciris-client` version pyproject.toml pins, via the one resolver."""
+    """The `ciris-client` FLOOR version, via the one resolver.
+
+    0.5.192 moved the dependency from `==X` to `>=FLOOR,<BOUND` so the client can
+    iterate for CIRISAgent without a paired server cut. An evidence row names a
+    symbol in a specific client version, and the floor is the right one to check:
+    it is the oldest a consumer may resolve, so a symbol present there is present
+    across the whole declared range. Checking the ceiling would prove less — a
+    symbol added in the newest client says nothing about what a floor install has.
+    """
     try:
         out = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "client_pin.py")],
+            [sys.executable, str(ROOT / "tools" / "client_pin.py"), "--floor"],
             capture_output=True,
             text=True,
             check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None
-    # `ciris-client==0.5.188` -> `0.5.188`
-    return out.split("==", 1)[1] if "==" in out else None
+    return out or None
 
 
 def client_checkout(pin: str) -> Path | None:
@@ -228,8 +235,10 @@ def main() -> int:
             # WARN: there is no floating version for it to be merely stale against.
             if row_tag != pin:
                 fails.append(
-                    f"L{ln} [{claim}]: ciris-client@'{row_tag}' does not match the "
-                    f"pyproject pin '{pin}' — the client pin is exact, so this is drift"
+                    f"L{ln} [{claim}]: ciris-client@'{row_tag}' is not the declared FLOOR "
+                    f"'{pin}'. An evidence row must name the oldest client a consumer "
+                    f"may resolve — a symbol proven only in a newer one says nothing "
+                    f"about a floor install (0.5.192 range decoupling)"
                 )
                 continue
             base = client_checkout(pin)
