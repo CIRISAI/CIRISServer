@@ -201,6 +201,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unclaimed_node_with_a_brain_waits() {
+        assert_eq!(
+            gate_for(Some("agent-k"), true),
+            StartupGate::WaitingForClaim {
+                actor_key_id: "agent-k".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_node_with_no_brain_starts_anyway() {
+        // A substrate node has nothing to attribute, and one that refused to
+        // federate until claimed could never carry the mesh it exists to serve.
+        assert_eq!(gate_for(None, true), StartupGate::Ready);
+    }
+
+    #[test]
+    fn a_claimed_node_with_a_brain_starts() {
+        assert_eq!(gate_for(Some("agent-k"), false), StartupGate::Ready);
+    }
+
+    #[test]
+    fn the_gate_holds_only_on_the_conjunction() {
+        // Both halves are required: neither an owner alone nor a brain alone holds
+        // the node. Pinned because dropping either turns a targeted hold into
+        // either a no-op or a mesh-wide outage on unclaimed substrate nodes.
+        assert_eq!(gate_for(None, false), StartupGate::Ready);
+        assert!(matches!(
+            gate_for(Some("a"), true),
+            StartupGate::WaitingForClaim { .. }
+        ));
+    }
+
+    #[test]
     fn a_comma_joined_cell_is_a_set() {
         assert_eq!(roles_of("canonical,node"), vec!["canonical", "node"]);
         assert_eq!(roles_of("agent"), vec!["agent"]);
@@ -938,6 +972,9 @@ pub async fn provision_node_identity(
                  `node`-typed or fused key here is the fusion this split removes."
             ),
         }
+        // Recorded only after the key is known-good, so the startup gate can never
+        // hold a node on the strength of an actor key we just refused.
+        set_actor_identity(actor);
     }
 
     // NOT gated: the owner-binding. A fresh node has no owner until someone
@@ -1003,6 +1040,87 @@ static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Record the wire identity. First writer wins; a second call with a DIFFERENT
 /// value is a bug worth shouting about rather than silently ignoring.
+/// The ACTOR key this node carries, when it carries a brain at all.
+///
+/// Separate from [`wire_identity`] because they are different keys on exactly the
+/// node that matters here: an agent-carrying node operates as its `node` key and
+/// authors brain work under its `agent` key, and CC 3.4.7.3 Clause A exists to
+/// keep them apart.
+static ACTOR_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record that this node carries a brain, under `key_id`.
+pub fn set_actor_identity(key_id: &str) {
+    if let Err(existing) = ACTOR_IDENTITY.set(key_id.to_owned()) {
+        if existing != key_id {
+            tracing::error!(
+                already = %ACTOR_IDENTITY.get().map(String::as_str).unwrap_or("<unset>"),
+                attempted = %key_id,
+                "actor identity RESET attempted with a different key — authorship would be \
+                 split across two agent identities. The first value stands."
+            );
+        }
+    }
+}
+
+/// The actor key this node carries, or `None` on a node with no brain.
+#[must_use]
+pub fn actor_identity() -> Option<&'static str> {
+    ACTOR_IDENTITY.get().map(String::as_str)
+}
+
+/// Whether this node may begin joining the mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupGate {
+    /// Nothing is owed — start.
+    Ready,
+    /// This node carries a brain and nobody owns it yet.
+    WaitingForClaim {
+        /// The actor key whose work would otherwise be unattributable.
+        actor_key_id: String,
+    },
+}
+
+/// **Hold an agent-carrying node at "waiting for claim" until someone owns it.**
+///
+/// An agent acts *through* a node on behalf of a human: `may_act_through(agent,
+/// node)` requires an owner, and CC 3.4.7.3 Clause D is fail-closed, so an unowned
+/// node cannot answer it at all. Joining the mesh first means publishing brain work
+/// no owner stands behind — every row unattributable at the moment it is authored,
+/// which is not a state a peer can repair later.
+///
+/// This reuses the first-run machinery rather than inventing a second notion of
+/// "unclaimed": [`crate::auth::bootstrap::is_first_run`] is the same predicate the
+/// claim routes gate themselves on, so the node is waiting on exactly the condition
+/// `POST /v1/setup/root` clears, and the PIN + NodeCode banner an operator already
+/// sees at `claim_pin` is already the instruction for how to clear it.
+///
+/// Deliberately does NOT gate a node with no brain. A plain node has nothing to
+/// attribute, and a substrate node that refused to federate until claimed could
+/// never serve the mesh it is there to carry.
+///
+/// `is_first_run` fails CLOSED (a directory error reads as NOT first-run), so an
+/// unreadable directory lets the node start rather than stranding it unreachable —
+/// the same direction the claim routes chose.
+pub async fn startup_gate(engine: &ciris_persist::prelude::Engine) -> StartupGate {
+    let unclaimed = crate::auth::bootstrap::is_first_run(engine).await;
+    gate_for(actor_identity(), unclaimed)
+}
+
+/// The decision itself, separated from where its two inputs come from.
+///
+/// `actor_identity` is a process-global `OnceLock` and "first run" needs a live
+/// engine, so a gate that read both directly could only ever be exercised in one
+/// state per test process — and the three states are exactly what needs pinning.
+#[must_use]
+pub fn gate_for(actor: Option<&str>, unclaimed: bool) -> StartupGate {
+    match (actor, unclaimed) {
+        (Some(actor_key_id), true) => StartupGate::WaitingForClaim {
+            actor_key_id: actor_key_id.to_owned(),
+        },
+        _ => StartupGate::Ready,
+    }
+}
+
 pub fn set_wire_identity(key_id: &str) {
     if let Err(existing) = WIRE_IDENTITY.set(key_id.to_owned()) {
         if existing != key_id {
