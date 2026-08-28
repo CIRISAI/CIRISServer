@@ -53,6 +53,26 @@ use serde::Serialize;
 /// inside fifteen minutes; the read API does.
 pub const CACHE_TTL: Duration = Duration::from_secs(900);
 
+/// How long a FAILED snapshot is served before another attempt.
+///
+/// A failed read IS cached — its `unavailable` notes are the current truth, and
+/// discarding them would leave callers reading a healthy older snapshot while the
+/// store is unreadable. But caching it for the full TTL turns a transient database
+/// error into fifteen minutes of "mesh unavailable" on a public surface, with no
+/// periodic loop left to retry it (Codex, PR #502). Short enough to recover
+/// promptly, long enough that a persistent failure is not a retry storm against a
+/// store already in trouble.
+pub const FAILED_TTL: Duration = Duration::from_secs(30);
+
+/// The freshness window for a given snapshot — the short one when the read failed.
+fn ttl_for(snap: &MeshStatus) -> Duration {
+    if snap.unavailable.is_empty() {
+        CACHE_TTL
+    } else {
+        FAILED_TTL
+    }
+}
+
 /// A point-in-time, public view of the mesh as one observer has converged it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MeshStatus {
@@ -132,7 +152,7 @@ pub async fn cached(engine: &std::sync::Arc<ciris_persist::prelude::Engine>) -> 
 fn fresh_snapshot(now: Instant) -> Option<MeshStatus> {
     let guard = CACHE.lock().ok()?;
     let (taken, snap) = guard.as_ref()?;
-    MeshStatus::is_fresh_at(*taken, now, CACHE_TTL).then(|| snap.clone())
+    MeshStatus::is_fresh_at(*taken, now, ttl_for(snap)).then(|| snap.clone())
 }
 
 /// The cached snapshot regardless of age.
@@ -219,14 +239,19 @@ pub async fn refresh(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
         },
     };
 
-    MeshStatus {
+    let mut snap = MeshStatus {
         as_of: Utc::now(),
         stale_after_seconds: CACHE_TTL.as_secs(),
         observer_key_id,
         identities,
         trace_events,
         unavailable,
-    }
+    };
+    // The advertised retry interval must match the one actually enforced, or a
+    // consumer honouring the contract waits fifteen minutes on a snapshot this node
+    // will itself replace in thirty seconds.
+    snap.stale_after_seconds = ttl_for(&snap).as_secs();
+    snap
 }
 
 /// Take a snapshot and store it, whatever its outcome.
@@ -315,6 +340,24 @@ mod tests {
             CACHE_TTL >= Duration::from_secs(600),
             "storage_summary() runs SUM(pgsize) FROM dbstat — O(database size). \
              A short TTL turns a status endpoint into a scheduled full scan."
+        );
+    }
+
+    /// A failed read is served briefly, not for the full TTL — otherwise a
+    /// transient database error becomes fifteen minutes of "mesh unavailable" on a
+    /// public surface, with no periodic loop left to retry it.
+    #[test]
+    fn a_failed_snapshot_expires_fast_and_says_so() {
+        let mut failed = snap();
+        failed.unavailable.push("store unreadable".into());
+        assert_eq!(ttl_for(&failed), FAILED_TTL);
+        assert!(FAILED_TTL < CACHE_TTL);
+
+        let good = snap();
+        assert_eq!(
+            ttl_for(&good),
+            CACHE_TTL,
+            "a healthy snapshot keeps the long TTL"
         );
     }
 

@@ -40,10 +40,28 @@ fn worker_threads() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(MIN_WORKER_THREADS);
 
-    // The floor still applies to an override BELOW it: asking for one worker on a
-    // 2-vCPU host is how this outage happened, and honouring that request would
-    // reintroduce it by configuration.
-    requested.unwrap_or(detected).max(MIN_WORKER_THREADS)
+    resolve_workers(requested, detected)
+}
+
+/// The decision itself, with both inputs passed in.
+///
+/// Separated so it can be tested without an ambient `TOKIO_WORKER_THREADS` or a
+/// particular core count deciding the outcome — a test that reads the environment
+/// fails on someone's machine for reasons unrelated to the code (Codex, PR #502).
+///
+/// The floor applies to an override BELOW it: asking for one worker on a 2-vCPU
+/// host is how CIRISServer#501 happened, and honouring that would reintroduce the
+/// outage by configuration.
+const fn resolve_workers(requested: Option<usize>, detected: usize) -> usize {
+    let want = match requested {
+        Some(n) => n,
+        None => detected,
+    };
+    if want > MIN_WORKER_THREADS {
+        want
+    } else {
+        MIN_WORKER_THREADS
+    }
 }
 
 fn main() -> Result<()> {
@@ -621,21 +639,32 @@ fn current_utc_date() -> String {
 mod tests {
     use super::*;
 
-    /// The floor is the point: a 2-vCPU host must not get a 2-slot runtime.
+    /// A 2-vCPU host must not get a 2-slot runtime, where one blocking task leaves
+    /// HTTP unschedulable (CIRISServer#446, hit in #501).
     #[test]
-    fn the_worker_count_never_falls_below_the_floor() {
-        assert!(worker_threads() >= MIN_WORKER_THREADS);
+    fn a_small_host_still_gets_the_floor() {
+        assert_eq!(resolve_workers(None, 1), MIN_WORKER_THREADS);
+        assert_eq!(resolve_workers(None, 2), MIN_WORKER_THREADS);
     }
 
-    /// …and it is a FLOOR, not a cap. A 32-core canonical must still get 32, or
-    /// fixing the small host would throttle the large one.
+    /// It is a FLOOR, not a cap — a 32-core canonical must still get 32, or fixing
+    /// the small host throttles the large one.
     #[test]
     fn the_floor_never_caps_a_large_host() {
-        let cores = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(MIN_WORKER_THREADS);
-        if cores > MIN_WORKER_THREADS {
-            assert_eq!(worker_threads(), cores);
-        }
+        assert_eq!(resolve_workers(None, 32), 32);
+    }
+
+    /// A deliberate high override is honoured even above the detected core count:
+    /// an operator asking for more knows something the host report does not say.
+    #[test]
+    fn a_high_override_is_honoured() {
+        assert_eq!(resolve_workers(Some(16), 2), 16);
+    }
+
+    /// …but an override BELOW the floor is still floored. Asking for one worker on
+    /// a 2-vCPU host is exactly how the outage happened.
+    #[test]
+    fn an_override_cannot_go_under_the_floor() {
+        assert_eq!(resolve_workers(Some(1), 2), MIN_WORKER_THREADS);
     }
 }
