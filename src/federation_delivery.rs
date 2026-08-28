@@ -1448,6 +1448,15 @@ pub async fn run_federation_delivery(
                                 }
                             }
                         }
+                        // RESET, or the pause buys nothing (Codex, PR #502). The
+                        // interval's next deadline elapses DURING the sleep, so the
+                        // following `tick()` is already ready and fires at once —
+                        // the stall branch would shift a reconcile by a couple of
+                        // seconds rather than omitting one, on exactly the hosts
+                        // with no headroom to spare. `reset` puts the next deadline
+                        // a full cadence from now, so a stalled node genuinely
+                        // halves its reconcile rate.
+                        interval.reset();
                     }
                     if last_logged != Some(count) {
                         tracing::info!(
