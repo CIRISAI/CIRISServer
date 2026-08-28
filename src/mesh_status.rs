@@ -89,11 +89,7 @@ pub async fn cached(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
             }
         }
     }
-    let fresh = refresh(engine).await;
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), fresh.clone()));
-    }
-    fresh
+    refresh_into_cache(engine).await
 }
 
 /// Take a new snapshot, reading each figure independently so one failure does not
@@ -133,6 +129,53 @@ pub async fn refresh(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
         trace_events,
         unavailable,
     }
+}
+
+/// Take a snapshot and store it, whatever its outcome.
+///
+/// A refresh that FAILED is still worth caching: its `unavailable` notes are the
+/// current truth, and discarding it would leave callers reading a healthy older
+/// snapshot while the store is unreadable.
+async fn refresh_into_cache(engine: &ciris_persist::prelude::Engine) -> MeshStatus {
+    let fresh = refresh(engine).await;
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// Warm the cache on a cadence so no caller ever pays for the read.
+///
+/// Without this the first request after each TTL expiry pays the full cost, and on
+/// a public endpoint that moment is the busiest by construction — the request that
+/// finds the cache cold is as likely to be the thousandth as the first. `cached`
+/// still falls back to computing, so a request arriving before the loop's first
+/// tick is answered rather than refused.
+///
+/// Refreshes at half the TTL, so a snapshot is replaced before it goes stale
+/// rather than exactly as it does.
+pub fn spawn_refresh_loop(
+    engine: std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> tokio::task::JoinHandle<()> {
+    let cadence = CACHE_TTL / 2;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(cadence);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tracing::info!(
+            cadence_secs = cadence.as_secs(),
+            "mesh-status refresh loop started (public snapshot warmed on a cadence)"
+        );
+        loop {
+            interval.tick().await;
+            let snap = refresh_into_cache(&engine).await;
+            if !snap.unavailable.is_empty() {
+                tracing::debug!(
+                    unavailable = snap.unavailable.len(),
+                    "mesh-status refresh completed with unreadable figures"
+                );
+            }
+        }
+    })
 }
 
 #[cfg(test)]
