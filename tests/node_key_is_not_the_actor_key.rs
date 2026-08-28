@@ -404,15 +404,14 @@ async fn provisioning_verifies_by_reading_the_directory_back() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// **An agent-carrying node whose actor key is unregistered is REFUSED.**
+/// **An actor key this node cannot speak for is refused.**
 ///
-/// This is the state that produced 3,404 refusals on one key in production:
-/// every row the brain authors is rejected at every peer with
-/// `attesting_key_id … does not exist in federation_keys`. Failing here puts it
-/// in front of whoever is starting the node, rather than in a peer's log they
-/// cannot read.
+/// The remaining honest boundary after auto-registration. We can self-register the
+/// key this node's engine HOLDS; we cannot manufacture a proof of possession for
+/// somebody else's, and an agent is hard-bound to its node precisely so that this
+/// question has a local answer.
 #[tokio::test]
-async fn an_agent_carrying_node_with_an_unregistered_actor_is_refused() {
+async fn an_actor_key_this_node_cannot_speak_for_is_refused() {
     let tmp = std::env::temp_dir().join(format!("ciris-prov-noactor-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     let engine = engine_for("carrier").await;
@@ -424,13 +423,118 @@ async fn an_agent_carrying_node_with_an_unregistered_actor_is_refused() {
         Some("an-actor-nobody-registered"),
     )
     .await
-    .expect_err("an unregistered actor must refuse provisioning, so edge does not start");
+    .expect_err("a key this node holds no possession proof for must refuse provisioning");
     let msg = err.to_string();
     assert!(
-        msg.contains("absent from `federation_keys`"),
-        "the refusal must name the missing registration, got: {msg}"
+        msg.contains("no proof of possession"),
+        "the refusal must name the possession gap, got: {msg}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The cure: an unregistered actor key that IS this engine's own is REGISTERED,
+/// not refused.**
+///
+/// The production state this closes — 1,943 refusals in one 30-minute window
+/// reading `attesting_key_id … does not exist in federation_keys`, from four keys,
+/// retried with no backoff. The old behaviour bailed here, which moved the failure
+/// from "a silent storm in a peer's log" to "your node will not boot" without ever
+/// giving the caller a way to satisfy the precondition: no surface to register an
+/// actor key existed at all (`attest::register_key` had ten test call sites and
+/// zero production ones).
+///
+/// `resolve_node_identity` already treats this same `Unregistered` verdict as a
+/// routine first boot for the NODE key. This asserts the actor key gets the same
+/// treatment.
+#[tokio::test]
+async fn an_unregistered_actor_that_is_this_engines_own_is_registered_not_refused() {
+    let tmp = std::env::temp_dir().join(format!("ciris-prov-selfactor-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let engine = engine_for("selfcarrier").await;
+
+    let derived = ciris_server::attest::KeySigner::Engine(&engine)
+        .key_id()
+        .await
+        .expect("derive this engine's actor key_id");
+
+    // Precondition: it really is absent, so the test proves a registration rather
+    // than observing one that already happened.
+    assert_eq!(
+        classify(engine.federation_directory().as_ref(), &derived)
+            .await
+            .expect("classify"),
+        IdentityVerdict::Unregistered,
+        "precondition: the actor key must start unregistered"
+    );
+
+    ciris_server::node_key::provision_node_identity(&engine, "prov-self", &tmp, Some(&derived))
+        .await
+        .expect("an agent-carrying node registers its own actor key instead of refusing to start");
+
+    match classify(engine.federation_directory().as_ref(), &derived)
+        .await
+        .expect("classify")
+    {
+        IdentityVerdict::Actor { .. } => {}
+        other => panic!("the registered actor key must read back as an actor, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **Occurrences are INDEPENDENT by default — the 99% case.**
+///
+/// Production holds nine `echo-core` keys, nine `datum`, eight `echo-speculative`,
+/// every one deliberately unlinked: an agent is hard-bound to the node hosting it,
+/// so separate occurrences are separate selves. All 200 occurrence rows on the
+/// canonical are self-referential, and this pins that we reproduce it rather than
+/// quietly joining agents that must stay apart.
+#[tokio::test]
+async fn an_agent_occurrence_is_its_own_self_by_default() {
+    let engine = engine_for("indep").await;
+    let derived = ciris_server::attest::KeySigner::Engine(&engine)
+        .key_id()
+        .await
+        .expect("derive");
+
+    ciris_server::node_key::register_actor_occurrence(&engine, &derived, None)
+        .await
+        .expect("register an independent agent occurrence");
+
+    // It acts for itself and for nothing else.
+    assert!(ciris_server::auth::verify::signer_acts_for(&engine, &derived, &derived).await);
+    let other = "some-unrelated-agent-key";
+    assert!(
+        !ciris_server::auth::verify::signer_acts_for(&engine, &derived, other).await,
+        "an independent occurrence must NOT act for another agent"
+    );
+}
+
+/// **The scout case: several occurrences of ONE self.**
+///
+/// Scout is the only multi-occurrence agent, and this path has never run in
+/// production — the canonical holds zero non-self-referential occurrence rows — so
+/// it is proven by test rather than trusted. `signer_acts_for` is the consumer that
+/// lights up, and it has no production exercise behind it either.
+#[tokio::test]
+async fn a_multi_occurrence_agent_acts_for_its_shared_root() {
+    let engine = engine_for("scoutcarrier").await;
+    const ROOT: &str = "scout-root-identity";
+    register(&engine, &signer_for(ROOT), ROOT, "agent").await;
+
+    let derived = ciris_server::attest::KeySigner::Engine(&engine)
+        .key_id()
+        .await
+        .expect("derive");
+
+    ciris_server::node_key::register_actor_occurrence(&engine, &derived, Some(ROOT))
+        .await
+        .expect("bind this occurrence under the shared root");
+
+    assert!(
+        ciris_server::auth::verify::signer_acts_for(&engine, &derived, ROOT).await,
+        "an occurrence bound under a root must act for that root — this is the whole \
+         point of the multi-occurrence path"
+    );
 }
 
 /// An agent-carrying node whose "actor" is itself `node`-typed is refused — that

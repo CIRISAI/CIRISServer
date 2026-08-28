@@ -775,6 +775,101 @@ fn policy_of(
 ///
 /// # Errors
 /// Keystore/seed IO, or a registration failure that is not a benign conflict.
+/// **Register an agent's ACTOR key as an occurrence, minting nothing.**
+///
+/// This is the cure for the refusal storm the `Unregistered` arm below used to
+/// merely announce: an actor key that never reached `federation_keys` has every
+/// row it authors refused at every peer, and the peer's log is not one the agent's
+/// operator can read. Measured on the canonical in one 30-minute window: **1,943
+/// refusals** reading `attesting_key_id … does not exist in federation_keys`,
+/// from four keys, retried without backoff.
+///
+/// # Why this needs no new key material
+///
+/// The actor key is the ENGINE's own identity — the one `emit_attestation_self`
+/// already signs with, and the one [`crate::attest::KeySigner::key_id`] derives.
+/// The node key is the newly-minted half of the split; the actor keeps the
+/// pre-existing keypair. So registering it is a proof-of-possession the node can
+/// already produce, and [`crate::attest::register_key`] reads both pubkeys off a
+/// live probe signature rather than a re-opened seed that might have diverged.
+///
+/// # Occurrences are INDEPENDENT by default
+///
+/// `root_identity_key_id` is `None` for every agent but one, and that default is
+/// load-bearing rather than a shortcut. Production holds nine `echo-core` keys,
+/// nine `datum`, eight `echo-speculative` — all deliberately unlinked, because an
+/// agent is hard-bound to the node that hosts it and separate occurrences are
+/// separate selves. `None` therefore binds the occurrence to ITSELF, reproducing
+/// exactly what the mesh already does (all 200 occurrence rows on the canonical
+/// are self-referential).
+///
+/// Passing `Some(root)` is for the genuine multi-occurrence agent — scout is the
+/// only one — where several occurrences ARE one self and `signer_acts_for` should
+/// treat any active one as acting for it. That path has never run in production
+/// (zero non-self-referential rows exist), so it is exercised by test here rather
+/// than trusted.
+///
+/// Idempotent: registration treats a matching row as success, and binding an
+/// occurrence that already exists is a no-op.
+///
+/// # Errors
+/// If the engine does not hold `actor_key_id` (we cannot prove possession of a key
+/// we do not have), or if registration or binding fails.
+pub async fn register_actor_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    actor_key_id: &str,
+    root_identity_key_id: Option<&str>,
+) -> Result<()> {
+    use ciris_persist::federation::types::{device_class, identity_type};
+
+    let signer = crate::attest::KeySigner::Engine(engine);
+    let derived = signer
+        .key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve this engine's derived actor key_id: {e}"))?;
+
+    // The honest boundary. We can self-register the key this node HOLDS; we cannot
+    // manufacture a proof of possession for someone else's. Bailing here is
+    // correct in a way the old blanket bail was not: it fires only when the caller
+    // named a key we genuinely cannot speak for.
+    if derived != actor_key_id {
+        anyhow::bail!(
+            "cannot register actor key {actor_key_id:?}: this engine signs as {derived:?}, so it              holds no proof of possession for it. An agent is hard-bound to its node — the actor              key must be the one this node's engine signs with."
+        );
+    }
+
+    crate::attest::register_key(
+        engine,
+        crate::attest::KeySigner::Engine(engine),
+        actor_key_id,
+        identity_type::AGENT,
+        serde_json::Value::Null,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("register actor key {actor_key_id}: {e}"))?;
+
+    let identity_key_id = root_identity_key_id.unwrap_or(actor_key_id);
+    crate::auth::occurrence::bind_occurrence_core(
+        engine,
+        identity_key_id,
+        actor_key_id,
+        device_class::AGENT,
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("bind actor occurrence {actor_key_id}: {e}"))?;
+
+    tracing::info!(
+        actor_key_id = %actor_key_id,
+        identity_key_id = %identity_key_id,
+        independent = root_identity_key_id.is_none(),
+        "actor key registered and bound as an agent occurrence"
+    );
+    Ok(())
+}
+
 pub async fn provision_node_identity(
     engine: &ciris_persist::prelude::Engine,
     keystore_alias: &str,
@@ -812,11 +907,31 @@ pub async fn provision_node_identity(
     if let Some(actor) = actor_key_id {
         match classify(dir.as_ref(), actor).await? {
             IdentityVerdict::Actor { .. } => {}
-            IdentityVerdict::Unregistered => anyhow::bail!(
-                "node identity NOT provisioned: this node carries an agent, but its actor \
-                 key {actor:?} is absent from `federation_keys`. Every row it authors \
-                 would be refused at every peer."
-            ),
+            // Absent ⇒ REGISTER it, do not refuse to start. An unregistered actor
+            // key is a first boot, exactly as it is for the node key a few hundred
+            // lines up (`resolve_node_identity` registers rather than bails on the
+            // same verdict). Refusing here only moved the agent team's failure from
+            // "a silent storm at a peer" to "your node will not boot" — better to
+            // read, but still a precondition we gave them no way to satisfy.
+            IdentityVerdict::Unregistered => {
+                tracing::info!(
+                    actor_key_id = %actor,
+                    "actor key is unregistered — registering it (first boot for this agent \
+                     occurrence)"
+                );
+                register_actor_occurrence(engine, actor, None).await?;
+                // Re-READ, do not trust the write: registration treats a benign
+                // conflict as success, which is exactly how a node once ran for
+                // months on a key whose row said something other than what the
+                // write reported.
+                match classify(dir.as_ref(), actor).await? {
+                    IdentityVerdict::Actor { .. } => {}
+                    other => anyhow::bail!(
+                        "node identity NOT provisioned: registered actor key {actor:?} reads back \
+                         as {other:?}, not an actor."
+                    ),
+                }
+            }
             other => anyhow::bail!(
                 "node identity NOT provisioned: the actor key {actor:?} classifies as \
                  {other:?}. An agent-carrying node needs a key that IS an actor — a \
