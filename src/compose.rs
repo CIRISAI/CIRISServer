@@ -1540,6 +1540,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    keep. Gating the disk-protector on having enough disk would disable it
     //    exactly when it matters — the shape of gate that produced #279's
     //    silently-absent listener. ────────────────────────────────────────────
+    // The mesh-status cache is a process-global and the in-process restart is
+    // supported, so a node coming back on a different home/identity must not serve
+    // the previous node's observer id and counts (Codex, PR #502).
+    crate::mesh_status::invalidate();
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {

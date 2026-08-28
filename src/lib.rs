@@ -340,6 +340,9 @@ pub mod node_control;
 /// carries the superset.
 pub mod node_identity;
 pub mod node_key;
+
+/// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
+pub mod node_runtime;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
 /// `node_code_codec.py` (CEG §0.10). `encode`/`encode_qr`/`decode` round-trip
 /// byte-identically with the agent so a code shared from one app decodes on the
@@ -1257,7 +1260,11 @@ mod python {
     /// their futures need not be `Send` (import_traces holds a `dyn io::Read`
     /// across awaits). The EMBEDDED entry uses [`rt_block_on_reentrant`].
     fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
-        let rt = tokio::runtime::Runtime::new()
+        // FLOORED (CIRISServer#501). This hosts `serve_with_python_adapter` — the
+        // embedded agent/fold topology, on exactly the small hosts the floor exists
+        // for. `Runtime::new()` here would have given them two workers while the
+        // fix reported success.
+        let rt = crate::node_runtime::build("ciris-node")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         rt.block_on(fut)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
@@ -1282,7 +1289,9 @@ mod python {
         // construction, and the same shield covers every inner persist/lens
         // sync helper reached from this entry.
         let run = || -> PyResult<()> {
-            let rt = tokio::runtime::Runtime::new()
+            // FLOORED for the same reason as `rt_block_on` — this is the reentrant
+            // serve path, same hosts, same two-worker exposure.
+            let rt = crate::node_runtime::build("ciris-node")
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             // ── RUNTIME-TOPOLOGY PROBE (#315 field diagnosis) ────────────────
             // Prove the SERVE runtime's time driver independently of any task

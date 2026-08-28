@@ -131,21 +131,66 @@ static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// A poisoned lock recomputes rather than failing: a status surface that goes dark
 /// because of its own cache is worse than one that costs a query.
 pub async fn cached(engine: &std::sync::Arc<ciris_persist::prelude::Engine>) -> MeshStatus {
-    let now = Instant::now();
-    if let Some(snap) = fresh_snapshot(now) {
+    if let Some(snap) = fresh_snapshot(Instant::now()) {
         return snap;
     }
 
-    // SINGLE-FLIGHT. Without it, a burst arriving after the TTL expires starts one
-    // page-walk per request — and this endpoint is public, so a burst is the
-    // expected shape rather than the unlucky one. A caller that loses the race is
-    // served the stale snapshot, which is what `as_of` is for.
+    // SINGLE-FLIGHT. Without it, a burst arriving after expiry starts one page walk
+    // per request — and this endpoint is public, so a burst is the expected shape.
     let Some(flight) = RefreshFlight::claim() else {
         return last_snapshot().unwrap_or_else(|| {
             MeshStatus::unread("a refresh is already in flight and no snapshot has been taken yet")
         });
     };
-    refresh_off_runtime(engine, flight).await
+
+    // RECHECK AFTER CLAIMING. The staleness test above and the claim are not one
+    // atomic step: a request can read "stale", be descheduled, and resume after
+    // another request has finished a refresh and released the flag. It would then
+    // claim a free slot and launch a redundant full page walk, and under a delayed
+    // burst those serialize (Codex, PR #502). Cheap to recheck, expensive not to.
+    if let Some(snap) = fresh_snapshot(Instant::now()) {
+        drop(flight);
+        return snap;
+    }
+
+    // NEVER MAKE A CALLER WAIT FOR THE WALK. Awaiting it here meant exactly one
+    // public request per TTL paid a full database scan and could time out — and
+    // with the periodic warmer gone, that cost landed on a user rather than on a
+    // background loop. The refresh runs detached; this request answers now with
+    // whatever is on hand, which is what `as_of` is for.
+    let stale = last_snapshot();
+    spawn_refresh(engine, flight);
+    stale.unwrap_or_else(|| MeshStatus::unread("the first snapshot is being taken now"))
+}
+
+/// Run a refresh detached, on a blocking thread, owning the claim.
+///
+/// The claim is MOVED INTO the task, and that placement is the protection: a
+/// started blocking task cannot be cancelled, but a request future can be. If the
+/// guard lived in the request it would release while the walk was still running,
+/// and the next request would start a second one — repeated cancellation against a
+/// public endpoint would then defeat single-flight entirely.
+fn spawn_refresh(engine: &std::sync::Arc<ciris_persist::prelude::Engine>, flight: RefreshFlight) {
+    let engine = std::sync::Arc::clone(engine);
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let _flight = flight;
+        handle.block_on(refresh_into_cache(&engine));
+    });
+}
+
+/// **Drop the cached snapshot.**
+///
+/// The cache is a process-global and the in-process
+/// `shutdown_node()` / `serve_with_adapter()` restart is supported, so a node that
+/// comes back on a different home, identity or reset store would otherwise serve
+/// the PREVIOUS node's observer id and counts for up to a full TTL (Codex, PR
+/// #502). Called at composition, so a new node never inherits an old node's view of
+/// the mesh.
+pub fn invalidate() {
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = None;
+    }
 }
 
 /// The cached snapshot if it is still inside its TTL at `now`.
@@ -173,40 +218,6 @@ impl RefreshFlight {
 impl Drop for RefreshFlight {
     fn drop(&mut self) {
         REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// Take the snapshot on a BLOCKING thread, never on a runtime worker.
-///
-/// `storage_summary()` does its SQLite work inline — no `spawn_blocking` anywhere
-/// in persist's retention path — so awaiting it from a worker occupies that worker
-/// for the whole page walk. A `#[tokio::main]` runtime sizes to core count, so on a
-/// 2-vCPU host that is one of TWO workers, and the accept loop loses: the socket
-/// stays LISTEN while `Recv-Q` climbs and nothing is ever accepted
-/// (CIRISServer#501). A blocking thread is not a worker, so the walk cannot starve
-/// the read API however long it takes.
-async fn refresh_off_runtime(
-    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
-    flight: RefreshFlight,
-) -> MeshStatus {
-    let engine = std::sync::Arc::clone(engine);
-    let handle = tokio::runtime::Handle::current();
-    // The claim is MOVED INTO the blocking task, and that placement IS the
-    // protection. A started blocking task cannot be cancelled, but the future
-    // awaiting it can be — a client disconnect drops this frame. If the guard lived
-    // here it would release while the page walk was still running, letting the next
-    // request claim the slot and start a SECOND walk; repeated cancellation against
-    // a public endpoint would defeat single-flight entirely and rebuild the
-    // amplification it exists to prevent (Codex, PR #502). Owned by the work.
-    match tokio::task::spawn_blocking(move || {
-        let _flight = flight;
-        handle.block_on(refresh_into_cache(&engine))
-    })
-    .await
-    {
-        Ok(snap) => snap,
-        Err(e) => last_snapshot()
-            .unwrap_or_else(|| MeshStatus::unread(&format!("refresh task failed: {e}"))),
     }
 }
 
@@ -340,6 +351,28 @@ mod tests {
             CACHE_TTL >= Duration::from_secs(600),
             "storage_summary() runs SUM(pgsize) FROM dbstat — O(database size). \
              A short TTL turns a status endpoint into a scheduled full scan."
+        );
+    }
+
+    /// A new node must not inherit the previous node's view of the mesh.
+    ///
+    /// The cache is a process-global and the in-process restart is supported, so
+    /// without this a node coming back on a different home, identity or reset store
+    /// would serve the OLD observer id and counts for up to a full TTL.
+    #[test]
+    fn invalidate_drops_the_previous_nodes_snapshot() {
+        {
+            let mut g = CACHE.lock().expect("lock");
+            *g = Some((Instant::now(), snap()));
+        }
+        assert!(
+            last_snapshot().is_some(),
+            "precondition: a snapshot is cached"
+        );
+        invalidate();
+        assert!(
+            last_snapshot().is_none(),
+            "composition must clear the prior node's view"
         );
     }
 

@@ -7,70 +7,12 @@
 
 use anyhow::Result;
 
-/// Worker threads for the node runtime — **never fewer than [`MIN_WORKER_THREADS`]**.
-///
-/// A bare `#[tokio::main]` sizes the runtime to core count, so a 2-vCPU host gets
-/// TWO workers. That is a two-slot budget for everything the node does at once, and
-/// any sustained blocking inside a worker leaves exactly one slot for the accept
-/// loop, the replication runtime, the scorer and every request in flight. When the
-/// second slot goes too, HTTP is simply unschedulable: the socket stays LISTEN,
-/// `Recv-Q` climbs as the kernel completes handshakes, and userspace never calls
-/// `accept()` — a node that looks alive in every other respect and answers nothing
-/// (CIRISServer#446, hit hard in #501).
-///
-/// A floor is not a fix for blocking work — the blocking read that exposed this is
-/// fixed where it lives, on a blocking thread. It is the margin that keeps ONE such
-/// mistake from taking the read API down, instead of the node having no headroom at
-/// all on the smallest host it supports.
-///
-/// `max`, never a fixed count: a 32-core canonical must still get 32.
-const MIN_WORKER_THREADS: usize = 4;
-
-fn worker_threads() -> usize {
-    // `#[tokio::main]` honoured TOKIO_WORKER_THREADS; building the runtime by hand
-    // silently dropped it, which would CAP a deliberately-tuned deployment — the
-    // opposite of this function's stated contract (Codex review, PR #502). An
-    // operator who asks for more than the host reports knows something we do not.
-    let requested = std::env::var("TOKIO_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0);
-
-    let detected = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(MIN_WORKER_THREADS);
-
-    resolve_workers(requested, detected)
-}
-
-/// The decision itself, with both inputs passed in.
-///
-/// Separated so it can be tested without an ambient `TOKIO_WORKER_THREADS` or a
-/// particular core count deciding the outcome — a test that reads the environment
-/// fails on someone's machine for reasons unrelated to the code (Codex, PR #502).
-///
-/// The floor applies to an override BELOW it: asking for one worker on a 2-vCPU
-/// host is how CIRISServer#501 happened, and honouring that would reintroduce the
-/// outage by configuration.
-const fn resolve_workers(requested: Option<usize>, detected: usize) -> usize {
-    let want = match requested {
-        Some(n) => n,
-        None => detected,
-    };
-    if want > MIN_WORKER_THREADS {
-        want
-    } else {
-        MIN_WORKER_THREADS
-    }
-}
-
 fn main() -> Result<()> {
-    let workers = worker_threads();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .enable_all()
-        .thread_name("ciris-node")
-        .build()?;
+    // The floor lives in the library, not here: `main.rs` is one of THREE runtime
+    // construction sites, and the other two host the embedded agent/fold serve
+    // path on exactly the small hosts this exists for (CIRISServer#501).
+    let workers = ciris_server::node_runtime::worker_threads();
+    let runtime = ciris_server::node_runtime::build("ciris-node")?;
     runtime.block_on(async_main(workers))
 }
 
@@ -82,7 +24,7 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     tracing::info!(
         worker_threads,
         available_parallelism = ?std::thread::available_parallelism().map(std::num::NonZeroUsize::get),
-        min_worker_threads = MIN_WORKER_THREADS,
+        min_worker_threads = ciris_server::node_runtime::MIN_WORKER_THREADS,
         "node runtime sized (floored so a small host keeps scheduling headroom — CIRISServer#446)"
     );
     let mut args = std::env::args().skip(1);
@@ -633,38 +575,4 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
 /// overridable so a CI run can stamp the exact build date).
 fn current_utc_date() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A 2-vCPU host must not get a 2-slot runtime, where one blocking task leaves
-    /// HTTP unschedulable (CIRISServer#446, hit in #501).
-    #[test]
-    fn a_small_host_still_gets_the_floor() {
-        assert_eq!(resolve_workers(None, 1), MIN_WORKER_THREADS);
-        assert_eq!(resolve_workers(None, 2), MIN_WORKER_THREADS);
-    }
-
-    /// It is a FLOOR, not a cap — a 32-core canonical must still get 32, or fixing
-    /// the small host throttles the large one.
-    #[test]
-    fn the_floor_never_caps_a_large_host() {
-        assert_eq!(resolve_workers(None, 32), 32);
-    }
-
-    /// A deliberate high override is honoured even above the detected core count:
-    /// an operator asking for more knows something the host report does not say.
-    #[test]
-    fn a_high_override_is_honoured() {
-        assert_eq!(resolve_workers(Some(16), 2), 16);
-    }
-
-    /// …but an override BELOW the floor is still floored. Asking for one worker on
-    /// a 2-vCPU host is exactly how the outage happened.
-    #[test]
-    fn an_override_cannot_go_under_the_floor() {
-        assert_eq!(resolve_workers(Some(1), 2), MIN_WORKER_THREADS);
-    }
 }
