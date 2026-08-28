@@ -82,7 +82,13 @@ impl MeshStatus {
     pub fn unread(why: &str) -> Self {
         Self {
             as_of: Utc::now(),
-            stale_after_seconds: CACHE_TTL.as_secs(),
+            // ZERO, not the TTL. This is a transient placeholder handed to a caller
+            // that lost the refresh race, and a real snapshot may land moments
+            // later. Stamping the full TTL would tell a consumer honouring the
+            // contract that an all-null mesh is current for fifteen minutes, so it
+            // would keep showing "unavailable" long after the winner populated the
+            // cache (Codex, PR #502). Already stale ⇒ retry at will.
+            stale_after_seconds: 0,
             observer_key_id: None,
             identities: None,
             trace_events: None,
@@ -114,12 +120,12 @@ pub async fn cached(engine: &std::sync::Arc<ciris_persist::prelude::Engine>) -> 
     // page-walk per request — and this endpoint is public, so a burst is the
     // expected shape rather than the unlucky one. A caller that loses the race is
     // served the stale snapshot, which is what `as_of` is for.
-    let Some(_flight) = RefreshFlight::claim() else {
+    let Some(flight) = RefreshFlight::claim() else {
         return last_snapshot().unwrap_or_else(|| {
             MeshStatus::unread("a refresh is already in flight and no snapshot has been taken yet")
         });
     };
-    refresh_off_runtime(engine).await
+    refresh_off_runtime(engine, flight).await
 }
 
 /// The cached snapshot if it is still inside its TTL at `now`.
@@ -161,10 +167,23 @@ impl Drop for RefreshFlight {
 /// the read API however long it takes.
 async fn refresh_off_runtime(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    flight: RefreshFlight,
 ) -> MeshStatus {
     let engine = std::sync::Arc::clone(engine);
     let handle = tokio::runtime::Handle::current();
-    match tokio::task::spawn_blocking(move || handle.block_on(refresh_into_cache(&engine))).await {
+    // The claim is MOVED INTO the blocking task, and that placement IS the
+    // protection. A started blocking task cannot be cancelled, but the future
+    // awaiting it can be — a client disconnect drops this frame. If the guard lived
+    // here it would release while the page walk was still running, letting the next
+    // request claim the slot and start a SECOND walk; repeated cancellation against
+    // a public endpoint would defeat single-flight entirely and rebuild the
+    // amplification it exists to prevent (Codex, PR #502). Owned by the work.
+    match tokio::task::spawn_blocking(move || {
+        let _flight = flight;
+        handle.block_on(refresh_into_cache(&engine))
+    })
+    .await
+    {
         Ok(snap) => snap,
         Err(e) => last_snapshot()
             .unwrap_or_else(|| MeshStatus::unread(&format!("refresh task failed: {e}"))),
@@ -299,34 +318,29 @@ mod tests {
         );
     }
 
-    /// Only ONE page walk may ever be in flight. The endpoint is public, so a burst
-    /// after expiry is the expected shape, and one walk per request is how a status
-    /// surface becomes an outage.
+    /// Only ONE page walk in flight, ever — and the slot survives a panic.
+    ///
+    /// ONE test, not two: `REFRESHING` is a process-global and the harness runs
+    /// tests in parallel, so two tests each claiming it would fail each other
+    /// nondeterministically while the implementation was correct (Codex, PR #502).
+    /// Sequential assertions in one test cannot race themselves.
     #[test]
-    fn only_one_refresh_may_be_in_flight() {
-        let first = RefreshFlight::claim().expect("first claim wins");
+    fn the_refresh_slot_is_exclusive_and_panic_safe() {
+        let first = RefreshFlight::claim().expect("first wins");
         assert!(
             RefreshFlight::claim().is_none(),
-            "a second refresh must not start while one is running"
+            "a second walk must not start while one is running"
         );
         drop(first);
-        assert!(
-            RefreshFlight::claim().is_some(),
-            "the slot must be reusable once the first finishes"
-        );
-    }
+        assert!(RefreshFlight::claim().is_some(), "the slot is reusable");
 
-    /// The flag clears even if the read panics, or the surface would be wedged
-    /// permanently stale by one bad refresh.
-    #[test]
-    fn a_panicking_refresh_does_not_wedge_the_flight_flag() {
         let _ = std::panic::catch_unwind(|| {
-            let _flight = RefreshFlight::claim().expect("claim");
+            let _f = RefreshFlight::claim().expect("claim");
             panic!("read blew up");
         });
         assert!(
             RefreshFlight::claim().is_some(),
-            "Drop must release the slot on the panic path"
+            "Drop releases the slot even when the read panics"
         );
     }
 

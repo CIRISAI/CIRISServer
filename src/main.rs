@@ -27,10 +27,23 @@ use anyhow::Result;
 const MIN_WORKER_THREADS: usize = 4;
 
 fn worker_threads() -> usize {
-    std::thread::available_parallelism()
+    // `#[tokio::main]` honoured TOKIO_WORKER_THREADS; building the runtime by hand
+    // silently dropped it, which would CAP a deliberately-tuned deployment — the
+    // opposite of this function's stated contract (Codex review, PR #502). An
+    // operator who asks for more than the host reports knows something we do not.
+    let requested = std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0);
+
+    let detected = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
-        .unwrap_or(MIN_WORKER_THREADS)
-        .max(MIN_WORKER_THREADS)
+        .unwrap_or(MIN_WORKER_THREADS);
+
+    // The floor still applies to an override BELOW it: asking for one worker on a
+    // 2-vCPU host is how this outage happened, and honouring that request would
+    // reintroduce it by configuration.
+    requested.unwrap_or(detected).max(MIN_WORKER_THREADS)
 }
 
 fn main() -> Result<()> {

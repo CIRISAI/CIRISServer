@@ -210,35 +210,49 @@ const _: () = assert!(
     "the prune must stay bounded per pass or it becomes the task that starves accept"
 );
 
-/// **Bound the re-derivable federation tables.**
+/// **Bound the one federation table that is actually an observation log.**
 ///
-/// `transport_destinations` is what boot prime iterates, and nothing has ever
-/// pruned it: 11,034 rows on the canonical against 748 federation keys, because a
-/// row is written per binding and removed never. That is what made boot prime
-/// O(directory churn) rather than O(peers) and put time-to-serving on a curve that
-/// grows forever. `announced_peers` (9,067 rows) is the same shape.
+/// `announced_peers` is a running note about who this node has heard from:
+/// `first_seen_at` / `last_seen_at` / `announce_count`, populated on all 9,067 rows
+/// on the canonical. A stale entry is RE-DERIVABLE — the peer announces again and
+/// the row comes back — so ageing one out costs a round-trip, not a fact.
 ///
-/// **Keys are deliberately NOT pruned.** A `federation_keys` row is an identity
-/// anchor: delete it and every row that key ever authored becomes unverifiable.
-/// Keys need EXPIRY, not deletion — and expiry is unreachable today because
-/// `produce_self_key_record` has no `valid_until` parameter (CIRISVerify#267). So
-/// this bounds what is safe to bound and leaves identity alone.
+/// # Why `transport_destinations` is NOT pruned, despite being the bigger table
+///
+/// It was, until the measurement contradicted the premise (Codex review, PR #502).
+/// That table holds 11,034 rows against 748 keys and is what boot prime iterates,
+/// so it looked like the obvious target. But:
+///
+/// ```text
+/// transport_destinations, all 11,034 rows:  last_seen_at IS NULL
+/// a 30-day prune would delete:               5,408
+/// of those, never-observed asserted routes:  5,408   (100%)
+/// ```
+///
+/// There are no observations in it. Every row is an ASSERTION, and persist ages
+/// them on `COALESCE(last_seen_at, asserted_at)`, so the fallback that exists to
+/// stop NULL rows being immortal is the only clock any of them ever runs on.
+///
+/// Its keep-predicate (`signature IS NULL AND retired_at IS NULL`) protects signed,
+/// epoch-versioned replicated routes — but `TransportDestination` carries no
+/// signature field at all, so `put_transport_destination` writes NULL for every
+/// locally-asserted row. That includes the accord-quorum-authorized canonical
+/// address update in `accord.rs::canonical_address_update`, which writes
+/// `last_seen_at: None` and is only ever recreated by another quorum. An
+/// explicit-hash canonical cannot announce itself back, so pruning that row strands
+/// the node on an obsolete bootstrap address with no path to relearn the route.
+///
+/// Bounding that table needs a predicate persist cannot currently express —
+/// "stale OBSERVATION" as distinct from "old assertion" — so it is left alone and
+/// asked for upstream. The boot-prime outage is closed by taking the prime off the
+/// critical path and yielding, which makes table size cost background work rather
+/// than availability; shrinking the table was the optimisation, not the fix.
 ///
 /// Best-effort: a failure here is logged and the retention pass continues. Hygiene
 /// must never be the reason the corpus bound stops being enforced.
-async fn prune_federation_churn(engine: &Engine) -> (usize, usize) {
+async fn prune_federation_churn(engine: &Engine) -> usize {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(FEDERATION_CHURN_MAX_AGE_DAYS);
 
-    let dests = match engine
-        .prune_transport_destinations_not_seen_since(cutoff, FEDERATION_CHURN_MAX_ROWS)
-        .await
-    {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(error = %e, "retention: transport-destination prune failed — continuing");
-            0
-        }
-    };
     let peers = match engine
         .prune_announced_peers_not_seen_since(cutoff, FEDERATION_CHURN_MAX_ROWS)
         .await
@@ -250,16 +264,15 @@ async fn prune_federation_churn(engine: &Engine) -> (usize, usize) {
         }
     };
 
-    if dests > 0 || peers > 0 {
+    if peers > 0 {
         tracing::info!(
-            transport_destinations_pruned = dests,
             announced_peers_pruned = peers,
             cutoff_days = FEDERATION_CHURN_MAX_AGE_DAYS,
             capped_at = FEDERATION_CHURN_MAX_ROWS,
-            "retention: pruned re-derivable federation rows (bounds boot prime; keys untouched)"
+            "retention: pruned stale peer announcements (re-derivable; routes and keys untouched)"
         );
     }
-    (dests, peers)
+    peers
 }
 
 pub async fn run_pass(
