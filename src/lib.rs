@@ -293,6 +293,8 @@ pub mod key_standing;
 /// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
+/// The node's own short-lived load-shed observation.
+pub mod load_shed;
 pub mod location;
 
 /// Repetition-collapsing log layer — "event X occurred Y times in past Z".

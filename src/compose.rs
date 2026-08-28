@@ -1545,6 +1545,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the previous node's observer id and counts (Codex, PR #502).
     crate::mesh_status::invalidate();
 
+    // The node measures itself and says so, under its own authority and with an
+    // expiry — #501 was a node that raised `cpu_stall` correctly and went dark
+    // anyway. Declaring refuses nobody; enforcement stays cooperative.
+    crate::compose_status::phase("load_shed_observer");
+    let _load_shed_join = crate::load_shed::spawn(Arc::clone(&engine), cfg.key_id.clone());
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {

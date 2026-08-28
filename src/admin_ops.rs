@@ -3169,6 +3169,84 @@ fn detail_str(ev: &HardCaseEvent, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The hard-case kind a NODE uses to report a condition about ITSELF.
+///
+/// Deliberately NOT an `admin_action:` kind, and the distinction is the whole
+/// point rather than a way around a gate. `check_admin_action_attribution` requires
+/// a non-empty `delegation_id` on every admin action, because an admin action is a
+/// governance act by a PERSON who can be held to it. A node has no delegation and
+/// no such standing.
+///
+/// What a node authors is not a decision, it is an OBSERVATION about itself: "I
+/// measured contention and I am carrying less for now." Giving it its own kind
+/// keeps that difference legible in the vocabulary instead of hiding it in a field,
+/// and leaves the human-attribution gate exactly as strict as it was.
+#[must_use]
+pub fn node_observation_kind(act: SelfAct) -> String {
+    format!("node_self_observation:{}", act.axis())
+}
+
+/// Detail key carrying a node observation's expiry.
+pub const OBSERVATION_EXPIRES_AT: &str = "expires_at";
+
+/// Has this event's own stated expiry passed?
+///
+/// Only node observations carry one. A human declaration is durable because
+/// somebody took responsibility for it and can lift it; a node observation expires
+/// because nobody did. **The lifetime encodes the authority.**
+fn observation_expired(e: &HardCaseEvent, now: DateTime<Utc>) -> bool {
+    detail_str(e, OBSERVATION_EXPIRES_AT)
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .is_some_and(|t| t.with_timezone(&Utc) <= now)
+}
+
+/// **Record this node's own short-lived observation on a self axis.**
+///
+/// Authored under the node's own authority, so it is bounded in time by
+/// construction: it CANNOT outlive the observation that produced it. Renewal is
+/// re-observation, not inheritance — each renewal is a fresh measurement.
+///
+/// There is deliberately no lift. A node that recovers simply stops renewing, and a
+/// node that dies mid-emergency stops renewing too. **Recovery is the lift**, which
+/// is what makes this safe to automate: a durable self-declaration would need a
+/// human to clear it, and that human may never come — the eternal emergency
+/// `mesh_config_effect` refuses to create.
+///
+/// # Errors
+/// Propagates the store's write failure.
+pub async fn record_node_observation(
+    engine: &Arc<Engine>,
+    act: SelfAct,
+    node_key_id: &str,
+    now: DateTime<Utc>,
+    ttl: chrono::Duration,
+    reason: &str,
+) -> Result<String, String> {
+    let expires_at = now + ttl;
+    let ev = HardCaseEvent {
+        // Deterministic per (kind, node, second): a renewal inside the same second
+        // is the same observation, so re-recording is idempotent.
+        event_id: format!(
+            "{}:{node_key_id}:{}",
+            node_observation_kind(act),
+            now.timestamp()
+        ),
+        kind: node_observation_kind(act),
+        target_key_id: Some(node_key_id.to_owned()),
+        subject_key_id: Some(node_key_id.to_owned()),
+        detail: serde_json::json!({
+            OBSERVATION_EXPIRES_AT: expires_at.to_rfc3339(),
+            admin_field::REASON: reason,
+            // No delegation, stated rather than omitted. A reader distinguishing a
+            // person's decision from a node's observation should not have to infer
+            // it from an absent key.
+            "authored_by": "node",
+        }),
+        emitted_at: now,
+    };
+    record(engine, ev).await
+}
+
 /// **The pure fold** over one axis — a function of
 /// `(act, node_key_id, events, now)` and nothing else, so it is testable
 /// without a substrate and cannot depend on the order rows arrived in.
@@ -3200,15 +3278,23 @@ pub fn fold_self_standing(
 ) -> SelfFold {
     let assert_kind = admin_action_kind(act.assert_op());
     let lift_kind = admin_action_kind(act.lift_op());
+    let observation_kind = node_observation_kind(act);
     let mut mine: Vec<&HardCaseEvent> = events
         .iter()
         .filter(|e| {
-            (e.kind == assert_kind || e.kind == lift_kind)
+            (e.kind == assert_kind || e.kind == lift_kind || e.kind == observation_kind)
                 && e.target_key_id.as_deref() == Some(node_key_id)
                 && e.emitted_at <= now
+                // An EXPIRED node observation is not standing. This is the whole
+                // safety property of letting a node speak for itself: the act
+                // lapses on its own, so nobody has to notice that it should.
+                && !observation_expired(e, now)
         })
         .collect();
-    let declarations = mine.iter().filter(|e| e.kind == assert_kind).count();
+    let declarations = mine
+        .iter()
+        .filter(|e| e.kind == assert_kind || e.kind == observation_kind)
+        .count();
     let lifts = mine.len() - declarations;
     if mine.is_empty() {
         return SelfFold {
@@ -3224,7 +3310,8 @@ pub fn fold_self_standing(
     }
     // Sorts ASCENDING; the last element governs. `declaration_rank` is 1 for a
     // declaration and 0 for a lift — restriction sorts LAST, i.e. wins.
-    let declaration_rank = |e: &HardCaseEvent| u8::from(e.kind == assert_kind);
+    let declaration_rank =
+        |e: &HardCaseEvent| u8::from(e.kind == assert_kind || e.kind == observation_kind);
     mine.sort_by(|a, b| {
         a.emitted_at
             .cmp(&b.emitted_at)
@@ -3234,7 +3321,7 @@ pub fn fold_self_standing(
     let governing = mine[mine.len() - 1];
     SelfFold {
         axis: act.axis(),
-        standing: if governing.kind == assert_kind {
+        standing: if governing.kind == assert_kind || governing.kind == observation_kind {
             SelfStanding::InForce
         } else {
             SelfStanding::Lifted
@@ -4451,6 +4538,86 @@ mod tests {
         let mut ev = admin_action_event(op, target, Some(target), "deleg-1", "because", when);
         ev.event_id = format!("{}:{suffix}", ev.event_id);
         ev
+    }
+
+    /// Build a node self-observation with an explicit expiry.
+    fn obs_event(act: SelfAct, target: &str, when: DateTime<Utc>, ttl_secs: i64) -> HardCaseEvent {
+        HardCaseEvent {
+            event_id: format!(
+                "{}:{target}:{}",
+                node_observation_kind(act),
+                when.timestamp()
+            ),
+            kind: node_observation_kind(act),
+            target_key_id: Some(target.to_owned()),
+            subject_key_id: Some(target.to_owned()),
+            detail: serde_json::json!({
+                OBSERVATION_EXPIRES_AT: (when + chrono::Duration::seconds(ttl_secs)).to_rfc3339(),
+                "reason": "measured contention",
+                "authored_by": "node",
+            }),
+            emitted_at: when,
+        }
+    }
+
+    /// A node's own observation stands while it is live.
+    #[test]
+    fn a_live_node_observation_is_in_force() {
+        let ev = obs_event(SelfAct::ShedLoad, NODE, at(0), 180);
+        let f = fold_self_standing(SelfAct::ShedLoad, NODE, &[ev], at(60));
+        assert_eq!(f.standing, SelfStanding::InForce);
+        assert_eq!(f.declarations, 1);
+    }
+
+    /// **And stops standing on its own.** This is the entire safety property of
+    /// letting a node speak under its own authority: the act cannot outlive the
+    /// observation that produced it, and nobody has to notice that it should end.
+    #[test]
+    fn an_expired_node_observation_stands_for_nothing() {
+        let ev = obs_event(SelfAct::ShedLoad, NODE, at(0), 180);
+        let f = fold_self_standing(SelfAct::ShedLoad, NODE, &[ev], at(181));
+        assert_eq!(
+            f.standing,
+            SelfStanding::NeverDeclared,
+            "an expired self-observation must leave no standing behind"
+        );
+        assert_eq!(f.declarations, 0);
+    }
+
+    /// A HUMAN declaration is durable — it has no expiry and must not acquire one.
+    /// Somebody took responsibility for it and can lift it; that is the difference
+    /// the two kinds encode.
+    #[test]
+    fn a_human_declaration_does_not_expire() {
+        let ev = act_event(OP_SELF_SHED, NODE, at(0), "a");
+        let f = fold_self_standing(SelfAct::ShedLoad, NODE, &[ev], at(100_000));
+        assert_eq!(f.standing, SelfStanding::InForce);
+        assert!(
+            f.delegation_id.is_some(),
+            "a human act carries its delegation"
+        );
+    }
+
+    /// A person's lift governs over a node's observation that preceded it — the
+    /// node informs, the operator decides.
+    #[test]
+    fn a_human_lift_governs_over_an_earlier_node_observation() {
+        let obs = obs_event(SelfAct::ShedLoad, NODE, at(0), 3600);
+        let lift = act_event(OP_SELF_SHED_RELEASE, NODE, at(10), "b");
+        let f = fold_self_standing(SelfAct::ShedLoad, NODE, &[obs, lift], at(20));
+        assert_eq!(f.standing, SelfStanding::Lifted);
+    }
+
+    /// The two are distinguishable on the wire without a new field: a node
+    /// observation carries no delegation, because there was none.
+    #[test]
+    fn a_node_observation_is_told_apart_by_its_missing_delegation() {
+        let ev = obs_event(SelfAct::ShedLoad, NODE, at(0), 180);
+        let f = fold_self_standing(SelfAct::ShedLoad, NODE, &[ev], at(60));
+        assert!(
+            f.delegation_id.is_none(),
+            "a node has no delegation, and the fold must not imply one"
+        );
     }
 
     #[test]
