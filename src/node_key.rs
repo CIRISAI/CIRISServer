@@ -178,11 +178,21 @@ pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
 /// ACTOR (or, on a node with no brain, the key that used to do both jobs). It never
 /// named the node.
 ///
-/// # This mints a new node key
+/// # Who this actually affects
 ///
-/// The alias IS the sealed-keystore lookup. Done now because TWO `-node` keys exist
-/// across the whole federation — the split shipped in 0.5.189 and the embedded path
-/// has only just begun provisioning. Every later day multiplies it.
+/// Only a node that NEEDS a split. `resolve_node_identity` reaches `node_signer`
+/// (and therefore this alias) exclusively on the `Actor` / `Fused` /
+/// `OtherInfrastructure` verdicts; a key already registered `node` classifies
+/// `SubstrateOnly` and is USED as-is, minting nothing.
+///
+/// So `ciris-canonical-1-d7bdeu223k` — registered `canonical,node`, and `canonical`
+/// is not an actor role — keeps its key, its destination hash, and its peer routes.
+/// It never calls this function.
+///
+/// The nodes this reaches are exactly the ones that have NO node key yet: an
+/// agent-carrying node whose configured key is the actor. There is nothing to
+/// migrate, because there is nothing there to replace. Two `-node` keys exist
+/// across the whole federation today.
 #[must_use]
 pub fn node_alias(_host_alias: &str) -> String {
     NODE_ALIAS.to_owned()
@@ -1227,4 +1237,22 @@ pub fn set_wire_identity(key_id: &str) {
 #[must_use]
 pub fn wire_identity() -> Option<&'static str> {
     WIRE_IDENTITY.get().map(String::as_str)
+}
+
+#[cfg(test)]
+mod canonical_classification {
+    use super::*;
+    /// The canonical's registered type is `canonical,node`. It must classify
+    /// SubstrateOnly so `resolve_node_identity` USES it rather than minting a
+    /// replacement — the alias change must not touch a node that is already
+    /// correctly node-typed.
+    #[test]
+    fn a_canonical_node_key_is_substrate_only_and_mints_nothing() {
+        let roles = roles_of("canonical,node");
+        assert!(roles.iter().any(|r| r == identity_type::NODE));
+        assert!(
+            !roles.iter().any(|r| is_actor_role(r)),
+            "no actor role, so no split and no new key: {roles:?}"
+        );
+    }
 }
