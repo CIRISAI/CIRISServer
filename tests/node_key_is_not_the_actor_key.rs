@@ -275,11 +275,28 @@ async fn an_unregistered_key_is_its_own_verdict() {
 /// The node alias is derived, stable, and never collides with the actor's.
 #[test]
 fn the_node_alias_is_distinct_from_the_actor_alias() {
-    assert_ne!(node_alias("ciris-agent-bootstrap"), "ciris-agent-bootstrap");
-    assert_eq!(
-        node_alias("ciris-agent-bootstrap"),
-        "ciris-agent-bootstrap-node"
-    );
+    let actor = "ciris-agent-bootstrap";
+    let node = node_alias(actor);
+
+    // Distinct: the node never shares the actor's sealed blob.
+    assert_ne!(node, actor);
+
+    // And it is the BASE alias every node has, not something derived from the
+    // host's name. `ciris-node` is always the base; an agent-carrying node ADDS an
+    // agent ID beside it. Deriving the node alias from the host let a deployment
+    // label leak into an identity — `ciris-agent-bootstrap-node` on an agent,
+    // `ciris-server-node` on a server — when all three are equally nodes.
+    assert_eq!(node, "ciris-node-bootstrap");
+    for foreign in ["agent", "server", "status"] {
+        assert!(
+            !node.split('-').any(|seg| seg == foreign),
+            "the node alias must not say {foreign:?}: {node}"
+        );
+    }
+
+    // The ACTOR's alias is untouched — renaming it mints a fresh key every boot,
+    // the defect that left 61 orphaned seed blobs.
+    assert_eq!(actor, "ciris-agent-bootstrap");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -402,6 +419,42 @@ async fn provisioning_verifies_by_reading_the_directory_back() {
         "the provisioned key must read back as pure substrate"
     );
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **The kind of a key is READ from the directory, never inferred from its name.**
+///
+/// CIRISServer#507: a consumer given only `key_id` guesses the kind from the NAME,
+/// and the name is the sealed-keystore alias the host chose — which defaults to an
+/// agent-shaped string on this build for a key registered `node`. The fact exists
+/// inside the node; it just was not on the wire.
+#[tokio::test]
+async fn a_keys_kind_comes_from_the_directory_not_from_its_name() {
+    let engine = engine_for("kindcheck").await;
+
+    // Deliberately agent-SHAPED name, registered as a node. A name-based guess
+    // gets this exactly backwards, which is the footgun.
+    const AGENT_SHAPED_NAME: &str = "ciris-agent-bootstrap-abc123";
+    register(
+        &engine,
+        &signer_for(AGENT_SHAPED_NAME),
+        AGENT_SHAPED_NAME,
+        identity_type::NODE,
+    )
+    .await;
+
+    assert_eq!(
+        ciris_server::node_key::identity_type_of(&engine, AGENT_SHAPED_NAME).await,
+        Some(identity_type::NODE.to_string()),
+        "the registered kind governs, not the alias the host happened to pick"
+    );
+
+    // And an unregistered key is UNKNOWN, not defaulted to anything. "not in the
+    // directory" and "is a node" are different facts.
+    assert_eq!(
+        ciris_server::node_key::identity_type_of(&engine, "never-registered").await,
+        None,
+        "an absent key must not read as some default kind"
+    );
 }
 
 /// **An actor key this node cannot speak for is refused.**

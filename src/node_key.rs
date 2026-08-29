@@ -67,9 +67,6 @@ use ciris_persist::federation::types::identity_type;
 use ciris_persist::federation::FederationDirectory;
 use std::sync::Arc;
 
-/// The keystore-alias suffix for the node's own key. Parallel to `-substrate`.
-pub const NODE_ALIAS_SUFFIX: &str = "-node";
-
 /// What a key is allowed to be, once we look at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityVerdict {
@@ -150,14 +147,55 @@ pub async fn classify(dir: &dyn FederationDirectory, key_id: &str) -> Result<Ide
     })
 }
 
-/// The keystore alias the node's own key lives under, given the host's alias.
+/// **The node's keystore alias. Always this, for every node.**
+///
+/// `ciris-node` is the BASE identity every node has; an agent-carrying node simply
+/// ADDS an agent ID beside it. The node key is not derived from whatever the host
+/// happened to be called — deriving it was the mistake, because it let a deployment
+/// label leak into an identity:
+///
+/// ```text
+/// before:  ciris-agent-bootstrap -> ciris-agent-bootstrap-node   (says "agent")
+///          ciris-server          -> ciris-server-node            (says "server")
+///          ciris-status          -> ciris-status-node            (says "status")
+/// after:   every node            -> ciris-node-bootstrap
+/// ```
+///
+/// `server` and `status` are deployment FLAVOURS, not identities — `agent = fabric
+/// node + brain` is one composition with two profiles (MISSION.md), so every one of
+/// those processes IS a node and their node keys should say so identically.
+///
+/// Uniqueness never came from the alias: the federation `key_id` is the alias plus
+/// a key fingerprint, which is why 688 distinct agents already share the single
+/// `ciris-agent-bootstrap` alias. Each deployment has its own keystore and identity
+/// dir, so one constant here still yields one key per node.
+pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
+
+/// The node's keystore alias — a constant, ignoring the host's own alias.
+///
+/// The parameter is taken and discarded HERE, once, with the reason attached
+/// rather than dropped silently at each of the call sites: the host alias names the
+/// ACTOR (or, on a node with no brain, the key that used to do both jobs). It never
+/// named the node.
+///
+/// # Who this actually affects
+///
+/// Only a node that NEEDS a split. `resolve_node_identity` reaches `node_signer`
+/// (and therefore this alias) exclusively on the `Actor` / `Fused` /
+/// `OtherInfrastructure` verdicts; a key already registered `node` classifies
+/// `SubstrateOnly` and is USED as-is, minting nothing.
+///
+/// So `ciris-canonical-1-d7bdeu223k` — registered `canonical,node`, and `canonical`
+/// is not an actor role — keeps its key, its destination hash, and its peer routes.
+/// It never calls this function.
+///
+/// The nodes this reaches are exactly the ones that have NO node key yet: an
+/// agent-carrying node whose configured key is the actor. There is nothing to
+/// migrate, because there is nothing there to replace. Two `-node` keys exist
+/// across the whole federation today.
 #[must_use]
-pub fn node_alias(keystore_alias: &str) -> String {
-    // Idempotent: a host that already passes `<x>-node` does not get `<x>-node-node`.
-    if keystore_alias.ends_with(NODE_ALIAS_SUFFIX) {
-        return keystore_alias.to_owned();
-    }
-    format!("{keystore_alias}{NODE_ALIAS_SUFFIX}")
+pub fn node_alias(_host_alias: &str) -> String {
+    NODE_ALIAS.to_owned()
 }
 
 /// What must move when a fused key is split.
@@ -281,16 +319,47 @@ mod tests {
         assert!(!is_actor_role("witness"));
     }
 
+    /// **Every node has the same base alias, whatever the deployment is called.**
+    ///
+    /// `server` and `status` are deployment FLAVOURS, not identities, and
+    /// `agent = fabric node + brain` is one composition with two profiles
+    /// (MISSION.md). All of them are nodes, so all their node keys say
+    /// `ciris-node-bootstrap` and differ only by the fingerprint the federation
+    /// `key_id` appends.
+    #[test]
+    fn every_node_takes_the_same_base_alias() {
+        for host in [
+            "ciris-agent-bootstrap",
+            "ciris-server",
+            "ciris-status",
+            "anything-at-all",
+        ] {
+            assert_eq!(
+                node_alias(host),
+                NODE_ALIAS,
+                "the node alias must not inherit {host:?}"
+            );
+        }
+    }
+
+    /// The node alias claims to be a node and nothing else.
+    #[test]
+    fn the_node_alias_claims_only_to_be_a_node() {
+        assert!(NODE_ALIAS.split('-').any(|seg| seg == identity_type::NODE));
+        for foreign in ["agent", "server", "status"] {
+            assert!(
+                !NODE_ALIAS.split('-').any(|seg| seg == foreign),
+                "the node alias must not say {foreign:?}"
+            );
+        }
+    }
+
+    /// Idempotent by construction: feeding it back yields the same alias, so a
+    /// re-run cannot mint a second key.
     #[test]
     fn the_node_alias_is_idempotent() {
-        assert_eq!(
-            node_alias("ciris-agent-bootstrap"),
-            "ciris-agent-bootstrap-node"
-        );
-        assert_eq!(
-            node_alias("ciris-agent-bootstrap-node"),
-            "ciris-agent-bootstrap-node"
-        );
+        assert_eq!(node_alias(NODE_ALIAS), NODE_ALIAS);
+        assert_eq!(node_alias(&node_alias("ciris-agent-bootstrap")), NODE_ALIAS);
     }
 }
 
@@ -1048,6 +1117,30 @@ static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// keep them apart.
 static ACTOR_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// **The registered `identity_type` for a key — read, never inferred.**
+///
+/// The kind of a key is a FACT in `federation_keys`, written at registration and
+/// consulted by admission and by every peer's agency gate. A consumer that guesses
+/// from the key's NAME is reading the sealed-keystore alias its host happened to
+/// choose — which on this build defaults to an agent-shaped string for a key that
+/// is registered `node` (CIRISServer#507).
+///
+/// `None` when the key is absent from the directory or the read fails.
+/// Deliberately not defaulted: "unregistered" and "node" are different facts, and
+/// a surface that renders them alike is what this exists to stop.
+pub async fn identity_type_of(
+    engine: &ciris_persist::prelude::Engine,
+    key_id: &str,
+) -> Option<String> {
+    engine
+        .federation_directory()
+        .lookup_public_key(key_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|rec| rec.identity_type)
+}
+
 /// Record that this node carries a brain, under `key_id`.
 pub fn set_actor_identity(key_id: &str) {
     if let Err(existing) = ACTOR_IDENTITY.set(key_id.to_owned()) {
@@ -1144,4 +1237,22 @@ pub fn set_wire_identity(key_id: &str) {
 #[must_use]
 pub fn wire_identity() -> Option<&'static str> {
     WIRE_IDENTITY.get().map(String::as_str)
+}
+
+#[cfg(test)]
+mod canonical_classification {
+    use super::*;
+    /// The canonical's registered type is `canonical,node`. It must classify
+    /// SubstrateOnly so `resolve_node_identity` USES it rather than minting a
+    /// replacement — the alias change must not touch a node that is already
+    /// correctly node-typed.
+    #[test]
+    fn a_canonical_node_key_is_substrate_only_and_mints_nothing() {
+        let roles = roles_of("canonical,node");
+        assert!(roles.iter().any(|r| r == identity_type::NODE));
+        assert!(
+            !roles.iter().any(|r| is_actor_role(r)),
+            "no actor role, so no split and no new key: {roles:?}"
+        );
+    }
 }
