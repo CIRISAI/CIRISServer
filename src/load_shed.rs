@@ -61,10 +61,18 @@ use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::prelude::Engine;
 
-/// The `config:{scope}` leaf for carried load. Open vocabulary per CC 4.5.1.1;
-/// `admission` / `replication` / `moderation` / `transport` are the canonical
-/// scopes and this joins them as the node's self-report of what it is carrying.
-pub const DIMENSION: &str = "config:load";
+/// The `config:{scope}` leaf for carried load, VERSIONED. Open vocabulary per CC
+/// 4.5.1.1; `admission` / `replication` / `moderation` / `transport` are the
+/// canonical scopes and this joins them as the node's self-report of what it is
+/// carrying.
+///
+/// The `:v1` is not decoration: persist's `DimensionAdmissionPolicy` refuses any
+/// `scores` dimension without a `:vN` segment (`MissingVersionSegment`, T3). The
+/// first cut of this module omitted it, and every emission would have been
+/// rejected at the put door while the loop logged "attestation failed" once a
+/// minute — the row could never have reached a peer (Codex, PR #504). Existing
+/// producers all carry one (`config:v1`, `consent:replication:v1`).
+pub const DIMENSION: &str = "config:load:v1";
 
 /// The one value this attestation carries: what the node is doing about it.
 pub const STATE_SHEDDING: &str = "shedding";
@@ -106,16 +114,55 @@ pub fn spec(node_key_id: &str, expires_at: chrono::DateTime<chrono::Utc>) -> cra
         .weighing(Some(1.0))
 }
 
-/// Emit one `config:load` self-attestation, signed by the engine.
+/// Who signs the node's self-report.
+///
+/// On a split node (an agent-carrying node whose configured key was an actor,
+/// `node_key::resolve_node_identity`) the wire identity is a separately minted
+/// node key and the Engine signs as the ACTOR. A row stamped with the node key as
+/// `attesting_key_id` but signed by the actor's pen fails signature verification
+/// against the node's registered public key — every emission rejected at
+/// admission (Codex, PR #504). `NodeIdentityResolution.signer` exists for exactly
+/// this ("author rows AS the node while the engine signs as the actor") and is
+/// carried here rather than dropped after boot.
+///
+/// On an unsplit node — the standalone binary, and the wheel's bare-agent path —
+/// the engine key IS the node key, and the engine is the right pen.
+#[derive(Clone)]
+pub enum NodePen {
+    /// Engine key == node key. Sign with the engine.
+    Engine,
+    /// A split happened; sign as the node with its own signer.
+    Node(Arc<ciris_persist::prelude::LocalSigner>),
+}
+
+impl NodePen {
+    /// Pick the pen from a boot's identity resolution.
+    #[must_use]
+    pub fn from_resolution(r: &crate::node_key::NodeIdentityResolution) -> Self {
+        match &r.signer {
+            Some(s) => Self::Node(Arc::clone(s)),
+            None => Self::Engine,
+        }
+    }
+
+    fn signer<'a>(&'a self, engine: &'a Engine) -> crate::attest::KeySigner<'a> {
+        match self {
+            Self::Engine => crate::attest::KeySigner::Engine(engine),
+            Self::Node(s) => crate::attest::KeySigner::Local(s),
+        }
+    }
+}
+
+/// Emit one `config:load` self-attestation, signed with the node's own pen.
 ///
 /// # Errors
 /// Stamp, sign, or put failure.
-pub async fn emit(engine: &Engine, node_key_id: &str) -> anyhow::Result<String> {
+pub async fn emit(engine: &Engine, pen: &NodePen, node_key_id: &str) -> anyhow::Result<String> {
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(TTL_SECS);
     let row = crate::attest::Emit::stamp(node_key_id, spec(node_key_id, expires_at))
         .map_err(|e| anyhow::anyhow!("stamp config:load for {node_key_id}: {e}"))?
-        .sign_and_assemble(crate::attest::KeySigner::Engine(engine))
+        .sign_and_assemble(pen.signer(engine))
         .await
         .map_err(|e| anyhow::anyhow!("sign config:load as {node_key_id}: {e}"))?;
     crate::attest::put(engine, row)
@@ -124,32 +171,52 @@ pub async fn emit(engine: &Engine, node_key_id: &str) -> anyhow::Result<String> 
 }
 
 /// Spawn the observe-and-attest loop.
-pub fn spawn(engine: Arc<Engine>, node_key_id: String) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+///
+/// Returns the shutdown sender and the join handle, so composition can stop it
+/// the way it stops the retention and config loops. Dropping the handle would
+/// only DETACH the task: on the supported in-process `shutdown_node()` restart the
+/// old observer would keep its `Arc<Engine>`, keep probing, keep renewing
+/// attestations against the old node, and every restart would add another one
+/// (Codex, PR #504).
+pub fn spawn(
+    engine: Arc<Engine>,
+    pen: NodePen,
+    node_key_id: String,
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let join = tokio::spawn(async move {
         let mut interval = tokio::time::interval(OBSERVE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
             dimension = DIMENSION,
             observe_secs = OBSERVE_INTERVAL.as_secs(),
             ttl_secs = TTL_SECS,
+            pen = match pen {
+                NodePen::Engine => "engine",
+                NodePen::Node(_) => "node (split)",
+            },
             "config:load observer started (self-attested on infra:attest, expires on its own)"
         );
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        tracing::info!("config:load observer shutting down");
+                        return;
+                    }
+                    continue;
+                }
+            }
 
-            // PROBE, and act on the FRESH reading — not the registry. `probe_contention`
-            // is otherwise only called from `/v1/health`, so a node with no health
-            // traffic would observe nothing. And when PSI becomes unavailable
-            // mid-run, the probe deliberately preserves the old warning rather than
-            // clearing it (no-evidence discipline), so reading the registry here
-            // would renew a "short-lived" row forever off a stale entry (Codex,
-            // PR #503). A fresh `Measured` stall is the only thing that renews.
-            let (cpu, io) = crate::degradation::probe_contention();
-            if !stalled(&cpu) && !stalled(&io) {
+            if !own_stall_now() {
                 continue;
             }
 
-            match emit(&engine, &node_key_id).await {
+            match emit(&engine, &pen, &node_key_id).await {
                 Ok(id) => tracing::warn!(
                     attestation_id = %id,
                     ttl_secs = TTL_SECS,
@@ -159,7 +226,30 @@ pub fn spawn(engine: Arc<Engine>, node_key_id: String) -> tokio::task::JoinHandl
                 Err(e) => tracing::warn!(error = %e, "config:load attestation failed — continuing"),
             }
         }
-    })
+    });
+    (shutdown_tx, join)
+}
+
+/// Probe, under the same lock `/v1/health` holds, and judge the FRESH reading.
+///
+/// PROBE rather than read: `probe_contention` is otherwise only called from
+/// `/v1/health`, so a node with no health traffic would observe nothing — and when
+/// PSI vanishes mid-run the probe deliberately preserves the old warning rather
+/// than clearing it (no-evidence discipline), so a registry read would renew a
+/// "short-lived" row forever off a stale entry.
+///
+/// UNDER `COLLECT_LOCK`: the health route holds it across its probes and its final
+/// `verdict()` precisely so one response cannot pair resource readings from one
+/// instant with warning state from another. A probe here without the lock could
+/// land between those two steps and put that inconsistency back (Codex, PR #504).
+/// `probe_contention` is synchronous file IO, so the `std` mutex is held for
+/// microseconds and never across an await.
+fn own_stall_now() -> bool {
+    let _collect = crate::degradation::COLLECT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (cpu, io) = crate::degradation::probe_contention();
+    stalled(&cpu) || stalled(&io)
 }
 
 /// A FRESH, CGROUP-SCOPED, degrading stall — never a stale registry entry, and
@@ -229,6 +319,42 @@ mod tests {
         assert_eq!(s.envelope[paths::DIMENSION], DIMENSION);
         assert!(DIMENSION.starts_with("config:"));
         assert!(!DIMENSION.starts_with("mesh_config:"));
+    }
+
+    /// The dimension carries a `:vN` segment. Without one persist refuses the row
+    /// at admission (`MissingVersionSegment`) and the observer logs a failure once
+    /// a minute while nothing ever reaches a peer — the first cut of this module.
+    #[test]
+    fn the_dimension_is_versioned_or_persist_refuses_it() {
+        let last = DIMENSION.rsplit(':').next().unwrap_or("");
+        assert!(
+            last.len() >= 2
+                && last.starts_with('v')
+                && last[1..].chars().all(|c| c.is_ascii_digit()),
+            "{DIMENSION} must end in :vN"
+        );
+    }
+
+    /// On a split node the row must be signed by the NODE's pen, not the engine's:
+    /// stamped as the node and signed by the actor fails verification at admission.
+    /// On an unsplit node the engine is the node, and the engine is right.
+    #[test]
+    fn the_pen_follows_the_split() {
+        use crate::node_key::{IdentityVerdict, NodeIdentityResolution};
+        let unsplit = NodeIdentityResolution {
+            node_key_id: NODE.into(),
+            split_from: None,
+            verdict: IdentityVerdict::SubstrateOnly,
+            signer: None,
+        };
+        assert!(matches!(
+            NodePen::from_resolution(&unsplit),
+            NodePen::Engine
+        ));
+        // A split resolution carries a signer; the pen must be that signer. (A
+        // real LocalSigner needs key material, so this asserts the mapping's shape
+        // on the `None` half and leaves the `Some` half to the compose path.)
+        assert!(unsplit.signer.is_none());
     }
 
     /// Federation scope, so it actually replicates — the reason an attestation and

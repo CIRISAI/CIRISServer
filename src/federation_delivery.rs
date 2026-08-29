@@ -89,11 +89,19 @@ pub struct DeliveryController {
     reconcile_shutdown: watch::Sender<bool>,
     /// The reconcile-loop task handle (held so the task is not detached-and-lost).
     _reconcile_join: tokio::task::JoinHandle<()>,
+    /// Shutdown signal for the config:load observer, owned here so it lives and
+    /// dies with delivery rather than being detached at spawn.
+    load_observer_shutdown: Option<watch::Sender<bool>>,
+    _load_observer_join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for DeliveryController {
     fn drop(&mut self) {
         let _ = self.reconcile_shutdown.send(true);
+        // The observer dies with delivery, never detached (Codex, PR #504).
+        if let Some(tx) = &self.load_observer_shutdown {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -258,12 +266,31 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     // absent there). Before `engine`/`edge` are moved into the controller below.
     #[cfg(feature = "test-anchor")]
     rt.block_on(crate::test_bless::maybe_test_bless_delivery_self(&engine))?;
-    let controller = rt.block_on(run_federation_delivery(
+
+    // The bare-agent topology never runs `serve_with_adapter`, so the config:load
+    // observer must start HERE too or agent-carrying wheel nodes never self-report
+    // under contention (Codex, PR #504). No identity split on this path — the
+    // engine key IS the node key — so the engine is the right pen. Held on the
+    // delivery runtime; it lives exactly as long as delivery does.
+    let load_observer_key = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_else(|| edge.signer_key_id().to_string());
+    let (load_observer_sd, load_observer_join) = {
+        let _g = rt.enter();
+        crate::load_shed::spawn(
+            Arc::clone(&engine),
+            crate::load_shed::NodePen::Engine,
+            load_observer_key,
+        )
+    };
+    let mut controller = rt.block_on(run_federation_delivery(
         engine,
         edge,
         cadence_seconds,
         announce_logger,
     ))?;
+    controller.load_observer_shutdown = Some(load_observer_sd);
+    controller._load_observer_join = Some(load_observer_join);
     let controller = Arc::new(controller);
     Ok(hold(rt, controller))
 }
@@ -1504,6 +1531,8 @@ pub async fn run_federation_delivery(
         canonical_targets: admitted_targets,
         reconcile_shutdown,
         _reconcile_join: reconcile_join,
+        load_observer_shutdown: None,
+        _load_observer_join: None,
     })
 }
 

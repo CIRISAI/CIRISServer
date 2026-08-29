@@ -1551,10 +1551,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // and this is a statement about the infrastructure. It declares; enforcement
     // stays cooperative. It is not `mesh_config` — that plane is the root's.
     crate::compose_status::phase("load_observer");
-    let load_observer_key = crate::node_key::wire_identity()
-        .map(str::to_owned)
-        .unwrap_or_else(|| cfg.key_id.clone());
-    let _load_observer_join = crate::load_shed::spawn(Arc::clone(&engine), load_observer_key);
+    let (load_observer_sd, load_observer_join) = crate::load_shed::spawn(
+        Arc::clone(&engine),
+        // The NODE's pen. On a split node the engine signs as the actor, and a row
+        // stamped as the node but signed by the actor fails verification at
+        // admission — `node_resolution.signer` exists for exactly this.
+        crate::load_shed::NodePen::from_resolution(&node_resolution),
+        node_resolution.node_key_id.clone(),
+    );
 
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
@@ -1644,6 +1648,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // first would race its shutdown branch against a `changed()` error break.
     let _ = retention_sd_tx.send(true);
     let _ = retention_join.await;
+    // The observer holds an Arc<Engine>; on the in-process restart path a detached
+    // one would keep renewing attestations against the OLD node.
+    let _ = load_observer_sd.send(true);
+    let _ = load_observer_join.await;
     // Tear down the mesh-config consumer refresh loop (CIRISServer#365). Its
     // readers (the read API, the ingest router) are already gone by here.
     let _ = mesh_config_sd_tx.send(true);
