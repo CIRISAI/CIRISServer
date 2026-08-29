@@ -652,9 +652,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // The node's identity aggregate (CEG §5.6.8.8.2) for GET /v1/identity —
     // assembled ONCE at boot from the federation signing key + the RNS transport
     // identity (both stable). Captured before edge.run() consumes the Edge.
-    let identity_json = local_identity_json(&engine, edge.local_transport_pubkey(), &cfg.key_id)
-        .await
-        .context("assemble /v1/identity aggregate")?;
+    // THE WIRE IDENTITY, not `cfg.key_id`. The split resolves ~370 lines above, so
+    // on an agent-carrying node `cfg.key_id` is the ACTOR and this surface was
+    // advertising it as the node's identity — the most public place to name the
+    // wrong key. Every other transport-plane caller already reads `wire_identity()`
+    // for exactly this reason; this one was missed.
+    let identity_json = local_identity_json(
+        &engine,
+        edge.local_transport_pubkey(),
+        &node_resolution.node_key_id,
+        crate::node_key::actor_identity(),
+    )
+    .await
+    .context("assemble /v1/identity aggregate")?;
 
     crate::compose_status::phase("transport_binding");
     // ── Self-publish this node's reticulum transport-tier binding ─────────────
@@ -1664,6 +1674,7 @@ async fn local_identity_json(
     engine: &Engine,
     transport_pubkey: Option<[u8; 64]>,
     wire_key_id: &str,
+    actor_key_id: Option<&str>,
 ) -> Result<String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -1696,6 +1707,35 @@ async fn local_identity_json(
                 serde_json::Value::String(wire_key_id.to_string()),
             );
         }
+        // ── STATE THE KIND; do not make a consumer infer it (CIRISServer#507) ──
+        //
+        // Without this a consumer reads `key_id` and guesses from the NAME — and
+        // the name is the sealed-keystore alias the host chose, which defaults to
+        // an agent-shaped string on a node that is not an agent. A guess from a
+        // label is not a fact, and the fact already exists inside this node:
+        // `provision_node_identity` registered this key `identity_type = node`.
+        // It simply was not on the wire.
+        //
+        // Read from the DIRECTORY, never restated: the row is what admission and
+        // every peer's agency gate actually consult, so a value derived any other
+        // way could disagree with the one that binds (CC 3.4.7.3).
+        let kind = crate::node_key::identity_type_of(engine, wire_key_id).await;
+        obj.insert(
+            "identity_type".into(),
+            kind.map_or(serde_json::Value::Null, serde_json::Value::String),
+        );
+
+        // The ACTOR key, named separately and only when one exists. Two distinct
+        // facts, two fields — a consumer that needs "which key does the brain
+        // author under" must never have to derive it by subtraction, and a node
+        // carrying no agent says so with `null` rather than by omission.
+        obj.insert(
+            "actor_key_id".into(),
+            actor_key_id.map_or(serde_json::Value::Null, |a| {
+                serde_json::Value::String(a.to_owned())
+            }),
+        );
+
         // CIRISServer#410 — the desktop launcher already probes /v1/identity,
         // so the per-process instance identity rides here too: `key_id` alone
         // cannot distinguish "my node, restarted" from "my node's PREVIOUS
