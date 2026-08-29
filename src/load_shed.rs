@@ -80,6 +80,32 @@ pub const STATE_SHEDDING: &str = "shedding";
 /// How often the node measures itself.
 pub const OBSERVE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Minimum gap between two emissions.
+///
+/// Expiry makes a row INACTIVE; it does not remove it, and this repo's retention
+/// loop has deletion levers for traces and audit entries only — an
+/// attestation-heavy store is a documented unenforceable disk case. A row per
+/// minute is 1,440 permanent rows a day, in this node's store AND every peer's,
+/// which worsens the very storage pressure that can trigger this loop (Codex,
+/// PR #504).
+///
+/// So renewal is spaced to just inside the TTL rather than run at the observation
+/// cadence: the node keeps a live declaration continuously, at ~1/3 the rows. The
+/// observation interval stays short because DETECTING quickly still matters — it
+/// is the *writing* that is throttled, not the looking.
+pub const MIN_EMIT_GAP_SECS: i64 = TTL_SECS - OBSERVE_INTERVAL.as_secs() as i64;
+
+// Pinned at COMPILE time — these are constants, so a test could only restate what
+// the compiler already knows (clippy `assertions_on_constants`). As const
+// assertions they fail the BUILD the moment someone retunes a value past its bound.
+//
+// Spacing must exceed the observation tick or nothing is saved, and must stay
+// under the TTL or the declaration lapses while the node is still stalled.
+const _: () = assert!(
+    MIN_EMIT_GAP_SECS > 0,
+    "renewal spacing must be positive or every tick mints a permanent row"
+);
+
 /// How long one attestation stands.
 ///
 /// Three observation intervals: long enough that a single slow tick does not drop
@@ -87,6 +113,11 @@ pub const OBSERVE_INTERVAL: Duration = Duration::from_secs(60);
 /// within minutes. Too short and the node flaps; too long and a recovered node
 /// keeps telling the mesh it is shedding — the failure only a person can clear.
 pub const TTL_SECS: i64 = 180;
+
+const _: () = assert!(
+    MIN_EMIT_GAP_SECS < TTL_SECS,
+    "a gap at or beyond the TTL lets the declaration lapse while the node still struggles"
+);
 
 /// Build the self-report the node will sign.
 ///
@@ -103,6 +134,18 @@ pub fn spec(node_key_id: &str, expires_at: chrono::DateTime<chrono::Utc>) -> cra
         "attesting_key_id": node_key_id,
         "subject_key_ids": [node_key_id],
         "score": 1.0,
+        // REQUIRED, not optional. `compose_policy::Composer::screen` refuses an
+        // envelope without it (`MalformedEnvelope("confidence")`) and deliberately
+        // does not default to 1.0 — so a row missing it is admitted and replicated
+        // and then contributes NOTHING to the composed verdict a peer would use to
+        // stop offering work (Codex, PR #504). The whole point of replicating this
+        // is that a peer can act on it.
+        //
+        // 1.0 because the producer is the subject: this is not an inference about
+        // someone else, it is a measurement of itself under `witness_relation:
+        // self`, and a consumer discounts self-attestation by relation rather than
+        // by the producer pre-discounting its own reading.
+        "confidence": 1.0,
         "cohort_scope": cohort_scope::FEDERATION,
         "witness_relation": "self",
         "state": STATE_SHEDDING,
@@ -190,8 +233,10 @@ pub fn spawn(
     let join = tokio::spawn(async move {
         let mut interval = tokio::time::interval(OBSERVE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_emit: Option<chrono::DateTime<chrono::Utc>> = None;
         tracing::info!(
             dimension = DIMENSION,
+            min_emit_gap_secs = MIN_EMIT_GAP_SECS,
             observe_secs = OBSERVE_INTERVAL.as_secs(),
             ttl_secs = TTL_SECS,
             pen = match pen {
@@ -216,13 +261,30 @@ pub fn spawn(
                 continue;
             }
 
+            // A live declaration already covers this moment — do not mint a second
+            // permanent row to say the same thing. Re-emit only once the standing
+            // one is close enough to expiring that a gap would open.
+            let now = chrono::Utc::now();
+            if last_emit.is_some_and(|t: chrono::DateTime<chrono::Utc>| {
+                now - t < chrono::Duration::seconds(MIN_EMIT_GAP_SECS)
+            }) {
+                continue;
+            }
+
             match emit(&engine, &pen, &node_key_id).await {
-                Ok(id) => tracing::warn!(
-                    attestation_id = %id,
-                    ttl_secs = TTL_SECS,
-                    "config:load = shedding — self-attested; expires on its own; peers may \
-                     read it to stop offering"
-                ),
+                Ok(id) => {
+                    // Only a SUCCESSFUL emission moves the clock. A failed one must
+                    // leave it, or a transient refusal would suppress renewal for a
+                    // whole gap and the node would go quiet while still struggling.
+                    last_emit = Some(now);
+                    tracing::warn!(
+                        attestation_id = %id,
+                        ttl_secs = TTL_SECS,
+                        renewal_gap_secs = MIN_EMIT_GAP_SECS,
+                        "config:load = shedding — self-attested; expires on its own; peers may \
+                         read it to stop offering"
+                    );
+                }
                 Err(e) => tracing::warn!(error = %e, "config:load attestation failed — continuing"),
             }
         }

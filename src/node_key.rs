@@ -904,14 +904,37 @@ pub async fn register_actor_occurrence(
     Ok(())
 }
 
+/// The node's own pen, retained when provisioning minted a node key.
+///
+/// `provision_node_identity` sets BOTH [`set_actor_identity`] and
+/// [`set_wire_identity`]: the wheel's embedded path is a SPLIT, exactly like the
+/// composed one. The engine keeps signing as the ACTOR, so anything authored AS
+/// the node needs this pen — a row stamped as the node and signed by the actor is
+/// rejected at admission (Codex, PR #504; I had claimed this path did not split,
+/// and it does). The signer was previously bound to `_signer` and dropped.
+///
+/// `None` on a node that never provisioned through this path — there the engine
+/// key IS the node key and the engine is the right pen.
+static NODE_PEN: std::sync::OnceLock<Arc<ciris_persist::prelude::LocalSigner>> =
+    std::sync::OnceLock::new();
+
+/// The node's own signer, when this boot minted one.
+#[must_use]
+pub fn node_pen_signer() -> Option<Arc<ciris_persist::prelude::LocalSigner>> {
+    NODE_PEN.get().map(Arc::clone)
+}
+
 pub async fn provision_node_identity(
     engine: &ciris_persist::prelude::Engine,
     keystore_alias: &str,
     identity_dir: &std::path::Path,
     actor_key_id: Option<&str>,
 ) -> Result<String> {
-    let (_signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+    let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
     let key_id = register_node_key(engine, &identity).await?;
+    // RETAINED, not dropped. Rows authored as the node need this pen; the engine
+    // signs as the actor on a split node.
+    let _ = NODE_PEN.set(signer);
 
     // ── The readiness gate: edge must not start on a half-provisioned identity ──
     //

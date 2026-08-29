@@ -272,16 +272,23 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     // under contention (Codex, PR #504). No identity split on this path — the
     // engine key IS the node key — so the engine is the right pen. Held on the
     // delivery runtime; it lives exactly as long as delivery does.
+    // THE WHEEL PATH SPLITS TOO. `provision_node_identity` mints a node key and
+    // sets both `set_actor_identity` and `set_wire_identity`, leaving the engine
+    // signing as the ACTOR — so a row stamped as the node and signed by the engine
+    // is rejected at admission (Codex, PR #504; the earlier claim that this path
+    // does not split was wrong). Provisioning RETAINS the node's pen for exactly
+    // this; when there is none, the engine is the node and is the right pen.
+    let engine_key = edge.signer_key_id().to_string();
     let load_observer_key = crate::node_key::wire_identity()
         .map(str::to_owned)
-        .unwrap_or_else(|| edge.signer_key_id().to_string());
+        .unwrap_or_else(|| engine_key.clone());
+    let load_pen = match crate::node_key::node_pen_signer() {
+        Some(signer) => crate::load_shed::NodePen::Node(signer),
+        None => crate::load_shed::NodePen::Engine,
+    };
     let (load_observer_sd, load_observer_join) = {
         let _g = rt.enter();
-        crate::load_shed::spawn(
-            Arc::clone(&engine),
-            crate::load_shed::NodePen::Engine,
-            load_observer_key,
-        )
+        crate::load_shed::spawn(Arc::clone(&engine), load_pen, load_observer_key)
     };
     let mut controller = rt.block_on(run_federation_delivery(
         engine,
