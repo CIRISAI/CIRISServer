@@ -278,23 +278,25 @@ fn the_node_alias_is_distinct_from_the_actor_alias() {
     let actor = "ciris-agent-bootstrap";
     let node = node_alias(actor);
 
-    // Distinct, as before — the node never shares the actor's sealed blob.
+    // Distinct: the node never shares the actor's sealed blob.
     assert_ne!(node, actor);
 
-    // AND node-shaped. The old derivation produced `ciris-agent-bootstrap-node`:
-    // distinct, but a key registered `identity_type = node` whose NAME says agent,
-    // so any consumer inferring kind from the name got it backwards
-    // (CIRISServer#507). The actor's own alias is untouched — renaming THAT mints
-    // a fresh key every boot.
+    // And it is the BASE alias every node has, not something derived from the
+    // host's name. `ciris-node` is always the base; an agent-carrying node ADDS an
+    // agent ID beside it. Deriving the node alias from the host let a deployment
+    // label leak into an identity — `ciris-agent-bootstrap-node` on an agent,
+    // `ciris-server-node` on a server — when all three are equally nodes.
     assert_eq!(node, "ciris-node-bootstrap");
-    assert!(
-        !node.contains("agent"),
-        "a node key must not wear the actor's word: {node}"
-    );
-    assert_eq!(
-        actor, "ciris-agent-bootstrap",
-        "the actor keeps its own alias"
-    );
+    for foreign in ["agent", "server", "status"] {
+        assert!(
+            !node.split('-').any(|seg| seg == foreign),
+            "the node alias must not say {foreign:?}: {node}"
+        );
+    }
+
+    // The ACTOR's alias is untouched — renaming it mints a fresh key every boot,
+    // the defect that left 61 orphaned seed blobs.
+    assert_eq!(actor, "ciris-agent-bootstrap");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

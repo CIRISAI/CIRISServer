@@ -67,9 +67,6 @@ use ciris_persist::federation::types::identity_type;
 use ciris_persist::federation::FederationDirectory;
 use std::sync::Arc;
 
-/// The keystore-alias suffix for the node's own key. Parallel to `-substrate`.
-pub const NODE_ALIAS_SUFFIX: &str = "-node";
-
 /// What a key is allowed to be, once we look at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityVerdict {
@@ -150,70 +147,45 @@ pub async fn classify(dir: &dyn FederationDirectory, key_id: &str) -> Result<Ide
     })
 }
 
-/// The token an ACTOR-shaped alias carries, which a node's alias must not inherit.
-pub const ACTOR_ALIAS_TOKEN: &str = "agent";
+/// **The node's keystore alias. Always this, for every node.**
+///
+/// `ciris-node` is the BASE identity every node has; an agent-carrying node simply
+/// ADDS an agent ID beside it. The node key is not derived from whatever the host
+/// happened to be called — deriving it was the mistake, because it let a deployment
+/// label leak into an identity:
+///
+/// ```text
+/// before:  ciris-agent-bootstrap -> ciris-agent-bootstrap-node   (says "agent")
+///          ciris-server          -> ciris-server-node            (says "server")
+///          ciris-status          -> ciris-status-node            (says "status")
+/// after:   every node            -> ciris-node-bootstrap
+/// ```
+///
+/// `server` and `status` are deployment FLAVOURS, not identities — `agent = fabric
+/// node + brain` is one composition with two profiles (MISSION.md), so every one of
+/// those processes IS a node and their node keys should say so identically.
+///
+/// Uniqueness never came from the alias: the federation `key_id` is the alias plus
+/// a key fingerprint, which is why 688 distinct agents already share the single
+/// `ciris-agent-bootstrap` alias. Each deployment has its own keystore and identity
+/// dir, so one constant here still yields one key per node.
+pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
 
-/// The keystore alias the node's own key lives under, given the host's alias.
+/// The node's keystore alias — a constant, ignoring the host's own alias.
 ///
-/// # Why this is not simply `{alias}-node`
+/// The parameter is taken and discarded HERE, once, with the reason attached
+/// rather than dropped silently at each of the call sites: the host alias names the
+/// ACTOR (or, on a node with no brain, the key that used to do both jobs). It never
+/// named the node.
 ///
-/// It was, and the result read `ciris-agent-bootstrap-node` — a NODE key wearing
-/// the word `agent`. That is the footgun CIRISServer#507 is about, arriving from
-/// the naming side: a consumer with only a `key_id` guesses the kind from the
-/// name, and this name says the opposite of what the key is registered as.
+/// # This mints a new node key
 ///
-/// The host's alias is the AGENT's and is correct for the agent — `CIRIS_AGENT_ID`
-/// names the sealed blob the brain signs with, and renaming *that* mints a fresh
-/// key every boot (the defect that left 61 orphaned seed blobs). So the actor
-/// alias is left exactly alone and only the DERIVED node alias is made
-/// node-shaped: `ciris-agent-bootstrap` → `ciris-node-bootstrap`.
-///
-/// Where the alias carries no actor token the suffix still applies, so
-/// `ciris-server` → `ciris-server-node` and `ciris-status` → `ciris-status-node`
-/// are unchanged.
-///
-/// # This derivation change mints a new node key
-///
-/// The alias IS the sealed-keystore lookup, so changing it means the node's own
-/// key is minted fresh and the previous one is orphaned. Done deliberately and
-/// now, while **two** `-node` keys exist across the whole federation: the split
-/// shipped in 0.5.189 and the embedded path has only just begun provisioning. Every
-/// later day multiplies the migration, because each agent-carrying node that boots
-/// on the old derivation mints another agent-shaped node key.
-///
-/// Idempotent in both directions: an alias already node-shaped is returned
-/// unchanged, so a re-run cannot produce `…-node-node` or re-substitute.
+/// The alias IS the sealed-keystore lookup. Done now because TWO `-node` keys exist
+/// across the whole federation — the split shipped in 0.5.189 and the embedded path
+/// has only just begun provisioning. Every later day multiplies it.
 #[must_use]
-pub fn node_alias(keystore_alias: &str) -> String {
-    // Already ours — never re-derive.
-    if keystore_alias.ends_with(NODE_ALIAS_SUFFIX)
-        || keystore_alias
-            .split('-')
-            .any(|seg| seg == identity_type::NODE)
-    {
-        return keystore_alias.to_owned();
-    }
-
-    // An actor-shaped alias becomes node-shaped IN PLACE, so the node key stops
-    // claiming to be an agent. Segment-exact so `agentic-foo` is untouched.
-    if keystore_alias
-        .split('-')
-        .any(|seg| seg == ACTOR_ALIAS_TOKEN)
-    {
-        return keystore_alias
-            .split('-')
-            .map(|seg| {
-                if seg == ACTOR_ALIAS_TOKEN {
-                    identity_type::NODE
-                } else {
-                    seg
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("-");
-    }
-
-    format!("{keystore_alias}{NODE_ALIAS_SUFFIX}")
+pub fn node_alias(_host_alias: &str) -> String {
+    NODE_ALIAS.to_owned()
 }
 
 /// What must move when a fused key is split.
@@ -337,59 +309,47 @@ mod tests {
         assert!(!is_actor_role("witness"));
     }
 
-    /// **A node key must not wear the word `agent`.**
+    /// **Every node has the same base alias, whatever the deployment is called.**
     ///
-    /// The old derivation produced `ciris-agent-bootstrap-node`: a key registered
-    /// `identity_type = node` whose NAME says agent. Any consumer inferring kind
-    /// from the name gets it exactly backwards (CIRISServer#507).
+    /// `server` and `status` are deployment FLAVOURS, not identities, and
+    /// `agent = fabric node + brain` is one composition with two profiles
+    /// (MISSION.md). All of them are nodes, so all their node keys say
+    /// `ciris-node-bootstrap` and differ only by the fingerprint the federation
+    /// `key_id` appends.
     #[test]
-    fn an_actor_shaped_alias_yields_a_node_shaped_node_alias() {
-        assert_eq!(
-            node_alias("ciris-agent-bootstrap"),
-            "ciris-node-bootstrap",
-            "the derived NODE alias must not inherit the actor's word"
-        );
-        assert!(!node_alias("ciris-agent-bootstrap").contains(ACTOR_ALIAS_TOKEN));
+    fn every_node_takes_the_same_base_alias() {
+        for host in [
+            "ciris-agent-bootstrap",
+            "ciris-server",
+            "ciris-status",
+            "anything-at-all",
+        ] {
+            assert_eq!(
+                node_alias(host),
+                NODE_ALIAS,
+                "the node alias must not inherit {host:?}"
+            );
+        }
     }
 
-    /// The ACTOR's alias is untouched. `CIRIS_AGENT_ID` names the sealed blob the
-    /// brain signs with; renaming it mints a fresh key every boot, which is the
-    /// defect that left 61 orphaned seed blobs. Only the derived alias changes.
+    /// The node alias claims to be a node and nothing else.
     #[test]
-    fn the_actors_own_alias_is_never_rewritten() {
-        let actor = "ciris-agent-bootstrap";
-        assert_ne!(node_alias(actor), actor, "the node gets its OWN alias");
-        assert_eq!(
-            actor, "ciris-agent-bootstrap",
-            "and the actor keeps its own"
-        );
+    fn the_node_alias_claims_only_to_be_a_node() {
+        assert!(NODE_ALIAS.split('-').any(|seg| seg == identity_type::NODE));
+        for foreign in ["agent", "server", "status"] {
+            assert!(
+                !NODE_ALIAS.split('-').any(|seg| seg == foreign),
+                "the node alias must not say {foreign:?}"
+            );
+        }
     }
 
-    /// Aliases carrying no actor token keep the plain suffix — no surprise renames
-    /// for the standalone server or the status node.
-    #[test]
-    fn a_neutral_alias_still_just_takes_the_suffix() {
-        assert_eq!(node_alias("ciris-server"), "ciris-server-node");
-        assert_eq!(node_alias("ciris-status"), "ciris-status-node");
-    }
-
-    /// Idempotent in BOTH directions, or a re-run mints yet another key: the
-    /// suffixed form and the substituted form must each be fixed points.
+    /// Idempotent by construction: feeding it back yields the same alias, so a
+    /// re-run cannot mint a second key.
     #[test]
     fn the_node_alias_is_idempotent() {
-        assert_eq!(node_alias("ciris-server-node"), "ciris-server-node");
-        assert_eq!(node_alias("ciris-node-bootstrap"), "ciris-node-bootstrap");
-        // and stable under repetition
-        let once = node_alias("ciris-agent-bootstrap");
-        assert_eq!(node_alias(&once), once);
-    }
-
-    /// Segment-exact: a word merely CONTAINING "agent" is not an actor token, or a
-    /// host called `agentic-relay` would be silently renamed.
-    #[test]
-    fn substitution_is_segment_exact() {
-        assert_eq!(node_alias("agentic-relay"), "agentic-relay-node");
-        assert!(node_alias("agentic-relay").starts_with("agentic"));
+        assert_eq!(node_alias(NODE_ALIAS), NODE_ALIAS);
+        assert_eq!(node_alias(&node_alias("ciris-agent-bootstrap")), NODE_ALIAS);
     }
 }
 
