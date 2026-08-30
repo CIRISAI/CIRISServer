@@ -1579,6 +1579,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the previous node's observer id and counts (Codex, PR #502).
     crate::mesh_status::invalidate();
 
+    // Resolve the conferred capability set ONCE. Doing it per request turned the
+    // peer-facing declaration into three DB round-trips on a shared connection and
+    // made it the only route timing out on the canonical (0.5.193 regression).
+    crate::conformance::prime_capabilities(&engine).await;
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {

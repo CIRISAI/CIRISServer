@@ -488,6 +488,44 @@ pub struct DeclaredConformance {
     pub capabilities: Option<Vec<String>>,
 }
 
+/// The conferred capability set, computed ONCE at boot.
+///
+/// # Why this is not read per request
+///
+/// 0.5.193 added the capability set to `/v1/federation/conformance` and resolved it
+/// on every call — `lookup_public_key` plus `local_derived_key_id`, so a route that
+/// did ONE config read now did three DB round-trips. That route is the
+/// unauthenticated PEER-FACING declaration, fetched before a peer commits to a
+/// federation relationship, and on the canonical it is served from a single
+/// `Arc<Mutex<Connection>>` shared with everything else. Measured there: every
+/// DB-touching endpoint crawls while non-DB ones are instant, and this one was the
+/// only route timing out outright at 8s — at 0% CPU, so contention rather than work.
+/// I tripled the cost of the surface a peer needs most, on the node least able to
+/// afford it.
+///
+/// The conferred set changes only when a key's roles change, which is a conferral
+/// ceremony rather than per-request data — the same reasoning that has
+/// `/v1/identity` assembled once at boot and served as a string. A conferral
+/// therefore surfaces here on the next restart, which is stated rather than hidden.
+static CAPABILITIES: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+
+/// Resolve the conferred set once and cache it. Called at composition.
+pub async fn prime_capabilities(engine: &Arc<Engine>) {
+    let caps = node_conferred_capabilities(engine).await;
+    match &caps {
+        Some(c) => tracing::info!(
+            capabilities = ?c,
+            "conferred capability set primed for /v1/federation/conformance (boot-computed; \
+             a conferral surfaces on the next restart)"
+        ),
+        None => tracing::warn!(
+            "conferred capability set could NOT be read at boot — /v1/federation/conformance \
+             will report `null` (unknown), never an empty set"
+        ),
+    }
+    let _ = CAPABILITIES.set(caps);
+}
+
 /// The conferred scopes on the key this node OPERATES AS.
 ///
 /// The node key, not the engine's — on an agent-carrying node those differ, and
@@ -572,7 +610,10 @@ pub fn parse_declaration(tokens: &[String]) -> Result<Vec<ConformanceProfile>, S
 ///     the declaration. (Loud: the failure is logged at `error`.)
 pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
     let build: Vec<ConformanceProfile> = BUILD_PROFILES.to_vec();
-    let capabilities = node_conferred_capabilities(engine).await;
+    // The CACHE, not a fresh lookup — see `CAPABILITIES`. `None` here means either
+    // "not primed" or "unreadable at boot", and both render as `null`: an
+    // unresolved capability set must never present as an empty one.
+    let capabilities = CAPABILITIES.get().cloned().flatten();
     let base = |profiles: Vec<ConformanceProfile>, declared_by_config: bool| DeclaredConformance {
         profiles,
         build_profiles: build.clone(),

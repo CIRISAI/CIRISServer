@@ -9,6 +9,10 @@
 //! A test that cannot fail is worse than no test: it occupies the slot where a real
 //! one would go. These call `local_identity_json` and assert on what it returns.
 //!
+//! Also covers the sibling surface `/v1/federation/conformance`, whose capability
+//! set 0.5.193 resolved per request — three DB round-trips on the peer-facing
+//! declaration, which made it the only route timing out on the canonical.
+//!
 //! # The defect these now pin
 //!
 //! `local_identity_aggregate` sources signing and content-KEM pubkeys from the
@@ -229,4 +233,52 @@ async fn a_node_with_no_agent_says_null_rather_than_omitting() {
         "the field must always be present"
     );
     assert!(v["actor_key_id"].is_null());
+}
+
+/// **The peer-facing declaration must not hit the DB per request.**
+///
+/// 0.5.193 resolved the conferred capability set on every call to
+/// `/v1/federation/conformance` — `lookup_public_key` plus `local_derived_key_id`,
+/// turning one config read into three DB round-trips. On the canonical, where a
+/// single `Arc<Mutex<Connection>>` is shared with everything, that route became the
+/// only one timing out (8s, at 0% CPU — contention, not work) while non-DB routes
+/// answered in 8ms.
+///
+/// This asserts the read comes from the boot cache: BEFORE priming, an admitted key
+/// still reports `null`, which a live lookup could not produce. One test rather than
+/// two, because the cache is a `OnceLock` and can only be primed once per process.
+#[tokio::test]
+async fn the_conformance_capability_set_is_read_from_cache_not_the_database() {
+    const NODE: &str = "conformance-cache-node";
+    let engine = engine_for(NODE).await;
+    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+
+    // The production path: composition sets the wire identity to the NODE key
+    // before anything resolves capabilities. Without this the resolver falls back
+    // to `engine.local_derived_key_id()` — a different subject — which is a real
+    // sharp edge tracked separately, not what this test is pinning.
+    ciris_server::node_key::set_wire_identity(NODE);
+
+    // Unprimed: `null`, even though the key IS in the directory. A per-request
+    // lookup would find it — so `null` here proves the cache is the source.
+    let before = ciris_server::conformance::declared(&engine).await;
+    assert!(
+        before.capabilities.is_none(),
+        "unprimed must report `null`; a value here means the route is still reading \
+         the directory per request"
+    );
+
+    ciris_server::conformance::prime_capabilities(&engine).await;
+
+    let after = ciris_server::conformance::declared(&engine).await;
+    assert!(
+        after.capabilities.is_some(),
+        "after priming the boot-computed set is served"
+    );
+
+    // And `null` still never renders as an empty set — unresolved and none-conferred
+    // are different facts.
+    let v = serde_json::to_value(&before).expect("serialize");
+    assert!(v["capabilities"].is_null());
+    assert_ne!(v["capabilities"], serde_json::json!([]));
 }
