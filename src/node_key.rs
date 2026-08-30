@@ -220,16 +220,42 @@ fn legacy_node_alias(host_alias: &str) -> String {
 /// no-migration rather than merely rare.
 fn resolve_node_alias(host_alias: &str, identity_dir: &std::path::Path) -> String {
     let legacy = legacy_node_alias(host_alias);
-    if SealedEd25519Signer::open_existing(legacy.clone(), identity_dir.to_path_buf()).is_ok() {
-        tracing::info!(
-            legacy_alias = %legacy,
-            base_alias = %NODE_ALIAS,
-            "adopting the existing node key rather than rotating to the base alias — \
-             rotating would strand this node's ownership and consent on the legacy key"
-        );
-        return legacy;
+    match SealedEd25519Signer::open_existing(legacy.clone(), identity_dir.to_path_buf()) {
+        // ABSENT — genuinely no legacy identity. Take the base alias.
+        Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => NODE_ALIAS.to_owned(),
+
+        // PRESENT BUT UNREADABLE — permissions, corruption, a locked keystore.
+        // This is NOT proof that no legacy identity exists, and treating it as
+        // proof is how the migration this function exists for would strand the
+        // very state it protects: the node would mint a base-alias identity and
+        // leave its ownership and peer consent on a legacy key it simply could not
+        // open this boot (Codex, PR #510).
+        //
+        // So keep the legacy alias. `node_signer` then fails loudly on the same
+        // blob rather than silently succeeding as somebody else — a boot that
+        // stops is recoverable, a boot that comes back as a different node is not.
+        Err(e) => {
+            tracing::error!(
+                legacy_alias = %legacy,
+                error = %e,
+                "the legacy node key exists or may exist and could not be opened — \
+                 KEEPING the legacy alias. Rotating to the base alias here would \
+                 strand this node's ownership and peer consent on a key it cannot \
+                 currently read."
+            );
+            legacy
+        }
+
+        Ok(_) => {
+            tracing::info!(
+                legacy_alias = %legacy,
+                base_alias = %NODE_ALIAS,
+                "adopting the existing node key rather than rotating to the base \
+                 alias — rotating would strand this node's ownership and consent"
+            );
+            legacy
+        }
     }
-    NODE_ALIAS.to_owned()
 }
 
 /// What must move when a fused key is split.

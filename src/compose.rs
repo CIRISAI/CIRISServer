@@ -297,7 +297,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // embedded path), leaving a node that split HERE reporting `actor_key_id: null`
     // while its own resolution had just established it carries one
     // (Codex, PR #508).
-    if let Some(actor) = node_resolution.split_from.as_deref() {
+    // ONLY an actor-bearing verdict. `split_from` is also set for
+    // `OtherInfrastructure` — a `witness` or `substrate_persist` key — and
+    // recording one of those as "the actor" would make /v1/identity advertise a
+    // false `actor_key_id`, and would let `startup_gate` hold a BRAINLESS
+    // infrastructure node as though it carried an agent (Codex, PR #510).
+    // `OtherInfrastructure` exists precisely because it is a third thing.
+    if let (Some(actor), true) = (
+        node_resolution.split_from.as_deref(),
+        matches!(
+            node_resolution.verdict,
+            crate::node_key::IdentityVerdict::Actor { .. }
+                | crate::node_key::IdentityVerdict::Fused { .. }
+        ),
+    ) {
         crate::node_key::set_actor_identity(actor);
     }
     if node_resolution.did_split() {
@@ -667,10 +680,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // for exactly this reason; this one was missed.
     // The actor from THIS boot's resolution, falling back to the process-global for
     // the embedded path that set it during provisioning.
-    let identity_actor: Option<String> = node_resolution
-        .split_from
-        .clone()
-        .or_else(|| crate::node_key::actor_identity().map(str::to_owned));
+    let identity_actor: Option<String> = crate::node_key::actor_identity().map(str::to_owned);
     let identity_json = local_identity_json(
         &engine,
         edge.local_transport_pubkey(),
@@ -1701,23 +1711,24 @@ pub async fn local_identity_json(
         .await
         .map_err(|e| anyhow::anyhow!("persist local_identity_aggregate: {e}"))?;
 
-    // **DO NOT RELABEL.** `local_identity_aggregate` sources its signing and
-    // content-KEM public keys from the ENGINE's signer — which on a split node is
-    // the ACTOR's. 0.5.195 overrode `key_id`/`pqc_key_id` with the node key and
-    // left those pubkeys alone, so the id and the key material disagreed: worse
-    // than the mislabelling it set out to fix, because a consumer verifying a
-    // fingerprint or sealing to that identity would use the wrong key
-    // (Codex, PR #508 — merged before its review was read).
+    // **`key_id` IS THE NODE'S ADDRESS — that is the established contract.**
+    //
+    // `app/fabric-client/.../LocalIdentityAggregate.kt` says it in terms: "[keyId]
+    // is THE federation address peers / lens / registry use to reach this node",
+    // and its parser sets `ignoreUnknownKeys`, so a new field does NOT migrate it.
+    // Making `key_id` the engine's would hand every such consumer the ACTOR key as
+    // the node's address (Codex, PR #510).
+    //
+    // But the aggregate's signing and content-KEM pubkeys come from the ENGINE's
+    // signer, which on a split node is the actor's. 0.5.195 left that disagreement
+    // SILENT, so a consumer verifying a fingerprint against `key_id` used the wrong
+    // key. The fix is not to move `key_id` — it is to NAME whose key material this
+    // is, so the difference is legible instead of hidden.
     //
     // A fully node-shaped aggregate is not constructible here: `node_signer` mints
     // Ed25519 + ML-DSA-65 only, and the node has no content-KEM pair of its own.
-    // So the aggregate stays the ENGINE's, internally consistent, and the node and
-    // actor identities are STATED BESIDE it rather than written over it.
-    //
-    // persist reports `key_id` from the engine's configured local label — the
-    // keystore alias, not the derived federation identity — so that one override
-    // stays (CIRISServer#34): it makes the aggregate agree with `federation_keys`
-    // and the `SignedKeyRecord`, which is a correction, not a relabel.
+    // Until it does, the honest surface states both identities and which one the
+    // bytes belong to.
     let engine_key_id = engine
         .local_derived_key_id()
         .await
@@ -1725,16 +1736,30 @@ pub async fn local_identity_json(
 
     let mut v = serde_json::to_value(&aggregate).context("serialize LocalIdentityAggregate")?;
     if let Some(obj) = v.as_object_mut() {
+        // The node's address, as every consumer already reads it. persist reports
+        // the keystore alias here rather than the derived federation identity, so
+        // this override also keeps the aggregate agreeing with `federation_keys`
+        // and the `SignedKeyRecord` (CIRISServer#34).
         obj.insert(
             "key_id".into(),
-            serde_json::Value::String(engine_key_id.clone()),
+            serde_json::Value::String(node_key_id.to_owned()),
         );
         if obj.get("pqc_key_id").is_some_and(|p| !p.is_null()) {
             obj.insert(
                 "pqc_key_id".into(),
-                serde_json::Value::String(engine_key_id.clone()),
+                serde_json::Value::String(node_key_id.to_owned()),
             );
         }
+
+        // WHOSE KEY MATERIAL the pubkeys above are. Equal to `key_id` on an
+        // unsplit node; the ACTOR on a split one. A consumer verifying a
+        // fingerprint or sealing to this identity must use THIS, not `key_id` —
+        // and silence here is what made 0.5.195 dangerous rather than merely
+        // untidy.
+        obj.insert(
+            "key_material_key_id".into(),
+            serde_json::Value::String(engine_key_id.clone()),
+        );
 
         // The NODE's key, stated rather than substituted. On an unsplit node this
         // equals `key_id`; on a split one it is the separately minted node key, and

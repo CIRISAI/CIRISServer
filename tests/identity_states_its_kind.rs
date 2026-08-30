@@ -113,12 +113,14 @@ async fn payload(
     serde_json::from_str(&json).expect("valid JSON")
 }
 
-/// **The 0.5.195 regression, pinned.** `key_id` must agree with the key material
-/// beside it. The aggregate's pubkeys come from the ENGINE's signer, so `key_id`
-/// must be the engine's — never overwritten with the node's, which would leave a
-/// consumer verifying a fingerprint against the wrong key.
+/// **`key_id` is the node's ADDRESS — the established consumer contract.**
+///
+/// `app/fabric-client/.../LocalIdentityAggregate.kt`: *"[keyId] is THE federation
+/// address peers / lens / registry use to reach this node"*, with
+/// `ignoreUnknownKeys` set — so a new field does not migrate it. Making `key_id`
+/// the engine's would hand every such consumer the ACTOR key as the node address.
 #[tokio::test]
-async fn the_key_id_agrees_with_the_key_material_beside_it() {
+async fn the_key_id_is_the_nodes_address() {
     const ACTOR: &str = "split-actor";
     const NODE: &str = "split-node";
     let engine = engine_for(ACTOR).await;
@@ -126,19 +128,41 @@ async fn the_key_id_agrees_with_the_key_material_beside_it() {
     register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
 
     let v = payload(&engine, NODE, Some(ACTOR)).await;
+    assert_eq!(
+        v["key_id"], NODE,
+        "peers reach this node by key_id; it must be the NODE key"
+    );
+}
 
+/// **The 0.5.195 regression, pinned: the disagreement must be NAMED.**
+///
+/// The aggregate's pubkeys come from the engine's signer — the actor on a split
+/// node — while `key_id` is the node's address. That mismatch is unavoidable until
+/// the node has content-KEM material of its own. What made .195 dangerous rather
+/// than untidy was that it was SILENT: a consumer verifying a fingerprint against
+/// `key_id` used the wrong key with nothing to warn it.
+#[tokio::test]
+async fn whose_key_material_this_is_must_be_stated() {
+    const ACTOR: &str = "split-actor-km";
+    const NODE: &str = "split-node-km";
+    let engine = engine_for(ACTOR).await;
+    register(&engine, &signer_for(ACTOR), ACTOR, identity_type::AGENT).await;
+    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+
+    let v = payload(&engine, NODE, Some(ACTOR)).await;
     let engine_derived = engine
         .local_derived_key_id()
         .await
         .expect("engine derived key_id");
+
     assert_eq!(
-        v["key_id"], engine_derived,
-        "key_id must name the identity whose pubkeys this aggregate carries"
+        v["key_material_key_id"], engine_derived,
+        "the pubkeys belong to the ENGINE, and the payload must say so"
     );
     assert_ne!(
-        v["key_id"], NODE,
-        "relabelling the aggregate with the node key while its pubkeys stay the \
-         actor's is the 0.5.195 defect"
+        v["key_material_key_id"], v["key_id"],
+        "on a split node these differ — which is exactly why it must be stated \
+         rather than left for a consumer to discover by failed verification"
     );
 }
 
