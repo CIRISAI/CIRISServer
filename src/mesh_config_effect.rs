@@ -243,6 +243,16 @@ pub const fn consumption(key: MeshConfigKey) -> Consumption {
         // replication offer filter) is CIRISEdge#440 and is not reached from
         // here — see `trace_plane`'s doc, which says so rather than implying
         // the whole plane is governed.
+        // The background-work bound: CC 4.2.1's graded "do less work" tier,
+        // which stops short of the halt and is TTL-bounded, so a node recovers
+        // on its own when the relief expires. CIRISEdge#547 is the shape of
+        // the problem — a canonical dying after ~22h with the worker floor
+        // unable to help — and a root-driven ceiling is the handle that was
+        // missing there.
+        MeshConfigKey::LoadCeiling => Consumption::Wired {
+            site: "EffectiveMeshConfig::load_ceiling",
+            effect: "crate::background_scheduler (the bound every background task acquires)",
+        },
         MeshConfigKey::FeatureTraceReplication => Consumption::Wired {
             site: "EffectiveMeshConfig::trace_plane",
             effect: "crate::ingest_http (the HTTP trace-ingest relay)",
@@ -359,6 +369,55 @@ impl Reading {
             Self::Folded { relieved: true, .. } => "relieved",
             Self::Unreadable => "unreadable",
         }
+    }
+}
+
+/// **How many background tasks this node runs at once.**
+///
+/// `load.ceiling`'s value, named rather than passed as a bare integer. Carries
+/// `relieved` alongside it because the two facts an operator needs are
+/// different: 64 because nobody has spoken, and 64 because a root asked for it,
+/// are the same number and different states of the mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadCeiling {
+    max_concurrent_tasks: usize,
+    relieved: bool,
+}
+
+impl LoadCeiling {
+    /// A ceiling at an explicit bound, clamped by persist's own spec.
+    ///
+    /// For the pre-config bootstrap window and for tests. Production reads
+    /// [`EffectiveMeshConfig::load_ceiling`] instead — this cannot forge a
+    /// `relieved` claim, which stays `false` because no root asked for it.
+    #[must_use]
+    pub fn for_bound(max_concurrent_tasks: usize) -> Self {
+        let spec = MeshConfigKey::LoadCeiling.spec();
+        let floor = if spec.min > 1 { spec.min } else { 1 };
+        let hi = usize::try_from(spec.max).unwrap_or(usize::MAX);
+        let lo = usize::try_from(floor).unwrap_or(1);
+        Self {
+            max_concurrent_tasks: max_concurrent_tasks.clamp(lo, hi),
+            relieved: false,
+        }
+    }
+
+    /// The concurrency bound, **never zero**.
+    ///
+    /// persist floors this key at 1 deliberately: *"Relief that reaches zero is
+    /// a halt, and the halt is the other tier of the graded response —
+    /// different authority, no TTL. A node held at 1 still converges, slowly,
+    /// and recovers on its own when the relief expires; a node at 0 converges
+    /// never."* A consumer must not be able to derive a stall from this.
+    #[must_use]
+    pub const fn max_concurrent_tasks(self) -> usize {
+        self.max_concurrent_tasks
+    }
+
+    /// Did a subscribed root move this off the owner's baseline?
+    #[must_use]
+    pub const fn relieved(self) -> bool {
+        self.relieved
     }
 }
 
@@ -511,6 +570,52 @@ impl EffectiveMeshConfig {
         }
     }
 
+    /// `load.ceiling` — **how many background tasks this node runs at once.**
+    ///
+    /// Consumer: [`crate::background_scheduler`], the bound every background
+    /// task acquires against. This is the RELIEF half of the two-plane load
+    /// model: a node self-reports `config:load` on `infra:attest`, and a trust
+    /// root relieves through `mesh_config` under CC 4.2.1. The node never sets
+    /// this for itself — CIRISServer#503 tried the node-local form and was
+    /// withdrawn on the constitution, not on engineering, because a node holds
+    /// no delegation to itself.
+    ///
+    /// Bounds come from persist's own spec rather than being transcribed here.
+    /// A number copied into a second file is a number that can disagree with
+    /// the first — the defect class currently open as CIRISEdge#548.
+    ///
+    /// Unreadable ⇒ the owner default, which is the concurrency this node ran
+    /// at before the key was wired. Failing CLOSED here would turn a directory
+    /// blip into a node that stops doing background work at all.
+    #[must_use]
+    pub fn load_ceiling(&self) -> LoadCeiling {
+        let spec = MeshConfigKey::LoadCeiling.spec();
+        // Floored at `max(spec.min, 1)`: persist already sets min = 1, and the
+        // second guard costs nothing next to a consumer that could otherwise
+        // acquire against zero permits and never wake.
+        let floor = if spec.min > 1 { spec.min } else { 1 };
+        let clamp = |v: i64| -> usize {
+            let v = if v < floor {
+                floor
+            } else if v > spec.max {
+                spec.max
+            } else {
+                v
+            };
+            usize::try_from(v).unwrap_or(1)
+        };
+        match self.read(MeshConfigKey::LoadCeiling) {
+            Reading::Folded { value, relieved } => LoadCeiling {
+                max_concurrent_tasks: clamp(value),
+                relieved,
+            },
+            Reading::Unreadable => LoadCeiling {
+                max_concurrent_tasks: clamp(spec.owner_default),
+                relieved: false,
+            },
+        }
+    }
+
     /// The reading behind each wired consumer, for logs and for the gate test.
     /// Reads through the SAME accessors the consumers do.
     #[must_use]
@@ -574,6 +679,22 @@ impl MeshConfigEffect {
     #[must_use]
     pub fn trace_plane(&self) -> PlaneAdmission {
         self.rx.borrow().trace_plane()
+    }
+
+    /// Watch the plane for changes.
+    ///
+    /// A consumer that must REACT to relief (rather than sample it per request)
+    /// awaits on this. `changed()` erroring means every sender is gone, which
+    /// is composition shutdown, not a config fault.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<Arc<EffectiveMeshConfig>> {
+        self.rx.clone()
+    }
+
+    /// `load.ceiling`, live.
+    #[must_use]
+    pub fn load_ceiling(&self) -> LoadCeiling {
+        self.rx.borrow().load_ceiling()
     }
 
     /// The whole current reading — for a log line or a test assertion.
@@ -793,7 +914,11 @@ mod tests {
         assert_eq!(declared, readable);
         assert_eq!(
             declared,
-            vec!["backpressure.summary_only", "feature.trace_replication"],
+            vec![
+                "backpressure.summary_only",
+                "feature.trace_replication",
+                "load.ceiling",
+            ],
         );
     }
 
@@ -829,9 +954,18 @@ mod tests {
         let relieved = reading_over(vec![
             row(MeshConfigKey::BackpressureSummaryOnly, 1, None),
             row(MeshConfigKey::FeatureTraceReplication, 0, None),
+            // `load.ceiling` is HigherMeansMoreFlow, so a RESTRICTION is a
+            // LOWER value: 8 concurrent tasks instead of the owner's 64.
+            row(MeshConfigKey::LoadCeiling, 8, None),
         ]);
         assert_eq!(relieved.serve_fidelity(), ServeFidelity::SummaryOnly);
         assert_eq!(relieved.trace_plane(), PlaneAdmission::Paused);
+        assert_eq!(relieved.load_ceiling().max_concurrent_tasks(), 8);
+        assert!(relieved.load_ceiling().relieved());
+        // The floor holds even under relief: a root may throttle to 1, never
+        // to 0 — a halt is the other tier of the graded response.
+        let floored = reading_over(vec![row(MeshConfigKey::LoadCeiling, 1, None)]);
+        assert_eq!(floored.load_ceiling().max_concurrent_tasks(), 1);
         // …and the reading names WHY the value is what it is.
         for (_, reading) in relieved.wired_readings() {
             assert_eq!(reading.as_str(), "relieved");

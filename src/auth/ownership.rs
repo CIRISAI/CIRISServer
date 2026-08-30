@@ -635,6 +635,7 @@ pub async fn build_signed_owner_binding(
         identity_type::USER,
         &ed25519_pubkey_b64,
         Some(&ml_dsa_65_pubkey_b64),
+        None,
     )
     .map_err(OwnershipError::Sign)?;
     let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;
@@ -814,6 +815,7 @@ async fn register_user_key(
         identity_type::USER,
         &binding.ed25519_pubkey_b64,
         Some(&binding.ml_dsa_65_pubkey_b64),
+        None,
     )
     .map_err(OwnershipError::Sign)?;
     let reg_canonical = canonicalize_owner_binding_envelope(&reg_envelope)?;

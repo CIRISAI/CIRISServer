@@ -69,6 +69,7 @@ async fn register(engine: &Engine, signer: &LocalSigner, key_id: &str, ident: &s
         ident,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .expect("bind subject (#659)");
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
@@ -120,6 +121,7 @@ async fn try_register(
         ident,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .expect("bind subject (#659)");
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)

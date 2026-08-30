@@ -447,7 +447,12 @@ pub async fn mint_user_identity(
         // alias_hint.
         Some(derived_key_id.clone()),
         label,
-        &now,
+        // v14.0.0: the window is a checked type, not two loose strings —
+        // `Validity::checked` is the ONLY constructor, so an instant nothing can
+        // compare against cannot reach a signed record (CIRISVerify#268). `None`
+        // expiry keeps today's behaviour; see the note at the accord producers.
+        ciris_verify_core::federation_identity::Validity::checked(&now, None)
+            .map_err(|e| anyhow::anyhow!("validity window for the federation identity: {e}"))?,
         // seal_alias = the keystore alias: seal/re-open the ML-DSA half (and the
         // software Ed25519 seed) under `<alias>` while the recorded id is derived.
         Some(key_id_alias),
@@ -651,6 +656,7 @@ pub async fn mint_portable_software_occurrence(
         &identity,
         "user",
         &now,
+        None,
         &[],
     )
     .await

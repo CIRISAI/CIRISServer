@@ -94,7 +94,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
 
     // (1) SEED — A1, the baked HUMANITY_ACCORD anchor, present on BOTH nodes.
     let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
-    let a1_anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, &[])
+    let a1_anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
     let a1_ed = ed32(&a1_anchor.record.pubkey_ed25519_base64);
@@ -111,7 +111,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     // Node A's identity + its BOOT-time SELF-signed own row (what register_self_key
     // writes) in A's directory.
     let node_a = HybridSigningIdentity::generate(node_a_key).expect("gen node A");
-    let a_self = produce_self_key_record(&node_a, "node", &now, &[])
+    let a_self = produce_self_key_record(&node_a, "node", &now, None, &[])
         .await
         .expect("A self record");
     let a_ed_b64 = a_self.record.pubkey_ed25519_base64.clone();
@@ -150,6 +150,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
             roles: Vec::new(),
         },
         &now,
+        None,
         &[],
     )
     .await

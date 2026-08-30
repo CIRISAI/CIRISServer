@@ -228,6 +228,7 @@ async fn self_key_record_json(engine: &Engine) -> String {
         &identity,
         identity_type::STEWARD,
         &chrono::Utc::now().to_rfc3339(),
+        None,
         &[],
     )
     .await
@@ -261,6 +262,7 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
         identity_type::WITNESS,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .expect("bind the subject into the peer's registration envelope (#659)");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer registration");
@@ -664,7 +666,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
 
     // Seed the A1 accord anchor (persist v12.0.2 first-boot-seeds this in prod).
     let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
-    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, &[])
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
     let a1_ed: [u8; 32] = BASE64
@@ -683,7 +685,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
 
     // A target node's boot-time SELF-signed own row (the row to be upgraded).
     let target = HybridSigningIdentity::generate("adopt-target-test").expect("gen target");
-    let t_self = produce_self_key_record(&target, "node", &now, &[])
+    let t_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
     let t_ed = t_self.record.pubkey_ed25519_base64.clone();
@@ -708,6 +710,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
             roles: Vec::new(),
         },
         &now,
+        None,
         &[],
     )
     .await

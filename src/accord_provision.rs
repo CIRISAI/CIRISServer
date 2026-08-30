@@ -1426,7 +1426,9 @@ async fn admit_node_impl(
     // (1) The holder's OWN self-signed `steward,accord_holder` anchor record — the
     //     rooting terminus persist bakes (its ed25519 pubkey IS a pinned anchor).
     let anchor =
-        match produce_self_key_record(&identity, "steward,accord_holder", &valid_from, &[]).await {
+        match produce_self_key_record(&identity, "steward,accord_holder", &valid_from, None, &[])
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 return err(
@@ -1457,6 +1459,12 @@ async fn admit_node_impl(
             roles: roles.to_vec(),
         },
         &valid_from,
+        // `valid_until`: None. CIRISVerify#267 made expiry expressible on the
+        // producers; what a CI-key or admitted-node expiry SHOULD be is a policy
+        // question, and deciding it inside a substrate repin is how a semantic
+        // change ships disguised as an adoption. None reproduces the pre-v14
+        // bytes exactly (an absent expiry omits the member, CEG §0.9).
+        None,
         // #172: transport hints ride INSIDE this scrub-signed envelope, so the accord
         // holder attests the node's reachability along with its identity (empty for a
         // plain admit-node; the add-canonical ceremony passes the node's ip hint).
@@ -1830,6 +1838,7 @@ async fn propose_canonical_impl(st: ProvisionState, mut req: AddCanonicalRequest
                 .collect(),
         },
         &valid_from,
+        None,
         &hints,
     )
     .await
@@ -2131,6 +2140,7 @@ async fn propose_ci_key_impl(st: ProvisionState, req: ProposeCiKeyRequest) -> Re
                 ],
             },
             &valid_from,
+            None,
             &[],
         )
         .await
@@ -2728,6 +2738,7 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
                     .collect(),
             },
             &vf,
+            None,
             &hints,
         )
         .await
@@ -3875,7 +3886,7 @@ mod tests {
         use ciris_verify_core::federation_self_record::produce_self_key_record;
         use ciris_verify_core::self_at_login::HybridSigningIdentity;
         let id = HybridSigningIdentity::generate(key_id).expect("gen identity");
-        let rec = produce_self_key_record(&id, "canonical,node", "2026-07-05T00:00:00Z", &[])
+        let rec = produce_self_key_record(&id, "canonical,node", "2026-07-05T00:00:00Z", None, &[])
             .await
             .expect("produce self key record");
         serde_json::to_value(&rec).expect("record to json")

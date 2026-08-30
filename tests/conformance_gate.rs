@@ -190,6 +190,7 @@ async fn self_key_record_json(engine: &Engine) -> String {
         identity_type::STEWARD,
         &BASE64.encode(&probe.classical.public_key),
         Some(&BASE64.encode(&probe.pqc.public_key)),
+        None,
     )
     .expect("bind this node's subject into its registration envelope");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize self envelope");
@@ -242,6 +243,7 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
         identity_type::WITNESS,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .expect("bind the peer's subject into its registration envelope");
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize peer registration");

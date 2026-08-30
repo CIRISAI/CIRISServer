@@ -509,7 +509,7 @@ pub async fn register_node_key(
     use ciris_verify_core::federation_self_record::produce_self_key_record;
 
     let valid_from = chrono::Utc::now().to_rfc3339();
-    let v_rec = produce_self_key_record(identity, identity_type::NODE, &valid_from, &[])
+    let v_rec = produce_self_key_record(identity, identity_type::NODE, &valid_from, None, &[])
         .await
         .map_err(|e| anyhow::anyhow!("produce node self key record: {e}"))?;
     let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)

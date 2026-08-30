@@ -447,7 +447,7 @@ async fn mint_portable_root() -> PortableRoot {
         identity_type: "canonical,node".to_string(),
         roles: vec![INFRA_SERVE.to_string()],
     };
-    let partial = produce_scrubbed_key_record(&holders[0], target, VALID_FROM, &[])
+    let partial = produce_scrubbed_key_record(&holders[0], target, VALID_FROM, None, &[])
         .await
         .expect("A1 scrub of the canonical");
     let canonical_verify = append_scrub(partial, &holders[1])
@@ -460,7 +460,7 @@ async fn mint_portable_root() -> PortableRoot {
 
     // (5) The user — a self-signed `user` identity.
     let user = seeded_identity(USER, qa_seed("user"));
-    let user_rec = produce_self_key_record(&user, "user", VALID_FROM, &[])
+    let user_rec = produce_self_key_record(&user, "user", VALID_FROM, None, &[])
         .await
         .expect("user self record");
     dir.put_public_key(to_persist(&user_rec))
@@ -528,7 +528,7 @@ async fn mint_portable_root() -> PortableRoot {
 /// with every other leg green (user trust edge + fresh lifecycle).
 async fn add_vouch_only_root(fx: &PortableRoot) {
     let vouch = seeded_identity(VOUCH_ROOT, qa_seed("vouch-root"));
-    let rec = produce_self_key_record(&vouch, "node", VALID_FROM, &[])
+    let rec = produce_self_key_record(&vouch, "node", VALID_FROM, None, &[])
         .await
         .expect("vouch-root self record");
     fx.dir
@@ -710,7 +710,7 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // Register the user FIRST: the federation-tier ingest gate refuses a row whose
     // attester has no registered pubkeys to verify against (CC 5.3.2.4.3.1).
     dir2.put_public_key(to_persist(
-        &produce_self_key_record(&fx.user, "user", VALID_FROM, &[])
+        &produce_self_key_record(&fx.user, "user", VALID_FROM, None, &[])
             .await
             .expect("user self record"),
     ))
@@ -866,7 +866,7 @@ async fn qa_expired_trust_edge_is_dead() {
     let fx = mint_portable_root().await;
 
     let user2 = seeded_identity("qa-user-2", qa_seed("user-2"));
-    let rec = produce_self_key_record(&user2, "user", VALID_FROM, &[])
+    let rec = produce_self_key_record(&user2, "user", VALID_FROM, None, &[])
         .await
         .expect("user-2 self record");
     fx.dir
@@ -922,7 +922,7 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         identity_type: "canonical,node".to_string(),
         roles: vec![], // <- the defect: no infra:serve conferred
     };
-    let partial = produce_scrubbed_key_record(&fx.holders[0], target, VALID_FROM, &[])
+    let partial = produce_scrubbed_key_record(&fx.holders[0], target, VALID_FROM, None, &[])
         .await
         .expect("A1 scrub");
     let old = to_persist(
@@ -947,7 +947,7 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         identity_type: "canonical,node".to_string(),
         roles: vec![INFRA_SERVE.to_string()],
     };
-    let rp = produce_scrubbed_key_record(&fx.holders[0], rebless_target, VALID_FROM, &[])
+    let rp = produce_scrubbed_key_record(&fx.holders[0], rebless_target, VALID_FROM, None, &[])
         .await
         .expect("A1 re-bless scrub");
     let reblessed = to_persist(
@@ -1034,7 +1034,7 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         .await
         .expect("attach");
     dir2.put_public_key(to_persist(
-        &produce_self_key_record(&fx.user, "user", VALID_FROM, &[])
+        &produce_self_key_record(&fx.user, "user", VALID_FROM, None, &[])
             .await
             .expect("user self record"),
     ))

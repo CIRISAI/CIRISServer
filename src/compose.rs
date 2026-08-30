@@ -935,6 +935,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     )
     .await;
 
+    // ── The background-work bound, governed by `load.ceiling` ────────────────
+    // CC 4.2.1's graded "do less work" tier. A trust root relieves this node by
+    // lowering the ceiling; the node never sets it for itself (CIRISServer#503
+    // was withdrawn on exactly that point). `govern` follows the plane so an
+    // expiring relief actually restores the ceiling rather than leaving the
+    // node throttled until the next boot.
+    let background =
+        crate::background_scheduler::BackgroundScheduler::from_config(&mesh_config_effect);
+    tracing::info!(
+        max_concurrent_tasks = background.granted(),
+        "background scheduler bound (load.ceiling)"
+    );
+    {
+        let sched = Arc::clone(&background);
+        let effect = mesh_config_effect.clone();
+        tokio::spawn(async move { crate::background_scheduler::govern(sched, effect).await });
+    }
+
     // ── The responsible-USER signer for POST /v1/setup/claim-remote is no longer
     //    resolved at boot (it would be absent on a fresh node — the fed-ID is minted
     //    DURING the first-run wizard). The claim-remote router resolves it at request
@@ -2839,10 +2857,15 @@ async fn register_substrate_key(
     // the node key uses (`build_self_key_record`), bridged verify→persist by the
     // structurally-identical JSON shape.
     let valid_from = chrono::Utc::now().to_rfc3339();
-    let v_rec =
-        produce_self_key_record(identity, identity_type::SUBSTRATE_PERSIST, &valid_from, &[])
-            .await
-            .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
+    let v_rec = produce_self_key_record(
+        identity,
+        identity_type::SUBSTRATE_PERSIST,
+        &valid_from,
+        None,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
     let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist substrate SignedKeyRecord: {e}"))?;
     let key_id = signed.record.key_id.clone();
@@ -3195,6 +3218,7 @@ pub(crate) async fn build_self_key_record(
         &identity,
         ciris_persist::federation::types::identity_type::NODE,
         &valid_from,
+        None,
         &[],
     )
     .await

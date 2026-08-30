@@ -321,6 +321,9 @@ pub mod mesh_genesis;
 /// **The two-or-three keys a node holds** — the single source of truth for the
 /// node / fed / agent split, the aliases they live under, and the invariants
 /// that keep them from fusing or being re-derived (CIRISServer#511).
+/// **The background-work bound** — `load.ceiling`'s consumer, the graded
+/// "do less work" tier a trust root drives under CC 4.2.1.
+pub mod background_scheduler;
 pub mod key_convention;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
