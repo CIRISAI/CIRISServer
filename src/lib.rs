@@ -543,6 +543,15 @@ pub use compose::{serve, serve_with_adapter};
 /// node can set `config:*` knobs (e.g. `net.bootstrap_peers`) with no app/session.
 pub use compose::{run_config_get, run_config_set};
 
+/// The `GET /v1/identity` payload assembly.
+///
+/// Re-exported so the contract can be asserted against what production ACTUALLY
+/// produces. The first version of that test built the expected JSON by hand and
+/// asserted the literal contained what it had just inserted — it would have passed
+/// if this function omitted, renamed or mispopulated every field, and it did pass
+/// while 0.5.195 shipped a real defect on this exact surface (Codex, PR #508).
+pub use compose::local_identity_json;
+
 /// The shared persist `Engine` (re-exported so a downstream adapter crate gets
 /// the EXACT type [`AdapterContext::engine`] carries, without depending on
 /// `ciris-persist` directly or guessing its path).

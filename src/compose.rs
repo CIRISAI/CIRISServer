@@ -292,6 +292,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // The serve path performs its OWN split, so it must record the actor too —
+    // `set_actor_identity` was only ever called by `provision_node_identity` (the
+    // embedded path), leaving a node that split HERE reporting `actor_key_id: null`
+    // while its own resolution had just established it carries one
+    // (Codex, PR #508).
+    if let Some(actor) = node_resolution.split_from.as_deref() {
+        crate::node_key::set_actor_identity(actor);
+    }
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
@@ -657,11 +665,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // advertising it as the node's identity — the most public place to name the
     // wrong key. Every other transport-plane caller already reads `wire_identity()`
     // for exactly this reason; this one was missed.
+    // The actor from THIS boot's resolution, falling back to the process-global for
+    // the embedded path that set it during provisioning.
+    let identity_actor: Option<String> = node_resolution
+        .split_from
+        .clone()
+        .or_else(|| crate::node_key::actor_identity().map(str::to_owned));
     let identity_json = local_identity_json(
         &engine,
         edge.local_transport_pubkey(),
         &node_resolution.node_key_id,
-        crate::node_key::actor_identity(),
+        identity_actor.as_deref(),
     )
     .await
     .context("assemble /v1/identity aggregate")?;
@@ -1670,10 +1684,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 ///     reachable for a hardware-signed Engine (#223 closed the `null` gap);
 ///   - **RET-transport** role (x25519 ‖ ed25519, RNS `get_public_key` order),
 ///     supplied here from the Reticulum transport identity.
-async fn local_identity_json(
+pub async fn local_identity_json(
     engine: &Engine,
     transport_pubkey: Option<[u8; 64]>,
-    wire_key_id: &str,
+    node_key_id: &str,
     actor_key_id: Option<&str>,
 ) -> Result<String> {
     use base64::Engine as _;
@@ -1687,26 +1701,50 @@ async fn local_identity_json(
         .await
         .map_err(|e| anyhow::anyhow!("persist local_identity_aggregate: {e}"))?;
 
-    // persist's aggregate reports `key_id`/`pqc_key_id` from the engine's
-    // configured local labels — which are the KEYSTORE alias (the raw `--key-id`),
-    // NOT the derived federation/wire identity. The `federation_keys` row and the
-    // `SignedKeyRecord` both carry the derived `key_id`, so override here so
-    // GET /v1/identity matches the canonical surfaces (CIRISServer#34). The
-    // federation registers the hybrid (Ed25519 + ML-DSA-65) under ONE key_id, so
-    // `pqc_key_id` is that same derived key_id (the keystore `{alias}-pqc` blob is
-    // an internal storage label, not the federation identity).
+    // **DO NOT RELABEL.** `local_identity_aggregate` sources its signing and
+    // content-KEM public keys from the ENGINE's signer — which on a split node is
+    // the ACTOR's. 0.5.195 overrode `key_id`/`pqc_key_id` with the node key and
+    // left those pubkeys alone, so the id and the key material disagreed: worse
+    // than the mislabelling it set out to fix, because a consumer verifying a
+    // fingerprint or sealing to that identity would use the wrong key
+    // (Codex, PR #508 — merged before its review was read).
+    //
+    // A fully node-shaped aggregate is not constructible here: `node_signer` mints
+    // Ed25519 + ML-DSA-65 only, and the node has no content-KEM pair of its own.
+    // So the aggregate stays the ENGINE's, internally consistent, and the node and
+    // actor identities are STATED BESIDE it rather than written over it.
+    //
+    // persist reports `key_id` from the engine's configured local label — the
+    // keystore alias, not the derived federation identity — so that one override
+    // stays (CIRISServer#34): it makes the aggregate agree with `federation_keys`
+    // and the `SignedKeyRecord`, which is a correction, not a relabel.
+    let engine_key_id = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+
     let mut v = serde_json::to_value(&aggregate).context("serialize LocalIdentityAggregate")?;
     if let Some(obj) = v.as_object_mut() {
         obj.insert(
             "key_id".into(),
-            serde_json::Value::String(wire_key_id.to_string()),
+            serde_json::Value::String(engine_key_id.clone()),
         );
         if obj.get("pqc_key_id").is_some_and(|p| !p.is_null()) {
             obj.insert(
                 "pqc_key_id".into(),
-                serde_json::Value::String(wire_key_id.to_string()),
+                serde_json::Value::String(engine_key_id.clone()),
             );
         }
+
+        // The NODE's key, stated rather than substituted. On an unsplit node this
+        // equals `key_id`; on a split one it is the separately minted node key, and
+        // a consumer that needs the node identity reads it HERE instead of trusting
+        // that `key_id` means whichever of the two it happened to want.
+        obj.insert(
+            "node_key_id".into(),
+            serde_json::Value::String(node_key_id.to_owned()),
+        );
+
         // ── STATE THE KIND; do not make a consumer infer it (CIRISServer#507) ──
         //
         // Without this a consumer reads `key_id` and guesses from the NAME — and
@@ -1719,7 +1757,9 @@ async fn local_identity_json(
         // Read from the DIRECTORY, never restated: the row is what admission and
         // every peer's agency gate actually consult, so a value derived any other
         // way could disagree with the one that binds (CC 3.4.7.3).
-        let kind = crate::node_key::identity_type_of(engine, wire_key_id).await;
+        // The kind of the NODE key — the one a peer routes to and the one whose
+        // `identity_type` the agency gate consults.
+        let kind = crate::node_key::identity_type_of(engine, node_key_id).await;
         obj.insert(
             "identity_type".into(),
             kind.map_or(serde_json::Value::Null, serde_json::Value::String),
