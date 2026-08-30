@@ -198,6 +198,66 @@ pub fn node_alias(_host_alias: &str) -> String {
     NODE_ALIAS.to_owned()
 }
 
+/// The alias a node's key lived under BEFORE the base-alias change: `{host}-node`.
+fn legacy_node_alias(host_alias: &str) -> String {
+    format!("{host_alias}-node")
+}
+
+/// **Adopt an existing node identity; only a NEW node takes the new base alias.**
+///
+/// The alias is the sealed-keystore lookup, so switching it mints a different key
+/// and therefore a different node `key_id`. For a node that already split under the
+/// old `{host}-node` derivation that is not a rename — it is a silent identity
+/// change, and the boot migration would not follow it: `move_owner_binding_to_node_key`
+/// queries `owner_of(actor_key_id)` and `reauthor_consent_as_node` lists grants
+/// authored by the ACTOR, but after the original split both already belong to the
+/// LEGACY node key. The node would come back unowned with its replication peers
+/// invisible (Codex, PR #508).
+///
+/// So the legacy blob is probed first and adopted when present. An already-split
+/// node keeps the identity its peers know; only a node with no node key yet gets
+/// `ciris-node-bootstrap`. That makes the base-alias change genuinely
+/// no-migration rather than merely rare.
+fn resolve_node_alias(host_alias: &str, identity_dir: &std::path::Path) -> String {
+    let legacy = legacy_node_alias(host_alias);
+    match SealedEd25519Signer::open_existing(legacy.clone(), identity_dir.to_path_buf()) {
+        // ABSENT — genuinely no legacy identity. Take the base alias.
+        Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => NODE_ALIAS.to_owned(),
+
+        // PRESENT BUT UNREADABLE — permissions, corruption, a locked keystore.
+        // This is NOT proof that no legacy identity exists, and treating it as
+        // proof is how the migration this function exists for would strand the
+        // very state it protects: the node would mint a base-alias identity and
+        // leave its ownership and peer consent on a legacy key it simply could not
+        // open this boot (Codex, PR #510).
+        //
+        // So keep the legacy alias. `node_signer` then fails loudly on the same
+        // blob rather than silently succeeding as somebody else — a boot that
+        // stops is recoverable, a boot that comes back as a different node is not.
+        Err(e) => {
+            tracing::error!(
+                legacy_alias = %legacy,
+                error = %e,
+                "the legacy node key exists or may exist and could not be opened — \
+                 KEEPING the legacy alias. Rotating to the base alias here would \
+                 strand this node's ownership and peer consent on a key it cannot \
+                 currently read."
+            );
+            legacy
+        }
+
+        Ok(_) => {
+            tracing::info!(
+                legacy_alias = %legacy,
+                base_alias = %NODE_ALIAS,
+                "adopting the existing node key rather than rotating to the base \
+                 alias — rotating would strand this node's ownership and consent"
+            );
+            legacy
+        }
+    }
+}
+
 /// What must move when a fused key is split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerBindingMove {
@@ -380,7 +440,7 @@ pub async fn node_signer(
     Arc<ciris_persist::prelude::LocalSigner>,
     ciris_verify_core::self_at_login::HardwareRootedIdentity,
 )> {
-    let alias = node_alias(keystore_alias);
+    let alias = resolve_node_alias(keystore_alias, identity_dir);
 
     let ed: Arc<dyn HardwareSigner> = Arc::from(
         SealedEd25519Signer::open_or_create(alias.clone(), identity_dir.to_path_buf(), None)
