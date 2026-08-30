@@ -318,6 +318,9 @@ pub mod mesh_config_effect;
 pub mod mesh_config_surface;
 pub mod mesh_genesis;
 
+/// **The two-or-three keys a node holds** — the single source of truth for the
+/// node / fed / agent split, the aliases they live under, and the invariants
+/// that keep them from fusing or being re-derived (CIRISServer#511).
 pub mod key_convention;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
@@ -341,7 +344,6 @@ pub mod node_control;
 /// carries the superset.
 pub mod node_identity;
 pub mod node_key;
-pub mod session_table;
 
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
 pub mod node_runtime;
