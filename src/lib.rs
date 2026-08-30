@@ -344,6 +344,10 @@ pub mod node_control;
 /// carries the superset.
 pub mod node_identity;
 pub mod node_key;
+/// **The session claim table** — which occurrence of this self is handling
+/// which `(community, session)`, and the rule that an unclaimed attestation is
+/// acted on by nobody.
+pub mod session_table;
 
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
 pub mod node_runtime;
