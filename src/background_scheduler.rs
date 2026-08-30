@@ -32,14 +32,21 @@
 //! relief expires; a node at 0 converges never and would sit there until a TTL
 //! nobody is watching runs out."* Nothing here can produce a zero bound.
 //!
-//! # Shrinking is deferred, not forced
+//! # Shrinking is deferred, not forced — and it must not be racy
 //!
-//! Lowering the ceiling never cancels running work. Tokio's `forget_permits`
-//! can only reclaim slots that are FREE, so a shrink takes back what it can
-//! immediately and the remainder as tasks finish ([`TaskSlot::drop`] reconciles).
-//! The alternative — aborting mid-flight tasks to hit a number — turns a
-//! throttle into a correctness hazard, and relief is supposed to be the SAFE
-//! tier of the graded response.
+//! Lowering the ceiling never cancels running work. `forget_permits` reclaims
+//! only FREE slots, so a shrink takes back what it can at once and the rest as
+//! tasks finish. Aborting mid-flight work to hit a number would turn a throttle
+//! into a correctness hazard, and relief is the SAFE tier of the graded response.
+//!
+//! **The subtlety that made the first version wrong under load.** Releasing a
+//! permit and then calling `forget_permits` is a race: a released permit can be
+//! handed straight to a queued waiter before the reclaim runs, so the reclaim
+//! finds nothing free and `granted` never falls. With a sustained backlog — the
+//! overloaded node this whole mechanism exists for — the ceiling would drop and
+//! concurrency would not. A finishing task therefore **consumes** its own permit
+//! (`OwnedSemaphorePermit::forget`) while a shrink is outstanding, instead of
+//! returning it for someone else to take.
 
 use crate::mesh_config_effect::{LoadCeiling, MeshConfigEffect};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -177,9 +184,29 @@ pub struct TaskSlot {
 impl Drop for TaskSlot {
     fn drop(&mut self) {
         self.scheduler.completed.fetch_add(1, Ordering::Relaxed);
-        // Release FIRST, then reconcile: the permit must be back in the
-        // semaphore before a pending shrink can reclaim it.
-        drop(self.permit.take());
+        let permit = self.permit.take();
+
+        // Decide UNDER THE LOCK whether this permit is owed to a shrink, so the
+        // decision cannot race another slot finishing.
+        let owed = {
+            let mut b = self.scheduler.bound.lock().expect("bound mutex");
+            if b.granted > b.target {
+                b.granted -= 1;
+                true
+            } else {
+                false
+            }
+        };
+
+        match (owed, permit) {
+            // Consume it. Releasing first would let a queued waiter take it
+            // before any reclaim could run, and the shrink would never land.
+            (true, Some(p)) => p.forget(),
+            (_, p) => drop(p),
+        }
+
+        // A shrink may still be outstanding against slots that are free right
+        // now; take those back too.
         self.scheduler.reconcile();
     }
 }
@@ -279,6 +306,75 @@ mod tests {
         assert_eq!(sched.granted(), 1, "and never drops below the target");
     }
 
+    /// **The case the first version got wrong.** With callers QUEUED behind the
+    /// ceiling, a finishing task's permit must not be handed to the next waiter
+    /// while a shrink is outstanding — otherwise the ceiling drops and
+    /// concurrency does not, on exactly the overloaded node relief is for.
+    ///
+    /// This measures concurrency **while the backlog drains**, not the state
+    /// after it has drained. An earlier version of this test asserted the final
+    /// `granted`, which both the correct and the racy implementation reach — it
+    /// passed against the bug it was written for and was therefore no test at
+    /// all. The transient IS the defect.
+    #[tokio::test]
+    async fn a_shrink_lands_even_with_a_queue_of_waiters() {
+        let sched = BackgroundScheduler::with_bound(4);
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(sched.acquire().await);
+        }
+
+        // Everything below runs AFTER the shrink, so the peak it records is the
+        // concurrency the relief actually achieved.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak_after_shrink = Arc::new(AtomicUsize::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let s = Arc::clone(&sched);
+            let f = Arc::clone(&in_flight);
+            let p = Arc::clone(&peak_after_shrink);
+            waiters.push(tokio::spawn(async move {
+                let slot = s.acquire().await;
+                let now = f.fetch_add(1, Ordering::SeqCst) + 1;
+                p.fetch_max(now, Ordering::SeqCst);
+                // Stay in flight long enough for a sibling to overlap if the
+                // ceiling is not actually holding.
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                f.fetch_sub(1, Ordering::SeqCst);
+                drop(slot);
+            }));
+        }
+        tokio::task::yield_now().await;
+
+        // The root relieves the node hard while every slot is busy and eight
+        // more callers are queued behind it.
+        sched.apply(ceiling(1));
+        assert_eq!(sched.target(), 1);
+        assert_eq!(
+            sched.granted(),
+            4,
+            "nothing was free, so nothing was reclaimed yet"
+        );
+
+        for slot in held {
+            drop(slot);
+        }
+        for w in waiters {
+            w.await.expect("waiter");
+        }
+
+        assert_eq!(
+            peak_after_shrink.load(Ordering::SeqCst),
+            1,
+            "after relief to 1, queued work must run ONE at a time — a released \
+             permit handed straight to a waiter is how the ceiling drops while \
+             concurrency does not"
+        );
+        assert_eq!(sched.granted(), 1);
+    }
+
     /// Re-applying the same ceiling is a no-op, so a config refresh that
     /// changed nothing does not churn the semaphore or log a change.
     #[tokio::test]
@@ -286,6 +382,56 @@ mod tests {
         let sched = BackgroundScheduler::with_bound(3);
         sched.apply(ceiling(3));
         assert_eq!((sched.target(), sched.granted()), (3, 3));
+    }
+
+    /// **The scheduler must actually bound something.**
+    ///
+    /// The first revision of this module was constructed, governed, logged, and
+    /// declared `Wired` in `mesh_config_effect::consumption` — while the only
+    /// `acquire` call sites in the tree were these tests. Lowering `load.ceiling`
+    /// resized an unused semaphore and changed no workload at all.
+    ///
+    /// The existing gate did not catch it because it asks whether the ACCESSOR is
+    /// read outside its module, and `govern` reads it. Reading a ceiling and
+    /// obeying one are different claims, and only the second is the point.
+    ///
+    /// So this asks the question that actually matters: does non-test production
+    /// code, somewhere other than this file, take a slot?
+    #[test]
+    fn some_production_code_outside_this_module_actually_takes_a_slot() {
+        fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    scan(&path, hits);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && !path.ends_with("background_scheduler.rs")
+                {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // Everything from the first `mod tests` on is test code.
+                    let prod = text.split("mod tests").next().unwrap_or("");
+                    for (n, line) in prod.lines().enumerate() {
+                        if line.contains(".acquire().await") && !line.trim_start().starts_with("//")
+                        {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        scan(std::path::Path::new("src"), &mut hits);
+        assert!(
+            !hits.is_empty(),
+            "no production code takes a slot, so `load.ceiling` would bound nothing \
+             and its `Wired` arm in mesh_config_effect::consumption would be a false \
+             claim. Either bound some work or change the arm to Unbuilt."
+        );
     }
 
     /// Build a `LoadCeiling` the way production does — through the accessor,

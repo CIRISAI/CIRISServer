@@ -507,7 +507,16 @@ pub struct DeclaredConformance {
 /// ceremony rather than per-request data — the same reasoning that has
 /// `/v1/identity` assembled once at boot and served as a string. A conferral
 /// therefore surfaces here on the next restart, which is stated rather than hidden.
-static CAPABILITIES: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+/// A `RwLock`, not a `OnceLock`. `shutdown_node()` supports an IN-PROCESS
+/// restart, and `OnceLock::set` succeeds only once per process — so after a
+/// restart a newly conferred role, or recovery from a first boot whose lookup
+/// failed and cached `None`, would be discarded and this route would serve the
+/// stale first-boot answer for the life of the process. The doc above promises
+/// "surfaces on the next restart"; with a `OnceLock` that promise was false for
+/// the restart this binary actually supports.
+///
+/// Outer `Option` = has it ever been primed; inner = what the lookup found.
+static CAPABILITIES: std::sync::RwLock<Option<Option<Vec<String>>>> = std::sync::RwLock::new(None);
 
 /// Resolve the conferred set once and cache it. Called at composition.
 pub async fn prime_capabilities(engine: &Arc<Engine>) {
@@ -523,7 +532,11 @@ pub async fn prime_capabilities(engine: &Arc<Engine>) {
              will report `null` (unknown), never an empty set"
         ),
     }
-    let _ = CAPABILITIES.set(caps);
+    // REPLACE, so a re-composition re-primes rather than being ignored.
+    match CAPABILITIES.write() {
+        Ok(mut slot) => *slot = Some(caps),
+        Err(poisoned) => *poisoned.into_inner() = Some(caps),
+    }
 }
 
 /// The conferred scopes on the key this node OPERATES AS.
@@ -613,7 +626,9 @@ pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
     // The CACHE, not a fresh lookup — see `CAPABILITIES`. `None` here means either
     // "not primed" or "unreadable at boot", and both render as `null`: an
     // unresolved capability set must never present as an empty one.
-    let capabilities = CAPABILITIES.get().cloned().flatten();
+    let capabilities = CAPABILITIES
+        .read()
+        .map_or(None, |slot| slot.clone().flatten());
     let base = |profiles: Vec<ConformanceProfile>, declared_by_config: bool| DeclaredConformance {
         profiles,
         build_profiles: build.clone(),

@@ -6,8 +6,8 @@
 //! | role      | present          | identity_type | alias                               |
 //! |-----------|------------------|---------------|-------------------------------------|
 //! | **node**  | ALWAYS           | `node`        | [`NODE_ALIAS`] — one fixed literal  |
-//! | **fed**   | ALWAYS (claim)   | `user`        | owner-chosen (e.g. `eric-moore-v1`) |
-//! | **agent** | ONLY if an agent | `agent`       | [`AGENT_ALIAS`] — the agent's own   |
+//! | **fed**   | once CLAIMED     | `user`        | owner-chosen (e.g. `eric-moore-v1`) |
+//! | **agent** | ONLY if an agent | `agent`       | host-supplied, never reconstructed  |
 //!
 //! - The **node** key is the fabric identity: the RNS transport identity, the
 //!   announce, the destination a peer dials, and **the only one of the three that
@@ -16,10 +16,12 @@
 //! - The **fed** key is the CLAIM identity — the owner's own federation identity,
 //!   the one that claims this node. It is owner-chosen and commonly lives *off
 //!   this box* (the owner's phone or laptop), so a node holds a claim BY it,
-//!   which is not the same as holding it.
+//!   which is not the same as holding it. An UNCLAIMED node has none at all, and
+//!   that is a supported state, not a defect — see [`KeyRole::always_present`].
 //! - The **agent** key is minted only when an agent is installed — at first run
 //!   or later as an upgrade. A relay-only node never has one, and that absence is
-//!   a fact about the deployment, never a defect.
+//!   a fact about the deployment, never a defect. Its alias is **host-supplied**
+//!   and this module deliberately publishes no literal for it (I2).
 //!
 //! # Which key is advertised, and how an owner is reached
 //!
@@ -115,13 +117,6 @@
 /// having its own keystore and its own key material.
 pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
 
-/// The keystore alias an installed agent's own key lives under.
-///
-/// Named here for the convention's sake, but NOT minted here: the agent mints its
-/// own actor key and hands us the id. Per I2 we consume that id; we never
-/// reconstruct it from this literal.
-pub const AGENT_ALIAS: &str = "ciris-agent-bootstrap";
-
 /// The three key roles, and what each one is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyRole {
@@ -147,15 +142,20 @@ impl KeyRole {
 
     /// Does every node hold a key in this role?
     ///
-    /// `Fed` is `true` as a RELATIONSHIP — every node is claimed — while the key
-    /// material commonly lives on the owner's device. Distinguish "this node
-    /// holds the key" from "this node is claimed by it" before using this.
+    /// **Only the node key.** An earlier draft said `Fed` too, on the reasoning
+    /// that "every node is claimed" — but an UNCLAIMED node is a state this
+    /// repository explicitly supports and builds for: `owner_of` returns `None`
+    /// until the setup claim completes, and a brain-carrying node with no owner
+    /// is meant to hold at "waiting for claim" rather than proceed. A caller
+    /// enumerating required keys from this would have invented a fed identity
+    /// for a node that correctly has none.
+    ///
+    /// So the fed relationship is OPTIONAL here, and that is distinct again from
+    /// off-box key custody: "no owner yet" and "the owner's key lives on their
+    /// phone" are different facts, and neither is "this node holds a fed key".
     #[must_use]
     pub const fn always_present(self) -> bool {
-        match self {
-            Self::Node | Self::Fed => true,
-            Self::Agent => false,
-        }
+        matches!(self, Self::Node)
     }
 
     /// Is this the role we ADVERTISE — the one carrying a dialable route?
@@ -175,8 +175,13 @@ impl KeyRole {
     pub const fn fixed_alias(self) -> Option<&'static str> {
         match self {
             Self::Node => Some(NODE_ALIAS),
-            Self::Agent => Some(AGENT_ALIAS),
-            Self::Fed => None,
+            // NOT `ciris-agent-bootstrap`. That is a conventional default, not
+            // a rule: the actor key's alias is host-supplied
+            // (`ServerConfig::keystore_alias` / `--key-id`) and legitimately
+            // differs. Returning a literal here would have a caller mint or
+            // look up a DIFFERENT federation identity — I2's exact failure, in
+            // the module that states I2.
+            Self::Agent | Self::Fed => None,
         }
     }
 }
@@ -219,9 +224,24 @@ mod tests {
 
     /// **I4.** Node always, agent only sometimes — the asymmetry is the point.
     #[test]
-    fn the_node_key_is_mandatory_and_the_agent_key_is_not() {
+    fn only_the_node_key_is_mandatory() {
         assert!(KeyRole::Node.always_present());
         assert!(!KeyRole::Agent.always_present());
+        assert!(
+            !KeyRole::Fed.always_present(),
+            "an unclaimed node has no fed identity — `owner_of` returns None until \
+             the setup claim completes, and that is a supported state"
+        );
+    }
+
+    /// **I2.** Only the node alias is fixed. The actor key's alias is
+    /// host-supplied, so publishing a literal for it would invite exactly the
+    /// re-derivation this module exists to forbid.
+    #[test]
+    fn only_the_node_role_publishes_a_fixed_alias() {
+        assert_eq!(KeyRole::Node.fixed_alias(), Some(NODE_ALIAS));
+        assert_eq!(KeyRole::Agent.fixed_alias(), None);
+        assert_eq!(KeyRole::Fed.fixed_alias(), None);
     }
 
     /// **The advertised role is the node, and ONLY the node.**
@@ -238,6 +258,60 @@ mod tests {
              (CIRISServer#335); owners are reached by walking owner_binding to a node"
         );
         assert!(!KeyRole::Agent.is_advertised());
+    }
+
+    /// **I2, enforced instead of promised.** The node alias literal appears
+    /// ONCE in the tree.
+    ///
+    /// This module shipped its first revision asserting that a second
+    /// implementation of a rule is the defect — while itself introducing a
+    /// second `"ciris-node-bootstrap"` literal beside the one in `node_key`,
+    /// referenced by nothing but its own tests. Both could have drifted, and
+    /// every test would have passed: precisely the failure the module describes,
+    /// committed in the module describing it.
+    ///
+    /// A doc paragraph saying "do not duplicate this" is not a mechanism. This
+    /// is the mechanism. It scrapes rather than trusting a re-export to stay put,
+    /// because a future edit that reintroduces the literal would not otherwise
+    /// fail anything.
+    #[test]
+    fn the_node_alias_literal_exists_exactly_once_in_the_tree() {
+        fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    scan(&path, hits);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    for (n, line) in text.lines().enumerate() {
+                        // The LITERAL, not a mention of it in prose.
+                        if line.contains(&format!("\"{NODE_ALIAS}\""))
+                            && !line.trim_start().starts_with("//")
+                        {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        scan(std::path::Path::new("src"), &mut hits);
+        // This file defines it and asserts it; every other site must import.
+        let foreign: Vec<&String> = hits
+            .iter()
+            .filter(|h| !h.starts_with("src/key_convention.rs"))
+            .collect();
+        assert!(
+            foreign.is_empty(),
+            "the node alias literal must exist ONCE — `key_convention::NODE_ALIAS`. \
+             A second spelling can drift from the first without any test failing \
+             (CIRISEdge#548). Import it instead. Found: {foreign:?}"
+        );
     }
 
     /// **I3.** The node alias says `node` and nothing else. An alias carrying

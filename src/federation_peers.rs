@@ -996,16 +996,16 @@ async fn test_admit_peer(
             roles: Vec::new(),
         };
         let valid_from = chrono::Utc::now().to_rfc3339();
-        let scrubbed = match produce_scrubbed_key_record(&test_root, target, &valid_from, &[]).await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                return err(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    &format!("test-root scrub-sign of {key_id}: {e}"),
-                )
-            }
-        };
+        let scrubbed =
+            match produce_scrubbed_key_record(&test_root, target, &valid_from, None, &[]).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        &format!("test-root scrub-sign of {key_id}: {e}"),
+                    )
+                }
+            };
         match serde_json::to_value(&scrubbed).ok().and_then(|v| {
             serde_json::from_value::<ciris_persist::federation::SignedKeyRecord>(v).ok()
         }) {

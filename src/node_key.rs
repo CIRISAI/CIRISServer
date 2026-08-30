@@ -169,7 +169,7 @@ pub async fn classify(dir: &dyn FederationDirectory, key_id: &str) -> Result<Ide
 /// a key fingerprint, which is why 688 distinct agents already share the single
 /// `ciris-agent-bootstrap` alias. Each deployment has its own keystore and identity
 /// dir, so one constant here still yields one key per node.
-pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
+pub use crate::key_convention::NODE_ALIAS;
 
 /// The node's keystore alias — a constant, ignoring the host's own alias.
 ///

@@ -251,7 +251,13 @@ pub const fn consumption(key: MeshConfigKey) -> Consumption {
         // missing there.
         MeshConfigKey::LoadCeiling => Consumption::Wired {
             site: "EffectiveMeshConfig::load_ceiling",
-            effect: "crate::background_scheduler (the bound every background task acquires)",
+            // Names what is ACTUALLY bounded today, not the aspiration. The
+            // first revision of this arm claimed the scheduler generally and
+            // nothing acquired from it outside its own tests — a `Wired` arm
+            // that bounded no work, in the registry whose entire purpose is to
+            // stop this module claiming effects it does not have.
+            effect: "crate::retention_loop (each eviction pass takes a slot in \
+                     crate::background_scheduler)",
         },
         MeshConfigKey::FeatureTraceReplication => Consumption::Wired {
             site: "EffectiveMeshConfig::trace_plane",

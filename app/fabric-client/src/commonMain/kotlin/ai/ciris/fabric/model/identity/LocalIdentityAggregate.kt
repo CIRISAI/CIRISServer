@@ -32,7 +32,8 @@ import kotlinx.serialization.Serializable
  *                 ([contentMlKem768PubkeyB64], PQC).
  *
  * [keyId] is THE federation address peers / lens / registry use to reach this
- * node. Optional capability keys default to null — older persist builds and
+ * node. It is NOT necessarily the key the pubkeys below belong to — see
+ * [keyMaterialKeyId] and [keyMaterialBelongsToAnotherKey]. Optional capability keys default to null — older persist builds and
  * non-PQC deployments omit them. `ignoreUnknownKeys` is set on the JSON parser
  * so forward-compatible field additions don't break decode.
  */
@@ -63,6 +64,29 @@ data class LocalIdentityAggregate(
     val identityHash: String? = null,
     @SerialName("evaluated_at_unix_ms")
     val evaluatedAtUnixMs: Long? = null,
+    // ── The node/actor split (CIRISServer 0.5.196) ─────────────────────────
+    /**
+     * Whose key material the pubkeys above actually are.
+     *
+     * On a node carrying an agent, the signing and content-KEM pubkeys come
+     * from the ENGINE's signer — the ACTOR — while [keyId] is the NODE's
+     * address. Those are two different keys, and before this field the
+     * disagreement was invisible: a consumer verifying a fingerprint, or
+     * sealing to this identity, would use the wrong one and get no warning.
+     *
+     * Null on a server too old to say. Null is "unknown", NOT "they match".
+     */
+    @SerialName("key_material_key_id")
+    val keyMaterialKeyId: String? = null,
+    /** This node's own key — always present on a 0.5.196+ server. */
+    @SerialName("node_key_id")
+    val nodeKeyId: String? = null,
+    /** The agent's key, when one is installed. Null on a relay-only node. */
+    @SerialName("actor_key_id")
+    val actorKeyId: String? = null,
+    /** `node` / `agent` / `user`, read from the federation directory. */
+    @SerialName("identity_type")
+    val identityType: String? = null,
 ) {
     /** PQC signing material present (ML-DSA-65 pubkey and/or its key id). */
     val hasPqc: Boolean
@@ -75,4 +99,23 @@ data class LocalIdentityAggregate(
     /** Content-encryption keys present (X25519 and/or ML-KEM-768). */
     val hasContentEncryption: Boolean
         get() = contentX25519PubkeyB64 != null || contentMlKem768PubkeyB64 != null
+
+    /**
+     * **Do the pubkeys above belong to [keyId]?**
+     *
+     * `true` when the server says they belong to a different key — on a split
+     * node, the actor's. Verify a fingerprint or seal to this identity only
+     * after checking this.
+     *
+     * `false` when they agree AND when the server did not say. Null is
+     * unknown, and unknown must not read as a warning any more than it reads
+     * as an all-clear — a client that treated silence as a mismatch would
+     * flag every older server.
+     */
+    val keyMaterialBelongsToAnotherKey: Boolean
+        get() = keyMaterialKeyId != null && keyMaterialKeyId != keyId
+
+    /** This node carries an agent as well as being a node. */
+    val isSplitNode: Boolean
+        get() = actorKeyId != null && nodeKeyId != null && actorKeyId != nodeKeyId
 }

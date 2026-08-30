@@ -928,9 +928,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // already sees the plane, and re-folds on its own cadence, which is what
     // makes an expiring relief actually expire.
     let (mesh_config_sd_tx, mesh_config_sd_rx) = watch::channel(false);
+    // THE NODE KEY, not `cfg.key_id`. Trust-root relief is addressed to the key
+    // the mesh knows this node by, and on an agent-carrying split node
+    // `cfg.key_id` is the ACTOR — so a node asked to slow down would have read
+    // its own default and ignored the relief filed for it. Same substitution as
+    // `publish_self_transport_destination` a few hundred lines down, and the
+    // same defect class this release exists to close.
+    let mesh_config_subject = crate::node_key::wire_identity()
+        .unwrap_or(&cfg.key_id)
+        .to_owned();
     let (mesh_config_effect, mesh_config_join) = crate::mesh_config_effect::spawn(
         Arc::clone(&engine),
-        cfg.key_id.clone(),
+        mesh_config_subject,
         mesh_config_sd_rx,
     )
     .await;
@@ -1613,7 +1622,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             audit_log_max_age_days = ?cfg.policy.audit_log_max_age_days,
             "retention loop spawned (local-store eviction; bounds HOT from config:* retention.*)"
         );
-        crate::retention_loop::spawn(Arc::clone(&engine), config_rx.clone(), retention_sd_rx)
+        crate::retention_loop::spawn(
+            Arc::clone(&engine),
+            config_rx.clone(),
+            retention_sd_rx,
+            Some(Arc::clone(&background)),
+        )
     };
 
     // ── SAME-KEY EQUIVOCATION DETECTOR (CIRISServer#350, CC 6.1.1 N4) ────────
