@@ -318,6 +318,7 @@ pub mod mesh_config_effect;
 pub mod mesh_config_surface;
 pub mod mesh_genesis;
 
+pub mod key_convention;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
 /// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
@@ -340,6 +341,7 @@ pub mod node_control;
 /// carries the superset.
 pub mod node_identity;
 pub mod node_key;
+pub mod session_table;
 
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
 pub mod node_runtime;
