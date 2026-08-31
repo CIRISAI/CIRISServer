@@ -116,6 +116,7 @@ impl Device {
             identity_type::NODE,
             &ed_pub,
             Some(&pqc_pub),
+            None,
         )
         .expect("bind the subject into the registration envelope (#659)");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize registration");

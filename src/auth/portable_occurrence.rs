@@ -527,6 +527,7 @@ async fn associate_handler(
             &authorizer,
             ciris_persist::federation::types::identity_type::USER,
             &now,
+            None,
             &[],
         )
         .await

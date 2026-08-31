@@ -318,6 +318,13 @@ pub mod mesh_config_effect;
 pub mod mesh_config_surface;
 pub mod mesh_genesis;
 
+/// **The two-or-three keys a node holds** — the single source of truth for the
+/// node / fed / agent split, the aliases they live under, and the invariants
+/// that keep them from fusing or being re-derived (CIRISServer#511).
+/// **The background-work bound** — `load.ceiling`'s consumer, the graded
+/// "do less work" tier a trust root drives under CC 4.2.1.
+pub mod background_scheduler;
+pub mod key_convention;
 /// **Mesh control-plane relay** (CIRISServer#128 Phase D): `POST /v1/mesh/relay`
 /// (the local RNS-gateway endpoint) + the remote `MeshControlResponder` riding
 /// edge v8.0.0's generic opaque RPC on CIRISServer's CC 0.7 Tier-2 kind
@@ -542,6 +549,15 @@ pub use compose::{serve, serve_with_adapter};
 /// node's Engine offline + read/write a signed `config:v1` CEG object, so a HEADLESS
 /// node can set `config:*` knobs (e.g. `net.bootstrap_peers`) with no app/session.
 pub use compose::{run_config_get, run_config_set};
+
+/// The `GET /v1/identity` payload assembly.
+///
+/// Re-exported so the contract can be asserted against what production ACTUALLY
+/// produces. The first version of that test built the expected JSON by hand and
+/// asserted the literal contained what it had just inserted — it would have passed
+/// if this function omitted, renamed or mispopulated every field, and it did pass
+/// while 0.5.195 shipped a real defect on this exact surface (Codex, PR #508).
+pub use compose::local_identity_json;
 
 /// The shared persist `Engine` (re-exported so a downstream adapter crate gets
 /// the EXACT type [`AdapterContext::engine`] carries, without depending on

@@ -724,10 +724,18 @@ fn describe_bounds(policy: &RetentionPolicy, total_disk_bytes: u64) -> String {
 /// started has nothing to evict that it did not also have a moment before, and
 /// deleting during the boot storm competes with the ingest/replication work that
 /// actually has a deadline.
+/// Spawn the eviction loop.
+///
+/// `scheduler` bounds each PASS, not the loop. A long-lived task holding a slot
+/// for its lifetime would starve every other bounded unit — at a relieved
+/// ceiling of 1 it would hold the only permit forever — so the acquire wraps
+/// `run_pass` and releases before the next sleep. `None` runs unbounded, which
+/// is what a composition without a mesh-config plane does.
 pub fn spawn(
     engine: Arc<Engine>,
     mut config_rx: watch::Receiver<ResolvedConfig>,
     mut shutdown: watch::Receiver<bool>,
+    scheduler: Option<Arc<crate::background_scheduler::BackgroundScheduler>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cadence = RetentionConfig::from_resolved(&config_rx.borrow()).cadence;
@@ -753,6 +761,14 @@ pub fn spawn(
                             "retention cadence retuned from config:* (hot)"
                         );
                     }
+                    // Hold a slot for the PASS only. Acquiring here means a
+                    // relieved node runs fewer passes concurrently with other
+                    // bounded work, rather than the loop itself being throttled
+                    // into never running.
+                    let _slot = match scheduler.as_ref() {
+                        Some(s) => Some(s.acquire().await),
+                        None => None,
+                    };
                     if let Err(e) = run_pass(&engine, &cfg).await {
                         // The ONE alarm in this module. Never panics the
                         // controller: a transient substrate error must cost one

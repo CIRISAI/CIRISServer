@@ -78,7 +78,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
 
     // (1) A1's self-signed `steward,accord_holder` anchor → register (the rooting
     //     terminus persist bakes; here we admit it through the strict gate).
-    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, &[])
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 self-signed anchor");
     let a1_ed_b64 = anchor.record.pubkey_ed25519_base64.clone();
@@ -94,7 +94,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
     // The target node identity (its published hybrid pubkeys — what the operator
     // hands the holder from the node's self-key-record).
     let target = HybridSigningIdentity::generate("canonical-server-1-test").expect("gen target");
-    let target_self = produce_self_key_record(&target, "node", &now, &[])
+    let target_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
     let target_ed_b64 = target_self.record.pubkey_ed25519_base64.clone();
@@ -115,6 +115,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
             roles: Vec::new(),
         },
         &now,
+        None,
         &[],
     )
     .await
@@ -181,7 +182,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
     let now = chrono::Utc::now().to_rfc3339();
 
     let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
-    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, &[])
+    let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
     let a1_ed_b64 = anchor.record.pubkey_ed25519_base64.clone();
@@ -196,7 +197,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
 
     // The node's boot-time state: its OWN row, SELF-signed.
     let target = HybridSigningIdentity::generate("canonical-server-1-test").expect("gen target");
-    let target_self = produce_self_key_record(&target, "node", &now, &[])
+    let target_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
     let target_ed_b64 = target_self.record.pubkey_ed25519_base64.clone();
@@ -238,6 +239,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
             roles: Vec::new(),
         },
         &now,
+        None,
         &[],
     )
     .await

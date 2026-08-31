@@ -615,6 +615,7 @@ pub async fn register_key(
         identity_type,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .map_err(Error::Envelope)?;
 

@@ -69,6 +69,7 @@ async fn register(engine: &Engine, signer: &LocalSigner, key_id: &str) {
         identity_type::NODE,
         &ed_pub,
         Some(&pqc_pub),
+        None,
     )
     .expect("bind subject (#659)");
     let canonical =

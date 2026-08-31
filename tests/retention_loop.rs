@@ -238,7 +238,7 @@ async fn the_spawned_loop_evicts_aged_traces_on_its_cadence() {
     // first tick must find them.
     let (config_tx, config_rx) = watch::channel(retention_config(1, 1));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let join = retention_loop::spawn(Arc::clone(&engine), config_rx, shutdown_rx);
+    let join = retention_loop::spawn(Arc::clone(&engine), config_rx, shutdown_rx, None);
 
     // Poll rather than sleep-a-fixed-amount: the assertion is "the loop gets
     // there", and a fixed sleep would encode a guess about scheduling as if it

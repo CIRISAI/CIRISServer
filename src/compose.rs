@@ -292,6 +292,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // The serve path performs its OWN split, so it must record the actor too —
+    // `set_actor_identity` was only ever called by `provision_node_identity` (the
+    // embedded path), leaving a node that split HERE reporting `actor_key_id: null`
+    // while its own resolution had just established it carries one
+    // (Codex, PR #508).
+    // ONLY an actor-bearing verdict. `split_from` is also set for
+    // `OtherInfrastructure` — a `witness` or `substrate_persist` key — and
+    // recording one of those as "the actor" would make /v1/identity advertise a
+    // false `actor_key_id`, and would let `startup_gate` hold a BRAINLESS
+    // infrastructure node as though it carried an agent (Codex, PR #510).
+    // `OtherInfrastructure` exists precisely because it is a third thing.
+    if let (Some(actor), true) = (
+        node_resolution.split_from.as_deref(),
+        matches!(
+            node_resolution.verdict,
+            crate::node_key::IdentityVerdict::Actor { .. }
+                | crate::node_key::IdentityVerdict::Fused { .. }
+        ),
+    ) {
+        crate::node_key::set_actor_identity(actor);
+    }
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
@@ -657,11 +678,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // advertising it as the node's identity — the most public place to name the
     // wrong key. Every other transport-plane caller already reads `wire_identity()`
     // for exactly this reason; this one was missed.
+    // The actor from THIS boot's resolution, falling back to the process-global for
+    // the embedded path that set it during provisioning.
+    let identity_actor: Option<String> = crate::node_key::actor_identity().map(str::to_owned);
     let identity_json = local_identity_json(
         &engine,
         edge.local_transport_pubkey(),
         &node_resolution.node_key_id,
-        crate::node_key::actor_identity(),
+        identity_actor.as_deref(),
     )
     .await
     .context("assemble /v1/identity aggregate")?;
@@ -904,12 +928,39 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // already sees the plane, and re-folds on its own cadence, which is what
     // makes an expiring relief actually expire.
     let (mesh_config_sd_tx, mesh_config_sd_rx) = watch::channel(false);
+    // THE NODE KEY, not `cfg.key_id`. Trust-root relief is addressed to the key
+    // the mesh knows this node by, and on an agent-carrying split node
+    // `cfg.key_id` is the ACTOR — so a node asked to slow down would have read
+    // its own default and ignored the relief filed for it. Same substitution as
+    // `publish_self_transport_destination` a few hundred lines down, and the
+    // same defect class this release exists to close.
+    let mesh_config_subject = crate::node_key::wire_identity()
+        .unwrap_or(&cfg.key_id)
+        .to_owned();
     let (mesh_config_effect, mesh_config_join) = crate::mesh_config_effect::spawn(
         Arc::clone(&engine),
-        cfg.key_id.clone(),
+        mesh_config_subject,
         mesh_config_sd_rx,
     )
     .await;
+
+    // ── The background-work bound, governed by `load.ceiling` ────────────────
+    // CC 4.2.1's graded "do less work" tier. A trust root relieves this node by
+    // lowering the ceiling; the node never sets it for itself (CIRISServer#503
+    // was withdrawn on exactly that point). `govern` follows the plane so an
+    // expiring relief actually restores the ceiling rather than leaving the
+    // node throttled until the next boot.
+    let background =
+        crate::background_scheduler::BackgroundScheduler::from_config(&mesh_config_effect);
+    tracing::info!(
+        max_concurrent_tasks = background.granted(),
+        "background scheduler bound (load.ceiling)"
+    );
+    {
+        let sched = Arc::clone(&background);
+        let effect = mesh_config_effect.clone();
+        tokio::spawn(async move { crate::background_scheduler::govern(sched, effect).await });
+    }
 
     // ── The responsible-USER signer for POST /v1/setup/claim-remote is no longer
     //    resolved at boot (it would be absent on a fresh node — the fed-ID is minted
@@ -1555,6 +1606,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the previous node's observer id and counts (Codex, PR #502).
     crate::mesh_status::invalidate();
 
+    // Resolve the conferred capability set ONCE. Doing it per request turned the
+    // peer-facing declaration into three DB round-trips on a shared connection and
+    // made it the only route timing out on the canonical (0.5.193 regression).
+    crate::conformance::prime_capabilities(&engine).await;
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {
@@ -1566,7 +1622,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             audit_log_max_age_days = ?cfg.policy.audit_log_max_age_days,
             "retention loop spawned (local-store eviction; bounds HOT from config:* retention.*)"
         );
-        crate::retention_loop::spawn(Arc::clone(&engine), config_rx.clone(), retention_sd_rx)
+        crate::retention_loop::spawn(
+            Arc::clone(&engine),
+            config_rx.clone(),
+            retention_sd_rx,
+            Some(Arc::clone(&background)),
+        )
     };
 
     // ── SAME-KEY EQUIVOCATION DETECTOR (CIRISServer#350, CC 6.1.1 N4) ────────
@@ -1670,10 +1731,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 ///     reachable for a hardware-signed Engine (#223 closed the `null` gap);
 ///   - **RET-transport** role (x25519 ‖ ed25519, RNS `get_public_key` order),
 ///     supplied here from the Reticulum transport identity.
-async fn local_identity_json(
+pub async fn local_identity_json(
     engine: &Engine,
     transport_pubkey: Option<[u8; 64]>,
-    wire_key_id: &str,
+    node_key_id: &str,
     actor_key_id: Option<&str>,
 ) -> Result<String> {
     use base64::Engine as _;
@@ -1687,26 +1748,65 @@ async fn local_identity_json(
         .await
         .map_err(|e| anyhow::anyhow!("persist local_identity_aggregate: {e}"))?;
 
-    // persist's aggregate reports `key_id`/`pqc_key_id` from the engine's
-    // configured local labels — which are the KEYSTORE alias (the raw `--key-id`),
-    // NOT the derived federation/wire identity. The `federation_keys` row and the
-    // `SignedKeyRecord` both carry the derived `key_id`, so override here so
-    // GET /v1/identity matches the canonical surfaces (CIRISServer#34). The
-    // federation registers the hybrid (Ed25519 + ML-DSA-65) under ONE key_id, so
-    // `pqc_key_id` is that same derived key_id (the keystore `{alias}-pqc` blob is
-    // an internal storage label, not the federation identity).
+    // **`key_id` IS THE NODE'S ADDRESS — that is the established contract.**
+    //
+    // `app/fabric-client/.../LocalIdentityAggregate.kt` says it in terms: "[keyId]
+    // is THE federation address peers / lens / registry use to reach this node",
+    // and its parser sets `ignoreUnknownKeys`, so a new field does NOT migrate it.
+    // Making `key_id` the engine's would hand every such consumer the ACTOR key as
+    // the node's address (Codex, PR #510).
+    //
+    // But the aggregate's signing and content-KEM pubkeys come from the ENGINE's
+    // signer, which on a split node is the actor's. 0.5.195 left that disagreement
+    // SILENT, so a consumer verifying a fingerprint against `key_id` used the wrong
+    // key. The fix is not to move `key_id` — it is to NAME whose key material this
+    // is, so the difference is legible instead of hidden.
+    //
+    // A fully node-shaped aggregate is not constructible here: `node_signer` mints
+    // Ed25519 + ML-DSA-65 only, and the node has no content-KEM pair of its own.
+    // Until it does, the honest surface states both identities and which one the
+    // bytes belong to.
+    let engine_key_id = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+
     let mut v = serde_json::to_value(&aggregate).context("serialize LocalIdentityAggregate")?;
     if let Some(obj) = v.as_object_mut() {
+        // The node's address, as every consumer already reads it. persist reports
+        // the keystore alias here rather than the derived federation identity, so
+        // this override also keeps the aggregate agreeing with `federation_keys`
+        // and the `SignedKeyRecord` (CIRISServer#34).
         obj.insert(
             "key_id".into(),
-            serde_json::Value::String(wire_key_id.to_string()),
+            serde_json::Value::String(node_key_id.to_owned()),
         );
         if obj.get("pqc_key_id").is_some_and(|p| !p.is_null()) {
             obj.insert(
                 "pqc_key_id".into(),
-                serde_json::Value::String(wire_key_id.to_string()),
+                serde_json::Value::String(node_key_id.to_owned()),
             );
         }
+
+        // WHOSE KEY MATERIAL the pubkeys above are. Equal to `key_id` on an
+        // unsplit node; the ACTOR on a split one. A consumer verifying a
+        // fingerprint or sealing to this identity must use THIS, not `key_id` —
+        // and silence here is what made 0.5.195 dangerous rather than merely
+        // untidy.
+        obj.insert(
+            "key_material_key_id".into(),
+            serde_json::Value::String(engine_key_id.clone()),
+        );
+
+        // The NODE's key, stated rather than substituted. On an unsplit node this
+        // equals `key_id`; on a split one it is the separately minted node key, and
+        // a consumer that needs the node identity reads it HERE instead of trusting
+        // that `key_id` means whichever of the two it happened to want.
+        obj.insert(
+            "node_key_id".into(),
+            serde_json::Value::String(node_key_id.to_owned()),
+        );
+
         // ── STATE THE KIND; do not make a consumer infer it (CIRISServer#507) ──
         //
         // Without this a consumer reads `key_id` and guesses from the NAME — and
@@ -1719,7 +1819,9 @@ async fn local_identity_json(
         // Read from the DIRECTORY, never restated: the row is what admission and
         // every peer's agency gate actually consult, so a value derived any other
         // way could disagree with the one that binds (CC 3.4.7.3).
-        let kind = crate::node_key::identity_type_of(engine, wire_key_id).await;
+        // The kind of the NODE key — the one a peer routes to and the one whose
+        // `identity_type` the agency gate consults.
+        let kind = crate::node_key::identity_type_of(engine, node_key_id).await;
         obj.insert(
             "identity_type".into(),
             kind.map_or(serde_json::Value::Null, serde_json::Value::String),
@@ -2769,10 +2871,15 @@ async fn register_substrate_key(
     // the node key uses (`build_self_key_record`), bridged verify→persist by the
     // structurally-identical JSON shape.
     let valid_from = chrono::Utc::now().to_rfc3339();
-    let v_rec =
-        produce_self_key_record(identity, identity_type::SUBSTRATE_PERSIST, &valid_from, &[])
-            .await
-            .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
+    let v_rec = produce_self_key_record(
+        identity,
+        identity_type::SUBSTRATE_PERSIST,
+        &valid_from,
+        None,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce substrate_persist self key record: {e}"))?;
     let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist substrate SignedKeyRecord: {e}"))?;
     let key_id = signed.record.key_id.clone();
@@ -3125,6 +3232,7 @@ pub(crate) async fn build_self_key_record(
         &identity,
         ciris_persist::federation::types::identity_type::NODE,
         &valid_from,
+        None,
         &[],
     )
     .await

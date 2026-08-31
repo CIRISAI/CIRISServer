@@ -182,6 +182,7 @@ impl Holder {
             identity_type::ACCORD_HOLDER,
             &ed_pub,
             Some(&pqc_pub),
+            None,
         )
         .expect("bind the holder's subject into its registration envelope");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize holder reg");

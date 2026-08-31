@@ -194,7 +194,7 @@ pub(crate) async fn maybe_test_bless_self(
     } else {
         Vec::new()
     };
-    let scrubbed = produce_scrubbed_key_record(&test_root, target, &valid_from, &hints)
+    let scrubbed = produce_scrubbed_key_record(&test_root, target, &valid_from, None, &hints)
         .await
         .map_err(|e| anyhow!("test-root scrub-sign of {}: {e}", rec.key_id))?;
 

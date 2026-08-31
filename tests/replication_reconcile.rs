@@ -133,9 +133,10 @@ impl Peer {
         // NODE, not WITNESS: these fixtures ARE replication target nodes, and
         // since the #472 arc the coordinator set is filtered to transport-
         // capable (NODE-role) subjects — a person or witness gets no dialer.
-        let rec = produce_self_key_record(&self.identity, identity_type::NODE, VALID_FROM, &[])
-            .await
-            .expect("peer self-signed key record");
+        let rec =
+            produce_self_key_record(&self.identity, identity_type::NODE, VALID_FROM, None, &[])
+                .await
+                .expect("peer self-signed key record");
         // The same serde round-trip `test_bless::maybe_test_bless_self` adopts
         // through — verify's producer shape IS persist's wire shape.
         serde_json::from_value(serde_json::to_value(&rec).expect("verify record -> json"))

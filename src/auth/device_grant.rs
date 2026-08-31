@@ -462,6 +462,7 @@ async fn register_minted_agent_key(
         &identity,
         identity_type::AGENT,
         &valid_from,
+        None,
         &[],
     )
     .await

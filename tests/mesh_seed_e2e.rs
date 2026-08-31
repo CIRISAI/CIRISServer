@@ -543,6 +543,10 @@ impl PeerNodeB {
             identity_type::NODE,
             &ed_pub,
             Some(&pqc_pub),
+            // valid_until: None — verify v14 made expiry expressible; the seed
+            // ceremony deliberately mints without one. `None` reproduces the
+            // pre-v14 bytes exactly (an absent expiry omits the member).
+            None,
         )
         .expect("bind the subject into B's registration envelope (#659)");
         let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize B registration");
