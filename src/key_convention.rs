@@ -276,7 +276,7 @@ mod tests {
     /// fail anything.
     #[test]
     fn the_node_alias_literal_exists_exactly_once_in_the_tree() {
-        fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+        fn scan(dir: &std::path::Path, hits: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
             };
@@ -293,7 +293,14 @@ mod tests {
                         if line.contains(&format!("\"{NODE_ALIAS}\""))
                             && !line.trim_start().starts_with("//")
                         {
-                            hits.push(format!("{}:{}", path.display(), n + 1));
+                            // Keep the PATH, not a rendered string: `display()`
+                            // writes `src\key_convention.rs` on Windows, so a
+                            // `starts_with("src/…")` filter below excluded
+                            // nothing and this gate failed on its own
+                            // definition. Ubuntu-only PR runs never saw it; the
+                            // full matrix on `main` did.
+                            hits.push(path.clone());
+                            let _ = n;
                         }
                     }
                 }
@@ -302,9 +309,12 @@ mod tests {
         let mut hits = Vec::new();
         scan(std::path::Path::new("src"), &mut hits);
         // This file defines it and asserts it; every other site must import.
-        let foreign: Vec<&String> = hits
+        // `Path::ends_with` matches whole COMPONENTS and is separator-agnostic,
+        // unlike a prefix test over `display()`.
+        let foreign: Vec<String> = hits
             .iter()
-            .filter(|h| !h.starts_with("src/key_convention.rs"))
+            .filter(|p| !p.ends_with("key_convention.rs"))
+            .map(|p| p.display().to_string())
             .collect();
         assert!(
             foreign.is_empty(),
