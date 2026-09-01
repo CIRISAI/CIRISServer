@@ -1,0 +1,6 @@
+# Build inputs staged by run.sh, never committed: a 34 MB wheel and a 70 MB
+# uber-jar are exactly the "distribute via releases and fetch on install" case
+# the repo-size rule excludes. run.sh copies them in and tells you how to build
+# either one if it cannot find it.
+wheels/
+jars/
