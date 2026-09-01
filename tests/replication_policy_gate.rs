@@ -115,8 +115,39 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 ///
 /// Mirroring this also clears the 6 cohabitation conformance jobs that have been
 /// red on server-skew since v16.3.0.
+/// ## v18.12.1 re-pin — the RECEIVE axis widens on four already-public planes
+///
+/// `20499cab…` → `e54c5677…5a6fe71681710dbf25` (CIRISServer#522, CIRISEdge#552/#556).
+///
+/// One cell. `Key`, `IdentityOccurrence`, `TransportDestination` and
+/// `IdentityOccurrenceRevocation` move from
+/// `subject_pull:data_subject; subject-only` to
+/// `subject_pull:data_subject+any_attributed; public envelope`.
+///
+/// **Disclosure-neutral, and the direction is the point.** Those four planes
+/// already serve `public` on the ADVERTISE axis — public signed envelopes, no
+/// capability gate, already reachable through ordinary anti-entropy. `subject-only`
+/// was making them *un-addressable, not undisclosed*: `Pull` is the only verb that
+/// names a record by identifier, every other read is content-hash addressed, and a
+/// node cannot compute the hash of a record it has never held. Under the hash-first
+/// directory (CIRISEdge#552) a signer's `Key` became permanently unfetchable — and
+/// with it every row that key signed, **revocations included**. That is a kill
+/// order that does not land. The widening restores addressability for records the
+/// federation already discloses; an UNATTRIBUTED requester is still served nothing.
+///
+/// **The property to re-check, per this gate's own rule, is not the hash.**
+/// `Attestation` is unchanged and keeps `subject-only`: its serve cell is
+/// conditional per ROW — `trace:*` rides `capability:infra:serve`, plus the per-row
+/// G2 scores carve — so a per-plane widening there would conflate a per-record gate
+/// with a per-plane one. E3's closure is therefore intact: `trace:*` still serves
+/// only to `capability:infra:serve` recipients, which is the load-bearing fact this
+/// gate witnesses.
+///
+/// Note the hash in CIRISServer#522's opening text (`e8216fec…`) is STALE — it
+/// moved again when #552/#553/#554 landed on top of #556. The current value is
+/// CIRISServer#524 §7's, pinned here.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "20499cabaf1c0566b5a8d66f8d03c8a980b760c733e83444b7345a7733f22d74";
+    "e54c56775e8d56442f9fdbaa0346397cdc169e7cc6237f5a6fe71681710dbf25";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {
