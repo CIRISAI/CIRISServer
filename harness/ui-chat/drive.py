@@ -171,6 +171,55 @@ class Ui:
         return False
 
 
+def node_code(read_api_port: int) -> str:
+    """One side's node code — the identifier a person hands over out of band.
+
+    Read over HTTP here, which is what a person does by reading it off their own
+    screen. The out-of-band part is not the transport; it is that the OTHER side
+    learns it from the person rather than from the federation. That distinction
+    is the design, and CIRISServer#524 §6.3 rules it:
+
+        "Stranger contact is meant to start from a nodecode, not a directory
+         lookup. You hand out an identifier out-of-band, the peer dials that
+         specific node (which serves its own record), and consent follows.
+         Building 'search the federation for a person' on top of `discover` will
+         work only for people you already have a consented relationship with —
+         that is the boundary, not a gap to route around."
+
+    An earlier revision of this driver waited for discovery to deliver the peer's
+    fed-id and called that wait a blocked stage. It was not blocked: it asked the
+    substrate for an address-book lookup it refuses by design, because answering
+    a third-party probe "would make a body-holding server an address-book oracle
+    for records it never advertised" (§6.1).
+    """
+    url = f"http://127.0.0.1:{read_api_port}/v1/federation/node-code"
+    with urllib.request.urlopen(url, timeout=10) as r:
+        payload = json.loads(r.read().decode())
+    code = payload.get("code") or ""
+    if not code:
+        raise UiError(f"no node code at :{read_api_port} — payload keys {sorted(payload)}")
+    return code
+
+
+def add_peer_by_code(ui: Ui, code: str) -> None:
+    """Admit a peer from the code they handed you — the stranger-contact entry.
+
+    This is what makes the peer's own record fetchable: you dial THAT node and it
+    serves its own record. Everything downstream — learning the owner behind it,
+    adding the contact, consent — hangs off having done this first.
+    """
+    ui.click_if_present("nav_epistemic_network_ops")
+    ui.wait_for_tag("btn_add_peer", secs=90)
+    ui.click("btn_add_peer")
+    ui.wait_for_tag("input_add_peer_code", secs=30)
+    ui.type_into("input_add_peer_code", code)
+    ui.click("btn_add_peer_submit")
+    time.sleep(8)
+    if "text_add_peer_error" in ui.tags():
+        raise UiError(f"{ui.name}: peer add refused (see text_add_peer_error)")
+    log(ui.name, "peer admitted from the handed-over code")
+
+
 def wait_for_key(ui: Ui, api_port: int, key_id: str, secs: int = 240) -> None:
     """Wait for a peer's FED-ID to reach this node's federation directory.
 
@@ -510,8 +559,20 @@ def main() -> int:
         # entirely — node-to-node delivery wearing a person-to-person label. The
         # fed-id being absent is the DEFECT, so it is waited for and then
         # reported, never substituted.
-        stage("discover:a_sees_b_fedid", lambda: wait_for_key(a, args.a_api, b_owner))
-        stage("discover:b_sees_a_fedid", lambda: wait_for_key(b, args.b_api, a_owner))
+        # THE OUT-OF-BAND HAND-OFF. Each side gets the other's node code the way a
+        # person would — handed over, not discovered. The harness carrying the
+        # string between the two UIs IS the out-of-band channel.
+        print("── exchange node codes (the stranger-contact entry) ──")
+        a_code, b_code = node_code(args.a_api), node_code(args.b_api)
+        log("handoff", f"A code {a_code[:24]}…   B code {b_code[:24]}…")
+        stage("peer:a_admits_b", lambda: add_peer_by_code(a, b_code))
+        stage("peer:b_admits_a", lambda: add_peer_by_code(b, a_code))
+
+        # Only now is the peer's record reachable — and only now can the by-name
+        # Pull that CIRISEdge#556 widened fetch the owner behind it.
+        print("── the owner behind each admitted node ──")
+        stage("resolve:a_sees_b_fedid", lambda: wait_for_key(a, args.a_api, b_owner))
+        stage("resolve:b_sees_a_fedid", lambda: wait_for_key(b, args.b_api, a_owner))
         a_types, b_types = b_owner, a_owner
 
         print("── contact + consent, through the UI ──")

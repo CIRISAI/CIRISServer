@@ -28,22 +28,40 @@ place. A container per node gives each its own netns, so its node genuinely *is*
 needs patching and no node moves off the default ports, which is also how a real
 install looks.
 
-## Status: BLOCKED at `discover:a_sees_b_fedid`
+## Status
 
 Passing: `first_run` ×2 (wizard, auto-claim from `<home>/claim_pin`),
 `restart:for_announce_optin`, `login` ×2.
 
-Blocked: both nodes discover each other's **node** keys and the canonical;
-neither ever obtains the other owner's **fed-id**, so `add_contact` refuses
-`contacts.unknown_fed_id`. The canonical's own directory shows both node keys and
-neither owner.
+Not yet run end to end: the stages after the node-code hand-off need a wheel
+built against edge **v18.12.1**, whose receive-axis widening (CIRISEdge#556) is
+what lets a by-name `Pull` fetch the owner record behind an admitted node.
 
-That is CIRISEdge#552's cell: `Key` already serves `public` on the advertise axis
-but the RECEIVE axis was `subject_pull:data_subject; subject-only`, which made it
-*"un-addressable, not undisclosed"* — `Pull` is the only by-name read, and a node
-cannot compute the hash of a record it has never held. CIRISEdge#556 widens it to
-`data_subject+any_attributed`. **This harness is waiting on an edge release
-carrying that** (CIRISServer#522, the `SERVE_ADVERTISE_POLICY_HASH` re-pin).
+### The stage that was wrong, and what replaced it
+
+An earlier revision had a `discover:a_sees_b_fedid` stage that waited for node A
+to learn node B's owner fed-id by discovery, and reported it as blocked on
+CIRISEdge#552. That was a misreading. CIRISServer#524 §6.3:
+
+> Stranger contact is meant to start from a nodecode, not a directory lookup.
+> You hand out an identifier out-of-band, the peer dials that specific node
+> (which serves its own record), and consent follows. Building "search the
+> federation for a person" on top of `discover` will work only for people you
+> already have a consented relationship with — **that is the boundary, not a gap
+> to route around.**
+
+So the stage was not waiting on a fix; it was asking the substrate for an
+address-book lookup it refuses on purpose — §6.1: answering a third-party probe
+"would make a body-holding server an address-book oracle for records it never
+advertised".
+
+The flow now matches the product: each side reads its own **node code**, the
+harness carries it across (that carrying IS the out-of-band channel, exactly as
+a person handing over a code is), `add_peer_by_code` admits it, and only then is
+the owner behind that node resolvable. The widening still matters — it is what
+makes the by-name fetch legal once a code names the peer — but it was never
+going to be sufficient on its own.
+
 
 ## What it found on the way
 
