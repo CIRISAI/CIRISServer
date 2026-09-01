@@ -663,6 +663,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
              (no local corpus / read API); free up disk to the baked minimum"
         );
     }
+    // `slices.registry` is an operator OPT-OUT, not the authorization. The grant
+    // is checked inside compose_registry, which withholds the slice when this
+    // node holds no accord-conferred infra:attest. Config can decline; it can
+    // never confer. (FSD/REGISTRY_SLICE_ROLE_GATE.md)
     if cfg.slices.registry {
         compose_registry(&edge, &engine, &cfg).await?;
     }
@@ -1088,6 +1092,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // node's trust root is the operator's decision, made at the
                     // operator's own machine.
                     .merge(crate::trust_root_api::router(
+                        Arc::clone(&engine),
+                        node_code.key_id.clone(),
+                    ))
+                    // TRUST ROOT, the federation-facing read: GET
+                    // /v1/trust-root/bundle. Deliberately NOT loopback-gated —
+                    // unlike the import/list/delete verbs above, which are the
+                    // operator's own act, this is how a peer bootstrapping into
+                    // the mesh fetches the portable root and checks it against
+                    // its own roster. The bundle is self-authenticating and the
+                    // outer envelope claims no authority; see the module docs
+                    // for why signing the wrapper would be worthless
+                    // (CIRISRegistry#133 — this is what retires
+                    // /v1/steward-key).
+                    .merge(crate::trust_root_broadcast::router(
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
                     ))
@@ -4189,17 +4207,164 @@ pub async fn run_config_get(
     crate::graph_config::get_config(&engine, key).await
 }
 
-/// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76). Attaches to
-/// the shared Edge (the node's single identity) + serves the registry trust
-/// surface over the shared Engine. SCAFFOLD. (0.5 is config-as-CEG; registry is 0.6.)
-async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
-    todo!("registry slice (Server 0.6) — pin ciris-registry-core (CIRISRegistry#76) + attach to the shared Edge")
+/// Is THIS node conferred the authority slice? — the registry role gate.
+///
+/// See `FSD/REGISTRY_SLICE_ROLE_GATE.md`. A node serves the registry surface
+/// because the accord blessed it to, never because an operator set a boolean:
+/// the trust root confers `infra:attest` (and `infra:serve`), and holding that
+/// grant IS the authorization. That is the same rule `add-canonical` already
+/// enforces on the way in — persist refuses the `canonical` role on any record
+/// that is not anchor-scrubbed — applied to what the blessed node then does.
+///
+/// Both key ids are ours on purpose. The question is *"do I hold this
+/// capability, from a root I MYSELF accept?"*, and the second half is the
+/// operator's un-trust lever: delete the `trust:accepts` row and this walk
+/// returns `None`, the slice goes dark on its own, and nothing special-cased
+/// it (`FSD/TRUST_ROOT_CAPABILITY_GATE.md` §1).
+///
+/// `Ok(None)` is NOT an error. A node that was never blessed is in a legitimate
+/// steady state; it simply does not serve the authority slice. Only a failure
+/// to *evaluate* the walk is an error, and it is fail-secure at the call site.
+///
+/// This cannot join [`Capabilities`], which is evaluated BEFORE the Engine is
+/// open (a pre-corpus structural gate — see `DEFAULT_LENS_STORE_MIN_GIB`).
+/// A delegation-graph walk needs the corpus, so the registry gate is
+/// necessarily post-corpus and lives here, at slice-composition time.
+pub(crate) async fn registry_slice_conferred(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+) -> Result<Option<ciris_persist::federation::trust_root::TrustedGrant>> {
+    let directory = engine.federation_directory();
+    ciris_persist::federation::trust_root::capability_roots_to_trusted_root(
+        directory.as_ref(),
+        node_key_id, // who accepts the root — us
+        node_key_id, // who holds the capability — us
+        ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("evaluate the registry-slice capability walk: {e}"))
+}
+
+/// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76, co-bump DONE:
+/// registry-core now resolves on this repo's exact triple). Attaches to the
+/// shared Edge (the node's single identity) + serves the registry trust surface
+/// over the shared Engine.
+///
+/// **The grant is the authority, and the check lives HERE rather than at the
+/// call site**, because an authority check belongs with the thing it authorises.
+/// `cfg.slices.registry` is retained as an operator *opt-out* only: it can keep
+/// a blessed node from serving, and can never make an unblessed node serve.
+///
+/// Phase 1 (this change) wires the gate and composes nothing — deliberately.
+/// `compose_registry` was a `todo!()`, unreachable only because the config bool
+/// defaults to false; making the grant the trigger without first giving this
+/// function a non-panicking body would panic at boot on exactly the nodes that
+/// ARE blessed (canonical-1 holds all four charter verbs). The surfaces land in
+/// phases 2-4 inside the conferred branch.
+async fn compose_registry(_edge: &Edge, engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<()> {
+    let Some(grant) = registry_slice_conferred(engine, &cfg.key_id).await? else {
+        tracing::info!(
+            node = %cfg.key_id,
+            scope = ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
+            "registry slice WITHHELD — this node holds no accord-conferred infra:attest \
+             grant from a trust root it accepts. This is a normal steady state for an \
+             unblessed node; the slice is conferred by `add-canonical`, never configured \
+             (FSD/REGISTRY_SLICE_ROLE_GATE.md)"
+        );
+        return Ok(());
+    };
+
+    tracing::info!(
+        node = %cfg.key_id,
+        root = %grant.root_key_id,
+        scope = ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
+        "registry slice CONFERRED by the trust root — the authority surface is not yet \
+         composed (Server 0.6 phases 2-4: the persist-native rewrite of builds / verify / \
+         revocation / integrity / transparency). Serving nothing yet, and saying so rather \
+         than pretending"
+    );
+    Ok(())
 }
 
 /// Consensus slice — folds in at **Server 1.0** (CIRISNodeCore#38). `install(&edge)`
 /// on the shared Edge + the WBD `route_deferral` / Wise-Authority surface. SCAFFOLD.
 async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
     todo!("node slice (Server 1.0) — pin ciris-node-core (CIRISNodeCore#38) + install(&edge)")
+}
+
+#[cfg(test)]
+mod registry_slice_gate_tests {
+    //! The registry slice is conferred, not configured
+    //! (`FSD/REGISTRY_SLICE_ROLE_GATE.md`).
+    //!
+    //! The regression these pin is a boot outage, not a feature. `compose_registry`
+    //! was a `todo!()`, reachable only because `slices.registry` defaults to false.
+    //! Anything that makes the grant the trigger without giving the function a
+    //! non-panicking body panics at boot on exactly the nodes that ARE blessed.
+
+    use super::*;
+
+    async fn engine_with_no_conferral() -> Arc<Engine> {
+        use ciris_keyring::MlDsa65SoftwareSigner;
+        use ciris_persist::prelude::LocalSigner;
+        let pqc = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0xB2; 32], "ciris-server-pqc".to_string())
+                .expect("pqc seed"),
+        );
+        let signer = Arc::new(LocalSigner::from_parts(
+            ed25519_dalek::SigningKey::from_bytes(&[0xB1; 32]),
+            "unblessed-node".to_string(),
+            Some(pqc),
+            Some("ciris-server-pqc".to_string()),
+        ));
+        Arc::new(
+            Engine::with_signer(signer, "sqlite::memory:")
+                .await
+                .expect("engine"),
+        )
+    }
+
+    /// An unblessed node resolves the gate to `None` — and that is a steady
+    /// state, not a fault. Holding no accord conferral is the ordinary
+    /// condition of every node that has not been through `add-canonical`.
+    #[tokio::test]
+    async fn an_unblessed_node_is_not_conferred_the_authority_slice() {
+        let engine = engine_with_no_conferral().await;
+        let conferred = registry_slice_conferred(&engine, "unblessed-node")
+            .await
+            .expect("the walk must EVALUATE cleanly even when it confers nothing");
+        assert!(
+            conferred.is_none(),
+            "a node with no accord-conferred infra:attest must not be granted the \
+             authority slice — config cannot confer it and neither can absence of proof"
+        );
+    }
+
+    /// The boot-panic regression, pinned directly: withholding must RETURN, not
+    /// panic and not error. A node that is simply unblessed has to finish
+    /// composing and come up serving everything else.
+    #[tokio::test]
+    async fn withholding_the_slice_is_not_a_boot_failure() {
+        let engine = engine_with_no_conferral().await;
+        let conferred = registry_slice_conferred(&engine, "unblessed-node").await;
+        assert!(
+            matches!(conferred, Ok(None)),
+            "an unblessed node must resolve to Ok(None): Err would fail the boot of a \
+             node whose only \"problem\" is that it was never blessed"
+        );
+    }
+
+    /// The gate asks about THIS node on both sides of the walk — "do I hold this
+    /// capability, from a root I myself accept?". Passing a stranger's key id
+    /// must not confer anything either; nothing about being asked about grants.
+    #[tokio::test]
+    async fn asking_about_a_stranger_confers_nothing() {
+        let engine = engine_with_no_conferral().await;
+        let conferred = registry_slice_conferred(&engine, "some-other-node")
+            .await
+            .expect("walk evaluates");
+        assert!(conferred.is_none(), "no conferral exists for any key here");
+    }
 }
 
 #[cfg(test)]
