@@ -26,8 +26,24 @@
 //! Test 4 is paired with a control (`the_owner_reads_their_own_community`) for
 //! the reason the whole file exists: a refusal test that passes because the
 //! fixture never worked proves nothing.
+//!
+//! # Two things the fixture must genuinely BE, not merely register
+//!
+//! A send now needs both halves of a real conversation, so neither can be
+//! faked with a directory row:
+//!
+//! * **the owner holds their key** — the message is signed by the PERSON, and
+//!   the route opens that key off disk ([`OwnerIdentity`]);
+//! * **the contact answers the handshake** — the body is sealed under the
+//!   room's MLS record secret, so this single-node fixture plays the far side
+//!   ([`open_chat`], [`contact_room_key`]).
+//!
+//! Both are the same lesson as the control above, one rung down: a fixture that
+//! only looks like the other party keys no room and signs no words.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -48,11 +64,9 @@ use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::auth::session::DelegationConstraints;
 use ciris_server::auth::store;
 use ciris_server::contacts_chat::{self, pair_community_key_id};
+use ciris_server::identity::UserIdentityBackend;
 
 const NODE_KEY_ID: &str = "ciris-server";
-const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
-const OWNER_ED_SEED: [u8; 32] = [0xF1; 32];
-const OWNER_PQC_SEED: [u8; 32] = [0xF2; 32];
 
 /// The contact the owner chats with.
 const CONTACT_KEY_ID: &str = "bob-v1";
@@ -184,52 +198,148 @@ async fn seed_user_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8)
         .unwrap_or_else(|e| panic!("seed user key {key_id}: {e}"));
 }
 
-fn owner_user_signer() -> LocalSigner {
-    let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&OWNER_PQC_SEED, format!("{OWNER_USER_KEY_ID}-pqc"))
-            .expect("owner ML-DSA-65 seed"),
-    );
-    LocalSigner::from_parts(
-        SigningKey::from_bytes(&OWNER_ED_SEED),
-        OWNER_USER_KEY_ID.to_string(),
-        Some(pqc),
-        Some(format!("{OWNER_USER_KEY_ID}-pqc")),
-    )
+/// One `CIRIS_HOME` for the whole test binary. [`OwnerIdentity::mint`] seals the
+/// owner's ML-DSA-65 half into `ciris_verify_core::ceg_outbox::keys_dir()`,
+/// which hangs off this env var — left unset, every test in this file would
+/// write into the developer's real `~/ciris`. Set ONCE, because tests run in
+/// parallel; what keeps two owners off the same seal file is the per-test
+/// ALIAS, not this directory.
+fn ciris_home() -> PathBuf {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("ciris-chat-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create CIRIS_HOME");
+        std::env::set_var("CIRIS_HOME", &dir);
+        dir
+    })
+    .clone()
+}
+
+/// **The owner's key, actually held.**
+///
+/// A chat message is signed by the PERSON, so `send_message` opens the owner's
+/// fed-ID through `owner_signer_capsule::acquire` — which reads it off disk. A
+/// federation-directory row with no custody behind it answers `NoFedIdentity`,
+/// and every send 403s `chat.author_signer_unavailable`. The owner here is
+/// therefore MINTED the way `POST /v1/self/identity` mints one: a real Ed25519
+/// half under `alias` in `seed_dir`, a real ML-DSA-65 half sealed under the same
+/// alias, and a registered id that is the #247 DERIVED `<alias>-<fp>` form.
+///
+/// That derivation is why the owner's key id is a runtime value in this file
+/// rather than the constant it used to be: it embeds the fingerprint of a key
+/// that did not exist until this test started.
+struct OwnerIdentity {
+    /// The keystore ALIAS — the storage key for BOTH halves, and what
+    /// `resolve_user_signers` re-opens by.
+    alias: String,
+    /// The #247 DERIVED federation key_id: what the owner-binding names, what
+    /// `require_owner_bound` hands the routes, and what every "this is the
+    /// owner" assertion in this file spells.
+    key_id: String,
+    /// The seed directory — the SAME `PathBuf` [`serve`] hands `router`. The
+    /// capsule resolves the signer out of the router's copy, so a fixture that
+    /// minted anywhere else would mint a key the route cannot find.
+    seed_dir: PathBuf,
+    pubkey_ed25519_base64: String,
+    pubkey_ml_dsa_65_base64: String,
+}
+
+impl OwnerIdentity {
+    /// Mint one under an alias unique to this test.
+    ///
+    /// UNIQUE is load-bearing twice: the ML-DSA seal is keyed by alias inside a
+    /// PROCESS-GLOBAL keyring directory, and `active_user_alias` is one pointer
+    /// file per seed dir. Two tests sharing either would race — and tests here
+    /// run in parallel, `concurrent_chat_creation_is_an_idempotent_success`
+    /// building twelve fixtures of its own.
+    ///
+    /// The `alice-` prefix is not decoration: `PairRole::of` gives the
+    /// lexicographically SMALLER fed-ID the creator's role, and [`open_chat`]
+    /// keys the room by publishing the joiner's KeyPackage. Sorting the owner
+    /// before [`CONTACT_KEY_ID`] is what makes the owner the creator; the
+    /// assertion in `open_chat` is where that is stated out loud.
+    async fn mint() -> Self {
+        static NTH: AtomicU32 = AtomicU32::new(0);
+        let alias = format!(
+            "alice-owner-{}-{}",
+            std::process::id(),
+            NTH.fetch_add(1, Ordering::Relaxed)
+        );
+        let seed_dir = ciris_home().join(&alias);
+        std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
+        let minted = ciris_server::identity::mint_user_identity(
+            UserIdentityBackend::Software,
+            &alias,
+            Some("Chat Owner"),
+            seed_dir.clone(),
+        )
+        .await
+        .expect("mint the owner's fed-ID");
+        assert!(
+            minted.key_id.starts_with(&format!("{alias}-")),
+            "expected a derived `{alias}-<fp>` key_id, got {}",
+            minted.key_id
+        );
+        // The two files `POST /v1/self/identity` writes beside the seed, and both
+        // matter here. The capsule is handed the owner-binding's DERIVED id as
+        // its default alias, so WITHOUT the pointer it looks for
+        // `<derived>.ed25519.seed` and finds nothing; the marker is what makes
+        // the re-open choose the same custody backend the mint used.
+        std::fs::write(
+            seed_dir.join(format!("{alias}.backend")),
+            UserIdentityBackend::Software.label(),
+        )
+        .expect("record the custody-backend marker");
+        ciris_server::write_active_user_alias(&seed_dir, &alias)
+            .expect("record the active_user_alias pointer");
+        Self {
+            alias,
+            key_id: minted.key_id,
+            seed_dir,
+            pubkey_ed25519_base64: minted.pubkey_ed25519_base64,
+            pubkey_ml_dsa_65_base64: minted.pubkey_ml_dsa_65_base64,
+        }
+    }
+
+    /// The owner's own signer, re-opened from the SAME custody the route reads.
+    /// A binding or delegation this signs therefore verifies against the
+    /// registered pubkeys — the fixture cannot sign with material the server
+    /// does not hold.
+    async fn signer(&self) -> LocalSigner {
+        ciris_server::identity::hardware_user_signers(
+            UserIdentityBackend::Software,
+            &self.alias,
+            self.seed_dir.clone(),
+        )
+        .await
+        .expect("re-open the owner's minted fed-ID")
+        .0
+    }
 }
 
 /// Bind the responsible party — the serve-only floor refuses every route here on
 /// an owner-UNBOUND node, and the owner's key IS the chat identity.
-async fn bind_owner(engine: &Engine) {
-    let owner_ed_pub = BASE64.encode(
-        SigningKey::from_bytes(&OWNER_ED_SEED)
-            .verifying_key()
-            .to_bytes(),
-    );
-    let owner_mldsa_pub = {
-        let pqc = MlDsa65SoftwareSigner::from_seed_bytes(
-            &OWNER_PQC_SEED,
-            format!("{OWNER_USER_KEY_ID}-pqc"),
-        )
-        .expect("owner ML-DSA-65 seed");
-        BASE64.encode(pqc.public_key().await.expect("owner ML-DSA-65 pubkey"))
-    };
+async fn bind_owner(engine: &Engine, owner: &OwnerIdentity) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": OWNER_USER_KEY_ID });
+    let envelope = serde_json::json!({ "key_id": owner.key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner envelope");
     let record = KeyRecord {
-        key_id: OWNER_USER_KEY_ID.to_string(),
-        pubkey_ed25519_base64: owner_ed_pub,
-        pubkey_ml_dsa_65_base64: Some(owner_mldsa_pub),
+        key_id: owner.key_id.clone(),
+        // THE MINTED pubkeys, not a fixture's own seeds: the capsule signs with
+        // the key on disk, and a directory row carrying anything else would make
+        // every message the owner sends fail verification at the boundary.
+        pubkey_ed25519_base64: owner.pubkey_ed25519_base64.clone(),
+        pubkey_ml_dsa_65_base64: Some(owner.pubkey_ml_dsa_65_base64.clone()),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::USER.into(),
-        identity_ref: OWNER_USER_KEY_ID.to_string(),
+        identity_ref: owner.key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
-        scrub_key_id: OWNER_USER_KEY_ID.to_string(),
+        scrub_key_id: owner.key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -251,7 +361,7 @@ async fn bind_owner(engine: &Engine) {
     let node = node_key_id(engine).await;
     ciris_server::auth::ownership::emit_steward_binding(
         engine,
-        &owner_user_signer(),
+        &owner.signer().await,
         &node,
         &scopes,
     )
@@ -340,14 +450,7 @@ async fn consent_subjects(engine: &Engine, node: &str) -> Vec<String> {
 /// call takes its own directory under the system temp dir; the path is unique
 /// per process and test so two tests never adopt into the same keystore.
 async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSigner> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NTH: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "ciris-chat-node-{}-{}",
-        std::process::id(),
-        NTH.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).expect("keystore dir");
+    let dir = keystore_dir("node");
     let classical =
         ciris_keyring::SealedEd25519Signer::adopt(NODE_KEY_ID.to_string(), dir, &[0xA1; 32])
             .expect("adopt the node's sealed ed25519 key");
@@ -368,17 +471,12 @@ async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSig
 }
 
 /// Serve the contacts+chat router on an ephemeral port.
-async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
+///
+/// `seed_dir` is the owner's OWN seed directory, never a throwaway: the route
+/// opens the author's key out of this path, so handing it an empty directory is
+/// the same as having no owner key at all.
+async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::JoinHandle<()>) {
     let signer = node_edge_signer(&engine).await;
-    let seed_dir = std::env::temp_dir().join(format!(
-        "ciris-chat-seeds-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
     let app = contacts_chat::router(engine, signer, seed_dir);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -390,19 +488,27 @@ async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{addr}"), handle)
 }
 
-/// The whole fixture: a claimed node, a registered contact with a device, and an
-/// owner session.
-async fn fixture() -> (Arc<Engine>, String, String, tokio::task::JoinHandle<()>) {
+/// The whole fixture: a claimed node, a registered contact with a device, an
+/// owner session — and the owner's minted identity, which the caller needs
+/// because the owner's key id is no longer knowable at compile time.
+async fn fixture() -> (
+    Arc<Engine>,
+    String,
+    String,
+    OwnerIdentity,
+    tokio::task::JoinHandle<()>,
+) {
     let engine = node().await;
+    let owner_id = OwnerIdentity::mint().await;
     register_self(&engine).await;
-    bind_owner(&engine).await;
+    bind_owner(&engine, &owner_id).await;
     seed_user_key(&engine, CONTACT_KEY_ID, 0xB0, 0xB1).await;
     seed_user_key(&engine, STRANGER_A_KEY_ID, 0xC0, 0xC1).await;
     seed_user_key(&engine, STRANGER_B_KEY_ID, 0xD0, 0xD1).await;
     seed_contact_occurrence(&engine).await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
-    let (base, handle) = serve(Arc::clone(&engine)).await;
-    (engine, base, owner, handle)
+    let (base, handle) = serve(Arc::clone(&engine), owner_id.seed_dir.clone()).await;
+    (engine, base, owner, owner_id, handle)
 }
 
 /// `GET /v1/contacts` as the owner, decoded.
@@ -437,6 +543,37 @@ async fn live_grants_for(
         .collect()
 }
 
+/// A standing grant that does NOT cover `chat:` — the precondition the widening
+/// tests are about.
+///
+/// Spelled out here rather than taken from
+/// [`ciris_server::peer::default_attestation_prefixes`], because the peering
+/// DEFAULT is free to widen (it is edge's `DEFAULT_CONSENT_PREFIXES`, and it now
+/// carries `chat:` itself). A "narrow" set derived from a constant that may
+/// already be wide is not narrow — the premise would evaporate and the tests
+/// would keep passing while proving nothing.
+fn narrow_peering_prefixes() -> Vec<String> {
+    vec!["capacity:".to_string(), "trace:".to_string()]
+}
+
+/// What `POST /v1/contacts` guarantees a contact's grant covers: the peering
+/// default, PLUS `chat:` — computed from the same two sources `add_contact`
+/// reads, never restated as a literal list. A literal here would fork from the
+/// default the moment the default moved, which is exactly the failure mode the
+/// single-sourcing of that constant exists to prevent.
+fn contact_grant_prefixes() -> Vec<String> {
+    let mut prefixes = ciris_server::peer::default_attestation_prefixes();
+    prefixes.push(ciris_edge::chat::CHAT_ATTESTATION_PREFIX.to_string());
+    ciris_server::peer::normalize_prefixes(&prefixes)
+}
+
+/// The sorted, deduped UNION of two prefix sets — what a widening must produce.
+fn union_prefixes(a: &[String], b: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = a.to_vec();
+    all.extend_from_slice(b);
+    ciris_server::peer::normalize_prefixes(&all)
+}
+
 /// The prefix set the single live grant covers, sorted. Panics if the peer has
 /// no live grant — an absent grant and an empty one are different facts and the
 /// tests must not collapse them onto `vec![]`.
@@ -458,9 +595,107 @@ async fn live_grant_prefixes(engine: &Engine, node: &str, peer: &str) -> Vec<Str
     prefixes
 }
 
-/// `POST /v1/contacts` + `POST /v1/chat` in one step — the precondition for the
-/// message tests.
-async fn open_chat(client: &reqwest::Client, base: &str, owner: &str) -> String {
+// ─── The far side of the room ───────────────────────────────────────────────
+
+/// The CONTACT's federation identity in EDGE's type, over the SAME seeds
+/// `seed_user_key` registered — so a handshake row it signs verifies against the
+/// contact's registered pubkeys, and `share` accepts it as the row's own author.
+///
+/// `SealedEd25519Signer` is disk-backed with no in-memory constructor, so each
+/// call takes its own directory, for the reason spelled out at
+/// [`node_edge_signer`].
+async fn contact_edge_signer() -> Arc<ciris_edge::identity::LocalSigner> {
+    let dir = keystore_dir("contact");
+    let classical =
+        ciris_keyring::SealedEd25519Signer::adopt(CONTACT_KEY_ID.to_string(), dir, &[0xB0; 32])
+            .expect("adopt the contact's sealed ed25519 key");
+    let pqc = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{CONTACT_KEY_ID}-pqc"))
+        .expect("contact ML-DSA-65 seed");
+    Arc::new(ciris_edge::identity::LocalSigner::new(
+        // The contact is registered under its plain alias, not a derived id, so
+        // that is what its rows must be attested under.
+        CONTACT_KEY_ID.to_string(),
+        Arc::new(classical),
+        Some(Arc::new(pqc)),
+    ))
+}
+
+/// A fresh sealed-keystore directory, unique per process and call.
+fn keystore_dir(what: &str) -> PathBuf {
+    static NTH: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ciris-chat-{what}-{}-{}",
+        std::process::id(),
+        NTH.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("keystore dir");
+    dir
+}
+
+/// Put a row and place it in the room, speaking as `actor` — the fixture's copy
+/// of the module's own private `share_in_room`, and deliberately the same two
+/// steps in the same order (store, THEN share, so the crossing acts on bytes
+/// that already exist).
+async fn share_as(
+    engine: &Engine,
+    row: ciris_persist::federation::types::Attestation,
+    room: &str,
+    node: &ciris_edge::identity::LocalSigner,
+    actor: &ciris_edge::identity::LocalSigner,
+) -> String {
+    use ciris_edge::replication::attestation_bind::{share, Shared, Signers, With};
+    let dir = engine.federation_directory();
+    dir.put_attestation(ciris_persist::federation::SignedAttestation {
+        attestation: row.clone(),
+    })
+    .await
+    .unwrap_or_else(|e| panic!("put {}: {e}", row.attestation_id));
+    let crossing = share(
+        &*dir,
+        &row,
+        With::Community {
+            community_key_id: room.to_owned(),
+        },
+        ciris_edge::replication::attestation_bind::CrossingBasis::ProducerAuthority,
+        Signers {
+            node,
+            actor: Some(actor),
+        },
+    )
+    .await
+    .expect("share the row with the room");
+    match crossing.shared {
+        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+            attestation_id
+        }
+        Shared::AwaitingActor {
+            attestation_id,
+            age_ms,
+        } => panic!("row {attestation_id} still waits for its author's signer ({age_ms} ms)"),
+    }
+}
+
+/// `POST /v1/contacts` + `POST /v1/chat`, then the CONTACT's half of the room's
+/// MLS handshake — together, the precondition for the message tests.
+///
+/// From edge v20.0.0 a community body is SEALED, always, so a room only one side
+/// has key material in is a room nobody can speak in: `send_message` answers 503
+/// `chat.room_not_keyed_yet` for as long as the counterpart's row is missing, and
+/// on a single-node fixture it is missing forever. The counterpart is a person
+/// this fixture has to play, so it plays them — mints the contact's key material,
+/// publishes their KeyPackage into the room as a row the CONTACT themself signs
+/// (v39.0.0 will not let this node author another key's claim), and hands back
+/// the material the creator's Welcome is joined with.
+///
+/// Returns the room id and that material; [`contact_room_key`] turns the material
+/// into the key that opens what the owner sends.
+async fn open_chat(
+    client: &reqwest::Client,
+    base: &str,
+    owner: &str,
+    engine: &Engine,
+    owner_id: &OwnerIdentity,
+) -> (String, ciris_edge::mls::cohort_group::CohortKeyMaterial) {
     let resp = client
         .post(format!("{base}/v1/contacts"))
         .bearer_auth(owner)
@@ -478,17 +713,77 @@ async fn open_chat(client: &reqwest::Client, base: &str, owner: &str) -> String 
         .expect("POST /v1/chat");
     assert_eq!(resp.status(), 200, "start chat: {:?}", resp.text().await);
     let json: serde_json::Value = resp.json().await.expect("start chat json");
-    json["community_id"]
+    let community_id = json["community_id"]
         .as_str()
         .expect("community_id")
-        .to_string()
+        .to_string();
+
+    // WHICH HALF THE FIXTURE PUBLISHES, stated rather than assumed. `PairRole`
+    // is order-free — it hands the smaller fed-ID the creator's role — so the
+    // owner is the creator only because its minted alias sorts first. Were that
+    // to change, the owner would become the joiner, its own KeyPackage would not
+    // exist until a first send had already been refused, and this one-shot setup
+    // would quietly stop keying the room.
+    assert_eq!(
+        ciris_edge::chat::PairRole::of(&owner_id.key_id, CONTACT_KEY_ID),
+        ciris_edge::chat::PairRole::Creator,
+        "the fixture publishes the JOINER's KeyPackage, which keys the room only \
+         while the owner ({}) holds the creator's role against {CONTACT_KEY_ID}",
+        owner_id.key_id
+    );
+    let (material, key_package) =
+        ciris_edge::mls::cohort_group::mint_cohort_key_material(CONTACT_KEY_ID)
+            .expect("mint the contact's MLS key material");
+    let key_package = ciris_edge::mls::cohort_group::key_package_to_bytes(key_package)
+        .expect("serialize the contact's KeyPackage");
+    let contact = contact_edge_signer().await;
+    let row = ciris_edge::chat::key_package_attestation(
+        &contact,
+        &owner_id.key_id,
+        &key_package,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("the contact's KeyPackage row");
+    let node = node_edge_signer(engine).await;
+    share_as(engine, row, &community_id, &node, &contact).await;
+    (community_id, material)
+}
+
+/// The CONTACT's view of the room key, once the owner's Welcome has landed.
+///
+/// This is the far side actually joining, not a re-derivation: the key comes out
+/// of an MLS group built from the creator's Welcome and the SAME material whose
+/// KeyPackage [`open_chat`] published. A body it opens is a body the other member
+/// can genuinely read.
+async fn contact_room_key(
+    engine: &Engine,
+    owner_id: &OwnerIdentity,
+    community_id: &str,
+    material: ciris_edge::mls::cohort_group::CohortKeyMaterial,
+) -> ciris_edge::chat::RoomKey {
+    let dir = engine.federation_directory();
+    let (welcome, _epoch) = ciris_edge::chat::welcome_from(&*dir, &owner_id.key_id, community_id)
+        .await
+        .expect("read the creator's Welcome")
+        .expect("the owner's send must have admitted the contact and shared a Welcome");
+    let store = ciris_edge::mls::ScopeStateProvider::new(Arc::new(
+        ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(community_id.as_bytes())
+            .expect("the contact's own MLS store"),
+    ));
+    let group = ciris_edge::mls::CohortGroup::join(store, community_id, material, &welcome, 16)
+        .await
+        .expect("join the room from the Welcome");
+    ciris_edge::chat::RoomKey::of(&group)
+        .await
+        .expect("the room key, as the contact holds it")
 }
 
 // ─── 1. Add a contact by fedID ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -555,7 +850,7 @@ async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
     assert_eq!(row["chat_started"], false, "no chat opened yet");
     assert_eq!(
         row["chat_community_id"],
-        serde_json::json!(pair_community_key_id(OWNER_USER_KEY_ID, CONTACT_KEY_ID))
+        serde_json::json!(pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID))
     );
     assert!(
         row["pubkey_ed25519_base64"].is_string(),
@@ -565,7 +860,7 @@ async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
 
 #[tokio::test]
 async fn an_unknown_fed_id_is_refused_with_a_typed_reason() {
-    let (_engine, base, owner, _h) = fixture().await;
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/v1/contacts"))
@@ -579,9 +874,9 @@ async fn an_unknown_fed_id_is_refused_with_a_typed_reason() {
     assert_eq!(json["reason_id"], "contacts.unknown_fed_id");
 }
 
-/// **THE PR #464 P1 REGRESSION.** Federate with a peer the ordinary way FIRST —
-/// which leaves a standing `consent:replication:v1` grant covering `capacity:` /
-/// `trace:` and nothing else — and only then add them as a contact.
+/// **THE PR #464 P1 REGRESSION.** Give a peer a standing
+/// `consent:replication:v1` grant that does NOT cover `chat:` — the shape a
+/// federation peering leaves behind — and only then add them as a contact.
 ///
 /// This is the case the old code got wrong, and it got it wrong in the direction
 /// that hides: `emit_replication_consent`'s guard matched on (subject, dimension)
@@ -596,28 +891,24 @@ async fn an_unknown_fed_id_is_refused_with_a_typed_reason() {
 /// one grant that survives the fold.
 #[tokio::test]
 async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
 
-    // Ordinary federation peering: the boot/peering default prefix set.
+    // The pre-existing peering grant, deliberately without `chat:`.
     let peered = ciris_server::peer::emit_replication_consent(
         &engine,
         &node,
         CONTACT_KEY_ID,
-        &ciris_server::peer::default_attestation_prefixes(),
+        &narrow_peering_prefixes(),
     )
     .await
     .expect("pre-existing federation peering grant");
     assert!(peered.freshly_emitted);
     assert_eq!(
         live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
-        vec![
-            "capacity:".to_string(),
-            "self:delegates_to:".to_string(),
-            "trace:".to_string(),
-        ],
-        "the fixture must actually start NARROW (the default set, sans chat:), \
-         or this test proves nothing"
+        narrow_peering_prefixes(),
+        "the fixture must actually start NARROW (no chat:), or this test proves \
+         nothing"
     );
 
     let client = reqwest::Client::new();
@@ -647,14 +938,16 @@ async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
     // live grant for this peer.
     assert_eq!(
         live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
-        vec![
-            "capacity:".to_string(),
-            "chat:".to_string(),
-            "self:delegates_to:".to_string(),
-            "trace:".to_string()
-        ],
+        union_prefixes(&narrow_peering_prefixes(), &contact_grant_prefixes()),
         "the widened grant must carry the UNION — dropping capacity:/trace: would \
          trade one dead plane for two"
+    );
+    assert!(
+        live_grant_prefixes(&engine, &node, CONTACT_KEY_ID)
+            .await
+            .iter()
+            .any(|p| p == ciris_edge::chat::CHAT_ATTESTATION_PREFIX),
+        "and it must cover chat: — the whole point of the widening"
     );
     let live = live_grants_for(&engine, &node, CONTACT_KEY_ID).await;
     assert_eq!(live.len(), 1, "exactly one grant may be live for a peer");
@@ -698,7 +991,7 @@ async fn adding_an_already_peered_key_widens_its_narrow_consent_grant() {
 /// no-op, just pointing the other way.
 #[tokio::test]
 async fn widening_preserves_the_standing_grants_policy() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
     let opts = ciris_server::peer::ConsentGrantOptions {
         audience: Some(cohort_scope::SPECIES.to_string()),
@@ -739,7 +1032,10 @@ async fn widening_preserves_the_standing_grants_policy() {
     // above is unchanged, which is the property this test exists for.
     assert_eq!(
         payload["attestation_prefixes"],
-        serde_json::json!(["capacity:", "chat:", "self:delegates_to:", "trace:"]),
+        serde_json::json!(union_prefixes(
+            &["trace:".to_string()],
+            &contact_grant_prefixes()
+        )),
         "the union must be sorted + deduped so the JCS bytes are stable"
     );
 }
@@ -787,7 +1083,7 @@ async fn withdraw_consent_grant(engine: &Engine, peer: &str, grant_attestation_i
 /// make — rather than only the route on top of it.
 #[tokio::test]
 async fn emit_replication_consent_re_grants_after_a_withdraw() {
-    let (engine, _base, _owner, _h) = fixture().await;
+    let (engine, _base, _owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
 
     let first = ciris_server::peer::emit_replication_consent(
@@ -847,7 +1143,7 @@ async fn emit_replication_consent_re_grants_after_a_withdraw() {
 /// now I can't add them again", with the UI reporting success every time.
 #[tokio::test]
 async fn re_adding_an_un_contacted_person_restores_a_live_grant() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
     let client = reqwest::Client::new();
 
@@ -900,12 +1196,8 @@ async fn re_adding_an_un_contacted_person_restores_a_live_grant() {
     );
     assert_eq!(
         live_grant_prefixes(&engine, &node, CONTACT_KEY_ID).await,
-        vec![
-            "capacity:".to_string(),
-            "chat:".to_string(),
-            "self:delegates_to:".to_string(),
-            "trace:".to_string()
-        ]
+        contact_grant_prefixes(),
+        "a re-grant must restore the FULL contact coverage, chat: included"
     );
     let listed = contacts_list(&client, &base, &owner).await;
     assert_eq!(listed["total"], 1, "the contact must be back: {listed}");
@@ -916,20 +1208,21 @@ async fn re_adding_an_un_contacted_person_restores_a_live_grant() {
 
 #[tokio::test]
 async fn chat_creation_is_convergent_and_idempotent_for_a_pair() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
 
     // THE convergence property: the id is derived from public inputs alone, so
     // the other end computes the same one without ever talking to this node —
     // in either argument order.
     assert_eq!(
         community_id,
-        pair_community_key_id(OWNER_USER_KEY_ID, CONTACT_KEY_ID)
+        pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID)
     );
     assert_eq!(
         community_id,
-        pair_community_key_id(CONTACT_KEY_ID, OWNER_USER_KEY_ID),
+        pair_community_key_id(CONTACT_KEY_ID, &owner_id.key_id),
         "a room the two ends can only reach by agreeing who initiated is not a room"
     );
 
@@ -942,7 +1235,7 @@ async fn chat_creation_is_convergent_and_idempotent_for_a_pair() {
         .expect("the community must exist after POST /v1/chat");
     let mut members: Vec<String> = community.members.iter().map(|m| m.key_id.clone()).collect();
     members.sort();
-    let mut expected = vec![OWNER_USER_KEY_ID.to_string(), CONTACT_KEY_ID.to_string()];
+    let mut expected = vec![owner_id.key_id.clone(), CONTACT_KEY_ID.to_string()];
     expected.sort();
     assert_eq!(members, expected);
 
@@ -963,7 +1256,7 @@ async fn chat_creation_is_convergent_and_idempotent_for_a_pair() {
 
 #[tokio::test]
 async fn a_chat_with_a_non_contact_is_refused() {
-    let (_engine, base, owner, _h) = fixture().await;
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
     // STRANGER_A is a registered key but was never added as a contact — so this
     // node has consented to replicate nothing to them, and a room whose messages
@@ -984,9 +1277,10 @@ async fn a_chat_with_a_non_contact_is_refused() {
 
 #[tokio::test]
 async fn send_and_list_round_trip_carries_the_hamburger_fields() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
 
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1011,6 +1305,10 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
         .await
         .expect("POST message 2");
     assert_eq!(resp.status(), 200);
+    let second_id = resp.json::<serde_json::Value>().await.expect("send json")["attestation_id"]
+        .as_str()
+        .expect("attestation_id")
+        .to_string();
 
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1023,27 +1321,72 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     assert_eq!(list["total"], 2, "both messages must come back: {list}");
     let messages = list["messages"].as_array().expect("messages array");
 
-    // NEWEST LAST — a transcript reads down the page.
-    assert_eq!(messages[0]["body"], "first");
-    assert_eq!(messages[1]["body"], "second");
+    // NEWEST LAST — a transcript reads down the page. The order is asserted on
+    // the row IDENTITIES, because from edge v20.0.0 the projection's `body` is
+    // the SEALED body and no longer distinguishes them by eye.
+    assert_eq!(messages[0]["attestation_id"], serde_json::json!(first_id));
+    assert_eq!(messages[1]["attestation_id"], serde_json::json!(second_id));
+
+    // THE ROUND TRIP, END TO END: what the owner sent is what the OTHER MEMBER
+    // reads. The plaintext never appears on the plane — the projection carries
+    // ciphertext — so the words are recovered the only way anyone can recover
+    // them, by joining the room from the creator's Welcome and opening the rows
+    // with the key that join yields. A test that read `body` off the response
+    // would now be asserting on base64 and would pass on a broken seal.
+    assert_ne!(
+        messages[0]["body"], "first",
+        "a community body must never be on the plane in plaintext: {messages:?}"
+    );
+    let key = contact_room_key(&engine, &owner_id, &community_id, contact_material).await;
+    let opened = ciris_edge::chat::messages_in_room(
+        &*engine.federation_directory(),
+        &[owner_id.key_id.clone(), CONTACT_KEY_ID.to_string()],
+        &community_id,
+        &key,
+    )
+    .await
+    .expect("read the room as the contact");
+    assert_eq!(
+        opened
+            .iter()
+            .map(|m| (m.attestation_id.as_str(), m.body.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                first_id.as_str(),
+                ciris_edge::chat::Body::Text("first".to_string())
+            ),
+            (
+                second_id.as_str(),
+                ciris_edge::chat::Body::Text("second".to_string())
+            ),
+        ],
+        "both messages must open, in order, for the room's other member"
+    );
 
     // THE HAMBURGER FIELDS. The client renders each message with the same
     // attestation card it uses everywhere else; a bespoke `{from,text,at}` would
     // have hidden every one of these.
-    let node = node_key_id(&engine).await;
     let m = &messages[0];
     assert_eq!(m["attestation_id"], serde_json::json!(first_id));
-    // THE NODE ATTESTS, THE HUMAN AUTHORS — two fields, two questions. A card
-    // that read `attesting_key_id` as the sender would label every message with
-    // the box it passed through.
-    assert_eq!(m["attesting_key_id"], serde_json::json!(node));
-    assert_eq!(m["attested_key_id"], serde_json::json!(node));
-    assert_eq!(m["author"], OWNER_USER_KEY_ID);
+    // THE HUMAN ATTESTS AND AUTHORS — one key, and it is in the SIGNATURE. The
+    // node used to attest with the author riding in an envelope member, which
+    // made a reader trust the box about whose words these were; since the
+    // signer-explicit send the two fields answer with the same person, and
+    // `author` is no longer a claim anyone could have written.
+    assert_eq!(m["attesting_key_id"], serde_json::json!(owner_id.key_id));
+    assert_eq!(m["attested_key_id"], serde_json::json!(owner_id.key_id));
+    assert_eq!(m["author"], owner_id.key_id);
     assert_eq!(m["attestation_type"], attestation_type::SCORES);
     assert_eq!(m["cohort_scope"], cohort_scope::COMMUNITY);
     assert_eq!(m["community_id"], serde_json::json!(community_id));
     assert_eq!(m["status"], "live");
-    assert_eq!(m["subject_key_ids"], serde_json::json!([node]));
+    assert_eq!(
+        m["subject_key_ids"],
+        serde_json::json!([owner_id.key_id]),
+        "a community placement is a producer's claim about their OWN content, so \
+         the row names nobody else"
+    );
     assert_eq!(m["content_type"], "text/plain");
     assert_eq!(m["mine"], true);
     assert!(m["asserted_at"].is_string());
@@ -1051,9 +1394,10 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
 
 #[tokio::test]
 async fn a_withdrawn_message_reads_back_as_withdrawn() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
 
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1256,7 +1600,7 @@ async fn withdraw_own_message(engine: &Engine, community_id: &str, target_attest
 /// `community` tier is decorative.
 #[tokio::test]
 async fn a_non_member_cannot_read_the_communitys_messages() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let (community_id, a_signer, a_key_id) = strangers_community(&engine).await;
     let secret = "the strangers' private message";
     seed_message_as(
@@ -1309,12 +1653,13 @@ async fn a_non_member_cannot_read_the_communitys_messages() {
 /// membership.
 #[tokio::test]
 async fn the_owner_reads_their_own_community() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
     // The SAME seeding path the withheld community used, so the two tests differ
     // in exactly one variable: whether the caller is on the roster.
-    seed_message(&engine, OWNER_USER_KEY_ID, &community_id, "hello").await;
+    seed_message(&engine, &owner_id.key_id, &community_id, "hello").await;
 
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1330,7 +1675,7 @@ async fn the_owner_reads_their_own_community() {
 
 #[tokio::test]
 async fn an_unknown_community_is_a_404_not_a_403() {
-    let (_engine, base, owner, _h) = fixture().await;
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{base}/v1/chat/chat:pair:v1:deadbeef/messages"))
@@ -1353,37 +1698,17 @@ async fn an_unknown_community_is_a_404_not_a_403() {
 /// `delegates_to(owner -> actor)` edge in the graph on every use (so revoking the
 /// delegation kills the token immediately), which is why this emits the real edge
 /// first rather than only registering the in-memory grant.
-async fn mint_delegated_token(engine: &Engine, owner_wa_id: &str, client_id: &str) -> String {
+async fn mint_delegated_token(
+    engine: &Engine,
+    owner_id: &OwnerIdentity,
+    owner_wa_id: &str,
+    client_id: &str,
+) -> String {
     // The durable, owner-signed act-on-behalf edge — built through persist's own
     // envelope helper and the user-signed emit path device_grant's approve uses.
     ciris_server::auth::ownership::emit_signed_attestation(
         engine,
-        &owner_user_signer(),
-        attestation_type::DELEGATES_TO,
-        client_id,
-        ciris_persist::federation::delegates_to_envelope(
-            client_id,
-            &[DELEGATED_SCOPE.to_string()],
-            false,
-        ),
-        None,
-    )
-    .await
-    .expect("emit delegates_to(owner -> actor)");
-    mint_delegated_token_inner(owner_wa_id, client_id, DelegationConstraints::default())
-}
-
-/// The same, with an owner-set ALLOW-LIST — the case codex named: a delegate
-/// granted one verb and reaching for the others.
-async fn mint_constrained_delegated_token(
-    engine: &Engine,
-    owner_wa_id: &str,
-    client_id: &str,
-    allow: &[&str],
-) -> String {
-    ciris_server::auth::ownership::emit_signed_attestation(
-        engine,
-        &owner_user_signer(),
+        &owner_id.signer().await,
         attestation_type::DELEGATES_TO,
         client_id,
         ciris_persist::federation::delegates_to_envelope(
@@ -1396,6 +1721,38 @@ async fn mint_constrained_delegated_token(
     .await
     .expect("emit delegates_to(owner -> actor)");
     mint_delegated_token_inner(
+        owner_id,
+        owner_wa_id,
+        client_id,
+        DelegationConstraints::default(),
+    )
+}
+
+/// The same, with an owner-set ALLOW-LIST — the case codex named: a delegate
+/// granted one verb and reaching for the others.
+async fn mint_constrained_delegated_token(
+    engine: &Engine,
+    owner_id: &OwnerIdentity,
+    owner_wa_id: &str,
+    client_id: &str,
+    allow: &[&str],
+) -> String {
+    ciris_server::auth::ownership::emit_signed_attestation(
+        engine,
+        &owner_id.signer().await,
+        attestation_type::DELEGATES_TO,
+        client_id,
+        ciris_persist::federation::delegates_to_envelope(
+            client_id,
+            &[DELEGATED_SCOPE.to_string()],
+            false,
+        ),
+        None,
+    )
+    .await
+    .expect("emit delegates_to(owner -> actor)");
+    mint_delegated_token_inner(
+        owner_id,
         owner_wa_id,
         client_id,
         DelegationConstraints {
@@ -1408,6 +1765,7 @@ async fn mint_constrained_delegated_token(
 const DELEGATED_SCOPE: &str = "owner:act-on-behalf";
 
 fn mint_delegated_token_inner(
+    owner_id: &OwnerIdentity,
     owner_wa_id: &str,
     client_id: &str,
     constraints: DelegationConstraints,
@@ -1420,7 +1778,7 @@ fn mint_delegated_token_inner(
     ciris_server::auth::session::register_delegated_grant(DelegatedGrant {
         owner_wa_id: owner_wa_id.to_string(),
         owner_role: ciris_server::auth::roles::UserRole::SystemAdmin,
-        owner_key_id: OWNER_USER_KEY_ID.to_string(),
+        owner_key_id: owner_id.key_id.clone(),
         client_id: client_id.to_string(),
         scope: DELEGATED_SCOPE.to_string(),
         expires_at: now + 600,
@@ -1446,10 +1804,11 @@ fn mint_delegated_token_inner(
 /// and the cohort gate still applies underneath.
 #[tokio::test]
 async fn a_delegate_may_not_author_a_message_but_may_read() {
-    let (_engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
-    let delegated = mint_delegated_token(&_engine, "wa-owner", CONTACT_KEY_ID).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let delegated = mint_delegated_token(&engine, &owner_id, "wa-owner", CONTACT_KEY_ID).await;
 
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1492,11 +1851,18 @@ async fn a_delegate_may_not_author_a_message_but_may_read() {
 /// the node. All five must refuse, and each must say which contract refused it.
 #[tokio::test]
 async fn an_announce_only_delegate_reaches_no_contacts_or_chat_route() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
-    let delegated =
-        mint_constrained_delegated_token(&engine, "wa-owner", CONTACT_KEY_ID, &["announce"]).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let delegated = mint_constrained_delegated_token(
+        &engine,
+        &owner_id,
+        "wa-owner",
+        CONTACT_KEY_ID,
+        &["announce"],
+    )
+    .await;
 
     for (method, path, reason) in [
         (
@@ -1548,11 +1914,18 @@ async fn an_announce_only_delegate_reaches_no_contacts_or_chat_route() {
 /// without this, "gate everything" and "gate the right things" look identical.
 #[tokio::test]
 async fn a_read_granted_delegate_reads_but_still_cannot_send() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
-    let delegated =
-        mint_constrained_delegated_token(&engine, "wa-owner", CONTACT_KEY_ID, &["chat_read"]).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let delegated = mint_constrained_delegated_token(
+        &engine,
+        &owner_id,
+        "wa-owner",
+        CONTACT_KEY_ID,
+        &["chat_read"],
+    )
+    .await;
 
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1580,24 +1953,26 @@ async fn a_read_granted_delegate_reads_but_still_cannot_send() {
     assert_eq!(json["reason_id"], "chat.delegate_may_not_author");
 }
 
-/// **A FEDERATED PEER IS NOT A CONTACT.** The accept-side mirror of the widening
-/// fix: `POST /v1/contacts` widens a narrow grant on the SEND side, but the guard
-/// on `POST /v1/chat` accepted any consent peer — so an ordinarily-federated key
-/// carrying only `capacity:`/`trace:` could have a room opened with it and
-/// messages accepted locally, while `chat:` stayed ineligible to replicate.
+/// **A PEER WHOSE GRANT DOES NOT COVER `chat:` IS NOT A CONTACT.** The
+/// accept-side mirror of the widening fix: `POST /v1/contacts` widens a narrow
+/// grant on the SEND side, but the guard on `POST /v1/chat` accepted any consent
+/// peer — so a key carrying only `capacity:`/`trace:` could have a room opened
+/// with it and messages accepted locally, while `chat:` stayed ineligible to
+/// replicate.
 ///
 /// A one-way plane is worse than a closed one: it looks like a working
 /// conversation from this side and arrives nowhere.
 #[tokio::test]
 async fn an_ordinarily_federated_peer_is_not_a_contact() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
-    // Ordinary federation peering — capacity:/trace: only, never a contact.
+    // A standing peering grant without chat: — see `narrow_peering_prefixes`
+    // for why this is not taken from the peering default.
     ciris_server::peer::emit_replication_consent(
         &engine,
         &node,
         CONTACT_KEY_ID,
-        &ciris_server::peer::default_attestation_prefixes(),
+        &narrow_peering_prefixes(),
     )
     .await
     .expect("federation peering grant");
@@ -1667,9 +2042,10 @@ async fn an_ordinarily_federated_peer_is_not_a_contact() {
 async fn a_chat_message_verifies_at_the_persist_boundary() {
     use ciris_persist::federation::tier_ingest::verify_row_hybrid_signature;
 
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
         .bearer_auth(&owner)
@@ -1681,10 +2057,13 @@ async fn a_chat_message_verifies_at_the_persist_boundary() {
     let sent: serde_json::Value = resp.json().await.expect("send json");
     let id = sent["attestation_id"].as_str().expect("attestation_id");
 
-    let node = node_key_id(&engine).await;
+    // Under the OWNER's id, not the node's: since the signer-explicit send the
+    // person attests their own words, so the row is authored where the person
+    // is. Looking under the node here would find nothing — which is a stronger
+    // statement of the same property, not a weaker one.
     let directory = engine.federation_directory();
     let row = directory
-        .list_attestations_by(&node)
+        .list_attestations_by(&owner_id.key_id)
         .await
         .expect("list_attestations_by")
         .into_iter()
@@ -1692,7 +2071,7 @@ async fn a_chat_message_verifies_at_the_persist_boundary() {
         .expect("the stored message row");
 
     // Signer == attester: the property the far side's gate actually turns on.
-    assert_eq!(row.attesting_key_id, node);
+    assert_eq!(row.attesting_key_id, owner_id.key_id);
     assert_eq!(
         row.scrub_key_id, row.attesting_key_id,
         "the split that made every cross-node ingest refuse must be gone"
@@ -1708,19 +2087,24 @@ async fn a_chat_message_verifies_at_the_persist_boundary() {
 /// invisible: everything green, every message signed, every message attributed
 /// to a box.
 ///
-/// So this asserts the other half, and asserts it INSIDE the signed bytes: the
-/// envelope names the owner, the projection reads the author from THERE (not
-/// from the attester), and the live owner-binding the node acts under actually
-/// exists.
+/// So this asserts the other half, and asserts it where the claim now lives:
+/// **in the signature**. The predecessor asserted the author rode as an
+/// `on_behalf_of_key_id` envelope member and named the flip that would end that
+/// — "if this ever equals the owner the signer-explicit upgrade has landed". It
+/// has landed. The human signs their own words, so the envelope carries no
+/// author CLAIM at all, and the projection reads the attester because the
+/// attester IS the human. That is the same property held one rung higher: an
+/// envelope member is producer-asserted and a signature is not.
 #[tokio::test]
 async fn the_message_names_its_human_author_inside_the_signed_envelope() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
         .bearer_auth(&owner)
-        .json(&serde_json::json!({ "body": "my words, the node's signature" }))
+        .json(&serde_json::json!({ "body": "my words, my signature" }))
         .send()
         .await
         .expect("POST message");
@@ -1729,39 +2113,48 @@ async fn the_message_names_its_human_author_inside_the_signed_envelope() {
     let id = sent["attestation_id"].as_str().expect("attestation_id");
 
     let node = node_key_id(&engine).await;
-    let row = engine
-        .federation_directory()
-        .list_attestations_by(&node)
+    let directory = engine.federation_directory();
+    let row = directory
+        .list_attestations_by(&owner_id.key_id)
         .await
         .expect("list_attestations_by")
         .into_iter()
         .find(|a| a.attestation_id == id)
         .expect("the stored message row");
 
-    // IN THE ENVELOPE — covered by the signature the far side verifies, so a
-    // relay cannot rewrite the author while the row still checks out.
+    // THE SIGNATURE NAMES THE HUMAN. `verify_row_hybrid_signature` resolves the
+    // attester's REGISTERED pubkeys and checks the bytes against them, so this
+    // is the owner's own key or nothing — a relay that rewrote the author would
+    // have to forge that signature, which is the point of moving the claim here
+    // from an envelope member anyone in the room could have written.
     assert_eq!(
-        row.attestation_envelope["on_behalf_of_key_id"],
-        serde_json::json!(OWNER_USER_KEY_ID),
-        "the signed envelope must name the human: {:?}",
+        row.attesting_key_id, owner_id.key_id,
+        "the person attests their own words: {:?}",
         row.attestation_envelope
     );
-    assert_ne!(
-        row.attesting_key_id, OWNER_USER_KEY_ID,
-        "the node attests — if this ever equals the owner the signer-explicit \
-         upgrade has landed, and `author` should come from the attester again"
+    ciris_persist::federation::tier_ingest::verify_row_hybrid_signature(directory.as_ref(), &row)
+        .await
+        .expect("the human's own signature must verify against their registered key");
+    assert!(
+        row.attestation_envelope
+            .get(contacts_chat::FIELD_ON_BEHALF_OF)
+            .is_none(),
+        "the author no longer rides as a producer-asserted envelope member — a row \
+         carrying one again would mean the weaker mechanism came back: {:?}",
+        row.attestation_envelope
     );
 
-    // THE AUTHORITY IT ACTS UNDER is live and resolvable — not the node's say-so.
-    // `is_steward_bound` is withdraws-aware, so this is the same read that would
-    // stop being true the moment the owner revoked the binding.
+    // THE AUTHORITY THE NODE ACTS UNDER is still live and resolvable — not the
+    // node's say-so. `is_steward_bound` is withdraws-aware, so this is the same
+    // read that would stop being true the moment the owner revoked the binding,
+    // and it is what the owner-gate on every route here rests on.
     assert_eq!(
         ciris_server::auth::ownership::is_steward_bound(&engine, &node).await,
-        Some(OWNER_USER_KEY_ID.to_string()),
-        "a node authoring on its owner's behalf must hold a LIVE owner-binding"
+        Some(owner_id.key_id.clone()),
+        "a node serving its owner's chat must hold a LIVE owner-binding"
     );
 
-    // AND THE PROJECTION READS THE ENVELOPE, not the attester.
+    // AND THE PROJECTION AGREES: the card names the human on both fields.
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
         .bearer_auth(&owner)
@@ -1770,11 +2163,11 @@ async fn the_message_names_its_human_author_inside_the_signed_envelope() {
         .expect("GET messages");
     let list: serde_json::Value = resp.json().await.expect("messages json");
     let m = &list["messages"][0];
-    assert_eq!(m["author"], OWNER_USER_KEY_ID, "author is the human: {m}");
+    assert_eq!(m["author"], owner_id.key_id, "author is the human: {m}");
     assert_eq!(
         m["attesting_key_id"],
-        serde_json::json!(node),
-        "attester is the node"
+        serde_json::json!(owner_id.key_id),
+        "and so is the attester — one key, not a box speaking for a person"
     );
     assert_eq!(
         m["mine"], true,
@@ -1786,9 +2179,10 @@ async fn the_message_names_its_human_author_inside_the_signed_envelope() {
 
 #[tokio::test]
 async fn every_route_refuses_without_an_owner_session() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
     let observer = mint_session(&engine, "wa-observer", WaRole::Observer).await;
 
     for (method, path) in [
@@ -1838,7 +2232,7 @@ async fn every_route_refuses_without_an_owner_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_chat_creation_is_an_idempotent_success() {
     for round in 0..12 {
-        let (_engine, base, owner, _h) = fixture().await;
+        let (_engine, base, owner, _owner_id, _h) = fixture().await;
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("{base}/v1/contacts"))
@@ -1956,11 +2350,13 @@ fn contact_signer() -> LocalSigner {
 /// and the owner's genuine message still projects the owner.
 #[tokio::test]
 async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let community_id = open_chat(&client, &base, &owner).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
 
-    // A genuine message from the owner, as a control.
+    // A genuine message from the owner, as a control. Its id is kept because the
+    // sealed body cannot be picked out of the transcript by eye.
     let resp = client
         .post(format!("{base}/v1/chat/{community_id}/messages"))
         .bearer_auth(&owner)
@@ -1968,7 +2364,14 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
         .send()
         .await
         .expect("send genuine");
-    assert_eq!(resp.status(), 200);
+    let status = resp.status();
+    let body = resp.text().await.expect("send genuine body");
+    assert_eq!(status, 200, "send genuine: {body}");
+    let genuine_id = serde_json::from_str::<serde_json::Value>(&body).expect("send json")
+        ["attestation_id"]
+        .as_str()
+        .expect("attestation_id")
+        .to_string();
 
     // The contact's node: a real key the CONTACT's own live owner-binding
     // names — which puts it in the transcript's scan set, exactly the position
@@ -1994,7 +2397,7 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
         &engine,
         &evil_node,
         Some(&evil_signer),
-        OWNER_USER_KEY_ID,
+        &owner_id.key_id,
         &community_id,
     )
     .await;
@@ -2039,11 +2442,8 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
         "the same node claiming its OWN bound member is the legitimate far-side \
          shape and must project the member: {l}"
     );
-    let genuine = msgs
-        .iter()
-        .find(|m| m["body"] == "genuine")
-        .expect("genuine message");
-    assert_eq!(genuine["author"], OWNER_USER_KEY_ID);
+    let genuine = find(&genuine_id);
+    assert_eq!(genuine["author"], owner_id.key_id);
     assert_eq!(genuine["mine"], true);
 }
 
@@ -2117,7 +2517,7 @@ async fn seed_message_attested_by(
 #[tokio::test]
 async fn a_poisoned_roster_under_the_pair_id_is_refused() {
     use ciris_persist::federation::types::{Community, CommunityMember};
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/v1/contacts"))
@@ -2128,13 +2528,13 @@ async fn a_poisoned_roster_under_the_pair_id_is_refused() {
         .expect("POST /v1/contacts");
     assert_eq!(resp.status(), 200);
 
-    let community_id = pair_community_key_id(OWNER_USER_KEY_ID, CONTACT_KEY_ID);
+    let community_id = pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID);
     let now = chrono::Utc::now();
     engine
         .put_community_self_signed(Community {
             community_key_id: community_id.clone(),
             community_name: "poisoned".to_string(),
-            members: [OWNER_USER_KEY_ID, CONTACT_KEY_ID, STRANGER_A_KEY_ID]
+            members: [owner_id.key_id.as_str(), CONTACT_KEY_ID, STRANGER_A_KEY_ID]
                 .iter()
                 .map(|k| CommunityMember {
                     key_id: (*k).to_string(),
@@ -2200,7 +2600,7 @@ fn both_chat_write_handlers_enforce_declared_conformance() {
 /// directions.
 #[tokio::test]
 async fn a_claimed_contacts_grant_names_their_bound_node() {
-    let (engine, base, owner, _h) = fixture().await;
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
 
     // Claim the contact: a NODE-role key bound by the contact's own live
