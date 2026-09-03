@@ -39,8 +39,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-ios,     dir: ios-device,    lib_dir_out: device_lib_dir }
-          - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir }
+          - { target: aarch64-apple-ios,     dir: ios-device,    lib_dir_out: device_lib_dir, sdk: iphoneos }
+          - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir,    sdk: iphonesimulator }
     env:
       # 3.10 is not arbitrary: the client's iOS app embeds CPython 3.10
       # (CIRISClient's `iosApp` Resources carry `python3.10` +
@@ -58,6 +58,21 @@ jobs:
       # default features stay ON (`default = ["pkcs11"]`), which is precisely
       # what `maturin build` compiles for the published wheel.
       IOS_PYO3_FEATURES: extension-module
+      # ── THE TAG HAS TO BE TRUE (CIRISServer#532) ──────────────────────────
+      #
+      # Unset, the two slices pick DIFFERENT floors from the same commit in the
+      # same job: measured on the published v0.5.196 asset, the device slice
+      # carries `LC_VERSION_MIN_IPHONEOS 10.0` and the simulator slice
+      # `LC_BUILD_VERSION minos 14.0`. That was invisible while the artifact was
+      # a tarball — nothing reads a floor out of a tar member — and becomes a
+      # correctness bug the moment the same binaries ship as wheels, because
+      # `pip` installs on the strength of the TAG. A wheel tagged `ios_13_0`
+      # around the 14.0 simulator slice installs on iOS 13 and fails at load.
+      #
+      # 13.0 is the floor the app targets, and pinning it here makes one number
+      # true of both slices, the tarball and the wheels alike.
+      # `tools/check_ios_wheel.py` refuses any wheel whose binary disagrees.
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
@@ -227,6 +242,48 @@ jobs:
         with:
           name: ciris-server-ios-${{ matrix.dir }}
           path: dist/${{ matrix.dir }}/_native.abi3.so
+          if-no-files-found: error
+      # ── The PEP 730 wheel (CIRISServer#532) ────────────────────────────────
+      #
+      # AFTER the tarball slice is uploaded, deliberately: the tarball is what
+      # CIRISAgent's `update_substrate_libs.py` already consumes, and a new
+      # packaging lane must not be able to cost us the artifact that works.
+      #
+      # maturin is here for its DIST-INFO, not for a build. `maturin build
+      # --target aarch64-apple-ios` is refused before it compiles anything —
+      # "platform.system() in python, darwin, and the rust target … don't match"
+      # — which is exactly why the slice above is a `cargo build` and is
+      # recorded as such in ci.yml. What maturin CAN do without a compiler is
+      # `pep517 write-dist-info`, the same path pip drives for
+      # `prepare_metadata_for_build_wheel`, and that keeps the packaging
+      # metadata single-sourced: a hand-written METADATA would be a second
+      # spelling that silently stops matching the other eight wheels the first
+      # time pyproject.toml moves.
+      - name: install maturin (dist-info for the ios wheel)
+        run: pip install "maturin>=1.13,<2"
+      - name: assemble the ios wheel (${{ matrix.sdk }})
+        run: >-
+          python3 tools/build_ios_wheel.py
+          --so "dist/${{ matrix.dir }}/_native.abi3.so"
+          --sdk ${{ matrix.sdk }}
+          --ios-min "$IPHONEOS_DEPLOYMENT_TARGET"
+          --out dist-wheel
+      # THE GATE. A wheel filename is a promise about a binary nobody opens, and
+      # iOS is the platform where no build machine and no CI job ever loads the
+      # artifact — the device that finds out is a phone, after distribution. So
+      # the tag is checked against the Mach-O load commands here, where it is
+      # cheap. Self-tested (`--self-test`) so the refusals are exercised on every
+      # platform, not only when something is already wrong.
+      - name: verify the wheel tag against the binary
+        run: |
+          set -euo pipefail
+          ls -la dist-wheel/
+          python3 tools/check_ios_wheel.py --self-test
+          python3 tools/check_ios_wheel.py dist-wheel/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-ios-wheel-${{ matrix.dir }}
+          path: dist-wheel/*.whl
           if-no-files-found: error
       # The ONE CI job that SAVES a CIRISCache blob, and it does not contradict
       # the "CI does NOT save" note on clippy-test above: that note is about
