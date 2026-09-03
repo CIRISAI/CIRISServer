@@ -1466,6 +1466,25 @@ async fn prime_canonicals(
              explicit-hash canonicals (they stay unrooted until announce-reachable)"
         ),
     }
+    if admitted_targets.is_empty() {
+        // The same class as "0 consent peers", one layer earlier: a node with no
+        // admitted canonical has nowhere to send even before consent is asked
+        // about, and every later stage reports a plausible-looking nothing.
+        tracing::warn!(
+            node_key_id = %node_key_id,
+            canonical_key_ids = ?canonical_key_ids,
+            dial_addrs = ?dial_addrs,
+            "federation delivery: NO canonical was admitted, so this node has no \
+             replication target at all. If canonical_key_ids is empty the baked \
+             canonical record was not read — the seed bundle is missing or this \
+             node booted without it. If it is NON-empty, the canonicals are known \
+             but none admitted: each is admitted by reading its key record back \
+             out of the directory, so the failure is admission (an unregistered or \
+             unverifiable canonical key), not transport. Fix that before reading \
+             anything downstream: rooting, consent and delivery will all report \
+             quiet, healthy-looking zeroes"
+        );
+    }
     Ok(admitted_targets)
 }
 
@@ -1601,10 +1620,34 @@ pub async fn run_federation_delivery(
                         interval.reset();
                     }
                     if last_logged != Some(count) {
-                        tracing::info!(
-                            consent_peers = count,
-                            "federation delivery converged to {count} consent peers",
-                        );
+                        if count == 0 {
+                            // ZERO IS NOT CONVERGENCE. This read "converged to 0
+                            // consent peers" at info, which is what a healthy
+                            // node says — while meaning that nothing this node
+                            // ever authors can sail, to anyone, for any reason.
+                            // It is the trace plane's empty transcript.
+                            tracing::warn!(
+                                consent_peers = 0,
+                                "federation delivery has NO consent peers — nothing \
+                                 will replicate off this node, and no error will be \
+                                 raised because there is nobody to fail to reach. \
+                                 Rooting is not enough: a canonical becomes a \
+                                 REPLICATION peer only once an owner authors a \
+                                 `consent:replication` grant to it (POST \
+                                 /v1/federation/consent, after the claim). If a \
+                                 grant does exist, it is not being read back as \
+                                 live — check it is not withdrawn, that its \
+                                 audience covers the peer, and that the peer key \
+                                 in the grant is the peer's NODE key: a grant \
+                                 naming a PERSON is not routable, because a \
+                                 person's fed-ID carries no transport binding"
+                            );
+                        } else {
+                            tracing::info!(
+                                consent_peers = count,
+                                "federation delivery converged to {count} consent peers",
+                            );
+                        }
                         last_logged = Some(count);
                     }
                 }
@@ -1615,7 +1658,14 @@ pub async fn run_federation_delivery(
                         consecutive_failures = backoff.consecutive_failures(),
                         backoff_secs = wait.as_secs(),
                         at_ceiling = backoff.at_ceiling(),
-                        "federation-delivery reconcile tick failed — backing off"
+                        "federation-delivery reconcile tick failed — backing off. This \
+                         tick reads the consent topology back out of the CEG and \
+                         applies it to the live runtime, so a persistent failure \
+                         here freezes the peer set at whatever it last was: rows \
+                         keep being authored and none of the topology changes take. \
+                         A directory error points at the substrate; a runtime error \
+                         points at the transport (an edge booted with \
+                         disable_reticulum, or a dead link)"
                     );
                     // Stay interruptible while waiting: a node shutting down must
                     // not have to sit through a ceiling-length backoff first.

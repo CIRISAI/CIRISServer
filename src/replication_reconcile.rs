@@ -98,13 +98,36 @@ pub async fn reconcile_once(
                     report.awaiting_actor,
                 );
             }
+            if report.awaiting_actor > 0 {
+                // AN `Ok` THAT DID NOTHING, on a cadence. These rows are counted
+                // every tick and moved by none of them: the sweep will not
+                // re-author another key's claim, which is the v39 correction
+                // itself, so nothing here converges with time. Said once per tick
+                // at warn because the info line above reads like progress.
+                tracing::warn!(
+                    awaiting_actor = report.awaiting_actor,
+                    "{} row(s) are stuck awaiting their author's signer and will NOT \
+                     move on their own — the sweep re-authors nobody's claim, so \
+                     this repeats every tick unchanged. If the author is a REMOTE \
+                     key, this is correct and the rows wait for that node. If the \
+                     author is THIS node's owner, the crossing was handed no actor \
+                     (or one keyed for `attest::emit`, whose `key_id` is already \
+                     derived and so derives twice against `custody_for`) — see \
+                     `identity::hardware_user_crossing_signer`",
+                    report.awaiting_actor,
+                );
+            }
         }
         // Never fail the tick on the repair motion: the peer-set convergence
         // below is the loop's primary duty and must still run.
         Err(e) => tracing::warn!(
             error = %e,
             "CIRISPersist#530 consent sweep failed this tick — stranded rows (if any) stay \
-             unofferable until the next tick; peer convergence continues"
+             unofferable until the next tick; peer convergence continues. This sweep is \
+             what carries a locally-authored row from `self` to the audience its \
+             covering grant names, so while it is failing, rows accumulate that this \
+             node can read and no peer can: the symptom downstream is a plane that \
+             looks healthy locally and delivers nothing"
         ),
     }
 
