@@ -210,11 +210,13 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   - `src/equivocation.rs` needed no change to BENEFIT: it reads
     //     `asserted_at` through `key_standing::signed_instant`, and that member
     //     is the claim's instant again, which is the whole point of #801.
-    //   - `attestation_crossing::is_placement_widening` keys on
-    //     `differs_in ∋ cohort_scope`, NOT on `widened_at`. Deliberate: v39-era
-    //     widenings carry no `widened_at` and their bytes are signed and cannot
-    //     be re-rendered, so a `widened_at` discriminator would silently stop
-    //     recognising any widening a v39 peer already placed.
+    //   - `attestation_crossing::is_placement_widening` keys on `widened_at`
+    //     itself. `crossing::check_widening` REQUIRES the member on every
+    //     widening — it refuses one without it — so on a v40 mesh it is present
+    //     on every widening that got through the put door, and absent
+    //     everywhere else. Inferring the shape from `differs_in` instead, which
+    //     is what this did through the v39 adoption, is a second spelling of a
+    //     definition the substrate now states outright.
     const ADOPTED: &str = "e7135559a3d843ecff3ad34ee3b1a10acf92b33f199a327758139969e19f5699";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,

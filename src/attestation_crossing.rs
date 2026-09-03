@@ -37,7 +37,7 @@
 //! it WAITS for that actor. Callers must say which happened rather than
 //! flattening it, so this returns the outcome.
 
-use ciris_persist::federation::envelope::{paths, row_paths};
+use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::{
     crossing, Attestation, Audience, CrossingBasis, Error, MeshCrossingOutcome,
 };
@@ -146,15 +146,26 @@ pub fn placed_id(outcome: &MeshCrossingOutcome) -> Option<&str> {
 /// Is this row a `supersedes` written to PLACE a claim at a wider audience,
 /// rather than to replace or retract it?
 ///
-/// `widen_audience` stamps `differs_in` with the members that differ from the
-/// row it supersedes, and for a pure widening that list is exactly
-/// `["cohort_scope"]` — the body is the prior's, reused.
+/// Asked of `widened_at`, which persist v40.0.0 (#801) added for exactly this
+/// and which `crossing::check_widening` REQUIRES on every widening — it refuses
+/// one without it, saying why: *"a widening carries the claim's instant in
+/// `asserted_at` and its OWN in `widened_at`, so a reader can tell when the
+/// claim was made from when it was placed"*. So on a v40 mesh the member is
+/// present on every widening that got through the put door, and absent
+/// everywhere else (it is `skip_serializing_if = "Option::is_none"`).
 ///
-/// **Every consumer that folds `supersedes` needs this.** Since v39.0.0 a widened
-/// claim leaves TWO rows, and the second one supersedes the first as a matter of
-/// mechanism. A reader that does not tell the two apart reports a message as
-/// retracted by its own arrival, or a detector counts one claim as two and calls
-/// the pair a revision. Both happened here before this existed.
+/// **Every consumer that folds `supersedes` needs this.** A widened claim leaves
+/// TWO rows, and the second supersedes the first as a matter of mechanism. A
+/// reader that cannot tell the two apart reports a message as retracted by its
+/// own arrival, or a detector counts one claim as two and calls the pair a
+/// revision. Both happened here before this existed.
+///
+/// This keyed on `differs_in ∋ cohort_scope` through the v39 adoption, to keep
+/// recognising widenings a v39 peer might already have placed. v39 never
+/// shipped — persist tagged it and we never did, and the ladder that refused
+/// our tag is the reason — so there is no such row to recognise, and inferring
+/// the shape from `differs_in` when the substrate states it outright is a second
+/// spelling of persist's own definition.
 #[must_use]
 pub fn is_placement_widening(row: &Attestation) -> bool {
     is_placement_widening_envelope(&row.attestation_envelope)
@@ -165,12 +176,7 @@ pub fn is_placement_widening(row: &Attestation) -> bool {
 #[must_use]
 pub fn is_placement_widening_envelope(envelope: &serde_json::Value) -> bool {
     envelope
-        .get(paths::DIFFERS_IN)
-        .and_then(|v| v.as_array())
-        .is_some_and(|entries| {
-            entries
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|e| e.trim_start_matches('/') == row_paths::COHORT_SCOPE)
-        })
+        .get(paths::WIDENED_AT)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty())
 }
