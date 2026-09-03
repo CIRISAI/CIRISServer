@@ -46,6 +46,9 @@ use ciris_persist::scrub::NullScrubber;
 use ciris_persist::verify::canonical::Canonicalizer;
 use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
 
+#[path = "support/fixture_pqc.rs"]
+mod fixture_pqc;
+
 // ── A fabric node: one independent in-memory Engine + its node-identity signer ──
 
 /// Stand up an independent node — its own SQLite-in-memory substrate, keyed by
@@ -102,6 +105,7 @@ async fn cross_register(engine: &Engine, key_id: &str, agent_sk: &SigningKey) {
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("cross-register peer key in federation directory");
+    fixture_pqc::register(engine).await;
 }
 
 /// Build the CEG wire bytes for a corpus batch: a single signed `CompleteTrace`
@@ -151,12 +155,12 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
     let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
     bound.extend_from_slice(&canon);
     bound.extend_from_slice(&ed_sig);
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     use ciris_crypto::PqcSigner as _;
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    trace.pqc_key_id = Some(fixture_pqc::KEY_ID.into());
 
     let envelope = serde_json::json!({
         "events": [{

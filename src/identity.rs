@@ -675,6 +675,26 @@ pub async fn mint_portable_software_occurrence(
         transport_hint: None,
         alias_hint: Some(alias.to_string()),
         group_key_id: None,
+        // EMPTY, and deliberately so — verify v14.1.0 / CIRISVerify#269.
+        //
+        // A v3 code MAY embed the owner's nodes so a stranger can reach them
+        // without holding the federation directory (the phone-class case CC
+        // 5.4.6 names, where a peer "cannot hold the full directory"). This
+        // mint happens during first run, BEFORE any node is owner-bound, so
+        // there is nothing truthful to embed and a guess would be worse than
+        // silence.
+        //
+        // Costless: an empty list "still encodes as v2, byte-identically to
+        // before, so nothing already issued moves" — only a non-empty list
+        // emits `CIRIS-V3-`. Every code minted here therefore keeps resolving
+        // through the directory exactly as it does today.
+        //
+        // A populated one belongs where the owner's node set is known and
+        // current — the announce/promote path, not identity minting — and each
+        // entry must carry the NODE's transport Ed25519, never this user key.
+        // `encode` refuses the latter outright, which is CIRISServer#335 made
+        // unencodable rather than merely documented.
+        owned_nodes: Vec::new(),
     })
     .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
 

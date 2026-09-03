@@ -30,6 +30,13 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 const DEFAULT_STARTED_AT: &str = "2026-06-14T00:00:00Z";
 const DEFAULT_COMPLETED_AT: &str = "2026-06-14T00:01:00Z";
 
+/// The shared ML-DSA-65 identity this builder signs the PQC half with. Callers
+/// that INGEST what it builds must also `fixture_pqc::register` it — see that
+/// module for why an unregistered PQC half is a hard refusal since persist
+/// v38.8.0 (#789).
+#[path = "fixture_pqc.rs"]
+pub mod fixture_pqc;
+
 /// The emitter's batch, at the fixture's original fixed instants.
 #[allow(dead_code)] // used by tests/ingest_http.rs, not by every consumer
 pub fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec<u8> {
@@ -108,12 +115,12 @@ pub fn build_batch_bytes_at(
     let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
     bound.extend_from_slice(&canon);
     bound.extend_from_slice(&ed_sig);
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     use ciris_crypto::PqcSigner as _;
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    trace.pqc_key_id = Some(fixture_pqc::KEY_ID.into());
 
     let envelope = serde_json::json!({
         "events": [{

@@ -35,6 +35,9 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 
 use ciris_server::scorer::{self, ScorerConfig};
 
+#[path = "support/fixture_pqc.rs"]
+mod fixture_pqc;
+
 #[path = "support/log_capture.rs"]
 mod log_capture;
 #[path = "support/revocation.rs"]
@@ -181,6 +184,7 @@ async fn register_key_hybrid(
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("register key in federation directory");
+    fixture_pqc::register(engine).await;
 }
 
 /// Build one signed `CompleteTrace` wire batch carrying DMA / IDMA / CONSCIENCE
@@ -288,7 +292,7 @@ fn build_trace_batch(
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    trace.pqc_key_id = Some(fixture_pqc::KEY_ID.into());
 
     let envelope = serde_json::json!({
         "events": [{
@@ -309,7 +313,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     let (node, node_ed_pub_b64, node_mldsa_pub_b64) = node_a_with_keys().await;
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
 
     // ── Precondition: both the attesting (Node A) and attested (agent) keys
     //    must exist as federation_keys rows for put_attestation's FK. Node A's
@@ -472,7 +476,7 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
     let (node, node_ed_pub_b64, node_mldsa_pub_b64) = node_a_with_keys().await;
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
 
     let node_key_id = node
         .local_derived_key_id()
@@ -678,7 +682,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
 
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     let node_key_id = node
         .local_derived_key_id()
         .await
@@ -891,7 +895,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
 
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     let node_key_id = node
         .local_derived_key_id()
         .await

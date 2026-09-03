@@ -45,6 +45,9 @@ use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCan
 use ciris_server::config_reconcile::ResolvedConfig;
 use ciris_server::retention_loop::{self, RetentionConfig, RetentionOutcome};
 
+#[path = "support/fixture_pqc.rs"]
+mod fixture_pqc;
+
 #[path = "support/log_capture.rs"]
 mod log_capture;
 
@@ -102,6 +105,7 @@ async fn register_agent_key(engine: &Engine, ed_pubkey_b64: &str) {
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("register agent key in federation directory");
+    fixture_pqc::register(engine).await;
 }
 
 /// One signed `CompleteTrace` wire batch, stamped at `at`. The timestamp is the
@@ -164,7 +168,7 @@ fn trace_batch(
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    trace.pqc_key_id = Some(fixture_pqc::KEY_ID.into());
 
     serde_json::json!({
         "events": [{
@@ -186,7 +190,7 @@ fn trace_batch(
 async fn ingest_aged_traces(engine: &Engine, n: usize, age_days: i64) -> u64 {
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     register_agent_key(engine, &BASE64.encode(agent_sk.verifying_key().to_bytes())).await;
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     let at = chrono::Utc::now() - chrono::Duration::days(age_days);
     for i in 0..n {
         engine

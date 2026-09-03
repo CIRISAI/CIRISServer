@@ -91,6 +91,9 @@ use ciris_server::mesh_relay::{MeshControlResponder, MeshRequester, MeshSendErro
 use ciris_server::peer::{self, CONSENT_DIMENSION};
 use ciris_server::PeerB;
 
+#[path = "support/fixture_pqc.rs"]
+mod fixture_pqc;
+
 // ── Fixed contract strings ───────────────────────────────────────────────────
 
 /// The delegation scope every mesh-seed owner-op rides on.
@@ -212,6 +215,7 @@ async fn register_key(
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("register federation key");
+    fixture_pqc::register(engine).await;
 }
 
 /// Mint the LOCAL owner's fed-ID on disk under `owner_alias` (software custody) and
@@ -618,6 +622,7 @@ async fn cross_register_agent(engine: &Engine, key_id: &str, agent_sk: &SigningK
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("cross-register agent key");
+    fixture_pqc::register(engine).await;
 }
 
 /// Build the CEG wire bytes for a single hybrid-signed `CompleteTrace` in a
@@ -660,13 +665,13 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
     let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
     bound.extend_from_slice(&canon);
     bound.extend_from_slice(&ed_sig);
-    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let mldsa = fixture_pqc::signer();
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 =
         Some(BASE64.encode(ciris_crypto::PqcSigner::sign(&mldsa, &bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 =
         Some(BASE64.encode(ciris_crypto::PqcSigner::public_key(&mldsa).expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    trace.pqc_key_id = Some(fixture_pqc::KEY_ID.into());
     let envelope = serde_json::json!({
         "events": [{
             "event_type": "complete_trace",

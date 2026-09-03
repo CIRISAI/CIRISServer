@@ -577,8 +577,21 @@ mod tests {
         // The exact admission gate: V2Jcs canonicalizer + Strict hybrid policy.
         let canon = canonicalizer_for(canon_version_for_trace_schema("3.0.0"));
         let ed25519_pubkey_b64 = B64.encode(vk.to_bytes());
-        let outcome = verify_trace_hybrid(ptrace, canon, &ed25519_pubkey_b64, HybridPolicy::Strict)
-            .expect("persist verify_trace_hybrid must accept a 3.0.0 hybrid-sealed lens trace");
+        let pqc_pubkey_b64 = B64.encode(&hybrid.pqc.public_key);
+        // The ML-DSA-65 half is now a PARAMETER (persist v38.8.0, #789): the
+        // gate resolves it from the federation directory by `pqc_key_id` and no
+        // longer reads `CompleteTrace::pubkey_ml_dsa_65`, because a payload that
+        // supplies the key it is checked against proves nothing. There is no
+        // directory in this unit test, so we pass what one would hold for
+        // `hyb-pqc` — the signer's own public half.
+        let outcome = verify_trace_hybrid(
+            ptrace,
+            canon,
+            &ed25519_pubkey_b64,
+            Some(pqc_pubkey_b64.as_str()),
+            HybridPolicy::Strict,
+        )
+        .expect("persist verify_trace_hybrid must accept a 3.0.0 hybrid-sealed lens trace");
         assert_eq!(outcome, VerifyOutcome::HybridVerified);
 
         // Sanity: the canon we built equals JCS for 3.0.0 (dispatch live).

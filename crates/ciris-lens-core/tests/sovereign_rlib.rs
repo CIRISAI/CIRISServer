@@ -155,12 +155,23 @@ async fn register_key_in_directory(engine: &Engine, signer: &LocalSigner) {
     // sovereign-rlib-key-gnan6vglih". The fingerprint suffix in that error IS
     // the tell.
     let key_id = signer.derived_key_id();
+    // BOTH halves, since persist v38.8.0 (#789): `verify_trace_hybrid` takes the
+    // ML-DSA-65 pubkey as a parameter resolved from THIS directory row by
+    // `pqc_key_id`, and no longer reads the one the trace envelope carries — a
+    // payload that supplies the key it is checked against proves nothing. A row
+    // with `None` here is therefore not a classical-only fallback but a hard
+    // refusal ("has no ML-DSA-65 pubkey in the federation directory").
+    let pqc_pubkey_b64 = signer
+        .pqc_public_key_b64()
+        .await
+        .expect("pqc pubkey")
+        .expect("this signer is hybrid — see test_signer");
     let now = Utc::now();
 
     let record = KeyRecord {
         key_id: key_id.clone(),
         pubkey_ed25519_base64: pubkey_b64.clone(),
-        pubkey_ml_dsa_65_base64: None,
+        pubkey_ml_dsa_65_base64: Some(pqc_pubkey_b64),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::AGENT.into(),
         identity_ref: key_id.clone(),

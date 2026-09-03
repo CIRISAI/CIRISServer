@@ -307,6 +307,36 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
     .await;
     register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
 
+    // THE TRACE'S `pqc_key_id` MUST RESOLVE IN THE DIRECTORY, with its PQC half.
+    //
+    // persist v38.8.0 stopped trusting the ML-DSA-65 pubkey the payload carries
+    // and now looks it up by `pqc_key_id`, refusing outright rather than falling
+    // back (CIRISPersist#789):
+    //
+    //   UnknownKey("pqc_key_id test-mldsa has no ML-DSA-65 pubkey in the
+    //   federation directory — refusing rather than falling back to the pubkey
+    //   the payload nominates")
+    //
+    // That is the point of the change: an inline pubkey is a value the sender
+    // chose, so verifying against it asks the signature to vouch for its own key.
+    // This fixture signs with `mldsa` under that key id, so the record has to
+    // carry the matching public half or every ingest below is refused.
+    let mldsa_pub_b64 = {
+        // Scoped: `public_key` comes from a trait both ciris_crypto and
+        // ciris_keyring provide, and importing either at file scope would make
+        // every other call site ambiguous.
+        use ciris_crypto::PqcSigner as _;
+        BASE64.encode(mldsa.public_key().expect("ml-dsa pk"))
+    };
+    register_key_hybrid(
+        &node,
+        "test-mldsa",
+        &agent_pub_b64,
+        Some(&mldsa_pub_b64),
+        identity_type::AGENT,
+    )
+    .await;
+
     // Ingest a scorable corpus for the agent.
     const N_TRACES: usize = 30;
     for i in 0..N_TRACES {
