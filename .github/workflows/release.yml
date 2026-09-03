@@ -472,7 +472,7 @@ jobs:
             # can install, named after an implementation detail, which is the
             # same mistake the `ios-ios-*` guard below already exists to prevent.
             case "$target" in
-              ios-wheel-*)
+              ios-wheels)
                 cp "$dir"/*.whl release/
                 continue
                 ;;
