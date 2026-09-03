@@ -1133,6 +1133,15 @@ struct ChatMessage {
     mine: bool,
 }
 
+/// ONE id, ONE sentence. Two sites refuse with `chat.not_a_pair_room`, and they
+/// had drifted into two different English texts — which means at least one
+/// endpoint renders a sentence it does not say in every language that bundle
+/// covers. `tools/check_server_localization.py`'s `server-id-single-valued`
+/// check is what caught it; a shared const is what stops it recurring, since a
+/// second copy cannot drift from a name.
+const NOT_A_PAIR_ROOM: &str =
+    "this room has no second member — a pair chat addresses exactly one other person";
+
 /// The `live`/`superseded`/`withdrawn`/`recanted` token for a composer type.
 fn status_token(attestation_type_str: &str) -> &'static str {
     match attestation_type_str {
@@ -1348,9 +1357,7 @@ async fn send_message(
                     return refuse(
                         StatusCode::CONFLICT,
                         "chat.not_a_pair_room",
-                        "this room has no second member — a pair chat addresses exactly one \
-                         other person, and `chat_message_attestation` derives the room from \
-                         the two fed-IDs",
+                        NOT_A_PAIR_ROOM,
                     )
                 }
             }
@@ -1709,8 +1716,7 @@ async fn other_member(
             None => Err(refuse(
                 StatusCode::CONFLICT,
                 "chat.not_a_pair_room",
-                "this room has no second member — a pair chat addresses exactly one \
-                 other person",
+                NOT_A_PAIR_ROOM,
             )),
         },
         Ok(None) => Err(refuse(

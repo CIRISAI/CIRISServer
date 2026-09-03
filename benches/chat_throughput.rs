@@ -19,8 +19,11 @@
 //! over HTTP through `reqwest` — the same way `tests/contacts_chat.rs` drives it.
 //! Nothing under measurement is stubbed: each `POST /v1/chat/{id}/messages`
 //! performs the owner gate, the membership check, an `attestation_upsert_local`,
-//! a hybrid-signed `attestation_promote(community)`, and the read-back
-//! projection. Each `GET` re-reads and re-folds the whole transcript.
+//! the sealed community placement — edge's `share`, which is `enter_mesh` over
+//! the same bytes plus a `widen_audience` the AUTHOR signs (persist v39 removed
+//! `attestation_promote`, under which the node re-signed and so became the
+//! author of a claim it was only carrying) — and the read-back projection. Each
+//! `GET` re-reads and re-folds the whole transcript, opening every body.
 //!
 //! # The fixture is a COPY, and that is a hazard worth naming
 //!
@@ -33,7 +36,7 @@
 //! that copy was right, the producer was wrong, and everything was green. So this
 //! copy does not merely run — it **asserts its own preconditions** at the first
 //! message and at each list: the round-trip must carry `attestation_id`,
-//! `cohort_scope: community`, `author == OWNER_USER_KEY_ID` with a node-attested
+//! `cohort_scope: community`, `author == attesting_key_id == the owner`, whose
 //! row (the c84add0 two-fact shape), and the
 //! transcript total must equal the number of messages actually emitted. A fixture
 //! that has drifted out from under this file fails the bench instead of quietly
@@ -86,9 +89,11 @@ use ciris_server::contacts_chat;
 // ─── Fixture constants (mirrors tests/contacts_chat.rs) ─────────────────────
 
 const NODE_KEY_ID: &str = "ciris-server";
-const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
-const OWNER_ED_SEED: [u8; 32] = [0xF1; 32];
-const OWNER_PQC_SEED: [u8; 32] = [0xF2; 32];
+// The owner's fed-ID is MINTED, not a pair of fixture seeds. `send_message`
+// signs with the person's own key, opened off disk through
+// `owner_signer_capsule::acquire`, so a hand-registered key with no seed beside
+// it made every POST fail `chat.author_signer_unavailable: NoFedIdentity` — the
+// bench measured a cold start and then emitted nothing at all.
 const CONTACT_KEY_ID: &str = "bob-v1";
 const CONTACT_OCCURRENCE_KEY_ID: &str = "bob-v1-phone";
 
@@ -271,50 +276,95 @@ async fn seed_user_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8)
         .unwrap_or_else(|e| panic!("seed user key {key_id}: {e}"));
 }
 
-fn owner_user_signer() -> LocalSigner {
-    let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&OWNER_PQC_SEED, format!("{OWNER_USER_KEY_ID}-pqc"))
-            .expect("owner ML-DSA-65 seed"),
-    );
-    LocalSigner::from_parts(
-        SigningKey::from_bytes(&OWNER_ED_SEED),
-        OWNER_USER_KEY_ID.to_string(),
-        Some(pqc),
-        Some(format!("{OWNER_USER_KEY_ID}-pqc")),
-    )
+/// The bench's CIRIS_HOME, so the minted seal lands somewhere this process owns.
+fn ciris_home() -> std::path::PathBuf {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("ciris-chat-bench-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create CIRIS_HOME");
+        std::env::set_var("CIRIS_HOME", &dir);
+        dir
+    })
+    .clone()
 }
 
-async fn bind_owner(engine: &Engine) {
-    let owner_ed_pub = BASE64.encode(
-        SigningKey::from_bytes(&OWNER_ED_SEED)
-            .verifying_key()
-            .to_bytes(),
-    );
-    let owner_mldsa_pub = {
-        let pqc = MlDsa65SoftwareSigner::from_seed_bytes(
-            &OWNER_PQC_SEED,
-            format!("{OWNER_USER_KEY_ID}-pqc"),
+/// The owner's minted fed-ID — the same shape `tests/contacts_chat.rs` builds.
+struct OwnerFedId {
+    alias: String,
+    key_id: String,
+    seed_dir: std::path::PathBuf,
+    pubkey_ed25519_base64: String,
+    pubkey_ml_dsa_65_base64: String,
+}
+
+impl OwnerFedId {
+    async fn mint() -> Self {
+        // `PairRole::of` gives the lexicographically SMALLER fed-ID the creator's
+        // role, and the room is keyed by publishing the joiner's KeyPackage —
+        // so sorting the owner before CONTACT_KEY_ID is what makes the owner the
+        // creator, exactly as in the test fixture.
+        let alias = format!("alice-bench-owner-{}", std::process::id());
+        let seed_dir = ciris_home().join(&alias);
+        std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
+        let minted = ciris_server::identity::mint_user_identity(
+            ciris_server::identity::UserIdentityBackend::Software,
+            &alias,
+            Some("Bench Owner"),
+            seed_dir.clone(),
         )
-        .expect("owner ML-DSA-65 seed");
-        BASE64.encode(pqc.public_key().await.expect("owner ML-DSA-65 pubkey"))
-    };
+        .await
+        .expect("mint the owner's fed-ID");
+        // The two files `POST /v1/self/identity` writes beside the seed: without
+        // the pointer the capsule looks for `<derived>.ed25519.seed`, and without
+        // the marker the re-open can choose a different custody backend.
+        std::fs::write(
+            seed_dir.join(format!("{alias}.backend")),
+            ciris_server::identity::UserIdentityBackend::Software.label(),
+        )
+        .expect("record the custody-backend marker");
+        ciris_server::write_active_user_alias(&seed_dir, &alias)
+            .expect("record the active_user_alias pointer");
+        Self {
+            alias,
+            key_id: minted.key_id,
+            seed_dir,
+            pubkey_ed25519_base64: minted.pubkey_ed25519_base64,
+            pubkey_ml_dsa_65_base64: minted.pubkey_ml_dsa_65_base64,
+        }
+    }
+
+    async fn signer(&self) -> LocalSigner {
+        ciris_server::identity::hardware_user_local_signer(
+            ciris_server::identity::UserIdentityBackend::Software,
+            &self.alias,
+            self.seed_dir.clone(),
+        )
+        .await
+        .expect("re-open the owner's fed-ID")
+    }
+}
+
+async fn bind_owner(engine: &Engine, owner: &OwnerFedId) {
     let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": OWNER_USER_KEY_ID });
+    let envelope = serde_json::json!({ "key_id": owner.key_id });
     let canonical = ceg_produce_canonicalize(&envelope).expect("canonicalize owner envelope");
     let record = KeyRecord {
-        key_id: OWNER_USER_KEY_ID.to_string(),
-        pubkey_ed25519_base64: owner_ed_pub,
-        pubkey_ml_dsa_65_base64: Some(owner_mldsa_pub),
+        key_id: owner.key_id.clone(),
+        // THE MINTED pubkeys. The capsule signs with the key on disk, so a
+        // directory row carrying anything else fails verification at the boundary.
+        pubkey_ed25519_base64: owner.pubkey_ed25519_base64.clone(),
+        pubkey_ml_dsa_65_base64: Some(owner.pubkey_ml_dsa_65_base64.clone()),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::USER.into(),
-        identity_ref: OWNER_USER_KEY_ID.to_string(),
+        identity_ref: owner.key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
-        scrub_key_id: OWNER_USER_KEY_ID.to_string(),
+        scrub_key_id: owner.key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -336,7 +386,7 @@ async fn bind_owner(engine: &Engine) {
     let node = node_key_id(engine).await;
     ciris_server::auth::ownership::emit_steward_binding(
         engine,
-        &owner_user_signer(),
+        &owner.signer().await,
         &node,
         &scopes,
     )
@@ -419,11 +469,97 @@ async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSig
     ))
 }
 
-async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
+/// The CONTACT as edge's signer — the far side of the room, from the same fixed
+/// seeds `seed_user_key` registers it under.
+async fn contact_edge_signer() -> Arc<ciris_edge::identity::LocalSigner> {
+    let dir = std::env::temp_dir().join(format!("ciris-chat-bench-contact-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("keystore dir");
+    let classical =
+        ciris_keyring::SealedEd25519Signer::adopt(CONTACT_KEY_ID.to_string(), dir, &[0xB0; 32])
+            .expect("adopt the contact's sealed ed25519 key");
+    let pqc = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{CONTACT_KEY_ID}-pqc"))
+        .expect("contact ML-DSA-65 seed");
+    Arc::new(ciris_edge::identity::LocalSigner::new(
+        // The contact is registered under its plain alias, not a derived id, so
+        // that is what its rows must be attested under.
+        CONTACT_KEY_ID.to_string(),
+        Arc::new(classical),
+        Some(Arc::new(pqc)),
+    ))
+}
+
+/// Put a row and place it in the room through edge's one door.
+async fn share_as(
+    engine: &Engine,
+    row: ciris_persist::federation::types::Attestation,
+    room: &str,
+    node: &ciris_edge::identity::LocalSigner,
+    actor: &ciris_edge::identity::LocalSigner,
+) {
+    use ciris_edge::replication::attestation_bind::{share, CrossingBasis, Signers, With};
+    let dir = engine.federation_directory();
+    dir.put_attestation(ciris_persist::federation::SignedAttestation {
+        attestation: row.clone(),
+    })
+    .await
+    .unwrap_or_else(|e| panic!("put {}: {e}", row.attestation_id));
+    share(
+        &*dir,
+        &row,
+        With::Community {
+            community_key_id: room.to_owned(),
+        },
+        CrossingBasis::ProducerAuthority,
+        Signers {
+            node,
+            actor: Some(actor),
+        },
+    )
+    .await
+    .expect("share the row with the room");
+}
+
+/// **Key the room, or the bench measures a 503.**
+///
+/// A chat message is sealed to the room's MLS epoch, so `POST` refuses with
+/// `chat.room_not_keyed_yet` until the JOINER's KeyPackage has arrived and the
+/// owner has answered with a Welcome. `PairRole::of` hands the lexicographically
+/// smaller fed-ID the creator's role, and the owner's alias is minted to sort
+/// before [`CONTACT_KEY_ID`] — so the contact is the joiner and this is its
+/// KeyPackage. Were that order to flip, the owner would become the joiner and
+/// the room would never key.
+async fn key_the_room(engine: &Engine, owner_key_id: &str, community_id: &str) {
+    assert_eq!(
+        ciris_edge::chat::PairRole::of(owner_key_id, CONTACT_KEY_ID),
+        ciris_edge::chat::PairRole::Creator,
+        "the bench publishes the JOINER's KeyPackage, which keys the room only \
+         while the owner ({owner_key_id}) holds the creator's role against {CONTACT_KEY_ID}"
+    );
+    let (_material, key_package) =
+        ciris_edge::mls::cohort_group::mint_cohort_key_material(CONTACT_KEY_ID)
+            .expect("mint the contact's MLS key material");
+    let key_package = ciris_edge::mls::cohort_group::key_package_to_bytes(key_package)
+        .expect("serialize the contact's KeyPackage");
+    let contact = contact_edge_signer().await;
+    let row = ciris_edge::chat::key_package_attestation(
+        &contact,
+        owner_key_id,
+        &key_package,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("the contact's KeyPackage row");
+    let node = node_edge_signer(engine).await;
+    share_as(engine, row, community_id, &node, &contact).await;
+}
+
+async fn serve(
+    engine: Arc<Engine>,
+    seed_dir: std::path::PathBuf,
+) -> (String, tokio::task::JoinHandle<()>) {
     let signer = node_edge_signer(&engine).await;
-    let seed_dir =
-        std::env::temp_dir().join(format!("ciris-chat-bench-seeds-{}", std::process::id()));
-    std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
+    // THE MINTED DIR, not one of its own: the route opens the owner's fed-ID
+    // from whatever it is handed, and an empty directory is `NoFedIdentity`.
     let app = contacts_chat::router(engine, signer, seed_dir);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -440,18 +576,22 @@ struct Bed {
     _engine: Arc<Engine>,
     base: String,
     owner: String,
+    /// The MINTED owner fed-ID the transcript must name — derived, so it
+    /// cannot be a const.
+    owner_key_id: String,
     community_id: String,
     _serve: tokio::task::JoinHandle<()>,
 }
 
 async fn build_bed(client: &reqwest::Client) -> Result<Bed, String> {
     let engine = node().await;
+    let owner_id = OwnerFedId::mint().await;
     register_self(&engine).await;
-    bind_owner(&engine).await;
+    bind_owner(&engine, &owner_id).await;
     seed_user_key(&engine, CONTACT_KEY_ID, 0xB0, 0xB1).await;
     seed_contact_occurrence(&engine).await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
-    let (base, handle) = serve(Arc::clone(&engine)).await;
+    let (base, handle) = serve(Arc::clone(&engine), owner_id.seed_dir.clone()).await;
 
     let resp = client
         .post(format!("{base}/v1/contacts"))
@@ -484,16 +624,20 @@ async fn build_bed(client: &reqwest::Client) -> Result<Bed, String> {
     // The convergence property the whole room depends on — recomputed here, so a
     // fixture that stopped deriving the pair id fails loudly rather than
     // benchmarking a room only this process can find.
-    if community_id != contacts_chat::pair_community_key_id(OWNER_USER_KEY_ID, CONTACT_KEY_ID) {
+    if community_id != contacts_chat::pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID) {
         return Err(format!(
             "community_id {community_id} is not the derived pair id — fixture drift"
         ));
     }
 
+    // The handshake, before any phase measures a send.
+    key_the_room(&engine, &owner_id.key_id, &community_id).await;
+
     Ok(Bed {
         _engine: engine,
         base,
         owner,
+        owner_key_id: owner_id.key_id,
         community_id,
         _serve: handle,
     })
@@ -528,6 +672,28 @@ async fn emit_messages(
         let status = resp.status();
         if status != 200 {
             let text = resp.text().await.unwrap_or_default();
+            // A RATE LIMIT IS A MEASUREMENT, not a broken fixture. Every send now
+            // places its row with `widen_audience`, which shares persist's
+            // per-peer burst budget with federation replication — so a fast
+            // sender meets a ceiling that has nothing to do with how quickly
+            // this node can sign. Record where it lands instead of discarding
+            // the whole phase; the phases after this one still have their
+            // transcript.
+            if text.contains("rate limited") {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "phase": tag,
+                        "ran": true,
+                        "ceiling": "peer_burst",
+                        "messages_before_limit": i,
+                        "note": "widen_audience shares the peer-replication burst \
+                                 budget; this is the send ceiling, not a failure",
+                        "refusal": text,
+                    })
+                );
+                return Ok(lat);
+            }
             return Err(format!("POST message {i} returned {status}: {text}"));
         }
         if verify_first && i == 0 {
@@ -545,17 +711,32 @@ async fn emit_messages(
             // THE TWO-FACT SHAPE (c84add0): messages are AUTHORED by the human
             // and ATTESTED by the node that carried them — the attester is the
             // engine's derived key, never the owner. Asserting the owner in
-            // attesting_key_id was the pre-attribution shape; this guard fired
-            // (correctly) the day the producer changed, and the fix is to
-            // assert what production now writes, on both axes.
-            if json["message"]["author"] != OWNER_USER_KEY_ID {
+            // BOTH AXES NAME THE OWNER, and that is the v20 shape rather than a
+            // collapse of two fields into one. The node no longer attests a
+            // human's words: `chat_message_attestation(author, ..)` makes the
+            // author the attester, and the reader projects the attester (never
+            // the `on_behalf_of_key_id` claim — CIRISEdge#564). The guard below
+            // used to demand the OPPOSITE on the second axis, back when a
+            // community row had to be node-attested to deliver; it would now
+            // fail on every correct row.
+            if json["message"]["author"] != bed.owner_key_id.as_str() {
                 return Err(format!(
                     "the read-back message does not name the owner as AUTHOR: {json}"
                 ));
             }
-            if json["message"]["attesting_key_id"] == OWNER_USER_KEY_ID {
+            if json["message"]["attesting_key_id"] != bed.owner_key_id.as_str() {
                 return Err(format!(
-                    "the read-back message is attested by the OWNER — a community                      row must be node-attested (signer==attester is what makes it                      deliver); the owner belongs in `author`: {json}"
+                    "the read-back message is not ATTESTED by the owner — from edge \
+                     v20.0.0 the human signs their own chat row, and a row the node \
+                     attested is one the fabric authored on their behalf: {json}"
+                ));
+            }
+            if json["message"]["body"].is_null() {
+                return Err(format!(
+                    "the read-back message did not OPEN ({}): a sealed community row \
+                     the sender cannot read back means the bench is measuring a \
+                     write path with no reader: {json}",
+                    json["message"]["unopened_reason"]
                 ));
             }
             if json["message"]["mine"] != true {
