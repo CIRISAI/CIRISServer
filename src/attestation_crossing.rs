@@ -37,6 +37,7 @@
 //! it WAITS for that actor. Callers must say which happened rather than
 //! flattening it, so this returns the outcome.
 
+use ciris_edge::replication::attestation_bind::{share_plan, SharePlan};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::{
     crossing, Attestation, Audience, CrossingBasis, Error, MeshCrossingOutcome,
@@ -55,6 +56,40 @@ use ciris_persist::Engine;
 /// Returns the outcome of the LAST verb that ran: the widening when one was
 /// needed, otherwise the crossing. A widening is skipped when the row already
 /// sits at `target` — `enter_mesh` alone is then the whole motion.
+///
+/// # Whose rule decides the SHAPE of the motion
+///
+/// **The plan is edge's** — [`share_plan`], the pure half of
+/// `ciris_edge::replication::attestation_bind::share`. It answers, from the row
+/// and the target alone, the question this function used to answer for itself:
+/// crossing, widening, both, or nothing. It is edge's because it already WAS
+/// edge's; a second copy here is the mirrored-rule shape, and this copy had
+/// drifted.
+///
+/// The drift, precisely: the local rule compared `cohort_scope` STRINGS. Every
+/// `community` audience spells that field `"community"`, so a `community:A` row
+/// asked for `community:B` compared EQUAL, skipped its widening, and returned
+/// `Crossed` — [`is_placed`] said yes and the row was still in cohort A. The
+/// same held for two families. `Audience` equality carries the cohort id, and
+/// `share_plan` compares audiences, so the narrowing is now REFUSED by name
+/// (`check_strictly_wider`) instead of being silently reported as done.
+///
+/// Two other refusals come with it, both before the directory is touched: a row
+/// carrying no `dimension` (without an information type no consent grant can
+/// cover it, so it must not reach a wire), and a target narrower than the row's
+/// own audience — which the old shape let `widen_audience` refuse only AFTER
+/// `enter_mesh` had already put the row in the mesh.
+///
+/// **The EXECUTION stays on the `Engine`.** Edge's `share` runs the verbs over a
+/// bare `FederationDirectory` and needs an explicit
+/// `ciris_edge::identity::LocalSigner` for this node; persist's `LocalSigner`
+/// keeps its classical half private, so an `Engine` cannot yield one, and these
+/// callers hold an `Engine` and nothing else. `Engine::enter_mesh` /
+/// `Engine::widen_audience` resolve custody from the engine's own composed
+/// signer, which is exactly what a caller with no signer in hand needs. A caller
+/// that DOES hold both — `contacts_chat::share_in_room`, and
+/// `tests/trace_round_e2e.rs` for the trace plane — calls edge's `share`
+/// directly and never comes through here.
 pub async fn enter_mesh_at(
     engine: &Engine,
     attestation_id: &str,
@@ -69,6 +104,11 @@ pub async fn enter_mesh_at(
         ))
     })?;
 
+    // Decided from the row and the target alone — no directory, no signer — so
+    // a refusal costs nothing AND, more to the point, happens before the tier
+    // crossing rather than after it.
+    let plan = share_plan(&row, target).map_err(Error::InvalidArgument)?;
+
     // The crossing is over the row AS IT STANDS — its own audience, not the
     // target. `enter_mesh` cross-checks all nine axes against the row and
     // refuses by axis name, so describing it at the target audience here would
@@ -76,13 +116,14 @@ pub async fn enter_mesh_at(
     // a scope change into the signed envelope. That smuggling is the whole
     // reason `attestation_promote` is gone.
     let placed = Audience::of_row(&row)?;
-    let ci = crossing::describe(&row, placed.clone(), basis.clone())?;
+    let ci = crossing::describe(&row, placed, basis.clone())?;
     let crossed = engine.enter_mesh(attestation_id, &ci, actor).await?;
 
     // A row that is waiting on its actor has not crossed, so there is nothing to
-    // widen; returning here keeps the caller's report honest.
+    // widen; returning here keeps the caller's report honest. `Enter` and
+    // `AlreadyThere` are edge's two plans with no widening in them.
     if matches!(crossed, MeshCrossingOutcome::AwaitingActor { .. })
-        || placed.cohort_scope() == target.cohort_scope()
+        || matches!(plan, SharePlan::Enter | SharePlan::AlreadyThere)
     {
         return Ok(crossed);
     }

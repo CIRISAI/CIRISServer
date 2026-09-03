@@ -310,6 +310,97 @@ pub fn reprime_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> 
     Ok(admitted.len())
 }
 
+/// **What edge's advertise filter does with one of THIS node's own rows.**
+///
+/// Four answers, not two, because "not offered to everyone" and "not offered at
+/// all" are opposite findings and this surface used to report them as one
+/// number. `Withheld` is a placement fault the producer must fix; the two
+/// `OfferedPending*` readings are correct placements whose RECIPIENT is chosen
+/// one layer downstream, at send/fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertiseVerdict {
+    /// On the wire to every consented peer.
+    Offered,
+    /// On the wire at the list level; WHICH peer receives it is decided by the
+    /// #379/#386 serve gate against the recipient's effective `infra:serve`.
+    /// This is the `trace:*` reading.
+    OfferedPendingRecipientServeGate,
+    /// On the wire at the list level; narrowed per recipient by the DATA
+    /// SUBJECT's grant (the CC#46 `scores:*` reading).
+    OfferedPendingSubjectGrant,
+    /// Not advertised at all — the row is stranded where it sits.
+    Withheld,
+}
+
+impl AdvertiseVerdict {
+    /// Does edge put this row on the wire at all?
+    #[must_use]
+    pub fn is_offered(self) -> bool {
+        !matches!(self, AdvertiseVerdict::Withheld)
+    }
+
+    /// The token reported on the operator surface.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdvertiseVerdict::Offered => "offered",
+            AdvertiseVerdict::OfferedPendingRecipientServeGate => {
+                "offered_pending_recipient_serve_gate"
+            }
+            AdvertiseVerdict::OfferedPendingSubjectGrant => "offered_pending_subject_grant",
+            AdvertiseVerdict::Withheld => "withheld",
+        }
+    }
+}
+
+/// **Edge's advertise decision, reproduced — because edge does not export it.**
+///
+/// `FederationDirectoryReplicationBridge::attestation_is_advertised` (edge
+/// v20.0.0 `src/replication/bridge.rs:4552`) and the `attestation_projection`
+/// it dispatches on (`:4727`) are PRIVATE associated fns. A consumer that needs
+/// to answer "would edge offer this row?" — which is the first question anyone
+/// debugging a stalled plane asks — has no choice but to re-derive it. This is
+/// that re-derivation, in ONE place, with edge's arms enumerated exhaustively.
+///
+/// It is a mirrored rule and it should not exist; the fix is upstream, one
+/// exported predicate. Until then it lives here rather than inline in the
+/// diagnostic, so that `tests/trace_round_e2e.rs` can hold it against the real
+/// thing — edge's own `local_refs`, over a real placed row — instead of against
+/// a second copy of itself. That differential is the only mechanism that catches
+/// a drift; a comment promising to stay in sync is not one, and this predicate
+/// has now drifted twice.
+///
+/// The drift both times was the same two arms. `Capability` and `Subject`
+/// answered `false` here while edge answers `true`, so a `trace:*` row placed at
+/// `cohort_scope=federation` — the WIDEST projection a trace ever reaches, since
+/// the Trace family resolves `Capability(infra:serve)` at every commons tier and
+/// never widens past it — was reported as stranded under a hint telling the
+/// operator to go re-scope rows that were already terminally placed.
+///
+/// `attesting_key_id` / `node_key_id` serve the `SelfOwn` arm: it is
+/// publish-YOUR-OWN (the KERI shape), NOT "never advertised". A `self`-scoped
+/// row IS advertised, by its own producer.
+#[must_use]
+pub fn advertise_verdict(
+    projection: &ciris_persist::federation::namespace::Projection,
+    attesting_key_id: &str,
+    node_key_id: &str,
+) -> AdvertiseVerdict {
+    use ciris_persist::federation::namespace::Projection;
+    match projection {
+        Projection::Global | Projection::Cohort => AdvertiseVerdict::Offered,
+        Projection::Capability(_) => AdvertiseVerdict::OfferedPendingRecipientServeGate,
+        Projection::Subject => AdvertiseVerdict::OfferedPendingSubjectGrant,
+        Projection::SelfOwn => {
+            if attesting_key_id == node_key_id {
+                AdvertiseVerdict::Offered
+            } else {
+                AdvertiseVerdict::Withheld
+            }
+        }
+    }
+}
+
 /// Gather the live, per-canonical-peer delivery state — the queryable half of
 /// "why isn't the trace sailing?" (CIRISServer#294). Pure async over the current
 /// edge/engine; the wheel wrapper [`delivery_status_json`] supplies the handles.
@@ -433,9 +524,32 @@ async fn gather_delivery_status(
                     // offerable, and the strand (if any) lies elsewhere. That is
                     // why this now reports the projection instead of asserting a
                     // verdict it cannot support.
+                    //
+                    // AND the arm that broke the FIX: reproducing edge's
+                    // predicate means reproducing ALL of it, and the second
+                    // version still answered `false` for the two arms edge
+                    // answers `true`. Both versions failed the same way — a
+                    // parallel predicate that agrees with the real one on the
+                    // rows you happen to be looking at. The arms are enumerated
+                    // exhaustively below against edge's OWN source, and the
+                    // per-recipient narrowing the `Capability` / `Subject` arms
+                    // carry is reported as ITS OWN verdict rather than collapsed
+                    // into "withheld".
+                    //
+                    // This copy exists only because edge does not export the
+                    // predicate: `attestation_is_advertised` and
+                    // `attestation_projection` are private associated fns on
+                    // `FederationDirectoryReplicationBridge` (edge v20.0.0
+                    // `replication/bridge.rs:4552` / `:4727`). The right fix is
+                    // upstream — one exported predicate, and this block calls it.
                     use ciris_persist::federation::namespace as ns;
                     let mut covered_rows = 0usize;
                     let mut stranded = 0usize;
+                    // Rows the projection filter OFFERS and the per-recipient
+                    // serve gate then decides (the `trace:*` cell). Counted apart
+                    // from `stranded` because they are the OPPOSITE finding:
+                    // correctly placed, and gated one layer downstream.
+                    let mut capability_gated = 0usize;
                     let mut by_projection: std::collections::BTreeMap<String, usize> =
                         std::collections::BTreeMap::new();
                     if !grants.is_empty() {
@@ -485,34 +599,33 @@ async fn gather_delivery_status(
                                 // so the producer IS this node — hence SelfOwn
                                 // here is ADVERTISED, not withheld.
                                 //
-                                // v36's two new audience kinds are reported, never
-                                // guessed. `Capability` gates on a token this
-                                // surface cannot resolve (it has no peer in hand —
-                                // it is describing OUR OWN rows), and `Subject`
-                                // gates on the row's subject set. Answering either
-                                // with a bare true/false here would be exactly the
-                                // parallel-predicate drift the comment above this
-                                // block was written about, so they fall out of the
-                                // advertised count and are surfaced by name in
-                                // `by_projection` instead.
-                                let advertised = match proj {
-                                    ns::Projection::Global | ns::Projection::Cohort => true,
-                                    ns::Projection::SelfOwn => a.attesting_key_id == node,
-                                    ns::Projection::Capability(_) | ns::Projection::Subject => {
-                                        false
+                                // ONE predicate, in [`advertise_verdict`], where a
+                                // test can hold it against edge's real `local_refs`
+                                // over a real placed row. Inline, it was a second
+                                // copy of edge's rule that nothing compared to
+                                // anything, and it drifted on the same two arms
+                                // twice — `Capability` / `Subject` answered
+                                // "withheld" where edge answers "advertised", which
+                                // reported a correctly placed `trace:*` row as
+                                // stranded and sent the operator to re-scope rows
+                                // that were already terminally placed.
+                                let verdict = advertise_verdict(&proj, &a.attesting_key_id, &node);
+                                match verdict {
+                                    AdvertiseVerdict::Withheld => stranded += 1,
+                                    AdvertiseVerdict::OfferedPendingRecipientServeGate => {
+                                        capability_gated += 1;
                                     }
-                                };
+                                    AdvertiseVerdict::Offered
+                                    | AdvertiseVerdict::OfferedPendingSubjectGrant => {}
+                                }
                                 *by_projection
                                     .entry(format!(
                                         "{:?}/{}/{}",
                                         proj,
                                         a.cohort_scope,
-                                        if advertised { "offered" } else { "withheld" }
+                                        verdict.as_str()
                                     ))
                                     .or_default() += 1;
-                                if !advertised {
-                                    stranded += 1;
-                                }
                             }
                         }
                     }
@@ -548,6 +661,29 @@ async fn gather_delivery_status(
                         "trace plane armed, but this node holds NO rows covered by the grant \
                          yet — nothing has been sealed (or nothing matches the covered \
                          prefixes). Not a fault: emit first, then re-read."
+                    } else if capability_gated > 0 {
+                        // PLACED AND CAPABILITY-GATED — the reading that used to
+                        // be swallowed by `stranded > 0` above, which reported a
+                        // placement fault for rows whose placement is correct.
+                        "PLACED AND CAPABILITY-GATED: the grant is correct and \
+                         `capability_gated_rows` covered row(s) are placed at their WIDEST \
+                         projection. `trace:*` resolves Capability(infra:serve) at every \
+                         commons tier and never widens further, so cohort_scope=federation \
+                         is the TERMINAL placement here, not a strand — there is nothing \
+                         left to widen and no repair sweep to run. Edge advertises them; \
+                         whether each RECIPIENT receives one is decided per peer by the \
+                         #379/#386 serve gate. If nothing ships, read \
+                         `withholds.by_reason` — and read its two legs APART: \
+                         `serve_capability_missing` is leg A (no accord-conferred \
+                         `infra:serve` on the peer's KEY RECORD, minted locally), while \
+                         `serve_capability_not_rooted` is leg B (the `delegates_to` GRAPH \
+                         walk, `capability_roots_to_trusted_root`). Leg B needs a live, \
+                         FEDERATION-TIER `delegates_to(root -> peer, infra:serve)` in THIS \
+                         node's own directory — a row authored by the root ON THE PEER that \
+                         must REPLICATE here. Leg A passing while leg B fails means exactly \
+                         that: the conferral row has not arrived, which is a CARRIAGE fault \
+                         on the peer->us direction (consent is DIRECTED — check the peer's \
+                         own consent:replication grant naming us), not a fault in these rows."
                     } else {
                         "trace plane armed and every covered row is OFFERABLE by edge's own \
                          advertise predicate (see rows_by_projection for the per-row \
@@ -569,8 +705,14 @@ async fn gather_delivery_status(
                         // armed-but-stranded interlock (CIRISAgent#932).
                         "covered_rows": covered_rows,
                         "stranded_covered_rows": stranded,
+                        // Covered rows edge DOES advertise, whose recipient is
+                        // then chosen by the #379/#386 serve gate rather than by
+                        // scope. Reported apart from `stranded` because "placed at
+                        // its widest projection" and "unofferable" are opposite
+                        // findings this diagnostic used to report as one number.
+                        "capability_gated_rows": capability_gated,
                         // Per-row breakdown through edge's OWN advertise
-                        // predicate: "<Projection>/<cohort_scope>/<offered|withheld>".
+                        // predicate: "<Projection>/<cohort_scope>/<verdict>".
                         // Report the projection rather than a guessed verdict —
                         // if the round still sees nothing while every row reads
                         // `offered`, the gate is NOT the offer filter and the

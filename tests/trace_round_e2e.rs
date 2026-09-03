@@ -36,6 +36,33 @@
 //! `DirectoryStateAdapter` bridges edge's sync `StateProvider` trait to persist's
 //! async surface via `block_in_place` + `block_on`, which panics on a
 //! current-thread runtime.
+//!
+//! # What still calls persist directly, and why
+//!
+//! The CROSSING is edge's — `attestation_bind::publish` places the second trace
+//! here, and `advertise_verdict` is held against edge's own `local_refs`. What
+//! remains on persist remains because edge does not own it, not because it was
+//! missed:
+//!
+//! * **`promote_consented_backlog`** — persist's consent-driven SWEEP, the
+//!   production placement path (`replication_reconcile::reconcile_once`) and the
+//!   only thing that ever places a trace sealed BEFORE its grant existed. Edge
+//!   has no sweep; `share` is per-row. Both doors are driven below.
+//! * **`emit_attestation_self`** — AUTHORSHIP. Edge ships producers for the two
+//!   rows it authors itself (`owner_binding_attestation`,
+//!   `replication_consent_attestation`) and none for `trace:*`; persist's emit
+//!   chokepoint is what stamps the instants into the signed bytes
+//!   (CIRISPersist#598) and binds the row mirror (#643).
+//! * **`put_public_key` / `signed_canonical_record_with_roles` /
+//!   `establish_trust_root_side`** — the KEY and TRUST-ROOT planes. Accord
+//!   conferral is a 2-of-3 co-scrub against a roster persist resolves itself; a
+//!   fixture cannot reach it through any edge surface, which is the whole reason
+//!   this file needs `--features test-anchor`.
+//! * **`list_attestations_by` / `get_attestation` / `has_accord_conferred_role` /
+//!   `capability_roots_to_trusted_root`** — READS of the corpus and of the serve
+//!   gate's two legs. Edge's read DX is per-plane (`chat::ChatMessage::from_row`
+//!   opens a room); there is no `trace:*` opener, and the round's question is
+//!   "is the row THERE", which is persist's to answer.
 
 //! Requires `--features test-anchor`: conferring `infra:serve` is an ACCORD act
 //! (2-of-3 co-scrub), not a field you can set — persist refuses a self-claimed
@@ -56,7 +83,7 @@ use ciris_edge::replication::{
     MutableDirectoryStateAdapter, ReplicationMessage, ReplicationOutcome, Session, SessionRole,
     StateApplier, StateProvider,
 };
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
+use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{algorithm, cohort_scope, identity_type};
 use ciris_persist::federation::{FederationDirectory as _, KeyRecord, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};
@@ -90,12 +117,25 @@ struct Node {
     key_id: String,
     ed_pub: String,
     pqc_pub: String,
+    /// **The same hardware material, keyed the way edge's replication DX takes
+    /// it** — and the two keyings are opposites, which is the trap this field
+    /// exists to keep out of every call site.
+    ///
+    /// `attestation_bind::custody_for` compares `LocalSigner.key_id` to the
+    /// row's `attesting_key_id` VERBATIM (edge v20.0.0 `attestation_bind.rs:663`
+    /// and `:696`), so edge's signer carries the DERIVED federation id. Persist's
+    /// `LocalSigner` above carries the ALIAS, because `derive_key_id` is applied
+    /// to it downstream — the field is either the derive input or its output,
+    /// never both. Handing edge a signer keyed the persist way makes every
+    /// crossing refuse with `CustodyIsNotTheActor`, and handing persist one keyed
+    /// edge's way double-derives.
+    edge_signer: ciris_edge::identity::LocalSigner,
 }
 
 async fn node(alias: &str, ed_seed: u8, pqc_seed: u8) -> Node {
     let signing_key = SigningKey::from_bytes(&[ed_seed; 32]);
     let ed_pub = BASE64.encode(signing_key.verifying_key().to_bytes());
-    let pqc = Arc::new(
+    let pqc: Arc<dyn ciris_keyring::PqcSigner> = Arc::new(
         MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{alias}-pqc"))
             .expect("ML-DSA-65 seed"),
     );
@@ -103,7 +143,7 @@ async fn node(alias: &str, ed_seed: u8, pqc_seed: u8) -> Node {
     let signer = Arc::new(LocalSigner::from_parts(
         signing_key,
         alias.to_string(),
-        Some(pqc),
+        Some(Arc::clone(&pqc)),
         Some(format!("{alias}-pqc")),
     ));
     let engine = Arc::new(
@@ -112,11 +152,32 @@ async fn node(alias: &str, ed_seed: u8, pqc_seed: u8) -> Node {
             .expect("engine"),
     );
     let key_id = engine.local_derived_key_id().await.expect("derived key_id");
+
+    // Edge's signer over the SAME seeds — not a second identity. Built from the
+    // seed bytes rather than converted from the persist signer because persist
+    // keeps its classical half private (`crate::identity`: "one cannot be
+    // converted into the other").
+    let classical: Arc<dyn ciris_keyring::HardwareSigner> = Arc::new(
+        ciris_keyring::Ed25519SoftwareSigner::from_bytes(&[ed_seed; 32], format!("{alias}-ed"))
+            .expect("ed25519 software signer over the node's seed"),
+    );
+    // Proven, not assumed: a signer whose public half differs from the one this
+    // node REGISTERS produces a widening that canonicalizes, signs, and is then
+    // refused at the put door for a reason that reads like a persist bug.
+    assert_eq!(
+        BASE64.encode(classical.public_key().await.expect("edge classical pubkey")),
+        ed_pub,
+        "the edge signer must carry the same classical half the directory registers"
+    );
+    let edge_signer =
+        ciris_edge::identity::LocalSigner::new(key_id.clone(), classical, Some(Arc::clone(&pqc)));
+
     Node {
         engine,
         key_id,
         ed_pub,
         pqc_pub,
+        edge_signer,
     }
 }
 
@@ -231,6 +292,120 @@ async fn register(on: &Node, who: &Node, id_type: &str, roles: Vec<String>) {
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("register key");
+}
+
+/// Seal ONE `trace:complete:v1` at `(tier=local, cohort_scope=self)` — where
+/// every producer's row starts, and the only place persist lets a local row sit
+/// ("local-tier rows MUST be `self`"). Returns its `attestation_id`.
+///
+/// Still `emit_attestation_self`, and deliberately: edge's replication DX owns
+/// the CROSSING, not authorship. It ships producers for the two rows it is
+/// itself the author of (`owner_binding_attestation`,
+/// `replication_consent_attestation`) and none for `trace:*` — a trace is the
+/// agent's claim, and persist's emit chokepoint is what stamps the instants into
+/// the signed bytes (CIRISPersist#598) and binds the row mirror (#643).
+async fn seal_trace(n: &Node, trace_id: &str) -> String {
+    let trace_envelope = serde_json::json!({
+        "dimension": "trace:complete:v1",
+        // persist requires BOTH of these non-empty on any `trace:*` envelope
+        // (admission.rs:1342 — `for field in ["trace_id", "agent_id_hash"]`),
+        // else TraceDimensionInvalid.
+        "trace_id": trace_id,
+        "agent_id_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+        // EXACTLY ONE of "trace" (inline object) / "manifest" (content-addressed).
+        // Inline is the simpler shape for a round test; the manifest form would
+        // additionally require schema/content_hash/byte_len.
+        "trace": { "summary": "in-process round e2e", "steps": 1 },
+        "attesting_key_id": n.key_id,
+        "subject_key_ids": [n.key_id],
+        "score": 1.0,
+        "cohort_scope": cohort_scope::SELF,
+        // NO `asserted_at` here: the emit chokepoint stamps it, TRUNCATED to the
+        // microsecond floor postgres can hold. A producer that writes the field
+        // itself is honoured rather than overwritten, so a hand-written
+        // `Utc::now()` put nanoseconds into the signed bytes — which persist v31
+        // refuses outright rather than rounding (CIRISPersist#598).
+    });
+    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trace_envelope)
+        .expect("trace envelope");
+    let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
+        ciris_persist::federation::types::attestation_type::SCORES,
+        core,
+        cohort_scope::SELF,
+    );
+    input.attested_key_id = Some(n.key_id.clone());
+    input.subject_key_ids = vec![n.key_id.clone()];
+    n.engine
+        .emit_attestation_self(input)
+        .await
+        .expect("seal a trace")
+}
+
+/// **Place a sealed trace through EDGE's one door** — `attestation_bind`'s
+/// federation form.
+///
+/// `publish`, not `share`: edge deliberately leaves `federation` out of `With`
+/// ("`federation` reads like 'the mesh' and means 'anyone at all, in the clear',
+/// and it should be something you typed", `attestation_bind.rs:417`), and
+/// `federation` is exactly where a trace goes — persist's sweep stamps the
+/// covering grant's `audience`, which defaults to `federation`
+/// (`ConsentGrantOptions::default`). The narrowing that keeps a trace off a
+/// stranger's disk is NOT the cohort: `trace:*` resolves
+/// `Projection::Capability(infra:serve)`, so the audience is narrowed per
+/// RECIPIENT at send/fetch by the #379/#386 serve gate. Saying `publish` out
+/// loud is right, and it is what the sweep was doing silently.
+///
+/// `CrossingBasis::ConsentGrant` naming the live grant — byte-for-byte the basis
+/// `promote_consented_backlog` builds (persist v40.0.0 `engine.rs:3688` and
+/// `:3740`), so the two doors describe the SAME nine-axis crossing and a
+/// difference between them would be a difference in the substrate, not in how
+/// they were asked.
+///
+/// Returns the id of the row the wider audience actually reads — the WIDENING,
+/// not the row passed in. That distinction is the whole reason `Shared` carries
+/// an id at all.
+async fn place_through_edge(n: &Node, attestation_id: &str, grant_id: &str) -> String {
+    use ciris_edge::replication::attestation_bind::{publish, CrossingBasis, Shared, Signers};
+
+    let dir = n.engine.federation_directory();
+    let row = dir
+        .get_attestation(attestation_id)
+        .await
+        .expect("read the sealed row back")
+        .unwrap_or_else(|| panic!("row {attestation_id} does not exist"));
+
+    let crossing = publish(
+        dir.as_ref(),
+        &row,
+        CrossingBasis::ConsentGrant {
+            attestation_id: grant_id.to_owned(),
+        },
+        Signers {
+            node: &n.edge_signer,
+            // The node IS the attester of its own trace, so there is no separate
+            // actor to hold. `None` here is a statement, not an omission — an
+            // unsigned row by someone else would WAIT rather than be re-authored
+            // in this node's name.
+            actor: None,
+        },
+    )
+    .await
+    .expect("edge places the trace at the federation");
+
+    match crossing.shared {
+        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+            attestation_id
+        }
+        Shared::AwaitingActor {
+            attestation_id,
+            age_ms,
+        } => panic!(
+            "the trace {attestation_id} waits for its actor after {age_ms} ms — this node \
+             authored it, so `custody_for` should have signed with the node's own key. \
+             Check that `Node::edge_signer.key_id` is the DERIVED federation id and not \
+             the alias"
+        ),
+    }
 }
 
 fn bridge(n: &Node) -> Arc<FederationDirectoryReplicationBridge> {
@@ -380,7 +555,7 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     // The agent consents to replicate `trace:` to the canonical. NOTE the default
     // prefix set is ["capacity:"] — a defaulted grant sweeps no traces at all,
     // which is itself a silent failure this test refuses to reproduce.
-    ciris_server::peer::emit_replication_consent(
+    let grant = ciris_server::peer::emit_replication_consent(
         &agent.engine,
         &agent.key_id,
         &canonical.key_id,
@@ -389,45 +564,26 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     .await
     .expect("agent authors a consent:replication grant covering trace:");
 
-    // Seal a trace, then let the consent edge place it: promotion stamps
-    // cohort_scope FROM the covering grant's audience (CIRISPersist#509), which
-    // is the half that was missing when traces sat at (self, federation).
-    let trace_envelope = serde_json::json!({
-        "dimension": "trace:complete:v1",
-        // persist requires BOTH of these non-empty on any `trace:*` envelope
-        // (admission.rs:1342 — `for field in ["trace_id", "agent_id_hash"]`),
-        // else TraceDimensionInvalid.
-        "trace_id": "round-e2e-trace-0001",
-        "agent_id_hash": "0000000000000000000000000000000000000000000000000000000000000001",
-        // EXACTLY ONE of "trace" (inline object) / "manifest" (content-addressed).
-        // Inline is the simpler shape for a round test; the manifest form would
-        // additionally require schema/content_hash/byte_len.
-        "trace": { "summary": "in-process round e2e", "steps": 1 },
-        "attesting_key_id": agent.key_id,
-        "subject_key_ids": [agent.key_id],
-        "score": 1.0,
-        "cohort_scope": cohort_scope::SELF,
-        // NO `asserted_at` here: the emit chokepoint stamps it, TRUNCATED to the
-        // microsecond floor postgres can hold. A producer that writes the field
-        // itself is honoured rather than overwritten, so a hand-written
-        // `Utc::now()` put nanoseconds into the signed bytes — which persist v31
-        // refuses outright rather than rounding (CIRISPersist#598).
-    });
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trace_envelope)
-        .expect("trace envelope");
-    let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
-        ciris_persist::federation::types::attestation_type::SCORES,
-        core,
-        cohort_scope::SELF,
-    );
-    input.attested_key_id = Some(agent.key_id.clone());
-    input.subject_key_ids = vec![agent.key_id.clone()];
-    agent
-        .engine
-        .emit_attestation_self(input)
-        .await
-        .expect("seal a trace");
-
+    // ══ TWO DOORS PLACE A TRACE, AND BOTH ARE PRODUCTION ═════════════════
+    //
+    // A sealed trace starts at `(tier=local, cohort_scope=self)` and has to be
+    // both CROSSED into the mesh and WIDENED to an audience before the offer
+    // filter will look at it. Since persist v39.0.0 those are two verbs, and
+    // this node reaches them two different ways:
+    //
+    //   1. `promote_consented_backlog` — persist's consent-driven SWEEP, run
+    //      every tick by `replication_reconcile::reconcile_once`. It is what
+    //      places a trace sealed BEFORE its grant existed, and it is the only
+    //      thing that ever places a trace today.
+    //   2. `attestation_bind::publish` — EDGE's one door, per row, at the
+    //      moment the producer holds it. The same composition (`enter_mesh`
+    //      then a `supersedes` the actor signs), asked directly.
+    //
+    // Both are driven here because "we moved onto edge's DX" is only a true
+    // statement if a row placed edge's way crosses the wire exactly like one
+    // placed persist's way — and that is a ROUND property, invisible from
+    // either door alone. This test is the only instrument that can see it.
+    let swept = seal_trace(&agent, "round-e2e-trace-0001").await;
     let sweep = agent
         .engine
         .promote_consented_backlog()
@@ -446,6 +602,41 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         sweep.widened,
         sweep.awaiting_actor,
     );
+
+    // Sealed AFTER the sweep ON PURPOSE. The sweep walks every local-tier row
+    // the grant covers, so a trace sealed before it would be placed by door 1
+    // and prove nothing about door 2 — the fixture would be balanced, and a
+    // balanced fixture tests nothing.
+    let by_edge = seal_trace(&agent, "round-e2e-trace-0002").await;
+    let placed_by_edge = place_through_edge(&agent, &by_edge, &grant.attestation_id).await;
+    assert_ne!(
+        placed_by_edge, by_edge,
+        "a widening is a NEW `supersedes` row and its id is what the audience reads \
+         — if `share` handed back the id it was given, nothing was widened and the \
+         row the canonical can see is still the narrow one"
+    );
+    // Both doors leave the CLAIM row behind at `self` and place a widening. The
+    // pair is the design (the narrow row is what the actor signed; the widening
+    // is a separate claim they also signed), and a reader that cannot tell them
+    // apart reports the trace as retracted by its own placement.
+    for (door, narrow) in [
+        ("the consent sweep", &swept),
+        ("edge's `publish`", &by_edge),
+    ] {
+        let row = agent
+            .engine
+            .federation_directory()
+            .get_attestation(narrow)
+            .await
+            .expect("read the narrow row back")
+            .unwrap_or_else(|| panic!("{door}: the claim row vanished"));
+        assert_eq!(
+            row.cohort_scope,
+            cohort_scope::SELF,
+            "{door} must not rewrite the audience inside the bytes the actor signed \
+             — that smuggling is why `attestation_promote` was deleted"
+        );
+    }
 
     // DIAGNOSTIC: does leg B actually resolve from the agent's records?
     {
@@ -490,10 +681,101 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     let mut agent_applier = MutableDirectoryStateAdapter::new(agent_bridge);
     let mut canon_applier = MutableDirectoryStateAdapter::new(canon_bridge);
 
+    let offered_refs = agent_provider.local_refs(EnvelopeKind::Attestation);
     eprintln!(
         "AGENT OFFERS {} ref(s) to the canonical",
-        agent_provider.local_refs(EnvelopeKind::Attestation).len()
+        offered_refs.len()
     );
+
+    // ══ THE MIRRORED PREDICATE, HELD AGAINST THE REAL ONE ════════════════
+    //
+    // `federation_delivery::advertise_verdict` re-derives edge's
+    // `attestation_is_advertised` because edge keeps it private
+    // (v20.0.0 `replication/bridge.rs:4552`). A mirrored rule with nothing
+    // comparing it to the original is the shape this codebase keeps paying for,
+    // and this one had already drifted twice on the same two arms — answering
+    // "withheld" for `Capability`/`Subject` where edge answers "advertised", so
+    // a terminally-placed `trace:*` row was reported to the operator as stranded.
+    //
+    // The differential runs in ONE direction, and deliberately: `local_refs`
+    // applies MORE than the projection filter (the per-peer consent and serve
+    // gates sit on top of it), so "our predicate offers it" does not imply edge
+    // advertises it. The converse does: a row edge PUT ON THE WIRE cannot be one
+    // our predicate calls stranded. That is precisely the drift, and it is a
+    // fact about the real filter, not about a second copy of the rule.
+    {
+        use ciris_persist::federation::namespace as ns;
+        use sha2::Digest as _;
+        // Edge's wire hash for this plane is `content_hash_of(&Attestation)` —
+        // the sha256 of the BARE row's `serde_json::to_vec` (edge v20.0.0
+        // `bridge.rs:7256`, and `:5811` for why the plane keys on it). NOT the
+        // row's `original_content_hash`, which digests the ENVELOPE alone; using
+        // that matched nothing and the vacuity guard below caught it.
+        let by_hash: std::collections::HashSet<[u8; 32]> =
+            offered_refs.iter().map(|r| r.envelope_hash).collect();
+        let mine = agent
+            .engine
+            .federation_directory()
+            .list_attestations_by(&agent.key_id)
+            .await
+            .expect("the agent's own corpus");
+        let mut checked = 0usize;
+        let mut traces_checked = 0usize;
+        for a in &mine {
+            let wire_hash: [u8; 32] = sha2::Sha256::digest(
+                serde_json::to_vec(a).expect("serialize the row edge advertises"),
+            )
+            .into();
+            if !by_hash.contains(&wire_hash) {
+                continue;
+            }
+            let dim = a
+                .attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(|d| d.as_str())
+                .unwrap_or_default();
+            let proj = ns::projection_for(
+                ns::Plane::Attestation { dimension: dim },
+                &a.cohort_scope,
+                ns::registry::authority_for(dim).class,
+                ns::is_withdraw_or_revocation(&a.attestation_type),
+            );
+            let verdict = ciris_server::federation_delivery::advertise_verdict(
+                &proj,
+                &a.attesting_key_id,
+                &agent.key_id,
+            );
+            assert!(
+                verdict.is_offered(),
+                "edge PUT {} ({dim}, scope={}, {proj:?}) on the wire, and our mirrored \
+                 predicate calls it `{}`. The operator surface would report it as \
+                 `stranded_covered_rows` and send someone to re-scope a row that is \
+                 already placed. Re-read edge's `attestation_is_advertised` \
+                 (v20.0.0 bridge.rs:4584) and fix `advertise_verdict` to match it",
+                a.attestation_id,
+                a.cohort_scope,
+                verdict.as_str(),
+            );
+            checked += 1;
+            if dim.starts_with("trace:") {
+                traces_checked += 1;
+            }
+        }
+        // The join itself is load-bearing, and it already failed once: a
+        // differential whose two sides stop matching passes VACUOUSLY, which is
+        // the one failure mode a differential must not have. This guard is what
+        // turned a green "0 rows compared" into a red naming the reason.
+        assert!(
+            checked > 0 && traces_checked > 0,
+            "the ref→row join matched {checked} row(s) and {traces_checked} trace(s) — \
+             the differential above would have passed without comparing anything. \
+             `EnvelopeRef.envelope_hash` is no longer sha256(serde_json::to_vec(row))"
+        );
+        eprintln!(
+            "ADVERTISE DIFFERENTIAL: {checked} offered row(s) ({traces_checked} trace) \
+             agree with edge's own filter"
+        );
+    }
 
     let mut initiator = Session::new(SessionRole::Initiator, EnvelopeKind::Attestation);
     let mut responder = Session::new(SessionRole::Responder, EnvelopeKind::Attestation);
@@ -588,8 +870,37 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
          trace advertised a hash the index could not serve — `wanted=6 packed=5 \
          dropped=1`)."
     );
+
+    // ── AND THE CONVERSION'S OWN CRITERION ────────────────────────────────
+    // Edge's door is not adopted until a row placed through it crosses. The
+    // assertion above passes on EITHER trace, so it cannot see the difference:
+    // door 1 alone would keep it green while `attestation_bind::publish` placed
+    // nothing the canonical could read. Name both trace ids.
+    let arrived: std::collections::BTreeSet<&str> = traces
+        .iter()
+        .filter_map(|a| {
+            a.attestation_envelope
+                .get("trace_id")
+                .and_then(|t| t.as_str())
+        })
+        .collect();
+    for (door, trace_id) in [
+        ("persist's consent sweep", "round-e2e-trace-0001"),
+        ("edge's `attestation_bind::publish`", "round-e2e-trace-0002"),
+    ] {
+        assert!(
+            arrived.contains(trace_id),
+            "{door} placed a trace that never reached the canonical. Arrived: {arrived:?} \
+             ({} trace row(s), {admitted} envelope(s) admitted). A door that places a row \
+             the wire cannot carry has not replaced the other one — read the SENDER's \
+             ledger first (`withholds_by_reason`), because a serve-gate withhold and a \
+             Deliver-pack drop are indistinguishable from here",
+            traces.len(),
+        );
+    }
     eprintln!(
-        "TRACE PLANE CROSSED: {} trace:* row(s) in the canonical's corpus",
+        "TRACE PLANE CROSSED: {} trace:* row(s) in the canonical's corpus, from both \
+         doors ({arrived:?})",
         traces.len()
     );
 }
