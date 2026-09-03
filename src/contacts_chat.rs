@@ -1112,22 +1112,30 @@ struct ChatMessage {
     content_type: &'static str,
     /// RFC3339. The transcript is ordered by this, ascending.
     asserted_at: String,
-    /// **WHO WROTE IT — the ATTESTER, and only the attester.**
+    /// **WHO WROTE IT**, from `ChatMessage::author_key_id` — edge's own answer.
     ///
-    /// This used to read the envelope's `on_behalf_of_key_id`, which was right
-    /// while the NODE attested and the human was named inside. From edge v20.0.0
-    /// the human attests their own row (`chat_message_attestation(author, ..)`),
-    /// so the signature already answers this question and the legacy member is
-    /// documented upstream as "read, never written".
+    /// In v20.0.0 that field could not be trusted: it read the envelope's
+    /// `on_behalf_of_key_id` and fell back to the attester only when the member
+    /// was absent, so a member of the room — who signs its own envelope — could
+    /// name ANY key there, including this node's owner, and the row rendered as
+    /// the owner's own words with `mine: true`. Edge sealed the body to
+    /// `attesting_key_id` while attributing the text to the claim, so the two
+    /// disagreed by construction. This projected `attesting_key_id` directly to
+    /// stay out of the way of it (CIRISEdge#564).
     ///
-    /// NOT taken from `ChatMessage::author_key_id` (edge v20.0.0
-    /// `chat.rs:772-775`), which still prefers that member and falls back to the
-    /// attester only when it is absent. A member of the room signs its own
-    /// envelope, so it can set `on_behalf_of_key_id` to ANY key — including this
-    /// node's owner — and the row renders as the owner's own words with
-    /// `mine: true`. Edge binds the body's seal to `a.attesting_key_id` while
-    /// attributing the text to the claim, so the two disagree by construction.
-    /// Filed upstream; until it lands, the projection here is the wire truth.
+    /// v20.1.0 closed it at the source: `from_row` no longer reads authorship
+    /// out of any envelope member, the raw value is surfaced as
+    /// `on_behalf_of_claim` — plainly a claim — and ONLY `messages_in_room`
+    /// promotes it, after `owner_of(attester)` proves a live owner binding backs
+    /// it. So the field is the attester unless a node is legitimately speaking
+    /// for its own owner, and reading it is once again the right thing.
+    ///
+    /// We do not call `messages_in_room` itself: it drops every row referenced
+    /// by another, which is right for a plain transcript but would silently
+    /// DELETE a withdrawn message instead of rendering it as `withdrawn`, and
+    /// this surface reports a status with the same vocabulary `memory_api`'s CEG
+    /// projection uses. The promotion that helper performs is therefore not
+    /// applied here — a node-attested row is attributed to the node.
     author: String,
     /// `true` when this node's owner is the AUTHOR (same source as `author`).
     mine: bool,
@@ -1639,9 +1647,9 @@ async fn collect_messages(
             asserted_at: opened.asserted_at.to_rfc3339(),
             // WHOSE WORDS — edge's, off the row's own attester. It is no longer
             // a claim this projection has to weigh: the person signed the row.
-            // THE SIGNATURE, not the claim — see `author` on the struct.
-            mine: row.attesting_key_id == owner.key_id,
-            author: row.attesting_key_id.clone(),
+            // EDGE DECIDES, and from v20.1.0 it decides correctly.
+            mine: opened.author_key_id == owner.key_id,
+            author: opened.author_key_id,
         });
     }
     out.sort_by(|a, b| {
