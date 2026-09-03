@@ -433,20 +433,18 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         .promote_consented_backlog()
         .await
         .expect("promote the consented backlog");
-    // The repair motion the server's reconcile tick also runs (CIRISPersist#530):
-    // re-scopes rows already at federation tier but still suppressed.
-    let repair = agent
-        .engine
-        .repair_stranded_scope_backlog()
-        .await
-        .expect("repair stranded scopes");
+    // v39.0.0 folded the #530 repair motion INTO this sweep: pass 1 enters the
+    // mesh, pass 2 widens rows already in it at an undiscoverable scope. There
+    // is no second call to make — `repair_stranded_scope_backlog` is gone.
     assert!(
-        sweep.promoted > 0 || repair.rescoped > 0,
-        "the trace must be placed by the consent edge — neither the promote sweep \
-         ({} promoted) nor the repair sweep ({} rescoped) moved it, so it is still \
-         invisible to the offer filter (CIRISPersist#509/#530)",
+        sweep.promoted > 0 || sweep.widened > 0,
+        "the trace must be placed by the consent edge — the sweep neither entered it \
+         into the mesh ({} promoted) nor widened it to the grant's audience ({} \
+         widened), so it is still invisible to the offer filter \
+         (CIRISPersist#509/#530). {} row(s) await their actor's signer",
         sweep.promoted,
-        repair.rescoped,
+        sweep.widened,
+        sweep.awaiting_actor,
     );
 
     // DIAGNOSTIC: does leg B actually resolve from the agent's records?

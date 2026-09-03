@@ -62,7 +62,9 @@ use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
 use super::moderation::{self, Duty};
+use crate::attestation_crossing;
 use crate::auth::verify::{self, VerifyError};
+use ciris_persist::federation::{Audience, CrossingBasis, MeshCrossingOutcome};
 
 /// The fixed dimension PREFIX for a watchlist config attestation
 /// (`watchlist:{id}`). NOT a substrate primitive — the §3 fabric-side workaround
@@ -206,10 +208,26 @@ pub async fn enable_watchlist(
     // Promote to federation tier so a peer reads the same enable (cross-fabric
     // agreement on "is a watchlist on for this group"). Attributed to the
     // enabling authority; node co-signs the promotion.
-    engine
-        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-        .await
-        .map_err(|e| format!("promote watchlist_config: {e}"))?;
+    let outcome = attestation_crossing::enter_mesh_at(
+        engine,
+        &attestation_id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        None,
+    )
+    .await
+    .map_err(|e| format!("promote watchlist_config: {e}"))?;
+    if let MeshCrossingOutcome::AwaitingActor { age_ms, .. } = outcome {
+        // v39.0.0: "attributed to the enabling authority" is now enforced, not
+        // just intended — the node co-scrubs and never re-authors. An enable by
+        // a key this node does not hold waits for that key.
+        tracing::info!(
+            attestation_id = %attestation_id,
+            signer_key_id = %signer_key_id,
+            age_ms,
+            "watchlist enable awaits its enabling authority's signer before entering the mesh"
+        );
+    }
     Ok(attestation_id)
 }
 
@@ -254,10 +272,26 @@ pub async fn disable_watchlist(
         .attestation_upsert_local(input)
         .await
         .map_err(|e| format!("withdraw watchlist_config: {e}"))?;
-    engine
-        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-        .await
-        .map_err(|e| format!("promote watchlist withdraw: {e}"))?;
+    let outcome = attestation_crossing::enter_mesh_at(
+        engine,
+        &attestation_id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        None,
+    )
+    .await
+    .map_err(|e| format!("promote watchlist withdraw: {e}"))?;
+    if let MeshCrossingOutcome::AwaitingActor { age_ms, .. } = outcome {
+        // A withdraw that waits is worth saying out loud: revocability is the
+        // reason this path exists, so a silent wait would be the bad failure.
+        tracing::warn!(
+            attestation_id = %attestation_id,
+            signer_key_id = %signer_key_id,
+            age_ms,
+            "watchlist WITHDRAW awaits its signer before entering the mesh — the disable is \
+             recorded locally but peers still read the enable until it crosses"
+        );
+    }
     Ok(attestation_id)
 }
 

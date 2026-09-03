@@ -44,6 +44,7 @@ use ciris_persist::prelude::{Engine, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
 
+use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::auth::session::DelegationConstraints;
 use ciris_server::auth::store;
 use ciris_server::contacts_chat::{self, pair_community_key_id};
@@ -60,6 +61,36 @@ const CONTACT_OCCURRENCE_KEY_ID: &str = "bob-v1-phone";
 /// Two strangers whose community the owner is deliberately NOT in.
 const STRANGER_A_KEY_ID: &str = "carol-v1";
 const STRANGER_B_KEY_ID: &str = "dave-v1";
+
+/// Stranger A as an IDENTITY that can sign, under the DERIVED id.
+///
+/// Placing a row into a community is a MEMBERSHIP claim (persist v39.0.0
+/// refuses `WriteScopeRefused(NoCommunityMembership)` otherwise), so the row
+/// must be attested by a member — and this node is deliberately NOT one in the
+/// strangers' room. The member therefore has to sign it in, and `custody_for`
+/// accepts a signer only when `derived_key_id() == attesting_key_id`, so the
+/// membership, the attestation and the registration all use the derived id.
+/// Same seeds as `seed_user_key` registers, so this is the same identity.
+fn stranger_a_identity() -> (LocalSigner, String) {
+    identity_for(STRANGER_A_KEY_ID, 0xC0, 0xC1)
+}
+
+/// A hybrid signer for `alias`, and the DERIVED id its rows must be attested and
+/// registered under. Same seeds the `seed_*_key` helpers register, so the signer
+/// and the directory row are one identity.
+fn identity_for(alias: &str, ed_seed: u8, pqc_seed: u8) -> (LocalSigner, String) {
+    let signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(&[ed_seed; 32]),
+        alias.to_string(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{alias}-pqc"))
+                .expect("ml-dsa seed"),
+        ) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{alias}-pqc")),
+    );
+    let key_id = signer.derived_key_id();
+    (signer, key_id)
+}
 
 // ─── Fixture ────────────────────────────────────────────────────────────────
 
@@ -110,6 +141,13 @@ async fn register_self(engine: &Engine) {
 /// Seed a `user`-role key straight into the directory. The routes under test
 /// require the row to EXIST; key-admission coverage lives in
 /// `tests/federation_admin.rs`.
+/// Register a user key under the id it will be ATTESTED under. `seed_user_key`
+/// spells the alias; `seed_user_key_at` spells a derived id for the same seeds
+/// — the same identity, registered where `custody_for` will look for it.
+async fn seed_user_key_at(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8) {
+    seed_user_key(engine, key_id, ed_seed, pqc_seed).await;
+}
+
 async fn seed_user_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8) {
     let ed = SigningKey::from_bytes(&[ed_seed; 32]);
     let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{key_id}-pqc"))
@@ -983,7 +1021,7 @@ async fn a_withdrawn_message_reads_back_as_withdrawn() {
 
     // The author withdraws it — the ordinary CEG composer, emitted the same way
     // the route emits the message it targets.
-    withdraw_own_message(&engine, &message_id).await;
+    withdraw_own_message(&engine, &community_id, &message_id).await;
 
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1004,15 +1042,17 @@ async fn a_withdrawn_message_reads_back_as_withdrawn() {
 
 /// A community of two strangers, authored by this node (as a replicated row
 /// would be), holding a real message. The owner is deliberately not on it.
-async fn strangers_community(engine: &Engine) -> String {
+async fn strangers_community(engine: &Engine) -> (String, LocalSigner, String) {
     use ciris_persist::federation::types::{Community, CommunityMember};
-    let community_id = pair_community_key_id(STRANGER_A_KEY_ID, STRANGER_B_KEY_ID);
+    let (a_signer, a_key_id) = stranger_a_identity();
+    seed_user_key_at(engine, &a_key_id, 0xC0, 0xC1).await;
+    let community_id = pair_community_key_id(&a_key_id, STRANGER_B_KEY_ID);
     let now = chrono::Utc::now();
     engine
         .put_community_self_signed(Community {
             community_key_id: community_id.clone(),
-            community_name: format!("{STRANGER_A_KEY_ID} <-> {STRANGER_B_KEY_ID}"),
-            members: [STRANGER_A_KEY_ID, STRANGER_B_KEY_ID]
+            community_name: format!("{a_key_id} <-> {STRANGER_B_KEY_ID}"),
+            members: [a_key_id.as_str(), STRANGER_B_KEY_ID]
                 .iter()
                 .map(|k| CommunityMember {
                     key_id: (*k).to_string(),
@@ -1027,7 +1067,7 @@ async fn strangers_community(engine: &Engine) -> String {
         })
         .await
         .expect("author the strangers' community");
-    community_id
+    (community_id, a_signer, a_key_id)
 }
 
 /// Emit a chat message into `community_id` authored by `author` — the same row
@@ -1036,6 +1076,22 @@ async fn strangers_community(engine: &Engine) -> String {
 async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &str) -> String {
     // NODE-attested, AUTHOR-attributed — the shape `send_message` writes.
     let node = node_key_id(engine).await;
+    seed_message_as(engine, &node, None, author, community_id, body).await
+}
+
+/// [`seed_message`] with the attester named, and its signer when that attester
+/// is not this node. v39.0.0 will not let this node author another key's claim,
+/// so a message placed in a room this node is not in has to be signed by someone
+/// who is in it.
+async fn seed_message_as(
+    engine: &Engine,
+    node: &str,
+    actor: Option<&LocalSigner>,
+    author: &str,
+    community_id: &str,
+    body: &str,
+) -> String {
+    let node = node.to_string();
     let envelope = serde_json::json!({
         (paths::DIMENSION): contacts_chat::CHAT_MESSAGE_DIMENSION,
         "community_id": community_id,
@@ -1065,11 +1121,23 @@ async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &
         .attestation_upsert_local(input)
         .await
         .expect("upsert seeded chat message");
-    engine
-        .attestation_promote(&id, cohort_scope::COMMUNITY)
-        .await
-        .expect("promote seeded chat message to the community tier");
-    id
+    let outcome = ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Community {
+            community_key_id: community_id.to_string(),
+        },
+        &CrossingBasis::ProducerAuthority,
+        actor,
+    )
+    .await
+    .expect("promote seeded chat message to the community tier");
+    // THE PLACED ROW'S ID, not the local one. The widening writes a new row and
+    // that is what the community reads back, so a fixture returning the local id
+    // hands its test an id no transcript will ever contain.
+    ciris_server::attestation_crossing::placed_id(&outcome)
+        .expect("the seeded message must reach the community")
+        .to_owned()
 }
 
 /// The owner's `withdraws` composer over one of their own messages.
@@ -1082,7 +1150,7 @@ async fn seed_message(engine: &Engine, author: &str, community_id: &str, body: &
 /// owner's own key — which is exactly the constraint the client faces: the
 /// server can stage a message on the owner's behalf, but only the holder of the
 /// owner's key can retract one.
-async fn withdraw_own_message(engine: &Engine, target_attestation_id: &str) {
+async fn withdraw_own_message(engine: &Engine, community_id: &str, target_attestation_id: &str) {
     // Same shape as the message it retracts: NODE-attested, node-signed,
     // owner-attributed. The owner exercises revocation THROUGH the node, which is
     // consistent with the route being owner-gated and `ChatAuthor` never
@@ -1119,10 +1187,17 @@ async fn withdraw_own_message(engine: &Engine, target_attestation_id: &str) {
         .attestation_upsert_local(input)
         .await
         .expect("upsert withdraws");
-    engine
-        .attestation_promote(&id, cohort_scope::COMMUNITY)
-        .await
-        .expect("promote withdraws");
+    ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Community {
+            community_key_id: community_id.to_string(),
+        },
+        &CrossingBasis::ProducerAuthority,
+        None,
+    )
+    .await
+    .expect("promote withdraws");
 }
 
 /// **The test that matters.** The node's OWNER — the highest authority this
@@ -1132,9 +1207,17 @@ async fn withdraw_own_message(engine: &Engine, target_attestation_id: &str) {
 #[tokio::test]
 async fn a_non_member_cannot_read_the_communitys_messages() {
     let (engine, base, owner, _h) = fixture().await;
-    let community_id = strangers_community(&engine).await;
+    let (community_id, a_signer, a_key_id) = strangers_community(&engine).await;
     let secret = "the strangers' private message";
-    seed_message(&engine, STRANGER_A_KEY_ID, &community_id, secret).await;
+    seed_message_as(
+        &engine,
+        &a_key_id,
+        Some(&a_signer),
+        &a_key_id,
+        &community_id,
+        secret,
+    )
+    .await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1840,8 +1923,9 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
     // The contact's node: a real key the CONTACT's own live owner-binding
     // names — which puts it in the transcript's scan set, exactly the position
     // the attack requires.
-    const EVIL_NODE: &str = "contact-node-1";
-    seed_node_key(&engine, EVIL_NODE, 0xE0, 0xE1).await;
+    const EVIL_NODE_ALIAS: &str = "contact-node-1";
+    let (evil_signer, evil_node) = identity_for(EVIL_NODE_ALIAS, 0xE0, 0xE1);
+    seed_node_key(&engine, &evil_node, 0xE0, 0xE1).await;
     let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
         .iter()
         .map(|s| s.to_string())
@@ -1849,17 +1933,30 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
     ciris_server::auth::ownership::emit_steward_binding(
         &engine,
         &contact_signer(),
-        EVIL_NODE,
+        &evil_node,
         &scopes,
     )
     .await
     .expect("bind contact -> its node");
 
     // The forgery: attested by the contact's node, claiming OUR owner.
-    let forged =
-        seed_message_attested_by(&engine, EVIL_NODE, OWNER_USER_KEY_ID, &community_id).await;
+    let forged = seed_message_attested_by(
+        &engine,
+        &evil_node,
+        Some(&evil_signer),
+        OWNER_USER_KEY_ID,
+        &community_id,
+    )
+    .await;
     // The far side's legitimate shape: same node, claiming ITS bound member.
-    let legit = seed_message_attested_by(&engine, EVIL_NODE, CONTACT_KEY_ID, &community_id).await;
+    let legit = seed_message_attested_by(
+        &engine,
+        &evil_node,
+        Some(&evil_signer),
+        CONTACT_KEY_ID,
+        &community_id,
+    )
+    .await;
 
     let resp = client
         .get(format!("{base}/v1/chat/{community_id}/messages"))
@@ -1878,7 +1975,7 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
     };
     let f = find(&forged);
     assert_eq!(
-        f["author"], EVIL_NODE,
+        f["author"], evil_node,
         "a claim the attesting node's binding does not back must project the \
          WIRE TRUTH, not the claim: {f}"
     );
@@ -1906,6 +2003,7 @@ async fn a_forged_author_claim_projects_the_attester_never_the_owner() {
 async fn seed_message_attested_by(
     engine: &Engine,
     node: &str,
+    actor: Option<&LocalSigner>,
     author: &str,
     community_id: &str,
 ) -> String {
@@ -1938,11 +2036,25 @@ async fn seed_message_attested_by(
         .attestation_upsert_local(input)
         .await
         .expect("upsert foreign-shaped chat message");
-    engine
-        .attestation_promote(&id, cohort_scope::COMMUNITY)
-        .await
-        .expect("promote to community tier");
-    id
+    let outcome = ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Community {
+            community_key_id: community_id.to_string(),
+        },
+        &CrossingBasis::ProducerAuthority,
+        // v39.0.0: this node cannot place another node's claim. The far side's
+        // node signs its own rows in, hostile intent included — which is the
+        // point of the test: the forgery must be a REAL row from a real key,
+        // not one this node manufactured on its behalf.
+        actor,
+    )
+    .await
+    .expect("promote to community tier");
+    // The placed row's id — see `seed_message_as`.
+    ciris_server::attestation_crossing::placed_id(&outcome)
+        .expect("the seeded message must reach the community")
+        .to_owned()
 }
 
 /// **A pre-planted room under the derived pair id is a conflict, not a chat**

@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 
 use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
 use ciris_persist::federation::types::{
-    algorithm, attestation_type, cohort_scope, identity_type, Community, CommunityMember,
-    KeyRecord, SignedCommunity, SignedKeyRecord,
+    algorithm, attestation_type, identity_type, Community, CommunityMember, KeyRecord,
+    SignedCommunity, SignedKeyRecord,
 };
 use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
@@ -370,11 +370,26 @@ async fn seed_track_record_witnessed(
         // agreeing with the fixture's setup, not rejecting it. Tolerated by
         // NAME so a different refusal still fails loudly; a bare `.ok()` would
         // swallow the next real gate.
-        match engine
-            .attestation_promote(&id, cohort_scope::FEDERATION)
-            .await
+        match ciris_server::attestation_crossing::enter_mesh_at(
+            engine,
+            &id,
+            &Audience::Federation,
+            &CrossingBasis::ProducerAuthority,
+            None,
+        )
+        .await
         {
-            Ok(_) => promoted += 1,
+            // PLACED, not merely `Ok`. v39.0.0 returns a typed outcome, and
+            // `AwaitingActor` — an unsigned row whose attester is not this node
+            // and whose signer this fixture does not hold — is an `Ok` that
+            // placed NOTHING. Counting it would report three promotions into a
+            // tier no row reached, which is the exact reading this assertion
+            // exists to catch.
+            Ok(o) => {
+                if ciris_server::attestation_crossing::is_placed(&o) {
+                    promoted += 1;
+                }
+            }
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
@@ -1459,6 +1474,7 @@ async fn ceg_dx_active_roster_readers_reachable() {
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::safety::infohazard;
 use tower::ServiceExt as _;
 

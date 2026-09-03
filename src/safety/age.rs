@@ -55,7 +55,9 @@ use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAtte
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
+use crate::attestation_crossing;
 use crate::auth::verify::{self, VerifyError};
+use ciris_persist::federation::{Audience, CrossingBasis, MeshCrossingOutcome};
 
 /// The witness-RESERVED dimension prefix for a PROVIDER/GOVERNMENT-attested
 /// age-assurance `scores` row (persist `default_reserved_prefix_rules` —
@@ -332,10 +334,31 @@ async fn emit_age_assurance_inner(
     // promotion (the same recipe consent.rs uses). The DECLARED VALUE remains the
     // subject's — promotion is visibility, not authorship.
     if promote {
-        engine
-            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-            .await
-            .map_err(|e| format!("promote age_assurance: {e}"))?;
+        // v39.0.0 makes the comment above TRUE. It already said "the DECLARED
+        // VALUE remains the subject's — promotion is visibility, not
+        // authorship", while `attestation_promote` was in fact re-signing the
+        // row with this node's key and clearing the subject's scrub. The
+        // crossing now carries the subject's own bytes; the node may only
+        // co-scrub. The attester here is the SUBJECT, so an unsigned row waits
+        // for the subject's signer rather than being authored by the node.
+        let outcome = attestation_crossing::enter_mesh_at(
+            engine,
+            &attestation_id,
+            &Audience::Federation,
+            &CrossingBasis::ProducerAuthority,
+            None,
+        )
+        .await
+        .map_err(|e| format!("promote age_assurance: {e}"))?;
+        if let MeshCrossingOutcome::AwaitingActor { age_ms, .. } = outcome {
+            tracing::info!(
+                attestation_id = %attestation_id,
+                subject_key_id = %subject_key_id,
+                age_ms,
+                "age assurance row awaits its subject's signer before entering the mesh \
+                 (v39.0.0: this node does not sign a subject's declaration for them)"
+            );
+        }
     }
     Ok(attestation_id)
 }

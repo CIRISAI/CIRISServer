@@ -104,6 +104,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use ciris_persist::federation::admission;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::precedence;
 use ciris_persist::federation::types::{
@@ -111,9 +112,11 @@ use ciris_persist::federation::types::{
 };
 use ciris_persist::prelude::{CallerScope, Engine};
 
+use crate::attestation_crossing;
 use crate::auth::refusal::refuse;
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
+use ciris_persist::federation::{Audience, CrossingBasis};
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
@@ -933,18 +936,31 @@ struct ChatMessage {
 }
 
 /// Is this row a chat message in `community_id`?
+///
+/// TWO shapes, since persist v39.0.0. A message is written as a `scores` row at
+/// `self` and then WIDENED into the community by a `supersedes` its author
+/// signs, so the row the community can actually read is the widening. The `self`
+/// original never appears here at all — it is structurally undiscoverable
+/// (CC 5.2) — which is why matching only `scores` returned an empty list.
 fn is_message_for(row: &Attestation, community_id: &str) -> bool {
-    row.attestation_type == attestation_type::SCORES
+    (row.attestation_type == attestation_type::SCORES
+        || (row.attestation_type == attestation_type::SUPERSEDES && attestation_crossing::is_placement_widening(row)))
         && row.cohort_scope == cohort_scope::COMMUNITY
         && row
             .attestation_envelope
             .get(paths::DIMENSION)
             .and_then(|v| v.as_str())
             == Some(CHAT_MESSAGE_DIMENSION)
-        && row
-            .attestation_envelope
-            .get(FIELD_COMMUNITY_ID)
-            .and_then(|v| v.as_str())
+        // ASK PERSIST WHICH COHORT THE ROW NAMES, do not match a field name.
+        // The row this node writes names it `community_id`, but `widen_audience`
+        // re-emits the cohort target under the canonical member for the audience
+        // — `community_key_id` — so a reader hand-matching the first spelling
+        // finds nothing on the very row the community is supposed to read. Both
+        // spellings are `COHORT_TARGET_ENVELOPE_FIELDS`; this is persist's own
+        // accessor over them.
+        && admission::envelope_cohort_target(&row.attestation_envelope)
+            .ok()
+            .flatten()
             == Some(community_id)
 }
 
@@ -1244,17 +1260,44 @@ async fn send_message(
             )
         }
     };
-    if let Err(e) = st
-        .engine
-        .attestation_promote(&attestation_id, cohort_scope::COMMUNITY)
-        .await
+    // v39.0.0: the crossing is two verbs. This row is attested by THIS NODE
+    // (`owner.node_key_id` above), so the engine's own composed signer stands in
+    // as the actor and no external signer is needed — the local row crosses at
+    // `self`, then a `supersedes` the node signs widens it to the community.
+    // That leaves TWO rows by design; `load_message` below reads the placed one.
+    let outcome = match attestation_crossing::enter_mesh_at(
+        &st.engine,
+        &attestation_id,
+        &Audience::Community {
+            community_key_id: community_id.clone(),
+        },
+        &CrossingBasis::ProducerAuthority,
+        None,
+    )
+    .await
     {
+        Ok(o) => o,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "chat.emit_failed",
+                format!("enter_mesh_at(community): {e}"),
+            )
+        }
+    };
+    // THE MESSAGE'S ID IS THE WIDENED ROW'S. `enter_mesh` crossed the local row
+    // at `self`; the `supersedes` that `widen_audience` then wrote is the row the
+    // community can actually read, and it has its own id. Reporting or re-reading
+    // the original here would name the narrow row — which is exactly the empty
+    // `messages: []` the community sees when this is got wrong.
+    eprintln!("CHAT-DIAG crossing outcome: {outcome:?}");
+    let Some(attestation_id) = attestation_crossing::placed_id(&outcome).map(str::to_owned) else {
         return refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chat.emit_failed",
-            format!("attestation_promote(community): {e}"),
+            format!("chat message did not reach the community: {outcome:?}"),
         );
-    }
+    };
     let message = match load_message(&st, &community_id, &attestation_id, &owner).await {
         Ok(Some(m)) => m,
         Ok(None) | Err(_) => {
@@ -1363,6 +1406,12 @@ async fn collect_messages(
         if !precedence::is_structural_composer(&row.attestation_type) {
             continue;
         }
+        // A widening is a `supersedes` that places the row, not one that ends
+        // it. Folding it as a composer would report every message as superseded
+        // by its own arrival in the community.
+        if attestation_crossing::is_placement_widening(row) {
+            continue;
+        }
         if let Some(target) =
             precedence::references_attestation_id_from_envelope(&row.attestation_envelope)
         {
@@ -1423,7 +1472,18 @@ async fn collect_messages(
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),
             attested_key_id: row.attested_key_id.clone(),
-            attestation_type: row.attestation_type.clone(),
+            // THE CLAIM'S TYPE, NOT THE PLACEMENT'S. A chat message is a
+            // `scores` claim; since persist v39.0.0 the row the community reads
+            // is the `supersedes` that WIDENED it into the community, which is
+            // how it got here and not what it is. Reporting `supersedes` would
+            // tell every client that every message replaced something, and
+            // `is_message_for` above has already established this row is a
+            // `chat:message:v1` claim — which is emitted as `scores`, always.
+            attestation_type: if attestation_crossing::is_placement_widening(row) {
+                attestation_type::SCORES.to_owned()
+            } else {
+                row.attestation_type.clone()
+            },
             subject_key_ids: row.subject_key_ids.clone(),
             cohort_scope: row.cohort_scope.clone(),
             community_id: community_id.to_owned(),

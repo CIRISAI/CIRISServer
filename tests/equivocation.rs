@@ -22,10 +22,56 @@ use ciris_persist::federation::types::{algorithm, cohort_scope, identity_type};
 use ciris_persist::federation::{FederationDirectory as _, KeyRecord, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};
 
+use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::equivocation::{self, DetectorConfig, HARD_CASE_KIND};
 
 const NODE_KEY_ID: &str = "node-a";
 const PEER_KEY_ID: &str = "peer-scorer";
+
+/// The peer as an IDENTITY that can sign, not a bare alias.
+///
+/// persist v39.0.0 accepts an actor only when
+/// `signer.derived_key_id() == row.attesting_key_id`, so a claim attested under
+/// the bare alias can never be signed into the mesh: the crossing returns
+/// `AwaitingActor`, the row stays local-tier, and the detector — which reads the
+/// federation tier — finds no contradiction to report. The alias remains the
+/// signer's NAME; the derived id is what rows are attested and registered under.
+fn peer_identity() -> (LocalSigner, String) {
+    let signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(&[0xB1; 32]),
+        PEER_KEY_ID.to_string(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0xB2; 32], format!("{PEER_KEY_ID}-pqc"))
+                .expect("peer ml-dsa"),
+        ) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{PEER_KEY_ID}-pqc")),
+    );
+    let key_id = signer.derived_key_id();
+    (signer, key_id)
+}
+
+fn peer_key_id() -> String {
+    peer_identity().1
+}
+
+/// The peer's ML-DSA-65 public half, base64.
+fn peer_pqc_pubkey_b64() -> String {
+    use ciris_crypto::PqcSigner as _;
+    BASE64.encode(
+        ciris_crypto::MlDsa65Signer::from_seed(&[0xB2; 32])
+            .expect("peer ml-dsa seed")
+            .public_key()
+            .expect("peer ml-dsa pk"),
+    )
+}
+
+/// The signer for `attester`, when this fixture holds it — the same question
+/// persist's `custody_for` asks. `None` for the node's own key is correct: the
+/// engine's composed signer stands in when the node IS the attester.
+fn actor_for(attester: &str) -> Option<LocalSigner> {
+    let (signer, id) = peer_identity();
+    (attester == id).then_some(signer)
+}
 const SUBJECT_KEY_ID: &str = "agent-subject";
 
 /// A dimension whose CLAIM VALUE lives in the envelope payload — the shape the
@@ -132,10 +178,16 @@ async fn seed(
         expires_at,
     )
     .await;
-    engine
-        .attestation_promote(&id, cohort_scope::FEDERATION)
-        .await
-        .expect("promote claim to federation tier");
+    let actor = actor_for(attester);
+    ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        actor.as_ref(),
+    )
+    .await
+    .expect("promote claim to federation tier");
     id
 }
 
@@ -196,7 +248,14 @@ async fn fixture() -> (Arc<Engine>, String) {
             .verifying_key()
             .to_bytes(),
     );
-    register_key(&engine, PEER_KEY_ID, &peer_ed, None, identity_type::NODE).await;
+    register_key(
+        &engine,
+        &peer_key_id(),
+        &peer_ed,
+        Some(&peer_pqc_pubkey_b64()),
+        identity_type::NODE,
+    )
+    .await;
     let subj_ed = BASE64.encode(
         SigningKey::from_bytes(&[0xC1; 32])
             .verifying_key()
@@ -249,7 +308,7 @@ async fn a_peers_two_claims_at_one_instant_are_detected_and_recorded() {
     let (engine, node_key_id) = fixture().await;
     let a = seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,
@@ -258,7 +317,7 @@ async fn a_peers_two_claims_at_one_instant_are_detected_and_recorded() {
     .await;
     let b = seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.1,
@@ -283,7 +342,7 @@ async fn a_peers_two_claims_at_one_instant_are_detected_and_recorded() {
     let cases = hard_cases(&engine).await;
     assert_eq!(cases.len(), 1, "expected exactly one recorded hard_case");
     let ev = &cases[0];
-    assert_eq!(ev.target_key_id.as_deref(), Some(PEER_KEY_ID));
+    assert_eq!(ev.target_key_id.as_deref(), Some(peer_key_id().as_str()));
     assert_eq!(ev.subject_key_id.as_deref(), Some(SUBJECT_KEY_ID));
     let ids: Vec<&str> = ev.detail["attestation_ids"]
         .as_array()
@@ -312,7 +371,7 @@ async fn re_detection_records_no_second_row() {
     let (engine, node_key_id) = fixture().await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,
@@ -321,7 +380,7 @@ async fn re_detection_records_no_second_row() {
     .await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.1,
@@ -368,7 +427,7 @@ async fn a_later_revision_records_nothing() {
     let (engine, node_key_id) = fixture().await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,
@@ -377,7 +436,7 @@ async fn a_later_revision_records_nothing() {
     .await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T1,
         0.1,
@@ -423,7 +482,7 @@ async fn an_expired_pair_is_outside_the_live_read() {
     let (engine, node_key_id) = fixture().await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,
@@ -432,7 +491,7 @@ async fn an_expired_pair_is_outside_the_live_read() {
     .await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.1,
@@ -467,7 +526,7 @@ async fn an_unpublished_local_draft_is_not_evidence() {
     let (engine, node_key_id) = fixture().await;
     seed_local(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         &node_key_id,
         T0,
         0.9,
@@ -476,7 +535,7 @@ async fn an_unpublished_local_draft_is_not_evidence() {
     .await;
     seed_local(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         &node_key_id,
         T0,
         0.1,
@@ -574,7 +633,7 @@ async fn a_duplicated_statement_records_nothing() {
     let (engine, node_key_id) = fixture().await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,
@@ -583,7 +642,7 @@ async fn a_duplicated_statement_records_nothing() {
     .await;
     seed(
         &engine,
-        PEER_KEY_ID,
+        &peer_key_id(),
         SUBJECT_KEY_ID,
         T0,
         0.9,

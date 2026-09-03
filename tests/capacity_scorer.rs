@@ -33,6 +33,7 @@ use ciris_persist::scrub::NullScrubber;
 use ciris_persist::verify::canonical::Canonicalizer;
 use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
 
+use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::scorer::{self, ScorerConfig};
 
 #[path = "support/fixture_pqc.rs"]
@@ -59,7 +60,12 @@ mod revocation;
 /// Vocabulary is single-sourced from persist (`paths::DIMENSION`,
 /// `STATE_GRANTED_PREFIX`, `ANALYZE_CONSENT_SCOPE`); a hand-mirrored literal
 /// compiles and skews the wire.
-async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
+async fn grant_analyze_consent(
+    engine: &Engine,
+    subject: &str,
+    subject_signer: &LocalSigner,
+    attester: &str,
+) {
     use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
@@ -94,14 +100,56 @@ async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
     // `resolve_scoped_consent` reads via `list_attestations_for`, which is
     // federation-tier only — a local row would be invisible and the gate would
     // still refuse.
-    engine
-        .attestation_promote(&id, cohort_scope::FEDERATION)
-        .await
-        .expect("promote analyze consent to federation tier");
+    ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        // v39.0.0: the grant is the SUBJECT's claim and the subject signs it in.
+        // `None` here returns `AwaitingActor`, the row never reaches the
+        // federation tier, and the scorer reads no consent and authors nothing.
+        Some(subject_signer),
+    )
+    .await
+    .expect("promote analyze consent to federation tier");
 }
 
 const NODE_KEY_ID: &str = "node-a";
 const AGENT_KEY_ID: &str = "agent-alpha";
+
+/// The agent as an IDENTITY that can sign, not a bare alias.
+///
+/// persist v39.0.0 accepts an actor only when
+/// `signer.derived_key_id() == row.attesting_key_id` (CIRISPersist#247's floor),
+/// so a row attested under the bare `AGENT_KEY_ID` alias can never be signed
+/// into the mesh by anyone: the crossing waits on an actor whose id will never
+/// match. The fixture therefore attests, registers and asserts under the DERIVED
+/// id, and holds the signer that goes with it.
+fn agent_identity() -> (LocalSigner, String) {
+    let signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(&[0x11; 32]),
+        AGENT_KEY_ID.to_string(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x12; 32], format!("{AGENT_KEY_ID}-pqc"))
+                .expect("agent ml-dsa"),
+        ) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{AGENT_KEY_ID}-pqc")),
+    );
+    let key_id = signer.derived_key_id();
+    (signer, key_id)
+}
+
+/// The agent's ML-DSA-65 public half, base64 — registered beside its Ed25519 one
+/// so persist v38.8.0 (#789) can resolve the hybrid signature it signs with.
+fn agent_pqc_pubkey_b64() -> String {
+    use ciris_crypto::PqcSigner as _;
+    BASE64.encode(
+        ciris_crypto::MlDsa65Signer::from_seed(&[0x12; 32])
+            .expect("agent ml-dsa seed")
+            .public_key()
+            .expect("agent ml-dsa pk"),
+    )
+}
 /// The agent's AV-9 identity hash on its traces — the subject the scorer
 /// attests about (and the key_id we register so the FK resolves).
 const AGENT_ID_HASH: &str = "agent-alpha";
@@ -138,9 +186,6 @@ async fn node_a_with_keys() -> (Arc<Engine>, String, String) {
 /// Register a peer/agent verifying key into the directory so (a) trace verify
 /// resolves it and (b) `put_attestation`'s attested-key FK resolves it. Mirrors
 /// `replication.rs::cross_register`.
-async fn register_key(engine: &Engine, key_id: &str, ed_pubkey_b64: &str, id_type: &str) {
-    register_key_hybrid(engine, key_id, ed_pubkey_b64, None, id_type).await;
-}
 
 /// Register a key, optionally with its ML-DSA-65 pubkey. The federation-tier
 /// ingest gate (persist v9.0.0) resolves `scrub_key_id`'s pubkeys here to verify
@@ -191,6 +236,7 @@ async fn register_key_hybrid(
 /// component payloads. The `idx` perturbs the feature values so the per-agent
 /// feature matrix has real covariance structure (not a rank-0 constant block).
 fn build_trace_batch(
+    agent_key_id: &str,
     agent_sk: &SigningKey,
     mldsa: &ciris_crypto::MlDsa65Signer,
     idx: usize,
@@ -273,7 +319,7 @@ fn build_trace_batch(
         cohort_scope: "federation".into(),
         cohort_target_id: None,
         signature: String::new(),
-        signature_key_id: AGENT_KEY_ID.into(),
+        signature_key_id: agent_key_id.into(),
         signature_ml_dsa_65: None,
         pubkey_ml_dsa_65: None,
         pqc_key_id: None,
@@ -340,13 +386,21 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         identity_type::NODE,
     )
     .await;
-    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    let (agent_signer, agent_key_id) = agent_identity();
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pubkey_b64()),
+        identity_type::AGENT,
+    )
+    .await;
 
     // ── Ingest a batch of synthetic-but-realistic traces for the agent ───────
     const N_TRACES: usize = 30;
     let mut inserted = 0usize;
     for i in 0..N_TRACES {
-        let bytes = build_trace_batch(&agent_sk, &mldsa, i);
+        let bytes = build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i);
         let summary = node
             .receive_and_persist(&bytes, &NullScrubber)
             .await
@@ -374,7 +428,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     // `NODE_KEY_ID` alias. Consenting to the alias would leave the real attester
     // unconsented and the gate would still refuse (the 0.5.138 derived-vs-alias
     // identity-fork class, in miniature).
-    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+    grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
 
     let emitted = scorer::run_pass(&node, &node_key_id, &cfg)
         .await
@@ -385,7 +439,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     //    attested=agent, federation tier, plausible N_eff-derived score. ───────
     let attestations = node
         .federation_directory()
-        .list_attestations_for(AGENT_KEY_ID)
+        .list_attestations_for(&agent_key_id)
         .await
         .expect("list attestations for the agent");
     assert_eq!(
@@ -400,7 +454,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         "attesting must be Node A (its derived federation key_id)"
     );
     assert_eq!(
-        att.attested_key_id, AGENT_KEY_ID,
+        att.attested_key_id, agent_key_id,
         "attested must be the agent"
     );
     assert_ne!(
@@ -490,14 +544,25 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
         identity_type::NODE,
     )
     .await;
-    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    let (agent_signer, agent_key_id) = agent_identity();
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pubkey_b64()),
+        identity_type::AGENT,
+    )
+    .await;
 
     for i in 0..30usize {
-        node.receive_and_persist(&build_trace_batch(&agent_sk, &mldsa, i), &NullScrubber)
-            .await
-            .expect("ingest synthetic trace");
+        node.receive_and_persist(
+            &build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i),
+            &NullScrubber,
+        )
+        .await
+        .expect("ingest synthetic trace");
     }
-    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+    grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
 
     let cfg = ScorerConfig {
         cadence: std::time::Duration::from_secs(3600),
@@ -521,7 +586,7 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
     // what a bound is compared against.
     let standing = node
         .federation_directory()
-        .list_attestations_for(AGENT_KEY_ID)
+        .list_attestations_for(&agent_key_id)
         .await
         .expect("read the standing capacity row")
         .into_iter()
@@ -695,13 +760,24 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
         identity_type::NODE,
     )
     .await;
-    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    let (agent_signer, agent_key_id) = agent_identity();
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pubkey_b64()),
+        identity_type::AGENT,
+    )
+    .await;
     for i in 0..30usize {
-        node.receive_and_persist(&build_trace_batch(&agent_sk, &mldsa, i), &NullScrubber)
-            .await
-            .expect("ingest synthetic trace");
+        node.receive_and_persist(
+            &build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i),
+            &NullScrubber,
+        )
+        .await
+        .expect("ingest synthetic trace");
     }
-    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+    grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
 
     let cfg = ScorerConfig {
         cadence: std::time::Duration::from_secs(3600),
@@ -822,9 +898,10 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
 /// both return `Ok(0)` for the pass and both look plausible in a log; the corpus
 /// is where they differ, and it is the thing the swallow actually damaged.
 async fn capacity_rows(engine: &Engine) -> usize {
+    let (_, agent_key_id) = agent_identity();
     engine
         .federation_directory()
-        .list_attestations_for(AGENT_KEY_ID)
+        .list_attestations_for(&agent_key_id)
         .await
         .expect("read the agent's attestations")
         .into_iter()
@@ -908,13 +985,24 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
         identity_type::NODE,
     )
     .await;
-    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    let (agent_signer, agent_key_id) = agent_identity();
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pubkey_b64()),
+        identity_type::AGENT,
+    )
+    .await;
     for i in 0..30usize {
-        node.receive_and_persist(&build_trace_batch(&agent_sk, &mldsa, i), &NullScrubber)
-            .await
-            .expect("ingest synthetic trace");
+        node.receive_and_persist(
+            &build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i),
+            &NullScrubber,
+        )
+        .await
+        .expect("ingest synthetic trace");
     }
-    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+    grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
 
     let cfg = ScorerConfig {
         cadence: std::time::Duration::from_secs(3600),

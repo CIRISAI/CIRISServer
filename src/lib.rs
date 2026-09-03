@@ -75,6 +75,10 @@ pub mod admin_ops;
 /// the defect class this module retires; `tests/one_author_per_row.rs` enforces
 /// it.
 pub mod attest;
+
+/// The v39 tier crossing (`enter_mesh` + `widen_audience`) composed in one
+/// place, replacing `attestation_promote`.
+pub mod attestation_crossing;
 /// The fabric auth subsystem — CIRISServer as the single auth authority
 /// (CIRISServer#9): one hybrid request contract, the CEG role-set, self-at-login
 /// (so consent/erasure are user-signed in 3.x, not agent-signed in 2.x), the

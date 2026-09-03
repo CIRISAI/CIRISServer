@@ -3066,6 +3066,8 @@ async fn cosign_genesis_impl(st: ProvisionState, req: CosignGenesisRequest) -> R
                         scrub_key_id: key_id.to_string(),
                         scrub_signature_classical: ed,
                         scrub_signature_pqc: Some(pqc),
+                        // Accord-quorum scrub, not a tier crossing (v39.0.0).
+                        cosigned_at: None,
                     })
             }
             Err(e) => {

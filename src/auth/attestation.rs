@@ -27,6 +27,8 @@ use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
 use super::verify::{self, VerifyError};
+use crate::attestation_crossing;
+use ciris_persist::federation::{Audience, CrossingBasis};
 
 #[derive(Clone)]
 struct AttestState {
@@ -136,12 +138,22 @@ async fn attestation(State(st): State<AttestState>, headers: HeaderMap, body: By
     };
 
     let promoted = if req.promote {
-        match st
-            .engine
-            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-            .await
+        // v39.0.0: `attestation_promote` is gone. The row is unsigned and its
+        // attester is whoever the REQUEST named, which on this endpoint is not
+        // generally this node — so with no actor signer in hand the crossing
+        // returns `AwaitingActor` and the row waits. That is the correct answer
+        // and the old one was not: the node used to re-sign the row with its own
+        // key, making the fabric the author of a claim it was only carrying.
+        match attestation_crossing::enter_mesh_at(
+            &st.engine,
+            &attestation_id,
+            &Audience::Federation,
+            &CrossingBasis::ProducerAuthority,
+            None,
+        )
+        .await
         {
-            Ok(p) => p,
+            Ok(o) => attestation_crossing::is_placed(&o),
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("promote: {e}")),
         }
     } else {

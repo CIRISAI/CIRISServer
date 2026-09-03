@@ -60,38 +60,42 @@ pub async fn reconcile_once(
     node_key_id: &str,
     runtime: &Arc<ReplicationRuntime>,
 ) -> anyhow::Result<usize> {
-    // ── The #530 REPAIR motion (persist v21.12.0) ───────────────────────────
-    // `promote_consented_backlog` is auto-fired at its own chokepoints, but it
-    // pages `WHERE tier = 'local'` — so a row that already reached
-    // `(cohort_scope = self|family, tier = federation)` is excluded from it BY
-    // CONSTRUCTION and no cadence of re-running ever revisits it. Such a row is
-    // past the tier gate, covered by a live grant, and still never offered.
-    // persist ships the second motion (`repair_stranded_scope_backlog`) but
-    // deliberately does NOT call it from the promote sweep, and nothing else
-    // called it either — leaving the (a)+(c) pair with only (a) wired.
+    // ── The #530 REPAIR motion (persist v39.0.0) ───────────────────────────
+    // Was `repair_stranded_scope_backlog`, which persist shipped but never
+    // called, leaving the (a)+(c) pair with only (a) wired — this loop was its
+    // only caller. v39.0.0 DELETED it and re-cut `promote_consented_backlog`
+    // over the two crossing verbs, so the motion is now that sweep's second
+    // pass: rows already in the mesh at an undiscoverable scope with no widening
+    // yet (`list_widening_candidates`) — the sealed-before-grant case #530
+    // found — are widened by a `supersedes` the ACTOR signs.
     //
-    // This loop is the right home: it is already the "converge the live runtime
-    // to the CEG" tick, and the repair is safe to run unconditionally —
-    // strictly WIDENING (a grant whose audience is itself suppressed means the
-    // row's invisibility MATCHES consent, so it is skipped, never narrowed),
-    // scoped to rows covered by a live grant, and a PURE placement correction
-    // (already federation-tier ⇒ no tier flip, no re-signing; `cohort_scope`
-    // lives outside the signed envelope so the scrub signature stays valid).
-    // Self-limiting like its sibling: a repaired row leaves the stranded set.
+    // That is a real change in what the repair DOES, and it is the point of
+    // v39. The old motion re-scoped a row in place, which was safe only because
+    // `cohort_scope` sat outside the signed envelope; the new one leaves the
+    // actor's row untouched and writes a second row at the wider audience. A
+    // row whose actor this node does not hold now WAITS (`awaiting_actor`)
+    // instead of being silently re-authored by the fabric.
     //
-    // Ordering matters — repair BEFORE computing the desired peer set, so a row
-    // corrected on this tick is offerable on this tick rather than the next.
-    match engine.repair_stranded_scope_backlog().await {
+    // Still the right home, and for the original reason: this is already the
+    // "converge the live runtime to the CEG" tick, and running it here — BEFORE
+    // the desired peer set is computed — makes a row corrected on this tick
+    // offerable on this tick rather than the next. The sweep is idempotent and
+    // self-limiting; persist also auto-fires it at its own chokepoints, so this
+    // call is the cadence, not the only trigger.
+    match engine.promote_consented_backlog().await {
         Ok(report) => {
-            if report.rescoped > 0 || report.skipped > 0 {
+            if report.promoted > 0 || report.widened > 0 || report.awaiting_actor > 0 {
                 tracing::info!(
-                    rescoped = report.rescoped,
+                    promoted = report.promoted,
+                    widened = report.widened,
+                    awaiting_actor = report.awaiting_actor,
                     skipped = report.skipped,
-                    "CIRISPersist#530 repair sweep: re-scoped {} stranded \
-                     (self|family, federation) row(s) to their covering grant's audience — \
-                     these were past the tier gate but never offered (the offer filter keys \
-                     on cohort_scope)",
-                    report.rescoped,
+                    "CIRISPersist#530 consent sweep: {} row(s) entered the mesh, {} widened to \
+                     their covering grant's audience; {} await their actor's signer (a row this \
+                     node did not author is not re-authored by it)",
+                    report.promoted,
+                    report.widened,
+                    report.awaiting_actor,
                 );
             }
         }
@@ -99,7 +103,7 @@ pub async fn reconcile_once(
         // below is the loop's primary duty and must still run.
         Err(e) => tracing::warn!(
             error = %e,
-            "CIRISPersist#530 repair sweep failed this tick — stranded rows (if any) stay \
+            "CIRISPersist#530 consent sweep failed this tick — stranded rows (if any) stay \
              unofferable until the next tick; peer convergence continues"
         ),
     }
