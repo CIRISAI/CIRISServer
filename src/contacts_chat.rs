@@ -107,7 +107,7 @@ use ciris_persist::federation::admission;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::precedence;
 use ciris_persist::federation::types::{
-    attestation_type, cohort_scope, Attestation, Community, CommunityMember, LocalAttestationInput,
+    attestation_type, cohort_scope, Attestation, LocalAttestationInput,
 };
 use ciris_persist::prelude::{CallerScope, Engine};
 
@@ -141,10 +141,6 @@ pub use ciris_edge::chat::{
     FIELD_COMMUNITY_ID, FIELD_CONTENT_TYPE, FIELD_ON_BEHALF_OF, PAIR_COMMUNITY_PREFIX,
 };
 
-/// `unanimous` — the honest `consensus_protocol` for a two-party community
-/// (persist's `check_consensus_protocol_form` accepts it as a canonical form).
-const PAIR_CONSENSUS_PROTOCOL: &str = "unanimous";
-
 /// What an omitted `content_type` means.
 const DEFAULT_CONTENT_TYPE: &str = "text/plain";
 
@@ -159,6 +155,14 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 struct ChatState {
     engine: Arc<Engine>,
+    /// THIS NODE's edge signer — the room record's authority.
+    ///
+    /// Edge's chat surface takes `ciris_edge::identity::LocalSigner`, which is
+    /// edge's own type and not persist's; the node's is built once at boot from
+    /// the same sealed federation key the Engine holds, plus its ML-DSA-65 half,
+    /// because from edge v20.0.0 there is no classical-only signing path
+    /// anywhere in the chat plane.
+    node_signer: Arc<ciris_edge::identity::LocalSigner>,
 }
 
 /// The owner-authority context every route here runs under: WHICH node, and
@@ -277,14 +281,6 @@ fn require_verb(
 // The id itself is `chat::pair_community_key_id`, re-exported above. The note
 // that used to live here explained a derivation this file no longer owns; edge
 // states it, and both ends of a room now read the same sentence.
-
-/// The community's display name, derived from the same sorted pair so both ends
-/// author identical roster content.
-fn pair_community_name(a: &str, b: &str) -> String {
-    let mut pair = [a, b];
-    pair.sort_unstable();
-    format!("{} <-> {}", pair[0], pair[1])
-}
 
 // ─── GET /v1/contacts ───────────────────────────────────────────────────────
 
@@ -778,27 +774,50 @@ async fn start_chat(
     };
 
     let member_key_ids = expected_members;
-    let community = Community {
-        community_key_id: community_id.clone(),
-        community_name: pair_community_name(&owner.key_id, &key_id),
-        members: member_key_ids
-            .iter()
-            .map(|k| CommunityMember {
-                key_id: k.clone(),
-                joined_at: founded_at,
-                role: None,
-            })
-            .collect(),
+    // ── THE ROOM RECORD IS EDGE'S (CIRISServer#524) ─────────────────────────
+    //
+    // This built the `Community` by hand, and the roster it produced differed
+    // from edge's in the one way that matters: both members carried
+    // `role: None`. Edge names both people `founder` outright, and says why —
+    // CC 4.5.4 / §11.11, no unmoderated federated space: "persist refuses to
+    // federate any content keyed on a community that has no live named
+    // moderator, and a named moderator exists iff the community has a
+    // steward-bound AUTHORITY root". A pair room is two equals, so the record
+    // makes each an authority root BY CONSTRUCTION rather than by the accident
+    // of a protocol setting.
+    //
+    // `community_name` was a second copy too — a sorted `"{a} <-> {b}"`, the
+    // same string edge formats — and it sits INSIDE `Community::signing_envelope`,
+    // so a drift there would have been two different signed records under one id.
+    //
+    // Edge's own note: "Everything that opens a pair room — the mesh harness,
+    // the tests, a consumer — builds it here, so the roster shape cannot drift
+    // between them." We were the consumer that drifted.
+    let signed = match ciris_edge::chat::signed_pair_community(
+        &owner.key_id,
+        &key_id,
         founded_at,
-        consensus_protocol: PAIR_CONSENSUS_PROTOCOL.to_owned(),
-        policy_blob: None,
-        // Server-computed by `put_community`.
-        persist_row_hash: String::new(),
+        &st.node_signer,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "chat.store_unavailable",
+                format!("signed_pair_community: {e}"),
+            )
+        }
     };
-    // Authored + hybrid-signed by THIS node through persist's own builder —
-    // never a hand-rolled `SignedCommunity`, because the JCS field-set gate
-    // verifies the signature over `Community::signing_envelope()` exactly.
-    if let Err(e) = st.engine.put_community_self_signed(community).await {
+    // Signed by edge over `Community::signing_envelope()` — the JCS field-set
+    // gate verifies exactly those bytes, which is why the record is never
+    // hand-rolled on either side of the room.
+    // The name the record actually carries — read off the signed room rather
+    // than re-derived, so the response cannot describe a room differently from
+    // the bytes that were stored.
+    let community_name = signed.community.community_name.clone();
+    if let Err(e) = st.engine.federation_directory().put_community(signed).await {
         // A LOST RACE IS A SUCCESS SOMEONE ELSE ALREADY HAD. Two concurrent
         // POSTs (double-tap, client retry, two devices) can both observe
         // `lookup_community` returning None above; one insert wins and the
@@ -839,14 +858,14 @@ async fn start_chat(
         return refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chat.community_create_failed",
-            format!("put_community_self_signed: {e}"),
+            format!("put_community: {e}"),
         );
     }
     (
         StatusCode::OK,
         Json(StartChatResponse {
             community_id: community_id.clone(),
-            community_name: pair_community_name(&owner.key_id, &key_id),
+            community_name,
             member_key_ids,
             cohort_scope: cohort_scope::COMMUNITY,
             freshly_created: true,
@@ -1539,8 +1558,16 @@ async fn list_messages(
 /// key_id and the responsible party's are BOTH resolved from the engine at
 /// request time (CIRISServer#372 Level 2 — with no parameter there is no second
 /// value to mismatch).
-pub fn router(engine: Arc<Engine>) -> Router {
-    let state = ChatState { engine };
+///
+/// `node_signer` is the one thing that cannot be resolved from the engine: edge
+/// signs with its OWN `LocalSigner` type, and the Engine holds persist's. It is
+/// the same sealed federation key either way — built once at boot, from the same
+/// classical and ML-DSA-65 halves the edge transport signer wraps.
+pub fn router(engine: Arc<Engine>, node_signer: Arc<ciris_edge::identity::LocalSigner>) -> Router {
+    let state = ChatState {
+        engine,
+        node_signer,
+    };
     Router::new()
         .route(
             "/v1/contacts",
@@ -1585,10 +1612,8 @@ mod tests {
         assert_eq!(id.len(), PAIR_COMMUNITY_PREFIX.len() + 64);
     }
 
-    /// The community name is derived from the same sorted pair, so both ends
-    /// author identical roster content.
-    #[test]
-    fn pair_name_is_order_free() {
-        assert_eq!(pair_community_name("b", "a"), pair_community_name("a", "b"));
-    }
+    // The room's NAME is edge's now — `chat::pair_community` formats it from
+    // the same sorted pair, and it rides inside `Community::signing_envelope`,
+    // so the property this used to assert is pinned where the string is built
+    // rather than beside a copy of it.
 }

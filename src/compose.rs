@@ -183,6 +183,33 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // point on (and could already name the process before it, via the lazily
     // minted instance_id).
     crate::node_identity::stamp(&cfg.key_id, &cfg.home);
+
+    // ── The node's EDGE signer, for the chat plane (CIRISServer#524) ──────────
+    //
+    // Edge's chat surface signs with `ciris_edge::identity::LocalSigner`, which
+    // is edge's own type — the Engine holds persist's, and neither converts to
+    // the other. This wraps the SAME two halves the edge transport signer wraps
+    // further down (`EdgeSigner::new(cfg.key_id, signer, Some(pqc))`), built
+    // here because the HTTP router is composed long before the replication
+    // runtime is, and the chat routes need it at mount time.
+    //
+    // AFTER `cfg.key_id` becomes the ENGINE's derived id, and that placement is
+    // the whole point: `signed_pair_community` stamps `authority_key_id` from
+    // the signer's `key_id` verbatim, and persist verifies a federation-tier row
+    // against the attester's REGISTERED key — which is the derived id, never the
+    // bare alias (CIRISPersist#247's floor). Built before this line it carried
+    // `ciris-server` and every room was refused: "attesting_key_id ciris-server
+    // is not registered". Exactly the phantom-identity fork the comment above
+    // describes, one surface further on.
+    //
+    // BOTH halves, always: from edge v20.0.0 `sign_bound_hybrid` refuses a
+    // signer without its ML-DSA-65 half, so a classical-only signer here would
+    // not degrade — it would fail every room record and every message.
+    let chat_node_signer = Arc::new(EdgeSigner::new(
+        cfg.key_id.clone(),
+        Arc::clone(&signer),
+        Some(Arc::clone(&pqc)),
+    ));
     tracing::info!(
         key_id = %cfg.key_id,
         keystore_alias = %cfg.keystore_alias,
@@ -1387,7 +1414,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // grant, a chat is a two-member `Community` under a derived
                     // id, and a message is a `chat:message:v1` attestation at
                     // `cohort_scope: community`. See `crate::contacts_chat`.
-                    .merge(crate::contacts_chat::router(Arc::clone(&engine)))
+                    .merge(crate::contacts_chat::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&chat_node_signer),
+                    ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge

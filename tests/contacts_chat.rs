@@ -327,9 +327,50 @@ async fn consent_subjects(engine: &Engine, node: &str) -> Vec<String> {
         .expect("list_consent_peers")
 }
 
+/// The node's EDGE signer — the room record's authority.
+///
+/// Edge signs the pair room with its own `LocalSigner` type over the SAME
+/// federation key the Engine holds, so this wraps the identical seeds the
+/// fixture's engine signer uses (`0xA1` classical, `0xA2` ML-DSA-65) under the
+/// identical `key_id`. Different material here would sign rooms the directory
+/// cannot verify — the failure would look like a storage error rather than a
+/// mismatched identity.
+///
+/// `SealedEd25519Signer` is disk-backed with no in-memory constructor, so each
+/// call takes its own directory under the system temp dir; the path is unique
+/// per process and test so two tests never adopt into the same keystore.
+async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSigner> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NTH: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ciris-chat-node-{}-{}",
+        std::process::id(),
+        NTH.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("keystore dir");
+    let classical =
+        ciris_keyring::SealedEd25519Signer::adopt(NODE_KEY_ID.to_string(), dir, &[0xA1; 32])
+            .expect("adopt the node's sealed ed25519 key");
+    let pqc = MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_KEY_ID}-pqc"))
+        .expect("node ML-DSA-65 seed");
+    // THE DERIVED id, never the alias: `signed_pair_community` stamps
+    // `authority_key_id` from this verbatim, and persist verifies the room
+    // against the attester's REGISTERED key (CIRISPersist#247).
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .expect("the engine's derived federation key_id");
+    Arc::new(ciris_edge::identity::LocalSigner::new(
+        key_id,
+        Arc::new(classical),
+        Some(Arc::new(pqc)),
+    ))
+}
+
 /// Serve the contacts+chat router on an ephemeral port.
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let app = contacts_chat::router(engine);
+    let signer = node_edge_signer(&engine).await;
+    let app = contacts_chat::router(engine, signer);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

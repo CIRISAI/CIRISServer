@@ -394,8 +394,34 @@ async fn mint_session(engine: &Engine, wa_id: &str, role: WaRole) -> String {
     ciris_server::auth::session::test_support_issue_session_token(wa_id)
 }
 
+/// The node's EDGE signer — the room record's authority (CIRISServer#524).
+///
+/// Same two halves the bench's engine signer holds, under the ENGINE's derived
+/// key id: `signed_pair_community` stamps `authority_key_id` from this verbatim
+/// and persist verifies the room against the attester's registered key, which is
+/// the derived id and never the bare alias (CIRISPersist#247).
+async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSigner> {
+    let dir = std::env::temp_dir().join(format!("ciris-chat-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("keystore dir");
+    let classical =
+        ciris_keyring::SealedEd25519Signer::adopt(NODE_KEY_ID.to_string(), dir, &[0xA1; 32])
+            .expect("adopt the node's sealed ed25519 key");
+    let pqc = MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_KEY_ID}-pqc"))
+        .expect("node ML-DSA-65 seed");
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .expect("the engine's derived federation key_id");
+    Arc::new(ciris_edge::identity::LocalSigner::new(
+        key_id,
+        Arc::new(classical),
+        Some(Arc::new(pqc)),
+    ))
+}
+
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let app = contacts_chat::router(engine);
+    let signer = node_edge_signer(&engine).await;
+    let app = contacts_chat::router(engine, signer);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
