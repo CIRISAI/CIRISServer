@@ -1417,6 +1417,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::contacts_chat::router(
                         Arc::clone(&engine),
                         Arc::clone(&chat_node_signer),
+                        crate::user_seed_dir(&cfg),
                     ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
@@ -2656,12 +2657,48 @@ pub(crate) enum FedIdUse {
 /// `claim-remote` can resolve it **at request time** (the fed-ID is minted DURING the
 /// first-run wizard, after boot). Returns `None` (not an error) when no user seed
 /// exists yet; `Err` when the use is unauthorized (bootstrap on an owned node).
+/// [`resolve_user_signer`], keeping edge's signer as well.
+///
+/// The owner-signer capsule needs both types for one identity; built here from a
+/// single open of the backend so they cannot disagree about the derived key_id.
+pub(crate) async fn resolve_user_signers(
+    engine: &Engine,
+    auth: FedIdUse,
+    user_key_id: &str,
+    seed_dir: std::path::PathBuf,
+) -> Result<
+    Option<(
+        Arc<ciris_persist::prelude::LocalSigner>,
+        Arc<ciris_edge::identity::LocalSigner>,
+    )>,
+> {
+    resolve_user_signer_inner(engine, auth, user_key_id, seed_dir).await
+}
+
 pub(crate) async fn resolve_user_signer(
     engine: &Engine,
     auth: FedIdUse,
     user_key_id: &str,
     seed_dir: std::path::PathBuf,
 ) -> Result<Option<Arc<ciris_persist::prelude::LocalSigner>>> {
+    Ok(
+        resolve_user_signer_inner(engine, auth, user_key_id, seed_dir)
+            .await?
+            .map(|(persist, _edge)| persist),
+    )
+}
+
+async fn resolve_user_signer_inner(
+    engine: &Engine,
+    auth: FedIdUse,
+    user_key_id: &str,
+    seed_dir: std::path::PathBuf,
+) -> Result<
+    Option<(
+        Arc<ciris_persist::prelude::LocalSigner>,
+        Arc<ciris_edge::identity::LocalSigner>,
+    )>,
+> {
     // CHOKE POINT — the fed-ID is bound to the login: release it only to a verified
     // owner session, or during the first-run bootstrap window (which CREATES the
     // owner). The bootstrap arm is re-checked here, so it can never wield the fed-ID
@@ -2695,14 +2732,14 @@ pub(crate) async fn resolve_user_signer(
 
     // Re-open the user identity under user_key_id with its recorded backend (the
     // Ed25519 half per backend; the ML-DSA-65 half is the sealed PQC signer).
-    let signer =
-        crate::identity::hardware_user_local_signer(backend, user_key_id, seed_dir).await?;
+    let (signer, edge) =
+        crate::identity::hardware_user_signers(backend, user_key_id, seed_dir).await?;
     tracing::info!(
         user_key_id = %user_key_id,
         "responsible-user signer resolved for claim-remote (minted user identity at \
          the conventional path — Server 0.5, no env)"
     );
-    Ok(Some(Arc::new(signer)))
+    Ok(Some((Arc::new(signer), Arc::new(edge))))
 }
 
 /// The node's **post-quantum** federation signing half — ML-DSA-65 — so the

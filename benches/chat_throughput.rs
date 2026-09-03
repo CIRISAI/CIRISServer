@@ -421,7 +421,10 @@ async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSig
 
 async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
     let signer = node_edge_signer(&engine).await;
-    let app = contacts_chat::router(engine, signer);
+    let seed_dir =
+        std::env::temp_dir().join(format!("ciris-chat-bench-seeds-{}", std::process::id()));
+    std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
+    let app = contacts_chat::router(engine, signer, seed_dir);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

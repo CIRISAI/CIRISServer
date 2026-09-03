@@ -106,16 +106,13 @@ use serde::{Deserialize, Serialize};
 use ciris_persist::federation::admission;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::precedence;
-use ciris_persist::federation::types::{
-    attestation_type, cohort_scope, Attestation, LocalAttestationInput,
-};
+use ciris_persist::federation::types::{attestation_type, cohort_scope, Attestation};
 use ciris_persist::prelude::{CallerScope, Engine};
 
 use crate::attestation_crossing;
 use crate::auth::refusal::refuse;
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
-use ciris_persist::federation::{Audience, CrossingBasis};
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
@@ -155,6 +152,13 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 struct ChatState {
     engine: Arc<Engine>,
+    /// The node's owner-seed location — what [`crate::owner_signer_capsule`]
+    /// needs to re-open the responsible party's fed-ID under a live owner
+    /// session. A chat row is signed by the PERSON, so the route has to be able
+    /// to reach their signer; the capsule is the gate that decides whether it may.
+    user_seed_dir: std::path::PathBuf,
+    /// Live MLS state per room — see [`RoomState`].
+    rooms: Arc<tokio::sync::Mutex<std::collections::HashMap<String, RoomState>>>,
     /// THIS NODE's edge signer — the room record's authority.
     ///
     /// Edge's chat surface takes `ciris_edge::identity::LocalSigner`, which is
@@ -163,6 +167,187 @@ struct ChatState {
     /// because from edge v20.0.0 there is no classical-only signing path
     /// anywhere in the chat plane.
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
+}
+
+/// Where a room's MLS handshake has got to on THIS node.
+///
+/// The conversation key is derived from a live `CohortGroup` (`RoomKey::of`), and
+/// the group is built by a two-row handshake OVER the room: the joiner publishes
+/// a `chat:key_package:v1`, the creator answers with a `chat:welcome:v1`. Which
+/// side we are is decided from the two fed-IDs alone — `PairRole::of` is
+/// order-free, so neither end has to be told and there is nothing to coordinate.
+///
+/// It is a state machine and not a single `CohortGroup` because the joiner mints
+/// its key material BEFORE the creator's Welcome exists, and the very same
+/// material is what `CohortGroup::join` consumes when the Welcome lands. Dropping
+/// it between the two requests would mint a second KeyPackage the creator never
+/// admitted, and the join would fail against a group that had added the first.
+enum RoomState {
+    /// Joiner: our KeyPackage is published; this is the material the Welcome
+    /// will be joined with.
+    AwaitingWelcome(ciris_edge::mls::cohort_group::CohortKeyMaterial),
+    /// Both roles, once the handshake completes.
+    Keyed(Arc<ciris_edge::mls::CohortGroup>),
+}
+
+/// Put a row and place it in the room — the ONE way this module writes chat.
+///
+/// Authored `self` and signed at write by the HUMAN, entered over the same bytes
+/// with the node's co-scrub, then widened to `community` by the owner's own
+/// `supersedes`. Two rows; the peer receives the second. Copied from edge's own
+/// `share_in_room` (`src/bin/edge_node.rs`) rather than re-derived, because the
+/// ordering — store, then `share` — is what makes the crossing act on bytes that
+/// already exist.
+async fn share_in_room(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    row: Attestation,
+    room: &str,
+    signers: ciris_edge::replication::attestation_bind::Signers<'_>,
+) -> Result<String, String> {
+    use ciris_edge::replication::attestation_bind::{share, CrossingBasis, Shared, With};
+    dir.put_attestation(ciris_persist::federation::SignedAttestation {
+        attestation: row.clone(),
+    })
+    .await
+    .map_err(|e| format!("put {}: {e}", row.attestation_id))?;
+    let crossing = share(
+        dir,
+        &row,
+        With::Community {
+            community_key_id: room.to_owned(),
+        },
+        CrossingBasis::ProducerAuthority,
+        signers,
+    )
+    .await?;
+    match crossing.shared {
+        // The PLACED row's id — the widening, which is what the room reads.
+        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+            Ok(attestation_id)
+        }
+        Shared::AwaitingActor {
+            attestation_id,
+            age_ms,
+        } => Err(format!(
+            "the row {attestation_id} waits for its author's signer ({age_ms} ms) — \
+             a chat row is signed by the person, and this node does not hold that key"
+        )),
+    }
+}
+
+/// Advance this room's MLS handshake as far as the rows on disk allow, and
+/// return the conversation key once it is complete.
+///
+/// `Ok(None)` is NOT a failure: it means the counterpart's handshake row has not
+/// replicated yet. That is the self-resolving stall in edge's ladder vocabulary
+/// — the caller should say "not keyed yet" and let the mesh converge, never
+/// retry in a loop and never alarm a person.
+///
+/// Deliberately driven off the DIRECTORY rather than a wait: these run inside an
+/// HTTP request, and blocking one on mesh convergence turns a chat send into a
+/// timeout. Edge's `sync_and_await` is the right tool for a background driver
+/// and the wrong one here.
+async fn room_key(
+    st: &ChatState,
+    me: &str,
+    peer: &str,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<Option<ciris_edge::chat::RoomKey>, String> {
+    use ciris_edge::chat::{self, PairRole, RoomKey};
+    use ciris_edge::mls::cohort_group::{
+        key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
+    };
+    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
+    use ciris_persist::encrypted_kv::XChaChaKvStore;
+
+    let room = pair_community_key_id(me, peer);
+    let dir = st.engine.federation_directory();
+    let mut rooms = st.rooms.lock().await;
+
+    if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
+        return RoomKey::of(group).await.map(Some);
+    }
+
+    // The MLS store is keyed by the room and lives for the process. State that
+    // outlives a restart is a separate concern (the group can be rebuilt from the
+    // handshake rows, which are durable CEG); what must NOT happen is two rooms
+    // sharing one store.
+    let store = ScopeStateProvider::new(Arc::new(
+        XChaChaKvStore::open_in_memory(room.as_bytes())
+            .map_err(|e| format!("open the room's MLS store: {e}"))?,
+    ));
+
+    match PairRole::of(me, peer) {
+        PairRole::Creator => {
+            let Some(kp_bytes) = chat::key_package_from(&*dir, peer, &room).await? else {
+                return Ok(None); // the joiner has not published theirs yet
+            };
+            let group = CohortGroup::create(store, &room, me, 16)
+                .await
+                .map_err(|e| format!("CohortGroup::create: {e}"))?;
+            let kp = key_package_from_bytes(&kp_bytes).map_err(|e| format!("KeyPackage: {e}"))?;
+            let commit = group
+                .add_member(peer, kp)
+                .await
+                .map_err(|e| format!("add_member: {e}"))?;
+            let epoch = commit.epoch();
+            let welcome = commit
+                .welcome()
+                .ok_or("add_member produced no Welcome")?
+                .to_vec();
+            let row = chat::welcome_attestation(author, peer, &welcome, epoch, chrono::Utc::now())
+                .await?;
+            share_in_room(
+                &*dir,
+                row,
+                &room,
+                ciris_edge::replication::attestation_bind::Signers {
+                    node: &st.node_signer,
+                    actor: Some(author),
+                },
+            )
+            .await?;
+            let key = RoomKey::of(&group).await?;
+            rooms.insert(room, RoomState::Keyed(Arc::new(group)));
+            Ok(Some(key))
+        }
+        PairRole::Joiner => {
+            let material = match rooms.remove(&room) {
+                Some(RoomState::AwaitingWelcome(m)) => m,
+                _ => {
+                    // Publish our half once, then wait for the Welcome.
+                    let (material, kp) = mint_cohort_key_material(me)
+                        .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
+                    let kp_bytes =
+                        key_package_to_bytes(kp).map_err(|e| format!("KeyPackage: {e}"))?;
+                    let row =
+                        chat::key_package_attestation(author, peer, &kp_bytes, chrono::Utc::now())
+                            .await?;
+                    share_in_room(
+                        &*dir,
+                        row,
+                        &room,
+                        ciris_edge::replication::attestation_bind::Signers {
+                            node: &st.node_signer,
+                            actor: Some(author),
+                        },
+                    )
+                    .await?;
+                    material
+                }
+            };
+            let Some((welcome, _epoch)) = chat::welcome_from(&*dir, peer, &room).await? else {
+                rooms.insert(room, RoomState::AwaitingWelcome(material));
+                return Ok(None); // the creator has not answered yet
+            };
+            let group = CohortGroup::join(store, &room, material, &welcome, 16)
+                .await
+                .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let key = RoomKey::of(&group).await?;
+            rooms.insert(room, RoomState::Keyed(Arc::new(group)));
+            Ok(Some(key))
+        }
+    }
 }
 
 /// The owner-authority context every route here runs under: WHICH node, and
@@ -1135,146 +1320,168 @@ async fn send_message(
     // vocabulary persist types no constant for.
     //
     // No `asserted_at` here (CIRISServer#402 / CIRISPersist#598): the local
-    // write stamps it once, at the substrate's own resolution.
-    let envelope = serde_json::json!({
-        (paths::DIMENSION): CHAT_MESSAGE_DIMENSION,
-        FIELD_COMMUNITY_ID: community_id,
-        // WHOSE WORDS. Inside the signed bytes, so the far side gets it under
-        // the same signature it already verifies.
-        FIELD_ON_BEHALF_OF: owner.key_id,
-        FIELD_BODY: req.body,
-        FIELD_CONTENT_TYPE: content_type,
-        // A `scores` row carries a score; the magnitude is not load bearing for
-        // a message, and a positive constant is the honest "this was said".
-        "score": 1.0,
-    });
-    // ── WHO SIGNS, AND WHY IT IS THE NODE ───────────────────────────────────
-    //
-    // The node signs, on the owner's behalf, under the recorded owner-binding.
-    // The row is attested by the node's own key (so signer == attester and every
-    // peer's ingest gate passes), and the AUTHOR rides in the signed envelope as
-    // `on_behalf_of_key_id`. What makes that a verifiable claim rather than the
-    // node's say-so is that the binding it acts under —
-    // `delegates_to(owner -> this node)` — is itself a federation-tier, REPLICATED,
-    // revocable CEG row: the far side can resolve the chain and check it, and an
-    // owner who withdraws the binding invalidates the authority for every row
-    // that leans on it.
-    //
-    // TWO substrate facts force this shape, and neither is a preference:
-    //
-    // 1. A community-scoped row CANNOT be signer-explicit. `put_attestation`
-    //    calls `check_write_cohort_scope_for(…, scope, None)` on all three
-    //    backends with a hardcoded `None` target, and the `community` arm needs
-    //    `Some(cid)` the writer belongs to — so the put door refuses EVERY
-    //    `cohort_scope: community` row, from any signer. Only `attestation_promote`
-    //    can mint one, and its `reseal_for_scope` re-signs with the engine key.
-    //    A community-scoped attestation is node-signed by construction here.
-    //
-    // 2. The node may not hold agency, so it does not claim any. CC 4.4.3.4.3 /
-    //    CC 1.13.5 — persist's `check_node_agency_admission` REJECTS a
-    //    `delegates_to` to a node-only key carrying `agency:*` (or the legacy
-    //    `message_io`), and this node registers as `identity_type::NODE`. So the
-    //    envelope names the AUTHOR and stops there: no scope claim, because
-    //    "infrastructure must not have agency" is the rule, not an obstacle. The
-    //    authority actually exercised is the infra owner-binding — store and
-    //    serve the owner's content — which is what this node legitimately holds.
-    //
-    // THE UPGRADE PATH: when persist carries a cohort TARGET through the write
-    // gate, a signer-explicit `community` write becomes possible and this flips
-    // to signing with the author's own key (the owner's app occurrence, which
-    // self-at-login legitimately grants `agency:message_io`, is the
-    // constitutionally correct signer — not the node, and not the node's engine
-    // key). `on_behalf_of_key_id` STAYS in both worlds: it is true either way,
-    // and a reader that learned to trust it does not have to relearn anything.
-    //
-    // THE LIVE-BINDING PRECONDITION is already enforced, once, upstream:
-    // `require_owner` runs `auth::gate::require_owner_bound`, which is
-    // `is_steward_bound` -> `owner_binding_stands` (withdraws-aware). An unclaimed
-    // node, or one whose binding has been withdrawn, is refused there with
-    // `auth.owner_gate.node_unowned` before any row is built. Re-checking it here
-    // would be a second answer to a question already answered.
-    let envelope_core =
-        match ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope) {
-            Ok(e) => e,
-            Err(e) => {
-                return refuse(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "chat.emit_failed",
-                    format!("build message envelope: {e}"),
-                )
-            }
-        };
-    let input = LocalAttestationInput {
-        attestation_id: None,
-        // THE NODE ATTESTS. Signer == attester by construction: the promote below
-        // re-seals with the engine's key, and the engine's key is what this names.
-        // The human is named in the envelope, not here.
-        attesting_key_id: owner.node_key_id.clone(),
-        // Producer-only at BOTH — `check_promotion_cohort_standing` refuses a
-        // `community` placement naming any other party, so these follow the
-        // attester rather than the author.
-        attested_key_id: Some(owner.node_key_id.clone()),
-        attestation_type: attestation_type::SCORES.to_owned(),
-        weight: None,
-        expires_at: None,
-        attestation_envelope: envelope_core,
-        subject_key_ids: vec![owner.node_key_id.clone()],
-        cohort_scope: cohort_scope::SELF.to_owned(),
-        scrub_signature_classical: None,
-        scrub_signature_pqc: None,
-    };
-    let attestation_id = match st
+    // The OTHER member — the room is a pair, so the peer is the member that is
+    // not the owner. Read off the community record rather than re-derived: the
+    // roster is what the audience gate serves against, so the peer we address
+    // must be the peer the room says it has.
+    let contact_key_id = match st
         .engine
         .federation_directory()
-        .attestation_upsert_local(input)
+        .lookup_community(&community_id)
         .await
+    {
+        Ok(Some(c)) => {
+            match c
+                .members
+                .iter()
+                .map(|m| m.key_id.clone())
+                .find(|k| *k != owner.key_id)
+            {
+                Some(peer) => peer,
+                None => {
+                    return refuse(
+                        StatusCode::CONFLICT,
+                        "chat.not_a_pair_room",
+                        "this room has no second member — a pair chat addresses exactly one \
+                         other person, and `chat_message_attestation` derives the room from \
+                         the two fed-IDs",
+                    )
+                }
+            }
+        }
+        Ok(None) => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "chat.unknown_community",
+                format!("no community {community_id:?} on this node"),
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("lookup_community: {e}"),
+            )
+        }
+    };
+    // Edge's row carries a body and no content type — the community tier is
+    // sealed text. Refusing an unsupported type is honest; accepting it and
+    // dropping it would tell the client something was stored that was not.
+    if content_type != DEFAULT_CONTENT_TYPE {
+        return refuse(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "chat.unsupported_content_type",
+            format!(
+                "the sealed community tier carries text only; got {content_type:?}, want \
+                 {DEFAULT_CONTENT_TYPE:?}"
+            ),
+        );
+    }
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim);
+
+    // ── THE MESSAGE IS EDGE'S ROW, SEALED, SIGNED BY THE PERSON ─────────────
+    //
+    // This built a plaintext `scores` row attested by the NODE and pushed it
+    // through persist's crossing directly. Three things were wrong with that,
+    // and only the wire could tell:
+    //
+    //   * the body was PLAINTEXT. From edge v20.0.0 the community tier is
+    //     encrypted, always — "there is no plaintext producer";
+    //   * the row was attested by the node, so the author rode in an envelope
+    //     member instead of in the signature, and a reader had to trust the box
+    //     about whose words these were;
+    //   * it was placed by calling persist, which skips the audience gate edge
+    //     applies per recipient — the row existed and was never served.
+    //
+    // Now: the OWNER signs at write, the body is sealed under the room's record
+    // secret, and `share` enters the mesh over those bytes (node co-scrub) and
+    // widens to the room with the owner's own `supersedes`.
+    let capsule = match crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer,
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "chat.author_signer_unavailable",
+                format!(
+                    "a chat message is signed by the person who wrote it, and this node \
+                     cannot wield that identity right now: {e:?}"
+                ),
+            )
+        }
+    };
+    let author = capsule.edge_signer();
+
+    // The conversation key. `None` is the self-resolving stall: the peer's half
+    // of the MLS handshake has not replicated yet. Say so plainly — the mesh
+    // converges on its own, and a client that retries in a loop is the wrong
+    // answer (edge's `LadderStall` vocabulary, §3 of its integration guide).
+    let key = match room_key(&st, &owner.key_id, &contact_key_id, author).await {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.room_not_keyed_yet",
+                "the room's key exchange has not completed — the other side's handshake \
+                 row has not arrived yet. This converges on its own; try again shortly.",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "chat.room_key_failed",
+                format!("derive the room key: {e}"),
+            )
+        }
+    };
+
+    let row = match ciris_edge::chat::chat_message_attestation(
+        author,
+        &contact_key_id,
+        &req.body,
+        chrono::Utc::now(),
+        &key,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "chat.emit_failed",
+                format!("chat_message_attestation: {e}"),
+            )
+        }
+    };
+    let attestation_id = match share_in_room(
+        &*st.engine.federation_directory(),
+        row,
+        &community_id,
+        ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(author),
+        },
+    )
+    .await
     {
         Ok(id) => id,
         Err(e) => {
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "chat.emit_failed",
-                format!("attestation_upsert_local(chat:message:v1): {e}"),
+                format!("share the message with the room: {e}"),
             )
         }
-    };
-    // v39.0.0: the crossing is two verbs. This row is attested by THIS NODE
-    // (`owner.node_key_id` above), so the engine's own composed signer stands in
-    // as the actor and no external signer is needed — the local row crosses at
-    // `self`, then a `supersedes` the node signs widens it to the community.
-    // That leaves TWO rows by design; `load_message` below reads the placed one.
-    let outcome = match attestation_crossing::enter_mesh_at(
-        &st.engine,
-        &attestation_id,
-        &Audience::Community {
-            community_key_id: community_id.clone(),
-        },
-        &CrossingBasis::ProducerAuthority,
-        None,
-    )
-    .await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "chat.emit_failed",
-                format!("enter_mesh_at(community): {e}"),
-            )
-        }
-    };
-    // THE MESSAGE'S ID IS THE WIDENED ROW'S. `enter_mesh` crossed the local row
-    // at `self`; the `supersedes` that `widen_audience` then wrote is the row the
-    // community can actually read, and it has its own id. Reporting or re-reading
-    // the original here would name the narrow row — which is exactly the empty
-    // `messages: []` the community sees when this is got wrong.
-    eprintln!("CHAT-DIAG crossing outcome: {outcome:?}");
-    let Some(attestation_id) = attestation_crossing::placed_id(&outcome).map(str::to_owned) else {
-        return refuse(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chat.emit_failed",
-            format!("chat message did not reach the community: {outcome:?}"),
-        );
     };
     let message = match load_message(&st, &community_id, &attestation_id, &owner).await {
         Ok(Some(m)) => m,
@@ -1563,9 +1770,15 @@ async fn list_messages(
 /// signs with its OWN `LocalSigner` type, and the Engine holds persist's. It is
 /// the same sealed federation key either way — built once at boot, from the same
 /// classical and ML-DSA-65 halves the edge transport signer wraps.
-pub fn router(engine: Arc<Engine>, node_signer: Arc<ciris_edge::identity::LocalSigner>) -> Router {
+pub fn router(
+    engine: Arc<Engine>,
+    node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    user_seed_dir: std::path::PathBuf,
+) -> Router {
     let state = ChatState {
         engine,
+        user_seed_dir,
+        rooms: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         node_signer,
     };
     Router::new()

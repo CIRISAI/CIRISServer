@@ -909,6 +909,89 @@ pub async fn hardware_user_local_signer(
     user_key_id: &str,
     seed_dir: PathBuf,
 ) -> Result<ciris_persist::prelude::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    // key_id = the DERIVED federation id; the Ed25519/ML-DSA blobs stay under the
+    // alias (opened above). `signer.key_id()` is therefore the registered wire id.
+    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        parts.derived_key_id,
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))
+}
+
+/// The SAME identity as [`hardware_user_local_signer`], as edge's signer type.
+///
+/// Edge's chat plane signs with `ciris_edge::identity::LocalSigner`; persist's is
+/// a different type that keeps its classical half private, so one cannot be
+/// converted into the other. Both are therefore built from ONE set of parts
+/// ([`user_signer_parts`]) rather than assembled twice — two constructions of
+/// "the owner's signer" could drift on the key_id, and a chat row signed under a
+/// key that is not the one the directory registered is refused at every peer with
+/// nothing local to see.
+pub async fn hardware_user_edge_signer(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<ciris_edge::identity::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    Ok(edge_signer_from(parts))
+}
+
+/// BOTH signer types for one identity, from ONE open of the hardware.
+///
+/// The capsule needs both — persist's to sign bytes a caller canonicalized,
+/// edge's to sign a row edge composes — and they must be the same identity. Two
+/// separate calls would open the backend twice and, worse, could disagree on the
+/// derived key_id if a mint raced between them; from one `UserSignerParts` they
+/// cannot.
+pub async fn hardware_user_signers(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<(
+    ciris_persist::prelude::LocalSigner,
+    ciris_edge::identity::LocalSigner,
+)> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    let edge = edge_signer_from(UserSignerParts {
+        classical: Arc::clone(&parts.classical),
+        pqc: Arc::clone(&parts.pqc),
+        derived_key_id: parts.derived_key_id.clone(),
+        pqc_key_id: parts.pqc_key_id.clone(),
+    });
+    let persist = ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        parts.derived_key_id,
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))?;
+    Ok((persist, edge))
+}
+
+fn edge_signer_from(parts: UserSignerParts) -> ciris_edge::identity::LocalSigner {
+    ciris_edge::identity::LocalSigner::new(parts.derived_key_id, parts.classical, Some(parts.pqc))
+}
+
+/// The opened halves of a user identity, before either signer type wraps them.
+struct UserSignerParts {
+    classical: Arc<dyn HardwareSigner>,
+    pqc: Arc<dyn PqcSigner>,
+    /// The #247 DERIVED federation key_id — what the identity is REGISTERED
+    /// under, and therefore what every row it signs must be attested under.
+    derived_key_id: String,
+    pqc_key_id: String,
+}
+
+async fn user_signer_parts(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<UserSignerParts> {
     let cfg = user_identity_config(&backend, user_key_id, seed_dir);
     let hw = open_user_signer(&backend, &cfg, false)?;
     // Derive the recorded federation key_id from the alias + the opened pubkey
@@ -930,16 +1013,12 @@ pub async fn hardware_user_local_signer(
     let pqc: Arc<dyn PqcSigner> = Arc::from(pqc);
     let pqc_key_id = format!("{user_key_id}-pqc");
 
-    // key_id = the DERIVED federation id; the Ed25519/ML-DSA blobs stay under the
-    // alias (opened above). `signer.key_id()` is therefore the registered wire id.
-    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+    Ok(UserSignerParts {
         classical,
+        pqc,
         derived_key_id,
-        Some(pqc),
-        Some(pqc_key_id),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))
+        pqc_key_id,
+    })
 }
 
 /// Open the holder's **already-provisioned** YubiKey PIV Ed25519 key as a
