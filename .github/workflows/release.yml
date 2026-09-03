@@ -465,7 +465,17 @@ jobs:
             # Without this they would be tarred and published as
             # `ciris-server-<tag>-ios-ios-device.tar.gz`: two assets nobody asked
             # for, named after an implementation detail.
+            # The PEP 730 iOS wheels (CIRISServer#532) are finished artifacts
+            # like the iOS tarball above: `.whl` IS the archive format, and pip
+            # resolves a wheel by its FILENAME. Taring one would produce
+            # `ciris-server-<tag>-ios-wheel-ios-device.tar.gz` — an asset nobody
+            # can install, named after an implementation detail, which is the
+            # same mistake the `ios-ios-*` guard below already exists to prevent.
             case "$target" in
+              ios-wheels)
+                cp "$dir"/*.whl release/
+                continue
+                ;;
               ios-ios-*) continue ;;
             esac
             tar -czvf "release/ciris-server-${{ github.ref_name }}-${target}.tar.gz" -C "$dir" .
@@ -476,13 +486,22 @@ jobs:
           if ! ls release/*-ios.tar.gz >/dev/null 2>&1; then
             echo "::warning::No iOS asset in this release — see the ios-asset job. CIRISAgent's refresh-ios-substrate.yml will skip CIRISServer until one is published."
           fi
-          cd release && sha256sum *.tar.gz > SHA256SUMS
+          # Wheels are hashed beside the tarballs. Globbed through `ls` rather
+          # than passed to sha256sum directly: an unmatched `*.whl` stays
+          # literal under bash and would fail the step on a release that
+          # legitimately has no wheels (the iOS lane red, everything else fine)
+          # — turning a partial release into no release at all.
+          cd release
+          # shellcheck disable=SC2012
+          sha256sum $(ls *.tar.gz *.whl 2>/dev/null) > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign artifacts (Sigstore keyless)
         run: |
           cd release
-          for f in *.tar.gz SHA256SUMS; do
+          # Same guard as the hashing step: `*.whl` must not become a literal
+          # argument when the iOS wheel lane produced nothing.
+          for f in $(ls *.tar.gz *.whl 2>/dev/null) SHA256SUMS; do
             cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
           done
       - name: Create GitHub Release
@@ -492,6 +511,9 @@ jobs:
             release/*.tar.gz
             release/*.tar.gz.sig
             release/*.tar.gz.pem
+            release/*.whl
+            release/*.whl.sig
+            release/*.whl.pem
             release/SHA256SUMS
             release/SHA256SUMS.sig
             release/SHA256SUMS.pem

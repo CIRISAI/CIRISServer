@@ -26,6 +26,10 @@ on:
           Name of the packaged artifact (device + simulator slices in one
           tarball). Callers download this rather than hard-coding the string.
         value: ciris-server-ios
+      wheels:
+        description: >-
+          Name of the PEP 730 iOS wheel artifact (device + simulator).
+        value: ciris-server-ios-wheels
 
 jobs:
   ios-build:
@@ -39,8 +43,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-ios,     dir: ios-device,    lib_dir_out: device_lib_dir }
-          - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir }
+          - { target: aarch64-apple-ios,     dir: ios-device,    lib_dir_out: device_lib_dir, sdk: iphoneos }
+          - { target: aarch64-apple-ios-sim, dir: ios-simulator, lib_dir_out: sim_lib_dir,    sdk: iphonesimulator }
     env:
       # 3.10 is not arbitrary: the client's iOS app embeds CPython 3.10
       # (CIRISClient's `iosApp` Resources carry `python3.10` +
@@ -58,6 +62,28 @@ jobs:
       # default features stay ON (`default = ["pkcs11"]`), which is precisely
       # what `maturin build` compiles for the published wheel.
       IOS_PYO3_FEATURES: extension-module
+      # ── THE TAG HAS TO BE TRUE (CIRISServer#532) ──────────────────────────
+      #
+      # Unset, the two slices pick DIFFERENT floors from the same commit in the
+      # same job: measured on the published v0.5.196 asset, the device slice
+      # carries `LC_VERSION_MIN_IPHONEOS 10.0` and the simulator slice
+      # `LC_BUILD_VERSION minos 14.0`. That was invisible while the artifact was
+      # a tarball — nothing reads a floor out of a tar member — and becomes a
+      # correctness bug the moment the same binaries ship as wheels, because
+      # `pip` installs on the strength of the TAG. A wheel tagged `ios_13_0`
+      # around the 14.0 simulator slice installs on iOS 13 and fails at load.
+      #
+      # 13.0 is the floor the app targets. It moves the DEVICE slice off its
+      # 10.0 default — measured, run 33721980725: 10.0 before, 13.0 after.
+      #
+      # It does NOT move the simulator, and that is not a failure to configure.
+      # The arm64 iPhone simulator did not exist before iOS 14 (it arrived with
+      # Apple silicon), so the toolchain floors `aarch64-apple-ios-sim` at 14.0
+      # and no deployment target lowers it. The two slices therefore carry
+      # genuinely different minimums, and each wheel's tag states its OWN —
+      # `build_ios_wheel.py` reads it out of the binary rather than being told.
+      # `tools/check_ios_wheel.py` refuses any wheel whose tag disagrees.
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.0
@@ -228,6 +254,12 @@ jobs:
           name: ciris-server-ios-${{ matrix.dir }}
           path: dist/${{ matrix.dir }}/_native.abi3.so
           if-no-files-found: error
+      # ── The PEP 730 wheel (CIRISServer#532) ────────────────────────────────
+      #
+      # AFTER the tarball slice is uploaded, deliberately: the tarball is what
+      # CIRISAgent's `update_substrate_libs.py` already consumes, and a new
+      # packaging lane must not be able to cost us the artifact that works.
+      #
       # The ONE CI job that SAVES a CIRISCache blob, and it does not contradict
       # the "CI does NOT save" note on clippy-test above: that note is about
       # DEBUG target/ dirs colliding with conformance's RELEASE `-s<version>`
@@ -246,6 +278,78 @@ jobs:
           # LRU-prune target/ to 4GB before tar (persist v1/ff52ca3): breaks the
           # fat-blob ratchet where superseded dep generations are re-saved forever.
           max-size-mb: "4096"
+
+  # ── The PEP 730 wheels (CIRISServer#532) ──────────────────────────────────
+  #
+  # A SEPARATE JOB, and on UBUNTU, for two reasons that were both learned the
+  # hard way in run 33721980725.
+  #
+  # 1. It must not be able to cost us the tarball. These steps started inside
+  #    `ios-build`, and when the wheel gate refused a mistagged wheel the whole
+  #    matrix leg went red — so `ios-package`, which `needs: [ios-build]`, was
+  #    SKIPPED and the release lost the iOS asset that had built perfectly. A
+  #    new packaging lane taking down the one that already works is exactly what
+  #    this was supposed to avoid; splitting the job is what actually avoids it.
+  #
+  # 2. None of this needs macOS. Assembling a zip and reading Mach-O load
+  #    commands is platform-independent, and macOS is the contended pool in this
+  #    org — the two `ios-build` legs are already the largest consumer in the
+  #    repo. `maturin pep517 write-dist-info` runs anywhere.
+  #
+  # Consumes the per-slice artifacts `ios-build` uploads, so the cross-compile
+  # happens exactly once.
+  ios-wheel:
+    name: ios wheels (PEP 730)
+    runs-on: ubuntu-latest
+    needs: [ios-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # maturin is here for its DIST-INFO, not for a build. `maturin build
+      # --target aarch64-apple-ios` is refused before it compiles anything —
+      # "platform.system() in python, linux, and the rust target … don't match"
+      # — which is why the slice is a `cargo build` and is recorded as such in
+      # ci.yml. What maturin CAN do without a compiler is `pep517
+      # write-dist-info`, the same path pip drives for
+      # `prepare_metadata_for_build_wheel`, and that keeps the packaging
+      # metadata single-sourced: a hand-written METADATA would be a second
+      # spelling that silently stops matching the other eight wheels the first
+      # time pyproject.toml moves.
+      - name: install maturin (dist-info only)
+        run: pip install "maturin>=1.13,<2"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-server-ios-ios-*
+          path: slices/
+      - name: assemble the wheels
+        run: |
+          set -euo pipefail
+          ls -R slices/
+          python3 tools/build_ios_wheel.py \
+            --so slices/ciris-server-ios-ios-device/_native.abi3.so \
+            --sdk iphoneos --out dist-wheel
+          python3 tools/build_ios_wheel.py \
+            --so slices/ciris-server-ios-ios-simulator/_native.abi3.so \
+            --sdk iphonesimulator --out dist-wheel
+      # THE GATE. A wheel filename is a promise about a binary nobody opens, and
+      # iOS is the platform where no build machine and no CI job ever loads the
+      # artifact — the device that finds out is a phone, after distribution. So
+      # the tag is checked against the Mach-O load commands here, where it is
+      # cheap. Self-tested first, so the refusals are exercised even on a run
+      # where every wheel is fine.
+      - name: verify each wheel tag against its binary
+        run: |
+          set -euo pipefail
+          ls -la dist-wheel/
+          python3 tools/check_ios_wheel.py --self-test
+          python3 tools/check_ios_wheel.py dist-wheel/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-server-ios-wheels
+          path: dist-wheel/*.whl
+          if-no-files-found: error
 
   # Recombine the two parallel slices into the single tar the release publishes.
   # Mirrors persist's `ios-package`. Runs on EVERY push/PR, not just releases:

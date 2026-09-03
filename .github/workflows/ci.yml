@@ -340,6 +340,16 @@ jobs:
       - name: "Evidence manifest resolves (CC impl: tier)"
         if: runner.os == 'Linux'
         run: python3 tools/check_evidence.py
+      # The iOS wheel gate's own negative cases (CIRISServer#532). It runs for
+      # real in ios-asset.yml, on macOS, against wheels only that job produces —
+      # so on every other run of CI the code that REFUSES a mistagged wheel is
+      # never executed. The self-test builds Mach-O headers by hand, needs no
+      # toolchain, and takes milliseconds, so the refusals are exercised here
+      # too: a gate whose failure paths only run when something is already
+      # broken is a gate nobody has tested.
+      - name: "iOS wheel tag checker self-test"
+        if: runner.os == 'Linux'
+        run: python3 tools/check_ios_wheel.py --self-test
       - name: sccache stats
         if: always()
         run: sccache --show-stats
