@@ -875,8 +875,17 @@ async fn an_unknown_fed_id_is_refused_with_a_typed_reason() {
 }
 
 /// **THE PR #464 P1 REGRESSION.** Give a peer a standing
-/// `consent:replication:v1` grant that does NOT cover `chat:` — the shape a
-/// federation peering leaves behind — and only then add them as a contact.
+/// `consent:replication:v1` grant that does NOT cover `chat:`, and only then add
+/// them as a contact.
+///
+/// The narrowness is CONSTRUCTED here, and that is a change of provenance worth
+/// stating: this used to be what an ordinary peering left behind, and it no
+/// longer is — the peering default now carries `chat:` itself. A chat-less
+/// standing grant today comes from an operator who narrowed one through
+/// `POST /v1/federation/consent`, or from a peer federated before the default
+/// widened. The PRIMITIVE under test is unchanged: a widening must supersede a
+/// narrower live grant rather than report it as already sufficient, and that is
+/// exercised by any grant narrower than the contact set, however it got narrow.
 ///
 /// This is the case the old code got wrong, and it got it wrong in the direction
 /// that hides: `emit_replication_consent`'s guard matched on (subject, dimension)
@@ -1962,8 +1971,17 @@ async fn a_read_granted_delegate_reads_but_still_cannot_send() {
 ///
 /// A one-way plane is worse than a closed one: it looks like a working
 /// conversation from this side and arrives nowhere.
+///
+/// **This was `an_ordinarily_federated_peer_is_not_a_contact` and is not any
+/// more.** The peering default now carries `chat:`, so an ordinary peering
+/// produces a contact and the old name asserted something false. What survives
+/// is the DOOR — the coverage guard and the refusal that names the missing
+/// prefix — which still runs for any grant narrower than the contact set. What
+/// the old name CLAIMED, that federation alone does not get you into a room, is
+/// a different property on a different mechanism, and it is pinned next door in
+/// [`an_ordinarily_federated_peer_is_still_not_in_the_room`].
 #[tokio::test]
-async fn an_ordinarily_federated_peer_is_not_a_contact() {
+async fn a_peer_whose_grant_omits_chat_is_not_a_contact() {
     let (engine, base, owner, _owner_id, _h) = fixture().await;
     let node = node_key_id(&engine).await;
     // A standing peering grant without chat: — see `narrow_peering_prefixes`
@@ -2025,6 +2043,121 @@ async fn an_ordinarily_federated_peer_is_not_a_contact() {
         .await
         .expect("POST /v1/chat");
     assert_eq!(resp.status(), 200, "the room opens once chat: is covered");
+}
+
+/// **WHAT ACTUALLY KEEPS AN ORDINARILY-FEDERATED PEER OUT OF A ROOM.**
+///
+/// While the peering default omitted `chat:`, the test above answered this by
+/// accident: an ordinary peer's grant lacked the prefix, so the coverage guard
+/// turned them away and nobody had to ask what would happen if it did not. The
+/// default now carries `chat:` for every peer this node federates with, so that
+/// accident is spent and the question is live and load-bearing.
+///
+/// **It was never the prefix.** `crate::peer`'s own doc says so and persist
+/// agrees: the consent send-set is built from peer IDS alone, and the prefixes
+/// gate only which rows `promote_consented_backlog` may PLACE — not the serve
+/// wire. What withholds a room's rows from a non-member is edge's CC 5.2
+/// audience gate, whose `community` arm serves a row only to a peer, or a
+/// peer's principal, on the room's roster.
+///
+/// So this pins BOTH halves of that sentence, because either one going quiet
+/// would make the other meaningless: the ordinarily-federated stranger IS in
+/// the consent set AND their grant DOES cover `chat:` (so nothing on the
+/// consent plane distinguishes them from a contact), and they are NOT on the
+/// room's roster (so the audience gate is the only thing left standing).
+///
+/// # NAMED GAP — the gate itself is not exercised here
+///
+/// `FederationDirectoryReplicationBridge::audience_withholds` is private to
+/// edge and needs a live replication bridge; this file drives the local HTTP
+/// router against an in-memory substrate. What follows asserts the FACTS that
+/// gate resolves, not the gate's use of them. A cross-node test that watches a
+/// room row be withheld from a consented non-member is still owed, and until it
+/// exists nothing in this repo fails if the audience gate stops consulting
+/// membership. That is a real hole, and it got deeper the day the default
+/// started granting `chat:` to every peer.
+#[tokio::test]
+async fn an_ordinarily_federated_peer_is_still_not_in_the_room() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let node = node_key_id(&engine).await;
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+
+    // The room holds REAL content — a withholding test over an empty room
+    // proves nothing, which is the same reason test 4 seeds a real message.
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "for the two of us" }))
+        .send()
+        .await
+        .expect("POST message");
+    assert_eq!(resp.status(), 200, "send: {:?}", resp.text().await);
+
+    // Federate a stranger the ORDINARY way — today's real default, not a
+    // narrowed one. This is the scenario the old test named and could no
+    // longer produce.
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &node,
+        STRANGER_A_KEY_ID,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("ordinary federation peering grant");
+
+    // HALF ONE — CONSENT DOES NOT HOLD THEM OUT. Both assertions are the
+    // premise: if the stranger ever dropped out of the consent set, or the
+    // default stopped covering chat:, the second half would be guarding a door
+    // nobody walks through and would pass for the wrong reason.
+    let peers = consent_subjects(&engine, &node).await;
+    assert!(
+        peers.iter().any(|p| p == STRANGER_A_KEY_ID),
+        "an ordinarily-federated peer is in the folded consent set: {peers:?}"
+    );
+    assert!(
+        live_grant_prefixes(&engine, &node, STRANGER_A_KEY_ID)
+            .await
+            .iter()
+            .any(|p| p == ciris_edge::chat::CHAT_ATTESTATION_PREFIX),
+        "and their grant COVERS chat: — the prefix is not what protects the room"
+    );
+
+    // HALF TWO — MEMBERSHIP DOES. The stranger is on no roster naming this
+    // room, and the room's own active roster is exactly the pair. These are
+    // the two reads the audience gate's `community` arm resolves.
+    let directory = engine.federation_directory();
+    let their_rooms = directory
+        .list_communities_for_member_active(STRANGER_A_KEY_ID)
+        .await
+        .expect("list_communities_for_member_active");
+    assert!(
+        !their_rooms
+            .iter()
+            .any(|c| c.community_key_id == community_id),
+        "a consented peer must not turn up on the roster of a room they were \
+         never admitted to: {:?}",
+        their_rooms
+            .iter()
+            .map(|c| &c.community_key_id)
+            .collect::<Vec<_>>()
+    );
+    let mut members: Vec<String> = directory
+        .active_community_members(&community_id)
+        .await
+        .expect("active_community_members")
+        .into_iter()
+        .map(|m| m.key_id)
+        .collect();
+    members.sort();
+    let mut expected = vec![owner_id.key_id.clone(), CONTACT_KEY_ID.to_string()];
+    expected.sort();
+    assert_eq!(
+        members, expected,
+        "the room's roster is the pair and nobody else — federating with a \
+         third party must not widen it"
+    );
 }
 
 /// **THE BOUNDARY GATE — the pin, flipped.**
