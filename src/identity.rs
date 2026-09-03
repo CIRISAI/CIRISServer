@@ -973,6 +973,45 @@ pub async fn hardware_user_signers(
     Ok((persist, edge))
 }
 
+/// The owner's identity keyed for persist's **crossing** verbs, which derive.
+///
+/// Server's ordinary user signer ([`hardware_user_local_signer`]) carries the
+/// DERIVED federation id in `key_id`, because [`crate::attest::emit`] — the one
+/// door — binds `signer.key_id()` to `attesting_key_id` verbatim and deliberately
+/// does NOT use `Engine::emit_attestation`, which would double-derive it. See
+/// `auth::ownership::emit_steward_binding` for that contract.
+///
+/// persist v39's `enter_mesh` / `widen_audience` are the FIRST persist entry
+/// points server must call holding a USER signer, and they take the other side:
+/// `custody_for` accepts an actor only when `signer.derived_key_id()` equals the
+/// row's `attesting_key_id` (persist `engine.rs:3580`). A signer built for the
+/// emit door can never satisfy it — it derives a second time and refuses with
+/// `CustodyIsNotTheActor { scrub_key_id: "<id>-<fp>-<fp>" }`.
+///
+/// One `LocalSigner` cannot serve both: `key_id()` returns the field verbatim and
+/// `derived_key_id()` always derives FROM it, so the field is either the input or
+/// the output, never both. This returns the same hardware-custodied material
+/// keyed the other way — `key_id` = the ALIAS — so `derived_key_id()` lands on the
+/// registered id. It is the convention `compose::substrate_persist_signer`
+/// already uses for the NODE. Use it ONLY to sign a crossing; anything that reads
+/// `key_id()` wants [`hardware_user_local_signer`].
+pub async fn hardware_user_crossing_signer(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<ciris_persist::prelude::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        // The ALIAS — the derive INPUT, not the wire id.
+        user_key_id.to_string(),
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose crossing-keyed user LocalSigner: {e}"))
+}
+
 fn edge_signer_from(parts: UserSignerParts) -> ciris_edge::identity::LocalSigner {
     ciris_edge::identity::LocalSigner::new(parts.derived_key_id, parts.classical, Some(parts.pqc))
 }
