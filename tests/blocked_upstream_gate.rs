@@ -63,7 +63,7 @@ use std::path::{Path, PathBuf};
 /// The 2026-08-06 sweep resolved six others: #334 / #321 / #219 / #113 / #112 →
 /// `state:unwired` (the capability had shipped), #111 closed as overtaken by the
 /// reverse-quorum plane. Do not re-add them here without re-blocking them.
-const BLOCKED_UPSTREAM_ISSUES: &[u32] = &[2, 114, 115, 285, 333];
+const BLOCKED_UPSTREAM_ISSUES: &[u32] = &[2, 114, 115, 285, 333, 534];
 
 const MANIFEST: &str = "evidence/blocked_upstream.tsv";
 const COLUMNS: [&str; 9] = [

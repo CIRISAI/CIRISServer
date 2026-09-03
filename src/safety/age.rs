@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use crate::attestation_crossing;
 use crate::auth::verify::{self, VerifyError};
 use ciris_persist::federation::{Audience, CrossingBasis, MeshCrossingOutcome};
+use ciris_persist::prelude::LocalSigner;
 
 /// The witness-RESERVED dimension prefix for a PROVIDER/GOVERNMENT-attested
 /// age-assurance `scores` row (persist `default_reserved_prefix_rules` —
@@ -239,10 +240,11 @@ fn parse_age_dimension(dimension: &str) -> Option<AgeAssurance> {
 pub async fn emit_age_assurance(
     engine: &Engine,
     subject_key_id: &str,
+    actor: Option<&LocalSigner>,
     level: AssuranceLevel,
     band: AgeBand,
 ) -> Result<String, String> {
-    emit_age_assurance_inner(engine, subject_key_id, level, band, true).await
+    emit_age_assurance_inner(engine, subject_key_id, actor, level, band, true).await
 }
 
 /// Local-tier-only variant: persist the self-declared age WITHOUT promoting it to
@@ -257,7 +259,7 @@ pub async fn emit_age_assurance_local(
     level: AssuranceLevel,
     band: AgeBand,
 ) -> Result<String, String> {
-    emit_age_assurance_inner(engine, subject_key_id, level, band, false).await
+    emit_age_assurance_inner(engine, subject_key_id, None, level, band, false).await
 }
 
 /// **CEG-native signed self-declared age.** The subject signs the
@@ -296,6 +298,7 @@ pub async fn emit_age_assurance_signed(
 async fn emit_age_assurance_inner(
     engine: &Engine,
     subject_key_id: &str,
+    actor: Option<&LocalSigner>,
     level: AssuranceLevel,
     band: AgeBand,
     promote: bool,
@@ -346,7 +349,7 @@ async fn emit_age_assurance_inner(
             &attestation_id,
             &Audience::Federation,
             &CrossingBasis::ProducerAuthority,
-            None,
+            actor,
         )
         .await
         .map_err(|e| format!("promote age_assurance: {e}"))?;
@@ -481,7 +484,11 @@ async fn set_age(State(st): State<AgeState>, headers: HeaderMap, body: Bytes) ->
              levels require a verifier attestation (not yet wired)",
         );
     }
-    match emit_age_assurance(&st.engine, &req.subject_key_id, level, req.band).await {
+    // No actor signer at an HTTP boundary: the claim's author is a remote
+    // key this node does not hold and must not stand in for (persist
+    // v39.0.0). The row is written and waits; the handlers above log it.
+    // CIRISServer#533 tracks giving this route the author's signature.
+    match emit_age_assurance(&st.engine, &req.subject_key_id, None, level, req.band).await {
         Ok(attestation_id) => (
             StatusCode::OK,
             Json(SetAgeResponse {

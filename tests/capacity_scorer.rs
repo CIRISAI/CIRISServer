@@ -183,10 +183,6 @@ async fn node_a_with_keys() -> (Arc<Engine>, String, String) {
     (Arc::new(engine), ed_pub_b64, mldsa_pub_b64)
 }
 
-/// Register a peer/agent verifying key into the directory so (a) trace verify
-/// resolves it and (b) `put_attestation`'s attested-key FK resolves it. Mirrors
-/// `replication.rs::cross_register`.
-
 /// Register a key, optionally with its ML-DSA-65 pubkey. The federation-tier
 /// ingest gate (persist v9.0.0) resolves `scrub_key_id`'s pubkeys here to verify
 /// an emitted attestation's hybrid signature, so an attesting node MUST be

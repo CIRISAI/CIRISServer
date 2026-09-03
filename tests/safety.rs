@@ -139,16 +139,49 @@ fn party_signer(key_id: &str) -> LocalSigner {
 /// Register a party with its REAL hybrid pubkeys under `identity_type`. Returns
 /// the matching signer.
 async fn register_party(engine: &Engine, key_id: &str, identity_type_str: &str) -> LocalSigner {
-    let signer = party_signer(key_id);
+    register_party_at(engine, key_id, key_id, identity_type_str).await
+}
+
+/// Register a party as an ACTOR — under the DERIVED id, which is the id its rows
+/// must be attested under for its signer to be accepted as their custody.
+///
+/// persist v39.0.0 matches `LocalSigner::derived_key_id()` against the row's
+/// `attesting_key_id` (CIRISPersist#247's floor). A party registered and attested
+/// under the bare alias therefore has no signer that can place its claims: the
+/// crossing waits for an actor whose id can never match. Returns the signer and
+/// that id; callers use the id everywhere the alias used to go.
+async fn register_actor(
+    engine: &Engine,
+    alias: &str,
+    identity_type_str: &str,
+) -> (LocalSigner, String) {
+    let signer = party_signer(alias);
+    let key_id = signer.derived_key_id();
+    register_party_at(engine, &key_id, alias, identity_type_str).await;
+    (signer, key_id)
+}
+
+/// The shared body: the RECORD lands at `record_key_id`, the KEY MATERIAL is the
+/// one `alias` seeds. They are the same string for `register_party` and differ
+/// for `register_actor`, which is the entire difference between the two.
+async fn register_party_at(
+    engine: &Engine,
+    record_key_id: &str,
+    alias: &str,
+    identity_type_str: &str,
+) -> LocalSigner {
+    let signer = party_signer(alias);
+    let key_id = record_key_id;
+    let key_id_for_seeds = alias;
     let ed_pub = BASE64.encode(
-        SigningKey::from_bytes(&party_ed_seed(key_id))
+        SigningKey::from_bytes(&party_ed_seed(key_id_for_seeds))
             .verifying_key()
             .to_bytes(),
     );
     let mldsa_pub = {
         let pqc = MlDsa65SoftwareSigner::from_seed_bytes(
-            &party_pqc_seed(key_id),
-            format!("{key_id}-pqc"),
+            &party_pqc_seed(key_id_for_seeds),
+            format!("{key_id_for_seeds}-pqc"),
         )
         .expect("party ML-DSA-65 seed");
         BASE64.encode(pqc.public_key().await.expect("party ML-DSA-65 pubkey"))
@@ -308,7 +341,19 @@ async fn withdraw_owner_binding(engine: &Engine, owner: &LocalSigner, member: &s
 /// see 3" turned out to be different facts (CIRISServer#357) and a fixture that
 /// cannot tell them apart is how the seam stayed invisible.
 async fn seed_track_record(engine: &Engine, member: &str, community: &str, count: usize) -> usize {
-    seed_track_record_witnessed(engine, member, community, count, None).await
+    seed_track_record_witnessed(engine, member, None, community, count, None).await
+}
+
+/// [`seed_track_record`] with the MEMBER's signer, which persist v39.0.0 needs
+/// before a row attested by that member can enter the mesh.
+async fn seed_track_record_signed(
+    engine: &Engine,
+    member: &str,
+    actor: &LocalSigner,
+    community: &str,
+    count: usize,
+) -> usize {
+    seed_track_record_witnessed(engine, member, Some(actor), community, count, None).await
 }
 
 /// [`seed_track_record`] with an explicit `witness_relation` on the envelope
@@ -317,7 +362,11 @@ async fn seed_track_record(engine: &Engine, member: &str, community: &str, count
 /// to `external`).
 async fn seed_track_record_witnessed(
     engine: &Engine,
+    // Threaded, not defaulted: a caller that wants the rows to REACH the
+    // federation must hand over the member's signer (v39.0.0). `None` is the
+    // deliberate "this fixture expects them to stay local" case.
     member: &str,
+    actor: Option<&LocalSigner>,
     community: &str,
     count: usize,
     witness_relation: Option<&str>,
@@ -375,7 +424,7 @@ async fn seed_track_record_witnessed(
             &id,
             &Audience::Federation,
             &CrossingBasis::ProducerAuthority,
-            None,
+            actor,
         )
         .await
         {
@@ -484,8 +533,13 @@ fn age_gate_blocks_minor_from_adult_allows_adult() {
 #[tokio::test]
 async fn age_assurance_emit_read_roundtrip_and_misdeclaration_does_not_slash() {
     let engine = node().await;
-    let subject = "age-subject";
-    register_party(&engine, subject, identity_type::USER).await;
+    let subject_alias = "age-subject";
+    // v39.0.0: a self-declaration is the SUBJECT's claim, so the subject signs
+    // it into the mesh. Registered and attested under the derived id, which is
+    // what `custody_for` matches its signer against.
+    let (subject_signer, subject) =
+        register_actor(&engine, subject_alias, identity_type::USER).await;
+    let subject = subject.as_str();
 
     // No assurance on record → read None; the protective viewer default is minor.
     assert!(ciris_server::safety::age::read_age_level(&engine, subject)
@@ -502,6 +556,7 @@ async fn age_assurance_emit_read_roundtrip_and_misdeclaration_does_not_slash() {
     ciris_server::safety::age::emit_age_assurance(
         &engine,
         subject,
+        Some(&subject_signer),
         AssuranceLevel::SelfDeclared,
         AgeBand::Adult,
     )
@@ -520,6 +575,7 @@ async fn age_assurance_emit_read_roundtrip_and_misdeclaration_does_not_slash() {
     ciris_server::safety::age::emit_age_assurance(
         &engine,
         subject,
+        Some(&subject_signer),
         AssuranceLevel::SelfDeclared,
         AgeBand::Minor,
     )
@@ -784,9 +840,14 @@ async fn existence_invariant_auto_promotes_highest_track_record_on_lapse() {
     let low = "ledger-low";
     let high = "ledger-high";
     let mid = "ledger-mid";
-    for m in [founder, low, high, mid] {
-        register_party(&engine, m, identity_type::AGENT).await;
-    }
+    // v39.0.0: a member's track record is that MEMBER's claim, so each member
+    // signs its own rows into the mesh. Registered under the derived id, which
+    // is what `custody_for` matches their signers against.
+    let (_, founder) = register_actor(&engine, founder, identity_type::AGENT).await;
+    let (low_signer, low) = register_actor(&engine, low, identity_type::AGENT).await;
+    let (high_signer, high) = register_actor(&engine, high, identity_type::AGENT).await;
+    let (mid_signer, mid) = register_actor(&engine, mid, identity_type::AGENT).await;
+    let (founder, low, high, mid) = (founder.as_str(), low.as_str(), high.as_str(), mid.as_str());
     let founder_owner = make_owner_bound(&engine, founder).await;
     for m in [low, high, mid] {
         make_owner_bound(&engine, m).await;
@@ -811,17 +872,21 @@ async fn existence_invariant_auto_promotes_highest_track_record_on_lapse() {
         "the owner-bound founder is a live moderator"
     );
     assert_eq!(
-        seed_track_record(&engine, high, community, 3).await,
+        seed_track_record_signed(&engine, high, &high_signer, community, 3).await,
         3,
         "with a live moderator the merit rows DO reach federation tier"
     );
-    assert_eq!(seed_track_record(&engine, mid, community, 1).await, 1);
+    assert_eq!(
+        seed_track_record_signed(&engine, mid, &mid_signer, community, 1).await,
+        1
+    );
     // CC 6.2.3.1 / CC 2.1 — `low` self-witnesses 5 actions. They promote fine
     // (the substrate has no opinion on `witness_relation`); the READ excludes
     // them. This is the anti-gaming exclusion biting in the real read path, not
     // just in the pure predicate's unit test.
     assert_eq!(
-        seed_track_record_witnessed(&engine, low, community, 5, Some("self")).await,
+        seed_track_record_witnessed(&engine, low, Some(&low_signer), community, 5, Some("self"))
+            .await,
         5,
         "self-witnessed rows are stored + promoted like any other"
     );
@@ -1285,8 +1350,12 @@ async fn watchlist_csam_additionally_requires_takedown() {
 async fn watchlist_publish_hook_is_opt_in_and_defers_the_matcher() {
     let engine = node().await;
     let community = "community:wl-hook";
-    let founder = "hook-founder";
-    register_party(&engine, founder, identity_type::AGENT).await;
+    let founder_alias = "hook-founder";
+    // v39.0.0: the enable is the enabling authority's claim, and that authority
+    // signs it into the mesh — the node no longer signs it for them.
+    let (founder_signer, founder) =
+        register_actor(&engine, founder_alias, identity_type::AGENT).await;
+    let founder = founder.as_str();
     make_owner_bound(&engine, founder).await;
     put_community(&engine, community, &[(founder, "founder")]).await;
 
@@ -1311,7 +1380,7 @@ async fn watchlist_publish_hook_is_opt_in_and_defers_the_matcher() {
             .await
             .unwrap()
     );
-    watchlist::enable_watchlist(&engine, founder, &enable)
+    watchlist::enable_watchlist(&engine, founder, Some(&founder_signer), &enable)
         .await
         .expect("enable watchlist");
 
@@ -1330,9 +1399,15 @@ async fn watchlist_publish_hook_is_opt_in_and_defers_the_matcher() {
     );
 
     // Disable (a withdraws) → consent requires revocability → the hook admits.
-    watchlist::disable_watchlist(&engine, founder, community, "csam:ncmec")
-        .await
-        .expect("disable watchlist");
+    watchlist::disable_watchlist(
+        &engine,
+        founder,
+        Some(&founder_signer),
+        community,
+        "csam:ncmec",
+    )
+    .await
+    .expect("disable watchlist");
     assert!(
         watchlist::watchlist_enables_for_group(&engine, community)
             .await
