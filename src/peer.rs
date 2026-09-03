@@ -151,13 +151,68 @@ pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 /// ascending + deduplicated** (see [`normalize_prefixes`]) so consumers agree
 /// byte-for-byte.
 ///
-/// # `trace:` is here because it is the whole point of the grant
+/// # THE LIST IS EDGE'S, RE-EXPORTED — not restated here
 ///
-/// This was `["capacity:"]` alone, which had the direction backwards: a node
-/// does not author `capacity:*` ABOUT ITSELF — the canonical does, and sends it
-/// back. What a node replicates UPSTREAM is its traces. So the default granted
-/// the one family that barely flows in this direction and withheld the one that
-/// matters.
+/// This is literally
+/// [`ciris_edge::replication::attestation_bind::DEFAULT_CONSENT_PREFIXES`],
+/// widened from `[&str; N]` to a slice and nothing else. It used to be a second
+/// copy of that list spelled out in this file, and the copy had already forked:
+/// ours said `["capacity:", "self:delegates_to:", "trace:"]` while edge's said
+/// `["capacity:", "chat:", "ownership:", "self:delegates_to:", "trace:"]`.
+///
+/// `pub const … = &edge::CONST`, not a re-declaration: a rename in edge is a
+/// compile error here and a widening is picked up automatically, so the two can
+/// no longer disagree. Same reasoning as the `pub use ciris_edge::chat::…` block
+/// at the top of [`crate::contacts_chat`].
+///
+/// # What these prefixes gate — and what they do NOT
+///
+/// They do **not** gate the serve wire. The consent send-set a peer is matched
+/// against is built from peer IDS alone (edge's `resolved_state` over
+/// `list_consent_peers`; persist's `consent_peer_set` query selects
+/// `peer_key_id` and reads no prefix column), and the withhold is decided on
+/// send-set membership before any prefix is consulted. A missing prefix
+/// therefore withholds neither the Attestation plane nor a row at that gate.
+///
+/// What they gate is COVERAGE — which rows a live grant lets the consent sweep
+/// place. persist's `resolve_row_placement` is the single predicate for both
+/// passes of `promote_consented_backlog` (which this node runs on a timer, see
+/// [`crate::replication_reconcile`]) and returns `None` — row skipped — for any
+/// dimension no live grant's `attestation_prefixes` covers. Pass 1 enters
+/// local-tier rows into the mesh; pass 2 widens rows already federation-tier but
+/// still at `cohort_scope` `self`/`family`.
+///
+/// # What the two missing prefixes cost today: nothing I could demonstrate
+///
+/// Stated plainly rather than inflated in either direction. Each namespace the
+/// copy was missing has a server path that performs its own placement and does
+/// not lean on the sweep:
+///
+///   * `chat:` — chat rides `chat:message:v1`. `POST /v1/contacts` already
+///     pushes this prefix onto the default explicitly before ensuring coverage,
+///     and a room only opens for a contact, so the omission was masked wherever
+///     chat actually runs.
+///   * `ownership:` — persist's `owner_binding_delegates_to_envelope` stamps
+///     `ownership:responsible_party:node:v1` (`types.rs` `owner_binding::DIMENSION`),
+///     NOT the `self:delegates_to:v1` axis, and [`crate::auth::ownership`] writes
+///     exactly that dimension. Those rows ARE pass-2 candidates — but they are
+///     attested by the OWNER, and the sweep widens with `actor: None`, so persist
+///     refuses the delegated widening and returns `AwaitingActor`. What actually
+///     places them is the owner-signed
+///     [`crate::auth::ownership::promote_owner_binding_to_federation`].
+///
+/// So: duplication with no behavioural difference on today's paths. That is the
+/// reason to single-source it now, not an argument against — the cost of a
+/// restated constant is never what it broke on the day it forked, it is that
+/// nothing in this file could tell you it had forked at all.
+///
+/// # Why each member is there (the history the copy carried)
+///
+/// `trace:` is the whole point of the grant. The default was `["capacity:"]`
+/// alone, which had the direction backwards: a node does not author `capacity:*`
+/// ABOUT ITSELF — the canonical does, and sends it back. What a node replicates
+/// UPSTREAM is its traces. So the default granted the one family that barely
+/// flows in this direction and withheld the one that matters.
 ///
 /// The consequence was total and silent. `promote_consented_backlog` only sweeps
 /// rows whose dimension a live grant's `attestation_prefixes` COVER, so every
@@ -172,22 +227,20 @@ pub const CONSENT_DIMENSION: &str = "consent:replication:v1";
 /// `covered_prefixes: ["capacity:","trace:"]`. A fixture that supplies the value
 /// production defaults cannot prove the default; it proved a path production
 /// could not take. `default_covers_the_trace_plane` below is the gate.
-pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] = &[
-    "capacity:",
-    // CIRISServer#472 arc — the AUTHORITY plane. Owner-binding `delegates_to`
-    // rows ride the attestation plane under this prefix
-    // (`self_at_login::DIMENSION_DELEGATES_TO` = "self:delegates_to:v1"), and
-    // WITHOUT it in the default grant no node ever serves anyone's bindings:
-    // measured on the chat ladder — every node held only its OWN owner-binding,
-    // so every person→node resolution walk starved one hop out (our consent
-    // healer, edge v18.4's #523 owner_of serve widening, the far side's
-    // transcript reads). A mesh that does not replicate the records that say
-    // WHO SPEAKS FOR WHOM cannot verify authority beyond one hop — the bindings
-    // are federation-tier and hybrid-signed precisely so peers can check them
-    // (§8.1.12.7 step 5, "promote so peers verify the agent's authority").
-    "self:delegates_to:",
-    "trace:",
-];
+///
+/// `self:delegates_to:` is the CIRISServer#472 arc — the AUTHORITY plane.
+/// Owner-binding `delegates_to` rows ride the attestation plane under this
+/// prefix (`self_at_login::DIMENSION_DELEGATES_TO` = "self:delegates_to:v1"),
+/// and WITHOUT it in the default grant no node ever serves anyone's bindings:
+/// measured on the chat ladder — every node held only its OWN owner-binding, so
+/// every person→node resolution walk starved one hop out (our consent healer,
+/// edge v18.4's #523 owner_of serve widening, the far side's transcript reads).
+/// A mesh that does not replicate the records that say WHO SPEAKS FOR WHOM
+/// cannot verify authority beyond one hop — the bindings are federation-tier and
+/// hybrid-signed precisely so peers can check them (§8.1.12.7 step 5, "promote
+/// so peers verify the agent's authority").
+pub const DEFAULT_GRANT_ATTESTATION_PREFIXES: &[&str] =
+    &ciris_edge::replication::attestation_bind::DEFAULT_CONSENT_PREFIXES;
 
 /// **The operator-facing consent disclosure — the copy a setup wizard SHOWS.**
 ///
@@ -1509,12 +1562,52 @@ mod default_prefix_gate {
     #[test]
     fn default_covers_the_trace_plane() {
         let prefixes = default_attestation_prefixes();
-        for dimension in ["trace:complete:v1", "capacity:sustained_coherence:v1"] {
+        for dimension in [
+            "trace:complete:v1",
+            "capacity:sustained_coherence:v1",
+            // The two planes the restated copy of this list was missing. Named
+            // by the producers' own constants, not by literals — a dimension
+            // spelled here would be a third copy of the thing that forked.
+            ciris_edge::chat::CHAT_MESSAGE_DIMENSION,
+            ciris_persist::federation::types::owner_binding::DIMENSION,
+            ciris_persist::federation::self_at_login::DIMENSION_DELEGATES_TO,
+        ] {
             assert!(
                 ciris_persist::federation::consent_grammar::covers(&prefixes, dimension),
                 "the default replication grant does not cover {dimension} — \
                  promote_consented_backlog will skip every such row, leaving it at \
                  (cohort_scope=self, tier=local) and never offered. Default is {prefixes:?}"
+            );
+        }
+    }
+
+    /// Our default must cover **everything edge's default covers**.
+    ///
+    /// Stated as a property over
+    /// [`ciris_edge::replication::attestation_bind::DEFAULT_CONSENT_PREFIXES`]
+    /// rather than as a literal five-element list, because a test that restates
+    /// the list is the same defect one layer up: that is precisely how the
+    /// three-element copy in this file stayed green while it was missing `chat:`
+    /// and `ownership:`. Superset, not equality — this node may legitimately
+    /// grant MORE than the substrate's floor, but never less.
+    ///
+    /// `DEFAULT_GRANT_ATTESTATION_PREFIXES` is edge's constant today, so this
+    /// holds trivially. It is a gate against the next person re-declaring it.
+    #[test]
+    fn default_covers_everything_edges_default_does() {
+        let ours = default_attestation_prefixes();
+        for prefix in ciris_edge::replication::attestation_bind::DEFAULT_CONSENT_PREFIXES {
+            // A dimension inside `prefix`'s namespace and no other's — `covers`
+            // is `starts_with`, so this passes only if our set carries `prefix`
+            // itself or something strictly shorter that still opens the plane.
+            let probe = format!("{prefix}probe:v1");
+            assert!(
+                ciris_persist::federation::consent_grammar::covers(&ours, &probe),
+                "our default grant does not cover edge's `{prefix}` namespace. \
+                 persist's `resolve_row_placement` — the single predicate for both \
+                 passes of `promote_consented_backlog` — returns None for a dimension \
+                 no live grant covers, so every such row is silently skipped by the \
+                 sweep and stays where it was written. Ours is {ours:?}"
             );
         }
     }
