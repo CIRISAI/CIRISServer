@@ -179,7 +179,7 @@ async fn seed(
     )
     .await;
     let actor = actor_for(attester);
-    ciris_server::attestation_crossing::enter_mesh_at(
+    let outcome = ciris_server::attestation_crossing::enter_mesh_at(
         engine,
         &id,
         &Audience::Federation,
@@ -188,7 +188,15 @@ async fn seed(
     )
     .await
     .expect("promote claim to federation tier");
-    id
+    // THE PLACED ROW'S ID, not the local one. The claim reaches the federation as
+    // a widening with its own id, and the `self` row it widens never replicates —
+    // so the widening is the row the detector sees and the row a peer could
+    // fetch, and it is therefore the id the evidence must name. A fixture
+    // returning the local id would be asserting against a row no off-node reader
+    // can resolve.
+    ciris_server::attestation_crossing::placed_id(&outcome)
+        .expect("the seeded claim must reach the federation")
+        .to_owned()
 }
 
 /// The local-tier half of [`seed`] — the unpublished draft, before promotion.

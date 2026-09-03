@@ -157,7 +157,14 @@ pub fn placed_id(outcome: &MeshCrossingOutcome) -> Option<&str> {
 /// the pair a revision. Both happened here before this existed.
 #[must_use]
 pub fn is_placement_widening(row: &Attestation) -> bool {
-    row.attestation_envelope
+    is_placement_widening_envelope(&row.attestation_envelope)
+}
+
+/// [`is_placement_widening`] over the envelope alone, for callers that hold the
+/// signed body without the row around it (`attest::claim_view`).
+#[must_use]
+pub fn is_placement_widening_envelope(envelope: &serde_json::Value) -> bool {
+    envelope
         .get(paths::DIFFERS_IN)
         .and_then(|v| v.as_array())
         .is_some_and(|entries| {

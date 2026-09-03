@@ -82,7 +82,7 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// the signed envelope, so it has no unsigned column twin to diverge from, which
 /// is why persist shipped it with no migration.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "e019ecb873f662399c13515414849a8d055d5ec2f0893e21f74cdccf6f60a111";
+    "e7135559a3d843ecff3ad34ee3b1a10acf92b33f199a327758139969e19f5699";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 
