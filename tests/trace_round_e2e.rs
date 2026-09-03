@@ -63,7 +63,7 @@
 //!   gate's two legs. Edge's read DX is per-plane (`chat::ChatMessage::from_row`
 //!   opens a room); there is no `trace:*` opener, and the round's question is
 //!   "is the row THERE", which is persist's to answer.
-
+//!
 //! Requires `--features test-anchor`: conferring `infra:serve` is an ACCORD act
 //! (2-of-3 co-scrub), not a field you can set — persist refuses a self-claimed
 //! role with `InfraAttestRoleNotAccordConferred`, which is the substrate working.

@@ -207,7 +207,21 @@ async fn share_in_room(
         attestation: row.clone(),
     })
     .await
-    .map_err(|e| format!("put {}: {e}", row.attestation_id))?;
+    .map_err(|e| {
+        tracing::error!(
+            attestation_id = %row.attestation_id,
+            attester = %row.attesting_key_id,
+            cohort_scope = %row.cohort_scope,
+            error = %e,
+            "chat: the LOCAL put refused the row, so nothing was placed. The local \
+             door verifies the row's hybrid signature against the ATTESTER's \
+             registered pubkeys — so the usual cause is an attester whose key is \
+             not in `federation_keys`, or one registered with different pubkeys \
+             than the signer that just signed. Check `get_public_key(attester)` \
+             and that the author's fed-ID was minted with the seed this node holds"
+        );
+        format!("put {}: {e}", row.attestation_id)
+    })?;
     let crossing = share(
         dir,
         &row,
@@ -217,7 +231,25 @@ async fn share_in_room(
         CrossingBasis::ProducerAuthority,
         signers,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            attestation_id = %row.attestation_id,
+            attester = %row.attesting_key_id,
+            room = %room,
+            error = %e,
+            "chat: the row was stored but NOT placed in the room. `share` runs \
+             `enter_mesh` (tier crossing over the same bytes) then \
+             `widen_audience` (a `supersedes` the ACTOR signs at the room's \
+             scope). `CustodyIsNotTheActor` means the actor's \
+             `derived_key_id()` does not equal the row's `attesting_key_id` — \
+             see `identity::hardware_user_crossing_signer`, since a signer built \
+             for `attest::emit` carries the already-derived id and derives twice \
+             here. `check_promotion_cohort_standing` means the community \
+             placement names a party other than its producer"
+        );
+        e
+    })?;
     match crossing.shared {
         // The PLACED row's id — the widening, which is what the room reads.
         Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
@@ -226,10 +258,25 @@ async fn share_in_room(
         Shared::AwaitingActor {
             attestation_id,
             age_ms,
-        } => Err(format!(
-            "the row {attestation_id} waits for its author's signer ({age_ms} ms) — \
+        } => {
+            tracing::warn!(
+                attestation_id = %attestation_id,
+                attester = %row.attesting_key_id,
+                room = %room,
+                age_ms,
+                "chat: the row is WAITING for its author's signature and has not \
+                 been placed — an `Ok` that did nothing. `custody_for` will sign \
+                 as the node only for a row this node attested; for anyone \
+                 else's row it needs that key's own signer. Nothing more happens \
+                 on its own: either the author signs it, or it sits. If this is \
+                 a row this node SHOULD be able to place, the actor passed to \
+                 `share` was `None` or was keyed the wrong way"
+            );
+            Err(format!(
+                "the row {attestation_id} waits for its author's signer ({age_ms} ms) — \
              a chat row is signed by the person, and this node does not hold that key"
-        )),
+            ))
+        }
     }
 }
 
@@ -270,6 +317,17 @@ async fn room_key(
     // no fed-ID and never will — requiring one to read would revoke a permission
     // the owner deliberately granted, on a technicality of key derivation.
     let Some(author) = author else {
+        tracing::debug!(
+            room = %room,
+            me = %me,
+            peer = %peer,
+            "chat: no author signer in hand, so the room cannot be keyed on this \
+             call. This is the READ path for a delegate with no fed-ID of its \
+             own — expected, and it means the delegate can only read a room some \
+             earlier call already keyed. If the OWNER sees this, their fed-ID \
+             could not be opened: check the seed dir, the `.backend` marker and \
+             the `active_user_alias` pointer"
+        );
         return Ok(None);
     };
 
@@ -285,7 +343,21 @@ async fn room_key(
     match PairRole::of(me, peer) {
         PairRole::Creator => {
             let Some(kp_bytes) = chat::key_package_from(&*dir, peer, &room).await? else {
-                return Ok(None); // the joiner has not published theirs yet
+                // the joiner has not published theirs yet
+                tracing::info!(
+                    room = %room,
+                    creator = %me,
+                    joiner = %peer,
+                    "chat: room not keyed — WE ARE THE CREATOR and the joiner's \
+                     KeyPackage has not arrived. The joiner publishes it on their \
+                     first `POST /v1/chat` or send, and it must then REPLICATE to \
+                     this node: it is a `chat:` row at the room's community scope, \
+                     so it rides the same consent grant as a message. If it never \
+                     arrives, look at the joiner's withholds for this room before \
+                     looking here — nothing on this node can complete the \
+                     handshake alone"
+                );
+                return Ok(None);
             };
             let group = CohortGroup::create(store, &room, me, 16)
                 .await
@@ -342,8 +414,22 @@ async fn room_key(
                 }
             };
             let Some((welcome, _epoch)) = chat::welcome_from(&*dir, peer, &room).await? else {
+                // the creator has not answered yet
+                tracing::info!(
+                    room = %room,
+                    joiner = %me,
+                    creator = %peer,
+                    "chat: room not keyed — WE ARE THE JOINER, our KeyPackage is \
+                     published, and the creator's Welcome has not arrived. The \
+                     creator answers when it next reads the room, so this \
+                     converges on its own IF our KeyPackage reached them. Check \
+                     that first: it is a `chat:` row at the room's community \
+                     scope and rides the consent grant. `PairRole::of` gives the \
+                     lexicographically smaller fed-ID the creator's role, so the \
+                     roles are fixed by the two ids and never negotiated"
+                );
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
-                return Ok(None); // the creator has not answered yet
+                return Ok(None);
             };
             let group = CohortGroup::join(store, &room, material, &welcome, 16)
                 .await
@@ -1606,6 +1692,13 @@ async fn collect_messages(
     }
 
     let mut out: Vec<ChatMessage> = Vec::new();
+    // Counters, so an empty transcript says WHICH step emptied it. Every one of
+    // these has been the answer at least once: no members (roster never
+    // replicated), rows but none at community scope (the widening never ran),
+    // rows in the room that would not open (sealed at an epoch this member does
+    // not hold).
+    let mut not_community = 0usize;
+    let mut not_this_room = 0usize;
     for row in &rows {
         // THE PLACED ROW ONLY. A message the owner sent exists twice on their own
         // node — the `self` original they signed, and the `community` widening
@@ -1614,10 +1707,12 @@ async fn collect_messages(
         // both here would render every one of your own messages twice, and only
         // to you. The room's transcript is what the room can see.
         if row.cohort_scope != cohort_scope::COMMUNITY {
+            not_community += 1;
             continue;
         }
         // Edge decides whether this row belongs to the room AND opens it.
         let Some(opened) = ciris_edge::chat::ChatMessage::from_row(row, community_id, key) else {
+            not_this_room += 1;
             continue;
         };
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
@@ -1657,6 +1752,44 @@ async fn collect_messages(
             .cmp(&b.asserted_at)
             .then_with(|| a.attestation_id.cmp(&b.attestation_id))
     });
+
+    // ONE LINE THAT EXPLAINS AN EMPTY TRANSCRIPT. Every count here has been the
+    // answer to "why is the room blank" at least once, and each points somewhere
+    // different — which is the whole reason they are counted separately rather
+    // than summed.
+    let unopened = out.iter().filter(|m| m.body.is_none()).count();
+    if out.is_empty() || unopened > 0 {
+        tracing::warn!(
+            room = %community_id,
+            members = members.len(),
+            rows_by_members = rows.len(),
+            skipped_not_community_scope = not_community,
+            skipped_other_room = not_this_room,
+            projected = out.len(),
+            unopened,
+            "chat: the transcript is empty or partly unreadable — read the counts \
+             left to right, the first surprising one is the answer. members=0: \
+             the community row never replicated here, so nothing is anchored \
+             (check the roster plane, not the message). rows_by_members=0: the \
+             members are known but none of their rows are on this node — a \
+             DELIVERY problem, look at the sender's withholds. \
+             skipped_not_community_scope>0 with projected=0: the rows exist but \
+             sit at `self`, so `widen_audience` never placed them and only this \
+             node can see them. skipped_other_room>0: rows carry a different \
+             `community_key_id` than the one asked for — the two sides derived \
+             different room ids. unopened>0: the rows arrived and belong here but \
+             the seal will not open, which is an MLS epoch this member does not \
+             hold (a row sealed before we joined, or sealed under edge v19's key \
+             derivation, which v20 deliberately cannot read)"
+        );
+    } else {
+        tracing::debug!(
+            room = %community_id,
+            members = members.len(),
+            projected = out.len(),
+            "chat: transcript assembled"
+        );
+    }
     Ok(out)
 }
 
