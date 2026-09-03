@@ -36,6 +36,33 @@
 //! `DirectoryStateAdapter` bridges edge's sync `StateProvider` trait to persist's
 //! async surface via `block_in_place` + `block_on`, which panics on a
 //! current-thread runtime.
+//!
+//! # What still calls persist directly, and why
+//!
+//! The CROSSING is edge's — `attestation_bind::publish` places the second trace
+//! here, and `advertise_verdict` is held against edge's own `local_refs`. What
+//! remains on persist remains because edge does not own it, not because it was
+//! missed:
+//!
+//! * **`promote_consented_backlog`** — persist's consent-driven SWEEP, the
+//!   production placement path (`replication_reconcile::reconcile_once`) and the
+//!   only thing that ever places a trace sealed BEFORE its grant existed. Edge
+//!   has no sweep; `share` is per-row. Both doors are driven below.
+//! * **`emit_attestation_self`** — AUTHORSHIP. Edge ships producers for the two
+//!   rows it authors itself (`owner_binding_attestation`,
+//!   `replication_consent_attestation`) and none for `trace:*`; persist's emit
+//!   chokepoint is what stamps the instants into the signed bytes
+//!   (CIRISPersist#598) and binds the row mirror (#643).
+//! * **`put_public_key` / `signed_canonical_record_with_roles` /
+//!   `establish_trust_root_side`** — the KEY and TRUST-ROOT planes. Accord
+//!   conferral is a 2-of-3 co-scrub against a roster persist resolves itself; a
+//!   fixture cannot reach it through any edge surface, which is the whole reason
+//!   this file needs `--features test-anchor`.
+//! * **`list_attestations_by` / `get_attestation` / `has_accord_conferred_role` /
+//!   `capability_roots_to_trusted_root`** — READS of the corpus and of the serve
+//!   gate's two legs. Edge's read DX is per-plane (`chat::ChatMessage::from_row`
+//!   opens a room); there is no `trace:*` opener, and the round's question is
+//!   "is the row THERE", which is persist's to answer.
 
 //! Requires `--features test-anchor`: conferring `infra:serve` is an ACCORD act
 //! (2-of-3 co-scrub), not a field you can set — persist refuses a self-claimed
