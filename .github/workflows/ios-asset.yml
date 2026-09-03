@@ -69,9 +69,16 @@ jobs:
       # `pip` installs on the strength of the TAG. A wheel tagged `ios_13_0`
       # around the 14.0 simulator slice installs on iOS 13 and fails at load.
       #
-      # 13.0 is the floor the app targets, and pinning it here makes one number
-      # true of both slices, the tarball and the wheels alike.
-      # `tools/check_ios_wheel.py` refuses any wheel whose binary disagrees.
+      # 13.0 is the floor the app targets. It moves the DEVICE slice off its
+      # 10.0 default — measured, run 33721980725: 10.0 before, 13.0 after.
+      #
+      # It does NOT move the simulator, and that is not a failure to configure.
+      # The arm64 iPhone simulator did not exist before iOS 14 (it arrived with
+      # Apple silicon), so the toolchain floors `aarch64-apple-ios-sim` at 14.0
+      # and no deployment target lowers it. The two slices therefore carry
+      # genuinely different minimums, and each wheel's tag states its OWN —
+      # `build_ios_wheel.py` reads it out of the binary rather than being told.
+      # `tools/check_ios_wheel.py` refuses any wheel whose tag disagrees.
       IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
@@ -266,7 +273,6 @@ jobs:
           python3 tools/build_ios_wheel.py
           --so "dist/${{ matrix.dir }}/_native.abi3.so"
           --sdk ${{ matrix.sdk }}
-          --ios-min "$IPHONEOS_DEPLOYMENT_TARGET"
           --out dist-wheel
       # THE GATE. A wheel filename is a promise about a binary nobody opens, and
       # iOS is the platform where no build machine and no CI job ever loads the

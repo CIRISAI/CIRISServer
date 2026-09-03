@@ -51,6 +51,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# ONE Mach-O parser in this repo. The tag's version comes from the binary, and
+# the gate reads the binary back — if those were two parsers they could disagree,
+# and the disagreement would be invisible until a wheel shipped.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_ios_wheel import probe_macho  # noqa: E402
+
 # `cp310-abi3` matches every other wheel in the matrix: pyo3's `abi3-py310`
 # means one wheel serves CPython 3.10+. Kept beside the iOS bits rather than
 # derived, because a wrong ABI tag here would be as silent as a wrong platform
@@ -81,9 +87,27 @@ def dist_info(tmp: Path) -> Path:
     return dirs[0]
 
 
-def build(so: Path, sdk: str, arch: str, ios_min: str, out_dir: Path) -> Path:
+def build(so: Path, sdk: str, arch: str, out_dir: Path) -> Path:
     if not so.is_file():
         raise SystemExit(f"no such extension: {so}")
+
+    # THE TAG STATES THE BINARY'S OWN MINIMUM, read out of its load commands
+    # rather than passed in beside it.
+    #
+    # It was an argument at first, pinned to `IPHONEOS_DEPLOYMENT_TARGET`, and CI
+    # proved that wrong on the first run: with the env var set to 13.0 the device
+    # slice moved to 13.0 and the SIMULATOR slice stayed at 14.0. Not a
+    # misconfiguration — the arm64 iPhone simulator did not exist before iOS 14
+    # (it arrived with Apple silicon), so the toolchain floors that target at
+    # 14.0 and no env var lowers it. The two slices have genuinely different
+    # minimums because they are genuinely different platforms, and a single
+    # asserted number can only be right about one of them.
+    #
+    # Deriving it means the tag cannot drift from the artifact it names. The
+    # deployment target still does real work — it is what moved the device slice
+    # off its 10.0 default — it just no longer has to be restated here.
+    info = probe_macho(so.read_bytes())
+    major, minor = info["minos"][0], info["minos"][1]
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -91,7 +115,6 @@ def build(so: Path, sdk: str, arch: str, ios_min: str, out_dir: Path) -> Path:
         name_version = di.name[: -len(".dist-info")]
         version = name_version.split("-")[-1]
 
-        major, minor = ios_min.split(".")[:2]
         tag = f"{PY_ABI_TAG}-ios_{major}_{minor}_{arch}_{sdk}"
         wheel_name = f"{name_version.replace('-', '-', 1)}-{tag}.whl"
 
@@ -151,17 +174,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--so", required=True, type=Path, help="the cross-compiled _native.abi3.so")
     ap.add_argument("--sdk", required=True, choices=["iphoneos", "iphonesimulator"])
     ap.add_argument("--arch", default="arm64")
-    ap.add_argument(
-        "--ios-min",
-        default="13.0",
-        help="minimum iOS, and the version in the tag. MUST match the binary's "
-        "own floor — tools/check_ios_wheel.py refuses a wheel where it does not.",
-    )
     ap.add_argument("--out", required=True, type=Path)
     a = ap.parse_args(argv)
     if not shutil.which("maturin"):
         raise SystemExit("maturin is not on PATH; it generates the dist-info")
-    build(a.so, a.sdk, a.arch, a.ios_min, a.out)
+    build(a.so, a.sdk, a.arch, a.out)
     return 0
 
 
