@@ -272,21 +272,11 @@ fn require_verb(
         .map(|deny| refuse(StatusCode::FORBIDDEN, reason_id, deny.detail))
 }
 
-// ─── The derived pair-community id ──────────────────────────────────────────
-
-/// **The convergent name for a two-party chat.**
-///
-/// `sha256` over the two `key_id`s sorted ascending and joined by a newline,
-/// under [`PAIR_COMMUNITY_PREFIX`]. Both properties are load bearing:
-///
-/// - **Sorted** so `pair(a, b) == pair(b, a)` — the two ends dial the same
-///   community without agreeing on who initiated.
-/// - **Separator-joined** so `("ab", "c")` and `("a", "bc")` cannot collide;
-///   `key_id`s carry no newline, so the concatenation is unambiguous.
-///
-/// Persist has no such convention of its own (searched: nothing in
-/// `federation/` derives a pair id), so this is the server's, stated once.
-#[must_use]
+// ─── The pair room ──────────────────────────────────────────────────────────
+//
+// The id itself is `chat::pair_community_key_id`, re-exported above. The note
+// that used to live here explained a derivation this file no longer owns; edge
+// states it, and both ends of a room now read the same sentence.
 
 /// The community's display name, derived from the same sorted pair so both ends
 /// author identical roster content.
