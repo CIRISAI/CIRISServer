@@ -102,7 +102,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use ciris_persist::federation::admission;
 use ciris_persist::federation::envelope::paths;
@@ -120,53 +119,32 @@ use ciris_persist::federation::{Audience, CrossingBasis};
 
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
-/// The `scores` dimension every chat message carries. Versioned because
-/// persist's `require_version_segment` demands a `:vN` segment on every `scores`
-/// dimension, and prefixed `chat:` because that prefix is NOT reserved by
-/// `default_reserved_prefix_rules` — an ordinary `user` identity may emit it.
-pub const CHAT_MESSAGE_DIMENSION: &str = "chat:message:v1";
-
-/// The replication-consent namespace prefix a contact grant must cover for chat
-/// messages to actually federate to the contact.
-pub const CHAT_ATTESTATION_PREFIX: &str = "chat:";
-
-/// The derived-id prefix for a two-party chat community. See the module docs.
-pub const PAIR_COMMUNITY_PREFIX: &str = "chat:pair:v1:";
+// ── THE CHAT VOCABULARY IS EDGE'S, RE-EXPORTED (CIRISServer#524) ────────────
+//
+// Every one of these was spelled here as a `const` of its own, and the copies
+// drifted exactly where a copy always drifts — at the member nobody re-reads.
+// Edge says `community_key_id`; this file said `community_id`. The two agreed
+// for as long as nothing compared them, and the moment edge v19.0.0 added a
+// per-recipient CC 5.2 audience gate the rows stopped being served: the wire
+// had two names for one field and only one of them was edge's.
+//
+// It survived our own tests because `is_message_for` asks persist's
+// `admission::envelope_cohort_target`, and BOTH spellings are in
+// `COHORT_TARGET_ENVELOPE_FIELDS` — so the reader resolved either while the
+// writer emitted the wrong one. A gate that accepts both names cannot tell you
+// that you are writing the wrong one.
+//
+// `pub use`, not re-declaration: a rename in edge is now a compile error here
+// instead of a silent divergence on the wire.
+pub use ciris_edge::chat::{
+    pair_community_key_id, CHAT_ATTESTATION_PREFIX, CHAT_MESSAGE_DIMENSION, FIELD_BODY,
+    FIELD_COMMUNITY_ID, FIELD_CONTENT_TYPE, FIELD_ON_BEHALF_OF, PAIR_COMMUNITY_PREFIX,
+};
 
 /// `unanimous` — the honest `consensus_protocol` for a two-party community
 /// (persist's `check_consensus_protocol_form` accepts it as a canonical form).
 const PAIR_CONSENSUS_PROTOCOL: &str = "unanimous";
 
-/// Envelope member naming the community a message belongs to. NOT an
-/// `envelope::paths` constant — persist types no cohort-target field (see
-/// `check_promotion_cohort_standing`'s own note that "the row has no field to
-/// name one"), so this is server vocabulary, spelled the same way
-/// `safety::moderation` already spells it.
-const FIELD_COMMUNITY_ID: &str = "community_id";
-/// **The attribution member: whose words these are.**
-///
-/// The row is attested and signed by the NODE (see `send_message` for why it
-/// cannot be the owner on this substrate), so the author cannot be read off
-/// `attesting_key_id`. It rides here instead — INSIDE the signed envelope, so it
-/// is covered by the same signature the far side verifies and a relay cannot
-/// rewrite it.
-///
-/// Named to persist's own §8.1.12.7 idiom, which spells an acting party as a
-/// `<role>_key_id` member beside the claim (`delegates_to_agent_envelope` →
-/// `agent_occurrence_key_id`; `partnership_grant_envelope` →
-/// `partner_occurrence_key_id`), and to the tree's existing `on_behalf_of`
-/// vocabulary (`auth::session` logs a delegated call as
-/// `on_behalf_of = <owner>`).
-///
-/// NOT an `envelope::paths` constant: `chat:message:v1` is a new family, so this
-/// member is ours to PROPOSE. Blessing it into persist's superset manifest is
-/// part of the substrate ask — until then it is server vocabulary, and the
-/// single-source rule (SRV-1) binds only the keys persist already owns.
-const FIELD_ON_BEHALF_OF: &str = "on_behalf_of_key_id";
-/// Envelope member carrying the message text.
-const FIELD_BODY: &str = "body";
-/// Envelope member carrying the body's media type.
-const FIELD_CONTENT_TYPE: &str = "content_type";
 /// What an omitted `content_type` means.
 const DEFAULT_CONTENT_TYPE: &str = "text/plain";
 
@@ -309,15 +287,6 @@ fn require_verb(
 /// Persist has no such convention of its own (searched: nothing in
 /// `federation/` derives a pair id), so this is the server's, stated once.
 #[must_use]
-pub fn pair_community_key_id(a: &str, b: &str) -> String {
-    let mut pair = [a, b];
-    pair.sort_unstable();
-    let mut h = Sha256::new();
-    h.update(pair[0].as_bytes());
-    h.update(b"\n");
-    h.update(pair[1].as_bytes());
-    format!("{PAIR_COMMUNITY_PREFIX}{}", hex::encode(h.finalize()))
-}
 
 /// The community's display name, derived from the same sorted pair so both ends
 /// author identical roster content.
