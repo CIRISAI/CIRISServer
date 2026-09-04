@@ -556,6 +556,11 @@ async fn delegate(
                     label,
                     Some(label),
                     seed_dir.clone(),
+                    // An AGENT identity, not this node's owner. It gets its
+                    // custody marker like any mint; the active-alias pointer
+                    // stays with the owner, or the last agent provisioned would
+                    // become who this node signs as.
+                    crate::identity::ActiveAlias::Leave,
                 )
                 .await
                 {

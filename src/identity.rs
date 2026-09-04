@@ -393,11 +393,27 @@ pub(crate) fn open_software_hybrid_identity(
 /// `PlatformSealed` / `Software` backends — DISTINCT from the node steward's
 /// `identity_dir`. `label` (the human's display name) yields the FSD-002
 /// `label-fingerprint` `key_id` when no explicit `fed_key_id` is given.
+/// Does this mint become the seed dir's ACTIVE identity?
+///
+/// `active_user_alias` is a per-seed-dir singleton meaning "the alias whose key
+/// is this node's owner", so only a mint that establishes the owner may set it.
+/// An agent/delegate mint writes its custody marker like any other and leaves the
+/// pointer alone — repointing it would hand the owner's signature to whichever
+/// identity was minted most recently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveAlias {
+    /// This IS the owner's identity: record it as the active one.
+    Adopt,
+    /// A secondary identity (an agent, a delegate). Leave the pointer as it is.
+    Leave,
+}
+
 pub async fn mint_user_identity(
     backend: UserIdentityBackend,
     key_id_alias: &str,
     label: Option<&str>,
     seed_dir: PathBuf,
+    active: ActiveAlias,
 ) -> Result<MintedUserIdentity> {
     let cfg = user_identity_config(&backend, key_id_alias, seed_dir);
 
@@ -485,6 +501,46 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user ML-DSA-65 public key: {e}"))?;
+
+    // ── THE TWO SIDECARS, WRITTEN BY THE MINT ────────────────────────────────
+    //
+    // These used to be written by `POST /v1/self/identity` and by nothing else,
+    // so an identity minted any other way could never be re-opened. That is not
+    // hypothetical: `provision_user_identity` (the CLI, and how a mesh node gets
+    // its owner fed-ID) mints under the default `<keystore_alias>-user` alias and
+    // wrote neither — while `owner_signer_capsule::acquire` is handed the
+    // owner-binding's DERIVED key_id. With no pointer, `active_user_alias`
+    // returns that derived id unchanged, the resolver looks for
+    // `<derived>.ed25519.seed`, and the file on disk is `<alias>.ed25519.seed`.
+    // The node then refuses every chat message with
+    // `chat.author_signer_unavailable: NoFedIdentity` — a claimed node that
+    // cannot sign as its own owner.
+    //
+    // Single-node tests never saw it because the FIXTURE wrote both files by
+    // hand. A fixture writing what production cannot is the tell, every time.
+    //
+    // They belong here because they describe the mint: WHICH backend actually
+    // held the key (after any ladder fallback — `backend` is the rung that
+    // succeeded, not the one requested) and WHICH alias is now current. Every
+    // caller gets them, and the route's own copies are gone.
+    write_user_backend_marker(&cfg.seed_dir, key_id_alias, backend.label());
+    if active == ActiveAlias::Adopt {
+        if let Err(e) = crate::write_active_user_alias(&cfg.seed_dir, key_id_alias) {
+            // Not fatal — the identity IS minted and the seed IS on disk. But say
+            // exactly what breaks, because the symptom appears much later and
+            // somewhere else entirely.
+            tracing::warn!(
+            error = %e,
+            alias = %key_id_alias,
+            seed_dir = %cfg.seed_dir.display(),
+            "minted the user fed-ID but could not record the active_user_alias \
+             pointer — owner-signer resolution falls back to the alias it was \
+             handed, so if that is the DERIVED key_id (which is what the owner \
+             signer capsule passes) this identity will not be found and the node \
+                 will refuse to sign as its owner"
+            );
+        }
+    }
 
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -1361,7 +1417,18 @@ async fn self_identity_handler(
     let mut last_err: Option<anyhow::Error> = None;
     for (rung, b) in ladder.into_iter().enumerate() {
         let backend_label = b.label();
-        match mint_user_identity(b, &alias, req.label.as_deref(), st.seed_dir.clone()).await {
+        // THE OWNER'S OWN MINT — the fed-ID wizard. Adopting is the point: the
+        // user minted under a name of their choosing and everything downstream
+        // must resolve to it rather than to `<node>-user`.
+        match mint_user_identity(
+            b,
+            &alias,
+            req.label.as_deref(),
+            st.seed_dir.clone(),
+            ActiveAlias::Adopt,
+        )
+        .await
+        {
             Ok(minted) => {
                 if rung > 0 {
                     tracing::warn!(
@@ -1369,17 +1436,11 @@ async fn self_identity_handler(
                         "custody fell back down the ladder — the requested hardware was unavailable"
                     );
                 }
-                // Record WHICH custody backend minted this identity, so the
-                // claim-remote signer (resolved at request time) re-opens it with
-                // the SAME backend (software seed file / TPM-sealed / YubiKey).
-                write_user_backend_marker(&st.seed_dir, &alias, backend_label);
-                // Record the active owner user alias so claim-remote + portable +
-                // post-claim owner-signer resolution (read at request time) find the
-                // signer the user just minted under THEIR chosen name, not <node>-user.
-                if let Err(e) = crate::write_active_user_alias(&st.seed_dir, &alias) {
-                    tracing::warn!(error = %e, alias = %alias,
-                        "could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
-                }
+                // The custody marker and the active_user_alias pointer are
+                // written by `mint_user_identity` itself now — they describe the
+                // mint, not this route, and every other caller needs them just as
+                // much. This route had the only copies, which is why an identity
+                // minted by the CLI could never be re-opened.
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -1700,6 +1761,7 @@ mod tests {
             "ciris-user",
             Some("Test Founder"),
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint software user identity");
@@ -1752,6 +1814,7 @@ mod tests {
             "ciris-user-sealed",
             Some("Sealed User"),
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint platform-sealed user identity");
@@ -1785,6 +1848,7 @@ mod tests {
             "claim-remote-user",
             None,
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint user identity");

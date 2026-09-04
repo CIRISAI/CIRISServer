@@ -272,6 +272,7 @@ impl OwnerIdentity {
             &alias,
             Some("Chat Owner"),
             seed_dir.clone(),
+            ciris_server::identity::ActiveAlias::Adopt,
         )
         .await
         .expect("mint the owner's fed-ID");
@@ -280,18 +281,25 @@ impl OwnerIdentity {
             "expected a derived `{alias}-<fp>` key_id, got {}",
             minted.key_id
         );
-        // The two files `POST /v1/self/identity` writes beside the seed, and both
-        // matter here. The capsule is handed the owner-binding's DERIVED id as
-        // its default alias, so WITHOUT the pointer it looks for
-        // `<derived>.ed25519.seed` and finds nothing; the marker is what makes
-        // the re-open choose the same custody backend the mint used.
-        std::fs::write(
-            seed_dir.join(format!("{alias}.backend")),
-            UserIdentityBackend::Software.label(),
-        )
-        .expect("record the custody-backend marker");
-        ciris_server::write_active_user_alias(&seed_dir, &alias)
-            .expect("record the active_user_alias pointer");
+        // THE FIXTURE NO LONGER WRITES THESE. It used to hand-write the custody
+        // marker and the `active_user_alias` pointer beside the seed, because
+        // only `POST /v1/self/identity` wrote them — so every mint reached any
+        // other way produced an identity nothing could re-open, and this fixture
+        // papered over it. `mint_user_identity` writes both now; asserting on
+        // them here is what keeps that true.
+        assert!(
+            seed_dir.join(format!("{alias}.backend")).exists(),
+            "the mint must record the custody backend beside the seed — without it \
+             the re-open can pick a different backend than the one that minted"
+        );
+        assert_eq!(
+            ciris_server::active_user_alias(&seed_dir, &minted.key_id),
+            alias,
+            "the mint must record the active_user_alias pointer. The capsule is \
+             handed the owner-binding's DERIVED key_id, so without the pointer the \
+             resolver looks for `<derived>.ed25519.seed`, finds `<alias>.ed25519.seed` \
+             instead, and the node refuses to sign as its own owner"
+        );
         Self {
             alias,
             key_id: minted.key_id,

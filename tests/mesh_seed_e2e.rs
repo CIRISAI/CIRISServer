@@ -233,6 +233,7 @@ async fn setup_local_owner(
         owner_alias,
         Some("Test Owner"),
         seed_dir.to_path_buf(),
+        ciris_server::identity::ActiveAlias::Adopt,
     )
     .await
     .expect("mint owner identity");

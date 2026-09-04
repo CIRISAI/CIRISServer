@@ -312,6 +312,7 @@ impl OwnerFedId {
             &alias,
             Some("Bench Owner"),
             seed_dir.clone(),
+            ciris_server::identity::ActiveAlias::Adopt,
         )
         .await
         .expect("mint the owner's fed-ID");
