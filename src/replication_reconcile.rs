@@ -36,6 +36,117 @@ use tokio::sync::{watch, Notify};
 
 use crate::config_reconcile::ResolvedConfig;
 
+/// Say WHICH rows the consent sweep reported `awaiting_actor` for, and what
+/// each one means — because the count alone was wrong three ways at once.
+///
+/// The sweep's candidates are federation-tier rows at an undiscoverable scope
+/// (`self` / `family`, CC 5.2) with no `supersedes` by their own attester. On
+/// every claimed node that set contains the OWNER-BINDING setup-complete wrote
+/// at `self`, and it stays in the set after a successful announce, because the
+/// announce widens by emitting a fresh federation-scope `delegates_to` rather
+/// than a `supersedes` — deliberately: persist's `owner_of` folds `delegates_to`
+/// rows only, and a peer holds nothing but the widening, so a `supersedes`
+/// widening of the binding would resolve the node to NO owner at every peer
+/// (CIRISPersist#807). So the binding's candidacy is not a stuck row:
+///
+/// * announced — the federation copy exists; the candidate is persist's
+///   bookkeeping, and this logs it at DEBUG;
+/// * not announced — P2P-only by the owner's choice (the wizard's opt-out);
+///   INFO, naming the route that widens it;
+/// * anything else — genuinely waiting on a signer this node does not hold;
+///   WARN, the only case that was ever a fault.
+///
+/// Read-only: it pages the same candidate list the sweep pages and writes
+/// nothing. Bounded to one page so a pathological corpus cannot turn a log
+/// line into a scan.
+async fn explain_awaiting_actor(engine: &Engine, node_key_id: &str, awaiting: u64) {
+    use ciris_persist::federation::admission::is_owner_binding_envelope;
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+
+    let dir = engine.federation_directory();
+    let candidates = match dir.list_widening_candidates(None, 64).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                awaiting_actor = awaiting,
+                error = %e,
+                "{awaiting} row(s) await their author's signer and this node could not read \
+                 which — the widening-candidate page failed"
+            );
+            return;
+        }
+    };
+    let mut unexplained = 0u64;
+    for row in &candidates {
+        if !is_owner_binding_envelope(&row.attestation_envelope) {
+            unexplained += 1;
+            tracing::warn!(
+                attestation_id = %row.attestation_id,
+                attester = %row.attesting_key_id,
+                attested = %row.attested_key_id,
+                cohort_scope = %row.cohort_scope,
+                "row awaits its author's signer and will NOT move on its own — the sweep \
+                 re-authors nobody's claim. If the author is a REMOTE key this is correct \
+                 and the row waits for that node. If the author is THIS node's owner, the \
+                 crossing was handed no actor (or one keyed for `attest::emit`, whose \
+                 `key_id` is already derived and so derives twice against `custody_for`) — \
+                 see `identity::hardware_user_crossing_signer`"
+            );
+            continue;
+        }
+        // The owner-binding. Is there a federation-scope `delegates_to` by the
+        // same owner onto the same node — i.e. has the owner announced?
+        let announced = dir
+            .list_attestations_for(&row.attested_key_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|a| {
+                a.attestation_type == attestation_type::DELEGATES_TO
+                    && a.attesting_key_id == row.attesting_key_id
+                    && a.cohort_scope == cohort_scope::FEDERATION
+                    && is_owner_binding_envelope(&a.attestation_envelope)
+            });
+        let ours = row.attested_key_id == node_key_id;
+        if announced {
+            tracing::debug!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                node = %row.attested_key_id,
+                "owner-binding listed as a widening candidate although the owner has \
+                 ANNOUNCED (a federation-scope delegates_to by the same owner exists). \
+                 Nothing to do: the announce widens by a fresh delegates_to because \
+                 owner_of folds delegates_to only (CIRISPersist#807)"
+            );
+        } else if ours {
+            tracing::info!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                "this node's owner-binding is held at cohort_scope `self` only: the owner \
+                 has NOT announced, so this node is P2P-only by choice — it can dial and \
+                 be dialled, and no peer can place it in a community audience. \
+                 POST /v1/federation/announce widens it (the wizard's default)"
+            );
+        } else {
+            tracing::info!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                node = %row.attested_key_id,
+                "a peer's owner-binding at cohort_scope `self` is held here without a \
+                 federation copy — their owner has not announced; the row waits for them"
+            );
+        }
+    }
+    if candidates.len() as u64 >= 64 && awaiting > candidates.len() as u64 {
+        tracing::warn!(
+            awaiting_actor = awaiting,
+            shown = candidates.len(),
+            "more rows await their author's signer than one page shows"
+        );
+    }
+    let _ = unexplained;
+}
+
 /// Run **one** reconcile pass: converge the runtime's live `Attestation`-kind
 /// **Initiator** set to the admitted `consent:replication` subjects in the corpus.
 /// Factored out of the loop so tests can drive a single deterministic step
@@ -102,20 +213,10 @@ pub async fn reconcile_once(
                 // AN `Ok` THAT DID NOTHING, on a cadence. These rows are counted
                 // every tick and moved by none of them: the sweep will not
                 // re-author another key's claim, which is the v39 correction
-                // itself, so nothing here converges with time. Said once per tick
-                // at warn because the info line above reads like progress.
-                tracing::warn!(
-                    awaiting_actor = report.awaiting_actor,
-                    "{} row(s) are stuck awaiting their author's signer and will NOT \
-                     move on their own — the sweep re-authors nobody's claim, so \
-                     this repeats every tick unchanged. If the author is a REMOTE \
-                     key, this is correct and the rows wait for that node. If the \
-                     author is THIS node's owner, the crossing was handed no actor \
-                     (or one keyed for `attest::emit`, whose `key_id` is already \
-                     derived and so derives twice against `custody_for`) — see \
-                     `identity::hardware_user_crossing_signer`",
-                    report.awaiting_actor,
-                );
+                // itself, so nothing here converges with time. Named row by row,
+                // because "stuck" was three different situations and the count
+                // alone read as a fault on every announced node in the mesh.
+                explain_awaiting_actor(engine, node_key_id, report.awaiting_actor).await;
             }
         }
         // Never fail the tick on the repair motion: the peer-set convergence

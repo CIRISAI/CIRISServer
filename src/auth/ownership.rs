@@ -1281,17 +1281,21 @@ pub async fn owner_binding_is_federation_scoped(engine: &Engine, node_key_id: &s
 /// owner-binding to `cohort_scope: federation` (public accountability) so the node
 /// counts as a federation participant.
 ///
-/// ## Mechanism — re-persist the PROVEN envelope at the wider cohort
+/// ## Mechanism — a FRESH `delegates_to` at federation scope, not a widening
 ///
-/// `cohort_scope` is NOT part of the user-signed envelope
-/// ([`build_owner_binding_envelope`]) — it is pure persisted-row metadata. So this
-/// re-persists the EXISTING binding's envelope and the owner's ORIGINAL hybrid
-/// signatures under `cohort_scope: federation`. The federation-tier ingest gate
-/// (`verify_federation_tier_ingest`) re-derives the canonical bytes from the
-/// (unchanged) envelope, cross-checks the (unchanged) `original_content_hash`, and
-/// Strict-re-verifies the owner's hybrid signature against the owner's REGISTERED
-/// pubkeys — so the SAME already-proven signature admits at the wider scope. No
-/// fresh signing, no user signer needed.
+/// The owner signs a new owner-binding at `cohort_scope: federation`
+/// ([`emit_steward_binding`]); the `self` original stays in place as a true
+/// statement about a narrower audience. This is deliberately NOT persist's
+/// `widen_audience` (a `supersedes` the actor signs at the wider scope), and
+/// the reason is a reader, not a writer: `owner_of` — the walk every peer
+/// makes to place a node in a community audience — folds `delegates_to` rows
+/// only (`live_delegation_granters`), and a peer never holds the `self` prior,
+/// so a `supersedes` widening of the binding would resolve this node to NO
+/// owner everywhere but here. Edge's own runner mints its bindings as
+/// `delegates_to` at federation scope for the same reason. The cost is that
+/// persist's consent sweep keeps listing the `self` copy as a widening
+/// candidate; `replication_reconcile` names that case and does not warn on it
+/// (CIRISPersist#807).
 ///
 /// # Why this needs the owner's signer (CIRISPersist#643)
 ///
