@@ -13,17 +13,22 @@
 
 name: ciris-mesh-repro
 
-# TEST-ANCHOR trust root (CIRISServer#258 / CIRISPersist#451) — one throwaway SW
-# hybrid key. The SEED blesses (test_bless scrub-signs each node's own record);
-# the PUBKEYS anchor (verify's `CIRIS_TEST_TRUST_ROOT` 1-of-N accord override +
-# persist's PQC-complete `test-accord-holder-0` genesis row); the SCRUB pair is
-# the root's sign_bound self-scrub over persist's pinned synthesized envelope,
-# making the seeded terminus scrub-VERIFYING so persist's own `root_binding`
-# Confirms through it. Both nodes root under this one SW root exactly as a prod
-# canonical roots under an A1-scrubbed record — no operator YubiKey, and never
-# touching the real trust key. ALL values below derive from the one SEED:
-#   CIRIS_TEST_TRUST_ROOT_SEED=<seed> cargo run --release \
-#     --example test_anchor_env --features test-anchor
+# ── Where these six values come from, and why you must not transcribe them ──
+# They are one synthetic trust root minted against THIS repo's persist + verify
+# pins. persist builds the terminus envelope and verify checks the scrub over
+# the stored bytes, so the two SCRUB values only verify under the pair they
+# were minted against. Bump a pin that changes the envelope and every harness
+# node roots `Advisory`, the Attestation plane goes dark, and the trace ladder
+# reads `arrive=0`. `tests/anchor_block_verifies.rs` catches that in a second
+# — run it after every substrate repin, before any mesh run.
+#
+# This repo no longer carries a generator (a third copy drifted and cost a day;
+# CIRISEdge hit the mirror image transcribing OUR block, edge 82d8650). Mint
+# with the substrate's generator — CIRISPersist#805 asks persist to ship it —
+# and until it lands, CIRISEdge's `tests/anchor_block_generate.rs` prints the
+# identical bytes ONLY while edge pins the same persist + verify as Cargo.lock
+# here. Ed25519 is deterministic: if its SCRUB differs from the one below, the
+# pins differ, and its block is not yours.
 # (regenerate-and-paste is always safe; the ML-DSA signature is randomized but
 # any emitted signature verifies).
 x-test-anchor-env: &test-anchor-env
