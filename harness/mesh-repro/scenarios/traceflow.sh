@@ -128,6 +128,30 @@ HINT_arrive="envelopes left the agent but no trace_events row exists at the cano
 # admitted before the key that signs it, and a key cannot be admitted before the
 # node that vouches for it.
 DIAG_arrive() {
+  echo "  ── ROOTING, both directions (the verdict's detail, not just its token) ──"
+  # The agent prints a delivery status every cadence; each peer entry now
+  # carries `rooting` = {verdict, kind, detail, chain[]}. The reconcile loop on
+  # BOTH nodes logs the same report on change, so the canonical's view of the
+  # agent is read from its log. `detail` is persist's own text naming the
+  # failing link — the thing the announce-admit line never carried.
+  echo "  [agent → canonical] from the agent's latest delivery status:"
+  compose logs agent 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -F "[DELIVERY-STATUS]" | tail -1 \
+    | sed 's/^.*\[DELIVERY-STATUS\] //' | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print("     (no delivery status yet)"); sys.exit()
+for p in d.get("peers",[]):
+    r=p.get("rooting",{})
+    print("     peer", p.get("key_id"), "→ verdict", r.get("verdict"), "kind", r.get("kind"))
+    if r.get("detail"): print("       detail:", str(r["detail"])[:600])
+    for l in r.get("chain",[]): print("       link", json.dumps(l)[:300])
+    if r.get("hint") and r.get("verdict")!="confirmed": print("       hint:", r["hint"][:400])
+'
+  echo "  [canonical → agent] and [agent → canonical] from the reconcile loops:"
+  for svc in canonical agent; do
+    compose logs "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -F "rooting verdict" | tail -2 \
+      | sed -E "s/^[a-z0-9-]+ +\| //" | cut -c1-900 | sed "s/^/     $svc: /"
+  done
   echo "  ── does the canonical have the AGENT'S KEY? ──"
   local agent_keys
   agent_keys=$(harness_db_count canonical federation_keys "key_id LIKE '%agent%'")
@@ -145,6 +169,11 @@ DIAG_arrive() {
   compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
     | grep -oE "want: dropped hashes[^\"]{0,80}kind=[A-Za-z]+[^\"]{0,40}" | sort -u | tail -4
   echo "  ── the canonical's stated reasons ──"
+  # The original one-line probe, kept: these three phrasings are the admission
+  # door's own words and name a DIFFERENT failure from the want-suppression
+  # above — refused at the gate, versus never asked for again.
+  compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -iE "REFUSED at admission|diverges from the signed envelope|DROPPED" | tail -5
   compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
     | grep -oiE "(refus|reject|withheld|unverifiable|unattributed)[^\"]{0,120}" | sort | uniq -c | tail -6
   echo "  ── the agent's rooting standing at the canonical ──"
@@ -164,10 +193,6 @@ DIAG_arrive() {
     | grep -oE "attestation (plane )?withheld[^\"]{0,120}" | sort | uniq -c | tail -5
 }
 EXIT_arrive=15
-DIAG_arrive() {
-  compose logs canonical 2>/dev/null | grep -iE "REFUSED at admission|diverges from the signed envelope|DROPPED" | tail -5
-}
-
 # ── 6. summarize — the scorer's read surfaces them ──────────────────────────
 stage_summarize() { harness_log_count canonical "n_summaries=[1-9]"; }
 HINT_summarize="rows arrived but the scorer's projection does not see them — 'accepted but not projected'. Check the cohort_scope predicate on the trace read and the row tier."

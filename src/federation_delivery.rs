@@ -401,6 +401,72 @@ pub fn advertise_verdict(
     }
 }
 
+/// **How this node ROOTS `peer_key_id`, with the reason when it does not.**
+///
+/// The traceflow ladder reads `arrive=0` and the diagnosis could only say that
+/// the canonical had admitted the agent `Advisory` with
+/// `reason="rooting_unsigned_provenance_link"` — a token, not a cause. The
+/// verdict's `detail` (which link, and what verify said about it) is produced
+/// by persist and dropped before any log line. This puts it where the ladder
+/// already looks: the per-peer delivery status on the agent, and the reconcile
+/// loop's log on both nodes.
+///
+/// The claimed pubkey is the directory's own record for the peer, so Steps 1-2
+/// of `root_binding` pass by construction and the report isolates Steps 3-4:
+/// chain assembly, the anchor gate, and per-link scrub verification — the part
+/// that has been failing. The chain is listed link by link so a failing link
+/// can be read against its neighbours: who scrubbed it, whether it is
+/// self-signed, and whether both halves of the hybrid scrub are present.
+async fn rooting_report(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    peer_key_id: &str,
+) -> serde_json::Value {
+    use ciris_persist::federation::rooting::{provenance_chain, root_binding, RootingVerdict};
+    use serde_json::json;
+    let claimed = match directory.lookup_public_key(peer_key_id).await {
+        Ok(Some(rec)) => rec.pubkey_ed25519_base64,
+        Ok(None) => {
+            return json!({ "verdict": "no_record", "hint": "the directory holds no key record for this peer — nothing to root; the Key plane has not delivered it yet" })
+        }
+        Err(e) => return json!({ "verdict": "directory_error", "error": e.to_string() }),
+    };
+    let chain = match provenance_chain(directory, peer_key_id).await {
+        Ok(c) => c
+            .chain
+            .iter()
+            .map(|l| {
+                json!({
+                    "key_id": l.key_id,
+                    "identity_type": l.identity_type,
+                    "scrub_key_id": l.scrub_key_id,
+                    "is_self_signed": l.is_self_signed,
+                    "scrub_sig_classical_len": l.scrub_signature_classical.len(),
+                    "scrub_sig_pqc_len": l.scrub_signature_pqc.as_ref().map_or(0, String::len),
+                    "envelope_keys": l.registration_envelope.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                    "original_content_hash": l.original_content_hash.get(..12).unwrap_or(""),
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(rej) => vec![json!({ "chain_error": rej.kind(), "detail": format!("{rej:?}") })],
+    };
+    match root_binding(directory, peer_key_id, &claimed).await {
+        RootingVerdict::Confirmed { .. } => json!({ "verdict": "confirmed", "chain": chain }),
+        RootingVerdict::Rejected { rejection } => json!({
+            "verdict": "rejected",
+            "kind": rejection.kind(),
+            // THE LINE THIS EXISTS FOR: persist's `detail` names the failing
+            // link and carries verify's own error text.
+            "detail": format!("{rejection:?}"),
+            "chain": chain,
+            "hint": "kind names the gate: unknown_key_id = the Key plane has not delivered the record; \
+                     not_rooted_at_steward = the chain's terminus is not a steward/accord_holder; \
+                     terminus_not_in_anchor = the terminus pubkey is not in CIRIS_TEST_TRUST_ROOT (six-var block incomplete or stale); \
+                     unsigned_provenance_link = a link's hybrid scrub does not verify against its scrubber's pubkey — \
+                     compare that link's envelope_keys and scrub_key_id with the copy on the node that produced it",
+        }),
+    }
+}
+
 /// Gather the live, per-canonical-peer delivery state — the queryable half of
 /// "why isn't the trace sailing?" (CIRISServer#294). Pure async over the current
 /// edge/engine; the wheel wrapper [`delivery_status_json`] supplies the handles.
@@ -754,11 +820,16 @@ async fn gather_delivery_status(
             .ok()
             .flatten()
             .is_some();
+        let rooting = match engine.as_ref() {
+            Some(engine) => rooting_report(&*engine.federation_directory(), t).await,
+            None => json!({ "verdict": "no_engine" }),
+        };
         peers.push(json!({
             "key_id": t,
             "knows_peer": knows_peer,
             "kex_present": kex_present,
             "deliverable": knows_peer && kex_present,
+            "rooting": rooting,
         }));
     }
 
@@ -1571,6 +1642,7 @@ pub async fn run_federation_delivery(
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
         let mut last_logged: Option<usize> = None;
+        let mut rooting_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Decay a failing reconcile instead of re-running it at full cadence
         // forever. Resets to the floor on the first success, so a peer that
         // recovers is not still being punished for an earlier blip.
@@ -1596,6 +1668,39 @@ pub async fn run_federation_delivery(
             {
                 Ok(count) => {
                     backoff.succeed();
+                    // ROOTING, per consent peer, on BOTH nodes — the ladder's
+                    // `arrive` diagnosis needs the canonical's view of the agent
+                    // as much as the agent's view of the canonical, and only
+                    // the agent prints a delivery status. Logged on CHANGE so a
+                    // stalled root is one line, not one per tick.
+                    if let Ok(peers) = crate::peer::replication_peers_from_consent(
+                        &reconcile_engine,
+                        &reconcile_node_key,
+                    )
+                    .await
+                    {
+                        let dir = reconcile_engine.federation_directory();
+                        for peer in peers {
+                            let report = rooting_report(&*dir, &peer).await;
+                            let verdict = report["verdict"].as_str().unwrap_or("?").to_owned();
+                            let key = format!(
+                                "{peer}:{verdict}:{}",
+                                report["kind"].as_str().unwrap_or("")
+                            );
+                            if rooting_seen.insert(key) {
+                                if verdict == "confirmed" {
+                                    tracing::info!(peer = %peer, "rooting verdict: CONFIRMED — this node roots the peer through the pinned anchor");
+                                } else {
+                                    tracing::warn!(
+                                        peer = %peer,
+                                        verdict = %verdict,
+                                        report = %report,
+                                        "rooting verdict: NOT confirmed — every plane that needs attribution (Attestation, Community) will withhold toward this peer until it is. `report.detail` names the failing link"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // SELF-PROTECTION, not shedding. Reconcile is this node's own
                     // optional housekeeping; the accept loop and the read API are
                     // not. #501 was a node that measured its own CPU stall, raised
