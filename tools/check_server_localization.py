@@ -747,6 +747,17 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # `chat.room_not_keyed_yet` is GONE — it was one sentence for four different
     # situations, on a surface that can say which. Replaced by `chat.state.*`,
     # which are chat-HISTORY notes rendered beside the messages, not errors.
+    # The contact LADDER's stalls (edge's `LadderStall`, mapped onto the axis a
+    # human acts on). Several are deliberately not failures — `not_yet_discovered`
+    # and `unreachable` resolve themselves — so they read as status, and want
+    # translating like any other user-facing sentence.
+    "contacts.awaiting_consent",
+    "contacts.code_admission_unavailable",
+    "contacts.consent_not_granted",
+    "contacts.malformed_code",
+    "contacts.prior_rung_incomplete",
+    "contacts.unreachable",
+    "contacts.unresolvable",
     "chat.state.awaiting_peer",
     "chat.state.join_requested",
     "chat.state.no_author_signer",

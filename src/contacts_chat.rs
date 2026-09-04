@@ -403,6 +403,80 @@ async fn duties_of(
     held
 }
 
+/// Turn edge's [`LadderStall`](ciris_edge::contact::LadderStall) into a refusal.
+///
+/// The stall vocabulary is deliberately not a wrapper over mechanical errors —
+/// edge calls it "the axis a human acts on" — so this maps it onto that axis and
+/// nothing else. Two of these are not failures at all: `NotYetDiscovered` and
+/// `Unreachable` resolve themselves, one waiting on the directory and one on the
+/// peer, and saying so is the difference between "try again in a minute" and
+/// "something is broken".
+///
+/// Where edge names a rung, the message says which one, because
+/// `Rung::previous()` exists precisely because "a failure is nearly always the
+/// previous rung not having completed".
+fn contact_stall_refusal(stall: &ciris_edge::contact::LadderStall) -> Response {
+    use ciris_edge::contact::LadderStall as S;
+    let (status, reason_id, detail) = match stall {
+        // 404, not 202. By the time a stall reaches here the caller has already
+        // established that the directory does not know this key at all — the
+        // "known person, no node yet" case is handled at the call site and never
+        // arrives — so this is genuinely "who?", and a `nobody-v1` that will
+        // never converge must not be reported as a wait that resolves itself.
+        S::NotYetDiscovered { fed_id } => (
+            StatusCode::NOT_FOUND,
+            "contacts.unknown_fed_id",
+            format!(
+                "{fed_id} is not in this node's federation directory. If they are real \
+                 and this is simply early, the rung before this one is `announce`: they \
+                 announce, this node admits it, and the key body is fetched on the next \
+                 round. If they handed you a CODE, paste that instead — a v3 code names \
+                 their nodes directly and needs no directory convergence at all"
+            ),
+        ),
+        S::Unreachable { fed_id } => (
+            StatusCode::ACCEPTED,
+            "contacts.unreachable",
+            format!(
+                "{fed_id} is known but nothing answered — ownership is not \
+                 reachability. Their nodes may be offline; Reticulum routes to them \
+                 when they return, however many hops away they are"
+            ),
+        ),
+        S::AwaitingConsent { fed_id } => (
+            StatusCode::ACCEPTED,
+            "contacts.awaiting_consent",
+            format!("{fed_id} has not consented yet. The ladder is waiting on a PERSON, and retrying changes nothing"),
+        ),
+        S::ConsentNotGranted { fed_id } => (
+            StatusCode::CONFLICT,
+            "contacts.consent_not_granted",
+            format!("this node has not consented to {fed_id} — the reciprocal of awaiting their consent, and this half is ours to fix"),
+        ),
+        S::PriorRungIncomplete { rung, prior } => (
+            StatusCode::CONFLICT,
+            "contacts.prior_rung_incomplete",
+            format!("`{rung}` cannot complete because `{prior}` has not — look there, not here"),
+        ),
+        S::MalformedCode { detail } => (
+            StatusCode::BAD_REQUEST,
+            "contacts.malformed_code",
+            format!(
+                "that looks like a CIRIS code but does not decode ({detail}). TERMINAL — \
+                 a truncated or corrupted paste does not repair itself, so ask for the \
+                 code again rather than retrying this one"
+            ),
+        ),
+        other => (
+            StatusCode::BAD_REQUEST,
+            "contacts.unresolvable",
+            format!("that identifier does not resolve to a contact: {other:?}"),
+        ),
+    };
+    ciris_edge::contact::log_rung(ciris_edge::contact::Rung::Discover, "", Some(stall));
+    refuse(status, reason_id, detail)
+}
+
 /// `(author_kind, relation)` for one author, memoised per transcript.
 ///
 /// Both come from ONE `contact::resolve`: `resolved_from` says what the author
@@ -1002,7 +1076,14 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
 
 #[derive(Debug, Deserialize)]
 struct AddContactRequest {
-    /// The contact's federation identity key (their fedID).
+    /// The contact's fedID **or** their fedcode — edge's `parse_contact_input`
+    /// classifies which, so this surface does not have to.
+    ///
+    /// `code` and `contact` are accepted as aliases: a client that has a pasted
+    /// or scanned code should not have to know that the field is historically
+    /// called `key_id`, and a v3 code is the ONLY input that makes a stranger
+    /// reachable without the directory.
+    #[serde(alias = "code", alias = "contact")]
     key_id: String,
 }
 
@@ -1083,27 +1164,98 @@ async fn add_contact(
         );
     }
     let directory = st.engine.federation_directory();
-    match directory.lookup_public_key(&key_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+
+    // ── EDGE'S CONTACT LADDER, not a directory lookup ────────────────────────
+    //
+    // This asked `lookup_public_key` and, on a miss, told the caller to go admit
+    // the key via peering and come back. That is the shape edge documents as
+    // WRONG: "a re-resolve runs `nodes_owned_by(fed_id)` against the directory —
+    // and a stranger has no owner-binding attestations there, so the retry
+    // returned `NotYetDiscovered` forever. Admitting a key never creates an
+    // ownership graph. The code was always the contact."
+    //
+    // It is also why chat could not cross the mesh. An owner-binding is written
+    // at `cohort_scope: self`, and edge's audience gate correctly withholds a
+    // `self` row from every peer — a peer is not one of the owner's own nodes —
+    // so `nodes_owned_by(peer)` stays empty on the far side FOREVER. With no
+    // node behind the person, the community audience gate can place nothing, and
+    // every `chat:` row is withheld both ways, including the KeyPackage that
+    // would key the room. The mapping has to arrive some other way, and the
+    // fedcode is that way: a v3 code names the subject's own nodes with the
+    // transport pubkey a destination derives from.
+    let lens = ciris_edge::contact::PersistLens::new(&*directory);
+    let resolution = match ciris_edge::contact::resolve_contact(&lens, &key_id).await {
+        Ok(r) => r,
+        // OWNERSHIP IS NOT REACHABILITY, and a contact may legitimately be added
+        // before either exists. `resolve` stalls `NotYetDiscovered` when it can
+        // find no NODE behind the person — which is also the state of a real
+        // person who has been admitted here but has not claimed a node yet, and
+        // this surface has always supported that: the grant is recorded against
+        // the PERSON as intent, and starts routing when a node appears.
+        //
+        // So the stall is only a refusal when the directory does not know the
+        // key at ALL. That is the honest split: "who?" is a refusal, "where?" is
+        // a not-yet.
+        Err(stall) => {
+            let known = matches!(directory.lookup_public_key(&key_id).await, Ok(Some(_)));
+            if !known {
+                return contact_stall_refusal(&stall);
+            }
+            tracing::info!(
+                key_id = %key_id,
+                stall = ?stall,
+                "contacts: adding a known person with no reachable node yet — the \
+                 grant records intent against the person and begins routing when \
+                 they claim one"
+            );
+            ciris_edge::contact::ContactResolution::Known(ciris_edge::contact::Subject {
+                fed_id: key_id.clone(),
+                nodes: Vec::new(),
+                resolved_from: ciris_edge::contact::IdentityKind::Person,
+            })
+        }
+    };
+    let key_id = match resolution {
+        // Already in the directory: nothing to admit, go straight to consent.
+        // Re-pasting a code for someone already known lands here too, which is
+        // what makes adding a contact twice idempotent instead of an error.
+        ciris_edge::contact::ContactResolution::Known(subject) => subject.fed_id,
+        // A stranger, and the code is SUFFICIENT — but admission stays OURS:
+        // edge hands over a verified `CodeAdmission` and never registers a key on
+        // the strength of a pasted string.
+        ciris_edge::contact::ContactResolution::ReadyFromCode { subject, admission } => {
+            // NOT YET WIRED, and refused explicitly rather than half-done.
+            // `federation_keys` accepts `algorithm: hybrid` and nothing else
+            // ("the only valid value for federation_keys writes from v0.2.0
+            // onward"), while a code carries an Ed25519 half and no ML-DSA one.
+            // Registering from a code therefore needs a decision about what a
+            // classical-only admission MEANS at the federation tier — that is a
+            // substrate policy question, not a shape to invent here, and a
+            // half-written admission would be a key in the directory that no
+            // hybrid gate will ever accept.
+            tracing::warn!(
+                key_id = %admission.key_id,
+                identity_type = %admission.identity_type,
+                owned_nodes = admission.owned_nodes.len(),
+                fed_id = %subject.fed_id,
+                "contacts: a fedcode resolved to an admittable stranger, and this \
+                 node cannot admit it yet — the code carries an Ed25519 half and \
+                 `federation_keys` takes hybrid records only"
+            );
             return refuse(
-                StatusCode::NOT_FOUND,
-                "contacts.unknown_fed_id",
+                StatusCode::NOT_IMPLEMENTED,
+                "contacts.code_admission_unavailable",
                 format!(
-                    "{key_id:?} is not in this node's federation directory — admit the key \
-                     first (POST /v1/federation/peering); an announced-but-unadmitted \
-                     bookmark carries no provenance and cannot be consented to"
+                    "this code names {} and carries {} reachable node(s), but this node \
+                     cannot yet admit a key from a code: the federation directory accepts \
+                     hybrid (Ed25519 + ML-DSA-65) key records only, and a code carries the \
+                     classical half. Admit them through peering for now",
+                    subject.fed_id,
+                    admission.owned_nodes.len()
                 ),
-            )
+            );
         }
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "contacts.store_unavailable",
-                format!("directory lookup: {e}"),
-            )
-        }
-    }
+    };
     // Resolve their identity occurrences — the devices this contact actually
     // speaks from. Reported, never required: a peer NODE legitimately has none,
     // and refusing on absence would make node contacts unaddable.
