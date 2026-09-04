@@ -1448,6 +1448,207 @@ impl std::fmt::Display for OwnershipError {
 }
 impl std::error::Error for OwnershipError {}
 
+// ─── The announce BUNDLE — what federation discovery actually walks ──────────
+
+/// One row of the identity bundle a peer walks to find this node.
+///
+/// Federation discovery (edge `contact::resolve`, CC 2.4.1.2) answers a fed-ID
+/// by walking `owner key → owner-binding → node key`, and for an agent node
+/// `→ owner→agent binding → agent key` as well. A pure fabric node therefore
+/// needs THREE rows federation-visible and an agent node FIVE; a peer that holds
+/// any fewer resolves the person to no node, or the node to no owner, and every
+/// community-scoped row (KeyPackage, Welcome, message) is withheld at THEIR
+/// side with "the recipient is not in the row's audience". That failure surfaces
+/// three stages downstream of the announce, which is why the bundle is
+/// enumerated and logged HERE, row by row, at the moment it is published.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnnouncedRow {
+    /// `owner_key` | `node_key` | `owner_binding` | `agent_key` | `agent_binding`.
+    pub role: &'static str,
+    pub key_id: String,
+    /// The attestation carrying a binding row; `None` for key records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation_id: Option<String>,
+    /// The widest `cohort_scope` this node holds the row at; `None` for key
+    /// records (the key plane carries no cohort scope).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cohort_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_type: Option<String>,
+    /// Can a peer hold this row? Key records: registered here. Bindings:
+    /// `cohort_scope: federation`.
+    pub federation_visible: bool,
+    /// What a peer needs it for, in one clause.
+    pub needed_for: &'static str,
+}
+
+/// The bundle, with the count discovery expects for this node's shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnnounceBundle {
+    pub rows: Vec<AnnouncedRow>,
+    /// 3 for a pure fabric node, 5 for a node with one agent, +2 per agent.
+    pub expected: usize,
+    /// Every expected row is federation-visible.
+    pub federation_discoverable: bool,
+}
+
+/// Enumerate this node's announce bundle and log it row by row.
+///
+/// Read-only. Called after [`promote_owner_binding_to_federation`] so the
+/// summary states the post-announce truth, and safe to call from any
+/// diagnostic path — it changes nothing.
+pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) -> AnnounceBundle {
+    let dir = engine.federation_directory();
+    let mut rows = Vec::new();
+
+    let key_row = |role: &'static str,
+                   key_id: &str,
+                   rec: Option<KeyRecord>,
+                   needed_for: &'static str| AnnouncedRow {
+        role,
+        key_id: key_id.to_string(),
+        attestation_id: None,
+        cohort_scope: None,
+        identity_type: rec.as_ref().map(|r| r.identity_type.clone()),
+        federation_visible: rec.is_some(),
+        needed_for,
+    };
+    rows.push(key_row(
+        "owner_key",
+        owner,
+        dir.lookup_public_key(owner).await.ok().flatten(),
+        "a peer verifies the owner's signature on the binding and on every chat row",
+    ));
+    rows.push(key_row(
+        "node_key",
+        node_key_id,
+        dir.lookup_public_key(node_key_id).await.ok().flatten(),
+        "a peer roots the transport announce and admits this node's rows",
+    ));
+
+    // The owner→node binding: the widest scope held.
+    let inbound = dir
+        .list_attestations_for(node_key_id)
+        .await
+        .unwrap_or_default();
+    let binding = widest_owner_binding(&inbound, owner);
+    rows.push(AnnouncedRow {
+        role: "owner_binding",
+        key_id: node_key_id.to_string(),
+        attestation_id: binding.as_ref().map(|a| a.attestation_id.clone()),
+        cohort_scope: binding.as_ref().map(|a| a.cohort_scope.clone()),
+        identity_type: None,
+        federation_visible: binding
+            .as_ref()
+            .is_some_and(|a| a.cohort_scope == cohort_scope::FEDERATION),
+        needed_for: "a peer walks node → owner (and fedID → nodes); without it this node is \
+                     in no community audience",
+    });
+
+    // Agents: every live `delegates_to` the owner authored onto an `agent` key.
+    let mut agents = 0usize;
+    if let Ok(authored) = dir.list_attestations_by(owner).await {
+        for a in authored
+            .iter()
+            .filter(|a| a.attestation_type == attestation_type::DELEGATES_TO)
+        {
+            let rec = dir
+                .lookup_public_key(&a.attested_key_id)
+                .await
+                .ok()
+                .flatten();
+            if rec.as_ref().map(|r| r.identity_type.as_str()) != Some(identity_type::AGENT) {
+                continue;
+            }
+            agents += 1;
+            rows.push(AnnouncedRow {
+                role: "agent_binding",
+                key_id: a.attested_key_id.clone(),
+                attestation_id: Some(a.attestation_id.clone()),
+                cohort_scope: Some(a.cohort_scope.clone()),
+                identity_type: None,
+                federation_visible: a.cohort_scope == cohort_scope::FEDERATION,
+                needed_for: "a peer walks agent → its responsible human (stewardship)",
+            });
+            rows.push(key_row(
+                "agent_key",
+                &a.attested_key_id,
+                rec,
+                "a peer verifies the agent's signature on its trace rows",
+            ));
+        }
+    }
+
+    let expected = 3 + 2 * agents;
+    let federation_discoverable = rows.iter().all(|r| r.federation_visible);
+    for r in &rows {
+        tracing::info!(
+            role = r.role,
+            key_id = %r.key_id,
+            attestation_id = r.attestation_id.as_deref().unwrap_or("-"),
+            cohort_scope = r.cohort_scope.as_deref().unwrap_or("-"),
+            federation_visible = r.federation_visible,
+            needed_for = r.needed_for,
+            "announce bundle row"
+        );
+    }
+    if federation_discoverable {
+        tracing::info!(
+            owner = %owner,
+            node_key_id = %node_key_id,
+            rows = rows.len(),
+            expected,
+            agents,
+            "announce COMPLETE — every row federation discovery walks is federation-visible: \
+             a peer can resolve fedID → owner → node{} and place this node in a community \
+             audience",
+            if agents > 0 { " → agent" } else { "" }
+        );
+    } else {
+        let missing: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.federation_visible)
+            .map(|r| format!("{}:{}", r.role, r.key_id))
+            .collect();
+        tracing::warn!(
+            owner = %owner,
+            node_key_id = %node_key_id,
+            missing = ?missing,
+            expected,
+            "announce INCOMPLETE — federation discovery walks owner key → owner-binding → \
+             node key (→ agent binding → agent key), and a peer holding any fewer resolves \
+             this node to no owner: every community-scoped row for it is then withheld at \
+             THEIR side (\"the recipient is not in the row's audience\"). A missing \
+             owner_binding means the owner has not announced (POST /v1/federation/announce); \
+             a missing key means the record was never registered here"
+        );
+    }
+    AnnounceBundle {
+        rows,
+        expected,
+        federation_discoverable,
+    }
+}
+
+/// The owner-binding (owner → node) held at the WIDEST cohort scope, federation
+/// preferred, from this node's inbound `delegates_to` rows.
+fn widest_owner_binding(inbound: &[Attestation], owner: &str) -> Option<Attestation> {
+    let is_binding = |a: &&Attestation| {
+        a.attestation_type == attestation_type::DELEGATES_TO
+            && a.attesting_key_id == owner
+            && a.attestation_envelope
+                .get("delegation_purpose")
+                .and_then(|v| v.as_str())
+                == Some(OWNER_BINDING_PURPOSE)
+    };
+    inbound
+        .iter()
+        .filter(is_binding)
+        .find(|a| a.cohort_scope == cohort_scope::FEDERATION)
+        .or_else(|| inbound.iter().find(is_binding))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -550,7 +550,103 @@ async fn author_facts(
 /// renders until the bundle carries that id (CIRISClient#36). Both are here on
 /// purpose — a client that only had the id would show a blank line for exactly
 /// the users least able to guess what happened.
-fn transcript_pending(community_id: &str, state: RoomHandshake) -> axum::response::Response {
+/// What federation discovery needs from EACH side of a conversation, read from
+/// THIS node's directory — and the sentence to say when a side is short.
+///
+/// A community row's audience is its members' NODES (CC 5.2). To deliver a room
+/// row, the SENDING node walks the recipient node → its owner → "is that owner a
+/// member"; the walk is answered from replicated owner-bindings, and the only
+/// binding a peer may hold is the federation-scoped one the owner publishes by
+/// ANNOUNCING. So a handshake that never completes is one of exactly two
+/// things, and they are on opposite sides of the wire:
+///
+/// * THIS node has not announced — the peer cannot place us in the audience,
+///   so nothing they publish for the room ever leaves their node in our
+///   direction. Fix: `POST /v1/federation/announce`, as the owner.
+/// * THE PEER resolves to no node here — their binding is not held at
+///   federation scope in this directory: they have not announced (P2P-only, a
+///   supported mode), or their announce has not replicated yet.
+///
+/// Both read identically from the room ("waiting for them"), which is why the
+/// room's own note stays localized and neutral and THIS sentence is logged and
+/// returned as a developer `hint` beside it.
+struct DiscoveryStanding {
+    peer: String,
+    mine_announced: bool,
+    peer_nodes: Vec<String>,
+}
+
+impl DiscoveryStanding {
+    async fn of(engine: &Engine, node_key_id: &str, peer_fed_id: &str) -> Self {
+        let mine_announced =
+            crate::auth::ownership::owner_binding_is_federation_scoped(engine, node_key_id).await;
+        let dir = engine.federation_directory();
+        let lens = ciris_edge::contact::PersistLens::new(&*dir);
+        let peer_nodes = match ciris_edge::contact::resolve(&lens, peer_fed_id).await {
+            Ok(subject) => subject.nodes,
+            Err(_) => Vec::new(),
+        };
+        Self {
+            peer: peer_fed_id.to_string(),
+            mine_announced,
+            peer_nodes,
+        }
+    }
+
+    /// `None` when both sides are resolvable here and a stall is only time.
+    fn hint(&self) -> Option<String> {
+        if !self.mine_announced {
+            return Some(
+                "THIS node has not announced: its owner-binding is held at cohort_scope `self` \
+                 only, so the other party's node cannot walk this node → its owner and cannot \
+                 place it in the room's audience. Everything they publish for this room is \
+                 withheld at THEIR side (\"the recipient is not in the row's audience\"). \
+                 Announce as the owner: POST /v1/federation/announce (the wizard's default)."
+                    .to_string(),
+            );
+        }
+        if self.peer_nodes.is_empty() {
+            return Some(format!(
+                "{} resolves to no node in this directory: their owner→node binding is not \
+                 held here at federation scope. Either they have not announced (P2P-only by \
+                 design) or their announce has not replicated yet (one anti-entropy round; \
+                 the peering grant must cover `self:delegates_to:`). Nothing can be delivered \
+                 to them until it does.",
+                self.peer
+            ));
+        }
+        None
+    }
+
+    /// Log it where the stall is observed. WARN when a side is short, INFO when
+    /// the wait is only time — a poller reading the log sees which.
+    fn log(&self, site: &str, room: &str) {
+        match self.hint() {
+            Some(hint) => tracing::warn!(
+                site,
+                room,
+                peer = %self.peer,
+                mine_announced = self.mine_announced,
+                peer_nodes = self.peer_nodes.len(),
+                "chat: handshake cannot complete — {hint}"
+            ),
+            None => tracing::info!(
+                site,
+                room,
+                peer = %self.peer,
+                peer_nodes = self.peer_nodes.len(),
+                "chat: handshake waiting on replication only — both sides resolve here; \
+                 the missing row crosses on the next anti-entropy round"
+            ),
+        }
+    }
+}
+
+fn transcript_pending(
+    community_id: &str,
+    state: RoomHandshake,
+    hint: Option<String>,
+) -> axum::response::Response {
     let (message_id, note) = state.note();
     // A SYSTEM ENTRY IN THE TRANSCRIPT, not a sibling object. Chat rooms and
     // agent conversations are one client surface, so the note arrives the same
@@ -598,6 +694,9 @@ fn transcript_pending(community_id: &str, state: RoomHandshake) -> axum::respons
             // waiting states resolve when the peer's row replicates, and a human
             // pressing retry changes nothing about that.
             "converges_on_its_own": state.converges_on_its_own(),
+            // DEVELOPER text, not a localized string: which side of the wire is
+            // short and what to do about it. `null` when the wait is only time.
+            "hint": hint,
         })),
     )
         .into_response()
@@ -753,6 +852,13 @@ async fn room_key(
                      looking here — nothing on this node can complete the \
                      handshake alone"
                 );
+                if let Ok(node) =
+                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                {
+                    DiscoveryStanding::of(&st.engine, &node, peer)
+                        .await
+                        .log("room_key:creator", &room);
+                }
                 return Ok((None, RoomHandshake::AwaitingPeer));
             };
             let group = CohortGroup::create(store, &room, me, 16)
@@ -824,6 +930,13 @@ async fn room_key(
                      lexicographically smaller fed-ID the creator's role, so the \
                      roles are fixed by the two ids and never negotiated"
                 );
+                if let Ok(node) =
+                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                {
+                    DiscoveryStanding::of(&st.engine, &node, peer)
+                        .await
+                        .log("room_key:joiner", &room);
+                }
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
                 return Ok((None, RoomHandshake::JoinRequested));
             };
@@ -1128,6 +1241,11 @@ struct AddContactResponse {
     reachable: bool,
     /// How many of their nodes this node can address right now.
     reachable_nodes: usize,
+    /// DEVELOPER text when `reachable_nodes == 0`: whether that is offline or
+    /// structural (they have not announced, or WE have not), and what to do.
+    /// Not a localized string; `null` when nothing is structurally short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
     /// The `consent:replication:v1` grant row that IS the contact relationship.
     consent_attestation_id: String,
     /// `false` when the standing grant already covered every required prefix —
@@ -1339,6 +1457,17 @@ async fn add_contact(
         // report unknown rather than asserting either answer.
         None => (false, 0),
     };
+    // Whether "not reachable" is offline or STRUCTURAL: an un-announced peer
+    // has no node here to be reachable AT, and an un-announced self cannot be
+    // delivered to however reachable the peer is. Said now, at the contact,
+    // rather than at the first message that never arrives.
+    let hint = if reachable_nodes == 0 {
+        let standing = DiscoveryStanding::of(&st.engine, &owner.node_key_id, &key_id).await;
+        standing.log("contact", &pair_community_key_id(&owner.key_id, &key_id));
+        standing.hint()
+    } else {
+        None
+    };
 
     // Resolve their identity occurrences — the devices this contact actually
     // speaks from. Reported, never required: a peer NODE legitimately has none,
@@ -1397,6 +1526,7 @@ async fn add_contact(
             source,
             reachable,
             reachable_nodes,
+            hint,
             key_id,
             consent_attestation_id: grant.attestation_id,
             freshly_emitted: grant.freshly_emitted,
@@ -2578,7 +2708,12 @@ async fn list_messages(
                 {
                     match room_key(&st, &owner.key_id, &peer, Some(capsule.edge_signer())).await {
                         Ok((Some(k), _)) => break 'key k,
-                        Ok((None, state)) => return transcript_pending(&community_id, state),
+                        Ok((None, state)) => {
+                            let standing =
+                                DiscoveryStanding::of(&st.engine, &owner.node_key_id, &peer).await;
+                            standing.log("transcript", &community_id);
+                            return transcript_pending(&community_id, state, standing.hint());
+                        }
                         Err(e) => {
                             return refuse(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2588,7 +2723,9 @@ async fn list_messages(
                         }
                     }
                 }
-                return transcript_pending(&community_id, first);
+                let standing = DiscoveryStanding::of(&st.engine, &owner.node_key_id, &peer).await;
+                standing.log("transcript", &community_id);
+                return transcript_pending(&community_id, first, standing.hint());
             }
             Err(e) => {
                 return refuse(
@@ -2609,6 +2746,14 @@ async fn list_messages(
                     "cohort_scope": cohort_scope::COMMUNITY,
                     "messages": messages,
                     "total": total,
+                    // Stated on EVERY transcript, not only the pending one. A
+                    // reader that polls for the handshake keys on this field;
+                    // when only the pending shape carried it, a keyed room
+                    // answered with the field ABSENT and a poller reading
+                    // `ready == true` waited on a room that was already done
+                    // (measured 2026-09-04: 150 s of polling a ready room).
+                    "ready": true,
+                    "converges_on_its_own": false,
                 })),
             )
                 .into_response()

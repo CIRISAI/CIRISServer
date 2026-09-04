@@ -107,8 +107,8 @@ to a chat). Run it:
 KEEP=1 ./run_scenario.sh chat 480 # leave the stack up
 ```
 
-The ladder: `rooted → peered → contact → room → sent → dark → one_sided →
-arrived → hamburger`. `arrived` is the one it exists for — the sender's
+The ladder: `rooted → peered → contact → room → dark → one_sided → bound →
+sent → arrived → hamburger`. `arrived` is the one it exists for — the sender's
 `attestation_id`, captured from its send response, must appear in the recipient's
 transcript with its body intact and its status `live`. Keying on the SENDER's id
 is what stops "the recipient derived the same room and is reading its own message
@@ -116,8 +116,33 @@ back" from passing for delivery.
 
 The array is ordered by DEPENDENCY, not by narrative: the monotonic verdict
 treats a positive later stage as proof of every earlier one, so `dark` and
-`one_sided` — which pass or fail without any delivery — sit *before* `arrived`.
+`one_sided` — which pass or fail without any delivery — sit *before* `sent`.
 Either one placed after it would silently certify a delivery that never happened.
+`bound` sits before `sent` because `sent` depends on it: the room is an MLS pair
+group, the creator can only speak once the joiner's KeyPackage has crossed, and
+that row crosses only if each node can walk the OTHER node → its owner, which is
+what `bound` measures (both directions, off the directories).
+
+Three acts the driver performs that a first reading might not expect:
+
+- **Announce, right after the claim.** Setup-complete writes the owner-binding
+  at `cohort_scope: self`; that is the privacy default and a row no peer may
+  ever hold (CC 5.2). `POST /v1/federation/announce` is the OWNER re-signing it
+  at federation scope — the wizard's default, an opt-OUT — and it is
+  loopback-only, so the scenario shell runs it on each node's console beside
+  the claim and hands the result to the driver. A node that has not announced
+  is P2P-only by design: it can dial, and it cannot be placed in anyone's
+  audience. Edge's bench-mesh runner has no such step because its
+  `owner_binding_attestation` mints the binding AT federation scope.
+- **SEND opens the room; SPEAK sends.** The message moved out of phase SEND
+  (where it ran before the joiner had even opened the room and measured
+  `503 chat.room_key_failed` on every run) into phase SPEAK after JOIN, gated on
+  the transcript's own `ready` field and logging the room's `chat.state.*` note
+  on every poll. The one-sided window between SEND and JOIN is unchanged.
+- **`bound` reads the result, the driver records the act.** A red `bound` prints
+  each node's announce answer and each directory's copy of the other party's
+  binding by cohort_scope, so it says whether the announce never ran or ran and
+  never replicated.
 
 `CHAT_NODES` is an ordered party list (first sends, the rest receive), so nothing
 in the ladder is two-shaped:

@@ -2715,6 +2715,11 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
         .json()
         .await
         .expect("messages json");
+    // A keyed room says so on EVERY transcript, not only the pending one. When
+    // only the pending shape carried `ready`, a poller keyed on `ready == true`
+    // waited out its whole budget on a room that was already done.
+    assert_eq!(json["ready"], true, "a keyed room states ready: {json}");
+    assert_eq!(json["converges_on_its_own"], false, "{json}");
     let m = &json["messages"].as_array().expect("messages")[0];
 
     assert_eq!(
@@ -2807,6 +2812,16 @@ async fn an_unstarted_room_returns_a_system_note_not_an_error() {
         "a conversation that has not finished starting is not a failure"
     );
     let json: serde_json::Value = resp.json().await.expect("messages json");
+    // The developer hint names WHICH side of the wire is short. In this fixture
+    // the owner's binding is federation-scoped (announced) and the contact is a
+    // bare person with no node, so the hint is about the PEER.
+    let hint = json["hint"]
+        .as_str()
+        .expect("a pending transcript carries a hint: {json}");
+    assert!(
+        hint.contains("resolves to no node") && hint.contains("announce"),
+        "the hint names the peer's missing binding and the announce: {hint}"
+    );
     let msgs = json["messages"].as_array().expect("messages array");
     assert_eq!(
         msgs.len(),
