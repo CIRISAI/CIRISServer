@@ -22,3 +22,22 @@ dist-obs/
 
 # maturin develop artifact (built into the source tree)
 python/ciris_server/_native*.so
+
+# ── Node-home artifacts, if a run ever points CIRIS_HOME at the checkout ──────
+#
+# `qa/qa_runner/server.py` used to default CIRIS_HOME to the repo root, which made
+# a node write its store, logs, secrets and — on a first run — the one-time
+# `claim_pin` into the working tree. That default is fixed (per-run temp dir), and
+# these stay as the belt: a claim SECRET must never become a tracked file, and a
+# stray `ciris_engine.db` must never be committable by an absent-minded `git add`.
+#
+# `data/` is NOT listed: it holds tracked mesh fixtures. A node home would collide
+# with it, which is a second reason home does not belong in the checkout.
+/claim_pin
+/ciris_engine.db
+/ciris_engine.db-wal
+/ciris_engine.db-shm
+/logs/
+/secrets/
+/keys/
+/identity/

@@ -2,6 +2,7 @@
 API server management for QA testing.
 """
 
+import tempfile
 import asyncio
 import hashlib
 import json
@@ -829,11 +830,28 @@ class APIServerManager:
         if not self.config.mock_llm:
             env.pop("CIRIS_MOCK_LLM", None)  # Remove if present
 
-        # Set CIRIS_HOME for verifier_singleton (required for audit hash chain)
+        # CIRIS_HOME for verifier_singleton (required for audit hash chain).
+        #
+        # NOT the repo root. Pointing home at the checkout makes the node write its
+        # data dir, logs, secrets, `ciris_engine.db` and — on a first run — the
+        # one-time `claim_pin` INTO the working tree. Two failures follow:
+        #
+        #   1. Anything that reads home at the PRODUCT default looks somewhere else
+        #      and finds nothing. A first-run claim then fails with the PIN sitting
+        #      in the repo, written by the same run that could not find it. This is
+        #      the shape that just cost a desktop first-run setup (CIRISAgent's
+        #      `server_manager` had the identical `setdefault(CIRIS_HOME, root)`).
+        #   2. A one-time claim SECRET lands in a git checkout.
+        #
+        # A per-run temp dir instead: isolated between runs, cleaned by the OS, and
+        # it cannot disagree with a product default because nothing else claims it.
+        # An explicit CIRIS_HOME from the caller still wins — that is the knob for
+        # pointing a run at a real home on purpose.
         if "CIRIS_HOME" not in env:
-            project_root = Path(__file__).parent.parent.parent
-            env["CIRIS_HOME"] = str(project_root)
-            self.console.print(f"[dim]Setting CIRIS_HOME={project_root}[/dim]")
+            qa_home = Path(tempfile.mkdtemp(prefix="ciris-qa-home-"))
+            env["CIRIS_HOME"] = str(qa_home)
+            self._qa_home = qa_home
+            self.console.print(f"[dim]Setting CIRIS_HOME={qa_home} (per-run temp)[/dim]")
 
         # Set CIRIS_ADAPTER environment variable (supports comma-separated adapters)
         # This allows loading modular services like Reddit alongside built-in adapters
@@ -1185,6 +1203,15 @@ class APIServerManager:
 
                 self.process = None
                 self.pid = None
+
+                # Remove the per-run temp home, but ONLY one we created. A home
+                # supplied by the caller is theirs and may hold a real node.
+                qa_home = getattr(self, "_qa_home", None)
+                if qa_home is not None:
+                    import shutil as _sh
+
+                    _sh.rmtree(qa_home, ignore_errors=True)
+                    self._qa_home = None
 
                 # Close PTY master fd
                 if hasattr(self, "_pty_master_fd"):
