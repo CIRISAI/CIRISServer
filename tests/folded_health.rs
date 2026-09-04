@@ -19,12 +19,20 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt as _;
 
+mod common;
+use common::RaisedWarning;
+
 /// The degradation registry is a PROCESS-GLOBAL, and libtest runs these cases
-/// in parallel threads of one process. Exactly one case below raises into it —
-/// and the moment it does, every OTHER case asserting `status == "ok"` can read
-/// `"degraded"` instead and fail for a reason that has nothing to do with what
-/// it is testing. So every case that reads `status` or `degraded_mode` takes
-/// this lock. `src/degradation.rs` and `tests/retention_loop.rs` carry the same
+/// in parallel threads of one process. TWO cases below raise into it — the
+/// comment here said "exactly one" until 0.5.196, which is the kind of count
+/// that silently stops being true — and the moment one does, every OTHER case
+/// asserting `status == "ok"` can read `"degraded"` instead and fail for a
+/// reason that has nothing to do with what it is testing. So every case that
+/// reads `status` or `degraded_mode` takes this lock.
+///
+/// The lock is necessary and was never sufficient: it serialises access but does
+/// not survive a panic between a raise and its clear. Both raising cases now use
+/// `common::RaisedWarning`, which clears on drop — including while unwinding. `src/degradation.rs` and `tests/retention_loop.rs` carry the same
 /// lock for the same reason; `oauth_state_matrix.rs` records the first time
 /// this repo paid for a leaked process-global.
 static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -59,6 +67,27 @@ async fn spawn_brain(body: serde_json::Value) -> (String, tokio::task::JoinHandl
 /// So these cases assert what they are actually about — that folding a brain
 /// does or does not MOVE the node's own verdict — which holds however loud the
 /// runner is.
+/// Assert the node is undegraded before a case that needs to attribute
+/// degradation to the BRAIN — and if it is not, say WHAT is in the registry.
+///
+/// The bare `assert!(!baseline.1)` this replaces failed four cases at once on
+/// `main` at the 0.5.196 merge and named nothing, so the cause had to be
+/// reconstructed from four line numbers. One leaked warning explains all four:
+/// three read `degraded_mode`, and the fourth indexes `warnings[0]`, which a
+/// leaked entry displaces. The registry is process-global and only tests write
+/// to it, so its contents ARE the diagnosis — printing them turns the next
+/// occurrence into a fact instead of an investigation.
+async fn assert_undegraded_baseline(case: &str) {
+    let (status, degraded) = bare_node_verdict().await;
+    assert!(
+        !degraded,
+        "fixture: `{case}` needs an undegraded node, but the process-global \
+         degradation registry already says {status:?}. Only tests write to it, so \
+         one of them raised without clearing. Standing warnings: {:#?}",
+        ciris_server::degradation::snapshot()
+    );
+}
+
 async fn bare_node_verdict() -> (String, bool) {
     let v = get_health(ciris_server::health::router()).await;
     (
@@ -331,10 +360,13 @@ async fn a_degraded_brain_degrades_the_folded_pair() {
 #[tokio::test]
 async fn a_healthy_brain_cannot_clear_the_nodes_own_degradation() {
     let _registry = REGISTRY_LOCK.lock().await;
-    ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
+    // GUARD, not a manual clear: everything between here and the old
+    // `clear` could unwind, and a leaked `critical` degrades every later
+    // case's baseline (see `common::RaisedWarning`).
+    let _fault = RaisedWarning::critical(
         "test.node_tier_fault",
         "a node-tier fault the brain knows nothing about",
-    ));
+    );
 
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
@@ -347,7 +379,6 @@ async fn a_healthy_brain_cannot_clear_the_nodes_own_degradation() {
     .await;
     let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
     h.abort();
-    ciris_server::degradation::clear("test.node_tier_fault");
 
     assert_eq!(
         v["data"]["degraded_mode"], true,
@@ -547,8 +578,16 @@ async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
          acts on and is nearly always small — discarding the entry throws away the signal to \
          save the noise: {codes:?}"
     );
-    let msg = v["data"]["warnings"][0]["message"]
-        .as_str()
+    // BY CODE, not by index: `warnings[0]` assumes the brain's entry is first,
+    // and any node-tier warning ahead of it silently retargets this assertion at
+    // a different entry — which is how this case failed alongside three
+    // `degraded_mode` cases for one shared reason.
+    let msg = v["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .find(|w| w["code"].as_str() == Some("agent.llm.no_provider"))
+        .and_then(|w| w["message"].as_str())
         .unwrap_or_default();
     assert!(
         msg.contains("truncated by this node"),
@@ -572,10 +611,10 @@ async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
 #[tokio::test]
 async fn folding_still_behaves_when_the_node_itself_is_degraded() {
     let _registry = REGISTRY_LOCK.lock().await;
-    ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
+    let _fault = RaisedWarning::critical(
         "test.forced_node_fault",
         "a node-tier fault, to simulate a loaded runner",
-    ));
+    );
 
     let baseline = bare_node_verdict().await;
     assert_eq!(
@@ -590,7 +629,6 @@ async fn folding_still_behaves_when_the_node_itself_is_degraded() {
     .await;
     let v = get_health(ciris_server::health::router_with_brain(Some(base))).await;
     h.abort();
-    ciris_server::degradation::clear("test.forced_node_fault");
 
     // The fold still does its job — the agent's cognitive state arrives, which
     // is what `clientModeFrom` reads — and the node's own verdict is untouched.
@@ -662,8 +700,7 @@ async fn an_enormous_code_or_severity_cannot_bypass_the_entry_bound() {
 #[tokio::test]
 async fn a_brain_warning_alone_degrades_the_folded_pair() {
     let _registry = REGISTRY_LOCK.lock().await;
-    let baseline = bare_node_verdict().await;
-    assert!(!baseline.1, "fixture: this case needs an undegraded node");
+    assert_undegraded_baseline("a_brain_warning_alone_degrades_the_folded_pair").await;
 
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
@@ -735,8 +772,7 @@ async fn an_informational_brain_warning_does_not_degrade_the_pair() {
 #[tokio::test]
 async fn a_critical_warning_past_the_cap_still_degrades_the_pair() {
     let _registry = REGISTRY_LOCK.lock().await;
-    let baseline = bare_node_verdict().await;
-    assert!(!baseline.1, "fixture: this case needs an undegraded node");
+    assert_undegraded_baseline("a_critical_warning_past_the_cap_still_degrades_the_pair").await;
 
     let mut ws: Vec<serde_json::Value> = (0..40)
         .map(|i| serde_json::json!({"code": format!("noise.{i}"), "message": "x", "severity": "info"}))
