@@ -1418,6 +1418,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&chat_node_signer),
                         crate::user_seed_dir(&cfg),
+                        // The live transport, so the contact ladder can run its
+                        // `discover` rung — "is there somewhere to send" — through
+                        // edge's own `RouteLens` instead of this module deciding
+                        // what reachable means.
+                        edge.reticulum_transport(),
                     ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST

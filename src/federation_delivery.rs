@@ -734,8 +734,18 @@ async fn gather_delivery_status(
         // replicated) — the two gates a sealed envelope must clear to be
         // deliverable. Both false with no FramesDropped WARN ⇒ never primed;
         // both true but no delivery ⇒ look at the driver (leviculum#25 loss).
+        // EDGE'S OWN PREDICATE, not our reading of the transport. `RouteLens`
+        // is what `contact::discover` consults for "can this node address that
+        // key right now" — the same question the send path asks before it dials
+        // — so asking it here means this diagnostic and the send path cannot
+        // drift on what reachable means.
         let knows_peer = match edge.reticulum_transport() {
-            Some(tr) => tr.knows_peer(t).await,
+            Some(tr) => {
+                use ciris_edge::contact::RouteLens as _;
+                ciris_edge::contact::ReticulumRoutes::new(&tr)
+                    .has_destination(t)
+                    .await
+            }
             None => false,
         };
         let kex_present = edge

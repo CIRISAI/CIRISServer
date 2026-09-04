@@ -165,6 +165,14 @@ struct ChatState {
     /// because from edge v20.0.0 there is no classical-only signing path
     /// anywhere in the chat plane.
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    /// The live Reticulum transport, when this node has one.
+    ///
+    /// Only ever used through edge's [`RouteLens`](ciris_edge::contact::RouteLens):
+    /// `discover` needs it to answer "is there somewhere to send", which is a
+    /// DIFFERENT question from "do they own nodes" and the one a caller acts on.
+    /// `None` in-process (a single-node test has no mesh), where discovery is
+    /// skipped rather than guessed at.
+    routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
 }
 
 /// Where a room's MLS handshake has got to on THIS node.
@@ -1101,6 +1109,16 @@ struct AddContactResponse {
     /// un-announced person as unreachable when they are simply reachable a
     /// different way.
     source: &'static str,
+    /// Can this node reach at least one of their nodes RIGHT NOW?
+    ///
+    /// From edge's `discover`, which is the rung that proves it: `resolve` shows
+    /// they own nodes, this shows one answers. `false` is not a failure — a
+    /// contact added while their device is off is still a contact, and RNS routes
+    /// when it returns — but a client that says "added" without saying this leaves
+    /// the user to find out at the first message.
+    reachable: bool,
+    /// How many of their nodes this node can address right now.
+    reachable_nodes: usize,
     /// The `consent:replication:v1` grant row that IS the contact relationship.
     consent_attestation_id: String,
     /// `false` when the standing grant already covered every required prefix —
@@ -1280,6 +1298,39 @@ async fn add_contact(
             );
         }
     };
+    // ── IS THERE SOMEWHERE TO SEND? ─────────────────────────────────────────
+    //
+    // `resolve` proved they own nodes; `discover` proves at least one can be
+    // reached, and edge is emphatic that these are different claims: "a person
+    // can own nodes this node has no route to, and reporting that as discovered
+    // hands the caller a `Subject` whose every send fails".
+    //
+    // Unreachable is NOT a refusal. RNS routes to a node when it comes back,
+    // however many hops away it is, so a contact added while their phone is off
+    // is a perfectly good contact. It is reported so the caller can say "added,
+    // not reachable yet" instead of discovering it at the first message.
+    let (reachable, reachable_nodes) = match st.routes.as_ref() {
+        Some(transport) => {
+            let route_lens = ciris_edge::contact::ReticulumRoutes::new(transport);
+            match ciris_edge::contact::discover(&lens, &route_lens, &key_id).await {
+                Ok(found) => (true, found.reachable.len()),
+                Err(stall) => {
+                    tracing::info!(
+                        key_id = %key_id,
+                        stall = ?stall,
+                        "contacts: added, but nothing answers for them yet — ownership is \
+                         not reachability. Their nodes may simply be offline; Reticulum \
+                         routes to them when they return"
+                    );
+                    (false, 0)
+                }
+            }
+        }
+        // No transport in this process (in-process tests, an HTTP-only node):
+        // report unknown rather than asserting either answer.
+        None => (false, 0),
+    };
+
     // Resolve their identity occurrences — the devices this contact actually
     // speaks from. Reported, never required: a peer NODE legitimately has none,
     // and refusing on absence would make node contacts unaddable.
@@ -1335,6 +1386,8 @@ async fn add_contact(
         StatusCode::OK,
         Json(AddContactResponse {
             source,
+            reachable,
+            reachable_nodes,
             key_id,
             consent_attestation_id: grant.attestation_id,
             freshly_emitted: grant.freshly_emitted,
@@ -2574,12 +2627,14 @@ pub fn router(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     user_seed_dir: std::path::PathBuf,
+    routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
 ) -> Router {
     let state = ChatState {
         engine,
         user_seed_dir,
         rooms: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         node_signer,
+        routes,
     };
     Router::new()
         .route(

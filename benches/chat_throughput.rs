@@ -561,7 +561,9 @@ async fn serve(
     let signer = node_edge_signer(&engine).await;
     // THE MINTED DIR, not one of its own: the route opens the owner's fed-ID
     // from whatever it is handed, and an empty directory is `NoFedIdentity`.
-    let app = contacts_chat::router(engine, signer, seed_dir);
+    // No transport in-process, so the `discover` rung is skipped rather than
+    // guessed at: a single-node fixture has no mesh to be reachable over.
+    let app = contacts_chat::router(engine, signer, seed_dir, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
