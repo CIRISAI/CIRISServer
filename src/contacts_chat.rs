@@ -366,6 +366,43 @@ fn author_kind_str(kind: &ciris_edge::contact::IdentityKind) -> &'static str {
     }
 }
 
+/// The moderation duties `who` holds in `community_id`, memoised per transcript.
+///
+/// Three calls to persist's CC 4.5.4 predicate, one per duty scope. Memoised
+/// because a busy channel has few authors and many messages, and the predicate
+/// walks a delegation chain each time.
+///
+/// A read error is NOT a duty. `is_named_moderator` is already fail-closed on
+/// anything it cannot establish; a transport-level failure here is treated the
+/// same way, because the alternative — showing a moderator badge on a directory
+/// error — puts authority on screen that nothing verified.
+async fn duties_of(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    cache: &mut HashMap<String, Vec<&'static str>>,
+    who: &str,
+    community_id: &str,
+) -> Vec<&'static str> {
+    use ciris_persist::federation::admission;
+    if let Some(hit) = cache.get(who) {
+        return hit.clone();
+    }
+    let mut held: Vec<&'static str> = Vec::new();
+    for duty in [
+        admission::DELEGATION_SCOPE_MODERATE,
+        admission::DELEGATION_SCOPE_TAKEDOWN,
+        admission::DELEGATION_SCOPE_REVIEW,
+    ] {
+        if admission::is_named_moderator(directory, who, community_id, duty)
+            .await
+            .unwrap_or(false)
+        {
+            held.push(duty);
+        }
+    }
+    cache.insert(who.to_owned(), held.clone());
+    held
+}
+
 /// `(author_kind, relation)` for one author, memoised per transcript.
 ///
 /// Both come from ONE `contact::resolve`: `resolved_from` says what the author
@@ -452,6 +489,7 @@ fn transcript_pending(community_id: &str, state: RoomHandshake) -> axum::respons
         author_kind: "none",
         relation: "none",
         author_role: None,
+        author_duties: Vec::new(),
         message_id: Some(message_id),
     };
     (
@@ -1522,17 +1560,34 @@ struct ChatMessage {
     /// `other` | `none`. Viewer-DEPENDENT and derived — a convenience so a client
     /// need not walk ownership itself, never a property of the row.
     relation: &'static str,
-    /// The author's role ON THE ROSTER, verbatim from the community row:
-    /// `founder` | `member` | operator-defined. Viewer-independent.
-    ///
-    /// This is the moderation signal, and it is passed through rather than
-    /// collapsed to an `is_moderator` boolean because the vocabulary is OPEN —
-    /// persist documents it as "`founder` / `member` / operator-defined", so a
-    /// boolean would have to decide, here and forever, what every future
-    /// operator-defined role means. In a PAIR room both members are founders and
-    /// both moderate; in a channel this is what distinguishes them.
+    /// The author's role ON THE ROSTER, verbatim: `founder` | `member` |
+    /// operator-defined. Viewer-independent, and **not** the moderation signal —
+    /// see `author_duties`. Passed through rather than interpreted, because
+    /// persist documents the vocabulary as open.
     #[serde(skip_serializing_if = "Option::is_none")]
     author_role: Option<String>,
+    /// **The moderation signal**: which duties this author actually holds in
+    /// THIS community — any of `moderate` / `takedown` / `review`.
+    ///
+    /// Moderation is a delegable DUTY, not a role (CC §4.5.x; `FSD/
+    /// MODERATION_CHILD_SAFETY.md` says so in its first line). A founder or
+    /// steward appoints a moderator by authoring a scoped `delegates_to`, and
+    /// §11.11 merit auto-promotion emits that same shape — so a member with no
+    /// special roster role can hold real moderation authority, and reading
+    /// `author_role == "founder"` would show them as an ordinary member while
+    /// they moderate.
+    ///
+    /// Answered by persist's `admission::is_named_moderator`, which is the CC
+    /// 4.5.4 predicate: a live scope-bearing chain from a STEWARD-BOUND member of
+    /// the community's authority set, with ⊆-attenuation, `sub_delegation`-gated
+    /// deputization, depth ≤ 5, and no `withdraws`-revoked edge — fail-closed on
+    /// anything it cannot establish. Not a walk this module could reproduce, and
+    /// not one it should: `src/safety/named.rs` composes the same predicate, and
+    /// two answers to "may they moderate" is the disagreement that matters.
+    ///
+    /// A founder is admitted zero-hop, so a pair room's two members both come
+    /// back with the full set.
+    author_duties: Vec<&'static str>,
     /// For `system` and `error` entries: the localization key naming WHICH note
     /// this is. A client looks it up; `body` carries the English fallback so a
     /// bundle that has not caught up yet renders a sentence rather than a blank.
@@ -2014,6 +2069,7 @@ async fn collect_messages(
     let mut who_cache: HashMap<String, (&'static str, &'static str)> = HashMap::new();
     // The roster's roles, from the membership rows already read above. No extra
     // query: this is the same list the transcript is anchored on.
+    let mut duty_cache: HashMap<String, Vec<&'static str>> = HashMap::new();
     let roles: HashMap<&str, Option<String>> = members
         .iter()
         .map(|m| (m.key_id.as_str(), m.role.clone()))
@@ -2086,6 +2142,13 @@ async fn collect_messages(
             author_kind: who.0,
             relation: who.1,
             author_role: roles.get(opened.author_key_id.as_str()).cloned().flatten(),
+            author_duties: duties_of(
+                &*directory,
+                &mut duty_cache,
+                &opened.author_key_id,
+                community_id,
+            )
+            .await,
             message_id: None,
             author: opened.author_key_id,
         });

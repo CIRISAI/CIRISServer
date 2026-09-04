@@ -2728,6 +2728,27 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
         m["message_id"].is_null(),
         "a spoken message has no localization key; only system/error notes do: {m}"
     );
+
+    // MODERATION IS A DUTY, NOT A ROLE. A founder holds it zero-hop, so the pair
+    // room's creator comes back with the full set — but the field must be driven
+    // by persist's CC 4.5.4 predicate rather than by the roster, or a member who
+    // was DELEGATED moderation by a founder renders as an ordinary member while
+    // holding real authority.
+    let duties = m["author_duties"].as_array().expect("author_duties");
+    let held: Vec<&str> = duties
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        held.contains(&"moderate"),
+        "the room's founder is a named moderator of their own community \
+         (zero-hop appointment): {m}"
+    );
+    assert!(
+        held.contains(&"takedown") && held.contains(&"review"),
+        "all three CC 4.5.x duties, since the founder is in the authority set \
+         for each: {m}"
+    );
 }
 
 /// **A room that has not finished starting says so IN THE TRANSCRIPT.**
