@@ -292,12 +292,277 @@ async fn share_in_room(
 /// HTTP request, and blocking one on mesh convergence turns a chat send into a
 /// timeout. Edge's `sync_and_await` is the right tool for a background driver
 /// and the wrong one here.
+/// ── WHAT AN ENTRY IS, ON TWO AXES ───────────────────────────────────────────
+///
+/// Chat rooms and agent conversations are ONE client surface, so they are one
+/// schema. The temptation is a single flat `role` — `self | other_human |
+/// my_agent | other_agent | system | error` — and it does not survive contact
+/// with a channel that has more than two people in it, because it fuses two
+/// independent questions:
+///
+///   * **What kind of entry is this?** Someone spoke, or the room narrated, or
+///     something failed. Viewer-independent — the same for every member.
+///   * **Who wrote it, and what are they to ME?** Viewer-DEPENDENT: the same row
+///     is "my agent" to its owner and "someone's agent" to everyone else, and
+///     these rows are CEG objects replicated verbatim to every member.
+///
+/// Fusing them means `other_human` collapses fifty distinct people into one
+/// label — the client still needs the author key to draw a name — and it gives
+/// two names to one row depending on who is looking, in a transcript that is
+/// byte-identical for all of them.
+///
+/// This is the split Matrix makes (`sender` + event `type`/`msgtype`, with "is it
+/// me" computed client-side) and the one the `system|user|assistant` role triple
+/// does not — that triple is fine for one person talking to one model and has no
+/// way to say WHICH user or WHICH agent, which is exactly what a channel needs.
+///
+/// So: [`EntryKind`] answers the first, `author` + `author_kind` the second, and
+/// `relation` is the derived viewer-relative convenience, marked as such.
+///
+/// | asked for | this schema |
+/// |---|---|
+/// | self | `kind=message`, `relation=self` |
+/// | other human | `kind=message`, `author_kind=person`, `relation=other` |
+/// | my agent | `kind=message`, `author_kind=agent`, `relation=own_agent` |
+/// | other agent | `kind=message`, `author_kind=agent`, `relation=other` |
+/// | system | `kind=system` + a `message_id` naming WHICH note |
+/// | error | `kind=error` + a `message_id` naming WHICH failure |
+///
+/// The last two carry a `message_id` rather than being bare categories, because
+/// "system" is not a thing a user can read — "Request to join chat sent" is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A participant said something.
+    Message,
+    /// The room narrating itself: handshake progress, membership changes.
+    System,
+    /// A failure the user has to see, in the place it happened.
+    Error,
+}
+
+impl EntryKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::System => "system",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// What the AUTHOR is — edge's vocabulary, not a second one of ours.
+/// `person` consents, `agent` is owned by a person and cannot consent for them,
+/// `node` is the box. `unknown` is honest: resolution genuinely stalls while a
+/// key body is in flight, and guessing "person" there would put a stranger's
+/// name on an agent's words.
+fn author_kind_str(kind: &ciris_edge::contact::IdentityKind) -> &'static str {
+    use ciris_edge::contact::IdentityKind;
+    match kind {
+        IdentityKind::Person => "person",
+        IdentityKind::Agent => "agent",
+        IdentityKind::Node => "node",
+        IdentityKind::Other(_) => "other",
+    }
+}
+
+/// `(author_kind, relation)` for one author, memoised per transcript.
+///
+/// Both come from ONE `contact::resolve`: `resolved_from` says what the author
+/// is, `fed_id` says whose it is. We do not walk ownership ourselves — that walk
+/// has an asymmetric ambiguous-node rule that exists for security reasons, and a
+/// second copy of it is a second answer.
+async fn author_facts(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    cache: &mut HashMap<String, (&'static str, &'static str)>,
+    author: &str,
+    owner_key_id: &str,
+) -> (&'static str, &'static str) {
+    if let Some(hit) = cache.get(author) {
+        return *hit;
+    }
+    let lens = ciris_edge::contact::PersistLens::new(directory);
+    let facts = match ciris_edge::contact::resolve(&lens, author).await {
+        Ok(subject) => {
+            let relation = if author == owner_key_id {
+                "self"
+            } else if subject.fed_id == owner_key_id {
+                // An agent or node this node's owner owns — their words, but not
+                // them. A channel draws this differently from both.
+                "own_agent"
+            } else {
+                "other"
+            };
+            (author_kind_str(&subject.resolved_from), relation)
+        }
+        // NOT an error: the directory has not converged on this key yet. Saying
+        // `unknown` is better than defaulting to `person`, which would put a
+        // human's framing on an agent's message.
+        Err(_) => (
+            "unknown",
+            if author == owner_key_id {
+                "self"
+            } else {
+                "other"
+            },
+        ),
+    };
+    cache.insert(author.to_owned(), facts);
+    facts
+}
+
+/// A transcript that cannot be read YET — 200, with the reason in the history.
+///
+/// The shape is the ordinary transcript shape plus a `handshake` object, so a
+/// client renders it the same way it renders messages: the note goes in the
+/// conversation, in order, where "Request to join chat sent" belongs. No new
+/// screen, no error dialog, and nothing for the client to invent.
+///
+/// `message_id` is what a localized client looks up; `message` is the English it
+/// renders until the bundle carries that id (CIRISClient#36). Both are here on
+/// purpose — a client that only had the id would show a blank line for exactly
+/// the users least able to guess what happened.
+fn transcript_pending(community_id: &str, state: RoomHandshake) -> axum::response::Response {
+    let (message_id, note) = state.note();
+    // A SYSTEM ENTRY IN THE TRANSCRIPT, not a sibling object. Chat rooms and
+    // agent conversations are one client surface, so the note arrives the same
+    // way a message does and renders in the history in order — "Request to join
+    // chat sent" sits where it happened. A parallel `handshake` field would have
+    // made every client build a second rendering path for the same sentence.
+    let entry = ChatMessage {
+        // Synthetic, and deliberately not an attestation id: no row was signed.
+        // A client keys off this for dedup; it must not look like something the
+        // room could supersede or withdraw.
+        attestation_id: format!("system:{message_id}"),
+        attestation_type: attestation_type::SCORES.to_string(),
+        attesting_key_id: String::new(),
+        attested_key_id: String::new(),
+        subject_key_ids: Vec::new(),
+        cohort_scope: cohort_scope::COMMUNITY.to_string(),
+        community_id: community_id.to_string(),
+        status: "live",
+        status_attestation_id: None,
+        body: Some(note.to_string()),
+        unopened_reason: None,
+        content_type: DEFAULT_CONTENT_TYPE,
+        asserted_at: chrono::Utc::now().to_rfc3339(),
+        author: String::new(),
+        mine: false,
+        kind: EntryKind::System.as_str(),
+        author_kind: "none",
+        relation: "none",
+        author_role: None,
+        message_id: Some(message_id),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "community_id": community_id,
+            "cohort_scope": cohort_scope::COMMUNITY,
+            "messages": vec![entry],
+            // `total` counts what people SAID. A system note is the room talking
+            // about itself, and counting it would make an unstarted conversation
+            // report one message.
+            "total": 0,
+            "ready": state.is_ready(),
+            // The client's cue to WAIT rather than offer a retry button: both
+            // waiting states resolve when the peer's row replicates, and a human
+            // pressing retry changes nothing about that.
+            "converges_on_its_own": state.converges_on_its_own(),
+        })),
+    )
+        .into_response()
+}
+
+/// ── THE ROOM'S HANDSHAKE, AS ONE TABLE ──────────────────────────────────────
+///
+/// A pair room is end-to-end encrypted, so nobody can speak into it until BOTH
+/// halves of the MLS handshake exist: the joiner publishes a KeyPackage, the
+/// creator answers with a Welcome. Both are ordinary `chat:` rows that have to
+/// REPLICATE, so the room spends real time — sometimes minutes — in a state that
+/// is neither broken nor ready.
+///
+/// That state used to reach the user as `503 chat.room_not_keyed_yet`, one
+/// sentence for every case, on a surface with no way to say "waiting for Bob".
+/// It is a conversation, and a conversation can say what it is doing.
+///
+/// | state | what is true | who acts next | the user sees |
+/// |---|---|---|---|
+/// | [`Ready`](RoomHandshake::Ready) | both halves landed; the group key exists | nobody | nothing — messages just work |
+/// | [`AwaitingPeer`](RoomHandshake::AwaitingPeer) | we CREATED the room; the peer has never opened it | the peer | "Waiting for them to join this chat" |
+/// | [`JoinRequested`](RoomHandshake::JoinRequested) | we are the joiner; our KeyPackage is published | the peer's node | "Request to join chat sent" |
+/// | [`NoAuthorSigner`](RoomHandshake::NoAuthorSigner) | no fed-ID in hand to sign the handshake | the caller | "This device can't act as you yet" |
+///
+/// The roles are not negotiated: `PairRole::of` gives the lexicographically
+/// smaller fed-ID the creator's role, so which of the two middle states a node is
+/// in is a pure function of the two ids.
+///
+/// ONE TABLE, THREE CONSUMERS — the log line, the refusal, and the transcript's
+/// system note all read [`RoomHandshake::note`]. They said three different things
+/// before, and only the log said anything useful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomHandshake {
+    /// Keyed. Messages send and open.
+    Ready,
+    /// We are the CREATOR and the joiner's KeyPackage has not arrived.
+    AwaitingPeer,
+    /// We are the JOINER; our KeyPackage is out and the Welcome has not returned.
+    JoinRequested,
+    /// No signer to author our half with — a delegate reading, or an owner whose
+    /// fed-ID this node cannot open.
+    NoAuthorSigner,
+}
+
+impl RoomHandshake {
+    /// `(reason_id, English)`. The id is what a client localizes; the English is
+    /// what it renders until the bundle carries that id (CIRISClient#36).
+    ///
+    /// These are CHAT-HISTORY notes, not errors: they belong in the transcript
+    /// beside the messages, in the same voice, because from the user's side
+    /// "waiting for them to join" IS the state of the conversation.
+    #[must_use]
+    pub fn note(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Ready => ("chat.state.ready", "End-to-end encrypted."),
+            Self::AwaitingPeer => (
+                "chat.state.awaiting_peer",
+                "Waiting for them to join this chat. They will see your invitation \
+                 when their device next syncs, and your messages will send once they do.",
+            ),
+            Self::JoinRequested => (
+                "chat.state.join_requested",
+                "Request to join chat sent. Waiting for them to let you in — this \
+                 completes on its own once their device answers.",
+            ),
+            Self::NoAuthorSigner => (
+                "chat.state.no_author_signer",
+                "This device cannot act as you yet, so it cannot join the chat's key \
+                 exchange. Create or unlock your federation ID to continue.",
+            ),
+        }
+    }
+
+    /// Is the room usable?
+    #[must_use]
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Does this resolve WITHOUT anyone doing anything? Both waiting states do —
+    /// which is why they are notes and not errors, and why a client that retries
+    /// in a loop is the wrong answer.
+    #[must_use]
+    pub fn converges_on_its_own(self) -> bool {
+        matches!(self, Self::AwaitingPeer | Self::JoinRequested)
+    }
+}
+
 async fn room_key(
     st: &ChatState,
     me: &str,
     peer: &str,
     author: Option<&ciris_edge::identity::LocalSigner>,
-) -> Result<Option<ciris_edge::chat::RoomKey>, String> {
+) -> Result<(Option<ciris_edge::chat::RoomKey>, RoomHandshake), String> {
     use ciris_edge::chat::{self, PairRole, RoomKey};
     use ciris_edge::mls::cohort_group::{
         key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
@@ -310,7 +575,9 @@ async fn room_key(
     let mut rooms = st.rooms.lock().await;
 
     if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
-        return RoomKey::of(group).await.map(Some);
+        return RoomKey::of(group)
+            .await
+            .map(|k| (Some(k), RoomHandshake::Ready));
     }
     // ADVANCING the handshake needs the person's signer; READING a room whose
     // handshake already finished does not. A delegate granted `chat_read` holds
@@ -328,7 +595,7 @@ async fn room_key(
              could not be opened: check the seed dir, the `.backend` marker and \
              the `active_user_alias` pointer"
         );
-        return Ok(None);
+        return Ok((None, RoomHandshake::NoAuthorSigner));
     };
 
     // The MLS store is keyed by the room and lives for the process. State that
@@ -357,7 +624,7 @@ async fn room_key(
                      looking here — nothing on this node can complete the \
                      handshake alone"
                 );
-                return Ok(None);
+                return Ok((None, RoomHandshake::AwaitingPeer));
             };
             let group = CohortGroup::create(store, &room, me, 16)
                 .await
@@ -386,7 +653,7 @@ async fn room_key(
             .await?;
             let key = RoomKey::of(&group).await?;
             rooms.insert(room, RoomState::Keyed(Arc::new(group)));
-            Ok(Some(key))
+            Ok((Some(key), RoomHandshake::Ready))
         }
         PairRole::Joiner => {
             let material = match rooms.remove(&room) {
@@ -429,14 +696,14 @@ async fn room_key(
                      roles are fixed by the two ids and never negotiated"
                 );
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
-                return Ok(None);
+                return Ok((None, RoomHandshake::JoinRequested));
             };
             let group = CohortGroup::join(store, &room, material, &welcome, 16)
                 .await
                 .map_err(|e| format!("CohortGroup::join: {e}"))?;
             let key = RoomKey::of(&group).await?;
             rooms.insert(room, RoomState::Keyed(Arc::new(group)));
-            Ok(Some(key))
+            Ok((Some(key), RoomHandshake::Ready))
         }
     }
 }
@@ -1240,7 +1507,37 @@ struct ChatMessage {
     /// applied here — a node-attested row is attributed to the node.
     author: String,
     /// `true` when this node's owner is the AUTHOR (same source as `author`).
+    ///
+    /// Kept, and it is exactly `relation == "self"`. Viewer-DEPENDENT, like
+    /// `relation`: the row it describes is replicated byte-identically to every
+    /// member, and this field is this node's reading of it.
     mine: bool,
+    /// `message` | `system` | `error` — see [`EntryKind`]. Viewer-independent.
+    kind: &'static str,
+    /// What the author IS: `person` | `agent` | `node` | `other` | `unknown`.
+    /// Viewer-independent, and the field a channel needs in order to draw an
+    /// agent differently from the human who owns it.
+    author_kind: &'static str,
+    /// The author's relationship to THIS node's owner: `self` | `own_agent` |
+    /// `other` | `none`. Viewer-DEPENDENT and derived — a convenience so a client
+    /// need not walk ownership itself, never a property of the row.
+    relation: &'static str,
+    /// The author's role ON THE ROSTER, verbatim from the community row:
+    /// `founder` | `member` | operator-defined. Viewer-independent.
+    ///
+    /// This is the moderation signal, and it is passed through rather than
+    /// collapsed to an `is_moderator` boolean because the vocabulary is OPEN —
+    /// persist documents it as "`founder` / `member` / operator-defined", so a
+    /// boolean would have to decide, here and forever, what every future
+    /// operator-defined role means. In a PAIR room both members are founders and
+    /// both moderate; in a channel this is what distinguishes them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_role: Option<String>,
+    /// For `system` and `error` entries: the localization key naming WHICH note
+    /// this is. A client looks it up; `body` carries the English fallback so a
+    /// bundle that has not caught up yet renders a sentence rather than a blank.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<&'static str>,
 }
 
 /// ONE id, ONE sentence. Two sites refuse with `chat.not_a_pair_room`, and they
@@ -1550,14 +1847,20 @@ async fn send_message(
     // converges on its own, and a client that retries in a loop is the wrong
     // answer (edge's `LadderStall` vocabulary, §3 of its integration guide).
     let key = match room_key(&st, &owner.key_id, &contact_key_id, Some(author)).await {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chat.room_not_keyed_yet",
-                "the room's key exchange has not completed — the other side's handshake \
-                 row has not arrived yet. This converges on its own; try again shortly.",
-            )
+        Ok((Some(k), _)) => k,
+        Ok((None, state)) => {
+            // THE STATE, NOT A GENERIC STALL. Same table the transcript renders,
+            // so the note the sender sees here is the note already sitting in
+            // their chat history — one sentence, not two descriptions of one
+            // situation that a client would have to reconcile.
+            let (reason_id, note) = state.note();
+            tracing::info!(
+                room = %pair_community_key_id(&owner.key_id, &contact_key_id),
+                state = ?state,
+                converges_on_its_own = state.converges_on_its_own(),
+                "chat: send refused — the room's handshake is not complete"
+            );
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, reason_id, note);
         }
         Err(e) => {
             return refuse(
@@ -1708,6 +2011,13 @@ async fn collect_messages(
     }
 
     let mut out: Vec<ChatMessage> = Vec::new();
+    let mut who_cache: HashMap<String, (&'static str, &'static str)> = HashMap::new();
+    // The roster's roles, from the membership rows already read above. No extra
+    // query: this is the same list the transcript is anchored on.
+    let roles: HashMap<&str, Option<String>> = members
+        .iter()
+        .map(|m| (m.key_id.as_str(), m.role.clone()))
+        .collect();
     // Counters, so an empty transcript says WHICH step emptied it. Every one of
     // these has been the answer at least once: no members (roster never
     // replicated), rows but none at community scope (the widening never ran),
@@ -1731,6 +2041,13 @@ async fn collect_messages(
             not_this_room += 1;
             continue;
         };
+        let who = author_facts(
+            &*directory,
+            &mut who_cache,
+            &opened.author_key_id,
+            &owner.key_id,
+        )
+        .await;
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
         let (body, unopened_reason) = match opened.body {
             ciris_edge::chat::Body::Text(text) => (Some(text), None),
@@ -1760,6 +2077,16 @@ async fn collect_messages(
             // a claim this projection has to weigh: the person signed the row.
             // EDGE DECIDES, and from v20.1.0 it decides correctly.
             mine: opened.author_key_id == owner.key_id,
+            kind: EntryKind::Message.as_str(),
+            // ONE resolve per distinct author, cached for this transcript. Edge
+            // answers both halves at once: `resolved_from` is what the author IS,
+            // and `fed_id` is the person behind it — so an agent's message is
+            // attributed to the agent AND placed relative to its owner without a
+            // second walk. A stall leaves it `unknown`, which is the truth.
+            author_kind: who.0,
+            relation: who.1,
+            author_role: roles.get(opened.author_key_id.as_str()).cloned().flatten(),
+            message_id: None,
             author: opened.author_key_id,
         });
     }
@@ -1807,46 +2134,6 @@ async fn collect_messages(
         );
     }
     Ok(out)
-}
-
-/// The three things every keyed chat route needs: the owner's signer, the other
-/// member, and the room's conversation key.
-///
-/// Factored because `send_message` and `list_messages` need exactly the same
-/// preamble and it is not a short one — the capsule is returned by value so the
-/// signer it lends out stays alive for the caller's borrow.
-///
-/// `Ok(None)` is the self-resolving stall: the MLS handshake has not completed,
-/// so there is no key yet and the honest answer is "not yet", not an empty
-/// transcript.
-/// Does this room hold any placed message at all?
-///
-/// Asked WITHOUT the room key, because "there are no messages" and "there are
-/// messages I cannot open" are different answers and a reader deserves the right
-/// one. Existence is a property of the row; only the body is sealed.
-async fn room_holds_messages(st: &ChatState, peer: &str, community_id: &str) -> bool {
-    let Ok(rows) = st
-        .engine
-        .federation_directory()
-        .list_attestations_by(peer)
-        .await
-    else {
-        return false;
-    };
-    rows.iter().any(|r| {
-        r.cohort_scope == cohort_scope::COMMUNITY
-            && r.attestation_envelope
-                .get(ciris_persist::federation::envelope::paths::DIMENSION)
-                .and_then(|v| v.as_str())
-                == Some(CHAT_MESSAGE_DIMENSION)
-            // THIS room. Without it a peer's message in ANY shared room would
-            // answer for this one, and an empty room would report itself
-            // unreadable because a different conversation had traffic.
-            && ciris_persist::federation::admission::envelope_cohort_target(&r.attestation_envelope)
-                .ok()
-                .flatten()
-                == Some(community_id)
-    })
 }
 
 /// The other person in a pair room. Split out of [`room_context`] because a
@@ -1972,54 +2259,42 @@ async fn list_messages(
     // capsule. Only ADVANCING an unfinished handshake needs the person, and a
     // delegate cannot do that anyway; for them the honest answer is the same
     // "not keyed yet" the owner would get, not a permission error.
-    let key = match room_key(&st, &owner.key_id, &peer, None).await {
-        Ok(Some(k)) => k,
-        // NO KEY YET. Before refusing, ask whether there is anything to refuse
-        // ABOUT: an empty room and an unreadable one are different answers, and
-        // only one of them is a problem. Counting placed rows needs no key —
-        // the ciphertext is what we cannot read, not the row's existence.
-        Ok(None) if !room_holds_messages(&st, &peer, &community_id).await => {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "community_id": community_id,
-                    "cohort_scope": cohort_scope::COMMUNITY,
-                    "messages": Vec::<ChatMessage>::new(),
-                    "total": 0,
-                })),
-            )
-                .into_response()
-        }
-        Ok(None) => match room_context(&st, &headers, &owner, &community_id).await {
-            Ok(Some((capsule, _))) => {
-                match room_key(&st, &owner.key_id, &peer, Some(capsule.edge_signer())).await {
-                    Ok(Some(k)) => k,
-                    Ok(None) | Err(_) => {
-                        return refuse(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "chat.room_not_keyed_yet",
-                            "the room's key exchange has not completed — the other side's \
-                             handshake row has not arrived yet. This converges on its own; \
-                             try again shortly.",
-                        )
+    let key = 'key: {
+        match room_key(&st, &owner.key_id, &peer, None).await {
+            Ok((Some(k), _)) => break 'key k,
+            // NOT KEYED — and that is a 200, not an error. The room exists, the
+            // conversation has simply not finished starting, and the transcript
+            // says so in its own voice. A 503 here made every client invent its
+            // own wording for a state the server can name exactly, and gave the
+            // user a failure where the truth is "waiting for them".
+            Ok((None, first)) => {
+                // One attempt to ADVANCE the handshake with the owner's signer:
+                // reading needs no fed-ID, authoring our half does. A delegate
+                // reaches neither, and gets the same note the owner would.
+                if let Ok(Some((capsule, _))) =
+                    room_context(&st, &headers, &owner, &community_id).await
+                {
+                    match room_key(&st, &owner.key_id, &peer, Some(capsule.edge_signer())).await {
+                        Ok((Some(k), _)) => break 'key k,
+                        Ok((None, state)) => return transcript_pending(&community_id, state),
+                        Err(e) => {
+                            return refuse(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "chat.room_key_failed",
+                                format!("derive the room key: {e}"),
+                            )
+                        }
                     }
                 }
+                return transcript_pending(&community_id, first);
             }
-            _ => {
+            Err(e) => {
                 return refuse(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "chat.room_not_keyed_yet",
-                    "the room's key exchange has not completed — the other side's handshake \
-                     row has not arrived yet. This converges on its own; try again shortly.",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "chat.room_key_failed",
+                    format!("derive the room key: {e}"),
                 )
             }
-        },
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "chat.room_key_failed",
-                format!("derive the room key: {e}"),
-            )
         }
     };
     match collect_messages(&st, &community_id, &owner, &key).await {

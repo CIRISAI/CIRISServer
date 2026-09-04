@@ -744,7 +744,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "chat.author_signer_unavailable",
     "chat.not_a_pair_room",
     "chat.room_key_failed",
-    "chat.room_not_keyed_yet",
+    # `chat.room_not_keyed_yet` is GONE — it was one sentence for four different
+    # situations, on a surface that can say which. Replaced by `chat.state.*`,
+    # which are chat-HISTORY notes rendered beside the messages, not errors.
+    "chat.state.awaiting_peer",
+    "chat.state.join_requested",
+    "chat.state.no_author_signer",
+    "chat.state.ready",
     "chat.unsupported_content_type",
     # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
     # dismissal path used to share `commons_surface.refusal.objection_absent`,

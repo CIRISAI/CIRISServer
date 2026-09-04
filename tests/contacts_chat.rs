@@ -2666,6 +2666,144 @@ async fn seed_message_attested_by(
     .expect("emit foreign-shaped chat message")
 }
 
+/// **The transcript's schema is the one a CHANNEL needs, not the one a pair does.**
+///
+/// Chat rooms and agent conversations are one client surface, so an entry has to
+/// carry two independent facts: what KIND of entry it is (viewer-independent),
+/// and who wrote it (with the viewer-relative reading marked as derived). A flat
+/// `self | other_human | my_agent | ...` role cannot express a room with fifty
+/// people in it, and gives one row two different names depending on who is
+/// looking — in a transcript that is byte-identical for every member.
+#[tokio::test]
+async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _m) = open_chat(&client, &base, &owner, &engine, &owner_id).await;
+
+    let resp = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "on two axes" }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        200,
+        "{}",
+        resp.text().await.unwrap_or_default()
+    );
+
+    let json: serde_json::Value = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages")
+        .json()
+        .await
+        .expect("messages json");
+    let m = &json["messages"].as_array().expect("messages")[0];
+
+    assert_eq!(
+        m["kind"], "message",
+        "a person speaking is a `message`: {m}"
+    );
+    assert_eq!(
+        m["author_kind"], "person",
+        "the author is a HUMAN and the entry must say so — a channel draws an \
+         agent differently from the person who owns it, and cannot if the only \
+         signal is the key: {m}"
+    );
+    assert_eq!(
+        m["relation"], "self",
+        "the viewer-relative reading, derived from the author: {m}"
+    );
+    assert_eq!(
+        m["mine"], true,
+        "`mine` is retained and must agree with `relation` — two fields that can \
+         disagree are worse than one: {m}"
+    );
+    assert!(
+        m["message_id"].is_null(),
+        "a spoken message has no localization key; only system/error notes do: {m}"
+    );
+}
+
+/// **A room that has not finished starting says so IN THE TRANSCRIPT.**
+///
+/// The handshake is not an error and must not arrive as one: a pair room is
+/// end-to-end encrypted, so it spends real time waiting for the other side's
+/// KeyPackage to replicate. That is a thing the conversation can say. It used to
+/// be `503 chat.room_not_keyed_yet` — one sentence for four situations, on a
+/// surface with no way to name which, leaving every client to invent wording for
+/// a state the server knows exactly.
+#[tokio::test]
+async fn an_unstarted_room_returns_a_system_note_not_an_error() {
+    let (_engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    // A contact who has NEVER opened the room, so no KeyPackage can exist.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200, "add the contact");
+    let community_id =
+        ciris_server::contacts_chat::pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID);
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 200, "open the room");
+
+    let resp = client
+        .get(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a conversation that has not finished starting is not a failure"
+    );
+    let json: serde_json::Value = resp.json().await.expect("messages json");
+    let msgs = json["messages"].as_array().expect("messages array");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the system note is IN the transcript: {json}"
+    );
+    let note = &msgs[0];
+    assert_eq!(note["kind"], "system", "{note}");
+    assert_eq!(
+        note["message_id"], "chat.state.awaiting_peer",
+        "we CREATED this room, so we are waiting on the peer's KeyPackage — and \
+         the id must name WHICH note, since `system` is not something a user \
+         reads: {note}"
+    );
+    assert!(
+        note["body"].as_str().is_some_and(|b| !b.is_empty()),
+        "the English fallback rides along, or a client whose bundle has not \
+         caught up renders a blank line: {note}"
+    );
+    assert_eq!(
+        json["total"], 0,
+        "`total` counts what people SAID — counting the room's own note would \
+         make an unstarted conversation report a message: {json}"
+    );
+    assert_eq!(
+        json["converges_on_its_own"], true,
+        "the client's cue to wait rather than offer a retry button: {json}"
+    );
+}
+
 /// **A pre-planted room under the derived pair id is a conflict, not a chat**
 /// (codex, contacts_chat.rs:702).
 ///
