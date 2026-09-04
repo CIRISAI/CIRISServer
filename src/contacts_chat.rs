@@ -597,31 +597,47 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     // human a conversation that silently never leaves this node.
     //
     // #472 — a routable grant names the contact's NODE, but the contact IS the
-    // PERSON: each chat-covering subject resolves through persist's owner_of
-    // (the withdraws-aware owner-binding fold) back to the human it speaks
-    // for. A person-subject grant (legacy, or the unclaimed-contact fallback)
-    // stays as-is; two grants resolving to one person are ONE contact.
+    // PERSON. EDGE RESOLVES THAT, we do not: `contact::resolve` takes any
+    // identifier (fedID, nodeID, agentID) and lands on the same `Subject`, so a
+    // node-subject grant and a person-subject grant fold to one contact without
+    // this module knowing which it held.
+    //
+    // This walked persist's `owner_of` itself. Never again: the reverse and
+    // forward owner walks handle an ambiguous node ASYMMETRICALLY on purpose
+    // (the reverse walk skips it, so one poisoned node cannot make its owner's
+    // every grant unroutable; the forward walk fails closed when asked about
+    // that node directly), and both directions are security-relevant. Two
+    // spellings of "who owns this key" are two answers that can disagree, in
+    // precisely the place where disagreement is an impersonation.
+    let directory = st.engine.federation_directory();
+    let lens = ciris_edge::contact::PersistLens::new(&*directory);
     let mut peer_ids: Vec<String> = Vec::new();
     for (subject, prefixes) in grants {
         if !prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX) {
             continue;
         }
-        let person = match st.engine.owner_of(&subject).await {
-            Ok(Some(owner_key)) => owner_key,
-            Ok(None) => subject,
-            Err(e) => {
-                return refuse(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "contacts.store_unavailable",
-                    format!("owner_of({subject}): {e}"),
-                )
+        let person = match ciris_edge::contact::resolve(&lens, &subject).await {
+            Ok(resolved) => resolved.fed_id,
+            // A STALL IS NOT AN ERROR, and a live grant must not vanish from the
+            // list because the directory has not converged on its subject yet.
+            // `NotYetDiscovered` fixes itself — edge queues the key fetch — so
+            // the grant is reported under the id it names until it does.
+            Err(stall) => {
+                tracing::info!(
+                    subject = %subject,
+                    stall = ?stall,
+                    "contacts: a chat-covering grant's subject does not resolve to a \
+                     person yet, so it is listed under the key the grant names. This \
+                     is the directory not having converged, not a broken grant — it \
+                     resolves itself once the subject's key body arrives"
+                );
+                subject
             }
         };
         if !peer_ids.contains(&person) {
             peer_ids.push(person);
         }
     }
-    let directory = st.engine.federation_directory();
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
         // The SAME projection `GET /v1/federation/peers` serves, resolved one
