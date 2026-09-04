@@ -157,29 +157,39 @@ that names the mechanism, and it prints every expected red beside the verdict, s
 the union of a ladder's ⚠ lines is a readable list of asks. A stage whose redness
 cannot be explained is a BREAK, not an XFAIL.
 
-**As of 2026-08-20 (0.5.185) it is green through `dark` and carries two reds —
-one expected, one not.** Both are deliverables: each names the wiring it is
-missing, so the union of them is a readable list of asks.
+**As of 2026-09-04 (0.5.197, persist v40 / edge v20.1.1) it is GREEN through
+`hamburger` with one RED-EXPECTED stage (`one_sided`).** Measured end to end
+on two sovereign nodes, from the rows' own `asserted_at` / `admitted_at`:
+
+| event | authored | landed on the peer | lag |
+|---|---|---|---|
+| node-a claims, then announces (owner-binding self → federation) | 17:58:48.3 / 17:58:48.5 | on node-b 17:59:21.2 | 33 s (one round) |
+| node-b claims, then announces | 17:58:49.8 / 17:58:50.3 | on node-a 18:00:20.6 | 90 s — first offer refused `attesting_key_id … does not exist in federation_keys` (transient): the owner's KEY arrived one round after the binding; admitted on retry |
+| node-a opens the room (creator) | 18:00:00.6 | — | hint logged: "node-b-user resolves to no node in this directory" — correct, its binding landed 20 s later |
+| node-b opens the room, publishes its KeyPackage | 18:00:46.7 (after the harness's 45 s one-sided window) | on node-a 18:01:20.7 | 34 s |
+| node-a keys the room, publishes Welcome, sends | 18:01:27.1 | Welcome + message on node-b 18:02:21.2 | 54 s |
+
+Claim to message-in-the-peer's-transcript: 3 min 33 s, of which ~55 s is
+harness-imposed (the one-sided window and poll granularity). Everything else
+is anti-entropy cadence (~30 s a round) plus one round lost to the key plane
+trailing the attestation plane — the announce bundle is offered as rows on two
+planes, and the binding can arrive before the key that verifies it.
 
 - `one_sided` ⚠ RED-EXPECTED. While only the sender held the roster, the
   recipient answered `404 chat.unknown_community` and held zero
   `federation_communities` rows for that id; it then derived the identical id
   itself. `compose::build_replication_peers` registers coordinators for
   Attestation / Key / IdentityOccurrence / TransportDestination and none for
-  Community, so no anti-entropy round for the roster plane ever runs. Edge
-  implements the plane end to end and persist has `put_community` — only the
-  registration is missing. Product consequence: a one-sided invitation is
-  impossible; both parties must independently open the same room.
-- `arrived` ✗ BREAK. The plane CARRIED the message — the recipient logged the
-  envelope delivered ~30 s after the send — and refused it at persist's bulk
-  ingest gate, because the row names the OWNER as `attesting_key_id` while its
-  hybrid signature is the NODE's (`attestation_promote` signs with the Engine's
-  own signer). `verify_row_hybrid_signature` checks that signature against the
-  ATTESTER's registered key and never reads `scrub_key_id`. Seven other
-  sender-authored rows in the same rounds, all with signer == attester, landed.
-  Not XFAIL'd: declaring the delivery stage expected-red would make CI green over
-  a feature that cannot cross a node boundary at all. The fix belongs in
-  `src/contacts_chat.rs` (`owner_signer_capsule::acquire`, #342), not here.
+  Community, so no anti-entropy round for the roster plane ever runs. Product
+  consequence: a one-sided invitation is impossible; both parties must
+  independently open the same room.
+
+The 2026-08-20 red at `arrived` (attester/signer split, `attestation_promote`
+signing with the node's key) is gone with the DX port: `share(With::Community)`
+places the row the OWNER signed with the node's co-scrub beside it, and
+`hamburger` asserts the attester IS the owner. What the port surfaced instead —
+every room row withheld as "not in the row's audience" — was the harness never
+announcing; see `scenarios/chat.sh` and the `bound` stage.
 
 On the projection question: `chat:message:v1` resolves `AttestationFamily::Unknown`,
 and at `cohort_scope: community` the conservative default gives `Projection::Cohort`

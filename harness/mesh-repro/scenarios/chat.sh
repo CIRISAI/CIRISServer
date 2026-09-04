@@ -167,7 +167,7 @@
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
 SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the node, author the owner, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
+SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
@@ -207,18 +207,23 @@ CHAT_SERVICES="canonical $CHAT_NODES"
 # signed envelope attributes the words to. They are separate questions and the
 # projection answers them separately (team-lead ruling, §8.1.12.7 fidelity).
 #
-#   CHAT_ATTESTER_WORLD=node   persist v38 — `put_attestation` refuses every
-#                              community-scope row at the write gate, so
-#                              `attestation_promote`'s re-seal is the only minting
-#                              door and it signs with the engine (e81a103). The
-#                              split is the design; the stage asserts it.
-#   CHAT_ATTESTER_WORLD=owner  after persist ask (a) or (b) — the producer's
-#                              signature survives promotion and the two converge.
+#   CHAT_ATTESTER_WORLD=owner  persist v39+ / edge v20 (the DX port, 0.5.197):
+#                              `share(With::Community)` → `enter_mesh` places
+#                              the row the ACTOR signed with the node's
+#                              co-scrub beside it (`custody=
+#                              ActorSignedNodeCoScrubbed`), so the attester IS
+#                              the owner and the author converges on it. The
+#                              stage asserts the convergence. THE DEFAULT.
+#   CHAT_ATTESTER_WORLD=node   persist v38 — `attestation_promote` re-sealed
+#                              every community row with the engine's signer,
+#                              so the attester was the NODE and the envelope
+#                              named the owner. Kept so the pre-port world can
+#                              still be measured; not what ships.
 #
 # CHAT_AUTHOR_FIELD is EMPTY until server-wire reports the name it chose. Empty
 # means the stage refuses to assert rather than probe a guess: a name that does
 # not exist and a feature that does not work read identically from here.
-CHAT_ATTESTER_WORLD="${CHAT_ATTESTER_WORLD:-node}"
+CHAT_ATTESTER_WORLD="${CHAT_ATTESTER_WORLD:-owner}"
 CHAT_AUTHOR_FIELD="${CHAT_AUTHOR_FIELD:-author}"
 # The console binary, bind-mounted from the SAME release build that produced the
 # wheel (docker-compose.chat.yml). `identity create` and `claim` live only in the
@@ -863,7 +868,7 @@ stage_hamburger() {
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python /opt/harness/chat_drive.py hamburger \
     "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" \
-    "$CHAT_A_OWNER" "$CHAT_A_NODE_KEY" "${CHAT_AUTHOR_FIELD:-}" "${CHAT_ATTESTER_WORLD:-node}" \
+    "$CHAT_A_OWNER" "$CHAT_A_NODE_KEY" "${CHAT_AUTHOR_FIELD:-}" "${CHAT_ATTESTER_WORLD:-owner}" \
     2>/dev/null | tr -d '[:space:]'
 }
 HINT_hamburger="the row reached the recipient but not with its identity intact — attesting_key_id is not the sender's owner, cohort_scope is not \`community\`, the subject set does not name the author, or the status folded away from \`live\`. Any of those makes the arrived object a different object from the one that was sent."
