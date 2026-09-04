@@ -118,6 +118,51 @@ DIAG_ship() {
 # ── 5. arrive — rows landed at the canonical (DIRECT DB, no log dependency) ──
 stage_arrive() { harness_db_count canonical trace_events; }
 HINT_arrive="envelopes left the agent but no trace_events row exists at the canonical. Suspect attribution (inbound frames dropped unattributed) or a signed-row divergence refusing the binding."
+# The diagnosis this stage never had. `ship` counts frames LEAVING; `arrive`
+# counts rows LANDING, and everything interesting happens in between — at the
+# RECIPIENT, whose reasons this stage was not reading at all. A CI run failed
+# here with nothing in the log but a DEBUG line saying the canonical had already
+# refused something, and no statement anywhere of what or why.
+#
+# The order below is the order the questions actually resolve in: a row cannot be
+# admitted before the key that signs it, and a key cannot be admitted before the
+# node that vouches for it.
+DIAG_arrive() {
+  echo "  ── does the canonical have the AGENT'S KEY? ──"
+  local agent_keys
+  agent_keys=$(harness_db_count canonical federation_keys "key_id LIKE '%agent%'")
+  echo "     federation_keys rows matching the agent: ${agent_keys}"
+  if [ "${agent_keys:-0}" = "0" ]; then
+    echo "     ⇒ THIS IS THE FAILURE, and it is upstream of every row. A trace is"
+    echo "       verified against its ATTESTER's registered pubkeys, so with no key"
+    echo "       row every frame the agent ships is unverifiable and is dropped"
+    echo "       BEFORE anything about traces, consent or audiences is consulted."
+    echo "       Look for the Key refusal below, not at the trace plane."
+  fi
+  echo "  ── keys the canonical REFUSED (and has stopped re-asking for) ──"
+  # CIRISEdge#544: once a body is refused the node suppresses the re-ask, so this
+  # line is the only lasting evidence that a refusal ever happened.
+  compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE "want: dropped hashes[^\"]{0,80}kind=[A-Za-z]+[^\"]{0,40}" | sort -u | tail -4
+  echo "  ── the canonical's stated reasons ──"
+  compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -oiE "(refus|reject|withheld|unverifiable|unattributed)[^\"]{0,120}" | sort | uniq -c | tail -6
+  echo "  ── the agent's rooting standing at the canonical ──"
+  # `advisory` is not fatal by itself (CC 3.3.6.2 — a routing hint), but an
+  # agent that never rises above it has no established authority, and
+  # `rooting_unsigned_provenance_link` says the provenance link was not signed.
+  compose logs canonical 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE "announce ADMITTED as [a-z]+[^\"]{0,60}reason=\"[a-z_]+\"" | sort -u | tail -4
+  echo "  ── what the agent believes it sent ──"
+  echo "     trace attestations at the agent: $(harness_db_count agent attestations "attestation_envelope LIKE '%trace:%'")"
+  echo "     of those, at cohort_scope=federation: $(harness_db_count agent attestations "attestation_envelope LIKE '%trace:%' AND cohort_scope='federation'")"
+  echo "     ⇒ rows at 'self' never left: the consent sweep places them, so a zero"
+  echo "       in the second line with a non-zero first is a PLACEMENT failure on"
+  echo "       the sender, not a delivery failure on the recipient."
+  echo "  ── the agent's withholds ──"
+  compose logs agent 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE "attestation (plane )?withheld[^\"]{0,120}" | sort | uniq -c | tail -5
+}
 EXIT_arrive=15
 DIAG_arrive() {
   compose logs canonical 2>/dev/null | grep -iE "REFUSED at admission|diverges from the signed envelope|DROPPED" | tail -5
