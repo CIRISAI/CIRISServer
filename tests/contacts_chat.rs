@@ -162,7 +162,17 @@ async fn seed_user_key_at(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: 
     seed_user_key(engine, key_id, ed_seed, pqc_seed).await;
 }
 
+/// Register a key with an explicit `identity_type` — `agent`, for the steward
+/// tests. Same record shape as [`seed_user_key`], which delegates to it.
+async fn seed_key_typed(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8, kind: &str) {
+    seed_key_inner(engine, key_id, ed_seed, pqc_seed, kind).await;
+}
+
 async fn seed_user_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8) {
+    seed_key_inner(engine, key_id, ed_seed, pqc_seed, identity_type::USER).await;
+}
+
+async fn seed_key_inner(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8, kind: &str) {
     let ed = SigningKey::from_bytes(&[ed_seed; 32]);
     let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{key_id}-pqc"))
         .expect("ML-DSA-65 seed");
@@ -174,7 +184,7 @@ async fn seed_user_key(engine: &Engine, key_id: &str, ed_seed: u8, pqc_seed: u8)
         pubkey_ed25519_base64: BASE64.encode(ed.verifying_key().to_bytes()),
         pubkey_ml_dsa_65_base64: Some(BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"))),
         algorithm: algorithm::HYBRID.into(),
-        identity_type: identity_type::USER.into(),
+        identity_type: kind.into(),
         identity_ref: key_id.to_string(),
         valid_from: now,
         valid_until: None,
@@ -2824,6 +2834,74 @@ async fn an_unstarted_room_returns_a_system_note_not_an_error() {
     assert_eq!(
         json["converges_on_its_own"], true,
         "the client's cue to wait rather than offer a retry button: {json}"
+    );
+}
+
+/// **An agent is associated to its human as an OCCURRENCE of that identity.**
+///
+/// Getting this right took three wrong answers, and each one is a real trap:
+///
+///   * `owner_of` is persist's CC 3.2 walk over OWNER-BINDING edges. It is about
+///     NODES, and returns `None` for an agent. The chat reader used it, so the
+///     owner's own agent came back `author_kind: unknown, relation: other` — a
+///     machine speaking for them, rendered as a stranger.
+///   * a bare `delegates_to(human → agent)` does NOT make the agent theirs.
+///     `can_accept_for_itself` is false only for a NODE or a MINOR, so an agent
+///     HAS agency, and `steward_bindings_of` therefore restricts it to explicit
+///     custody edges: "an unmarked delegation to a person is a capability
+///     conferral — giving them a job, not owning them".
+///   * the association is an IDENTITY OCCURRENCE. persist's own envelope builder
+///     says so in its parameter names — `delegates_to_agent_envelope(
+///     agent_occurrence_key_id, bilateral_pair_id, scope)` — and
+///     `steward_bindings_of` clause (2) is exactly "k is an occurrence of a
+///     `user`-role identity ⇒ that identity key".
+///
+/// Which is why the reader asks `steward_bindings_of`: one call that answers
+/// "who is the responsible human" for a person (clause 1, themselves), an agent
+/// (clause 2, the identity it occurs for) and a node (clause 3, its steward).
+#[tokio::test]
+async fn an_agent_resolves_to_the_human_whose_occurrence_it_is() {
+    use ciris_persist::federation::admission;
+
+    let (engine, _base, _owner, owner_id, _h) = fixture().await;
+    const AGENT: &str = "alice-agent-1";
+    seed_key_typed(&engine, AGENT, 0xE4, 0xE5, identity_type::AGENT).await;
+
+    // VACUITY GUARD. Registered but not yet anyone's, the agent must resolve to
+    // nobody — otherwise the assertion below could pass on a fixture that bound
+    // nothing at all.
+    let before = admission::steward_bindings_of(&*engine.federation_directory(), AGENT)
+        .await
+        .expect("steward_bindings_of");
+    assert!(
+        !before.contains(&owner_id.key_id),
+        "an unbound agent must resolve to no human: {before:?}"
+    );
+
+    engine
+        .federation_directory()
+        .put_identity_occurrence_local(IdentityOccurrence {
+            identity_key_id: owner_id.key_id.clone(),
+            occurrence_key_id: AGENT.to_string(),
+            device_class: "agent".to_string(),
+            hardware_attestation: None,
+            asserted_at: chrono::Utc::now(),
+            valid_until: None,
+            encryption_pubkeys: None,
+            transport_binding: None,
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("bind the agent as an occurrence of its human");
+
+    let after = admission::steward_bindings_of(&*engine.federation_directory(), AGENT)
+        .await
+        .expect("steward_bindings_of");
+    assert!(
+        after.contains(&owner_id.key_id),
+        "the agent must now resolve to its responsible named human — this is what \
+         the transcript reads to say `own_agent`, and it is the relation that lets \
+         a peer hold a machine's words to a person: {after:?}"
     );
 }
 

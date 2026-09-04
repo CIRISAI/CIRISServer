@@ -487,45 +487,54 @@ fn contact_stall_refusal(stall: &ciris_edge::contact::LadderStall) -> Response {
 
 /// `(author_kind, relation)` for one author, memoised per transcript.
 ///
-/// Both come from ONE `contact::resolve`: `resolved_from` says what the author
-/// is, `fed_id` says whose it is. We do not walk ownership ourselves — that walk
-/// has an asymmetric ambiguous-node rule that exists for security reasons, and a
-/// second copy of it is a second answer.
+/// ── STEWARD, NOT OWNER, FOR AN AGENT ────────────────────────────────────────
+///
+/// This asked `contact::resolve`, whose lens answers `owner_of` — persist's CC
+/// 3.2 OWNER-BINDING walk, which is about NODES and is dimension-restricted to
+/// owner-binding edges. An agent is not owned, it is STEWARDED: if an agent
+/// participates in the federation it has a responsible named human, and that
+/// relation is `steward_bindings_of`, not `owner_of`.
+///
+/// The consequence of getting it wrong was silent and specific: `owner_of(agent)`
+/// returns `None`, `resolve` stalls, and the reader reported the user's OWN agent
+/// as `author_kind: unknown, relation: other` — a machine speaking for them,
+/// rendered as a stranger.
+///
+/// `steward_bindings_of` is the right question for every author kind, because its
+/// first clause is "`k`'s own key is `user`-role ⇒ `k` steward-binds itself": a
+/// person resolves to themselves, an agent to its responsible human, a node to
+/// its steward. One call, one answer, and persist's own enumeration rather than a
+/// second walk — the same way `safety::named` composes `is_named_moderator`.
 async fn author_facts(
     directory: &dyn ciris_persist::federation::FederationDirectory,
     cache: &mut HashMap<String, (&'static str, &'static str)>,
     author: &str,
     owner_key_id: &str,
 ) -> (&'static str, &'static str) {
+    use ciris_persist::federation::admission;
     if let Some(hit) = cache.get(author) {
         return *hit;
     }
-    let lens = ciris_edge::contact::PersistLens::new(directory);
-    let facts = match ciris_edge::contact::resolve(&lens, author).await {
-        Ok(subject) => {
-            let relation = if author == owner_key_id {
-                "self"
-            } else if subject.fed_id == owner_key_id {
-                // An agent or node this node's owner owns — their words, but not
-                // them. A channel draws this differently from both.
-                "own_agent"
-            } else {
-                "other"
-            };
-            (author_kind_str(&subject.resolved_from), relation)
-        }
-        // NOT an error: the directory has not converged on this key yet. Saying
-        // `unknown` is better than defaulting to `person`, which would put a
-        // human's framing on an agent's message.
-        Err(_) => (
-            "unknown",
-            if author == owner_key_id {
-                "self"
-            } else {
-                "other"
-            },
-        ),
+    // WHAT the author is, from the directory's own identity_type.
+    let kind = match directory.lookup_public_key(author).await {
+        Ok(Some(rec)) => author_kind_str(&ciris_edge::contact::IdentityKind::from_identity_type(
+            &rec.identity_type,
+        )),
+        // Not an error: a key body can still be in flight. `unknown` is honest,
+        // where defaulting to `person` would put a human's framing on a
+        // machine's words.
+        _ => "unknown",
     };
+    // WHOSE it is — the responsible named human.
+    let relation = if author == owner_key_id {
+        "self"
+    } else {
+        match admission::steward_bindings_of(directory, author).await {
+            Ok(humans) if humans.iter().any(|h| h == owner_key_id) => "own_agent",
+            _ => "other",
+        }
+    };
+    let facts = (kind, relation);
     cache.insert(author.to_owned(), facts);
     facts
 }
