@@ -40,10 +40,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ed_pub = B64.encode(ed.public_key()?);
     let ml_pub = B64.encode(mldsa.public_key()?);
 
-    // persist v17.2.0's PINNED synthesized envelope for holder slot 0 —
-    // byte-identical canonicalization (JCS) to what the genesis seed verifies.
+    // PERSIST'S envelope, not a literal of it. The seeded terminus row's
+    // `registration_envelope` is built by persist's own
+    // `test_anchor_registration_envelope` — `{"test_anchor": true}` with the
+    // subject bound in (key_id, identity_type=accord_holder, both pubkeys) —
+    // and the walk verifies our scrub over the STORED bytes. This used to sign
+    // a hand-rolled two-key `{"key_id", "test_anchor"}` pinned to "persist
+    // v17.2.0's synthesized envelope"; persist's grew, the literal did not,
+    // and every node then rooted `Advisory` with
+    // `link test-accord-holder-0: classical scrub-signature did not verify`
+    // — the Attestation plane dark, and the trace ladder red at `arrive`,
+    // with the six env values still byte-identical to what this printed.
+    // One source of truth: build the envelope with the function that seeds it.
     let root = HybridSigningIdentity::new("test-accord-holder-0".to_string(), ed, mldsa);
-    let envelope = serde_json::json!({ "key_id": "test-accord-holder-0", "test_anchor": true });
+    let envelope = ciris_persist::federation::genesis::test_anchor_registration_envelope(
+        "test-accord-holder-0",
+        &ed_pub,
+        Some(&ml_pub),
+    );
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)?;
     let rt = tokio::runtime::Builder::new_current_thread().build()?;
     let (scrub_ed, scrub_pqc) = rt.block_on(root.sign_bound(&canonical))?;
