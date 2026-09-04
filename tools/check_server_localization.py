@@ -741,9 +741,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # emitted but not yet in the client bundle, so they render the server's
     # English in all 29 languages until the next `ciris-client` release carries
     # them. Recorded here rather than silently uncovered.
-    "chat.author_signer_unavailable",
-    "chat.not_a_pair_room",
-    "chat.room_key_failed",
     # `chat.room_not_keyed_yet` is GONE — it was one sentence for four different
     # situations, on a surface that can say which. Replaced by `chat.state.*`,
     # which are chat-HISTORY notes rendered beside the messages, not errors.
@@ -758,11 +755,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "contacts.prior_rung_incomplete",
     "contacts.unreachable",
     "contacts.unresolvable",
-    "chat.state.awaiting_peer",
-    "chat.state.join_requested",
-    "chat.state.no_author_signer",
-    "chat.state.ready",
-    "chat.unsupported_content_type",
     # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
     # dismissal path used to share `commons_surface.refusal.objection_absent`,
     # whose 29 locales all translate the BALLOT sentence — so a non-English
