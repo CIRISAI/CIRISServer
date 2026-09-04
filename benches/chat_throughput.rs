@@ -8,7 +8,8 @@
 //! Modelled directly on CIRISAgent's `memory-benchmark.yml` discipline: it does
 //! not ask "is this fast", it asks **what does RSS do as the transcript grows**,
 //! and it samples that at four phase boundaries — cold start, a 100-message warm
-//! set, a burst out to 1000, and a 30-second idle tail. The agent's benchmark
+//! set, a burst (out to 1000 once CIRISPersist#804 lands; 150 today — see the
+//! knobs table), and a 30-second idle tail. The agent's benchmark
 //! exists because a leak shows up as a *shape* across phases, never as a single
 //! number, and the same is true here.
 //!
@@ -61,8 +62,12 @@
 //!
 //! | env | default | meaning |
 //! |---|---|---|
-//! | `CHAT_BENCH_WARM` | `100` | messages emitted in the warm phase |
-//! | `CHAT_BENCH_BURST` | `900` | ADDITIONAL messages in the burst phase (→ 1000 total) |
+//! | `CHAT_BENCH_WARM` | `50` | messages emitted in the warm phase |
+//! | `CHAT_BENCH_BURST` | `100` | ADDITIONAL messages in the burst phase (→ 150 total) |
+//!
+//! The defaults are 50/100 rather than the intended 100/900 because persist's
+//! per-peer write quota refuses a locally-authored burst at ~250
+//! (CIRISPersist#804). Set both back the moment that lands.
 //! | `CHAT_BENCH_IDLE_SECS` | `30` | idle tail length |
 //! | `CHAT_BENCH_LIST_SAMPLES` | `5` | `GET` samples per latency measurement |
 
@@ -115,8 +120,30 @@ impl Cfg {
                 .unwrap_or(default)
         }
         Cfg {
-            warm: num("CHAT_BENCH_WARM", 100),
-            burst: num("CHAT_BENCH_BURST", 900),
+            // ── SIZED UNDER THE SUBSTRATE'S WRITE CEILING (CIRISPersist#804) ──
+            //
+            // 100 + 900 was the intended shape and is what this bench should
+            // measure. It cannot right now: every chat send places its row with
+            // `widen_audience` → `put_attestation`, which charges persist's
+            // per-peer write quota keyed on `row.attesting_key_id` — and since
+            // edge v20 that key is the HUMAN who wrote the message. So a node's
+            // own owner is metered by the control that exists to stop a hostile
+            // PEER flooding this node, and the burst is refused at ~250
+            // (measured: 243, 248 locally; ~344 in CI, where refill timing
+            // differs).
+            //
+            // 50 + 100 sits under the smallest ceiling observed with margin for
+            // that variance — 200 total ran clean repeatedly. Restore with
+            // `CHAT_BENCH_WARM=100 CHAT_BENCH_BURST=900` the moment #804 lands;
+            // the knobs exist so this is one variable, not a rewrite.
+            //
+            // THE COST, stated because a smaller bench measures less: the RSS
+            // extrapolation below reports per-1000 growth from a 150-message
+            // sample, so it is noisier and should not be gated on until the size
+            // is restored. Latency and the read-back reconciliation are
+            // unaffected — those are per-message facts.
+            warm: num("CHAT_BENCH_WARM", 50),
+            burst: num("CHAT_BENCH_BURST", 100),
             idle_secs: num("CHAT_BENCH_IDLE_SECS", 30),
             list_samples: num("CHAT_BENCH_LIST_SAMPLES", 5),
         }
@@ -901,7 +928,7 @@ async fn run(cfg: Cfg) -> i32 {
     merge(&mut obj, rss_json());
     emit(obj);
 
-    // ── Phase 3: burst (out to 1000) ───────────────────────────────────────
+    // ── Phase 3: burst ─────────────────────────────────────────────────────
     let t = Instant::now();
     let burst_lat = match emit_messages(&client, &bed, cfg.burst, "burst", false).await {
         Ok(l) => l,
