@@ -22,8 +22,11 @@ name: ciris-mesh-repro
 # reads `arrive=0`. `tests/anchor_block_verifies.rs` catches that in a second
 # — run it after every substrate repin, before any mesh run.
 #
-# This repo no longer carries a generator (a third copy drifted and cost a day;
-# CIRISEdge hit the mirror image transcribing OUR block, edge 82d8650). Mint
+# This repo no longer carries a generator. Ours signed a literal that never
+# matched persist's terminus — and nothing noticed for months, because edge
+# < v20 did not require a Rooted provenance to carry the Attestation plane;
+# v20 does, and the ladder went red the day we adopted it. CIRISEdge hit the
+# mirror image transcribing OUR block (edge 82d8650). Mint
 # with the substrate's generator — CIRISPersist#805 asks persist to ship it —
 # and until it lands, CIRISEdge's `tests/anchor_block_generate.rs` prints the
 # identical bytes ONLY while edge pins the same persist + verify as Cargo.lock

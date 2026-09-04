@@ -12,9 +12,14 @@
 //! ladder reads `arrive=0` with nothing in the logs but a token.
 //!
 //! That happened. The block was byte-identical to what our generator printed —
-//! and the generator was the stale copy, signing a two-key literal persist had
-//! outgrown. CIRISEdge hit the mirror image two days earlier by transcribing
-//! OUR block (CIRISEdge 82d8650). Three copies of one minter; one drifted.
+//! and the generator was WRONG, signing a two-key literal that never matched
+//! persist's subject-bound terminus. This test, run in a worktree at the last
+//! green commit (persist v38.7.0 / verify v14.0.0), fails with the identical
+//! text: the block had never rooted. The ladder was green because edge < v20
+//! did not make `Rooted` load-bearing for Attestation carriage; edge v20 does
+//! (f5194e5, c2b1e4c), and the trace plane went dark the day we adopted it.
+//! CIRISEdge hit the mirror image two days earlier by transcribing OUR block
+//! (edge 82d8650). Three copies of one minter; ours was wrong from the start.
 //!
 //! This is not a generator. It runs persist's real `root_binding` — the walk the
 //! canonical runs when the agent announces — against a directory seeded exactly
