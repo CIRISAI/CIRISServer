@@ -1,41 +1,43 @@
-# Mesh-seed runbook — seeding the canonical mesh from the Trust Root card (0.5.80)
+# Mesh-seed runbook — seeding the canonical mesh by a **2-of-3 co-scrub** across two machines (0.5.84)
 
-> ## ⚡ MODEL CHANGE (2026-07-04) — the seed is now a Trust Root card action
+> ## ⚡ MODEL (current — 0.5.84) — the seed is a cross-device m-of-n co-scrub
 >
-> **This runbook was the 0.5.75 delegation-grant + RNS-relay procedure** (promote
-> A/B `self → federation` and wire bilateral `consent:replication:v1` over
-> `POST /v1/mesh/relay` with a constrained delegation grant). **That model is
-> superseded.** As of **0.5.80 (the mesh-seed release)** the canonical mesh is
-> seeded by a **single accord-holder action on the Trust Root card** — the
-> **add-canonical** op — not by a delegation grant, not over the relay, and not by
-> promoting a node to "federation cohort scope." The delegation/relay machinery
-> still exists (it is how an owner drives a *remote* node's own API), but it is no
-> longer how the mesh is seeded.
+> A canonical server is admitted to the trust root by a **quorum of accord holders**,
+> not one. Since **0.5.84** the `HUMANITY_ACCORD` family is BAKED (persist v13.3.1 /
+> CIRISPersist#386 seeds the entrenched `quorum:2/3` row at boot on every node), and
+> the add-canonical admission gate is **dynamic m-of-n** (persist v13.2.0 /
+> CIRISPersist#383 — `canonical` is conferred iff the record's `distinct_scrub_count()`
+> ≥ the family's entrenched `M`, i.e. **2 of 3**). So the seed is a **co-scrub**: A1
+> scrub-signs the target (scrub #1), a second holder (B1) appends a scrub (scrub #2)
+> over the byte-identical envelope, and at 2-of-3 the record is conferred `canonical`.
 >
-> **Why the change:** a node is canonical because **the trust root signed off**, not
-> because it announced itself into a federation cohort. The seed is therefore an
-> **accord-conferred** act: an accord holder (A1, 1 of 3) scrub-signs the node to the
-> baked `HUMANITY_ACCORD` anchor with a `canonical` role. persist v13's admission
-> gate **refuses** the `canonical` role on any record that is not anchor-scrubbed
-> (`CanonicalRoleNotAccordConferred`), so nobody can bootstrap themselves into the
-> founding set. See CIRISServer#164 (the op), #163/CIRISPersist#342 (Option-A
-> addressing), CIRISPersist#372 (the `canonical` role + its gate).
+> **This runbook covers the cross-machine case** the operator actually runs: **A1 on
+> `lapbuntu2`, B1 on `mac-mini`** — two separate machines, each holding one portable
+> keyset. The two boxes are **NOT accord-peered**, so the co-scrub partial travels by
+> **manual transfer** (save/copy the JSON, or paste it into the Cosign sheet), not by
+> accord-gossip. (If they were peered, the partial + the completed record would gossip
+> automatically — noted at each step.)
 >
-> The **legacy delegation/relay procedure is preserved verbatim in Appendix A** for
-> the historical record and for the *separate* concern of driving a remote node's own
-> API over RNS. The cross-references to "§2 Option A" / "the one real gap" in
-> `RNS_CONTROL_RELAY.md` / `EDGE_8_0_OPAQUE_MIGRATION.md` point at Appendix A.
+> **Why m-of-n, why baked:** a node is canonical because **the trust root signed off**
+> — and the trust root is a *quorum*, so no single holder (or a single compromised
+> holder) can mint a founding server. The 1-of-N single-tap add of 0.5.80 is retired.
+>
+> **Superseded models** (kept in Appendix A): the 0.5.75 delegation-grant + RNS-relay
+> seed, and the 0.5.80 1-of-N Trust Root "Add canonical server" tap. The delegation/
+> relay machinery still exists for driving a *remote* node's own API, but is not how
+> the mesh is seeded. Cross-refs in `RNS_CONTROL_RELAY.md` / `EDGE_8_0_OPAQUE_MIGRATION.md`
+> point at Appendix A.
 
 **Goal:** bring **`canonical-server-1`** (Node A) into the canonical trust root so it
-**roots to the `HUMANITY_ACCORD` anchor**, is **marked `canonical`**, and is
-**reachable by a pubkey-authenticated address** — entirely from the **Trust Root
-card** with the operator's **A1 accord keyset** (portable FIPS YubiKey + USB-wrapped
-ML-DSA cosign), no CLI, no relay.
+**roots to the `HUMANITY_ACCORD` anchor**, is **marked `canonical`** (by a 2-of-3
+co-scrub), and is **reachable by a pubkey-authenticated address** — driven from the
+**Trust Root card** with the two portable accord keysets (FIPS YubiKey + USB-wrapped
+ML-DSA cosign), no CLI.
 
-**Substrate floor (the 0.5.80 mesh-seed release):**
-edge **v9.0.0** · persist **v13.0.0** · verify family **v8.7.0** (CC 1.0-rc). The
-`canonical` identity_type role and its accord-conferred admission gate ship in persist
-v13.0.0.
+**Substrate floor (0.5.84):**
+edge **v9.1.4** · persist **v13.3.1** · verify family **v8.9.0**. The baked `quorum:2/3`
+family + the dynamic m-of-n `canonical` admission gate + the co-scrub endpoints
+(`propose`/`cosign`, the open `/gossip-partial`, `/pending`) all ship at this floor.
 
 ---
 
@@ -43,15 +45,21 @@ v13.0.0.
 
 | Actor | Role in the seed |
 |---|---|
-| **`canonical-server-1`** (Node A) | **the node being seeded.** A normal, operator-owned (self-claimed) node until the accord signs it in. The lens / mesh-entry node. |
-| **A1 accord holder** (you) | **1 of 3** `HUMANITY_ACCORD` holders. Signs the add-canonical invocation from the Trust Root card with the portable keyset. `add`/`update-address` are **1-of-N** today (see the ladder in §4). |
-| **lapbuntu2** | **where the A1 crypto ops run** (the app/card + the portable signer). **NOT canonical, NOT in the trust root** — it is the operator's workstation, nothing more. |
-| **Node B** (`ciris-status-1`) | **NOT a canonical server** and **not involved in the seed.** B is an out-of-group status node; its bilateral replication with A is a separate, optional concern (Appendix A). |
+| **`canonical-server-1`** (Node A) | **the node being seeded.** A normal, operator-owned (self-claimed) node until the accord co-scrub confers `canonical`. The lens / mesh-entry node. The **completed 2-of-3 record must reach THIS node** to root (§3 step 5). |
+| **A1 holder** on **`lapbuntu2`** | **1 of 3** `HUMANITY_ACCORD` holders — the **proposer**. Runs the Trust Root card on lapbuntu2 with the A1 portable keyset (FIPS YubiKey Ed25519 + USB-wrapped ML-DSA). Produces **scrub #1** (`propose`). |
+| **B1 holder** on **`mac-mini`** | **1 of 3** holders — the **cosigner**. Runs the Trust Root card on the mac-mini with the B1 portable keyset. Appends **scrub #2** (`cosign`) over the byte-identical partial → the record reaches the 2-of-3 quorum. |
+| **lapbuntu2 / mac-mini** | **where the A1 / B1 crypto ops run** — the operator's two workstations. **NEITHER is canonical, NEITHER is in the trust root** — they are just where each holder's keyset is plugged in. |
+| **Node B** (`ciris-status-1`) | **NOT a canonical server** and **not involved in the seed.** An out-of-group status node; its bilateral replication with A is a separate, optional concern (Appendix A). *(Do not confuse the mac-**mini** — a holder's signing box — with Node **B** the status node.)* |
 
 The trust root is the **baked `HUMANITY_ACCORD` accord holders** (A1/B1/C1), seeded at
-persist first-boot. Canonical servers are the nodes those holders scrub-sign in. One
-scrub-signed record both **roots** the node and **marks it canonical** — there is no
-separate roster to maintain.
+persist first-boot (v13.3.1) as the entrenched `quorum:2/3` family. Canonical servers
+are the nodes those holders **co-scrub** in. The completed 2-of-3 scrubbed record both
+**roots** the node and **marks it canonical** — there is no separate roster to maintain.
+
+> **Custody note.** The scrub crypto runs **where each YubiKey is** — A1's on lapbuntu2,
+> B1's on the mac-mini — NOT on the canonical node. So neither signing box ends up
+> `canonical`; the *record they jointly produce* does, once it is delivered to and
+> adopted by Node A (§3 step 5).
 
 ---
 
@@ -59,11 +67,13 @@ separate roster to maintain.
 
 | # | Precondition | State |
 |---|---|---|
-| 1.1 | **CIRISServer 0.5.80 on PyPI / the node image** — carries edge v9.0.0 · persist v13.0.0 · verify v8.7.0 and the **add-canonical** op + Trust Root "Canonical servers" card section. | ⛔ cut |
-| 1.2 | **`canonical-server-1` deployed + operator-self-claimed** (owner-binding present) — the ordinary deploy+claim, unchanged from `FSD/BRIDGE_SEED_MESH.md` §0–§4a. The node need NOT be "announced to federation"; the accord scrub is what roots it. | ⛔ deploy |
-| 1.3 | **The A1 keyset is available on the signing workstation** (lapbuntu2): the portable FIPS YubiKey (Ed25519 slot) + the USB-wrapped ML-DSA-65 half — the same cosign path admit-node uses. | ✅ (you hold these) |
-| 1.4 | **The baked `HUMANITY_ACCORD` anchor is present** in the node's persist (first-boot seed, persist v13). `GET /v1/accord/family` projects it. | ✅ (v13 baked) |
-| 1.5 | **`net.bootstrap_peers` reachability** for any peer that will dial `canonical-server-1` — an `IP:port` config value (replaceable; NOT the trust anchor). Option-A addressing, §5. | ⛔ config |
+| 1.1 | **CIRISServer 0.5.84** on PyPI (the wheel each holder's app/node runs) — edge v9.1.4 · persist v13.3.1 · verify v8.9.0; carries the co-scrub endpoints (`propose`/`cosign`/`pending`) + the Trust Root card's **Propose** action, **Pending co-signs** section, and the **paste-a-partial** Cosign fallback. | ✅ live on PyPI |
+| 1.2 | **`canonical-server-1` (Node A) deployed + operator-self-claimed** (owner-binding present) — the ordinary deploy+claim, unchanged from `FSD/BRIDGE_SEED_MESH.md` §0–§4a. The node need NOT be "announced to federation"; the accord co-scrub is what roots it. | ⛔ deploy |
+| 1.3 | **A1 keyset on lapbuntu2** — the A1 FIPS YubiKey (Ed25519 slot) + its USB-wrapped ML-DSA-65 half, plugged into lapbuntu2. | ✅ (you hold these) |
+| 1.4 | **B1 keyset on the mac-mini** — the B1 FIPS YubiKey + its USB-wrapped ML-DSA-65 half, plugged into the mac-mini. **Two distinct holders/keysets are required** — A1 alone (1 scrub) does NOT confer canonical under the 2/3 gate. | ✅ (you hold these) |
+| 1.5 | **The baked `quorum:2/3` `HUMANITY_ACCORD` family is present** on Node A's persist (first-boot seed, v13.3.1). `GET /v1/accord/family` returns it with `entrenched:true` + the 3 seats. | ✅ (v13.3.1 baked) |
+| 1.6 | **A transfer channel lapbuntu2 → mac-mini → Node A** — the two signing boxes are **NOT accord-peered**, so you move the partial (and the finished record) by hand: AirDrop / scp / USB / copy-paste. No mesh path is required for the co-scrub itself. | ✅ (any file copy) |
+| 1.7 | **`net.bootstrap_peers` reachability** for any peer that will dial `canonical-server-1` — an `IP:port` config value (replaceable; NOT the trust anchor). Option-A addressing, §5. | ⛔ config |
 
 ---
 
@@ -73,75 +83,113 @@ The card (renamed from "Accord" in PR #165) is visible to **everyone** but only 
 **three accord holders** can act. It has two regions:
 
 - **Trust root** — the `HUMANITY_ACCORD` family + its live roster (read-only projection
-  of `GET /v1/accord/family`), and the kill-switch invocation surface (2-of-3).
-- **Canonical servers** (the 0.5.80 addition) — the list of nodes carrying the
-  `canonical` role, each with its bound address, plus the holder-only actions:
-  **Add canonical server · Update address · Supersede · Withdraw**.
+  of `GET /v1/accord/family`), and the kill-switch surface (raise a 2-of-3 halt).
+- **Canonical servers** — the list of nodes carrying the `canonical` role, each with its
+  bound address, plus **[+ New] → Propose a canonical server** (scrub #1) and the
+  holder ops **Update address · Supersede · Withdraw**.
+- **Pending co-signs (canonical)** — co-scrub partials awaiting more scrubs (below the
+  family quorum). Each has a **Cosign** action; **[+ New] → Cosign a pasted partial**
+  handles the not-peered case (paste the partial JSON A1 produced).
 
-The app holds **no keys**. Every action assembles an invocation, hands the JCS-canonical
-bytes to the **portable signer** (YubiKey Ed25519 + USB ML-DSA cosign), and posts the
-holder signature(s) to the node. The node verifies the accord quorum against its live
-`federation_keys` roster — the signature *is* the authority.
+The app holds **no keys**. Every action hands the JCS-canonical bytes to the **portable
+signer** (YubiKey Ed25519 + USB ML-DSA cosign) and posts the holder scrub to the node.
+Admission is persist's dynamic **m-of-n** gate against the entrenched family — the
+distinct scrub set *is* the authority; the record is conferred `canonical` only at 2-of-3.
 
 ---
 
-## 3. The seed — "Add canonical server" (the one action)
+## 3. The seed — the cross-machine 2-of-3 co-scrub
 
-On the Trust Root card → **Canonical servers** → **Add canonical server**:
+Five steps across the two boxes. Steps 1–2 on **lapbuntu2** (A1), step 3 on the
+**mac-mini** (B1), steps 4–5 deliver the finished record to **Node A**. The partial and
+the finished record move by **hand** (you are not peered).
+
+### Step 1 — A1 proposes (scrub #1), on lapbuntu2
+
+Trust Root card → **Canonical servers → [+ New] → Propose a canonical server**:
 
 1. **Select the target** — `canonical-server-1` (its derived `key_id`,
-   `canonical-server-1-<fp>`), pulled from the operator's owned-nodes.
-2. **Touch the YubiKey** (+ the USB ML-DSA half) — the card signs the add-canonical
-   invocation with the A1 keyset.
-3. Done. The node is rooted, marked canonical, and its address is published.
+   `canonical-server-1-<fp>`), from the owned-nodes picker. Set its address/transport
+   hint if prompted (Option-A, §5).
+2. **A1 keyset** — touch the YubiKey (+ USB ML-DSA). The card calls
+   `POST /v1/accord/canonical/propose`: `produce_scrubbed_key_record` scrub-signs the
+   target with the `canonical` role → a **1-scrub partial** (a verify `SignedKeyRecord`).
+3. This is **sub-quorum** (1 of 2) — NOT yet canonical. The response gives you the
+   `partial` JSON and `saved_to`:
+   `$CIRIS_HOME/ceg/outbox/canonical_coscrub/<canonical-server-1-<fp>>.json` on lapbuntu2.
 
-Behind that one tap, **add-canonical composes three effects**, each **accord-authorized
-1-of-N** via `canonical_op_quorum_m(CanonicalOpClass::Operational)` (so it auto-scales
-to m-of-n as the founder set grows — §4):
+### Step 2 — hand the partial to the mac-mini
 
-1. **Scrub-sign → root + mark canonical.** Reusing admit-node's scrub path
-   (`produce_scrubbed_key_record`, `src/accord_provision.rs`), the holder scrub-signs
-   the node's registration record and sets **`canonical`** in its `identity_type` set.
-   persist v13 admits it **only because** the scrub key is a `HUMANITY_ACCORD` anchor
-   holder — a self-signed or non-anchor record carrying `canonical` is **rejected**
-   (`CanonicalRoleNotAccordConferred`, fail-closed). This is the whole security
-   invariant: **canonical is conferred by the trust root, never self-claimed.**
-2. **Adopt onto the node's own row.** The scrubbed (anchored) record replaces the
-   node's self-signed own row via the DO-UPDATE upgrade path
-   (`Engine::adopt_scrub_upgrade`, local — shipped 0.5.78; or the remote
-   `POST /v1/federation/adopt-scrubbed`, shipped 0.5.79). The Key-plane then publishes
-   an **anchored, rootable** own-record. *(When CIRISEdge#277 ← CIRISPersist#375 land —
-   the upgrade-aware `apply_key` — replication itself can adopt a scrub-upgrade instead
-   of `DO NOTHING`-ing it; until then the adopt step above is the delivery path.)*
-3. **Publish the address.** Bind the node's `transport_destination` via the
-   **update-address** op (`POST /v1/accord/canonical/address`, shipped PR #165) — a
-   pubkey-authenticated, replaceable identity↔address record (Option-A, §5).
+Copy that partial `.json` (or the `partial` field from the propose response) to the
+mac-mini — **AirDrop / scp / USB / paste-buffer**, whatever's handy. It is a
+self-contained object; the mac-mini needs nothing else about Node A to sign it.
+*(If the two boxes were accord-peered, the partial would have gossiped to the mac-mini's
+"Pending co-signs" automatically and you'd skip this copy.)*
 
-**Rooting is receiver-side.** Any peer that pins the `HUMANITY_ACCORD` anchor roots
-`canonical-server-1`'s own record via `root_binding_anchored` (a directory lookup
-against the *receiver's* anchor) the moment it sees the published record. No push, no
-promotion, no relay.
+### Step 3 — B1 cosigns (scrub #2), on the mac-mini
+
+Trust Root card → **Pending co-signs (canonical)**:
+
+- If it's listed (gossip) → **⋮ → Cosign**.
+- Not peered → **[+ New] → Cosign a pasted partial**, and **paste** the JSON from step 2.
+
+Then **B1 keyset** — touch the mac-mini's YubiKey (+ USB ML-DSA). The card calls
+`POST /v1/accord/canonical/cosign`: `append_scrub` appends B1's scrub over the
+**byte-identical** envelope → a **2-scrub** record. That meets the family `M` = 2.
+
+> **Expect `conferred: false` here.** The mac-mini tries `adopt_scrub_upgrade` and it
+> fails — the record is **Node A's** row, not the mac-mini's. That is by design: the
+> mac-mini produced the finished *artifact*, it does not host the target. The finished
+> record is saved to
+> `$CIRIS_HOME/ceg/outbox/canonical_coscrub/<canonical-server-1-<fp>>.json` **on the
+> mac-mini** (and returned as `advanced` in the response). See §6.5.
+
+### Step 4 — get the finished record off the mac-mini
+
+The 2-of-3 record is that `advanced` JSON. Take it from the outbox file above (or the
+`advanced`/`saved_to` fields the Cosign result surfaces) and move it to a box that can
+reach Node A — same AirDrop/scp/USB as step 2.
+
+### Step 5 — deliver it to Node A → root + canonical
+
+Apply the finished record onto Node A's own row:
+
+```
+POST http://<node-A>:4243/v1/federation/adopt-scrubbed
+     Content-Type: application/json
+     <the finished 2-of-3 SignedKeyRecord>
+```
+
+`adopt_scrub_upgrade` runs **in place** on Node A (this IS its own row) → the self-signed
+row is replaced by the **anchor-scrubbed, 2-of-3** record → Node A is marked `canonical`
+and **roots to the `HUMANITY_ACCORD` anchor**. persist admits it **only because** the two
+scrub keys are `HUMANITY_ACCORD` holders and the distinct-scrub count meets the entrenched
+`M` — a self-signed or sub-quorum record carrying `canonical` is **rejected**
+(fail-closed). That is the whole invariant: **canonical is conferred by a trust-root
+quorum, never self-claimed, never by one holder.**
+
+**Rooting is receiver-side.** Any peer that pins the `HUMANITY_ACCORD` anchor then roots
+`canonical-server-1`'s published record via `root_binding_anchored` (a lookup against the
+*receiver's* baked anchor) — no push, no promotion, no relay.
 
 ---
 
-## 4. The authority ladder (1-of-N now, m-of-n later)
+## 4. The authority — dynamic m-of-n against the entrenched family
 
-Every canonical op resolves its quorum in **one place** — `canonical_op_quorum_m`
-(`src/accord.rs`) — so scaling is a one-line change, never a scatter of hard-coded
-`2`s.
+Admission reads the family's entrenched `quorum:M/N` (today **2/3**) via verify's
+`verify_quorum_policy` — a **dynamic** gate, never a hard-coded `2`. So the whole table
+is m-of-n and scales with the family with no code change:
 
-| Op | Class | Quorum today | Scales via |
-|---|---|---|---|
-| **Add canonical** (the seed) | `Operational` | **1-of-N** | change the `Operational` arm to read the family's entrenched `quorum:M/N` |
-| **Update address** | `Operational` | **1-of-N** | ″ |
-| **Supersede** (replace a canonical key) | `Structural` | **m-of-n** | `kill_switch_quorum_m` — the family's entrenched `quorum:M/N` (already m-of-n) |
-| **Withdraw** (remove from the trust root) | `Structural` | **m-of-n** | ″ |
+| Op | Quorum | How |
+|---|---|---|
+| **Add canonical** (the seed) | **m-of-n (2/3)** | the co-scrub — `distinct_scrub_count()` ≥ `M` confers `canonical` (§3) |
+| **Update address** | **m-of-n (2/3)** | same admission gate on the address record |
+| **Supersede** (replace a canonical key) | **m-of-n (2/3)** | 2-of-3 via `proposal_digest` (CIRISServer#377) |
+| **Withdraw** (remove from the trust root) | **m-of-n (2/3)** | ″ |
 
-Additive/operational acts (bring a server in, move its address) are 1-of-N because a
-single holder can safely grow reach. Destructive acts (remove or replace a founding
-server) are m-of-n — they need the family. As the founder set scales past 3, flip the
-`Operational` arm to the entrenched `quorum:M/N` and **all** ops become m-of-n with no
-other change.
+The 0.5.80 "additive ops are 1-of-N" ladder is **retired** — a single holder minting a
+founding server was the weakness the co-scrub closes. Grow the family to 3/5 and every op
+becomes 3-of-5 automatically (the gate reads the entrenched policy).
 
 ---
 
@@ -152,62 +200,66 @@ The seed **never bakes an IP as the anchor.** Three distinct layers:
 - **Trust** = the **pinned accord pubkeys** (the baked `HUMANITY_ACCORD` anchor). This
   is what roots a node. Immutable, cryptographic.
 - **Reachability** = the node's **pubkey-derived RNS destination hash** + the signed
-  **`transport_destination`** published by the update-address op (CC 3.3.6.2). Rebindable
-  by a 1-of-N accord signature when the server moves.
-- **Bootstrap hint** = `net.bootstrap_peers`, an ordinary `IP:port` **config** value
-  (owner-authored, replaceable). `CANONICAL_BOOTSTRAP_PEERS` stays **`[]`** for 0.5 by
-  design; **0.6 bakes the founder pubkeys + a replaceable address hint** (never IPs as
-  the anchor) — CIRISServer#163.
+  **`transport_destination`** carried in the scrub envelope / rebound by the update-address
+  op (CC 3.3.6.2). Rebindable by an **m-of-n** accord signature when the server moves.
+- **Bootstrap hint** = the mesh entry set is sourced from the **baked canonical servers'
+  signed envelope transport hints** (`Engine::canonical_bootstrap_hints`, 0.5.81 —
+  `CANONICAL_BOOTSTRAP_PEERS` the const is retired), unioned with the optional
+  `net.bootstrap_peers` `IP:port` override (owner-authored, replaceable). Never an IP as
+  the anchor — CIRISServer#163.
 
-So moving `canonical-server-1` to a new host is a **1-of-N Update-address** on the card
+So moving `canonical-server-1` to a new host is an **m-of-n Update-address** on the card
 plus a `net.bootstrap_peers` edit — the node's identity and rooted status are untouched.
 
 ---
 
 ## 6. Post-conditions — the seed is done when these hold
 
-- **`canonical-server-1`'s own row carries `canonical`** in its `identity_type` set and
-  its `scrub_key_id` is a `HUMANITY_ACCORD` holder (anchor-scrubbed, not self-signed).
-- The node **roots to the anchor** — `root_binding_anchored` = Confirmed against the
-  baked `HUMANITY_ACCORD` terminus.
+- **On Node A**, `GET /v1/accord/canonical/servers` lists `canonical-server-1` with the
+  `canonical` role, and its record carries **≥ 2 distinct accord-holder scrubs** (A1 + B1)
+  — `distinct_scrub_count()` ≥ the family `M`. `is_canonical` reads **`true`** on Node A.
+- Its own row is **anchor-scrubbed, not self-signed** (both `scrub_key_id`s are
+  `HUMANITY_ACCORD` holders), and the node **roots to the anchor** —
+  `root_binding_anchored` = Confirmed against the baked `HUMANITY_ACCORD` terminus.
 - Its **`transport_destination` is bound** (visible in the card's Canonical-servers list).
 - A **second node that pins the same anchor roots `canonical-server-1`** from its
-  published record — the field proof the mesh has a genesis trust root.
+  published record — the field proof the mesh has a 2-of-3-founded genesis trust root.
+- On lapbuntu2 / the mac-mini the record reads **not** canonical / `conferred:false` —
+  EXPECTED (they are signing boxes, not the target). Only Node A confers.
 
 ---
 
 ## 6.5 Collecting the seed object (what to hand to the persist bake)
 
-The `add-canonical` op emits a **signed seed object** — the artifact CIRISPersist bakes
-as the canonical genesis record. It lives in three places; the JSON on disk is authoritative.
+The co-scrub emits, at each step, a **verify `SignedKeyRecord`** for the target — the
+1-scrub partial (after propose) then the 2-of-3 finished record (after cosign). The JSON
+on disk is authoritative; it is what you carry between machines (§3 steps 2 & 4).
 
-1. **The card, immediately after "Add canonical server"** — surfaces
-   *"Seed saved to (hand it to persist to bake): `<path>`"* plus the Canonical-servers
-   list (the row + `canonical` badge + scrubbed-by A1 + address).
-2. **On disk (authoritative)** —
-   `$CIRIS_HOME/ceg/outbox/accord_admit_node/<target_key_id>.json`
-   (`$CIRIS_HOME` = the node's `--home`; env `CIRIS_HOME`, else `~/ciris`). Contents:
-   `{ holder_anchor, scrubbed_node, scrubber_key_id, target_key_id, produced_at }` —
-   the A1 self-signed anchor + the A1-scrubbed `canonical-server-1` record. **This JSON
-   is the bake artifact.**
-3. **DB + logs** — the record is a `federation_keys` row (read via
-   `GET /v1/accord/canonical/servers`); `$CIRIS_HOME/logs/ciris-server.log` logs
-   *"Trust Root: add-canonical — node admitted to the canonical set (accord-conferred)"*
-   + the adopt outcome.
+1. **The card** — Propose surfaces the `partial` + `saved_to`; Cosign surfaces `advanced`
+   + `saved_to` + `distinct_scrub_count` + `conferred`.
+2. **On disk (authoritative)**, on whichever signing box just ran —
+   `$CIRIS_HOME/ceg/outbox/canonical_coscrub/<canonical-server-1-<fp>>.json`
+   (`$CIRIS_HOME` = the node's `--home`; env `CIRIS_HOME`, else `~/ciris` on lapbuntu2 /
+   the mac node home on the mac-mini). After propose it holds the **1-scrub partial**;
+   after cosign it holds the **2-of-3 finished record** (`record.additional_scrubs` = the
+   appended scrubs). **This JSON is the artifact you move.**
+3. **DB + logs** — once adopted on Node A it is a `federation_keys` row (read via
+   `GET /v1/accord/canonical/servers`); `ciris-server.log` logs
+   *"Trust Root: co-scrub proposed / cosigned"* with `distinct_scrubs` + `conferred`.
 
-> **Which host writes it (custody matters).** The hardware scrub runs **where the A1
-> YubiKey + USB ML-DSA are** — i.e. the signing workstation the card talks to (e.g.
-> `lapbuntu2`), NOT necessarily the canonical node itself. When the scrub host is not
-> the target node: the seed JSON lands on the **scrub host**, `is_canonical` reads
-> **`false`** locally, and the adopt step reports **`adopted: false`** — this is
-> EXPECTED (the workstation isn't in the trust root). The record becomes canonical +
-> roots once the seed object is **baked into persist** (the follow-up issue) or applied
-> on the target node via `POST /v1/federation/adopt-scrubbed`. When the scrub host IS
-> the canonical node (YubiKey attached to it), the adopt succeeds in place and
-> `is_canonical` reads `true`.
+> **Custody: which host writes which file.** The scrub runs where the YubiKey is — the
+> **partial** lands on **lapbuntu2** (A1), the **finished record** on the **mac-mini**
+> (B1). On both signing boxes `is_canonical` reads **`false`** / `conferred:false` —
+> EXPECTED (neither is the target). The record roots + confers only when the finished
+> JSON is applied on **Node A** via `POST /v1/federation/adopt-scrubbed` (§3 step 5).
 
-**To hand off:** the seed JSON contents (item 2) + the `target_key_id`
-(`canonical-server-1-<fp>`) — enough to bake it and wire the adoption.
+**Two uses of the finished 2-of-3 record:**
+- **Adopt on Node A** (`/v1/federation/adopt-scrubbed`) — the live seed, this runbook's
+  path. Node A roots + becomes canonical immediately.
+- **Bake into persist genesis** (optional, CIRISServer#139 / a persist first-boot seed of
+  the canonical node record) — so *every* fresh node recognizes `canonical-server-1` as
+  canonical with zero adoption, the same way the `HUMANITY_ACCORD` holders + family are
+  baked. Hand off the finished JSON + `target_key_id` for that.
 
 ---
 
