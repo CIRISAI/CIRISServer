@@ -868,7 +868,15 @@ async fn run(cfg: Cfg) -> i32 {
         }
     };
     let warm_secs = t.elapsed().as_secs_f64();
-    let warm_list = match list_messages(&client, &bed, cfg.list_samples, cfg.warm).await {
+    // WHAT ACTUALLY LANDED, not what was asked for. `emit_messages` pushes one
+    // latency per SUCCESSFUL send and returns early when it meets the peer_burst
+    // ceiling, so its length is the count and `cfg.warm` is a request. Using the
+    // request made the reconciliation below compare the transcript against
+    // messages that were never sent, and report a rate limit as
+    // "the read is not returning what the writes put in" — blaming the reader
+    // for a write that was refused.
+    let warm_emitted = warm_lat.len();
+    let warm_list = match list_messages(&client, &bed, cfg.list_samples, warm_emitted).await {
         Ok(r) => r,
         Err(reason) => {
             emit(serde_json::json!({ "phase": "warm", "ran": false, "reason": reason }));
@@ -882,10 +890,11 @@ async fn run(cfg: Cfg) -> i32 {
     let mut obj = serde_json::json!({
         "phase": "warm",
         "ran": true,
-        "messages_emitted": cfg.warm,
+        "messages_emitted": warm_emitted,
+        "messages_requested": cfg.warm,
         "transcript_total": warm_list.1,
         "emit_seconds": round3(warm_secs),
-        "emit_messages_per_sec": round3(cfg.warm as f64 / warm_secs.max(f64::MIN_POSITIVE)),
+        "emit_messages_per_sec": round3(warm_emitted as f64 / warm_secs.max(f64::MIN_POSITIVE)),
         "emit_latency": latency_json(warm_lat),
         "list_latency": latency_json(warm_list.0),
     });
@@ -893,7 +902,6 @@ async fn run(cfg: Cfg) -> i32 {
     emit(obj);
 
     // ── Phase 3: burst (out to 1000) ───────────────────────────────────────
-    let total_after_burst = cfg.warm + cfg.burst;
     let t = Instant::now();
     let burst_lat = match emit_messages(&client, &bed, cfg.burst, "burst", false).await {
         Ok(l) => l,
@@ -906,6 +914,9 @@ async fn run(cfg: Cfg) -> i32 {
         }
     };
     let burst_secs = t.elapsed().as_secs_f64();
+    let burst_emitted = burst_lat.len();
+    // The transcript must hold everything BOTH phases actually wrote.
+    let total_after_burst = warm_emitted + burst_emitted;
     let burst_list = match list_messages(&client, &bed, cfg.list_samples, total_after_burst).await {
         Ok(r) => r,
         Err(reason) => {
@@ -920,10 +931,15 @@ async fn run(cfg: Cfg) -> i32 {
     let mut obj = serde_json::json!({
         "phase": "burst",
         "ran": true,
-        "messages_emitted": cfg.burst,
+        "messages_emitted": burst_emitted,
+        "messages_requested": cfg.burst,
+        // Non-zero means the ceiling truncated this phase — the `ceiling` line
+        // above says where. Reported as a number rather than left to be inferred
+        // from a difference nobody computes.
+        "messages_refused": cfg.burst.saturating_sub(burst_emitted),
         "transcript_total": burst_list.1,
         "emit_seconds": round3(burst_secs),
-        "emit_messages_per_sec": round3(cfg.burst as f64 / burst_secs.max(f64::MIN_POSITIVE)),
+        "emit_messages_per_sec": round3(burst_emitted as f64 / burst_secs.max(f64::MIN_POSITIVE)),
         "emit_latency": latency_json(burst_lat),
         "list_latency": latency_json(burst_list.0),
     });
