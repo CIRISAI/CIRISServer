@@ -26,6 +26,7 @@ use std::time::SystemTime;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use ciris_crypto::{MlDsa65Signer, PqcSigner as _};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -46,7 +47,7 @@ fn rt() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-async fn engine_with_key(agent_sk: &SigningKey) -> Arc<Engine> {
+async fn engine_with_key(agent_sk: &SigningKey, pqc_pubkey_b64: &str) -> Arc<Engine> {
     let node = Arc::new(LocalSigner::from_parts(
         SigningKey::from_bytes(&[0xA0; 32]),
         "bench-node".to_string(),
@@ -59,12 +60,15 @@ async fn engine_with_key(agent_sk: &SigningKey) -> Arc<Engine> {
             .expect("engine"),
     );
     // Register the agent key so VerifyMode::Full resolves the trace signature.
+    // ONE hybrid record carries BOTH halves under `KEY_ID` — the house convention
+    // (a host registers one hybrid self key for both halves), and what makes the
+    // trace's `pqc_key_id` resolvable below.
     let pubkey_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
     let now = chrono::Utc::now();
     let record = KeyRecord {
         key_id: KEY_ID.into(),
         pubkey_ed25519_base64: pubkey_b64.clone(),
-        pubkey_ml_dsa_65_base64: None,
+        pubkey_ml_dsa_65_base64: Some(pqc_pubkey_b64.to_string()),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::AGENT.into(),
         identity_ref: KEY_ID.into(),
@@ -92,7 +96,7 @@ async fn engine_with_key(agent_sk: &SigningKey) -> Arc<Engine> {
     engine
 }
 
-fn batch_bytes(agent_sk: &SigningKey, trace_id: &str) -> Vec<u8> {
+fn batch_bytes(agent_sk: &SigningKey, mldsa: &MlDsa65Signer, trace_id: &str) -> Vec<u8> {
     use ciris_persist::verify::canonical::Canonicalizer;
     use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
     let mut data = serde_json::Map::new();
@@ -129,18 +133,23 @@ fn batch_bytes(agent_sk: &SigningKey, trace_id: &str) -> Vec<u8> {
     // Hard cut (CIRISPersist v7.2.0 #225): VerifyMode::Full rejects classical-only
     // per-trace sigs. Sign FULL HYBRID — Ed25519 over `canon`, ML-DSA-65 over
     // `canon ‖ ed25519_sig` (the bound input; ciris-crypto HybridSigner contract).
-    // The ML-DSA pubkey rides the trace envelope (the verifier reads it there, not
-    // from the KeyRecord). Sync ciris_crypto signer → no async in the setup closure.
-    use ciris_crypto::{MlDsa65Signer, PqcSigner as _};
+    // The ML-DSA pubkey still RIDES the envelope (a real producer sends it, so the
+    // measured bytes stay realistic) but is no longer what the gate checks against:
+    // since persist v38.8.0 (CIRISPersist#789) the gate resolves the ML-DSA-65
+    // pubkey from the FEDERATION DIRECTORY by `pqc_key_id` and refuses rather than
+    // falling back to the one the payload nominates — a payload that supplies the
+    // key it is checked against proves nothing. So `pqc_key_id` must name a record
+    // the directory actually holds: `KEY_ID`, registered hybrid in
+    // `engine_with_key`. Naming an unregistered id here is what turned this bench
+    // red on the v40 adoption (0.5.197).
     let ed_sig = agent_sk.sign(&canon).to_bytes();
     let mut bound = Vec::with_capacity(canon.len() + ed_sig.len());
     bound.extend_from_slice(&canon);
     bound.extend_from_slice(&ed_sig);
-    let mldsa = MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("ml-dsa sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("ml-dsa pk")));
-    trace.pqc_key_id = Some("bench-mldsa".into());
+    trace.pqc_key_id = Some(KEY_ID.into());
     serde_json::json!({
         "events": [{ "event_type": "complete_trace", "trace_level": "generic",
                      "trace": serde_json::to_value(&trace).unwrap() }],
@@ -156,8 +165,13 @@ fn batch_bytes(agent_sk: &SigningKey, trace_id: &str) -> Vec<u8> {
 fn bench_ingest(c: &mut Criterion) {
     let _ = SystemTime::now(); // (no-op; keeps import honest if trimmed)
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    // Minted ONCE, not per iteration: the directory holds this exact public half,
+    // so the pubkey the gate resolves and the one that signed are the same by
+    // construction rather than by a seed constant repeated in two places.
+    let mldsa = MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
+    let pqc_pubkey_b64 = BASE64.encode(mldsa.public_key().expect("ml-dsa pk"));
     let runtime = rt();
-    let engine = runtime.block_on(engine_with_key(&agent_sk));
+    let engine = runtime.block_on(engine_with_key(&agent_sk, &pqc_pubkey_b64));
 
     let mut g = c.benchmark_group("replication_ingest");
     g.throughput(Throughput::Elements(1)); // one trace per iteration
@@ -168,7 +182,7 @@ fn bench_ingest(c: &mut Criterion) {
         b.to_async(&runtime).iter_batched(
             || {
                 n += 1;
-                batch_bytes(&agent_sk, &format!("repl-{n:08}"))
+                batch_bytes(&agent_sk, &mldsa, &format!("repl-{n:08}"))
             },
             |bytes| {
                 let engine = Arc::clone(&engine);
@@ -184,7 +198,7 @@ fn bench_ingest(c: &mut Criterion) {
     });
 
     // Re-delivery of an already-seen trace (anti gossip-loop dedup path).
-    let dup = batch_bytes(&agent_sk, "repl-dup-fixed");
+    let dup = batch_bytes(&agent_sk, &mldsa, "repl-dup-fixed");
     runtime.block_on(async {
         engine
             .receive_and_persist(&dup, &NullScrubber)
