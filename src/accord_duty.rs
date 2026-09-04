@@ -479,6 +479,12 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
         scrub_key_id: scrub_key_id.clone(),
         scrub_signature_classical: ed,
         scrub_signature_pqc: Some(pqc),
+        // v39.0.0 adds CC 2.6.7 `cosigned_at`, stamped by
+        // `crossing::plan_enter_mesh` on a NODE co-scrub at the tier crossing.
+        // This is an accord-quorum scrub on a key record, not a crossing, so
+        // there is no such instant to state — and inventing one here would ship
+        // a semantic change disguised as a repin.
+        cosigned_at: None,
     });
 
     let needed = quorum_needed(&st.engine).await;
@@ -628,6 +634,8 @@ pub async fn test_support_build_partial(
             scrub_key_id: k,
             scrub_signature_classical: ed,
             scrub_signature_pqc: Some(pqc),
+            // Accord-quorum scrub, not a tier crossing — see the sibling site.
+            cosigned_at: None,
         })
         .collect();
     row

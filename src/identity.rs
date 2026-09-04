@@ -393,11 +393,27 @@ pub(crate) fn open_software_hybrid_identity(
 /// `PlatformSealed` / `Software` backends — DISTINCT from the node steward's
 /// `identity_dir`. `label` (the human's display name) yields the FSD-002
 /// `label-fingerprint` `key_id` when no explicit `fed_key_id` is given.
+/// Does this mint become the seed dir's ACTIVE identity?
+///
+/// `active_user_alias` is a per-seed-dir singleton meaning "the alias whose key
+/// is this node's owner", so only a mint that establishes the owner may set it.
+/// An agent/delegate mint writes its custody marker like any other and leaves the
+/// pointer alone — repointing it would hand the owner's signature to whichever
+/// identity was minted most recently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveAlias {
+    /// This IS the owner's identity: record it as the active one.
+    Adopt,
+    /// A secondary identity (an agent, a delegate). Leave the pointer as it is.
+    Leave,
+}
+
 pub async fn mint_user_identity(
     backend: UserIdentityBackend,
     key_id_alias: &str,
     label: Option<&str>,
     seed_dir: PathBuf,
+    active: ActiveAlias,
 ) -> Result<MintedUserIdentity> {
     let cfg = user_identity_config(&backend, key_id_alias, seed_dir);
 
@@ -485,6 +501,46 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user ML-DSA-65 public key: {e}"))?;
+
+    // ── THE TWO SIDECARS, WRITTEN BY THE MINT ────────────────────────────────
+    //
+    // These used to be written by `POST /v1/self/identity` and by nothing else,
+    // so an identity minted any other way could never be re-opened. That is not
+    // hypothetical: `provision_user_identity` (the CLI, and how a mesh node gets
+    // its owner fed-ID) mints under the default `<keystore_alias>-user` alias and
+    // wrote neither — while `owner_signer_capsule::acquire` is handed the
+    // owner-binding's DERIVED key_id. With no pointer, `active_user_alias`
+    // returns that derived id unchanged, the resolver looks for
+    // `<derived>.ed25519.seed`, and the file on disk is `<alias>.ed25519.seed`.
+    // The node then refuses every chat message with
+    // `chat.author_signer_unavailable: NoFedIdentity` — a claimed node that
+    // cannot sign as its own owner.
+    //
+    // Single-node tests never saw it because the FIXTURE wrote both files by
+    // hand. A fixture writing what production cannot is the tell, every time.
+    //
+    // They belong here because they describe the mint: WHICH backend actually
+    // held the key (after any ladder fallback — `backend` is the rung that
+    // succeeded, not the one requested) and WHICH alias is now current. Every
+    // caller gets them, and the route's own copies are gone.
+    write_user_backend_marker(&cfg.seed_dir, key_id_alias, backend.label());
+    if active == ActiveAlias::Adopt {
+        if let Err(e) = crate::write_active_user_alias(&cfg.seed_dir, key_id_alias) {
+            // Not fatal — the identity IS minted and the seed IS on disk. But say
+            // exactly what breaks, because the symptom appears much later and
+            // somewhere else entirely.
+            tracing::warn!(
+            error = %e,
+            alias = %key_id_alias,
+            seed_dir = %cfg.seed_dir.display(),
+            "minted the user fed-ID but could not record the active_user_alias \
+             pointer — owner-signer resolution falls back to the alias it was \
+             handed, so if that is the DERIVED key_id (which is what the owner \
+             signer capsule passes) this identity will not be found and the node \
+                 will refuse to sign as its owner"
+            );
+        }
+    }
 
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -675,6 +731,26 @@ pub async fn mint_portable_software_occurrence(
         transport_hint: None,
         alias_hint: Some(alias.to_string()),
         group_key_id: None,
+        // EMPTY, and deliberately so — verify v14.1.0 / CIRISVerify#269.
+        //
+        // A v3 code MAY embed the owner's nodes so a stranger can reach them
+        // without holding the federation directory (the phone-class case CC
+        // 5.4.6 names, where a peer "cannot hold the full directory"). This
+        // mint happens during first run, BEFORE any node is owner-bound, so
+        // there is nothing truthful to embed and a guess would be worse than
+        // silence.
+        //
+        // Costless: an empty list "still encodes as v2, byte-identically to
+        // before, so nothing already issued moves" — only a non-empty list
+        // emits `CIRIS-V3-`. Every code minted here therefore keeps resolving
+        // through the directory exactly as it does today.
+        //
+        // A populated one belongs where the owner's node set is known and
+        // current — the announce/promote path, not identity minting — and each
+        // entry must carry the NODE's transport Ed25519, never this user key.
+        // `encode` refuses the latter outright, which is CIRISServer#335 made
+        // unencodable rather than merely documented.
+        owned_nodes: Vec::new(),
     })
     .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
 
@@ -889,6 +965,128 @@ pub async fn hardware_user_local_signer(
     user_key_id: &str,
     seed_dir: PathBuf,
 ) -> Result<ciris_persist::prelude::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    // key_id = the DERIVED federation id; the Ed25519/ML-DSA blobs stay under the
+    // alias (opened above). `signer.key_id()` is therefore the registered wire id.
+    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        parts.derived_key_id,
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))
+}
+
+/// The SAME identity as [`hardware_user_local_signer`], as edge's signer type.
+///
+/// Edge's chat plane signs with `ciris_edge::identity::LocalSigner`; persist's is
+/// a different type that keeps its classical half private, so one cannot be
+/// converted into the other. Both are therefore built from ONE set of parts
+/// ([`user_signer_parts`]) rather than assembled twice — two constructions of
+/// "the owner's signer" could drift on the key_id, and a chat row signed under a
+/// key that is not the one the directory registered is refused at every peer with
+/// nothing local to see.
+pub async fn hardware_user_edge_signer(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<ciris_edge::identity::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    Ok(edge_signer_from(parts))
+}
+
+/// BOTH signer types for one identity, from ONE open of the hardware.
+///
+/// The capsule needs both — persist's to sign bytes a caller canonicalized,
+/// edge's to sign a row edge composes — and they must be the same identity. Two
+/// separate calls would open the backend twice and, worse, could disagree on the
+/// derived key_id if a mint raced between them; from one `UserSignerParts` they
+/// cannot.
+pub async fn hardware_user_signers(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<(
+    ciris_persist::prelude::LocalSigner,
+    ciris_edge::identity::LocalSigner,
+)> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    let edge = edge_signer_from(UserSignerParts {
+        classical: Arc::clone(&parts.classical),
+        pqc: Arc::clone(&parts.pqc),
+        derived_key_id: parts.derived_key_id.clone(),
+        pqc_key_id: parts.pqc_key_id.clone(),
+    });
+    let persist = ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        parts.derived_key_id,
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))?;
+    Ok((persist, edge))
+}
+
+/// The owner's identity keyed for persist's **crossing** verbs, which derive.
+///
+/// Server's ordinary user signer ([`hardware_user_local_signer`]) carries the
+/// DERIVED federation id in `key_id`, because [`crate::attest::emit`] — the one
+/// door — binds `signer.key_id()` to `attesting_key_id` verbatim and deliberately
+/// does NOT use `Engine::emit_attestation`, which would double-derive it. See
+/// `auth::ownership::emit_steward_binding` for that contract.
+///
+/// persist v39's `enter_mesh` / `widen_audience` are the FIRST persist entry
+/// points server must call holding a USER signer, and they take the other side:
+/// `custody_for` accepts an actor only when `signer.derived_key_id()` equals the
+/// row's `attesting_key_id` (persist `engine.rs:3580`). A signer built for the
+/// emit door can never satisfy it — it derives a second time and refuses with
+/// `CustodyIsNotTheActor { scrub_key_id: "<id>-<fp>-<fp>" }`.
+///
+/// One `LocalSigner` cannot serve both: `key_id()` returns the field verbatim and
+/// `derived_key_id()` always derives FROM it, so the field is either the input or
+/// the output, never both. This returns the same hardware-custodied material
+/// keyed the other way — `key_id` = the ALIAS — so `derived_key_id()` lands on the
+/// registered id. It is the convention `compose::substrate_persist_signer`
+/// already uses for the NODE. Use it ONLY to sign a crossing; anything that reads
+/// `key_id()` wants [`hardware_user_local_signer`].
+pub async fn hardware_user_crossing_signer(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<ciris_persist::prelude::LocalSigner> {
+    let parts = user_signer_parts(backend, user_key_id, seed_dir).await?;
+    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        // The ALIAS — the derive INPUT, not the wire id.
+        user_key_id.to_string(),
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose crossing-keyed user LocalSigner: {e}"))
+}
+
+fn edge_signer_from(parts: UserSignerParts) -> ciris_edge::identity::LocalSigner {
+    ciris_edge::identity::LocalSigner::new(parts.derived_key_id, parts.classical, Some(parts.pqc))
+}
+
+/// The opened halves of a user identity, before either signer type wraps them.
+struct UserSignerParts {
+    classical: Arc<dyn HardwareSigner>,
+    pqc: Arc<dyn PqcSigner>,
+    /// The #247 DERIVED federation key_id — what the identity is REGISTERED
+    /// under, and therefore what every row it signs must be attested under.
+    derived_key_id: String,
+    pqc_key_id: String,
+}
+
+async fn user_signer_parts(
+    backend: UserIdentityBackend,
+    user_key_id: &str,
+    seed_dir: PathBuf,
+) -> Result<UserSignerParts> {
     let cfg = user_identity_config(&backend, user_key_id, seed_dir);
     let hw = open_user_signer(&backend, &cfg, false)?;
     // Derive the recorded federation key_id from the alias + the opened pubkey
@@ -910,16 +1108,12 @@ pub async fn hardware_user_local_signer(
     let pqc: Arc<dyn PqcSigner> = Arc::from(pqc);
     let pqc_key_id = format!("{user_key_id}-pqc");
 
-    // key_id = the DERIVED federation id; the Ed25519/ML-DSA blobs stay under the
-    // alias (opened above). `signer.key_id()` is therefore the registered wire id.
-    ciris_persist::prelude::LocalSigner::from_hardware_parts(
+    Ok(UserSignerParts {
         classical,
+        pqc,
         derived_key_id,
-        Some(pqc),
-        Some(pqc_key_id),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("compose hardware-backed user LocalSigner: {e}"))
+        pqc_key_id,
+    })
 }
 
 /// Open the holder's **already-provisioned** YubiKey PIV Ed25519 key as a
@@ -1223,7 +1417,18 @@ async fn self_identity_handler(
     let mut last_err: Option<anyhow::Error> = None;
     for (rung, b) in ladder.into_iter().enumerate() {
         let backend_label = b.label();
-        match mint_user_identity(b, &alias, req.label.as_deref(), st.seed_dir.clone()).await {
+        // THE OWNER'S OWN MINT — the fed-ID wizard. Adopting is the point: the
+        // user minted under a name of their choosing and everything downstream
+        // must resolve to it rather than to `<node>-user`.
+        match mint_user_identity(
+            b,
+            &alias,
+            req.label.as_deref(),
+            st.seed_dir.clone(),
+            ActiveAlias::Adopt,
+        )
+        .await
+        {
             Ok(minted) => {
                 if rung > 0 {
                     tracing::warn!(
@@ -1231,17 +1436,11 @@ async fn self_identity_handler(
                         "custody fell back down the ladder — the requested hardware was unavailable"
                     );
                 }
-                // Record WHICH custody backend minted this identity, so the
-                // claim-remote signer (resolved at request time) re-opens it with
-                // the SAME backend (software seed file / TPM-sealed / YubiKey).
-                write_user_backend_marker(&st.seed_dir, &alias, backend_label);
-                // Record the active owner user alias so claim-remote + portable +
-                // post-claim owner-signer resolution (read at request time) find the
-                // signer the user just minted under THEIR chosen name, not <node>-user.
-                if let Err(e) = crate::write_active_user_alias(&st.seed_dir, &alias) {
-                    tracing::warn!(error = %e, alias = %alias,
-                        "could not record active_user_alias pointer — owner-signer resolution may fall back to <node>-user");
-                }
+                // The custody marker and the active_user_alias pointer are
+                // written by `mint_user_identity` itself now — they describe the
+                // mint, not this route, and every other caller needs them just as
+                // much. This route had the only copies, which is why an identity
+                // minted by the CLI could never be re-opened.
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -1562,6 +1761,7 @@ mod tests {
             "ciris-user",
             Some("Test Founder"),
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint software user identity");
@@ -1614,6 +1814,7 @@ mod tests {
             "ciris-user-sealed",
             Some("Sealed User"),
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint platform-sealed user identity");
@@ -1647,6 +1848,7 @@ mod tests {
             "claim-remote-user",
             None,
             seed.clone(),
+            ActiveAlias::Adopt,
         )
         .await
         .expect("mint user identity");

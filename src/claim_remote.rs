@@ -1151,6 +1151,19 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
         "announce-self: owner-binding promoted to FEDERATION + net.announce_ownership=true \
          (Reticulum identity announce takes effect on next boot)"
     );
+
+    // (3) Say what the mesh will now be able to walk. The announce is the whole
+    // identity bundle — owner key, node key, owner-binding, and for an agent
+    // node the agent key and its stewardship binding — because federation
+    // discovery walks exactly those rows. Enumerated and logged row by row so a
+    // node that is "announced" but still unresolvable at its peers says which
+    // row is short HERE, instead of three stages later as a withheld KeyPackage.
+    let bundle = crate::auth::ownership::announce_bundle(
+        &st.engine,
+        &promoted.responsible_user_key_id,
+        &st.node_key_id,
+    )
+    .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1161,6 +1174,11 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
             "promoted_owner_binding_attestation_id": promoted.attestation_id,
             "announce_ownership": true,
             "announce_takes_effect": "next_boot",
+            // The bundle federation discovery walks, row by row, with what a peer
+            // can hold: 3 rows for a fabric node, 5 with an agent.
+            "bundle": bundle.rows,
+            "bundle_expected": bundle.expected,
+            "federation_discoverable": bundle.federation_discoverable,
         })),
     )
         .into_response()

@@ -1137,7 +1137,30 @@ async fn test_admit_peer(
     // so this should always hold; we verify it anyway because a missing projection is
     // exactly the failure that reads as "consented" in the table and darkens the
     // plane. Read-back through the SAME projection edge resolves the send-set from.
-    match crate::peer::replication_peers_from_consent(&st.engine, &node_key_id).await {
+    // THE PROJECTION ITSELF, not the routable-node view of it.
+    //
+    // This called `replication_peers_from_consent`, which is the projection PLUS
+    // a person→node resolution: a PERSON subject is replaced by the nodes bound
+    // to them. So verifying a person's grant against it asked "does this person
+    // appear in a list of nodes", which they never can — and the failure was
+    // reported as "the consent_peer_set projection did not take", sending the
+    // reader to a projection that was in fact perfectly correct.
+    //
+    // One name answering two questions: the consent SUBJECTS, and the nodes we
+    // would dial. Edge reads the subjects here (`list_consent_peers`, then its
+    // own `send_set.contains(peer) || owned_nodes.contains(peer)`), so the
+    // subjects are what this must read back.
+    //
+    // It bit exactly where it hurts most: the owner-key admit between two mesh
+    // nodes names the peer's OWNER, and an owner is a person, so the step that
+    // teaches one node about another's owner failed 500 every time — and the
+    // harness fell back to a test-only admit that hid it.
+    match st
+        .engine
+        .federation_directory()
+        .list_consent_peers(&node_key_id)
+        .await
+    {
         Ok(peers) if peers.iter().any(|p| p == &key_id) => {
             tracing::warn!(
                 peer = %key_id,

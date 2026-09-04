@@ -217,8 +217,15 @@ jobs:
 
       # Build separately from run so a COMPILE failure is never mistaken for a
       # benchmark result, and so the run step's own duration is the bench's.
+      # `--features test-anchor` is NOT optional here. The bench blesses its own
+      # canonical and mints its own trust root in-process; without the feature
+      # those fixture entry points do not exist, so the bench does not compile —
+      # and a version that DID compile would be one reaching for a real
+      # canonical, which is the last thing a CI bench should do. The feature was
+      # missing from both steps, so the job failed at compile with 6 errors and
+      # never ran a phase.
       - name: Build the bench (bench profile — thin LTO over the full substrate)
-        run: cargo bench --no-run --bench chat_throughput
+        run: cargo bench --features test-anchor --no-run --bench chat_throughput
 
       - name: Tier 1 — four-phase bench
         # `stdbuf -oL -eL` + the bench's own explicit flush after every phase.
@@ -233,7 +240,7 @@ jobs:
         # silent `|| true` here would let a bench that never ran read as coverage.
         run: |
           set -o pipefail
-          stdbuf -oL -eL cargo bench --bench chat_throughput \
+          stdbuf -oL -eL cargo bench --features test-anchor --bench chat_throughput \
             2>chat_bench_tier1.log | tee chat_bench_tier1.jsonl \
             || echo "::warning::tier-1 bench exited non-zero — see the ran:false lines in chat_bench_tier1.jsonl"
 

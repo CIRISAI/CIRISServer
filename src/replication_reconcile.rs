@@ -36,6 +36,117 @@ use tokio::sync::{watch, Notify};
 
 use crate::config_reconcile::ResolvedConfig;
 
+/// Say WHICH rows the consent sweep reported `awaiting_actor` for, and what
+/// each one means — because the count alone was wrong three ways at once.
+///
+/// The sweep's candidates are federation-tier rows at an undiscoverable scope
+/// (`self` / `family`, CC 5.2) with no `supersedes` by their own attester. On
+/// every claimed node that set contains the OWNER-BINDING setup-complete wrote
+/// at `self`, and it stays in the set after a successful announce, because the
+/// announce widens by emitting a fresh federation-scope `delegates_to` rather
+/// than a `supersedes` — deliberately: persist's `owner_of` folds `delegates_to`
+/// rows only, and a peer holds nothing but the widening, so a `supersedes`
+/// widening of the binding would resolve the node to NO owner at every peer
+/// (CIRISPersist#807). So the binding's candidacy is not a stuck row:
+///
+/// * announced — the federation copy exists; the candidate is persist's
+///   bookkeeping, and this logs it at DEBUG;
+/// * not announced — P2P-only by the owner's choice (the wizard's opt-out);
+///   INFO, naming the route that widens it;
+/// * anything else — genuinely waiting on a signer this node does not hold;
+///   WARN, the only case that was ever a fault.
+///
+/// Read-only: it pages the same candidate list the sweep pages and writes
+/// nothing. Bounded to one page so a pathological corpus cannot turn a log
+/// line into a scan.
+async fn explain_awaiting_actor(engine: &Engine, node_key_id: &str, awaiting: u64) {
+    use ciris_persist::federation::admission::is_owner_binding_envelope;
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+
+    let dir = engine.federation_directory();
+    let candidates = match dir.list_widening_candidates(None, 64).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                awaiting_actor = awaiting,
+                error = %e,
+                "{awaiting} row(s) await their author's signer and this node could not read \
+                 which — the widening-candidate page failed"
+            );
+            return;
+        }
+    };
+    let mut unexplained = 0u64;
+    for row in &candidates {
+        if !is_owner_binding_envelope(&row.attestation_envelope) {
+            unexplained += 1;
+            tracing::warn!(
+                attestation_id = %row.attestation_id,
+                attester = %row.attesting_key_id,
+                attested = %row.attested_key_id,
+                cohort_scope = %row.cohort_scope,
+                "row awaits its author's signer and will NOT move on its own — the sweep \
+                 re-authors nobody's claim. If the author is a REMOTE key this is correct \
+                 and the row waits for that node. If the author is THIS node's owner, the \
+                 crossing was handed no actor (or one keyed for `attest::emit`, whose \
+                 `key_id` is already derived and so derives twice against `custody_for`) — \
+                 see `identity::hardware_user_crossing_signer`"
+            );
+            continue;
+        }
+        // The owner-binding. Is there a federation-scope `delegates_to` by the
+        // same owner onto the same node — i.e. has the owner announced?
+        let announced = dir
+            .list_attestations_for(&row.attested_key_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|a| {
+                a.attestation_type == attestation_type::DELEGATES_TO
+                    && a.attesting_key_id == row.attesting_key_id
+                    && a.cohort_scope == cohort_scope::FEDERATION
+                    && is_owner_binding_envelope(&a.attestation_envelope)
+            });
+        let ours = row.attested_key_id == node_key_id;
+        if announced {
+            tracing::debug!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                node = %row.attested_key_id,
+                "owner-binding listed as a widening candidate although the owner has \
+                 ANNOUNCED (a federation-scope delegates_to by the same owner exists). \
+                 Nothing to do: the announce widens by a fresh delegates_to because \
+                 owner_of folds delegates_to only (CIRISPersist#807)"
+            );
+        } else if ours {
+            tracing::info!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                "this node's owner-binding is held at cohort_scope `self` only: the owner \
+                 has NOT announced, so this node is P2P-only by choice — it can dial and \
+                 be dialled, and no peer can place it in a community audience. \
+                 POST /v1/federation/announce widens it (the wizard's default)"
+            );
+        } else {
+            tracing::info!(
+                attestation_id = %row.attestation_id,
+                owner = %row.attesting_key_id,
+                node = %row.attested_key_id,
+                "a peer's owner-binding at cohort_scope `self` is held here without a \
+                 federation copy — their owner has not announced; the row waits for them"
+            );
+        }
+    }
+    if candidates.len() as u64 >= 64 && awaiting > candidates.len() as u64 {
+        tracing::warn!(
+            awaiting_actor = awaiting,
+            shown = candidates.len(),
+            "more rows await their author's signer than one page shows"
+        );
+    }
+    let _ = unexplained;
+}
+
 /// Run **one** reconcile pass: converge the runtime's live `Attestation`-kind
 /// **Initiator** set to the admitted `consent:replication` subjects in the corpus.
 /// Factored out of the loop so tests can drive a single deterministic step
@@ -60,47 +171,64 @@ pub async fn reconcile_once(
     node_key_id: &str,
     runtime: &Arc<ReplicationRuntime>,
 ) -> anyhow::Result<usize> {
-    // ── The #530 REPAIR motion (persist v21.12.0) ───────────────────────────
-    // `promote_consented_backlog` is auto-fired at its own chokepoints, but it
-    // pages `WHERE tier = 'local'` — so a row that already reached
-    // `(cohort_scope = self|family, tier = federation)` is excluded from it BY
-    // CONSTRUCTION and no cadence of re-running ever revisits it. Such a row is
-    // past the tier gate, covered by a live grant, and still never offered.
-    // persist ships the second motion (`repair_stranded_scope_backlog`) but
-    // deliberately does NOT call it from the promote sweep, and nothing else
-    // called it either — leaving the (a)+(c) pair with only (a) wired.
+    // ── The #530 REPAIR motion (persist v39.0.0) ───────────────────────────
+    // Was `repair_stranded_scope_backlog`, which persist shipped but never
+    // called, leaving the (a)+(c) pair with only (a) wired — this loop was its
+    // only caller. v39.0.0 DELETED it and re-cut `promote_consented_backlog`
+    // over the two crossing verbs, so the motion is now that sweep's second
+    // pass: rows already in the mesh at an undiscoverable scope with no widening
+    // yet (`list_widening_candidates`) — the sealed-before-grant case #530
+    // found — are widened by a `supersedes` the ACTOR signs.
     //
-    // This loop is the right home: it is already the "converge the live runtime
-    // to the CEG" tick, and the repair is safe to run unconditionally —
-    // strictly WIDENING (a grant whose audience is itself suppressed means the
-    // row's invisibility MATCHES consent, so it is skipped, never narrowed),
-    // scoped to rows covered by a live grant, and a PURE placement correction
-    // (already federation-tier ⇒ no tier flip, no re-signing; `cohort_scope`
-    // lives outside the signed envelope so the scrub signature stays valid).
-    // Self-limiting like its sibling: a repaired row leaves the stranded set.
+    // That is a real change in what the repair DOES, and it is the point of
+    // v39. The old motion re-scoped a row in place, which was safe only because
+    // `cohort_scope` sat outside the signed envelope; the new one leaves the
+    // actor's row untouched and writes a second row at the wider audience. A
+    // row whose actor this node does not hold now WAITS (`awaiting_actor`)
+    // instead of being silently re-authored by the fabric.
     //
-    // Ordering matters — repair BEFORE computing the desired peer set, so a row
-    // corrected on this tick is offerable on this tick rather than the next.
-    match engine.repair_stranded_scope_backlog().await {
+    // Still the right home, and for the original reason: this is already the
+    // "converge the live runtime to the CEG" tick, and running it here — BEFORE
+    // the desired peer set is computed — makes a row corrected on this tick
+    // offerable on this tick rather than the next. The sweep is idempotent and
+    // self-limiting; persist also auto-fires it at its own chokepoints, so this
+    // call is the cadence, not the only trigger.
+    match engine.promote_consented_backlog().await {
         Ok(report) => {
-            if report.rescoped > 0 || report.skipped > 0 {
+            if report.promoted > 0 || report.widened > 0 || report.awaiting_actor > 0 {
                 tracing::info!(
-                    rescoped = report.rescoped,
+                    promoted = report.promoted,
+                    widened = report.widened,
+                    awaiting_actor = report.awaiting_actor,
                     skipped = report.skipped,
-                    "CIRISPersist#530 repair sweep: re-scoped {} stranded \
-                     (self|family, federation) row(s) to their covering grant's audience — \
-                     these were past the tier gate but never offered (the offer filter keys \
-                     on cohort_scope)",
-                    report.rescoped,
+                    "CIRISPersist#530 consent sweep: {} row(s) entered the mesh, {} widened to \
+                     their covering grant's audience; {} await their actor's signer (a row this \
+                     node did not author is not re-authored by it)",
+                    report.promoted,
+                    report.widened,
+                    report.awaiting_actor,
                 );
+            }
+            if report.awaiting_actor > 0 {
+                // AN `Ok` THAT DID NOTHING, on a cadence. These rows are counted
+                // every tick and moved by none of them: the sweep will not
+                // re-author another key's claim, which is the v39 correction
+                // itself, so nothing here converges with time. Named row by row,
+                // because "stuck" was three different situations and the count
+                // alone read as a fault on every announced node in the mesh.
+                explain_awaiting_actor(engine, node_key_id, report.awaiting_actor).await;
             }
         }
         // Never fail the tick on the repair motion: the peer-set convergence
         // below is the loop's primary duty and must still run.
         Err(e) => tracing::warn!(
             error = %e,
-            "CIRISPersist#530 repair sweep failed this tick — stranded rows (if any) stay \
-             unofferable until the next tick; peer convergence continues"
+            "CIRISPersist#530 consent sweep failed this tick — stranded rows (if any) stay \
+             unofferable until the next tick; peer convergence continues. This sweep is \
+             what carries a locally-authored row from `self` to the audience its \
+             covering grant names, so while it is failing, rows accumulate that this \
+             node can read and no peer can: the symptom downstream is a plane that \
+             looks healthy locally and delivers nothing"
         ),
     }
 

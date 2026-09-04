@@ -673,6 +673,8 @@ async fn node_dismisses(
             scrub_key_id: (*c).to_string(),
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            // v39.0.0: accord-quorum scrub, not a tier crossing (CC 2.6.7).
+            cosigned_at: None,
         });
     }
     post(

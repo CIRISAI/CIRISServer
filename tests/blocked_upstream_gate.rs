@@ -63,6 +63,10 @@ use std::path::{Path, PathBuf};
 /// The 2026-08-06 sweep resolved six others: #334 / #321 / #219 / #113 / #112 →
 /// `state:unwired` (the capability had shipped), #111 closed as overtaken by the
 /// reverse-quorum plane. Do not re-add them here without re-blocking them.
+// #534 was registered here on 2026-09-03 and resolved the same day: persist
+// v40.0.0 landed CIRISPersist#801 (a widening carries the claim's instant, the
+// placement gets `widened_at`), the four equivocation tests went green on the
+// adopt, and the row came out with the issue. Do not re-add it.
 const BLOCKED_UPSTREAM_ISSUES: &[u32] = &[2, 114, 115, 285, 333];
 
 const MANIFEST: &str = "evidence/blocked_upstream.tsv";

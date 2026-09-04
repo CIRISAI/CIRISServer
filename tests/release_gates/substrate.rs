@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v14.0.0";
-pub const TARGET_PERSIST: &str = "v38.7.0";
-pub const TARGET_EDGE: &str = "v18.12.1";
+pub const TARGET_VERIFY: &str = "v14.1.0";
+pub const TARGET_PERSIST: &str = "v40.0.0";
+pub const TARGET_EDGE: &str = "v20.1.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -183,7 +183,41 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     // last. v36.0.0 (#642) added `consent_supersedes` to the signed envelope —
     // consent ordering became CAUSAL rather than resting on a producer-chosen
     // wall clock, which `DEFAULT_MAX_TOUCH_SKEW` (300s) could not bound.
-    const ADOPTED: &str = "e019ecb873f662399c13515414849a8d055d5ec2f0893e21f74cdccf6f60a111";
+    //
+    // Moved again at the v40 adopt, same order. v40.0.0 (#801, ours) added
+    // `widened_at`: a widening's `asserted_at` is now the CLAIM's instant,
+    // carried verbatim from the prior, and the act of placing it gets its own
+    // signed member. The diff is exactly one key — typed `Option<String>` and
+    // `skip_serializing_if = "Option::is_none"`, so every envelope that is not a
+    // widening stays byte-identical.
+    //
+    // Sites audited before this line moved. The build was CLEAN — a new
+    // `Option` member breaks nothing — and one site still needed changing, which
+    // is the argument for this gate rather than against it:
+    //   - `attest::ROW_BOOKKEEPING` gained `WIDENED_AT`. Two identical claims
+    //     republished at different moments are the same claim, and until it was
+    //     stripped from `claim_view` the duplicate arm stopped firing on any
+    //     widened row — the v31 `original_content_hash` breakage, returning by
+    //     another door. Found by `a_duplicated_statement_records_nothing`, not by
+    //     the compiler, because the strip list is string-keyed.
+    //   - `attest::WIDENING_BOOKKEEPING` is new for the same reason, one level
+    //     out: a widening also carries `references_attestation_id` and
+    //     `differs_in`, and two duplicates reference DIFFERENT priors. Stripped
+    //     only when the envelope is a placement widening, because on a real
+    //     `supersedes` the reference IS the claim.
+    //   - we never WRITE `widened_at`; `crossing::build_widening` does, inside
+    //     `Engine::widen_audience`, which `attestation_crossing` calls.
+    //   - `src/equivocation.rs` needed no change to BENEFIT: it reads
+    //     `asserted_at` through `key_standing::signed_instant`, and that member
+    //     is the claim's instant again, which is the whole point of #801.
+    //   - `attestation_crossing::is_placement_widening` keys on `widened_at`
+    //     itself. `crossing::check_widening` REQUIRES the member on every
+    //     widening — it refuses one without it — so on a v40 mesh it is present
+    //     on every widening that got through the put door, and absent
+    //     everywhere else. Inferring the shape from `differs_in` instead, which
+    //     is what this did through the v39 adoption, is a second spelling of a
+    //     definition the substrate now states outright.
+    const ADOPTED: &str = "e7135559a3d843ecff3ad34ee3b1a10acf92b33f199a327758139969e19f5699";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

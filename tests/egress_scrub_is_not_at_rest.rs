@@ -172,7 +172,12 @@ fn build_batch_bytes() -> Vec<u8> {
     trace.signature = BASE64.encode(ed_sig);
     trace.signature_ml_dsa_65 = Some(BASE64.encode(mldsa.sign(&bound).expect("sign")));
     trace.pubkey_ml_dsa_65 = Some(BASE64.encode(mldsa.public_key().expect("pk")));
-    trace.pqc_key_id = Some("test-mldsa".into());
+    // This file signs with its OWN ML-DSA key (seed 0x44) and registers that
+    // pubkey on `AGENT_KEY`'s own record, so the key id it names is that record
+    // — one identity holding both halves, the shape a production hybrid key
+    // record has. It does not use the shared `fixture_pqc` identity, which
+    // exists for the fixtures that sign with the common seed.
+    trace.pqc_key_id = Some(AGENT_KEY.into());
 
     serde_json::json!({
         "events": [{

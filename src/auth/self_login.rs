@@ -160,6 +160,14 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
     // (4) Drive the substrate flow.
     let input = SelfAtLoginInput {
         identity_key_id: req.identity_key_id,
+        // v39.0.0: the identity's OWN signer, when the caller holds it — the
+        // `delegates_to` from the identity to the agent is the identity's claim
+        // to make. This is an HTTP endpoint: the signer here is a remote user's
+        // FedID, whose key this node does not hold and must not stand in for.
+        // Absent, persist emits the delegation only if the identity IS this
+        // node's composed signer, and otherwise stages it local to wait
+        // (`delegation_promoted = false`) — which is the honest outcome.
+        identity_signer: None,
         app: req.app.into(),
         agent: req.agent.into(),
         bilateral_pair_id: req.bilateral_pair_id,

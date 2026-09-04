@@ -737,6 +737,32 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",
     "chat.community_shape_conflict",
+    # The chat plane's refusals, added with the edge v20.0.0 E2EE port. They are
+    # emitted but not yet in the client bundle, so they render the server's
+    # English in all 29 languages until the next `ciris-client` release carries
+    # them. Recorded here rather than silently uncovered.
+    "chat.author_signer_unavailable",
+    "chat.not_a_pair_room",
+    "chat.room_key_failed",
+    # `chat.room_not_keyed_yet` is GONE — it was one sentence for four different
+    # situations, on a surface that can say which. Replaced by `chat.state.*`,
+    # which are chat-HISTORY notes rendered beside the messages, not errors.
+    # The contact LADDER's stalls (edge's `LadderStall`, mapped onto the axis a
+    # human acts on). Several are deliberately not failures — `not_yet_discovered`
+    # and `unreachable` resolve themselves — so they read as status, and want
+    # translating like any other user-facing sentence.
+    "contacts.awaiting_consent",
+    "contacts.code_admission_unavailable",
+    "contacts.consent_not_granted",
+    "contacts.malformed_code",
+    "contacts.prior_rung_incomplete",
+    "contacts.unreachable",
+    "contacts.unresolvable",
+    "chat.state.awaiting_peer",
+    "chat.state.join_requested",
+    "chat.state.no_author_signer",
+    "chat.state.ready",
+    "chat.unsupported_content_type",
     # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
     # dismissal path used to share `commons_surface.refusal.objection_absent`,
     # whose 29 locales all translate the BALLOT sentence — so a non-English

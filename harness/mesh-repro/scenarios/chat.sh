@@ -125,59 +125,60 @@
 # plane is unwired, the product consequence is bounded and stated, and delivery
 # still works by convergent derivation. `arrived` does not: with it red, chat
 # does not cross a node boundary AT ALL, and a green gate over that is exactly
-# the false green this repo keeps paying for. This ladder gates PRs, so it stays
-# red until the producer signs as the owner — which is the point of gating on it.
-#
-# It is NOT fixable in this directory: the producer is `src/contacts_chat.rs`.
-# `owner_signer_capsule::acquire` (CIRISServer#342) is the mechanism that would
-# put the OWNER's own signature on the row without the key leaving the node.
-# Until that lands, this ladder is honestly red at `arrived`, exactly as
-# `genesis_seed` is honestly red at its unmet preconditions.
+# the false green this repo keeps paying for.
 
-# ── THE ASKS, in full — the union of this ladder's reds ─────────────────────
+# ── WHAT THIS MEASURED (2026-09-03/04, server 0.5.197 on persist v40 / edge
+#    v20.1.1 — the DX port) ─────────────────────────────────────────────────────
 #
-# The point of probing every stage independently is that when one goes red, the
-# red is a SENTENCE someone can act on. Three, in dependency order:
+# The attester/signer split above is HISTORY: on the edge DX the node attests a
+# community row by construction (`enter_mesh`, persist v39) and the envelope
+# names the author; `hamburger` asserts exactly that split. What the port
+# surfaced instead was one row that had never been on the wire in any run:
 #
-#  1. SERVER — sign the message as its attester. `send_message` must put the
-#     OWNER's own hybrid signature on the row (`owner_signer_capsule::acquire`,
-#     CIRISServer#342) instead of deferring to `attestation_promote`, whose
-#     signer is the node. Until then `arrived` is red and chat cannot cross a
-#     node boundary at all. WHEN THIS LANDS: nothing here changes; re-run.
+#   15 × "attestation withheld — the recipient is not in the row's audience"
+#    0 × delivered, in BOTH directions, every room row (KeyPackage, Welcome).
 #
-#  2. SERVER — register the roster plane. `compose::build_replication_peers`
-#     (src/compose.rs:3045) needs `EnvelopeKind::Community` (and `Family`, by the
-#     same argument). Edge and persist both implement the plane end to end; only
-#     the registration is missing. WHEN THIS LANDS: delete `XFAIL_one_sided`
-#     below — that one deletion turns the stage into a live gate, and nothing
-#     else in this file needs to move.
+# THE MECHANISM: a community row's audience is its members' NODES (CC 5.2), so
+# each node has to walk the OTHER node → its owner → "is that owner a member".
+# `owner_of` answers from replicated owner-bindings, and the binding
+# setup-complete writes is `cohort_scope: self` — which the SAME audience gate
+# withholds from every peer, correctly (a peer is not one of the owner's own
+# nodes). Setup-complete had done everything it should; the harness had never
+# done the one thing the wizard does next: ANNOUNCE. `POST
+# /v1/federation/announce` is the owner re-signing that binding at federation
+# scope (persist v31 put `cohort_scope` inside the signed bytes, so widening is
+# a new claim by the claimant, not a relabel), and it is an opt-OUT in the
+# wizard. A node that has not announced is P2P-only BY DESIGN — it can dial and
+# be dialled, and it cannot be placed in anyone's audience. Edge's bench-mesh
+# runner never meets this because `owner_binding_attestation` mints the binding
+# AT federation scope; ours is born `self` and widened. Same row on the wire.
 #
-#  3. PERSIST — decide the `chat:` family. This is the ONLY persist-side ask, and
-#     it is one registry row. `chat:message:v1` resolves
-#     `AttestationFamily::Unknown` today, so `projection_for` gives it the
-#     conservative default — which at `cohort_scope: community` is
-#     `Projection::Cohort`, i.e. ADVERTISED. That is confirmed empirically here,
-#     not assumed: the recipient logged the envelope DELIVERED before refusing it
-#     at the ingest gate, so chat is NOT blocked by an undecided family and never
-#     was. What is missing is that the cell is INHERITED rather than chosen. The
-#     precedent is `moderation:*` in persist v37.0.1, which enumerated its commons
-#     tiers explicitly for exactly this reason: a later consistency sweep that
-#     "finished" a wildcard-inherited row would lift the ceiling silently, and no
-#     test looked at that cell. The answer chat wants is the community roster.
+# The driver now announces every node right after its claim (its first act, so
+# the first anti-entropy round already carries the widened row), and `bound`
+# measures the RESULT on the far side, both directions, so this class of red
+# says "the binding did not cross" rather than "the message did not arrive".
 #
-# Nothing else is missing. Everything else this ladder touches is green.
+# The second thing the port forced: the room is an MLS pair group. The creator
+# cannot speak until the joiner's KeyPackage has crossed, so the message moved
+# from phase SEND (before the joiner had even opened the room — measured `503
+# chat.room_key_failed` on every run) to phase SPEAK, after JOIN, gated on the
+# room's own `chat.state.ready`. The one-sided window is unchanged.
 
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
 SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the node, author the owner, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
+SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
-# delivery, so they sit BEFORE `arrived`: put either after it and a green there
-# would silently certify a delivery that never happened. That ordering rule is
-# the whole reason this ladder is not simply the narrative order.
-STAGES=(rooted peered contact room sent dark one_sided arrived hamburger)
+# delivery, so they sit BEFORE `sent`: put either after it and a green there
+# would silently certify a delivery that never happened. `bound` sits before
+# `sent` because `sent` DEPENDS on it: the room is an MLS pair group, the
+# creator can only speak once the joiner's KeyPackage has crossed, and that
+# row crosses only if the joiner's node can place the creator's node in the
+# room's audience — which is the owner-binding walk `bound` measures. That
+# ordering rule is the whole reason this ladder is not simply the narrative order.
+STAGES=(rooted peered contact room dark one_sided bound sent arrived hamburger)
 # (The definitions below are grouped by topic, not by ladder position — each
 #  header carries its own number, and THIS array is the running order.)
 
@@ -206,18 +207,23 @@ CHAT_SERVICES="canonical $CHAT_NODES"
 # signed envelope attributes the words to. They are separate questions and the
 # projection answers them separately (team-lead ruling, §8.1.12.7 fidelity).
 #
-#   CHAT_ATTESTER_WORLD=node   persist v38 — `put_attestation` refuses every
-#                              community-scope row at the write gate, so
-#                              `attestation_promote`'s re-seal is the only minting
-#                              door and it signs with the engine (e81a103). The
-#                              split is the design; the stage asserts it.
-#   CHAT_ATTESTER_WORLD=owner  after persist ask (a) or (b) — the producer's
-#                              signature survives promotion and the two converge.
+#   CHAT_ATTESTER_WORLD=owner  persist v39+ / edge v20 (the DX port, 0.5.197):
+#                              `share(With::Community)` → `enter_mesh` places
+#                              the row the ACTOR signed with the node's
+#                              co-scrub beside it (`custody=
+#                              ActorSignedNodeCoScrubbed`), so the attester IS
+#                              the owner and the author converges on it. The
+#                              stage asserts the convergence. THE DEFAULT.
+#   CHAT_ATTESTER_WORLD=node   persist v38 — `attestation_promote` re-sealed
+#                              every community row with the engine's signer,
+#                              so the attester was the NODE and the envelope
+#                              named the owner. Kept so the pre-port world can
+#                              still be measured; not what ships.
 #
 # CHAT_AUTHOR_FIELD is EMPTY until server-wire reports the name it chose. Empty
 # means the stage refuses to assert rather than probe a guess: a name that does
 # not exist and a feature that does not work read identically from here.
-CHAT_ATTESTER_WORLD="${CHAT_ATTESTER_WORLD:-node}"
+CHAT_ATTESTER_WORLD="${CHAT_ATTESTER_WORLD:-owner}"
 CHAT_AUTHOR_FIELD="${CHAT_AUTHOR_FIELD:-author}"
 # The console binary, bind-mounted from the SAME release build that produced the
 # wheel (docker-compose.chat.yml). `identity create` and `claim` live only in the
@@ -335,16 +341,70 @@ except Exception: print("")')"
     fi
     echo "  ✓ $svc claimed — owner=$owner"
 
-    python3 - "$state_json" "$svc" "$token" "$owner" "$ed" "$pqc" <<'PY'
+    # ANNOUNCE — the wizard's default (an opt-OUT), and the step this harness
+    # had never run. Setup-complete wrote the owner-binding at `cohort_scope:
+    # self`; this is the OWNER re-signing it at federation scope, the only copy
+    # a peer may hold (CC 5.2). Without it no peer can walk node → owner, so no
+    # peer can place this node in a community row's audience, and the room's
+    # KeyPackage/Welcome/messages are withheld in both directions — the
+    # 2026-09-03 red. LOOPBACK-ONLY like every setup route (the wizard runs on
+    # the node's own host), which is why it lives here beside the claim and not
+    # in the driver, which reaches nodes by name over the mesh bridge and was
+    # answered `403 setup routes are localhost-only` for its trouble.
+    announce="$(compose exec -T "$svc" python - "$token" <<'PY' 2>/dev/null
+import json, sys, urllib.request, urllib.error
+req = urllib.request.Request("http://127.0.0.1:4243/v1/federation/announce", method="POST",
+                             headers={"Authorization": "Bearer " + sys.argv[1],
+                                      "Content-Type": "application/json"}, data=b"{}")
+try:
+    r = urllib.request.urlopen(req, timeout=30)
+    status, body = r.status, r.read().decode()
+except urllib.error.HTTPError as e:
+    status, body = e.code, e.read().decode()
+except Exception as e:  # noqa: BLE001
+    status, body = 0, repr(e)
+try:
+    b = json.loads(body)
+except Exception:
+    b = {"detail": body[:200]}
+rows = b.get("bundle") or []
+print(json.dumps({"status": status,
+                  "promoted_owner_binding_attestation_id": b.get("promoted_owner_binding_attestation_id"),
+                  # The bundle federation discovery walks: 3 rows for a fabric
+                  # node, 5 with an agent. `bundle_visible` counts what a peer
+                  # may hold; the announce is COMPLETE only when it equals
+                  # `bundle_expected`.
+                  "federation_discoverable": b.get("federation_discoverable"),
+                  "bundle_expected": b.get("bundle_expected"),
+                  "bundle_visible": sum(1 for r in rows if r.get("federation_visible")),
+                  "bundle_missing": [r.get("role") + ":" + str(r.get("key_id")) for r in rows if not r.get("federation_visible")],
+                  "detail": b.get("detail") or b.get("error") or b.get("reason_id")}))
+PY
+)"
+    [ -n "$announce" ] || announce='{"status": 0, "detail": "announce produced no output"}'
+    case "$announce" in
+      *'"federation_discoverable": true'*) echo "  ✓ $svc announced — bundle COMPLETE ($(printf '%s' "$announce" | python3 -c 'import json,sys; b=json.load(sys.stdin); print("%s/%s rows federation-visible" % (b.get("bundle_visible"), b.get("bundle_expected")))')): a peer can walk fedID → owner → node" ;;
+      *'"status": 200'*) echo "  ⚠ $svc announced but the bundle is INCOMPLETE: $announce" ;;
+      *) echo "  ✗ $svc announce FAILED: $announce" ;;
+    esac
+
+    python3 - "$state_json" "$svc" "$token" "$owner" "$ed" "$pqc" "$announce" <<'PY'
 import json, sys
-path, svc, token, owner, ed, pqc = sys.argv[1:7]
+path, svc, token, owner, ed, pqc, announce = sys.argv[1:8]
 d = json.load(open(path))
+try:
+    ann = json.loads(announce)
+except Exception:
+    ann = {"status": 0, "detail": announce[:200]}
 d["nodes"][svc] = {
     "base": f"http://{svc}:4243",
     "token": token,
     "owner_key_id": owner,
     "owner_ed25519": ed,
     "owner_ml_dsa_65": pqc,
+    # The ACT, recorded where it happened; the driver logs it in sequence and
+    # the `bound` stage reads the RESULT off both directories.
+    "announce": ann,
 }
 json.dump(d, open(path, "w"))
 PY
@@ -384,6 +444,18 @@ except Exception: print("")' "$CHAT_STATE/result_send.json" "$CHAT_SENDER")"
   fi
   { sed 's/^/  /' "$CHAT_STATE/join.err" 2>/dev/null | tail -20; } || true
 
+  # ── PHASE 3: the SENDER waits for the room to be keyed, then speaks ───────
+  # The joiner's KeyPackage has to cross to the creator (one anti-entropy round
+  # once the audience walk resolves) before the creator can add the member and
+  # send. The driver polls the room's own `chat.state.*` note, so a stall here
+  # is logged as WHICH half is missing, not as a timeout.
+  echo "── chat: phase SPEAK (sender waits for the keyed room, then sends) ──"
+  if ! compose exec -T "$CHAT_SENDER" python /opt/harness/chat_drive.py drive speak \
+        <"$state_json" >"$CHAT_STATE/result_speak.json" 2>"$CHAT_STATE/speak.err"; then
+    echo "  WARN: chat_drive.py drive speak exited non-zero — the ladder will localise it"
+  fi
+  { sed 's/^/  /' "$CHAT_STATE/speak.err" 2>/dev/null | tail -20; } || true
+
   python3 - "$CHAT_STATE" "$CHAT_MESSAGE_TEXT" "$CHAT_SENDER" "$CHAT_RECIPIENTS" <<'VARS'
 import json, os, shlex, sys
 state_dir, message, sender, recipients_raw = sys.argv[1:5]
@@ -401,6 +473,8 @@ def load(name):
 state = load("state.json")
 send = load("result_send.json")
 join = load("result_join.json")
+speak = load("result_speak.json")
+announce = send.get("announce") or {}
 nodes = state.get("nodes", {})
 # The node key_id is discovered in BOTH phases; either result is authoritative.
 disc = {**(send.get("nodes") or {}), **(join.get("nodes") or {})}
@@ -444,7 +518,13 @@ out = {
     "CHAT_B_NODE_KEY": n(first),
     "CHAT_CID_A": (rooms.get(sender) or {}).get("community_id") or "",
     "CHAT_CID_B": (rooms.get(first) or {}).get("community_id") or "",
-    "CHAT_ATT_ID": (send.get("sent") or {}).get("attestation_id") or "",
+    "CHAT_ATT_ID": (speak.get("sent") or {}).get("attestation_id") or "",
+    # The announce, per node: HTTP status and the federation-scoped binding it
+    # minted. `bound` reads the RESULT off the directories; this is the ACT.
+    "CHAT_ANNOUNCE_A": json.dumps(announce.get(sender) or {}),
+    "CHAT_ANNOUNCE_B": json.dumps(announce.get(first) or {}),
+    "CHAT_HANDSHAKE_A": json.dumps((speak.get("handshake") or {}).get(sender) or {}),
+    "CHAT_HANDSHAKE_B": json.dumps((join.get("handshake") or {}).get(first) or {}),
     "CHAT_CONTACT_A_FRESH": str((contacts.get(sender) or {}).get("freshly_emitted")),
     "CHAT_CONTACT_B_FRESH": str((contacts.get(first) or {}).get("freshly_emitted")),
     "CHAT_OWNER_ADMIT_VIA": json.dumps(send.get("owner_admit_via") or {}),
@@ -454,7 +534,7 @@ out = {
     "CHAT_ONE_SIDED_REASON": str(one_sided.get("reason_id") or ""),
     "CHAT_ONE_SIDED_ROWS": rows.get(first, "?"),
     "CHAT_DRIVE_ERRORS": " | ".join(
-        (send.get("errors") or []) + (join.get("errors") or [])) or "<none>",
+        (send.get("errors") or []) + (join.get("errors") or []) + (speak.get("errors") or [])) or "<none>",
 }
 with open(os.path.join(state_dir, "vars.sh"), "w") as f:
     for k, v in out.items():
@@ -462,6 +542,7 @@ with open(os.path.join(state_dir, "vars.sh"), "w") as f:
 print("  prepare: " + " ".join(
     "%s=%s" % (k, v) for k, v in out.items()
     if k in ("CHAT_A_OWNER", "CHAT_B_OWNER", "CHAT_CID_A", "CHAT_CID_B", "CHAT_ATT_ID",
+             "CHAT_ANNOUNCE_A", "CHAT_ANNOUNCE_B", "CHAT_HANDSHAKE_A", "CHAT_HANDSHAKE_B",
              "CHAT_OWNER_ADMIT_VIA", "CHAT_ONE_SIDED_STATUS", "CHAT_ONE_SIDED_REASON",
              "CHAT_ONE_SIDED_ROWS")))
 VARS
@@ -593,15 +674,78 @@ DIAG_room() {
   grep -hE "room:" "$CHAT_STATE/send.err" "$CHAT_STATE/join.err" 2>/dev/null | tail -4
 }
 
+
+# ── bound — each node can walk the OTHER's node → owner ─────────────────────
+# THE STAGE THE 2026-09-03 RED WAS MISSING. A community row's audience is its
+# members' NODES (CC 5.2), and a node that cannot resolve `owner_of(peer_node)`
+# cannot place that peer in any audience — so the joiner's MLS KeyPackage, the
+# creator's Welcome and every message are withheld ("the recipient is not in
+# the row's audience") in both directions, and the ladder read it as `arrived`.
+#
+# `owner_of` is answered from replicated owner-bindings, and the binding that
+# setup-complete writes is `cohort_scope: self` — correct, and by construction
+# never carried to a peer. The copy a peer CAN hold is the one the owner
+# re-signs at federation scope: `POST /v1/federation/announce`, the wizard's
+# default (announcing is an opt-OUT). The driver announces every node right
+# after its claim; this stage checks that the RESULT reached the other side.
+# Edge's bench-mesh runner never has this stage because its binding is minted
+# AT federation scope — same row on the wire, different birthplace.
+_chat_bound_one() {
+  # $1 = the node whose directory we read; $2 = the OTHER party's owner; $3 = their node.
+  harness_db_count "$1" federation_attestations \
+    "attestation_type='delegates_to' AND attesting_key_id='${2:-none}' \
+     AND attested_key_id='${3:-none}' AND cohort_scope='federation'"
+}
+stage_bound() {
+  _chat_load
+  local recip="${CHAT_RECIPIENT_SVC:-node-b}" a_holds_b b_holds_a
+  a_holds_b="$(_chat_bound_one "$CHAT_SENDER" "${CHAT_B_OWNER:-}" "${CHAT_B_NODE_KEY:-}")"
+  b_holds_a="$(_chat_bound_one "$recip" "${CHAT_A_OWNER:-}" "${CHAT_A_NODE_KEY:-}")"
+  if [ "${a_holds_b:-0}" -gt 0 ] && [ "${b_holds_a:-0}" -gt 0 ]; then echo 1; else echo 0; fi
+}
+HINT_bound="a node cannot resolve the other party's node to its owner, so it cannot put that node in any community row's audience and every room row (KeyPackage, Welcome, message) is withheld: 'attestation withheld — the recipient is not in the row's audience'. The diagnosis says which of the two it is: the ANNOUNCE never ran (POST /v1/federation/announce answered non-2xx — read its body; a 503 means the owner's signer is not on the node, a 409 that the node is not owner-bound), or it ran and the federation-scoped binding never REPLICATED (the peering grant must cover \`self:delegates_to:\` — the owner-binding's dimension — and the peer must hold the OWNER's key to verify the owner's signature). A node that has not announced is P2P-only by design: it can dial, and it cannot be placed in anyone's audience."
+EXIT_bound=39
+DIAG_bound() {
+  _chat_load
+  local recip="${CHAT_RECIPIENT_SVC:-node-b}"
+  echo "  ── the ACT: what each node's announce answered ──"
+  echo "  ${CHAT_SENDER}: ${CHAT_ANNOUNCE_A:-<not recorded>}"
+  echo "  ${recip}: ${CHAT_ANNOUNCE_B:-<not recorded>}"
+  echo "  ── the RESULT: the other party's owner→node binding, by cohort_scope, on each node ──"
+  local s
+  for s in "$CHAT_SENDER" "$recip"; do
+    if [ "$s" = "$CHAT_SENDER" ]; then o="${CHAT_B_OWNER:-none}"; n="${CHAT_B_NODE_KEY:-none}"; else o="${CHAT_A_OWNER:-none}"; n="${CHAT_A_NODE_KEY:-none}"; fi
+    echo "  $s holds $o → $n: federation=$(harness_db_count "$s" federation_attestations "attestation_type='delegates_to' AND attesting_key_id='$o' AND attested_key_id='$n' AND cohort_scope='federation'") self=$(harness_db_count "$s" federation_attestations "attestation_type='delegates_to' AND attesting_key_id='$o' AND attested_key_id='$n' AND cohort_scope='self'") owner_key=$(harness_db_count "$s" federation_keys "key_id='$o'")"
+  done
+  echo "  ── each node's OWN binding, by cohort_scope (self = setup-complete; federation = the announce) ──"
+  for s in "$CHAT_SENDER" "$recip"; do
+    if [ "$s" = "$CHAT_SENDER" ]; then o="${CHAT_A_OWNER:-none}"; n="${CHAT_A_NODE_KEY:-none}"; else o="${CHAT_B_OWNER:-none}"; n="${CHAT_B_NODE_KEY:-none}"; fi
+    echo "  $s own binding $o → $n: self=$(harness_db_count "$s" federation_attestations "attestation_type='delegates_to' AND attesting_key_id='$o' AND attested_key_id='$n' AND cohort_scope='self'") federation=$(harness_db_count "$s" federation_attestations "attestation_type='delegates_to' AND attesting_key_id='$o' AND attested_key_id='$n' AND cohort_scope='federation'")"
+  done
+  echo "  ── the handshake, as each room reports it ──"
+  echo "  ${CHAT_SENDER} (creator): ${CHAT_HANDSHAKE_A:-<not recorded>}"
+  echo "  ${recip} (joiner):  ${CHAT_HANDSHAKE_B:-<not recorded>}"
+  echo "  ── audience withholds, both nodes ──"
+  for s in "$CHAT_SENDER" "$recip"; do
+    echo "  $s:"
+    compose logs "$s" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
+      | grep -oE "attestation (plane )?withheld[^\"]{0,120}" | sort | uniq -c | tail -4 | sed 's/^/    /'
+  done
+  grep -E "announce:|handshake:" "$CHAT_STATE/send.err" "$CHAT_STATE/join.err" "$CHAT_STATE/speak.err" 2>/dev/null | tail -8 | sed 's/^/  /'
+}
+
 # ── 5. sent — the message row exists on node A ──────────────────────────────
 stage_sent() {
   _chat_load
   if [ -n "${CHAT_ATT_ID:-}" ]; then echo 1; else echo 0; fi
 }
-HINT_sent="POST /v1/chat/{id}/messages did not return an attestation_id. chat.not_a_member means build_caller_admission did not resolve the owner into the community (the roster is read from the directory, never asserted); chat.emit_failed names the substrate refusal — most likely check_promotion_cohort_standing, which refuses a community placement naming any party but its producer."
+HINT_sent="POST /v1/chat/{id}/messages did not return an attestation_id. chat.room_key_failed with the room still reporting chat.state.awaiting_peer means the creator never received the joiner's KeyPackage — \`bound\` is green, so the binding replicated; check that the joiner's room row and KeyPackage were advertised (the diagnosis prints the joiner's own handshake state and both nodes' withholds). chat.not_a_member means build_caller_admission did not resolve the owner into the community (the roster is read from the directory, never asserted); chat.emit_failed names the substrate refusal — most likely check_promotion_cohort_standing, which refuses a community placement naming any party but its producer."
 EXIT_sent=34
 DIAG_sent() {
-  grep -E "send:" "$CHAT_STATE/send.err" 2>/dev/null | tail -4
+  _chat_load
+  echo "  creator's handshake: ${CHAT_HANDSHAKE_A:-<not recorded>}"
+  echo "  joiner's handshake:  ${CHAT_HANDSHAKE_B:-<not recorded>}"
+  grep -E "handshake:|send:" "$CHAT_STATE/speak.err" 2>/dev/null | tail -6 | sed 's/^/  /'
 }
 
 # ── 8. arrived — A's BYTES in B's transcript. THE STAGE THIS EXISTS FOR ─────
@@ -724,7 +868,7 @@ stage_hamburger() {
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python /opt/harness/chat_drive.py hamburger \
     "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" \
-    "$CHAT_A_OWNER" "$CHAT_A_NODE_KEY" "${CHAT_AUTHOR_FIELD:-}" "${CHAT_ATTESTER_WORLD:-node}" \
+    "$CHAT_A_OWNER" "$CHAT_A_NODE_KEY" "${CHAT_AUTHOR_FIELD:-}" "${CHAT_ATTESTER_WORLD:-owner}" \
     2>/dev/null | tr -d '[:space:]'
 }
 HINT_hamburger="the row reached the recipient but not with its identity intact — attesting_key_id is not the sender's owner, cohort_scope is not \`community\`, the subject set does not name the author, or the status folded away from \`live\`. Any of those makes the arrived object a different object from the one that was sent."

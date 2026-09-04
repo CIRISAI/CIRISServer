@@ -49,7 +49,10 @@ use ciris_persist::federation::types::{attestation_type, cohort_scope, LocalAtte
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
+use crate::attestation_crossing;
 use crate::auth::verify::{self, VerifyError};
+use ciris_persist::federation::{Audience, CrossingBasis, MeshCrossingOutcome};
+use ciris_persist::prelude::LocalSigner;
 
 /// The `moderation:{allegation_type}` dimension prefix (CEG §5.6.4 /
 /// persist `MODERATION_DIMENSION_PREFIX`). A `moderation:*` `scores` row IS the
@@ -140,9 +143,15 @@ pub async fn admit_moderation_action(
 /// substrate even if a caller forgets — defense in depth.
 ///
 /// Returns the persisted attestation id.
+/// `actor` is the signer of ``signer_key_id``, when the caller holds it. Since persist
+/// v39.0.0 this node may not sign another key's claim into the mesh: without the
+/// signer the row is written and then WAITS (`AwaitingActor`), local-tier and
+/// unreadable across the federation. That is the honest outcome, not a failure —
+/// but a caller that means the claim to federate must pass the signer.
 pub async fn emit_moderation_event(
     engine: &Engine,
     signer_key_id: &str,
+    actor: Option<&LocalSigner>,
     community_key_id: &str,
     allegation_type: &str,
     target_key_ids: &[String],
@@ -182,10 +191,25 @@ pub async fn emit_moderation_event(
         .map_err(|e| format!("upsert moderation event: {e}"))?;
     // Promote to federation tier so the ModerationEvent is federation-visible
     // (the audit chain + the track-record signal read it across the federation).
-    engine
-        .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-        .await
-        .map_err(|e| format!("promote moderation event: {e}"))?;
+    let outcome = attestation_crossing::enter_mesh_at(
+        engine,
+        &attestation_id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        actor,
+    )
+    .await
+    .map_err(|e| format!("promote moderation event: {e}"))?;
+    if let MeshCrossingOutcome::AwaitingActor { age_ms, .. } = outcome {
+        // v39.0.0: the event is the SIGNER's claim, not the fabric's. Without
+        // their signer it waits rather than being re-authored by this node.
+        tracing::info!(
+            attestation_id = %attestation_id,
+            signer_key_id = %signer_key_id,
+            age_ms,
+            "moderation event awaits its signer before entering the mesh"
+        );
+    }
     Ok(attestation_id)
 }
 
@@ -441,6 +465,8 @@ async fn moderation(State(st): State<ModState>, headers: HeaderMap, body: Bytes)
     match emit_moderation_event(
         &st.engine,
         &req.signer_key_id,
+        // See CIRISServer#533: no actor signer at an HTTP boundary.
+        None,
         &req.community_key_id,
         &req.allegation_type,
         &req.target_key_ids,

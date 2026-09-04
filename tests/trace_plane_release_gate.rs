@@ -82,16 +82,46 @@ async fn node(seed: u8, alias: &str) -> Arc<Engine> {
     )
 }
 
-/// Cross-register a producer's Ed25519 verifying key so `VerifyMode::Full`
-/// resolves a trace signed under `key_id`. The founder-quorum door does this in
-/// production; here it is what separates the good producer from the stuck one.
+/// Cross-register a producer's verifying keys so `VerifyMode::Full` resolves a
+/// trace signed under `key_id`. The founder-quorum door does this in production;
+/// here it is what separates the good producer from the stuck one.
+///
+/// This registers the CLASSICAL half only. A test that also INGESTS a batch
+/// needs [`register_fixture_pqc_key`] as well — deliberately a second call
+/// rather than a line inside this one, because the PQC identity is shared by
+/// every producer while this record is per-producer, and because tests below
+/// count directory rows: folding an extra row into every cross-registration
+/// would move a peer-count delta that is the thing under assertion.
 async fn cross_register(engine: &Engine, key_id: &str, sk: &SigningKey, id_type: &str) {
     let pubkey_b64 = BASE64.encode(sk.verifying_key().to_bytes());
-    let now = Utc::now();
+    put_key(engine, key_id, &pubkey_b64, None, id_type, Utc::now()).await;
+}
+
+/// Register the ML-DSA-65 half the ingested batches are signed with.
+///
+/// Since persist v38.8.0 (#789) verify resolves a hybrid payload's `pqc_key_id`
+/// against the directory instead of trusting the pubkey the payload carries. An
+/// Ed25519-only record is not a degraded pass but a hard `verify_unknown_key`,
+/// so a gate that admits hybrid batches must put this row. Content is fixed
+/// (see `accord_batch::pqc_record_ed25519_b64`) so repeated calls write the
+/// identical row rather than colliding.
+async fn register_fixture_pqc_key(engine: &Engine) {
+    accord_batch::fixture_pqc::register(engine).await;
+}
+
+async fn put_key(
+    engine: &Engine,
+    key_id: &str,
+    pubkey_b64: &str,
+    pqc_pubkey_b64: Option<String>,
+    id_type: &str,
+    now: DateTime<Utc>,
+) {
+    let pubkey_b64 = pubkey_b64.to_string();
     let record = KeyRecord {
         key_id: key_id.to_string(),
         pubkey_ed25519_base64: pubkey_b64.clone(),
-        pubkey_ml_dsa_65_base64: None,
+        pubkey_ml_dsa_65_base64: pqc_pubkey_b64,
         algorithm: algorithm::HYBRID.into(),
         identity_type: id_type.to_string(),
         identity_ref: key_id.to_string(),
@@ -218,6 +248,7 @@ async fn a_second_arrival_moves_the_band_and_a_dark_plane_goes_green_again() {
     let refusals = IngestRefusals::new();
     let sk = SigningKey::from_bytes(&[0x21; 32]);
     cross_register(&engine, PRODUCER, &sk, identity_type::AGENT).await;
+    register_fixture_pqc_key(&engine).await;
 
     // ── The chain, link by link, through the real route ─────────────────────
     let (status, body) = post(
@@ -625,6 +656,7 @@ async fn the_watch_says_it_out_loud_and_then_stops_saying_it() {
     let refusals = IngestRefusals::new();
     let sk = SigningKey::from_bytes(&[0x21; 32]);
     cross_register(&engine, PRODUCER, &sk, identity_type::AGENT).await;
+    register_fixture_pqc_key(&engine).await;
     let (status, _) = post(
         Arc::clone(&engine),
         &refusals,

@@ -94,10 +94,38 @@ impl std::fmt::Display for CapsuleRefusal {
 
 /// A signing capability scoped to the owner's fed-ID.
 ///
-/// Holds the signer privately. There is no accessor, no `Deref`, and no
-/// serialization — the only way out is a signature.
+/// Holds the signer privately. There is no `Deref`, no serialization, and no
+/// public accessor — the only way out through the crate boundary is a signature.
+///
+/// # The one in-crate exception, and its boundary
+///
+/// [`Self::edge_signer`] is `pub(crate)` and hands out an
+/// `Arc<ciris_edge::identity::LocalSigner>` for the chat plane (CIRISServer#524).
+/// Edge's chat surface takes a signer VALUE — `chat_message_attestation(&author,
+/// …)` and `Signers { node, actor }` — because from v19.0.0 the row is signed by
+/// its author at write and the node merely co-scrubs; there is no "hand me bytes
+/// and I will sign them" seam to pass this capsule through.
+///
+/// What that does and does not widen:
+///
+/// * It confers the same AUTHORITY [`Self::sign_hybrid`] already confers — the
+///   ability to produce the owner's signature over bytes this process chooses.
+///   A caller that can reach `edge_signer` could reach `sign_hybrid`.
+/// * It does NOT export key material. `LocalSigner` holds `Arc<dyn
+///   HardwareSigner>`, whose whole contract is that the private half never
+///   leaves the backend, so the module's promise — "no method here returns key
+///   material" — still holds literally.
+/// * It stays `pub(crate)`. The threat this capsule was built against is release
+///   to Python/FFI/HTTP callers, and `pub(crate)` cannot be reached from any of
+///   them. Making it `pub` would be a different decision and is not this one.
+///
+/// The gate is unchanged either way: a capsule only exists after
+/// [`acquire`] has run the owner check, so holding one is already the
+/// authorization.
 pub struct OwnerSignerCapsule {
     signer: Arc<LocalSigner>,
+    /// The SAME identity as `signer`, in edge's type — see the type docs.
+    edge_signer: Arc<ciris_edge::identity::LocalSigner>,
 }
 
 /// One hybrid signature over caller-supplied canonical bytes.
@@ -114,6 +142,19 @@ impl OwnerSignerCapsule {
     #[must_use]
     pub fn key_id(&self) -> &str {
         self.signer.key_id()
+    }
+
+    /// The owner's signer in EDGE's type, for signing a row edge composes.
+    ///
+    /// `pub(crate)` on purpose — see the type docs for what this widens (the
+    /// same authority `sign_hybrid` already confers) and what it does not (key
+    /// material, which `HardwareSigner` never releases).
+    ///
+    /// Use it where edge needs the AUTHOR: `chat::chat_message_attestation`, and
+    /// the `actor` half of `attestation_bind::Signers`. Everywhere else, prefer
+    /// [`Self::sign_hybrid`], which keeps the bytes under the caller's control.
+    pub(crate) fn edge_signer(&self) -> &Arc<ciris_edge::identity::LocalSigner> {
+        &self.edge_signer
     }
 
     /// Sign caller-supplied bytes with the owner's hybrid identity.
@@ -184,7 +225,7 @@ pub async fn acquire(
     // THE ENFORCED CHOKE POINT — not a second path to the seed. `resolve_user_signer`
     // re-checks its own authorization, so this gate and that one must BOTH hold.
     let alias = crate::active_user_alias(&seed_dir, user_key_id);
-    match crate::compose::resolve_user_signer(
+    match crate::compose::resolve_user_signers(
         engine,
         crate::compose::FedIdUse::OwnerSession,
         &alias,
@@ -192,7 +233,10 @@ pub async fn acquire(
     )
     .await
     {
-        Ok(Some(signer)) => Ok(OwnerSignerCapsule { signer }),
+        Ok(Some((signer, edge_signer))) => Ok(OwnerSignerCapsule {
+            signer,
+            edge_signer,
+        }),
         Ok(None) => Err(CapsuleRefusal::NoFedIdentity),
         Err(e) => Err(CapsuleRefusal::Unavailable(e.to_string())),
     }

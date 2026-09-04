@@ -1,0 +1,6 @@
+# Build artifacts, same as the mesh harness next door: a ~70 MB desktop jar and
+# a ~34 MB wheel, both reproducible from the tree and neither belonging in git.
+# They were committed once by a `git add -A harness/` and had to be taken back
+# out; this is what stops the next one.
+wheels/
+jars/

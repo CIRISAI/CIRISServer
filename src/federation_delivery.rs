@@ -310,6 +310,163 @@ pub fn reprime_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> 
     Ok(admitted.len())
 }
 
+/// **What edge's advertise filter does with one of THIS node's own rows.**
+///
+/// Four answers, not two, because "not offered to everyone" and "not offered at
+/// all" are opposite findings and this surface used to report them as one
+/// number. `Withheld` is a placement fault the producer must fix; the two
+/// `OfferedPending*` readings are correct placements whose RECIPIENT is chosen
+/// one layer downstream, at send/fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertiseVerdict {
+    /// On the wire to every consented peer.
+    Offered,
+    /// On the wire at the list level; WHICH peer receives it is decided by the
+    /// #379/#386 serve gate against the recipient's effective `infra:serve`.
+    /// This is the `trace:*` reading.
+    OfferedPendingRecipientServeGate,
+    /// On the wire at the list level; narrowed per recipient by the DATA
+    /// SUBJECT's grant (the CC#46 `scores:*` reading).
+    OfferedPendingSubjectGrant,
+    /// Not advertised at all — the row is stranded where it sits.
+    Withheld,
+}
+
+impl AdvertiseVerdict {
+    /// Does edge put this row on the wire at all?
+    #[must_use]
+    pub fn is_offered(self) -> bool {
+        !matches!(self, AdvertiseVerdict::Withheld)
+    }
+
+    /// The token reported on the operator surface.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdvertiseVerdict::Offered => "offered",
+            AdvertiseVerdict::OfferedPendingRecipientServeGate => {
+                "offered_pending_recipient_serve_gate"
+            }
+            AdvertiseVerdict::OfferedPendingSubjectGrant => "offered_pending_subject_grant",
+            AdvertiseVerdict::Withheld => "withheld",
+        }
+    }
+}
+
+/// **Edge's advertise decision, reproduced — because edge does not export it.**
+///
+/// `FederationDirectoryReplicationBridge::attestation_is_advertised` (edge
+/// v20.0.0 `src/replication/bridge.rs:4552`) and the `attestation_projection`
+/// it dispatches on (`:4727`) are PRIVATE associated fns. A consumer that needs
+/// to answer "would edge offer this row?" — which is the first question anyone
+/// debugging a stalled plane asks — has no choice but to re-derive it. This is
+/// that re-derivation, in ONE place, with edge's arms enumerated exhaustively.
+///
+/// It is a mirrored rule and it should not exist; the fix is upstream, one
+/// exported predicate. Until then it lives here rather than inline in the
+/// diagnostic, so that `tests/trace_round_e2e.rs` can hold it against the real
+/// thing — edge's own `local_refs`, over a real placed row — instead of against
+/// a second copy of itself. That differential is the only mechanism that catches
+/// a drift; a comment promising to stay in sync is not one, and this predicate
+/// has now drifted twice.
+///
+/// The drift both times was the same two arms. `Capability` and `Subject`
+/// answered `false` here while edge answers `true`, so a `trace:*` row placed at
+/// `cohort_scope=federation` — the WIDEST projection a trace ever reaches, since
+/// the Trace family resolves `Capability(infra:serve)` at every commons tier and
+/// never widens past it — was reported as stranded under a hint telling the
+/// operator to go re-scope rows that were already terminally placed.
+///
+/// `attesting_key_id` / `node_key_id` serve the `SelfOwn` arm: it is
+/// publish-YOUR-OWN (the KERI shape), NOT "never advertised". A `self`-scoped
+/// row IS advertised, by its own producer.
+#[must_use]
+pub fn advertise_verdict(
+    projection: &ciris_persist::federation::namespace::Projection,
+    attesting_key_id: &str,
+    node_key_id: &str,
+) -> AdvertiseVerdict {
+    use ciris_persist::federation::namespace::Projection;
+    match projection {
+        Projection::Global | Projection::Cohort => AdvertiseVerdict::Offered,
+        Projection::Capability(_) => AdvertiseVerdict::OfferedPendingRecipientServeGate,
+        Projection::Subject => AdvertiseVerdict::OfferedPendingSubjectGrant,
+        Projection::SelfOwn => {
+            if attesting_key_id == node_key_id {
+                AdvertiseVerdict::Offered
+            } else {
+                AdvertiseVerdict::Withheld
+            }
+        }
+    }
+}
+
+/// **How this node ROOTS `peer_key_id`, with the reason when it does not.**
+///
+/// The traceflow ladder reads `arrive=0` and the diagnosis could only say that
+/// the canonical had admitted the agent `Advisory` with
+/// `reason="rooting_unsigned_provenance_link"` — a token, not a cause. The
+/// verdict's `detail` (which link, and what verify said about it) is produced
+/// by persist and dropped before any log line. This puts it where the ladder
+/// already looks: the per-peer delivery status on the agent, and the reconcile
+/// loop's log on both nodes.
+///
+/// The claimed pubkey is the directory's own record for the peer, so Steps 1-2
+/// of `root_binding` pass by construction and the report isolates Steps 3-4:
+/// chain assembly, the anchor gate, and per-link scrub verification — the part
+/// that has been failing. The chain is listed link by link so a failing link
+/// can be read against its neighbours: who scrubbed it, whether it is
+/// self-signed, and whether both halves of the hybrid scrub are present.
+async fn rooting_report(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    peer_key_id: &str,
+) -> serde_json::Value {
+    use ciris_persist::federation::rooting::{provenance_chain, root_binding, RootingVerdict};
+    use serde_json::json;
+    let claimed = match directory.lookup_public_key(peer_key_id).await {
+        Ok(Some(rec)) => rec.pubkey_ed25519_base64,
+        Ok(None) => {
+            return json!({ "verdict": "no_record", "hint": "the directory holds no key record for this peer — nothing to root; the Key plane has not delivered it yet" })
+        }
+        Err(e) => return json!({ "verdict": "directory_error", "error": e.to_string() }),
+    };
+    let chain = match provenance_chain(directory, peer_key_id).await {
+        Ok(c) => c
+            .chain
+            .iter()
+            .map(|l| {
+                json!({
+                    "key_id": l.key_id,
+                    "identity_type": l.identity_type,
+                    "scrub_key_id": l.scrub_key_id,
+                    "is_self_signed": l.is_self_signed,
+                    "scrub_sig_classical_len": l.scrub_signature_classical.len(),
+                    "scrub_sig_pqc_len": l.scrub_signature_pqc.as_ref().map_or(0, String::len),
+                    "envelope_keys": l.registration_envelope.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                    "original_content_hash": l.original_content_hash.get(..12).unwrap_or(""),
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(rej) => vec![json!({ "chain_error": rej.kind(), "detail": format!("{rej:?}") })],
+    };
+    match root_binding(directory, peer_key_id, &claimed).await {
+        RootingVerdict::Confirmed { .. } => json!({ "verdict": "confirmed", "chain": chain }),
+        RootingVerdict::Rejected { rejection } => json!({
+            "verdict": "rejected",
+            "kind": rejection.kind(),
+            // THE LINE THIS EXISTS FOR: persist's `detail` names the failing
+            // link and carries verify's own error text.
+            "detail": format!("{rejection:?}"),
+            "chain": chain,
+            "hint": "kind names the gate: unknown_key_id = the Key plane has not delivered the record; \
+                     not_rooted_at_steward = the chain's terminus is not a steward/accord_holder; \
+                     terminus_not_in_anchor = the terminus pubkey is not in CIRIS_TEST_TRUST_ROOT (six-var block incomplete or stale); \
+                     unsigned_provenance_link = a link's hybrid scrub does not verify against its scrubber's pubkey — \
+                     compare that link's envelope_keys and scrub_key_id with the copy on the node that produced it",
+        }),
+    }
+}
+
 /// Gather the live, per-canonical-peer delivery state — the queryable half of
 /// "why isn't the trace sailing?" (CIRISServer#294). Pure async over the current
 /// edge/engine; the wheel wrapper [`delivery_status_json`] supplies the handles.
@@ -433,9 +590,32 @@ async fn gather_delivery_status(
                     // offerable, and the strand (if any) lies elsewhere. That is
                     // why this now reports the projection instead of asserting a
                     // verdict it cannot support.
+                    //
+                    // AND the arm that broke the FIX: reproducing edge's
+                    // predicate means reproducing ALL of it, and the second
+                    // version still answered `false` for the two arms edge
+                    // answers `true`. Both versions failed the same way — a
+                    // parallel predicate that agrees with the real one on the
+                    // rows you happen to be looking at. The arms are enumerated
+                    // exhaustively below against edge's OWN source, and the
+                    // per-recipient narrowing the `Capability` / `Subject` arms
+                    // carry is reported as ITS OWN verdict rather than collapsed
+                    // into "withheld".
+                    //
+                    // This copy exists only because edge does not export the
+                    // predicate: `attestation_is_advertised` and
+                    // `attestation_projection` are private associated fns on
+                    // `FederationDirectoryReplicationBridge` (edge v20.0.0
+                    // `replication/bridge.rs:4552` / `:4727`). The right fix is
+                    // upstream — one exported predicate, and this block calls it.
                     use ciris_persist::federation::namespace as ns;
                     let mut covered_rows = 0usize;
                     let mut stranded = 0usize;
+                    // Rows the projection filter OFFERS and the per-recipient
+                    // serve gate then decides (the `trace:*` cell). Counted apart
+                    // from `stranded` because they are the OPPOSITE finding:
+                    // correctly placed, and gated one layer downstream.
+                    let mut capability_gated = 0usize;
                     let mut by_projection: std::collections::BTreeMap<String, usize> =
                         std::collections::BTreeMap::new();
                     if !grants.is_empty() {
@@ -485,34 +665,33 @@ async fn gather_delivery_status(
                                 // so the producer IS this node — hence SelfOwn
                                 // here is ADVERTISED, not withheld.
                                 //
-                                // v36's two new audience kinds are reported, never
-                                // guessed. `Capability` gates on a token this
-                                // surface cannot resolve (it has no peer in hand —
-                                // it is describing OUR OWN rows), and `Subject`
-                                // gates on the row's subject set. Answering either
-                                // with a bare true/false here would be exactly the
-                                // parallel-predicate drift the comment above this
-                                // block was written about, so they fall out of the
-                                // advertised count and are surfaced by name in
-                                // `by_projection` instead.
-                                let advertised = match proj {
-                                    ns::Projection::Global | ns::Projection::Cohort => true,
-                                    ns::Projection::SelfOwn => a.attesting_key_id == node,
-                                    ns::Projection::Capability(_) | ns::Projection::Subject => {
-                                        false
+                                // ONE predicate, in [`advertise_verdict`], where a
+                                // test can hold it against edge's real `local_refs`
+                                // over a real placed row. Inline, it was a second
+                                // copy of edge's rule that nothing compared to
+                                // anything, and it drifted on the same two arms
+                                // twice — `Capability` / `Subject` answered
+                                // "withheld" where edge answers "advertised", which
+                                // reported a correctly placed `trace:*` row as
+                                // stranded and sent the operator to re-scope rows
+                                // that were already terminally placed.
+                                let verdict = advertise_verdict(&proj, &a.attesting_key_id, &node);
+                                match verdict {
+                                    AdvertiseVerdict::Withheld => stranded += 1,
+                                    AdvertiseVerdict::OfferedPendingRecipientServeGate => {
+                                        capability_gated += 1;
                                     }
-                                };
+                                    AdvertiseVerdict::Offered
+                                    | AdvertiseVerdict::OfferedPendingSubjectGrant => {}
+                                }
                                 *by_projection
                                     .entry(format!(
                                         "{:?}/{}/{}",
                                         proj,
                                         a.cohort_scope,
-                                        if advertised { "offered" } else { "withheld" }
+                                        verdict.as_str()
                                     ))
                                     .or_default() += 1;
-                                if !advertised {
-                                    stranded += 1;
-                                }
                             }
                         }
                     }
@@ -548,6 +727,29 @@ async fn gather_delivery_status(
                         "trace plane armed, but this node holds NO rows covered by the grant \
                          yet — nothing has been sealed (or nothing matches the covered \
                          prefixes). Not a fault: emit first, then re-read."
+                    } else if capability_gated > 0 {
+                        // PLACED AND CAPABILITY-GATED — the reading that used to
+                        // be swallowed by `stranded > 0` above, which reported a
+                        // placement fault for rows whose placement is correct.
+                        "PLACED AND CAPABILITY-GATED: the grant is correct and \
+                         `capability_gated_rows` covered row(s) are placed at their WIDEST \
+                         projection. `trace:*` resolves Capability(infra:serve) at every \
+                         commons tier and never widens further, so cohort_scope=federation \
+                         is the TERMINAL placement here, not a strand — there is nothing \
+                         left to widen and no repair sweep to run. Edge advertises them; \
+                         whether each RECIPIENT receives one is decided per peer by the \
+                         #379/#386 serve gate. If nothing ships, read \
+                         `withholds.by_reason` — and read its two legs APART: \
+                         `serve_capability_missing` is leg A (no accord-conferred \
+                         `infra:serve` on the peer's KEY RECORD, minted locally), while \
+                         `serve_capability_not_rooted` is leg B (the `delegates_to` GRAPH \
+                         walk, `capability_roots_to_trusted_root`). Leg B needs a live, \
+                         FEDERATION-TIER `delegates_to(root -> peer, infra:serve)` in THIS \
+                         node's own directory — a row authored by the root ON THE PEER that \
+                         must REPLICATE here. Leg A passing while leg B fails means exactly \
+                         that: the conferral row has not arrived, which is a CARRIAGE fault \
+                         on the peer->us direction (consent is DIRECTED — check the peer's \
+                         own consent:replication grant naming us), not a fault in these rows."
                     } else {
                         "trace plane armed and every covered row is OFFERABLE by edge's own \
                          advertise predicate (see rows_by_projection for the per-row \
@@ -569,8 +771,14 @@ async fn gather_delivery_status(
                         // armed-but-stranded interlock (CIRISAgent#932).
                         "covered_rows": covered_rows,
                         "stranded_covered_rows": stranded,
+                        // Covered rows edge DOES advertise, whose recipient is
+                        // then chosen by the #379/#386 serve gate rather than by
+                        // scope. Reported apart from `stranded` because "placed at
+                        // its widest projection" and "unofferable" are opposite
+                        // findings this diagnostic used to report as one number.
+                        "capability_gated_rows": capability_gated,
                         // Per-row breakdown through edge's OWN advertise
-                        // predicate: "<Projection>/<cohort_scope>/<offered|withheld>".
+                        // predicate: "<Projection>/<cohort_scope>/<verdict>".
                         // Report the projection rather than a guessed verdict —
                         // if the round still sees nothing while every row reads
                         // `offered`, the gate is NOT the offer filter and the
@@ -592,8 +800,18 @@ async fn gather_delivery_status(
         // replicated) — the two gates a sealed envelope must clear to be
         // deliverable. Both false with no FramesDropped WARN ⇒ never primed;
         // both true but no delivery ⇒ look at the driver (leviculum#25 loss).
+        // EDGE'S OWN PREDICATE, not our reading of the transport. `RouteLens`
+        // is what `contact::discover` consults for "can this node address that
+        // key right now" — the same question the send path asks before it dials
+        // — so asking it here means this diagnostic and the send path cannot
+        // drift on what reachable means.
         let knows_peer = match edge.reticulum_transport() {
-            Some(tr) => tr.knows_peer(t).await,
+            Some(tr) => {
+                use ciris_edge::contact::RouteLens as _;
+                ciris_edge::contact::ReticulumRoutes::new(&tr)
+                    .has_destination(t)
+                    .await
+            }
             None => false,
         };
         let kex_present = edge
@@ -602,11 +820,16 @@ async fn gather_delivery_status(
             .ok()
             .flatten()
             .is_some();
+        let rooting = match engine.as_ref() {
+            Some(engine) => rooting_report(&*engine.federation_directory(), t).await,
+            None => json!({ "verdict": "no_engine" }),
+        };
         peers.push(json!({
             "key_id": t,
             "knows_peer": knows_peer,
             "kex_present": kex_present,
             "deliverable": knows_peer && kex_present,
+            "rooting": rooting,
         }));
     }
 
@@ -1324,6 +1547,25 @@ async fn prime_canonicals(
              explicit-hash canonicals (they stay unrooted until announce-reachable)"
         ),
     }
+    if admitted_targets.is_empty() {
+        // The same class as "0 consent peers", one layer earlier: a node with no
+        // admitted canonical has nowhere to send even before consent is asked
+        // about, and every later stage reports a plausible-looking nothing.
+        tracing::warn!(
+            node_key_id = %node_key_id,
+            canonical_key_ids = ?canonical_key_ids,
+            dial_addrs = ?dial_addrs,
+            "federation delivery: NO canonical was admitted, so this node has no \
+             replication target at all. If canonical_key_ids is empty the baked \
+             canonical record was not read — the seed bundle is missing or this \
+             node booted without it. If it is NON-empty, the canonicals are known \
+             but none admitted: each is admitted by reading its key record back \
+             out of the directory, so the failure is admission (an unregistered or \
+             unverifiable canonical key), not transport. Fix that before reading \
+             anything downstream: rooting, consent and delivery will all report \
+             quiet, healthy-looking zeroes"
+        );
+    }
     Ok(admitted_targets)
 }
 
@@ -1400,6 +1642,7 @@ pub async fn run_federation_delivery(
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
         let mut last_logged: Option<usize> = None;
+        let mut rooting_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Decay a failing reconcile instead of re-running it at full cadence
         // forever. Resets to the floor on the first success, so a peer that
         // recovers is not still being punished for an earlier blip.
@@ -1425,6 +1668,39 @@ pub async fn run_federation_delivery(
             {
                 Ok(count) => {
                     backoff.succeed();
+                    // ROOTING, per consent peer, on BOTH nodes — the ladder's
+                    // `arrive` diagnosis needs the canonical's view of the agent
+                    // as much as the agent's view of the canonical, and only
+                    // the agent prints a delivery status. Logged on CHANGE so a
+                    // stalled root is one line, not one per tick.
+                    if let Ok(peers) = crate::peer::replication_peers_from_consent(
+                        &reconcile_engine,
+                        &reconcile_node_key,
+                    )
+                    .await
+                    {
+                        let dir = reconcile_engine.federation_directory();
+                        for peer in peers {
+                            let report = rooting_report(&*dir, &peer).await;
+                            let verdict = report["verdict"].as_str().unwrap_or("?").to_owned();
+                            let key = format!(
+                                "{peer}:{verdict}:{}",
+                                report["kind"].as_str().unwrap_or("")
+                            );
+                            if rooting_seen.insert(key) {
+                                if verdict == "confirmed" {
+                                    tracing::info!(peer = %peer, "rooting verdict: CONFIRMED — this node roots the peer through the pinned anchor");
+                                } else {
+                                    tracing::warn!(
+                                        peer = %peer,
+                                        verdict = %verdict,
+                                        report = %report,
+                                        "rooting verdict: NOT confirmed — every plane that needs attribution (Attestation, Community) will withhold toward this peer until it is. `report.detail` names the failing link"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // SELF-PROTECTION, not shedding. Reconcile is this node's own
                     // optional housekeeping; the accept loop and the read API are
                     // not. #501 was a node that measured its own CPU stall, raised
@@ -1459,10 +1735,34 @@ pub async fn run_federation_delivery(
                         interval.reset();
                     }
                     if last_logged != Some(count) {
-                        tracing::info!(
-                            consent_peers = count,
-                            "federation delivery converged to {count} consent peers",
-                        );
+                        if count == 0 {
+                            // ZERO IS NOT CONVERGENCE. This read "converged to 0
+                            // consent peers" at info, which is what a healthy
+                            // node says — while meaning that nothing this node
+                            // ever authors can sail, to anyone, for any reason.
+                            // It is the trace plane's empty transcript.
+                            tracing::warn!(
+                                consent_peers = 0,
+                                "federation delivery has NO consent peers — nothing \
+                                 will replicate off this node, and no error will be \
+                                 raised because there is nobody to fail to reach. \
+                                 Rooting is not enough: a canonical becomes a \
+                                 REPLICATION peer only once an owner authors a \
+                                 `consent:replication` grant to it (POST \
+                                 /v1/federation/consent, after the claim). If a \
+                                 grant does exist, it is not being read back as \
+                                 live — check it is not withdrawn, that its \
+                                 audience covers the peer, and that the peer key \
+                                 in the grant is the peer's NODE key: a grant \
+                                 naming a PERSON is not routable, because a \
+                                 person's fed-ID carries no transport binding"
+                            );
+                        } else {
+                            tracing::info!(
+                                consent_peers = count,
+                                "federation delivery converged to {count} consent peers",
+                            );
+                        }
                         last_logged = Some(count);
                     }
                 }
@@ -1473,7 +1773,14 @@ pub async fn run_federation_delivery(
                         consecutive_failures = backoff.consecutive_failures(),
                         backoff_secs = wait.as_secs(),
                         at_ceiling = backoff.at_ceiling(),
-                        "federation-delivery reconcile tick failed — backing off"
+                        "federation-delivery reconcile tick failed — backing off. This \
+                         tick reads the consent topology back out of the CEG and \
+                         applies it to the live runtime, so a persistent failure \
+                         here freezes the peer set at whatever it last was: rows \
+                         keep being authored and none of the topology changes take. \
+                         A directory error points at the substrate; a runtime error \
+                         points at the transport (an edge booted with \
+                         disable_reticulum, or a dead link)"
                     );
                     // Stay interruptible while waiting: a node shutting down must
                     // not have to sit through a ceiling-length backoff first.

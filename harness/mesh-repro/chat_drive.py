@@ -10,6 +10,7 @@ once and read as a sequence.
 
     python chat_drive.py drive send   < state.json  > result_send.json
     python chat_drive.py drive join   < state.json  > result_join.json
+    python chat_drive.py drive speak  < state.json  > result_speak.json
     python chat_drive.py arrived      <base> <token> <community_id> <attestation_id>
     python chat_drive.py hamburger    <base> <token> <community_id> <attestation_id> <attester>
     python chat_drive.py dark         <base> <token> <community_id> <needle>
@@ -41,6 +42,28 @@ standing grant — which is exactly the case `ensure_replication_consent_covers`
 silent no-op because the idempotency guard compares (type, subject, dimension)
 and never the prefix set. So the fallback path is not a degraded run: it is the
 one that puts the widening under test.
+
+── The announce, and why it is the driver's FIRST act ──────────────────────
+
+Setup-complete writes the owner-binding `delegates_to(owner → node)` at
+`cohort_scope: self`. That is the privacy default (CC 1.13.3.4) and it is
+correct — and it is also a row NO peer may ever hold: the CC 5.2 audience gate
+withholds a `self` row from every node that is not one of the owner's own. A
+peer that cannot walk `node → owner` cannot place that node in ANY community
+row's audience, so a two-person room's MLS KeyPackage is withheld in both
+directions and the handshake never completes. Measured 2026-09-03: 15 rows
+"withheld — the recipient is not in the row's audience", 0 delivered.
+
+`POST /v1/federation/announce` is the OWNER re-stating that binding at
+federation scope (persist v31 put `cohort_scope` inside the signed bytes, so a
+wider audience is a new signature by the claimant, not a relabel). The wizard
+does it by default — announcing is an opt-OUT — and the scenario shell does it on
+each node's console right after the claim (the route is loopback-only), before
+the first anti-entropy round, because that is the step that makes
+`owner_of(peer_node)` answerable on the far side. Edge's own
+bench-mesh runner never needs the step: its `owner_binding_attestation` mints
+the binding AT federation scope. Ours is born `self` and widened; the two
+runners differ in where the widening happens, not in what replicates.
 """
 
 import json
@@ -143,10 +166,51 @@ def drive(state, phase):
 
     if phase == "join":
         return _phase_join(nodes, sender, recipients, out, step)
+    if phase == "speak":
+        return _phase_speak(nodes, sender, recipients, state, out, step)
     return _phase_send(nodes, sender, recipients, state, out, step)
 
 
+def _announce(nodes, out, step):
+    """Every claimed node has announced itself — the wizard's default, and the
+    scenario shell's act, not this driver's: `/v1/federation/announce` is a
+    setup route and setup routes are LOOPBACK-ONLY (this driver reaches nodes
+    by name over the mesh bridge and was answered `403 setup routes are
+    localhost-only`). The shell runs it on each node's own console right after
+    the claim and hands the result in via state; this logs it in sequence so a
+    red `bound` can say whether the announce never ran or ran and never
+    replicated. Recorded per node: the HTTP status and the id of the
+    federation-scoped binding it minted (`None` on an idempotent re-announce)."""
+    out["announce"] = {}
+    for name, n in nodes.items():
+        ann = n.get("announce")
+        if not isinstance(ann, dict):
+            out["announce"][name] = {"status": 0, "detail": "not announced by the scenario shell"}
+            step(f"announce:{name}", 0, "NOT ANNOUNCED — the shell recorded no announce for this node")
+            continue
+        out["announce"][name] = ann
+        status = int(ann.get("status") or 0)
+        promoted = ann.get("promoted_owner_binding_attestation_id")
+        if 200 <= status < 300:
+            complete = ann.get("federation_discoverable")
+            detail = (
+                f"bundle {ann.get('bundle_visible')}/{ann.get('bundle_expected')} federation-visible "
+                f"({'COMPLETE' if complete else 'INCOMPLETE: missing ' + str(ann.get('bundle_missing'))}); "
+                f"owner-binding widened: {promoted or '(already federation-scoped)'}"
+            )
+            # An announce that answered 200 with rows still invisible is not a
+            # green: name it as the 299 the ladder localises.
+            step(f"announce:{name}", 200 if complete else 299, detail)
+        else:
+            step(f"announce:{name}", status, str(ann.get("detail"))[:160])
+
+
 def _phase_send(nodes, sender, recipients, state, out, step):
+    # ── 0. announce: the owner-binding has left `self` scope ─────────────────
+    # Done by the shell at claim time (loopback-only route); logged here so the
+    # sequence reads in one place and a missing announce is named, not inferred.
+    _announce(nodes, out, step)
+
     # ── 1. peer every ordered pair through the PRODUCTION peering route ──────
     # Admission + the directed grant in one owner-authorized act, with the
     # operator's prefix set. The record handed over is the peer's test-root
@@ -215,10 +279,15 @@ def _phase_send(nodes, sender, recipients, state, out, step):
         out["owner_admit_via"][f"{host}<-{guest}"] = "test-admit-peer"
         step(f"owner-key:{host}<-{guest}", status, f"FALLBACK test-admit-peer: {str(body)[:120]}")
 
-    # ── 3. the SENDER alone: contact, room, message ──────────────────────────
+    # ── 3. the SENDER alone: contact + room (the CREATOR's half) ─────────────
+    # No message yet. The room is an MLS pair group, and the creator cannot add
+    # a member it holds no KeyPackage for: the joiner publishes one when IT
+    # opens the room (phase JOIN), and it has to replicate back here first. The
+    # message is phase SPEAK, after that handshake — sending here measured
+    # `503 chat.room_key_failed` on every run and could measure nothing else.
     out["contacts"] = {}
     out["rooms"] = {}
-    out["sent"] = {}
+    out["handshake"] = {}
     for guest in recipients:
         owner = nodes[guest].get("owner_key_id")
         if not owner:
@@ -233,7 +302,9 @@ def _phase_send(nodes, sender, recipients, state, out, step):
         step(
             f"contact:{sender}->{guest}-owner",
             status,
-            f"fresh={body.get('freshly_emitted') if isinstance(body, dict) else '?'}",
+            f"fresh={body.get('freshly_emitted') if isinstance(body, dict) else '?'} "
+            f"source={body.get('source') if isinstance(body, dict) else '?'} "
+            f"reachable_nodes={body.get('reachable_nodes') if isinstance(body, dict) else '?'}",
         )
         status, body = req(
             "POST",
@@ -252,17 +323,8 @@ def _phase_send(nodes, sender, recipients, state, out, step):
 
     cid = (out["rooms"].get(sender) or {}).get("community_id")
     if cid:
-        status, body = req(
-            "POST",
-            f"{nodes[sender]['base']}/v1/chat/{cid}/messages",
-            token=nodes[sender]["token"],
-            body={"body": state["message"]},
-        )
-        out["sent"] = body if isinstance(body, dict) else {"raw": body}
-        step("send:%s" % sender, status,
-             f"attestation_id={body.get('attestation_id') if isinstance(body, dict) else body}")
-    else:
-        step("send:%s" % sender, 0, "no community_id on the sender — nothing to send into")
+        out["handshake"][sender] = _handshake(nodes[sender]["base"], nodes[sender]["token"], cid)
+        step(f"handshake:{sender}", 200, str(out["handshake"][sender]))
 
     # ── 4. THE ONE-SIDED WINDOW ──────────────────────────────────────────────
     # Exactly one node has authored the roster. Ask every recipient for the room
@@ -322,6 +384,81 @@ def _phase_join(nodes, sender, recipients, out, step):
         step(f"room:{guest}", status,
              f"community_id={body.get('community_id') if isinstance(body, dict) else body} "
              f"fresh={body.get('freshly_created') if isinstance(body, dict) else '?'}")
+        cid = body.get("community_id") if isinstance(body, dict) else None
+        if cid:
+            out.setdefault("handshake", {})[guest] = _handshake(
+                nodes[guest]["base"], nodes[guest]["token"], cid)
+            step(f"handshake:{guest}", 200, str(out["handshake"][guest]))
+    return out
+
+
+def _handshake(base, token, cid):
+    """The room's own account of where the handshake stands, from the product
+    surface: `ready` plus the localized system note's id (`chat.state.*`). A
+    transcript that is not ready carries exactly one system entry saying why."""
+    status, body = req("GET", f"{base}/v1/chat/{cid}/messages", token=token)
+    if not isinstance(body, dict):
+        return {"status": status, "ready": False, "state": None}
+    notes = [m.get("message_id") for m in (body.get("messages") or []) if m.get("kind") == "system"]
+    # `ready` is stated on every transcript since 0.5.197; before that only the
+    # PENDING transcript carried it (`false`, beside its system note), so an
+    # absent field on a 200 with no system note is a keyed room, not an
+    # unknown one. Reading it that way keeps the probe honest on either shape.
+    ready = body.get("ready")
+    if ready is None and status == 200:
+        ready = not notes
+    return {
+        "status": status,
+        "ready": bool(ready),
+        "state": notes[0] if notes else None,
+        "reason_id": body.get("reason_id"),
+    }
+
+
+def _phase_speak(nodes, sender, recipients, state, out, step):
+    """The SENDER waits for the room to be keyed, then speaks.
+
+    Ready means: the joiner's KeyPackage crossed to this node, this node added
+    the member and published the Welcome. Every poll logs the room's own
+    `chat.state.*` note, so a stall reads as WHICH half is missing rather than
+    as a timeout. The wait is bounded in anti-entropy rounds (~30 s each)."""
+    out["rooms"] = {}
+    out["sent"] = {}
+    out["handshake"] = {}
+    guest = recipients[0] if recipients else None
+    owner = nodes[guest].get("owner_key_id") if guest else None
+    if not owner:
+        step(f"speak:{sender}", 0, "no recipient owner — nothing to send to")
+        return out
+    # Idempotent: the same derived room, `freshly_created: false`.
+    status, body = req("POST", f"{nodes[sender]['base']}/v1/chat",
+                       token=nodes[sender]["token"], body={"key_id": owner})
+    out["rooms"][sender] = body if isinstance(body, dict) else {"raw": body}
+    cid = body.get("community_id") if isinstance(body, dict) else None
+    if not step(f"room:{sender}", status, f"community_id={cid}") or not cid:
+        return out
+
+    deadline = time.time() + float(state.get("ready_wait_secs", 150))
+    hs = _handshake(nodes[sender]["base"], nodes[sender]["token"], cid)
+    while not hs["ready"] and time.time() < deadline:
+        log(f"handshake:{sender} not ready — {hs['state'] or hs['reason_id'] or hs['status']}")
+        time.sleep(10)
+        hs = _handshake(nodes[sender]["base"], nodes[sender]["token"], cid)
+    out["handshake"][sender] = hs
+    step(f"handshake:{sender}", 200 if hs["ready"] else 299,
+         f"ready={hs['ready']} state={hs['state']}"
+         + ("" if hs["ready"] else
+            " — the joiner's KeyPackage never reached this node; see the `bound` stage"))
+
+    status, body = req(
+        "POST",
+        f"{nodes[sender]['base']}/v1/chat/{cid}/messages",
+        token=nodes[sender]["token"],
+        body={"body": state["message"]},
+    )
+    out["sent"] = body if isinstance(body, dict) else {"raw": body}
+    step("send:%s" % sender, status,
+         f"attestation_id={body.get('attestation_id') if isinstance(body, dict) else body}")
     return out
 
 

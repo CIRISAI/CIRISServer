@@ -123,6 +123,13 @@ async fn setup_local_owner(engine: &Engine, owner_alias: &str, seed_dir: &Path) 
         owner_alias,
         Some("Test Owner"),
         seed_dir.to_path_buf(),
+        // LEAVE, even though this is the test's owner. Every test in this binary
+        // shares ONE process-wide seed dir (`ciris-devgrant-<pid>`) and mints its
+        // own owner alias into it, so adopting would have each test repoint the
+        // pointer out from under the others as they run in parallel. Production
+        // owner mints do adopt; a fixture sharing a seed dir across owners is the
+        // thing that cannot.
+        ciris_server::identity::ActiveAlias::Leave,
     )
     .await
     .expect("mint owner identity");

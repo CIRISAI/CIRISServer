@@ -143,11 +143,34 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// only to `capability:infra:serve` recipients, which is the load-bearing fact this
 /// gate witnesses.
 ///
-/// Note the hash in CIRISServer#522's opening text (`e8216fec…`) is STALE — it
-/// moved again when #552/#553/#554 landed on top of #556. The current value is
-/// CIRISServer#524 §7's, pinned here.
+/// ## v18.13.0 re-pin — the tier resolves from the DIRECTORY, not from AgentMode
+///
+/// `e54c5677…` → `c0a13e03…8e7d4b3` (CIRISServer#522).
+///
+/// Supersedes a run of values that never reached edge's `main` (`e8216fec…`,
+/// `75ceef58…`); `e54c5677…` DID reach ours, pinned against v18.12.1 in #525, so
+/// this is a move forward rather than a correction of something unpinned.
+///
+/// Two changes in this tag affect a rolled deployment, and neither is visible in
+/// the hash itself:
+///
+/// 1. **`agent_mode="server"` no longer implies directory-holding.** `AgentMode`
+///    is the local-resource posture (listener binding, outbound queue size); the
+///    directory role is a CONFERRED capability (`infra:serve`). v18.12.1 keyed
+///    retention on the wrong axis in both directions. The tier now resolves from
+///    the directory once `local_key_id` is set — which this composition does set,
+///    to the NODE key (`compose.rs`, `local_key_id: Some(node_key_id)`), matching
+///    the rule that under `use_node_identity` conferral is checked against the
+///    node and not the actor.
+/// 2. **Identifier lookups are canonical-only and rate limited.** A mesh server
+///    carries the directory as hashes and serves by hash; answering a lookup BY
+///    NAME requires the body, so a hash-first node cannot answer one whatever it
+///    is entitled to.
+///
+/// E3 unchanged and re-checked: `Attestation` keeps `subject-only`, `trace:*`
+/// still serves only to `capability:infra:serve` recipients.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "e54c56775e8d56442f9fdbaa0346397cdc169e7cc6237f5a6fe71681710dbf25";
+    "c0a13e031815163ac6972538a0597aff3d3396373f2e1f7d4fdbe3aa28e7d4b3";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

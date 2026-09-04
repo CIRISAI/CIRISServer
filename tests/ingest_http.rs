@@ -99,6 +99,7 @@ async fn cross_register(engine: &Engine, key_id: &str, agent_sk: &SigningKey) {
         .put_public_key(SignedKeyRecord { record })
         .await
         .expect("cross-register agent key in federation directory");
+    accord_batch::fixture_pqc::register(engine).await;
 }
 
 /// The exact wire bytes the `CIRIS-AccordMetrics/1.0` emitter ships: a single

@@ -53,6 +53,7 @@ use ciris_persist::scrub::NullScrubber;
 use ciris_persist::verify::canonical::Canonicalizer;
 use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
 
+use ciris_persist::federation::{Audience, CrossingBasis};
 use ciris_server::scorer::{self, ScorerConfig};
 
 const NODE_KEY_ID: &str = "node-a";
@@ -68,7 +69,12 @@ const AGENT_KEY_ID: &str = "agent-alpha";
 /// authors it naming the attester. Federation-tier (via promote) because
 /// `resolve_scoped_consent` reads through `list_attestations_for`, which is
 /// tier-filtered. Vocabulary single-sourced from persist, never hand-mirrored.
-async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
+async fn grant_analyze_consent(
+    engine: &Engine,
+    subject: &str,
+    subject_signer: &LocalSigner,
+    attester: &str,
+) {
     use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::envelope::paths;
@@ -97,10 +103,20 @@ async fn grant_analyze_consent(engine: &Engine, subject: &str, attester: &str) {
         })
         .await
         .expect("seed analyze consent");
-    engine
-        .attestation_promote(&id, cohort_scope::FEDERATION)
-        .await
-        .expect("promote analyze consent to federation tier");
+    ciris_server::attestation_crossing::enter_mesh_at(
+        engine,
+        &id,
+        &Audience::Federation,
+        &CrossingBasis::ProducerAuthority,
+        // v39.0.0: the grant is the SUBJECT's claim, so the subject signs it
+        // into the mesh. With `None` here the row would return `AwaitingActor`
+        // and never reach the federation tier, and the scorer — which reads
+        // through the tier-filtered `list_attestations_for` — would find no
+        // consent and author nothing.
+        Some(subject_signer),
+    )
+    .await
+    .expect("promote analyze consent to federation tier");
 }
 
 const AGENT_ID_HASH: &str = "agent-alpha";
@@ -127,10 +143,6 @@ async fn node_a_with_keys() -> (Arc<Engine>, String, String) {
         .await
         .expect("Engine::with_signer (sqlite::memory:) must succeed");
     (Arc::new(engine), ed_pub_b64, mldsa_pub_b64)
-}
-
-async fn register_key(engine: &Engine, key_id: &str, ed_pubkey_b64: &str, id_type: &str) {
-    register_key_hybrid(engine, key_id, ed_pubkey_b64, None, id_type).await;
 }
 
 async fn register_key_hybrid(
@@ -175,6 +187,7 @@ async fn register_key_hybrid(
 /// per-agent feature matrix has real covariance structure. Copied from
 /// `tests/capacity_scorer.rs::build_trace_batch`.
 fn build_trace_batch(
+    agent_key_id: &str,
     agent_sk: &SigningKey,
     mldsa: &ciris_crypto::MlDsa65Signer,
     idx: usize,
@@ -252,7 +265,7 @@ fn build_trace_batch(
         cohort_scope: "federation".into(),
         cohort_target_id: None,
         signature: String::new(),
-        signature_key_id: AGENT_KEY_ID.into(),
+        signature_key_id: agent_key_id.into(),
         signature_ml_dsa_65: None,
         pubkey_ml_dsa_65: None,
         pqc_key_id: None,
@@ -291,6 +304,26 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
     let (node, node_ed_pub_b64, node_mldsa_pub_b64) = node_a_with_keys().await;
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
+    // THE AGENT IS A SIGNER NOW, UNDER ITS DERIVED ID. persist v39.0.0 accepts a
+    // row's actor only when `signer.derived_key_id() == row.attesting_key_id`
+    // (CIRISPersist#247's floor), so the bare `AGENT_KEY_ID` alias this fixture
+    // used to attest and register under can no longer be signed for by anyone —
+    // the crossing would wait forever on an actor whose id never matches.
+    let agent_pqc = ciris_crypto::MlDsa65Signer::from_seed(&[0x12; 32]).expect("agent ml-dsa seed");
+    let agent_pqc_pub_b64 = {
+        use ciris_crypto::PqcSigner as _;
+        BASE64.encode(agent_pqc.public_key().expect("agent ml-dsa pk"))
+    };
+    let agent_signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(&[0x11; 32]),
+        AGENT_KEY_ID.to_string(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x12; 32], format!("{AGENT_KEY_ID}-pqc"))
+                .expect("agent ml-dsa"),
+        ) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{AGENT_KEY_ID}-pqc")),
+    );
+    let agent_key_id = agent_signer.derived_key_id();
     let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x77u8; 32]).expect("ml-dsa seed");
 
     let node_key_id = node
@@ -305,12 +338,49 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
         identity_type::NODE,
     )
     .await;
-    register_key(&node, AGENT_KEY_ID, &agent_pub_b64, identity_type::AGENT).await;
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pub_b64),
+        identity_type::AGENT,
+    )
+    .await;
+
+    // THE TRACE'S `pqc_key_id` MUST RESOLVE IN THE DIRECTORY, with its PQC half.
+    //
+    // persist v38.8.0 stopped trusting the ML-DSA-65 pubkey the payload carries
+    // and now looks it up by `pqc_key_id`, refusing outright rather than falling
+    // back (CIRISPersist#789):
+    //
+    //   UnknownKey("pqc_key_id test-mldsa has no ML-DSA-65 pubkey in the
+    //   federation directory — refusing rather than falling back to the pubkey
+    //   the payload nominates")
+    //
+    // That is the point of the change: an inline pubkey is a value the sender
+    // chose, so verifying against it asks the signature to vouch for its own key.
+    // This fixture signs with `mldsa` under that key id, so the record has to
+    // carry the matching public half or every ingest below is refused.
+    let mldsa_pub_b64 = {
+        // Scoped: `public_key` comes from a trait both ciris_crypto and
+        // ciris_keyring provide, and importing either at file scope would make
+        // every other call site ambiguous.
+        use ciris_crypto::PqcSigner as _;
+        BASE64.encode(mldsa.public_key().expect("ml-dsa pk"))
+    };
+    register_key_hybrid(
+        &node,
+        "test-mldsa",
+        &agent_pub_b64,
+        Some(&mldsa_pub_b64),
+        identity_type::AGENT,
+    )
+    .await;
 
     // Ingest a scorable corpus for the agent.
     const N_TRACES: usize = 30;
     for i in 0..N_TRACES {
-        let bytes = build_trace_batch(&agent_sk, &mldsa, i);
+        let bytes = build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i);
         node.receive_and_persist(&bytes, &NullScrubber)
             .await
             .expect("ingest synthetic trace");
@@ -325,7 +395,7 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
     };
     // CC#46 — the attester is the node's DERIVED key id (what emit_attestation_self
     // stamps and what is registered), not the bare NODE_KEY_ID alias.
-    grant_analyze_consent(&node, AGENT_KEY_ID, &node_key_id).await;
+    grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
 
     let emitted = scorer::run_pass(&node, &node_key_id, &cfg)
         .await
@@ -334,13 +404,13 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
 
     let dir = node.sqlite_backend().expect("sqlite backend present");
     let attestations = dir
-        .list_attestations_for(AGENT_KEY_ID)
+        .list_attestations_for(&agent_key_id)
         .await
         .expect("list attestations for the agent");
     assert_eq!(attestations.len(), 1, "exactly one capacity row");
     let att = &attestations[0];
     assert_eq!(att.attestation_type, "scores");
-    assert_eq!(att.attested_key_id, AGENT_KEY_ID);
+    assert_eq!(att.attested_key_id, agent_key_id);
     assert_ne!(
         att.attesting_key_id, att.attested_key_id,
         "anti-Goodhart on emission holds (attesting != attested)"
@@ -353,7 +423,7 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
     // populate subject_key_ids"); when that lands, this assertion trips.
     assert_eq!(
         att.subject_key_ids,
-        vec![AGENT_KEY_ID.to_string()],
+        vec![agent_key_id.clone()],
         "KNOWN DEFECT: scorer puts the scored agent in subject_key_ids — the \
          withdraws rule-2 self-revocation vector. STILL CORRECT to populate: it is \
          legitimate data-subject NAMING (the singular `attestation_subjects.subject_key_id` \
@@ -373,7 +443,7 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
     // which is exactly how this cut discovered v21.12.0 had closed it). Do NOT
     // "repair" it back: if this ever admits again, the anti-Goodhart wall has
     // been re-opened on the retraction side.
-    let refusal = resolve_withdraws_admission_rule(dir.as_ref(), AGENT_KEY_ID, att)
+    let refusal = resolve_withdraws_admission_rule(dir.as_ref(), &agent_key_id, att)
         .await
         .expect_err(
             "REGRESSION: the scored agent must NOT be admitted to withdraw its own \

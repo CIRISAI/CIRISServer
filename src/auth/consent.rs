@@ -25,6 +25,8 @@ use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 
 use super::verify::{self, VerifyError};
+use crate::attestation_crossing;
+use ciris_persist::federation::{Audience, CrossingBasis};
 
 #[derive(Clone)]
 struct ConsentState {
@@ -135,12 +137,19 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
     };
 
     let promoted = if req.promote {
-        match st
-            .engine
-            .attestation_promote(&attestation_id, cohort_scope::FEDERATION)
-            .await
+        // v39.0.0 — see `attestation_crossing`. The grant is the CONSENTING
+        // key's claim, so that key signs it; this node does not sign it into the
+        // mesh on their behalf. Without their signer the grant waits.
+        match attestation_crossing::enter_mesh_at(
+            &st.engine,
+            &attestation_id,
+            &Audience::Federation,
+            &CrossingBasis::ProducerAuthority,
+            None,
+        )
+        .await
         {
-            Ok(p) => p,
+            Ok(o) => attestation_crossing::is_placed(&o),
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("promote: {e}")),
         }
     } else {

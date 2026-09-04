@@ -147,6 +147,8 @@ pub async fn put_signed_by_many(
                 scrub_key_id: s.key_id.clone(),
                 scrub_signature_classical: e2,
                 scrub_signature_pqc: Some(p2),
+                // v39.0.0: accord-quorum scrub, not a tier crossing (CC 2.6.7).
+                cosigned_at: None,
             }
         })
         .collect();
