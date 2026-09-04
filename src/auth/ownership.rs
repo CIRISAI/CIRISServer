@@ -1234,6 +1234,44 @@ pub struct PromotedOwnerBinding {
     pub attestation_id: Option<String>,
 }
 
+/// Is this node's owner-binding visible to the FEDERATION, or private?
+///
+/// The answer decides what the node can do, and nothing else in the product says
+/// so out loud. Keys and bindings are created at setup completion, always;
+/// ANNOUNCING is the separate step (opt-out in the wizard) that widens the
+/// responsible-party binding from `cohort_scope: self` to `federation`.
+///
+/// A node that has not announced is **P2P-only**, and that is a real, supported
+/// mode rather than a broken one — but it has a consequence no chat route used to
+/// mention: a peer resolves "who owns this node" with persist's `owner_of`, which
+/// reads its OWN rows, and a `self`-scoped binding is withheld from every peer by
+/// the CC 5.2 audience gate (a peer is by definition not one of the owner's own
+/// nodes). So the far side can dial us and still refuse everything we send,
+/// including the MLS KeyPackage that would key a room.
+///
+/// `false` here is therefore the difference between "this conversation is
+/// converging" and "this conversation cannot complete over the directory", and
+/// the chat surface says which.
+pub async fn owner_binding_is_federation_scoped(engine: &Engine, node_key_id: &str) -> bool {
+    let Ok(rows) = engine
+        .federation_directory()
+        .list_attestations_for(node_key_id)
+        .await
+    else {
+        // Unknown is not "private": a directory read failure must not be
+        // reported to a user as a privacy setting they need to change.
+        return true;
+    };
+    rows.iter().any(|a| {
+        a.attestation_type == attestation_type::DELEGATES_TO
+            && a.cohort_scope == cohort_scope::FEDERATION
+            && a.attestation_envelope
+                .get("delegation_purpose")
+                .and_then(|v| v.as_str())
+                == Some(OWNER_BINDING_PURPOSE)
+    })
+}
+
 /// **Promote this node's owner-binding self → FEDERATION (CIRISServer#125 — the
 /// "announce yourself to the federation" opt-in).**
 ///

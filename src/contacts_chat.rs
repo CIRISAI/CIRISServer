@@ -1090,6 +1090,17 @@ struct AddContactRequest {
 #[derive(Debug, Serialize)]
 struct AddContactResponse {
     key_id: String,
+    /// **How this contact arrived**: `federation` (the directory already knew
+    /// them, which means they announced) or `direct` (a code carried their key,
+    /// no directory involved).
+    ///
+    /// A property of the CONTACT, not of any conversation with them. It is the
+    /// answer to "did I get this keypair from the federation or directly", and
+    /// it is what decides whether reaching them depends on their having
+    /// announced. Reported so a client can say which, rather than presenting an
+    /// un-announced person as unreachable when they are simply reachable a
+    /// different way.
+    source: &'static str,
     /// The `consent:replication:v1` grant row that IS the contact relationship.
     consent_attestation_id: String,
     /// `false` when the standing grant already covered every required prefix —
@@ -1215,6 +1226,19 @@ async fn add_contact(
             })
         }
     };
+    // HOW THIS CONTACT ARRIVED is a property of the CONTACT, not of any room —
+    // "did I get this keypair from the federation, or directly from them". Edge
+    // types it (`ContactInputSource`), and the two have genuinely different
+    // reachability stories: a directory contact is resolvable because they
+    // ANNOUNCED (their owner-binding is federation-scoped, so this node can
+    // resolve which person owns their nodes); a code contact is resolvable
+    // because the code carried it, with no directory involved and no announce
+    // required. An un-announced person is not unreachable — they are
+    // reachable ONLY directly, which is a supported mode and not a fault.
+    let source = match &resolution {
+        ciris_edge::contact::ContactResolution::Known(_) => "federation",
+        ciris_edge::contact::ContactResolution::ReadyFromCode { .. } => "direct",
+    };
     let key_id = match resolution {
         // Already in the directory: nothing to admit, go straight to consent.
         // Re-pasting a code for someone already known lands here too, which is
@@ -1310,6 +1334,7 @@ async fn add_contact(
     (
         StatusCode::OK,
         Json(AddContactResponse {
+            source,
             key_id,
             consent_attestation_id: grant.attestation_id,
             freshly_emitted: grant.freshly_emitted,
