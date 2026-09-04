@@ -73,8 +73,55 @@ harness_build_wheel() {
 
 harness_up() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
-  compose build
+
+  # A FAILED BUILD USED TO BE INVISIBLE. `compose build` ran unchecked and
+  # `compose up -d` then started whatever images already existed — so a build
+  # that could not run at all produced a full, confident ladder verdict about
+  # code that was hours old. It happened: the active buildx builder uses the
+  # docker-container driver, which does not share the host image store, so it
+  # tried to resolve `python:3.12-slim` from the registry, DNS timed out, and
+  # every run for the next five hours measured a stale binary while reporting
+  # stage-by-stage results as if they meant something.
+  if ! compose build; then
+    echo "  ✗ IMAGE BUILD FAILED — refusing to run the ladder against stale images."
+    echo "    A verdict from an image that does not contain the tree is worse than"
+    echo "    no verdict: it reads exactly like a real result."
+    echo "    If the failure is 'failed to resolve source metadata' for the base"
+    echo "    image, the active buildx builder cannot see the local image store:"
+    echo "      docker buildx ls                  # is a docker-container driver active?"
+    echo "      BUILDX_BUILDER=default $0 ...    # or: docker buildx use default"
+    return 3
+  fi
   compose up -d
+}
+
+# ── the image actually contains the tree ─────────────────────────────────────
+# The POSITIVE check, because a build can also succeed from cache and still ship
+# a stale layer. Compares the extension module the container imports against the
+# one in the wheel that was just packed. Cheap, and it is the only thing standing
+# between "the ladder is green" and "the ladder is green about something else".
+harness_assert_image_matches_wheel() {
+  local svc="$1" wheel host_sha cont_sha
+  wheel="$(ls -t "$HARNESS_DIR"/wheels/ciris_server-*.whl 2>/dev/null | head -1)"
+  [ -n "$wheel" ] || return 0
+  host_sha="$(python3 - "$wheel" <<'EOF'
+import hashlib, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+so = next((n for n in z.namelist() if n.endswith(".so")), None)
+print(hashlib.sha256(z.read(so)).hexdigest() if so else "")
+EOF
+)"
+  cont_sha="$(compose exec -T "$svc" sh -c \
+    'sha256sum /usr/local/lib/python*/site-packages/ciris_server/_native.abi3.so 2>/dev/null | cut -d" " -f1' \
+    2>/dev/null | tr -d "\r")"
+  if [ -n "$host_sha" ] && [ -n "$cont_sha" ] && [ "$host_sha" != "$cont_sha" ]; then
+    echo "  ✗ $svc IS RUNNING A DIFFERENT BINARY THAN THE WHEEL JUST BUILT."
+    echo "      wheel     ${host_sha:0:16}…  ($wheel)"
+    echo "      container ${cont_sha:0:16}…"
+    echo "    The ladder below would describe code that is not in your tree. Rebuild"
+    echo "    the images (see the buildx note in harness_up) before reading it."
+    return 3
+  fi
 }
 
 harness_cleanup() {

@@ -62,6 +62,11 @@ harness_build_wheel
 export CIRIS_SERVER_VERSION="local"
 harness_up || { echo "→ stack failed to come up"; exit 3; }
 harness_wait_healthy "${HEALTH_SERVICE:-canonical}"
+# Before ANY stage runs: is the code under test the code in the tree? A ladder
+# that measures a stale image is not a weaker signal, it is a false one.
+for _svc in $(compose ps --services 2>/dev/null); do
+  harness_assert_image_matches_wheel "$_svc" || exit 3
+done
 # OPTIONAL scenario hook, between "the stack is up" and "start measuring".
 # A carrier scenario needs none — traceflow's agent drives itself from inside its
 # container. A scenario whose subject is an OWNER-GATED HTTP surface does: nothing
