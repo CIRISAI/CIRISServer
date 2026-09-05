@@ -54,7 +54,8 @@ requires-python = ">=3.10"
 # (CIRISClient#9); a range here without that fix trades a release dance for a
 # permanent nag, which is worse.
 #
-# ── WHY THE FLOOR IS 0.5.190 AND NOT 0.5.188 ─────────────────────────────────
+# ── WHY THE FLOOR WAS 0.5.190 AND NOT 0.5.188 (history; the floor is now 0.5.202,
+#    see the note on `dependencies` below) ─────────────────────────────────────
 #
 # The API floor is 0.5.188 — `locale_bundle()` does not exist at 0.5.186, so the
 # guard cannot even run. But 0.5.188 publishes no `py3-none-any`, so a
@@ -73,8 +74,15 @@ requires-python = ">=3.10"
 # runs the localization guard against the FLOOR, and CI runs it against the
 # latest. The range we claim is the range we check; an untested bound is a
 # guess with a version number on it.
+#
+# FLOOR 0.5.202 (2026-09-04): the first client whose bundle defines the chat
+# handshake and refusal ids 0.5.197 emits (`chat.state.*`, `chat.room_key_failed`,
+# `chat.not_a_pair_room`, `chat.author_signer_unavailable`,
+# `chat.unsupported_content_type` — CIRISClient#36). 0.5.201 defines none of
+# them; below it a fresh install renders those states as raw ids. The
+# `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
 dependencies = [
-    "ciris-client>=0.5.190,<0.6",
+    "ciris-client>=0.5.202,<0.6",
 ]
 
 [project.urls]
