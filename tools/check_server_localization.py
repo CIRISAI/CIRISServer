@@ -457,7 +457,7 @@ _SERVER_MSG_ID_FORMATTED = re.compile(
 # "any dotted literal followed by a comma", sweeps in hostnames
 # (`accounts.google.com`), filenames (`libykcs11.dll`) and machine-only
 # degradation CODES, which are a different contract entirely.
-_SERVER_EMITTERS = re.compile(r"\b(?:m|err|msg|refuse|refusal|browser_refusal)\s*\(")
+_SERVER_EMITTERS = re.compile(r"\b(?:m|err|msg|refuse|refuse_with|refusal|browser_refusal)\s*\(")
 _DOTTED_ID = re.compile(r'"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"')
 
 
@@ -749,7 +749,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # and `unreachable` resolve themselves — so they read as status, and want
     # translating like any other user-facing sentence.
     "contacts.awaiting_consent",
-    "contacts.code_admission_unavailable",
+    "contacts.awaiting_key_body",
+    "contacts.code_commitment_mismatch",
+    "contacts.code_without_pqc_commitment",
+    "contacts.key_pull_unavailable",
     "contacts.consent_not_granted",
     "contacts.malformed_code",
     "contacts.prior_rung_incomplete",

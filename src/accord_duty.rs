@@ -525,10 +525,12 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
         Some(serde_json::Value::String(s)) => s.clone(),
         _ => "?".to_string(),
     };
+    // AUTHORED door (persist v41): this node assembled and signed the partial;
+    // it is not a peer's row and must not be metered as one.
     if let Err(e) = st
         .engine
         .federation_directory()
-        .put_attestation(SignedAttestation {
+        .put_attestation_authored(SignedAttestation {
             attestation: partial.clone(),
         })
         .await

@@ -211,7 +211,12 @@ async fn share_in_room(
     signers: ciris_edge::replication::attestation_bind::Signers<'_>,
 ) -> Result<String, String> {
     use ciris_edge::replication::attestation_bind::{share, CrossingBasis, Shared, With};
-    dir.put_attestation(ciris_persist::federation::SignedAttestation {
+    // The AUTHORED door (persist v41): the actor signed this row on this node,
+    // so it is the node's own writing and never a peer's — the ordinary door
+    // metered it as a stranger's and refused the owner's own sends at
+    // `peer_burst` (CIRISPersist#804). `share` below already takes this door
+    // for the rows it writes.
+    dir.put_attestation_authored(ciris_persist::federation::SignedAttestation {
         attestation: row.clone(),
     })
     .await
@@ -1305,6 +1310,9 @@ async fn add_contact(
         }
     };
     let key_id = req.key_id.trim().to_owned();
+    // The pasted input, kept verbatim: a fedcode's commitment is checked
+    // against the CODE, not against the id it resolved to.
+    let pasted = key_id.clone();
     if key_id.is_empty() {
         return refuse(
             StatusCode::BAD_REQUEST,
@@ -1393,36 +1401,153 @@ async fn add_contact(
         // edge hands over a verified `CodeAdmission` and never registers a key on
         // the strength of a pasted string.
         ciris_edge::contact::ContactResolution::ReadyFromCode { subject, admission } => {
-            // NOT YET WIRED, and refused explicitly rather than half-done.
-            // `federation_keys` accepts `algorithm: hybrid` and nothing else
-            // ("the only valid value for federation_keys writes from v0.2.0
-            // onward"), while a code carries an Ed25519 half and no ML-DSA one.
-            // Registering from a code therefore needs a decision about what a
-            // classical-only admission MEANS at the federation tier — that is a
-            // substrate policy question, not a shape to invent here, and a
-            // half-written admission would be a key in the directory that no
-            // hybrid gate will ever accept.
-            tracing::warn!(
-                key_id = %admission.key_id,
-                identity_type = %admission.identity_type,
-                owned_nodes = admission.owned_nodes.len(),
-                fed_id = %subject.fed_id,
-                "contacts: a fedcode resolved to an admittable stranger, and this \
-                 node cannot admit it yet — the code carries an Ed25519 half and \
-                 `federation_keys` takes hybrid records only"
-            );
-            return refuse(
-                StatusCode::NOT_IMPLEMENTED,
-                "contacts.code_admission_unavailable",
-                format!(
-                    "this code names {} and carries {} reachable node(s), but this node \
-                     cannot yet admit a key from a code: the federation directory accepts \
-                     hybrid (Ed25519 + ML-DSA-65) key records only, and a code carries the \
-                     classical half. Admit them through peering for now",
-                    subject.fed_id,
-                    admission.owned_nodes.len()
-                ),
-            );
+            // FEDCODE v3 ADMISSION (verify v14.2.0 / edge v20.2.0, CIRISVerify#272 —
+            // ours). A code names an Ed25519 key and persist takes `federation_keys`
+            // at `algorithm: hybrid` only, so the code carries a COMMITMENT —
+            // sha256 of the ML-DSA-65 pubkey — and the host binds the two before
+            // anything is trusted: the ML-DSA body (1952 bytes) is fetched through
+            // the existing Key Pull, then checked against the commitment. The
+            // classical and PQC halves are not cross-signed by anyone; joint
+            // control is proven at first use because every row must verify under
+            // both signatures. A code WITHOUT the commitment is not a hybrid
+            // registration path at all, and the check fails closed on it.
+            let Some(digest) = admission.ml_dsa_65_pubkey_sha256.as_deref() else {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "contacts.code_without_pqc_commitment",
+                    format!(
+                        "this code names {} but carries no ML-DSA-65 commitment (a v1/v2 code, \
+                         or a v3 code minted before CIRISVerify#272). The federation directory \
+                         holds hybrid keys only, and a pulled post-quantum key with nothing to \
+                         bind it to must not be admitted — ask them for a code minted by \
+                         ciris-server 0.5.198 or later, or add them through peering",
+                        subject.fed_id
+                    ),
+                );
+            };
+            let code = match ciris_verify_core::fedcode::decode(&pasted) {
+                Ok(c) => c,
+                Err(e) => {
+                    return refuse(
+                        StatusCode::BAD_REQUEST,
+                        "contacts.malformed_code",
+                        format!("the code decoded for resolution but not for verification: {e}"),
+                    )
+                }
+            };
+            match directory.lookup_public_key(&admission.key_id).await {
+                // The body has arrived (a Key Pull answered, or a peer's
+                // anti-entropy carried it): bind it to the code before trusting it.
+                Ok(Some(rec)) if rec.pubkey_ml_dsa_65_base64.is_some() => {
+                    use base64::Engine as _;
+                    let pulled = rec
+                        .pubkey_ml_dsa_65_base64
+                        .as_deref()
+                        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                        .unwrap_or_default();
+                    if let Err(e) =
+                        ciris_verify_core::fedcode::verify_pulled_ml_dsa_65_pubkey(&code, &pulled)
+                    {
+                        tracing::warn!(
+                            key_id = %admission.key_id,
+                            fed_id = %subject.fed_id,
+                            error = %e,
+                            "contacts: the ML-DSA-65 key the directory holds for this code's \
+                             subject does NOT match the code's commitment — refusing the \
+                             contact. Either the code was minted for a different PQC half or \
+                             the record that arrived was substituted; in neither case is this \
+                             the person the code names"
+                        );
+                        return refuse(
+                            StatusCode::CONFLICT,
+                            "contacts.code_commitment_mismatch",
+                            format!(
+                                "the post-quantum key held for {} does not match the commitment \
+                                 in this code, so the key and the code do not name the same \
+                                 identity: {e}",
+                                admission.key_id
+                            ),
+                        );
+                    }
+                    tracing::info!(
+                        key_id = %admission.key_id,
+                        fed_id = %subject.fed_id,
+                        owned_nodes = admission.owned_nodes.len(),
+                        digest = %digest,
+                        "contacts: fedcode v3 admitted — the pulled ML-DSA-65 key matches the \
+                         code's commitment; both halves are present and bound (CIRISVerify#272)"
+                    );
+                    subject.fed_id
+                }
+                // Not held yet: ask the mesh for the body. `request_key_body` rides
+                // edge's missing-signer recovery queue (bounded, shared) and, since
+                // edge v20.2.0 / CIRISEdge#568, is live at every tier — a conferred
+                // server answers an identifier Pull for any subject on a public plane.
+                Ok(_) => {
+                    let Some(runtime) = crate::compose::held_replication_runtime() else {
+                        return refuse(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "contacts.key_pull_unavailable",
+                            format!(
+                                "this code names {} and this node does not hold their key yet; \
+                                 fetching it needs the replication runtime, which this process \
+                                 is not running (no Reticulum transport). Add them from a node \
+                                 that is on the mesh, or through peering",
+                                admission.key_id
+                            ),
+                        );
+                    };
+                    let pulling = ciris_edge::contact::PersistLens::new(directory.as_ref())
+                        .with_replication(runtime.bridge());
+                    if !ciris_edge::contact::DirectoryLens::request_key_body(
+                        &pulling,
+                        &admission.key_id,
+                    )
+                    .await
+                    {
+                        return refuse(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "contacts.key_pull_unavailable",
+                            format!(
+                                "this node could not queue a Key Pull for {} — the replication \
+                                 runtime refused the request; see the node log",
+                                admission.key_id
+                            ),
+                        );
+                    }
+                    tracing::info!(
+                        key_id = %admission.key_id,
+                        fed_id = %subject.fed_id,
+                        digest = %digest,
+                        "contacts: fedcode v3 — key body requested from the mesh; the contact \
+                         completes when the record arrives and matches the commitment. \
+                         Paste the code again (or retry) after the next anti-entropy round"
+                    );
+                    return crate::auth::refusal::refuse_with(
+                        StatusCode::ACCEPTED,
+                        "contacts.awaiting_key_body",
+                        "the key this code names is being fetched from the mesh; retry once it \
+                         has arrived and the contact will be verified against the code's \
+                         commitment",
+                        serde_json::json!({
+                            "key_id": admission.key_id,
+                            "fed_id": subject.fed_id,
+                            "ml_dsa_65_pubkey_sha256": digest,
+                            "source": "direct",
+                            // The client's cue to WAIT rather than offer a retry
+                            // button: the body arrives on the mesh's own cadence.
+                            "converges_on_its_own": true,
+                        }),
+                    );
+                }
+                Err(e) => {
+                    return refuse(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "contacts.store_unavailable",
+                        format!("look up {}: {e}", admission.key_id),
+                    )
+                }
+            }
         }
     };
     // ── IS THERE SOMEWHERE TO SEND? ─────────────────────────────────────────

@@ -488,12 +488,21 @@ impl Emit {
     }
 }
 
-/// Store an assembled row through the ordinary door.
+/// Store an assembled row through the AUTHORED door.
+///
+/// This process built and signed the row, so it is metered against the node's
+/// own ceiling and never opens a peer bucket (persist v41, CIRISPersist#804 —
+/// ours). Before v41 the one door metered the owner's own writes as a stranger's:
+/// 652 of 900 chat sends refused at `peer_burst`, and `tracked_peers > 0` from a
+/// node talking to itself. Origin is a property of the CALL, not of the row —
+/// the quota runs at tier 0, before any signature check, so `attesting_key_id`
+/// is only a claim there; a door that trusted it would hand the bigger budget
+/// to anyone claiming the owner's key.
 pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
     let id = row.attestation_id.clone();
     engine
         .federation_directory()
-        .put_attestation(SignedAttestation { attestation: row })
+        .put_attestation_authored(SignedAttestation { attestation: row })
         .await
         .map_err(|e| Error::Persist(e.to_string()))?;
     Ok(id)

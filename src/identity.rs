@@ -701,6 +701,10 @@ pub async fn mint_portable_software_occurrence(
     // seeds under `alias` reproduces this exact id.
     let key_id = fedcode::derive_key_id(alias, &ed_pub);
 
+    // The ML-DSA-65 public key, taken before the signer moves into the identity:
+    // the fedcode below commits to it (CIRISVerify#272).
+    let mldsa_pub_for_commitment = ciris_crypto::PqcSigner::public_key(&mldsa)
+        .map_err(|e| anyhow::anyhow!("ml-dsa-65 public key for the fedcode commitment: {e}"))?;
     // The hybrid identity (a verify SelfSigner) over the two software halves.
     let identity = HybridSigningIdentity::new(key_id.clone(), ed, mldsa);
 
@@ -751,6 +755,23 @@ pub async fn mint_portable_software_occurrence(
         // `encode` refuses the latter outright, which is CIRISServer#335 made
         // unencodable rather than merely documented.
         owned_nodes: Vec::new(),
+        // THE COMMITMENT to this identity's post-quantum half (verify v14.2.0,
+        // CIRISVerify#272 — ours). A code names an Ed25519 key, and persist
+        // takes `federation_keys` writes at `algorithm: "hybrid"` only, so a
+        // code with no way to bind the ML-DSA half could never produce a
+        // conformant registration: `ReadyFromCode` was unreachable in
+        // practice. The key itself (1952 bytes) cannot ride a scannable code;
+        // its SHA-256 can. A host that admits this code fetches the ML-DSA body
+        // through the Key Pull and calls `verify_pulled_ml_dsa_65_pubkey`
+        // against this digest before writing the hybrid row — and that check
+        // fails CLOSED when the commitment is absent, so a code minted without
+        // it is not a hybrid registration path at all. Same bytes as the
+        // record above: the commitment is over the pubkey the self-record
+        // registers, so first use proves joint control of both halves.
+        ml_dsa_65_pubkey_sha256: Some({
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(mldsa_pub_for_commitment.as_slice()))
+        }),
     })
     .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
 

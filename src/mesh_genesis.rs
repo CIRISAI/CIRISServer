@@ -1163,6 +1163,10 @@ where
     // bug that did not exist.
     let mut already_held: Vec<String> = Vec::new();
     let mut forked: Vec<String> = Vec::new();
+    // The ORDINARY door, deliberately (persist v41 has three): these rows were
+    // signed by the ceremony's holders, not by this process, and they arrived
+    // by install rather than from an authenticated peer — so neither the
+    // authored nor the synced door may vouch for them.
     for a in &bundle.attestations {
         match dir.put_attestation(a.clone()).await {
             Ok(ciris_persist::federation::AttestationOutcome::Inserted) => {}
