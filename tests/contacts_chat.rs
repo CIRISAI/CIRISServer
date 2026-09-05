@@ -3086,3 +3086,230 @@ async fn a_claimed_contacts_grant_names_their_bound_node() {
         .expect("POST /v1/chat");
     assert_eq!(resp.status(), 200, "start chat: {:?}", resp.text().await);
 }
+
+// ─── The write knows who is writing (persist v41, CIRISPersist#804) ─────────
+
+/// The owner's own sends take the AUTHORED door and never open a peer bucket.
+///
+/// Pinned the way persist asks: by WHICH BUDGET the door selects, observable as
+/// `tracked_peers`, never by a refusal count — a refusal count measures the
+/// burst window's refill, and two of persist's own witnesses passed for the
+/// wrong reason exactly there. Before v41 the one door metered the owner as a
+/// stranger (652 of 900 chat sends refused at `peer_burst`) and `tracked_peers`
+/// lifted `node_state`'s quota band on a node talking to itself.
+#[tokio::test]
+async fn the_owners_own_sends_never_open_a_peer_bucket() {
+    use ciris_persist::federation::replication::admission::QuotaBudget;
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    // The fixture seeds the CONTACT's rows through the ordinary door (it is
+    // playing the far side), so a peer bucket may already exist. The claim under
+    // test is about the OWNER's writes: they must open no bucket of their own.
+    let before = engine
+        .federation_directory()
+        .peer_quota_observation()
+        .expect("the sqlite backend runs the admission path and reports its quota");
+    for i in 0..3 {
+        let resp = client
+            .post(format!("{base}/v1/chat/{community_id}/messages"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "body": format!("authored {i}") }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(
+            resp.status(),
+            200,
+            "send {i}: {}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+    let obs = engine
+        .federation_directory()
+        .peer_quota_observation()
+        .expect("the sqlite backend runs the admission path and reports its quota");
+    assert_eq!(
+        obs.tracked_peers, before.tracked_peers,
+        "the owner's own writes opened a PEER bucket — they went through the ordinary door and \
+         were metered as a stranger's: before {before:?}, after {obs:?}"
+    );
+    assert_eq!(
+        obs.refusals_by_budget
+            .get(&QuotaBudget::Peer)
+            .copied()
+            .unwrap_or(0),
+        before
+            .refusals_by_budget
+            .get(&QuotaBudget::Peer)
+            .copied()
+            .unwrap_or(0),
+        "local authorship was refused against the peer budget: {obs:?}"
+    );
+}
+
+// ─── fedcode v3: the code commits to the post-quantum half (CIRISVerify#272) ─
+
+/// Register a hybrid key record with GIVEN public halves — the shape a Key Pull
+/// leaves behind — so a code's commitment can be checked against it.
+async fn seed_key_record_with(engine: &Engine, key_id: &str, ed_b64: &str, pqc_b64: &str) {
+    use ciris_persist::federation::types::{algorithm, identity_type};
+    use ciris_persist::federation::{FederationDirectory as _, KeyRecord, SignedKeyRecord};
+    let now = chrono::Utc::now();
+    let record = KeyRecord {
+        key_id: key_id.to_string(),
+        pubkey_ed25519_base64: ed_b64.to_string(),
+        pubkey_ml_dsa_65_base64: Some(pqc_b64.to_string()),
+        algorithm: algorithm::HYBRID.into(),
+        identity_type: identity_type::USER.to_string(),
+        identity_ref: key_id.to_string(),
+        valid_from: now,
+        valid_until: None,
+        registration_envelope: serde_json::json!({ "key_id": key_id }),
+        original_content_hash: "deadbeef".into(),
+        scrub_signature_classical: ed_b64.to_string(),
+        scrub_signature_pqc: None,
+        scrub_key_id: key_id.to_string(),
+        scrub_timestamp: now,
+        pqc_completed_at: None,
+        persist_row_hash: String::new(),
+        capability_roles: Vec::new(),
+        attestation_evidence: None,
+        consent_role: None,
+        additional_scrubs: Vec::new(),
+    };
+    engine
+        .sqlite_backend()
+        .expect("sqlite")
+        .put_public_key(SignedKeyRecord { record })
+        .await
+        .expect("seed the pulled key record");
+}
+
+/// A code minted by 0.5.198 carries its ML-DSA-65 commitment; a stranger's code
+/// whose key this node does not hold, on a node with no replication runtime,
+/// is refused with the reason (no runtime to pull with), never admitted blind.
+#[tokio::test]
+async fn a_code_whose_key_is_not_held_says_it_cannot_pull_without_a_runtime() {
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
+    let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stranger = ciris_server::identity::mint_user_identity(
+        ciris_server::identity::UserIdentityBackend::Software,
+        "code-stranger",
+        None,
+        dir,
+        ciris_server::identity::ActiveAlias::Leave,
+    )
+    .await
+    .expect("mint a stranger with a fedcode");
+    let code = ciris_verify_core::fedcode::decode(&stranger.fedcode).expect("decode our own code");
+    assert!(
+        code.ml_dsa_65_pubkey_sha256.is_some(),
+        "a code minted here must carry the ML-DSA-65 commitment: {code:?}"
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": stranger.fedcode }))
+        .send()
+        .await
+        .expect("add contact by code");
+    assert_eq!(
+        resp.status(),
+        503,
+        "{}",
+        resp.text().await.unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["reason_id"], "contacts.key_pull_unavailable", "{body}");
+}
+
+/// Once the pulled record is held and matches the code's commitment, the code
+/// admits: the contact is added with `source: direct`, the person the code names.
+#[tokio::test]
+async fn a_code_admits_when_the_held_key_matches_its_commitment() {
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
+    let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let friend = ciris_server::identity::mint_user_identity(
+        ciris_server::identity::UserIdentityBackend::Software,
+        "code-friend",
+        None,
+        dir,
+        ciris_server::identity::ActiveAlias::Leave,
+    )
+    .await
+    .expect("mint");
+    seed_key_record_with(
+        &engine,
+        &friend.key_id,
+        &friend.pubkey_ed25519_base64,
+        &friend.pubkey_ml_dsa_65_base64,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": friend.fedcode }))
+        .send()
+        .await
+        .expect("add contact by code");
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["key_id"], friend.key_id, "{body}");
+    assert_eq!(
+        body["source"], "direct",
+        "a code contact is a DIRECT contact: {body}"
+    );
+}
+
+/// The held key's post-quantum half is NOT the one the code committed to: the
+/// code and the record do not name the same identity, and the contact is refused
+/// with the mismatch named — never admitted on the classical half alone.
+#[tokio::test]
+async fn a_code_is_refused_when_the_held_key_breaks_its_commitment() {
+    let (engine, base, owner, _owner_id, _h) = fixture().await;
+    let mint = |alias: &'static str| async move {
+        let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        ciris_server::identity::mint_user_identity(
+            ciris_server::identity::UserIdentityBackend::Software,
+            alias,
+            None,
+            dir,
+            ciris_server::identity::ActiveAlias::Leave,
+        )
+        .await
+        .expect("mint")
+    };
+    let claimed = mint("code-claimed").await;
+    let other = mint("code-other").await;
+    // The claimed identity's Ed25519 half with ANOTHER identity's ML-DSA half.
+    seed_key_record_with(
+        &engine,
+        &claimed.key_id,
+        &claimed.pubkey_ed25519_base64,
+        &other.pubkey_ml_dsa_65_base64,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": claimed.fedcode }))
+        .send()
+        .await
+        .expect("add contact by code");
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        body["reason_id"], "contacts.code_commitment_mismatch",
+        "{body}"
+    );
+}

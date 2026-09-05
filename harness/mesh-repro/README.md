@@ -169,6 +169,20 @@ on two sovereign nodes, from the rows' own `asserted_at` / `admitted_at`:
 | node-b opens the room, publishes its KeyPackage | 18:00:46.7 (after the harness's 45 s one-sided window) | on node-a 18:01:20.7 | 34 s |
 | node-a keys the room, publishes Welcome, sends | 18:01:27.1 | Welcome + message on node-b 18:02:21.2 | 54 s |
 
+**Re-measured on 0.5.198 (persist v41 / edge v20.2.1, 2026-09-05):** the two
+announce → binding directions took 181 s and 210 s — slower, not faster, and by
+a DIFFERENT mechanism than the one edge fixed for CIRISEdge#568. The owner's KEY
+was on the peer 31 s after the announce, well before the binding it verifies,
+so there was no key-before-binding refusal to recover from. What happened
+instead: the first Attestation round toward the freshly peered node timed out
+at +10 s ("round timed out waiting for peer reply") and the next round that
+completed toward it was ~150 s later; the canonical's binding shows the same
+gap (152 s / 181 s). Once rounds were flowing: KeyPackage → creator in the
+same round as the binding, Welcome + message → peer 25 s. One run each on
+0.5.197 and 0.5.198 is not a regression call; it is the number, and the
+mechanism, reported on CIRISEdge#568 for the leg edge added
+(`ladder.owner_binding_converged`).
+
 Claim to message-in-the-peer's-transcript: 3 min 33 s, of which ~55 s is
 harness-imposed (the one-sided window and poll granularity). Everything else
 is anti-entropy cadence (~30 s a round) plus one round lost to the key plane

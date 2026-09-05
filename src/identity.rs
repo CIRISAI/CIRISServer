@@ -22,7 +22,7 @@
 //!   the backend-independent rest: derives the federation `key_id`, attaches the
 //!   sealed ML-DSA-65 half **internally** (`get_platform_sealed_mldsa65_signer`),
 //!   emits the self-signed genesis [`SignedCegObject`] to the CEG outbox, and
-//!   returns the shareable **fedcode** (`CIRIS-V2-…`, [`ciris_verify_core::fedcode`],
+//!   returns the shareable **fedcode** (`CIRIS-V3-…` — it carries the ML-DSA-65 commitment, [`ciris_verify_core::fedcode`],
 //!   [`FedKind::User`](ciris_verify_core::fedcode::FedKind::User)).
 //!
 //! ## The YubiKey (PKCS#11) backend — gated + flagged
@@ -194,7 +194,8 @@ pub struct MintedUserIdentity {
     /// The federation `key_id` (FSD-002 `label-fingerprint` form when a label is
     /// given; else `sha256(ed_pubkey)`-derived).
     pub key_id: String,
-    /// The shareable **fedcode** — a `usercode` (`CIRIS-V2-…`). Decodes to
+    /// The shareable **fedcode** — a `usercode` (`CIRIS-V3-…`, carrying the ML-DSA-65
+    /// commitment, CIRISVerify#272). Decodes to
     /// [`FedKind::User`](ciris_verify_core::fedcode::FedKind::User) + this `key_id`.
     pub fedcode: String,
     /// Always `"user"` (this mints a USER identity).
@@ -387,7 +388,7 @@ pub(crate) fn open_software_hybrid_identity(
 /// signing half for `backend`, then calls verify v6.0.0
 /// `create_federation_identity(FedKind::User)` which attaches the sealed
 /// ML-DSA-65 half, writes the self-signed genesis CEG object to the outbox, and
-/// returns the user `key_id` + the `CIRIS-V2-` usercode + the pubkeys.
+/// returns the user `key_id` + the `CIRIS-V3-` usercode + the pubkeys.
 ///
 /// `seed_dir` is where the sealed/software Ed25519 seed lives for the
 /// `PlatformSealed` / `Software` backends — DISTINCT from the node steward's
@@ -571,7 +572,7 @@ pub struct PortableSoftwareKeyset {
     /// re-derive a DIFFERENT id — the occurrence identity would not survive the
     /// move). The mint records it in the manifest + the `.backend` filename stem.
     pub alias: String,
-    /// The shareable `CIRIS-V2-…` usercode (FedKind::User).
+    /// The shareable `CIRIS-V3-…` usercode (FedKind::User; carries the ML-DSA-65 commitment).
     pub fedcode: String,
     /// Always `"user"`.
     pub identity_type: String,
@@ -701,6 +702,10 @@ pub async fn mint_portable_software_occurrence(
     // seeds under `alias` reproduces this exact id.
     let key_id = fedcode::derive_key_id(alias, &ed_pub);
 
+    // The ML-DSA-65 public key, taken before the signer moves into the identity:
+    // the fedcode below commits to it (CIRISVerify#272).
+    let mldsa_pub_for_commitment = ciris_crypto::PqcSigner::public_key(&mldsa)
+        .map_err(|e| anyhow::anyhow!("ml-dsa-65 public key for the fedcode commitment: {e}"))?;
     // The hybrid identity (a verify SelfSigner) over the two software halves.
     let identity = HybridSigningIdentity::new(key_id.clone(), ed, mldsa);
 
@@ -740,10 +745,10 @@ pub async fn mint_portable_software_occurrence(
         // there is nothing truthful to embed and a guess would be worse than
         // silence.
         //
-        // Costless: an empty list "still encodes as v2, byte-identically to
-        // before, so nothing already issued moves" — only a non-empty list
-        // emits `CIRIS-V3-`. Every code minted here therefore keeps resolving
-        // through the directory exactly as it does today.
+        // An empty list adds nothing to the code. (The code is v3 all the same
+        // since verify v14.2.0, because the PQC commitment below rides the v3
+        // tail; a v3 code with no nodes still resolves through the directory
+        // exactly as a v2 one did — see `resolve_contact`.)
         //
         // A populated one belongs where the owner's node set is known and
         // current — the announce/promote path, not identity minting — and each
@@ -751,6 +756,23 @@ pub async fn mint_portable_software_occurrence(
         // `encode` refuses the latter outright, which is CIRISServer#335 made
         // unencodable rather than merely documented.
         owned_nodes: Vec::new(),
+        // THE COMMITMENT to this identity's post-quantum half (verify v14.2.0,
+        // CIRISVerify#272 — ours). A code names an Ed25519 key, and persist
+        // takes `federation_keys` writes at `algorithm: "hybrid"` only, so a
+        // code with no way to bind the ML-DSA half could never produce a
+        // conformant registration: `ReadyFromCode` was unreachable in
+        // practice. The key itself (1952 bytes) cannot ride a scannable code;
+        // its SHA-256 can. A host that admits this code fetches the ML-DSA body
+        // through the Key Pull and calls `verify_pulled_ml_dsa_65_pubkey`
+        // against this digest before writing the hybrid row — and that check
+        // fails CLOSED when the commitment is absent, so a code minted without
+        // it is not a hybrid registration path at all. Same bytes as the
+        // record above: the commitment is over the pubkey the self-record
+        // registers, so first use proves joint control of both halves.
+        ml_dsa_65_pubkey_sha256: Some({
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(mldsa_pub_for_commitment.as_slice()))
+        }),
     })
     .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
 
@@ -1775,12 +1797,31 @@ mod tests {
             "expected a derived `ciris-user-<fp>` key_id, got {}",
             minted.key_id
         );
-        // A valid CIRIS-V2- usercode that decodes to FedKind::User + this key_id.
+        // A valid usercode that decodes to FedKind::User + this key_id. It is a
+        // V3 code since verify v14.2.0: the commitment to the ML-DSA-65 half
+        // (CIRISVerify#272) rides the v3 tail, and it is what makes a code-admitted
+        // key registrable as a hybrid — so a code minted here MUST carry it, and
+        // it must be the digest of the very key the self-record registers.
         assert!(
-            minted.fedcode.starts_with("CIRIS-V2-"),
-            "got {}",
+            minted.fedcode.starts_with("CIRIS-V3-"),
+            "a minted code carries the PQC commitment and is therefore v3; got {}",
             minted.fedcode
         );
+        {
+            use base64::Engine as _;
+            use sha2::Digest as _;
+            let decoded = ciris_verify_core::fedcode::decode(&minted.fedcode).expect("decode");
+            let pqc = base64::engine::general_purpose::STANDARD
+                .decode(&minted.pubkey_ml_dsa_65_base64)
+                .expect("ml-dsa pubkey b64");
+            assert_eq!(
+                decoded.ml_dsa_65_pubkey_sha256.as_deref(),
+                Some(hex::encode(sha2::Sha256::digest(&pqc)).as_str()),
+                "the code's commitment must be sha256 of the registered ML-DSA-65 pubkey"
+            );
+            ciris_verify_core::fedcode::verify_pulled_ml_dsa_65_pubkey(&decoded, &pqc)
+                .expect("the registered key satisfies the code's own commitment");
+        }
         assert!(
             fedcode_is_user(&minted.fedcode, &minted.key_id),
             "fedcode {} did not decode to User/{}",

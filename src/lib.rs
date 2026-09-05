@@ -266,7 +266,7 @@ pub mod http_log;
 /// CIRISVerify#80). `mint_user_identity` opens the user's Ed25519 signing half
 /// for the chosen backend, calls verify v6.0.0 `create_federation_identity`
 /// (which attaches the sealed ML-DSA-65 half + emits the genesis CEG object),
-/// and returns the user `key_id` + the `CIRIS-V2-` usercode. The minted identity
+/// and returns the user `key_id` + the `CIRIS-V3-` usercode (it carries the ML-DSA-65 commitment, CIRISVerify#272). The minted identity
 /// also composes into the `POST /v1/setup/claim-remote` signer. Public so the
 /// CLI subcommand, the `POST /v1/self/identity` endpoint, and the integration
 /// test can drive it.

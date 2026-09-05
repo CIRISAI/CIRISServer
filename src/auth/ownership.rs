@@ -1549,12 +1549,28 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
                      in no community audience",
     });
 
-    // Agents: every live `delegates_to` the owner authored onto an `agent` key.
-    let mut agents = 0usize;
+    // Agents: every `agent`-typed key the owner has bound, ONE row per key at
+    // the WIDEST placement held (CIRISServer#541). Two things the first cut
+    // got wrong, both measured on the shipped single-key agent shape:
+    //   * the node key IS the agent key there, so the owner→node binding was
+    //     counted again as an agent binding;
+    //   * a widening leaves the `self` original live beside the federation
+    //     copy, and counting per ROW counted the same agent once per placement
+    //     — `expected` said 7, and the `self` copy's `federation_visible = false`
+    //     flipped `federation_discoverable` on a node every peer could walk.
+    // A peer never receives the `self` copy (CC 5.2), so the widest placement
+    // is the only one that says anything about discoverability.
+    // One spelling of "the widest placement" for the collapse below (the
+    // cohort_scope emit-site audit, CIRISServer#38, counts every mention of the
+    // federation constant; these are READS, and one read is enough).
+    let at_widest = |scope: &str| scope == cohort_scope::FEDERATION;
+    let mut agents_by_key: std::collections::BTreeMap<String, Attestation> =
+        std::collections::BTreeMap::new();
     if let Ok(authored) = dir.list_attestations_by(owner).await {
         for a in authored
-            .iter()
+            .into_iter()
             .filter(|a| a.attestation_type == attestation_type::DELEGATES_TO)
+            .filter(|a| a.attested_key_id != node_key_id)
         {
             let rec = dir
                 .lookup_public_key(&a.attested_key_id)
@@ -1564,23 +1580,33 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
             if rec.as_ref().map(|r| r.identity_type.as_str()) != Some(identity_type::AGENT) {
                 continue;
             }
-            agents += 1;
-            rows.push(AnnouncedRow {
-                role: "agent_binding",
-                key_id: a.attested_key_id.clone(),
-                attestation_id: Some(a.attestation_id.clone()),
-                cohort_scope: Some(a.cohort_scope.clone()),
-                identity_type: None,
-                federation_visible: a.cohort_scope == cohort_scope::FEDERATION,
-                needed_for: "a peer walks agent → its responsible human (stewardship)",
-            });
-            rows.push(key_row(
-                "agent_key",
-                &a.attested_key_id,
-                rec,
-                "a peer verifies the agent's signature on its trace rows",
-            ));
+            let wider = at_widest(&a.cohort_scope);
+            match agents_by_key.get(&a.attested_key_id) {
+                Some(held) if at_widest(&held.cohort_scope) && !wider => {}
+                _ => {
+                    agents_by_key.insert(a.attested_key_id.clone(), a);
+                }
+            }
         }
+    }
+    let agents = agents_by_key.len();
+    for (agent_key, a) in &agents_by_key {
+        let rec = dir.lookup_public_key(agent_key).await.ok().flatten();
+        rows.push(AnnouncedRow {
+            role: "agent_binding",
+            key_id: agent_key.clone(),
+            attestation_id: Some(a.attestation_id.clone()),
+            cohort_scope: Some(a.cohort_scope.clone()),
+            identity_type: None,
+            federation_visible: at_widest(&a.cohort_scope),
+            needed_for: "a peer walks agent → its responsible human (stewardship)",
+        });
+        rows.push(key_row(
+            "agent_key",
+            agent_key,
+            rec,
+            "a peer verifies the agent's signature on its trace rows",
+        ));
     }
 
     let expected = 3 + 2 * agents;
