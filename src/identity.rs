@@ -22,7 +22,7 @@
 //!   the backend-independent rest: derives the federation `key_id`, attaches the
 //!   sealed ML-DSA-65 half **internally** (`get_platform_sealed_mldsa65_signer`),
 //!   emits the self-signed genesis [`SignedCegObject`] to the CEG outbox, and
-//!   returns the shareable **fedcode** (`CIRIS-V2-…`, [`ciris_verify_core::fedcode`],
+//!   returns the shareable **fedcode** (`CIRIS-V3-…` — it carries the ML-DSA-65 commitment, [`ciris_verify_core::fedcode`],
 //!   [`FedKind::User`](ciris_verify_core::fedcode::FedKind::User)).
 //!
 //! ## The YubiKey (PKCS#11) backend — gated + flagged
@@ -194,7 +194,8 @@ pub struct MintedUserIdentity {
     /// The federation `key_id` (FSD-002 `label-fingerprint` form when a label is
     /// given; else `sha256(ed_pubkey)`-derived).
     pub key_id: String,
-    /// The shareable **fedcode** — a `usercode` (`CIRIS-V2-…`). Decodes to
+    /// The shareable **fedcode** — a `usercode` (`CIRIS-V3-…`, carrying the ML-DSA-65
+    /// commitment, CIRISVerify#272). Decodes to
     /// [`FedKind::User`](ciris_verify_core::fedcode::FedKind::User) + this `key_id`.
     pub fedcode: String,
     /// Always `"user"` (this mints a USER identity).
@@ -387,7 +388,7 @@ pub(crate) fn open_software_hybrid_identity(
 /// signing half for `backend`, then calls verify v6.0.0
 /// `create_federation_identity(FedKind::User)` which attaches the sealed
 /// ML-DSA-65 half, writes the self-signed genesis CEG object to the outbox, and
-/// returns the user `key_id` + the `CIRIS-V2-` usercode + the pubkeys.
+/// returns the user `key_id` + the `CIRIS-V3-` usercode + the pubkeys.
 ///
 /// `seed_dir` is where the sealed/software Ed25519 seed lives for the
 /// `PlatformSealed` / `Software` backends — DISTINCT from the node steward's
@@ -571,7 +572,7 @@ pub struct PortableSoftwareKeyset {
     /// re-derive a DIFFERENT id — the occurrence identity would not survive the
     /// move). The mint records it in the manifest + the `.backend` filename stem.
     pub alias: String,
-    /// The shareable `CIRIS-V2-…` usercode (FedKind::User).
+    /// The shareable `CIRIS-V3-…` usercode (FedKind::User; carries the ML-DSA-65 commitment).
     pub fedcode: String,
     /// Always `"user"`.
     pub identity_type: String,

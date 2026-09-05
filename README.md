@@ -300,7 +300,7 @@ Headless works too:
 ```sh
 pip install ciris-server        # the abi3 wheel (or: cargo build --release)
 ciris-server                    # boots a zero-setup node; unclaimed → prints NodeCode + claim PIN
-ciris-server identity create --backend pkcs11   # YubiKey-backed CIRIS-V2- fedcode
+ciris-server identity create --backend pkcs11   # YubiKey-backed CIRIS-V3- fedcode
 ```
 
 Data under `$CIRIS_HOME`, SQLite corpus (Postgres via config), Reticulum

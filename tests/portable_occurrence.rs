@@ -135,11 +135,29 @@ async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the
         .expect("mint portable software occurrence");
     assert_eq!(keyset.identity_type, "user");
     assert_eq!(keyset.alias, portable_alias);
+    // V3 since verify v14.2.0: the code carries the commitment to this keyset's
+    // ML-DSA-65 half (CIRISVerify#272), and it must be the digest of the key the
+    // self-record registers — checked through verify's own gate.
     assert!(
-        keyset.fedcode.starts_with("CIRIS-V2-"),
-        "got fedcode {}",
+        keyset.fedcode.starts_with("CIRIS-V3-"),
+        "a minted code carries the PQC commitment and is therefore v3; got fedcode {}",
         keyset.fedcode
     );
+    {
+        use base64::Engine as _;
+        let decoded = ciris_verify_core::fedcode::decode(&keyset.fedcode).expect("decode");
+        let pqc_b64 = keyset
+            .key_record
+            .record
+            .pubkey_ml_dsa_65_base64
+            .as_deref()
+            .expect("a portable keyset registers a hybrid record");
+        let pqc = base64::engine::general_purpose::STANDARD
+            .decode(pqc_b64)
+            .expect("ml-dsa pubkey b64");
+        ciris_verify_core::fedcode::verify_pulled_ml_dsa_65_pubkey(&decoded, &pqc)
+            .expect("the registered key satisfies the code's own commitment");
+    }
 
     // BOTH seed halves + the marker landed on the USB dir, keyed by the alias (the
     // proof it is portable).
