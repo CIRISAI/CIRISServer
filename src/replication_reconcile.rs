@@ -47,7 +47,11 @@ use crate::config_reconcile::ResolvedConfig;
 /// than a `supersedes` — deliberately: persist's `owner_of` folds `delegates_to`
 /// rows only, and a peer holds nothing but the widening, so a `supersedes`
 /// widening of the binding would resolve the node to NO owner at every peer
-/// (CIRISPersist#807). So the binding's candidacy is not a stuck row:
+/// (CIRISPersist#807 — CLOSED by persist v41.1.0, adopted in 0.5.199: a settled
+/// owner-binding is no longer offered as a candidate, so the "announced" case
+/// below should now be empty; it stays as the reading for any older substrate
+/// and as the guard if the candidate ever comes back). So the binding's
+/// candidacy is not a stuck row:
 ///
 /// * announced — the federation copy exists; the candidate is persist's
 ///   bookkeeping, and this logs it at DEBUG;
@@ -116,7 +120,9 @@ async fn explain_awaiting_actor(engine: &Engine, node_key_id: &str, awaiting: u6
                 "owner-binding listed as a widening candidate although the owner has \
                  ANNOUNCED (a federation-scope delegates_to by the same owner exists). \
                  Nothing to do: the announce widens by a fresh delegates_to because \
-                 owner_of folds delegates_to only (CIRISPersist#807)"
+                 owner_of folds delegates_to only. persist v41.1.0 stopped offering a \
+                 settled binding (CIRISPersist#807) — seeing this line on v41.1.0+ means \
+                 the candidate came back; say so upstream"
             );
         } else if ours {
             tracing::info!(
