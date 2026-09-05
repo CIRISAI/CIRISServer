@@ -293,7 +293,14 @@ mod tests {
                         if line.contains(&format!("\"{NODE_ALIAS}\""))
                             && !line.trim_start().starts_with("//")
                         {
-                            hits.push(format!("{}:{}", path.display(), n + 1));
+                            // Forward slashes on every OS: the exemption below is
+                            // spelled `src/key_convention.rs`, and Windows renders
+                            // this path as `src\key_convention.rs`, which made this
+                            // file's OWN two sites read as foreign and main's
+                            // Windows lane red on every run since the test landed
+                            // (the #517 class — a path bug in the gate itself).
+                            let shown = path.display().to_string().replace('\\', "/");
+                            hits.push(format!("{shown}:{}", n + 1));
                         }
                     }
                 }
