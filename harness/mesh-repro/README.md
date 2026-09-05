@@ -183,6 +183,17 @@ same round as the binding, Welcome + message → peer 25 s. One run each on
 mechanism, reported on CIRISEdge#568 for the leg edge added
 (`ladder.owner_binding_converged`).
 
+**Re-measured on edge v20.3.0 / persist v41.2.0 (2026-09-05 23:38 UTC), same
+ladder, still one run:** announce → binding on the peer **61 s and 90 s** (was
+181 s / 210 s on v20.2.1; 33 s / 90 s on v20.1.1); the canonical's binding 32 s
+and 92 s; KeyPackage → creator 35 s; Welcome + message → peer 25 s. All ten
+stages green on the first ladder sample. Edge v20.3.0 moved the dial out of
+the round's future (a 10 s round timeout could never complete a 30 s cold dial,
+and abandoning the round dropped the half-built link), so the first completed
+round toward a fresh peer no longer costs the link — which is the mechanism
+the v20.2.1 gap pointed at. One run each is still one run each; the direction
+matches the mechanism.
+
 Claim to message-in-the-peer's-transcript: 3 min 33 s, of which ~55 s is
 harness-imposed (the one-sided window and poll granularity). Everything else
 is anti-entropy cadence (~30 s a round) plus one round lost to the key plane
