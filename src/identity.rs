@@ -744,10 +744,10 @@ pub async fn mint_portable_software_occurrence(
         // there is nothing truthful to embed and a guess would be worse than
         // silence.
         //
-        // Costless: an empty list "still encodes as v2, byte-identically to
-        // before, so nothing already issued moves" — only a non-empty list
-        // emits `CIRIS-V3-`. Every code minted here therefore keeps resolving
-        // through the directory exactly as it does today.
+        // An empty list adds nothing to the code. (The code is v3 all the same
+        // since verify v14.2.0, because the PQC commitment below rides the v3
+        // tail; a v3 code with no nodes still resolves through the directory
+        // exactly as a v2 one did — see `resolve_contact`.)
         //
         // A populated one belongs where the owner's node set is known and
         // current — the announce/promote path, not identity minting — and each
@@ -1796,12 +1796,31 @@ mod tests {
             "expected a derived `ciris-user-<fp>` key_id, got {}",
             minted.key_id
         );
-        // A valid CIRIS-V2- usercode that decodes to FedKind::User + this key_id.
+        // A valid usercode that decodes to FedKind::User + this key_id. It is a
+        // V3 code since verify v14.2.0: the commitment to the ML-DSA-65 half
+        // (CIRISVerify#272) rides the v3 tail, and it is what makes a code-admitted
+        // key registrable as a hybrid — so a code minted here MUST carry it, and
+        // it must be the digest of the very key the self-record registers.
         assert!(
-            minted.fedcode.starts_with("CIRIS-V2-"),
-            "got {}",
+            minted.fedcode.starts_with("CIRIS-V3-"),
+            "a minted code carries the PQC commitment and is therefore v3; got {}",
             minted.fedcode
         );
+        {
+            use base64::Engine as _;
+            use sha2::Digest as _;
+            let decoded = ciris_verify_core::fedcode::decode(&minted.fedcode).expect("decode");
+            let pqc = base64::engine::general_purpose::STANDARD
+                .decode(&minted.pubkey_ml_dsa_65_base64)
+                .expect("ml-dsa pubkey b64");
+            assert_eq!(
+                decoded.ml_dsa_65_pubkey_sha256.as_deref(),
+                Some(hex::encode(sha2::Sha256::digest(&pqc)).as_str()),
+                "the code's commitment must be sha256 of the registered ML-DSA-65 pubkey"
+            );
+            ciris_verify_core::fedcode::verify_pulled_ml_dsa_65_pubkey(&decoded, &pqc)
+                .expect("the registered key satisfies the code's own commitment");
+        }
         assert!(
             fedcode_is_user(&minted.fedcode, &minted.key_id),
             "fedcode {} did not decode to User/{}",
