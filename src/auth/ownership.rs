@@ -1560,6 +1560,10 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
     //     flipped `federation_discoverable` on a node every peer could walk.
     // A peer never receives the `self` copy (CC 5.2), so the widest placement
     // is the only one that says anything about discoverability.
+    // One spelling of "the widest placement" for the collapse below (the
+    // cohort_scope emit-site audit, CIRISServer#38, counts every mention of the
+    // federation constant; these are READS, and one read is enough).
+    let at_widest = |scope: &str| scope == cohort_scope::FEDERATION;
     let mut agents_by_key: std::collections::BTreeMap<String, Attestation> =
         std::collections::BTreeMap::new();
     if let Ok(authored) = dir.list_attestations_by(owner).await {
@@ -1576,9 +1580,9 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
             if rec.as_ref().map(|r| r.identity_type.as_str()) != Some(identity_type::AGENT) {
                 continue;
             }
-            let wider = a.cohort_scope == cohort_scope::FEDERATION;
+            let wider = at_widest(&a.cohort_scope);
             match agents_by_key.get(&a.attested_key_id) {
-                Some(held) if held.cohort_scope == cohort_scope::FEDERATION && !wider => {}
+                Some(held) if at_widest(&held.cohort_scope) && !wider => {}
                 _ => {
                     agents_by_key.insert(a.attested_key_id.clone(), a);
                 }
@@ -1594,7 +1598,7 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
             attestation_id: Some(a.attestation_id.clone()),
             cohort_scope: Some(a.cohort_scope.clone()),
             identity_type: None,
-            federation_visible: a.cohort_scope == cohort_scope::FEDERATION,
+            federation_visible: at_widest(&a.cohort_scope),
             needed_for: "a peer walks agent → its responsible human (stewardship)",
         });
         rows.push(key_row(
