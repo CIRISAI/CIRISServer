@@ -196,8 +196,8 @@ async fn async_main(worker_threads: usize) -> Result<()> {
             // `first` is the already-consumed first token (Some for the default
             // serve path with a leading flag, None for a bare `ciris-server`).
             let leading = first.map(|s| s.to_string());
-            let (home, key_id) = ciris_server::parse_serve_flags(leading, args)?;
-            ciris_server::run(home, key_id).await
+            let (home, key_id, diagnostics) = ciris_server::parse_serve_flags(leading, args)?;
+            ciris_server::run(home, key_id, diagnostics).await
         }
     }
 }

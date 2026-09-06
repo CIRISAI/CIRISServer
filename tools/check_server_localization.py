@@ -744,20 +744,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # `chat.room_not_keyed_yet` is GONE — it was one sentence for four different
     # situations, on a surface that can say which. Replaced by `chat.state.*`,
     # which are chat-HISTORY notes rendered beside the messages, not errors.
-    # The contact LADDER's stalls (edge's `LadderStall`, mapped onto the axis a
-    # human acts on). Several are deliberately not failures — `not_yet_discovered`
-    # and `unreachable` resolve themselves — so they read as status, and want
-    # translating like any other user-facing sentence.
-    "contacts.awaiting_consent",
-    "contacts.awaiting_key_body",
-    "contacts.code_commitment_mismatch",
-    "contacts.code_without_pqc_commitment",
-    "contacts.key_pull_unavailable",
-    "contacts.consent_not_granted",
-    "contacts.malformed_code",
-    "contacts.prior_rung_incomplete",
-    "contacts.unreachable",
-    "contacts.unresolvable",
+    # The contact LADDER's stalls were here from 0.5.197 to 0.5.198 (CIRISClient#37);
+    # client 0.5.203 carries all eleven (`contacts.awaiting_consent` …
+    # `contacts.unresolvable`, plus `contacts.delegation_denied`), which is why the
+    # floor in pyproject.toml is 0.5.203: a floor below it would let CI install a
+    # client that renders those stalls in English for 28 languages while this
+    # list said the debt was gone.
     # NOT pre-existing debt and NOT prose-to-key: a DELIBERATE SPLIT. The
     # dismissal path used to share `commons_surface.refusal.objection_absent`,
     # whose 29 locales all translate the BALLOT sentence — so a non-English

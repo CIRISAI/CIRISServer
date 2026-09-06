@@ -25,7 +25,7 @@ import sys
 # tomllib is 3.11+; this must run on whatever python3 a runner happens to ship
 # before setup-python, so parse the one line we need rather than import it.
 PIN = re.compile(r'^\s*"(ciris-client(?:\[[^\]]+\])?[^"]*)"\s*,?\s*$', re.MULTILINE)
-#: The lower bound inside a requirement like `ciris-client>=0.5.202,<0.6`.
+#: The lower bound inside a requirement like `ciris-client>=0.5.203,<0.6`.
 FLOOR = re.compile(r">=\s*([0-9][0-9A-Za-z.\-]*)")
 
 

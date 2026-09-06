@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.198"
+version = "0.5.199"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1155,6 +1155,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "jsonwebtoken",
+ "libc",
  "libsqlite3-sys",
  "pbkdf2",
  "pyo3",
