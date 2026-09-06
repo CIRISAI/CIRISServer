@@ -272,25 +272,37 @@ mod tests {
         }
     }
 
-    /// A held allocation must move `uordblks`. This is the sanity check that
-    /// the numbers are this process's and not a constant.
+    /// A held allocation must move the in-use figure. This is the sanity check
+    /// that the numbers are this process's and not a constant.
+    ///
+    /// Two glibc facts shape it (the first version of this test tripped on
+    /// both in CI): a block past the mmap threshold is NOT in `uordblks` — it
+    /// is mmapped and counted in `hblkhd` — and in a 480-test binary other
+    /// threads free arena memory in the same millisecond, so `uordblks` alone
+    /// can fall while this thread holds its block. So: 64 MiB (past the 32 MiB
+    /// ceiling of glibc's dynamic mmap threshold, hence always mmapped), and
+    /// the in-use figure is `uordblks + hblkhd`, which only an mmapped free of
+    /// tens of MiB elsewhere could pull back down; half the block is the slack
+    /// for exactly that.
     #[cfg(target_env = "gnu")]
     #[test]
     fn live_bytes_track_a_real_allocation() {
-        fn live() -> u64 {
-            memory_report()["mallinfo2"]["uordblks"].as_u64().unwrap()
+        const BLOCK: usize = 64 * 1024 * 1024;
+        fn in_use() -> u64 {
+            let m = &memory_report()["mallinfo2"];
+            m["uordblks"].as_u64().unwrap() + m["hblkhd"].as_u64().unwrap()
         }
-        let before = live();
-        // Big enough to clear allocator noise from other test threads, and
-        // touched so it cannot be optimised away.
-        let mut v: Vec<u8> = vec![7; 32 * 1024 * 1024];
-        v[16 * 1024 * 1024] = 9;
-        let during = live();
-        assert!(
-            during >= before,
-            "live bytes should not fall while 32 MiB is held: before={before} during={during}"
-        );
+        let before = in_use();
+        // Touched so it cannot be optimised away and the pages are real.
+        let mut v: Vec<u8> = vec![7; BLOCK];
+        v[BLOCK / 2] = 9;
         std::hint::black_box(&v);
+        let during = in_use();
+        assert!(
+            during >= before + (BLOCK as u64) / 2,
+            "in-use bytes (uordblks + hblkhd) should rise by ~64 MiB while the block is held: \
+             before={before} during={during}"
+        );
         drop(v);
     }
 
