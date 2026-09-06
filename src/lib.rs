@@ -194,6 +194,10 @@ pub mod degradation;
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
 pub mod deployment;
+/// Operator diagnostics — runtime-gated (`--diagnostics` / `CIRIS_DIAGNOSTICS`),
+/// loopback-only: the mallinfo2 memory report and the CPU clocks behind
+/// `compose_status::mark` (CIRISServer#549 / #550).
+pub mod diag;
 /// **Same-key equivocation detection** (CIRISServer#350, CC 6.1.1 N4) — the
 /// periodic pass that compares the rows this node holds and emits a
 /// `hard_case:attestation_equivocation` when ONE key has signed two different
@@ -599,8 +603,11 @@ use anyhow::Result;
 /// `home` is the data root (`--home` or [`config::DEFAULT_CIRIS_HOME`]); `key_id`
 /// is the federation key label (`--key-id` or [`config::DEFAULT_KEY_ID`]). All
 /// other config is baked constants or `config:*` CEG resolved at boot.
-pub async fn run(home: std::path::PathBuf, key_id: String) -> Result<()> {
-    let cfg = ServerConfig::from_home(home, key_id)?;
+pub async fn run(home: std::path::PathBuf, key_id: String, diagnostics: bool) -> Result<()> {
+    let mut cfg = ServerConfig::from_home(home, key_id)?;
+    // `--diagnostics` or `CIRIS_DIAGNOSTICS=1` (CIRISServer#549/#550): the one
+    // runtime switch, read once here, recorded on the config compose reads.
+    cfg.diagnostics = crate::diag::arm(diagnostics);
     tracing::info!(
         home = %cfg.home.display(),
         data_dir = %cfg.data_dir.display(),
@@ -620,6 +627,8 @@ pub async fn run_default() -> Result<()> {
     run(
         std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME),
         config::DEFAULT_KEY_ID.to_string(),
+        // No flags on this path; `CIRIS_DIAGNOSTICS` is still honoured inside `run`.
+        false,
     )
     .await
 }
@@ -635,9 +644,13 @@ pub async fn run_default() -> Result<()> {
 pub fn parse_serve_flags(
     leading: Option<String>,
     rest: impl Iterator<Item = String>,
-) -> Result<(std::path::PathBuf, String)> {
+) -> Result<(std::path::PathBuf, String, bool)> {
     let mut home: Option<String> = None;
     let mut key_id: Option<String> = None;
+    // `--diagnostics` (CIRISServer#549/#550): a bare flag, no value. The third
+    // member of the result so the two serve entry points (binary + wheel
+    // `py_main`) cannot drift on how it is spelled or where it is read.
+    let mut diagnostics = false;
 
     let take_value = |arg: &str,
                       eq_value: Option<String>,
@@ -660,9 +673,10 @@ pub fn parse_serve_flags(
         match name.as_str() {
             "--home" => home = Some(take_value("--home", eq_value, &mut it)?),
             "--key-id" => key_id = Some(take_value("--key-id", eq_value, &mut it)?),
+            "--diagnostics" if eq_value.is_none() => diagnostics = true,
             other => {
                 return Err(anyhow::anyhow!(
-                    "unknown serve arg: {other} (usage: ciris-server [--home <path>] [--key-id <name>])"
+                    "unknown serve arg: {other} (usage: ciris-server [--home <path>] [--key-id <name>] [--diagnostics])"
                 ))
             }
         }
@@ -670,7 +684,7 @@ pub fn parse_serve_flags(
 
     let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
     let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
-    Ok((std::path::PathBuf::from(home), key_id))
+    Ok((std::path::PathBuf::from(home), key_id, diagnostics))
 }
 
 /// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
@@ -1473,9 +1487,9 @@ mod python {
             // — without this it fell through to run_default() and ignored
             // --home/--key-id, minting the bare "ciris-server" label (CIRISServer#27).
             _ => {
-                let (home, key_id) = crate::parse_serve_flags(first, args)
+                let (home, key_id, diagnostics) = crate::parse_serve_flags(first, args)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-                rt_block_on(crate::run(home, key_id))
+                rt_block_on(crate::run(home, key_id, diagnostics))
             }
         }
     }
@@ -1574,8 +1588,11 @@ mod python {
         // Read the Python adapter's static config under the GIL.
         let adapter = crate::py_adapter::build(py, adapter)?;
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
-        let cfg = crate::config::ServerConfig::from_home(home, key_id)
+        let mut cfg = crate::config::ServerConfig::from_home(home, key_id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        // The embedded fold has no CLI; the environment is its switch
+        // (`CIRIS_DIAGNOSTICS=1`, CIRISServer#549/#550).
+        cfg.diagnostics = crate::diag::arm(false);
         tracing::info!(
             key_id = %cfg.key_id,
             "serve_with_python_adapter: config resolved — entering the blocking serve \

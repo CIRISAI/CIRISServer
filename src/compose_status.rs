@@ -54,6 +54,26 @@ struct State {
     /// How many times the watchdog has flagged the CURRENT phase (resets on
     /// each new phase). Serialized so the host can see repeat-WARN pressure.
     stuck_warnings: u32,
+    /// Origin of the NEXT mark's deltas: wall, this thread's CPU clock and the
+    /// process CPU clock at the last phase stamp or mark. CPU clocks are read
+    /// only while diagnostics are on (see [`mark`]).
+    mark_wall: Option<Instant>,
+    mark_thread_cpu: Option<std::time::Duration>,
+    mark_process_cpu: Option<std::time::Duration>,
+    /// Sub-phase marks (diagnostics only): (phase, mark, wall ms, thread-CPU
+    /// ms, process-CPU ms). Wall vs thread-CPU vs process-CPU is what turns a
+    /// slow step into a kind of slow (CIRISServer#549): expensive code, this
+    /// process starving itself, or the host.
+    detail: Vec<Mark>,
+}
+
+#[derive(Clone, Copy)]
+struct Mark {
+    phase: &'static str,
+    mark: &'static str,
+    wall_ms: u128,
+    thread_cpu_ms: Option<u128>,
+    process_cpu_ms: Option<u128>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -63,6 +83,10 @@ static STATE: Mutex<State> = Mutex::new(State {
     completed: false,
     watchdog_running: false,
     stuck_warnings: 0,
+    mark_wall: None,
+    mark_thread_cpu: None,
+    mark_process_cpu: None,
+    detail: Vec::new(),
 });
 
 /// Stamp entry into a named compose phase. Records the previous phase's elapsed
@@ -74,6 +98,7 @@ pub fn phase(name: &'static str) {
     // record — the snapshot describes the CURRENT boot, not a prior one.
     if s.completed {
         s.history.clear();
+        s.detail.clear();
         s.completed = false;
     }
     if let (Some(prev), Some(started)) = (s.current, s.started) {
@@ -81,14 +106,82 @@ pub fn phase(name: &'static str) {
             s.history.push((prev, started.elapsed().as_millis()));
         }
     }
+    let now = Instant::now();
     s.current = Some(name);
-    s.started = Some(Instant::now());
+    s.started = Some(now);
     s.stuck_warnings = 0;
+    // Every phase stamp is also a mark origin, so the first mark inside a phase
+    // measures from the phase's own start. CPU clocks only when someone will
+    // read them.
+    s.mark_wall = Some(now);
+    if crate::diag::enabled() {
+        s.mark_thread_cpu = crate::diag::thread_cpu();
+        s.mark_process_cpu = crate::diag::process_cpu();
+    }
     tracing::info!(phase = name, "compose phase");
     if !s.watchdog_running {
         s.watchdog_running = true;
         spawn_watchdog();
     }
+}
+
+/// A SUB-PHASE mark, recorded only while diagnostics are on (`--diagnostics` /
+/// `CIRIS_DIAGNOSTICS=1`, see `diag.rs`). Off, this is one relaxed atomic load.
+///
+/// Records three deltas since the previous mark or phase stamp — wall, this
+/// thread's CPU, the whole process's CPU — and logs them at INFO. The three
+/// together name the KIND of slow (CIRISServer#549, a 23 s `read_api_bind` on
+/// the 2-vCPU canonical with no awaits in it): wall ≈ thread CPU is expensive
+/// code; wall ≫ thread CPU with process CPU climbing is this process starving
+/// the compose future with its own freshly spawned tiers; wall ≫ both is the
+/// host or blocking I/O. A phase's marks do not change `history` or the phase
+/// count, so a host rendering `[PHASE n/24]` is unaffected.
+///
+/// Thread-CPU deltas are meaningful across a synchronous stretch only: after an
+/// `.await` the future may resume on another worker, and a delta that spans
+/// one is reported but named by the caller (`listener_bound` follows the bind).
+pub fn mark(label: &'static str) {
+    if !crate::diag::enabled() {
+        return;
+    }
+    let now = Instant::now();
+    let thread_cpu = crate::diag::thread_cpu();
+    let process_cpu = crate::diag::process_cpu();
+    let mut s = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(phase) = s.current else {
+        return;
+    };
+    let wall_ms = s
+        .mark_wall
+        .map(|w| now.duration_since(w).as_millis())
+        .unwrap_or(0);
+    let delta =
+        |now: Option<std::time::Duration>, then: Option<std::time::Duration>| match (now, then) {
+            (Some(n), Some(t)) => Some(n.saturating_sub(t).as_millis()),
+            _ => None,
+        };
+    let m = Mark {
+        phase,
+        mark: label,
+        wall_ms,
+        thread_cpu_ms: delta(thread_cpu, s.mark_thread_cpu),
+        process_cpu_ms: delta(process_cpu, s.mark_process_cpu),
+    };
+    if s.detail.len() < MAX_HISTORY {
+        s.detail.push(m);
+    }
+    s.mark_wall = Some(now);
+    s.mark_thread_cpu = thread_cpu;
+    s.mark_process_cpu = process_cpu;
+    drop(s);
+    tracing::info!(
+        phase,
+        mark = label,
+        wall_ms = m.wall_ms,
+        thread_cpu_ms = m.thread_cpu_ms,
+        process_cpu_ms = m.process_cpu_ms,
+        "compose mark"
+    );
 }
 
 /// Mark compose complete (the read-API listener is bound and serving). The
@@ -114,7 +207,9 @@ pub fn complete() {
 /// {
 ///   "completed": false,
 ///   "current": {"phase": "edge_runtime", "elapsed_s": 74.2, "stuck": true},
-///   "history": [{"phase": "halt_gate", "ms": 3}, ...]
+///   "history": [{"phase": "halt_gate", "ms": 3}, ...],
+///   "detail": [{"phase": "read_api_bind", "mark": "router_built", "wall_ms": 12,
+///               "thread_cpu_ms": 11, "process_cpu_ms": 40}, ...]   // diagnostics only
 /// }
 /// ```
 ///
@@ -140,10 +235,25 @@ pub fn snapshot_json() -> String {
         .iter()
         .map(|(name, ms)| serde_json::json!({"phase": name, "ms": ms}))
         .collect();
+    let detail: Vec<serde_json::Value> = s
+        .detail
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "phase": m.phase,
+                "mark": m.mark,
+                "wall_ms": m.wall_ms,
+                "thread_cpu_ms": m.thread_cpu_ms,
+                "process_cpu_ms": m.process_cpu_ms,
+            })
+        })
+        .collect();
     serde_json::json!({
         "completed": s.completed,
         "current": current,
         "history": history,
+        // Empty unless diagnostics are on — see `mark`.
+        "detail": detail,
     })
     .to_string()
 }
@@ -188,6 +298,55 @@ fn spawn_watchdog() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Marks are silent until diagnostics are on, and then carry the three
+    /// clocks. Enabling is process-global and one-way, so this test runs the
+    /// "off" half first.
+    #[test]
+    fn marks_are_silent_off_and_carry_three_clocks_on() {
+        phase("test_mark_phase_off");
+        // Cannot assert "off" if another test in this binary already enabled
+        // diagnostics; only assert the shape is well-formed either way.
+        let snap: serde_json::Value = serde_json::from_str(&snapshot_json()).unwrap();
+        assert!(snap["detail"].is_array());
+
+        crate::diag::enable("test");
+        phase("test_mark_phase_on");
+        // Do a little work so the thread clock has something to show.
+        let mut acc = 0u64;
+        for i in 0..2_000_000u64 {
+            acc = acc.wrapping_mul(31).wrapping_add(i);
+        }
+        std::hint::black_box(acc);
+        mark("test_mark_a");
+        let snap: serde_json::Value = serde_json::from_str(&snapshot_json()).unwrap();
+        let d = snap["detail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["mark"] == "test_mark_a")
+            .expect("the mark landed in detail");
+        assert_eq!(d["phase"], "test_mark_phase_on");
+        assert!(d["wall_ms"].is_u64());
+        #[cfg(unix)]
+        {
+            assert!(
+                d["thread_cpu_ms"].is_u64(),
+                "thread clock present on unix: {d}"
+            );
+            assert!(
+                d["process_cpu_ms"].is_u64(),
+                "process clock present on unix: {d}"
+            );
+        }
+        // `history` and the phase count are untouched by marks.
+        assert!(!snap["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["phase"] == "test_mark_a"));
+        complete();
+    }
 
     #[test]
     fn phases_accumulate_and_complete() {

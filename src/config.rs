@@ -191,6 +191,11 @@ pub struct ServerConfig {
     /// Pre-corpus structural gate: minimum free disk (GiB) to mount the lens
     /// corpus. A **baked constant** ([`DEFAULT_LENS_STORE_MIN_GIB`]).
     pub lens_store_min_gib: u64,
+    /// Operator diagnostics (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`): mount the
+    /// loopback-only `/v1/node/diagnostics/*` routes and record CPU-vs-wall marks
+    /// per boot step. OFF by default; boot-structural (read once, at boot). See
+    /// `diag.rs` for why this is a runtime switch and not a cargo feature.
+    pub diagnostics: bool,
 }
 
 impl ServerConfig {
@@ -235,6 +240,7 @@ impl ServerConfig {
             occurrence_id,
             slices: Slices::default(),
             lens_store_min_gib: DEFAULT_LENS_STORE_MIN_GIB,
+            diagnostics: false,
         })
     }
 

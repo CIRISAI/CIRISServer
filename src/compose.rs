@@ -890,56 +890,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&mesh_responder),
     );
 
-    crate::compose_status::phase("edge_run");
-    // ── Run the one shared Edge (a single Reticulum transport per node) ───────
-    // CIRISServer#221: in the fold the embedded edge is ALREADY `run()`ing (the
-    // agent spawned it from init_edge_runtime) — spawning a second run loop on the
-    // same Edge would double-drive one transport. Skip it; the standalone node runs it.
-    let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
-    let edge_join = if embedded {
-        drop(edge_shutdown_rx);
-        None
-    } else {
-        let edge_run = Arc::clone(&edge);
-        Some(tokio::spawn(
-            async move { edge_run.run(edge_shutdown_rx).await },
-        ))
-    };
-
-    crate::compose_status::phase("replication_loop");
-    // ── The CEG-driven replication reconcile loop ─────────────────────────────
-    // Converges the live ReplicationRuntime to the corpus's consent:replication
-    // objects (the desired topology). Driven by a cadence tick
-    // (CIRIS_SERVER_REPLICATION_RECONCILE_SECS, default 30) AND the Notify the
-    // peering API fires after a CEG write. Spawned only when a runtime exists.
-    let (reconcile_sd_tx, reconcile_sd_rx) = watch::channel(false);
-    let reconcile_join = replication.as_ref().map(|runtime| {
-        crate::replication_reconcile::spawn(
-            Arc::clone(&engine),
-            // The SAME signer identity as the runtime (#312) — never the alias.
-            edge.signer_key_id().to_string(),
-            Arc::clone(runtime),
-            Arc::clone(&replication_notify),
-            config_rx.clone(),
-            reconcile_sd_rx,
-        )
-    });
-
-    crate::compose_status::phase("config_reconcile_loop");
-    // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
-    // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
-    // own cadence + its OWN `config_notify` the config API fires after a write,
-    // and republishes the live `ResolvedConfig` on `config_tx`. Consumers (scorer,
-    // replication reconciler) read the receiver: scorer knobs are hot; transport /
-    // mode are boot-structural. ONE Notify is shared by config_api + this loop.
-    let (config_sd_tx, config_sd_rx) = watch::channel(false);
-    let config_reconcile_join = crate::config_reconcile::spawn(
-        Arc::clone(&engine),
-        config_tx,
-        Arc::clone(&config_notify),
-        config_sd_rx,
-    );
-
     // ── The MESH-CONFIG consumer refresh loop (CIRISServer#365) ───────────────
     // The FEDERATION-scoped sibling of the loop above, and a different plane
     // entirely: `config:*` is what this node's OWNER set (SELF, #324);
@@ -1049,6 +999,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     accord_peers.clone(),
                     cfg.home.clone(),
                 );
+                crate::compose_status::mark("provision_built");
                 let r = identity_router(identity_json)
                     // Server health — the node's OWN liveness (/health, /v1/health,
                     // /v1/system/health). Mandatory base; the agent enriches the
@@ -1545,6 +1496,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // construction — asking earlier would hand the watch `None` and
                 // degrade an honest reading into `unreadable`.
                 crate::trace_plane_watch::spawn(Arc::clone(&engine), crate::ingest_http::held());
+                // Operator diagnostics (CIRISServer#549/#550): mounted ONLY when
+                // asked (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`), and every route
+                // in it sits behind the setup routes' loopback guard. Off, the
+                // paths do not exist on this listener (404, not 403).
+                let r = if cfg.diagnostics {
+                    r.merge(crate::diag::router())
+                } else {
+                    r
+                };
+                crate::compose_status::mark("router_built");
                 r
             },
             // CIRISServer#365 — `backpressure.summary_only`, the serve path's
@@ -1589,6 +1550,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 return Err(enrich_read_api_bind_error(err, cfg.read_api_addr().port()).await);
             }
         };
+        crate::compose_status::mark("listener_bound");
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
         // #279: the listener is now guaranteed BOUND here (lens-core binds
         // synchronously before spawning the accept loop and a bind failure is
@@ -1600,6 +1562,68 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         crate::node_control::arm(read.listen_addr());
         Some(read)
     };
+
+    // ── The three corpus-growth LOOPS start AFTER the listener is bound (#549).
+    //    They used to start three phases before it. Nothing in the router build
+    //    reads them — it holds the edge, the replication runtime, the config
+    //    receiver and the mesh-config fold, all of which exist by now — but on a
+    //    2-vCPU canonical their first ticks (announce verification, the first
+    //    anti-entropy rounds, the config re-resolve) landed on the same two
+    //    workers as the router build, and `read_api_bind` measured 23 s with 19
+    //    of them silent. The bind now happens first and the loops start on the
+    //    next lines, so the client-visible boot (`:4243` answering, CIRISServer
+    //    #548) no longer waits behind work that was never on its path. The edge
+    //    runtime itself, its slices, the transport binding and peer priming are
+    //    unchanged and still precede the bind; only the run loops move.
+    crate::compose_status::phase("edge_run");
+    // ── Run the one shared Edge (a single Reticulum transport per node) ───────
+    // CIRISServer#221: in the fold the embedded edge is ALREADY `run()`ing (the
+    // agent spawned it from init_edge_runtime) — spawning a second run loop on the
+    // same Edge would double-drive one transport. Skip it; the standalone node runs it.
+    let (edge_shutdown_tx, edge_shutdown_rx) = watch::channel(false);
+    let edge_join = if embedded {
+        drop(edge_shutdown_rx);
+        None
+    } else {
+        let edge_run = Arc::clone(&edge);
+        Some(tokio::spawn(
+            async move { edge_run.run(edge_shutdown_rx).await },
+        ))
+    };
+
+    crate::compose_status::phase("replication_loop");
+    // ── The CEG-driven replication reconcile loop ─────────────────────────────
+    // Converges the live ReplicationRuntime to the corpus's consent:replication
+    // objects (the desired topology). Driven by a cadence tick
+    // (CIRIS_SERVER_REPLICATION_RECONCILE_SECS, default 30) AND the Notify the
+    // peering API fires after a CEG write. Spawned only when a runtime exists.
+    let (reconcile_sd_tx, reconcile_sd_rx) = watch::channel(false);
+    let reconcile_join = replication.as_ref().map(|runtime| {
+        crate::replication_reconcile::spawn(
+            Arc::clone(&engine),
+            // The SAME signer identity as the runtime (#312) — never the alias.
+            edge.signer_key_id().to_string(),
+            Arc::clone(runtime),
+            Arc::clone(&replication_notify),
+            config_rx.clone(),
+            reconcile_sd_rx,
+        )
+    });
+
+    crate::compose_status::phase("config_reconcile_loop");
+    // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
+    // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
+    // own cadence + its OWN `config_notify` the config API fires after a write,
+    // and republishes the live `ResolvedConfig` on `config_tx`. Consumers (scorer,
+    // replication reconciler) read the receiver: scorer knobs are hot; transport /
+    // mode are boot-structural. ONE Notify is shared by config_api + this loop.
+    let (config_sd_tx, config_sd_rx) = watch::channel(false);
+    let config_reconcile_join = crate::config_reconcile::spawn(
+        Arc::clone(&engine),
+        config_tx,
+        Arc::clone(&config_notify),
+        config_sd_rx,
+    );
 
     // ── Capacity scorer — the score→emit pipeline (periodic, NOT in the ingest
     //    hot path). Derives per-agent N_eff from ingested traces and emits

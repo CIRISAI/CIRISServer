@@ -1155,6 +1155,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "jsonwebtoken",
+ "libc",
  "libsqlite3-sys",
  "pbkdf2",
  "pyo3",
