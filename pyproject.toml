@@ -82,7 +82,7 @@ requires-python = ">=3.10"
 # them; below it a fresh install renders those states as raw ids. The
 # `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
 dependencies = [
-    "ciris-client>=0.5.202,<0.6",
+    "ciris-client>=0.5.203,<0.6",
 ]
 
 [project.urls]
