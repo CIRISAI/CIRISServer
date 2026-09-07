@@ -746,7 +746,7 @@ pub fn check_aggregation_policy_fail_secure() -> Result<(), String> {
 }
 
 /// `cohort_scope` (CC 4.4.3.4.3) — THE assigned-but-wrong exemplar, asserted on the
-/// value the server ACTUALLY emits. A `config:v1` row is a self-report about THIS
+/// value the server ACTUALLY emits. A `config:{key}:v1` row is a self-report about THIS
 /// node's own runtime, so both config producers (`graph_config::config_envelope` and
 /// the load-bearing typed `set_config`, CIRISServer#324) stamp
 /// [`crate::graph_config::CONFIG_COHORT_SCOPE`] — the ONE const both route through.
@@ -789,11 +789,25 @@ pub fn check_config_cohort_scope_self() -> Result<(), String> {
                 .into(),
         );
     }
-    // (4) Anchor the config family to the server's public dimension const.
-    if crate::graph_config::CONFIG_DIMENSION != "config:v1" {
+    // (4) Anchor the config family to persist's `config:` prefix and pin the
+    // per-key leaf shape persist v42 keys the live set by (CIRISPersist#814
+    // part 3, CC 3.4.5.1): one leaf per key, versioned, under the family.
+    if crate::graph_config::CONFIG_DIMENSION_PREFIX != "config:" {
         return Err(format!(
-            "graph_config::CONFIG_DIMENSION drifted from config:v1 (got {:?})",
-            crate::graph_config::CONFIG_DIMENSION
+            "graph_config::CONFIG_DIMENSION_PREFIX drifted from config: (got {:?})",
+            crate::graph_config::CONFIG_DIMENSION_PREFIX
+        ));
+    }
+    if crate::graph_config::config_dimension("scorer.window") != "config:scorer.window:v1" {
+        return Err(format!(
+            "graph_config::config_dimension drifted from config:{{key}}:v1 (got {:?})",
+            crate::graph_config::config_dimension("scorer.window")
+        ));
+    }
+    if crate::graph_config::LEGACY_CONFIG_DIMENSION != "config:v1" {
+        return Err(format!(
+            "graph_config::LEGACY_CONFIG_DIMENSION drifted from config:v1 (got {:?})",
+            crate::graph_config::LEGACY_CONFIG_DIMENSION
         ));
     }
     Ok(())

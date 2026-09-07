@@ -7,8 +7,8 @@
 //!
 //! **The API never touches the runtime — it writes CEG; the runtime is
 //! CEG-driven.** `POST /v1/config` (see [`crate::config_api`]) only ever writes a
-//! signed `config:v1` object to the corpus ([`crate::graph_config::set_config`])
-//! and nudges this loop via a [`tokio::sync::Notify`]. The `config:v1` objects in
+//! signed `config:{key}:v1` object to the corpus ([`crate::graph_config::set_config`])
+//! and nudges this loop via a [`tokio::sync::Notify`]. The `config:{key}:v1` objects in
 //! the corpus ARE the desired runtime configuration; this loop is the single
 //! place that re-resolves them and republishes the live snapshot.
 //!

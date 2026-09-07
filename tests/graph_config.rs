@@ -12,7 +12,7 @@ use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{attestation_type, identity_type};
 use ciris_persist::prelude::{Engine, LocalSigner};
 
-use ciris_server::graph_config::{self, CONFIG_DIMENSION};
+use ciris_server::graph_config;
 use ciris_server::{ConfigScope, ConfigValue};
 
 const NODE_KEY_ID: &str = "ciris-server";
@@ -319,11 +319,14 @@ async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
         .expect("list attestations by node");
     rows.into_iter()
         .filter(|a| {
-            a.attestation_type == attestation_type::SCORES
+            // The first write of a key is a `scores` row, every renewal a
+            // `supersedes` on the key's OWN leaf (persist v42, CC 3.4.5.1).
+            (a.attestation_type == attestation_type::SCORES
+                || a.attestation_type == attestation_type::SUPERSEDES)
                 && a.attestation_envelope
                     .get("dimension")
                     .and_then(|d| d.as_str())
-                    == Some(CONFIG_DIMENSION)
+                    == Some(graph_config::config_dimension(key).as_str())
                 && a.attestation_envelope.get("key").and_then(|k| k.as_str()) == Some(key)
         })
         .max_by_key(|a| {
@@ -470,4 +473,281 @@ async fn an_expired_snapshot_rescans() {
         second.scan > first.scan && graph_config::SCANS.load(Ordering::Relaxed) > n,
         "an expired snapshot rescans"
     );
+}
+
+/// Every row this node wrote for `key` on the key's OWN leaf, oldest version
+/// first — the raw substrate view of the renewal chain.
+async fn config_rows(
+    engine: &Arc<Engine>,
+    key: &str,
+) -> Vec<ciris_persist::federation::types::Attestation> {
+    let nk = node_key_id(engine).await;
+    let leaf = graph_config::config_dimension(key);
+    let mut rows: Vec<_> = engine
+        .federation_directory()
+        .list_attestations_by(&nk)
+        .await
+        .expect("list attestations by node")
+        .into_iter()
+        .filter(|a| {
+            a.attestation_envelope
+                .get("dimension")
+                .and_then(|d| d.as_str())
+                == Some(leaf.as_str())
+        })
+        .collect();
+    rows.sort_by_key(|a| {
+        a.attestation_envelope
+            .get("version")
+            .and_then(|v| v.as_u64())
+    });
+    rows
+}
+
+fn references(a: &ciris_persist::federation::types::Attestation) -> Option<&str> {
+    a.attestation_envelope
+        .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
+        .and_then(|v| v.as_str())
+}
+
+/// persist v42 (CIRISPersist#814 part 3, CC 3.4.5.1): the config live set is
+/// per `(subject, scope, leaf)`, so each key is its own leaf, the first write
+/// is a `scores` row, and every write after it is a `supersedes` naming the
+/// row it replaces. Two keys are two leaves, never two live rows on one.
+#[tokio::test]
+async fn a_renewal_supersedes_the_row_it_replaces_on_the_keys_own_leaf() {
+    let engine = node().await;
+    register_self(&engine).await;
+    for v in 1..=3 {
+        graph_config::set_config(
+            &engine,
+            "renew.me",
+            ConfigValue::I64(v),
+            "owner",
+            ConfigScope::Local,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("write {v} of renew.me: {e}"));
+    }
+    // A second key beside it is a second LEAF — admitted as a plain first row.
+    graph_config::set_config(
+        &engine,
+        "renew.other",
+        ConfigValue::I64(9),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("a second key is its own leaf");
+
+    let rows = config_rows(&engine, "renew.me").await;
+    assert_eq!(rows.len(), 3, "three versions, three rows on one leaf");
+    assert_eq!(rows[0].attestation_type, attestation_type::SCORES);
+    assert_eq!(references(&rows[0]), None, "the first row renews nothing");
+    assert_eq!(rows[1].attestation_type, attestation_type::SUPERSEDES);
+    assert_eq!(
+        references(&rows[1]),
+        Some(rows[0].attestation_id.as_str()),
+        "the second write supersedes the first row"
+    );
+    assert_eq!(rows[2].attestation_type, attestation_type::SUPERSEDES);
+    assert_eq!(
+        references(&rows[2]),
+        Some(rows[1].attestation_id.as_str()),
+        "the third write supersedes the SECOND (the chain head), not the root"
+    );
+    for a in &rows {
+        assert_eq!(
+            a.attestation_envelope
+                .get("dimension")
+                .and_then(|d| d.as_str()),
+            Some("config:renew.me:v1"),
+            "the leaf is the key"
+        );
+        assert_eq!(a.cohort_scope, "self");
+    }
+    let read = graph_config::get_config(&engine, "renew.me")
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(read.value, ConfigValue::I64(3));
+    assert_eq!(read.version, 3);
+    assert_eq!(
+        read.previous_version.as_deref(),
+        Some(rows[1].attestation_id.as_str()),
+        "previous_version is the row this one supersedes"
+    );
+    assert_eq!(config_rows(&engine, "renew.other").await.len(), 1);
+}
+
+/// A recanted key can be written again. persist's renewal check does not
+/// fold a recant out of the live set, so a plain `scores` after a recant is
+/// refused ("already has a live row"); the write must supersede the dead
+/// head instead — and the fold still reads the new value.
+#[tokio::test]
+async fn a_recanted_key_can_be_written_again() {
+    let engine = node().await;
+    register_self(&engine).await;
+    graph_config::set_config(
+        &engine,
+        "again.flag",
+        ConfigValue::I64(1),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("first write");
+    let dead = written_row_id(&engine, "again.flag").await;
+    recant_row(&engine, &dead).await;
+    assert!(
+        graph_config::get_config(&engine, "again.flag")
+            .await
+            .expect("get")
+            .is_none(),
+        "recanted key reads as absent"
+    );
+    let entry = graph_config::set_config(
+        &engine,
+        "again.flag",
+        ConfigValue::I64(2),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("a write after a recant must be admitted (as a supersedes of the dead head)");
+    assert_eq!(
+        entry.version, 2,
+        "the version chain continues past the recanted row"
+    );
+    let rows = config_rows(&engine, "again.flag").await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].attestation_type, attestation_type::SUPERSEDES);
+    assert_eq!(references(&rows[1]), Some(dead.as_str()));
+    assert_eq!(
+        graph_config::get_config(&engine, "again.flag")
+            .await
+            .expect("get")
+            .map(|e| e.value),
+        Some(ConfigValue::I64(2))
+    );
+}
+
+/// A corpus written before 0.5.201 carries every key on the ONE legacy leaf
+/// `config:v1`. Such a row still reads; the first write of that key after the
+/// move opens the key's own leaf with a `scores` row (a renewal cannot cross
+/// leaves) at `version = legacy + 1`, and the fold prefers it by version.
+#[tokio::test]
+async fn a_legacy_single_leaf_row_still_reads_and_is_shadowed_by_the_next_write() {
+    let engine = node().await;
+    register_self(&engine).await;
+    let nk = node_key_id(&engine).await;
+    // The exact pre-0.5.201 shape, through the same door the node wrote it.
+    let mut spec = ciris_server::attest::Spec::new(
+        attestation_type::SCORES,
+        ciris_persist::federation::types::cohort_scope::SELF,
+        serde_json::json!({
+            "dimension": graph_config::LEGACY_CONFIG_DIMENSION,
+            "attesting_key_id": nk,
+            "score": 1.0,
+            "cohort_scope": "self",
+            "witness_relation": "self",
+            "key": "legacy.knob",
+            "value": 7,
+            "version": 1,
+            "updated_by": "old",
+            "scope": "local",
+            "previous_version": null,
+        }),
+    );
+    spec.attested_key_id = Some(nk.clone());
+    spec.subject_key_ids = vec![nk.clone()];
+    spec.weight = Some(1.0);
+    let legacy_id = ciris_server::attest::emit(
+        &engine,
+        ciris_server::attest::KeySigner::Engine(&engine),
+        spec,
+    )
+    .await
+    .expect("a legacy config:v1 row is still admitted (first row on that leaf)");
+    graph_config::invalidate();
+
+    let read = graph_config::get_config(&engine, "legacy.knob")
+        .await
+        .expect("get")
+        .expect("a legacy row reads");
+    assert_eq!(read.value, ConfigValue::I64(7));
+    assert_eq!(read.version, 1);
+
+    let entry = graph_config::set_config(
+        &engine,
+        "legacy.knob",
+        ConfigValue::I64(8),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("the first write after the move opens the key's own leaf");
+    assert_eq!(
+        entry.version, 2,
+        "the version continues from the legacy row"
+    );
+    assert_eq!(
+        entry.previous_version.as_deref(),
+        Some(legacy_id.as_str()),
+        "previous_version still points at the legacy row"
+    );
+    let rows = config_rows(&engine, "legacy.knob").await;
+    assert_eq!(rows.len(), 1, "one row on the key's own leaf");
+    assert_eq!(
+        rows[0].attestation_type,
+        attestation_type::SCORES,
+        "a leaf opens with a scores row; a supersedes cannot cross leaves"
+    );
+    assert_eq!(references(&rows[0]), None);
+    assert_eq!(
+        graph_config::get_config(&engine, "legacy.knob")
+            .await
+            .expect("get")
+            .map(|e| e.value),
+        Some(ConfigValue::I64(8)),
+        "the new leaf shadows the legacy row by version"
+    );
+}
+
+/// A key that cannot name a leaf is refused here, with the reason, before
+/// persist refuses the malformed segment at the door (CIRISPersist#815).
+#[tokio::test]
+async fn a_key_that_cannot_name_a_leaf_is_refused_with_the_reason() {
+    let engine = node().await;
+    register_self(&engine).await;
+    for bad in ["Upper.case", "has:colon", "has space", ".leading-dot", ""] {
+        let err = graph_config::set_config(
+            &engine,
+            bad,
+            ConfigValue::I64(1),
+            "owner",
+            ConfigScope::Local,
+        )
+        .await
+        .expect_err(bad);
+        assert!(
+            err.to_string().contains("cannot name a leaf"),
+            "{bad:?}: {err}"
+        );
+    }
+    for good in [
+        "net.radio.tx_power_dbm",
+        "federation.peer_sideband.ciris-server-omff5xbiyl",
+        "9lives",
+    ] {
+        graph_config::set_config(
+            &engine,
+            good,
+            ConfigValue::I64(1),
+            "owner",
+            ConfigScope::Local,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{good}: {e}"));
+    }
 }

@@ -467,6 +467,15 @@ async fn a_self_asserted_accord_holder_is_refused_at_the_door() {
 /// `AccordCoScrubbed` / `HardwareAttested` / `AnchorScrubbed` are gated;
 /// `DerivedFromVerifiedState` and `DelegatedFromTrustRoot` are not — and the
 /// second of those is the one persist's own comment calls the #543 attack.
+///
+/// The set DID change, and this pin re-derived it: persist v42.0.0
+/// (CIRISPersist#814) found — through #543's own gate,
+/// `authority_conferring_set_covers_every_reserved_prefix_rule` — that
+/// `registry` and `verify` reserved the `licensure:` family without being in
+/// `AUTHORITY_CONFERRING_IDENTITY_TYPES`, so a Sybil could self-assert a
+/// co-steward and mint an absorbing licence revocation. Both now declare
+/// `AccordCoScrubbed` (nine types became eleven) and a self-asserted one is
+/// refused at the door: the gated set is four, not two.
 #[tokio::test]
 async fn which_privileged_claims_are_self_assertable_and_which_are_gated() {
     let engine = node().await;
@@ -507,8 +516,17 @@ async fn which_privileged_claims_are_self_assertable_and_which_are_gated() {
     );
     assert_eq!(
         refused,
-        vec![identity_type::ACCORD_HOLDER, identity_type::CANONICAL],
-        "and exactly two are gated: the hardware-attested and anchor-scrubbed roots"
+        vec![
+            identity_type::ACCORD_HOLDER,
+            identity_type::CANONICAL,
+            identity_type::REGISTRY,
+            identity_type::VERIFY,
+        ],
+        "and exactly four are gated: the hardware-attested and anchor-scrubbed roots, plus \
+         the two accord-co-scrubbed co-stewards (`registry` / `verify`, persist v42 / \
+         CIRISPersist#814) — a self-asserted co-steward would gain standing over THIRD \
+         PARTIES (it could revoke a licence), which is why the ceremony is proportionate \
+         there and not for a routine detector"
     );
 }
 

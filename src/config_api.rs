@@ -165,6 +165,9 @@ async fn set_config(
     if req.key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
     }
+    if let Err(e) = graph_config::config_key_is_a_leaf(&req.key) {
+        return err(StatusCode::BAD_REQUEST, e.to_string());
+    }
 
     // `updated_by` = the authenticated owner identity (the directing party) —
     // the session's `wa_id` (the absorbed login identifier).
@@ -267,6 +270,9 @@ async fn update_config(
     if key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
     }
+    if let Err(e) = graph_config::config_key_is_a_leaf(&key) {
+        return err(StatusCode::BAD_REQUEST, e.to_string());
+    }
     let req: UpdateConfigRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
@@ -316,6 +322,9 @@ async fn delete_config(
     }
     if key.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "config key must not be empty");
+    }
+    if let Err(e) = graph_config::config_key_is_a_leaf(&key) {
+        return err(StatusCode::BAD_REQUEST, e.to_string());
     }
     match graph_config::delete_config(&st.engine, &key, &caller.wa_id).await {
         Ok(_) => {

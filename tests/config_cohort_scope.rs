@@ -38,7 +38,7 @@ use ciris_persist::federation::types::{
 };
 use ciris_persist::prelude::{Engine, LocalSigner};
 
-use ciris_server::graph_config::{self, CONFIG_DIMENSION};
+use ciris_server::graph_config;
 use ciris_server::{ConfigScope, ConfigValue};
 
 const NODE_KEY_ID: &str = "ciris-server";
@@ -100,11 +100,14 @@ async fn latest_config_row(engine: &Arc<Engine>, key: &str) -> Attestation {
         .expect("list attestations by node");
     rows.into_iter()
         .filter(|a| {
-            a.attestation_type == attestation_type::SCORES
+            // The first write of a key is a `scores` row, every renewal a
+            // `supersedes` on the key's OWN leaf (persist v42, CC 3.4.5.1).
+            (a.attestation_type == attestation_type::SCORES
+                || a.attestation_type == attestation_type::SUPERSEDES)
                 && a.attestation_envelope
                     .get("dimension")
                     .and_then(|d| d.as_str())
-                    == Some(CONFIG_DIMENSION)
+                    == Some(graph_config::config_dimension(key).as_str())
                 && a.attestation_envelope.get("key").and_then(|k| k.as_str()) == Some(key)
         })
         .max_by_key(|a| {

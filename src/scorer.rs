@@ -122,7 +122,7 @@ impl ScorerConfig {
         };
         // TEST-ANCHOR-FENCED knob overrides (mesh-repro traceflow E2E,
         // CIRISServer#315 / CIRISAgent#924): a harness canonical has no owner
-        // session to PUT config:v1 knobs, and the E2E must not wait out the
+        // session to PUT config knobs, and the E2E must not wait out the
         // 3600s production cadence. Honored ONLY under CIRIS_TESTING_MODE —
         // the same fence as the announce-cadence override in compose.rs; a
         // production node never reads these.

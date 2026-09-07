@@ -241,7 +241,7 @@ pub mod federation_surface;
 pub mod field_conformance;
 /// **Config-as-CEG** (Server 0.5 Phase 1) — a signed, owner-gated GraphConfig
 /// service over the CEG, mirroring CIRISAgent's `GraphConfigService` but
-/// hybrid-signed + owner-gated. Config entries are self-attested `config:v1`
+/// hybrid-signed + owner-gated. Config entries are self-attested `config:{key}:v1`
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
@@ -554,7 +554,7 @@ pub use adapter::{Adapter, AdapterConfig, AdapterContext, AdapterStatus, NoopAda
 pub use compose::{serve, serve_with_adapter};
 
 /// The console-trusted `config set`/`config get` CLI ops (Server 0.5.73) — open the
-/// node's Engine offline + read/write a signed `config:v1` CEG object, so a HEADLESS
+/// node's Engine offline + read/write a signed `config:{key}:v1` CEG object, so a HEADLESS
 /// node can set `config:*` knobs (e.g. `net.bootstrap_peers`) with no app/session.
 pub use compose::{run_config_get, run_config_set};
 
