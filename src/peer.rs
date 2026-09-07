@@ -783,6 +783,30 @@ async fn standing_live_grant(
         .find(|a| a.subject_key_ids.iter().any(|s| s == peer_key_id)))
 }
 
+/// Does `signer` hold the key registered as `key_id`?
+///
+/// A `LocalSigner` names its key under one of TWO conventions, and a check that
+/// knows only one refuses real signers (CIRISServer#563):
+///
+/// * **the registered id verbatim** — a user's fed-ID, a test party:
+///   `key_id()` is the `federation_keys` id itself (the `attest::KeySigner`
+///   contract, which must not derive again or it would mint `<id>-<fp>-<fp>`);
+/// * **the keystore alias** — every signer `node_key::node_signer` builds:
+///   `key_id()` is `ciris-node-bootstrap` and the id the node is registered
+///   under, and authors rows as, is `derived_key_id()` =
+///   `ciris-node-bootstrap-<fp>` (FSD-003 #247).
+///
+/// The boot re-author (`node_key::reauthor_consent_as_node`) hands the second
+/// kind in, and the guard below compared its ALIAS to the node's DERIVED id — so
+/// the migration that makes a split node's topology visible (CIRISServer#312)
+/// refused every grant it was asked to move, and a node whose actor had peered
+/// before the split died on its next boot. The test that covered it registered
+/// its node under a bare label, so alias and id coincided there and nowhere else.
+#[must_use]
+pub fn signer_holds(signer: &ciris_persist::prelude::LocalSigner, key_id: &str) -> bool {
+    signer.key_id() == key_id || signer.derived_key_id() == key_id
+}
+
 /// **The grant EMIT half, with no idempotency guard.**
 ///
 /// Split out of [`emit_replication_consent_with_policy`] because there are now
@@ -855,10 +879,24 @@ async fn emit_grant_row<S: AsRef<str>>(
         .local_derived_key_id()
         .await
         .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
-    let signs_as_node = opts
-        .author_signer
+    // The pen. An explicit `author_signer` wins; otherwise, on a split node
+    // (the engine signs as the actor, the row must be the node's), the signer
+    // the boot split HOLDS for the node key is the author — so every runtime
+    // emit site (`POST /v1/federation/peers`, the edge's consent callback, the
+    // coverage top-up) authors as the node without each one learning about the
+    // split (CIRISServer#563). A standalone node, where the engine IS the node,
+    // never reaches the fallback.
+    let author: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>> =
+        opts.author_signer.clone().or_else(|| {
+            if engine_author == node_key_id {
+                None
+            } else {
+                crate::node_key::held_node_signer().filter(|s| signer_holds(s, node_key_id))
+            }
+        });
+    let signs_as_node = author
         .as_ref()
-        .is_some_and(|s| s.key_id() == node_key_id);
+        .is_some_and(|s| signer_holds(s, node_key_id));
     if engine_author != node_key_id && !signs_as_node {
         anyhow::bail!(
             "refusing to emit a consent grant naming {node_key_id:?}: this engine signs as \
@@ -987,7 +1025,7 @@ async fn emit_grant_row<S: AsRef<str>>(
     input.attested_key_id = Some(peer_key_id.to_owned());
     input.subject_key_ids = vec![peer_key_id.to_owned()];
     input.weight = Some(1.0);
-    let attestation_id = match opts.author_signer.as_ref() {
+    let attestation_id = match author.as_ref() {
         // The ordinary path: the engine self-attests. Unchanged.
         None => engine
             .emit_attestation_self(input)

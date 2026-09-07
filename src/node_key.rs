@@ -580,6 +580,8 @@ pub async fn resolve_node_identity(
         | IdentityVerdict::OtherInfrastructure { roles } => {
             let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
             let node_key_id = register_node_key(engine, &identity).await?;
+            // The process holds the node's pen from here on (CIRISServer#563).
+            set_node_signer(signer.clone());
             tracing::warn!(
                 configured_key_id = %configured_key_id,
                 configured_roles = ?roles,
@@ -1039,8 +1041,10 @@ pub async fn provision_node_identity(
     identity_dir: &std::path::Path,
     actor_key_id: Option<&str>,
 ) -> Result<String> {
-    let (_signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+    let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
     let key_id = register_node_key(engine, &identity).await?;
+    // The process holds the node's pen from here on (CIRISServer#563).
+    set_node_signer(signer);
 
     // ── The readiness gate: edge must not start on a half-provisioned identity ──
     //
@@ -1166,6 +1170,39 @@ pub async fn provision_node_identity(
 /// Both are the same mistake in the same direction — reaching for "the node's
 /// key" and getting whichever key happened to be at hand.
 static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// The signer this process HOLDS for the node key, once the split has minted or
+/// adopted one. `None` on a standalone node, whose engine is the node and signs
+/// for it directly.
+static NODE_SIGNER: std::sync::OnceLock<std::sync::Arc<ciris_persist::prelude::LocalSigner>> =
+    std::sync::OnceLock::new();
+
+/// Record the node's own signer for the process (CIRISServer#563).
+///
+/// Set once, beside the wire identity, by the split that produced it. Read by
+/// [`crate::peer`]'s consent emit: on a split node the engine signs as the
+/// actor, so a grant named for the node needs THIS pen — and every runtime emit
+/// site gets it without knowing the split happened. A second set with a
+/// different key is the same boot-ordering bug `set_wire_identity` refuses.
+pub fn set_node_signer(signer: std::sync::Arc<ciris_persist::prelude::LocalSigner>) {
+    let attempted = signer.derived_key_id();
+    if let Err(_rejected) = NODE_SIGNER.set(signer) {
+        let already = NODE_SIGNER.get().map(|s| s.derived_key_id());
+        if already.as_deref() != Some(attempted.as_str()) {
+            tracing::error!(
+                already = %already.unwrap_or_default(),
+                attempted = %attempted,
+                "node signer RESET attempted with a different key — the node would author \
+                 under two identities. The first value stands."
+            );
+        }
+    }
+}
+
+/// The signer held for the node key, if this process split one off.
+#[must_use]
+pub fn held_node_signer() -> Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>> {
+    NODE_SIGNER.get().cloned()
+}
 
 /// Record the wire identity. First writer wins; a second call with a DIFFERENT
 /// value is a bug worth shouting about rather than silently ignoring.
