@@ -74,6 +74,25 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
+    // SIGTERM handling for the life of the PROCESS, installed before anything
+    // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`
+    // during boot is latched and honoured the moment the serve starts waiting,
+    // and one between the embedded fold's serve calls is honoured by the next.
+    // Idempotent across re-serves; returns once the handler is registered.
+    crate::node_control::install_terminate_broker();
+    crate::node_control::serve_began();
+    // Every exit from here on — the stop-select's teardown or any `?` on a boot
+    // step — runs `serve_ended`, which propagates a latched SIGTERM the serve
+    // did not get to answer itself (#556 review: a boot that fails past the
+    // broker's installation must not leave a suppressed SIGTERM behind).
+    struct ServeGuard;
+    impl Drop for ServeGuard {
+        fn drop(&mut self) {
+            crate::node_control::serve_ended();
+        }
+    }
+    let _serve_guard = ServeGuard;
+
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
     // fail-secure gate is live: if the OS entropy source is producing detectably
@@ -1726,15 +1745,28 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     tracing::info!(
         ret = %cfg.listen_addr,
         mode = %initial_config.mode,
-        "CIRISServer up as a Reticulum node — ctrl-c or shutdown_node() to stop"
+        "CIRISServer up as a Reticulum node — SIGINT (ctrl-c), SIGTERM or shutdown_node() to stop"
     );
     crate::compose_status::complete();
-    // Wait for a stop trigger: ctrl-c (standalone) OR an in-process
-    // shutdown_node() request (the embedded fold's clean restart, #276). The
-    // read-API addr was armed in node_control when the listener bound, so
-    // shutdown_node() can wait for :4243 to actually free after teardown below.
+    // Wait for a stop trigger: SIGINT (ctrl-c), SIGTERM (`docker stop`, systemd,
+    // a launcher's kill — CIRISServer#555: until 0.5.201 only SIGINT was
+    // handled and SIGTERM killed the process abruptly, ports and WAL included;
+    // the broker installed at the top of this fn owns the receiver for the
+    // process lifetime, so a SIGTERM that arrived during boot resolves here at
+    // once) OR an in-process shutdown_node() request (the embedded fold's
+    // clean restart, #276). The read-API addr was armed in node_control when
+    // the listener bound, so shutdown_node() can wait for :4243 to actually
+    // free after teardown below.
+    let mut stopped_by_sigterm = false;
     tokio::select! {
-        r = tokio::signal::ctrl_c() => { r.context("await ctrl_c")?; }
+        r = tokio::signal::ctrl_c() => {
+            r.context("await ctrl_c")?;
+            tracing::info!("SIGINT — stopping the node cleanly (releasing :4243)");
+        }
+        _ = crate::node_control::terminated() => {
+            tracing::info!("SIGTERM — stopping the node cleanly (releasing :4243)");
+            stopped_by_sigterm = true;
+        }
         _ = crate::node_control::shutdown_requested() => {
             tracing::info!("node shutdown requested (shutdown_node) — releasing :4243");
         }
@@ -1775,6 +1807,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // `None` in the #221 fold — the agent owns the edge's run loop (init_edge_runtime).
     if let Some(edge_join) = edge_join {
         let _ = edge_join.await;
+    }
+    // A SIGTERM asked for the PROCESS to end, not only this serve. Now that
+    // the node has unwound cleanly, finish what the signal asked for unless an
+    // embedding host owns SIGTERM and decides for itself (#556 review): an
+    // embedded fold has no `main` to return to, and a host left alive with a
+    // stopped node inside it is what turns `docker stop` into SIGKILL.
+    // The LATCH decides, not the arm that won: a SIGTERM that landed during a
+    // teardown that SIGINT or shutdown_node() started is answered the same way.
+    if stopped_by_sigterm || crate::node_control::terminated_now() {
+        crate::node_control::propagate_terminate();
     }
     Ok(())
 }

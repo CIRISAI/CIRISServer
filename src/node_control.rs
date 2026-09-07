@@ -42,7 +42,10 @@ static BOUND_ADDR: Mutex<Option<SocketAddr>> = Mutex::new(None);
 /// once the read-API listener is up, so `shutdown_node()` knows what port to
 /// free and can't act on a stale request from a previous serve.
 pub fn arm(read_api_addr: SocketAddr) {
-    let _ = latch().send(false);
+    // `send_replace`: `send` stores nothing when no receiver is alive, which is
+    // exactly the state before the stop-select is polled — a retained stale
+    // request would then stop every subsequent serve at once (#556 review).
+    latch().send_replace(false);
     *BOUND_ADDR.lock().unwrap_or_else(|p| p.into_inner()) = Some(read_api_addr);
 }
 
@@ -69,7 +72,256 @@ pub async fn shutdown_requested() {
 /// Signal the running node to stop (does not wait). `shutdown_node()` layers the
 /// port-free wait on top of this.
 pub fn request_shutdown() {
-    let _ = latch().send(true);
+    // `send_replace`, not `send`: `watch::Sender::send` drops the value when no
+    // receiver is alive, and a `shutdown_node()` that lands after `arm()` but
+    // before the serve reaches its stop-select had no receiver yet — the
+    // request evaporated and the node kept serving. Same defect the SIGTERM
+    // latch had; `arm()` still resets a request that predates the bind.
+    latch().send_replace(true);
+}
+
+// ── SIGTERM, for the life of the PROCESS (CIRISServer#555, #556 review) ──────
+//
+// Two things a per-serve `tokio::signal::unix::signal(...)` inside the stop
+// select gets wrong, both found by review: (1) an async fn installs its handler
+// only when the select first polls it, which is AFTER the listener is bound and
+// every loop is spawned, so a SIGTERM during boot still killed the process
+// abruptly; (2) the stream lived only as long as one serve call, and tokio
+// never restores the default disposition once a handler is registered, so a
+// SIGTERM between the embedded fold's serve calls was swallowed outright.
+//
+// So the receiver is owned by a dedicated OS thread with its own tiny runtime,
+// installed ONCE per process before the first boot phase, and it latches into a
+// `watch<bool>` that every serve's select awaits. A SIGTERM during boot is
+// latched and honoured the moment the serve starts waiting — a clean stop
+// right after boot instead of a corpse with half-written state. A SIGTERM
+// between serves is latched and honoured by the next serve. A SECOND SIGTERM
+// after the first is the operator insisting: the process exits at once (143),
+// which is what `docker stop`'s escalation and every init system expect.
+
+/// Diagnostics for the two halves of the broker: how many times the OS handler
+/// ran, and how many bytes the broker thread read. Read by the test and by an
+/// operator who wants to know whether a SIGTERM reached the handler.
+pub static HANDLER_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static BROKER_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a serve is currently running (from `serve_with_adapter`'s first
+/// line to its return, success or error). The broker consults it: a SIGTERM
+/// that lands while a serve is active is latched for that serve to unwind on;
+/// one that lands with NO serve active — idle between the embedded fold's
+/// serve calls, or after a boot that failed past the broker's installation —
+/// has nothing to clean up and is propagated by the broker itself, so the
+/// process ends the way the default action would have (#556 review).
+static SERVE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark a serve as running. Paired with [`serve_ended`]; both idempotent.
+pub fn serve_began() {
+    SERVE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Mark the serve as finished (however it finished). If SIGTERM arrived while
+/// it ran and it did not propagate itself, this does — a serve that returned
+/// on an error path still owes the signal its answer.
+pub fn serve_ended() {
+    SERVE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    if terminated_now() {
+        propagate_terminate();
+    }
+}
+
+/// Has SIGTERM been latched? Readable from any thread, no runtime needed.
+#[must_use]
+pub fn terminated_now() -> bool {
+    *terminated_latch().subscribe().borrow()
+}
+
+/// The SIGTERM latch. `true` once the process has received SIGTERM; never
+/// reset — a terminated process does not un-terminate.
+fn terminated_latch() -> &'static watch::Sender<bool> {
+    static TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    TX.get_or_init(|| watch::channel(false).0)
+}
+
+/// Whether the process had its OWN SIGTERM handler before the broker chained
+/// onto it. `true` = a host (the agent's Python runtime, say) handles SIGTERM
+/// and decides what the process does after this node has stopped; `false` =
+/// the disposition was the default (terminate), so after a clean teardown the
+/// node must finish what the default would have done — see
+/// [`propagate_terminate`]. Read once at install; never changes after.
+static HOST_OWNS_SIGTERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the process-wide SIGTERM broker, once. Idempotent; returns when the
+/// handler is REGISTERED (not merely requested), so a caller may rely on the
+/// disposition from this line on. Where the platform has no SIGTERM, or the
+/// handler cannot be installed, this returns and [`terminated`] simply never
+/// resolves — the other stop triggers behave exactly as before.
+///
+/// No tokio in the path, deliberately: a `tokio::signal` stream is drained by
+/// whichever runtime's driver wakes first, and a receiver that must outlive
+/// every serve call and be observable from any of them cannot depend on which
+/// runtimes happen to be alive. The OS handler is async-signal-safe — one
+/// non-blocking `write(2)` of one byte to a socketpair — and a plain blocking
+/// thread reads it. Order of construction is load-bearing (#556 review): the
+/// reader thread exists BEFORE the handler is registered, so there is never a
+/// registered handler with nobody behind it; if the handler cannot be
+/// registered the writer is dropped and the reader exits.
+pub fn install_terminate_broker() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            use std::io::Read as _;
+            use std::os::unix::io::{AsRawFd, IntoRawFd};
+            let (mut reader, writer) = match std::os::unix::net::UnixStream::pair() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM broker: no socketpair — SIGTERM will not stop this node cleanly");
+                    return;
+                }
+            };
+            // Non-blocking writer: the handler must never block inside a
+            // signal context. If the buffer is full the notification is
+            // already pending, and EAGAIN is the right answer.
+            if let Err(e) = writer.set_nonblocking(true) {
+                tracing::warn!(error = %e, "SIGTERM broker: cannot make the notifier non-blocking — not installing");
+                return;
+            }
+            // Who owned SIGTERM before us? SIG_DFL means nobody: after a clean
+            // teardown the node finishes the default action itself.
+            // SAFETY: `sigaction` with a null new action only READS the current
+            // disposition into `old`, which is zero-initialised storage we own.
+            let host_owns = unsafe {
+                let mut old: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut old) == 0 {
+                    old.sa_sigaction != libc::SIG_DFL
+                } else {
+                    false
+                }
+            };
+            HOST_OWNS_SIGTERM.store(host_owns, std::sync::atomic::Ordering::SeqCst);
+
+            // 1. The reader, BEFORE the handler exists.
+            let spawned = std::thread::Builder::new()
+                .name("sigterm-broker".into())
+                .spawn(move || {
+                    let mut byte = [0u8; 1];
+                    // NO tracing on this thread, ever: the repository's file
+                    // sink is synchronous, and a stuck sink between the first
+                    // byte and the second `read_exact` would turn the promised
+                    // immediate escalation into a hang. Raw stderr only.
+                    let say = |msg: &[u8]| {
+                        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer.
+                        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+                    };
+                    // First byte: LATCH, then decide who answers the signal.
+                    if reader.read_exact(&mut byte).is_err() {
+                        return;
+                    }
+                    terminated_latch().send_replace(true);
+                    BROKER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if SERVE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+                        say(b"ciris-server: SIGTERM - stopping the node cleanly\n");
+                    } else {
+                        // Nothing is serving: no cleanup to run, no select to
+                        // observe the latch. Finish what the signal asked for.
+                        say(b"ciris-server: SIGTERM with no serve active - terminating\n");
+                        propagate_terminate();
+                    }
+                    // Second byte: the operator insisting. Exit at once.
+                    if reader.read_exact(&mut byte).is_ok() {
+                        say(b"ciris-server: second SIGTERM - exiting immediately (143)\n");
+                        std::process::exit(143);
+                    }
+                });
+            if let Err(e) = spawned {
+                // No reader → no handler. The default disposition stays.
+                tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned — SIGTERM keeps its default action");
+                return;
+            }
+
+            // 2. The handler, now that the reader is waiting. The writer fd is
+            // owned by the handler for the life of the process on success; on
+            // failure it is dropped here, which ends the reader.
+            let wfd = writer.as_raw_fd();
+            // SAFETY: the handler does exactly one async-signal-safe call —
+            // a non-blocking `write(2)` of a single byte to an fd that is
+            // never closed — plus one relaxed atomic add. Registration chains
+            // with any handler a host had installed rather than replacing it.
+            let registered = unsafe {
+                signal_hook_registry::register(libc::SIGTERM, move || {
+                    HANDLER_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // EAGAIN = a byte is already queued = already notified.
+                    let _ = libc::write(wfd, b"t".as_ptr().cast(), 1);
+                })
+            };
+            match registered {
+                Ok(_) => {
+                    let _ = writer.into_raw_fd(); // leak: the handler owns it now
+                    tracing::info!(
+                        host_owns_sigterm = host_owns,
+                        "SIGTERM broker installed — docker stop / systemd stop now end the node cleanly"
+                    );
+                }
+                Err(e) => {
+                    drop(writer); // the reader's read_exact fails → thread exits
+                    tracing::warn!(
+                        error = %e,
+                        "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
+                         stop this node cleanly; SIGTERM keeps its default action"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// After a SIGTERM-initiated teardown has COMPLETED: finish what the signal
+/// asked for. The broker's handler suppressed the default action so the node
+/// could unwind cleanly; if nobody else in this process handles SIGTERM (the
+/// standalone binary; an embedding host whose disposition was the default),
+/// the process must now terminate the way the default would have — restore
+/// `SIG_DFL` and re-raise, so the exit status is the conventional one and
+/// nothing above us keeps a stopped node's process alive until `docker stop`
+/// escalates to SIGKILL (#556 review). If a host DID own SIGTERM, its handler
+/// already ran (the registration chains) and the host decides; this returns.
+pub fn propagate_terminate() {
+    // Raw stderr, never tracing: this runs on the broker thread when no serve
+    // is active, and a blocking sink must not sit ahead of the exit.
+    let say = |msg: &[u8]| {
+        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer.
+        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+    };
+    if HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst) {
+        say(
+            b"ciris-server: node stopped on SIGTERM; the embedding host owns SIGTERM and decides\n",
+        );
+        return;
+    }
+    #[cfg(unix)]
+    {
+        say(b"ciris-server: SIGTERM honoured - terminating the process (default action)\n");
+        // SAFETY: restoring the default disposition and re-raising a signal
+        // this process has already received and finished handling.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            libc::raise(libc::SIGTERM);
+        }
+    }
+    // Not reached on unix unless the raise was blocked; the conventional status.
+    std::process::exit(143);
+}
+
+/// Await the process's SIGTERM. Resolves at once if it has already arrived
+/// (during boot, or between serves); never resolves where no broker could be
+/// installed. Used inside `serve_with_adapter`'s stop select beside ctrl-c and
+/// [`shutdown_requested`].
+pub async fn terminated() {
+    let mut rx = terminated_latch().subscribe();
+    // `wait_for` returns immediately if the value is already `true`; the sender
+    // is a static, so this only errors if the process is tearing down.
+    if rx.wait_for(|v| *v).await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// The `ciris_server.shutdown_node()` contract: request stop, then block until
@@ -108,11 +360,13 @@ pub fn shutdown_node_blocking(timeout: Duration) -> bool {
 mod tests {
     use super::*;
 
-    // One serial test: `arm`/`disarm`/`latch` are process-global, so parallel
-    // sub-tests would race the shared state. Exercise the whole contract in
-    // sequence instead.
+    /// `arm`/`disarm`/`latch` are process-global; the tests that touch them
+    /// run one at a time.
+    static LATCH_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn node_control_contract() {
+        let _serial = LATCH_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         // 1. No node serving → shutdown is an immediate no-op success.
         disarm();
         assert!(shutdown_node_blocking(Duration::from_secs(1)));
@@ -137,5 +391,73 @@ mod tests {
         // 4. disarm clears the recorded addr.
         disarm();
         assert_eq!(bound_addr(), None);
+    }
+
+    /// The broker is installed BEFORE the signal is raised (the install returns
+    /// only after the OS handler is registered), and a real SIGTERM to this
+    /// process is latched and observed by `terminated()` from a runtime the
+    /// broker knows nothing about — proving both review findings closed: no
+    /// window before installation, and a receiver that outlives any one serve
+    /// and any one runtime. One raise only: the second SIGTERM exits the process.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_sigterm_is_latched_and_observed() {
+        // A serve is "running" for the duration: with none active the broker
+        // would (correctly) terminate this test process on the raise.
+        serve_began();
+        install_terminate_broker();
+        install_terminate_broker(); // idempotent
+                                    // SAFETY: raises SIGTERM in this process; the broker's handler is
+                                    // registered (install returns only after it is), so the default
+                                    // action does not run.
+        let rc = unsafe { libc::raise(libc::SIGTERM) };
+        assert_eq!(rc, 0, "raise(SIGTERM)");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            if tokio::time::timeout(Duration::from_secs(5), terminated())
+                .await
+                .is_err()
+            {
+                panic!(
+                    "terminated() did not resolve after SIGTERM: handler_hits={} broker_reads={} latched={}",
+                    HANDLER_HITS.load(std::sync::atomic::Ordering::Relaxed),
+                    BROKER_READS.load(std::sync::atomic::Ordering::Relaxed),
+                    *terminated_latch().subscribe().borrow()
+                );
+            }
+        });
+        assert!(
+            terminated_now(),
+            "latched, readable without a runtime, never reset"
+        );
+        assert!(
+            !HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst),
+            "a test binary has the default disposition, so the node would own termination"
+        );
+        assert_eq!(HANDLER_HITS.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(BROKER_READS.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // Neither serve_ended() nor propagate_terminate() is called here: with
+        // the latch set, either would end the test process — which is the
+        // contract, not a bug.
+    }
+
+    /// The regression the fourth review found: `arm()` reset the stop latch
+    /// with `send`, which stores nothing while no receiver is alive — the
+    /// normal state before the stop-select is polled — so a retained request
+    /// stopped every subsequent serve at once.
+    #[test]
+    fn arm_clears_a_retained_stop_request_even_with_no_receiver() {
+        let _serial = LATCH_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        request_shutdown(); // retained (send_replace)
+        assert!(*latch().subscribe().borrow(), "retained without a receiver");
+        arm("127.0.0.1:4243".parse().unwrap());
+        assert!(
+            !*latch().subscribe().borrow(),
+            "arm must clear it even with no receiver alive"
+        );
+        disarm();
     }
 }
