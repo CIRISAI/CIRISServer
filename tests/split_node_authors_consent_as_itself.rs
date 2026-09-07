@@ -38,6 +38,7 @@ use std::sync::Arc;
 const ACTOR_ALIAS: &str = "ciris-agent-bootstrap";
 const PEER: &str = "ciris-canonical-1-for-the-split-test";
 const PEER_2: &str = "a-second-peer-consented-at-runtime";
+const PEER_3: &str = "a-third-peer-named-through-the-actor";
 
 fn seed(label: &str, n: u8) -> [u8; 32] {
     let mut s = [0u8; 32];
@@ -137,6 +138,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     .await;
     register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
     register(&engine, &signer_for(PEER_2), PEER_2, identity_type::NODE).await;
+    register(&engine, &signer_for(PEER_3), PEER_3, identity_type::NODE).await;
 
     // ── Before the split: the wizard peers with the canonical. The engine is the
     //    only pen, so the grant is the ACTOR'S — the state every agent-hosted node
@@ -230,6 +232,120 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .iter()
             .all(|p| p != PEER_2),
         "the runtime grant did NOT land under the actor"
+    );
+
+    // ── Phase 3: a caller that names the ACTOR — the contacts surface's
+    //    `self_identity::resolve`, the admin router's configured key — means
+    //    "this node". It is normalised to the node, not refused and not authored
+    //    under the actor (Codex P1 on #564).
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &actor,
+        PEER_3,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("a grant named for the actor on a split node is authored as the node");
+    assert!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &node)
+            .await
+            .expect("read as the node")
+            .contains(&PEER_3.to_string()),
+        "the node reads the grant the actor-naming caller asked for"
+    );
+    assert!(
+        !ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+            .await
+            .expect("read as the actor")
+            .contains(&PEER_3.to_string()),
+        "and it did NOT land under the actor"
+    );
+
+    // ── Phase 4: widening coverage (adding a contact) supersedes the node's
+    //    standing grant with a row the NODE signs — same attester as the grant
+    //    it retires (Codex P2 on #564). Named for the actor, like the contacts
+    //    surface does.
+    let defaults = ciris_server::peer::default_attestation_prefixes();
+    let extra = ["hard_case:", "location:", "capacity:", "trace:"]
+        .into_iter()
+        .find(|p| !defaults.iter().any(|d| d == p))
+        .expect("a prefix outside the default set, so the widening is real")
+        .to_string();
+    let coverage = ciris_server::peer::ensure_replication_consent_covers(
+        &engine,
+        &actor,
+        PEER,
+        std::slice::from_ref(&extra),
+    )
+    .await
+    .expect("widen the node's grant");
+    assert!(coverage.freshly_emitted, "a new, wider grant was written");
+    assert!(
+        coverage.superseded_attestation_id.is_some(),
+        "the supersedes composer succeeded — the corpus says the narrower grant is retired"
+    );
+    let rows = engine
+        .federation_directory()
+        .list_attestations_by(&node)
+        .await
+        .expect("the node's rows");
+    let supersedes: Vec<_> = rows
+        .iter()
+        .filter(|a| {
+            a.attestation_type == ciris_persist::federation::types::attestation_type::SUPERSEDES
+        })
+        .collect();
+    assert_eq!(
+        supersedes.len(),
+        1,
+        "exactly one supersedes row, authored by the node"
+    );
+    assert_eq!(
+        supersedes[0]
+            .attestation_envelope
+            .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
+            .and_then(|v| v.as_str()),
+        coverage.superseded_attestation_id.as_deref(),
+        "and it retires the grant the coverage call says it retired"
+    );
+    assert!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &node)
+            .await
+            .expect("read as the node")
+            .contains(&PEER.to_string()),
+        "consent to the peer is never momentarily absent across the widening"
+    );
+
+    // ── Phase 5: the CC#46 `analyze` grant is the NODE's consent to be scored,
+    //    signed with the node's pen, and it must RESOLVE (Codex P1 on #564).
+    let analyze = ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
+        .await
+        .expect("the analyze grant authors as the node and resolves");
+    assert!(analyze.is_some(), "a fresh analyze grant was written");
+    let resolved = engine
+        .federation_directory()
+        .resolve_scoped_consent(
+            PEER,
+            &node,
+            ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("resolve");
+    assert!(
+        matches!(
+            resolved,
+            ciris_persist::federation::hard_case::ConsentState::Granted
+        ),
+        "the peer may now score THIS NODE (the node key, not the actor): {resolved:?}"
+    );
+    assert!(
+        ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
+            .await
+            .expect("idempotent")
+            .is_none(),
+        "a second call finds the resolved stance and writes nothing"
     );
 
     // ── And the guard still refuses a pen that is not the node's.

@@ -1226,7 +1226,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // POST peering (each node authors its OWN consent grant).
                     .merge(crate::federation_admin::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        // The NODE's identity: the wire identity the split
+                        // established, else the configured key (which then IS
+                        // the node). `cfg.key_id` is the ACTOR on a split node,
+                        // and the owner-binding and consent both live on the
+                        // node key (CC 3.4.7.3, CIRISServer#563).
+                        crate::node_key::wire_identity()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| cfg.key_id.clone()),
                         self_key_record_json.clone(),
                         // Nudge the reconciler after a consent write (CEG changed)
                         // — but ONLY when a runtime exists to converge. The handler

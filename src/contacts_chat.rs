@@ -1020,15 +1020,22 @@ async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Res
             ))
         }
     };
-    let node_key_id = crate::self_identity::resolve(&st.engine, "contacts_chat")
-        .await
-        .map_err(|e| {
-            refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "auth.owner_gate.no_self_identity",
-                format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
-            )
-        })?;
+    // THIS NODE: the wire identity when boot split one off (the engine then
+    // signs as the ACTOR, and the owner-binding and the consent topology both
+    // sit on the node key — CC 3.4.7.3, CIRISServer#563); otherwise the
+    // engine's own derived id, never a label.
+    let node_key_id = match crate::node_key::wire_identity() {
+        Some(wire) => wire.to_owned(),
+        None => crate::self_identity::resolve(&st.engine, "contacts_chat")
+            .await
+            .map_err(|e| {
+                refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "auth.owner_gate.no_self_identity",
+                    format!("{} ({e})", crate::self_identity::MESSAGE_TEXT),
+                )
+            })?,
+    };
     // The serve-only floor (CC 3.2 / CC 1.13.5): an owner-UNBOUND node has no
     // responsible party, so it has no chat identity to author as either.
     let key_id = crate::auth::gate::require_owner_bound(&st.engine, &node_key_id)
