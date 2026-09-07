@@ -79,12 +79,61 @@ pub fn enable(source: &'static str) {
     );
 }
 
+/// `POST` — release what the allocator can give back (`malloc_trim(0)`) and
+/// report the heap before and after. Loopback-only, under the same switch.
+pub const ROUTE_TRIM: &str = "/v1/node/diagnostics/memory/trim";
+
+/// The arena cap this process asks glibc for when the operator has not.
+///
+/// CIRISStatus#69 measured `MALLOC_ARENA_MAX=2` on the sister node: committed
+/// 1458 → 611 MB, live unchanged. The canonical's `ciris-server` sat at the
+/// default cap (8 × nproc = 16 arenas, 15 in use) until the same variable
+/// took it from 2.47 GB to 1.0 GB (CIRISServer#552). Every glibc node gets
+/// that here without an operator knowing the knob exists; an explicit
+/// `MALLOC_ARENA_MAX` in the environment always wins.
+pub const ARENA_MAX: i32 = 2;
+
+/// Tune the process allocator, once, before the runtime spawns its threads.
+/// glibc only; a no-op everywhere else (bionic, iOS, macOS, Windows have no
+/// `mallopt` and no arena model to cap). Called by the same three serve
+/// entries as [`arm`], and independent of the diagnostics switch: it is not an
+/// instrument, it is the fix the instrument found.
+pub fn tune_allocator() {
+    #[cfg(target_env = "gnu")]
+    {
+        if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+            tracing::info!(
+                "allocator: MALLOC_ARENA_MAX set in the environment — leaving glibc's arena cap alone"
+            );
+            return;
+        }
+        // SAFETY: `mallopt` sets a process-wide allocator parameter; it takes
+        // two plain integers and touches no memory of ours. Called before any
+        // thread contention could have created arenas beyond the cap.
+        let rc = unsafe { libc::mallopt(libc::M_ARENA_MAX, ARENA_MAX) };
+        if rc == 1 {
+            tracing::info!(
+                arena_max = ARENA_MAX,
+                "allocator: glibc arena cap set (CIRISServer#552)"
+            );
+        } else {
+            tracing::warn!(
+                arena_max = ARENA_MAX,
+                rc,
+                "allocator: mallopt(M_ARENA_MAX) refused"
+            );
+        }
+    }
+}
+
 /// Arm diagnostics from the serve entry point: ON if the CLI flag was given or
 /// the environment asks, naming which; returns the resulting state so the
 /// caller can record it on `ServerConfig`. The ONE place the two switches meet,
 /// so the binary, the wheel's `py_main` and the embedded adapter cannot read
-/// them differently.
+/// them differently. Also the one place the allocator is tuned, for the same
+/// reason.
 pub fn arm(flag: bool) -> bool {
+    tune_allocator();
     if flag {
         enable(FLAG);
     } else if env_requests() {
@@ -222,11 +271,63 @@ async fn memory() -> Json<Value> {
     Json(memory_report())
 }
 
+/// `malloc_trim(0)`: hand back every whole free page the allocator holds — the
+/// top of the brk heap AND, since glibc 2.8, free pages inside free chunks of
+/// every arena. Returns whether the call reported releasing anything; `None`
+/// where there is no glibc.
+pub fn trim() -> Option<bool> {
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: `malloc_trim` walks the allocator's own bookkeeping under its
+        // locks and takes one integer; it frees nothing the program holds.
+        Some(unsafe { libc::malloc_trim(0) } == 1)
+    }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        None
+    }
+}
+
+/// The trim door. Measurement first: the report before, the call, the report
+/// after, and the deltas that matter (`fordblks`, `RssAnon`, `VmSwap`), so one
+/// call on the canonical says how much of an 888 MB free list a trim can
+/// actually return — before anyone writes a trim POLICY. It changes nothing a
+/// program can observe except its footprint; it is still a POST because it acts.
+async fn memory_trim() -> Json<Value> {
+    let before = memory_report();
+    let released = trim();
+    let after = memory_report();
+    let kb = |r: &Value, k: &str| -> Option<i64> {
+        r["proc"][k]
+            .as_str()
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|n| n.parse::<i64>().ok())
+    };
+    let u = |r: &Value, k: &str| r["mallinfo2"][k].as_u64().map(|v| v as i64);
+    let delta = |f: &dyn Fn(&Value) -> Option<i64>| match (f(&before), f(&after)) {
+        (Some(a), Some(b)) => json!(b - a),
+        _ => Value::Null,
+    };
+    Json(json!({
+        "released": released,
+        "delta": {
+            "fordblks_bytes": delta(&|r| u(r, "fordblks")),
+            "arena_bytes": delta(&|r| u(r, "arena")),
+            "keepcost_bytes": delta(&|r| u(r, "keepcost")),
+            "RssAnon_kb": delta(&|r| kb(r, "RssAnon")),
+            "VmSwap_kb": delta(&|r| kb(r, "VmSwap")),
+        },
+        "before": before,
+        "after": after,
+    }))
+}
+
 /// The diagnostics router. Mounted by compose ONLY when diagnostics are on;
 /// every route in it sits behind the loopback guard the setup routes use.
 pub fn router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
+        .route(ROUTE_TRIM, axum::routing::post(memory_trim))
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ))

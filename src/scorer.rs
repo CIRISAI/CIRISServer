@@ -154,6 +154,71 @@ impl ScorerConfig {
 /// [`ScorerConfig`], so a `POST /v1/config` that retunes `scorer.*` applies on the
 /// next pass with NO restart. The sleep period itself tracks the live
 /// `scorer.cadence_secs`: we recompute the interval whenever the cadence changes.
+/// How long an UNCHANGED corpus may keep the scorer from running a pass.
+///
+/// On the canonical a pass took 30–43 s of wall time every 60 s while authoring
+/// nothing — the corpus had not moved, and the node spent most of a vCPU
+/// re-deriving scores that already stood (CIRISServer#553: 64% of two cores
+/// busy on an idle node). A pass whose inputs have not changed since the last
+/// one produces the same answer; the tick now reads the corpus watermark
+/// (`MAX(trace_events.ts)` + `COUNT(*)`, one cheap aggregate) and skips the
+/// pass while it is unchanged. Not forever: a standing score is re-emitted
+/// before its coalescing bucket ages out (see `bucket_width`), so an idle node
+/// still runs a full pass at least this often. One hour against a 24 h bucket
+/// floor leaves a wide margin.
+pub const IDLE_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The corpus watermark a tick compares against the previous pass's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorpusWatermark {
+    pub last_admitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub rows: u64,
+}
+
+/// Why a tick ran, or did not run, the pass. Named so the log line and a test
+/// can say which — an idle node that never scores and a node whose scorer
+/// died look identical from outside otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickDecision {
+    /// First pass, or the watermark could not be read: run.
+    RunNoBaseline,
+    /// The corpus moved since the last pass: run.
+    RunCorpusChanged,
+    /// Unchanged, but the last pass is older than [`IDLE_REFRESH`]: run, so
+    /// standing scores are refreshed before they age out.
+    RunIdleRefresh,
+    /// Unchanged and recently scored: skip.
+    Skip,
+}
+
+/// Pure: decide from the previous watermark, the current one, and the time
+/// since the last pass. `None` for `current` means the watermark read failed —
+/// never a reason to skip.
+#[must_use]
+pub fn tick_decision(
+    previous: Option<CorpusWatermark>,
+    current: Option<CorpusWatermark>,
+    since_last_pass: std::time::Duration,
+) -> TickDecision {
+    match (previous, current) {
+        (None, _) | (_, None) => TickDecision::RunNoBaseline,
+        (Some(p), Some(c)) if p != c => TickDecision::RunCorpusChanged,
+        _ if since_last_pass >= IDLE_REFRESH => TickDecision::RunIdleRefresh,
+        _ => TickDecision::Skip,
+    }
+}
+
+/// Read the watermark through the same aggregate the trace-plane watch and the
+/// operator surface read, so "did the corpus move" has one definition.
+async fn corpus_watermark(engine: &Engine) -> Option<CorpusWatermark> {
+    crate::operator_surface::corpus_of(engine.storage_summary().await)
+        .ok()
+        .map(|c| CorpusWatermark {
+            last_admitted_at: c.last_admitted_at,
+            rows: c.rows,
+        })
+}
+
 pub fn spawn(
     engine: Arc<Engine>,
     mut config_rx: watch::Receiver<crate::config_reconcile::ResolvedConfig>,
@@ -205,6 +270,10 @@ pub fn spawn(
         // The first immediate tick fires at once; skip it so we don't score an
         // empty just-booted corpus.
         tick.tick().await;
+        // The idle short-circuit's memory: the watermark the last pass ran
+        // against, and when it ran (CIRISServer#553).
+        let mut last_watermark: Option<CorpusWatermark> = None;
+        let mut last_pass_at = std::time::Instant::now();
         loop {
             // CIRISServer#315 ask 2: select on the CONFIG WATCH as well as the
             // tick, so a hot knob write re-arms the timer IMMEDIATELY instead of
@@ -231,11 +300,41 @@ pub fn spawn(
                             "capacity scorer cadence retuned from config:* (hot)"
                         );
                     }
-                    if let Err(e) = run_pass(&engine, &node_key_id, &cfg).await {
-                        tracing::warn!(
-                            error = %e,
-                            "capacity scorer pass failed (will retry next cadence)"
+                    let current = corpus_watermark(&engine).await;
+                    let decision =
+                        tick_decision(last_watermark, current, last_pass_at.elapsed());
+                    if decision == TickDecision::Skip {
+                        // AUDIBLE skip: the tick fired, the corpus had not moved,
+                        // nothing was re-derived. A silent skip would read as a
+                        // dead scorer from outside.
+                        tracing::info!(
+                            last_admitted_at = ?current.and_then(|w| w.last_admitted_at),
+                            rows = current.map(|w| w.rows),
+                            since_last_pass_s = last_pass_at.elapsed().as_secs(),
+                            idle_refresh_s = IDLE_REFRESH.as_secs(),
+                            "capacity scorer pass SKIPPED — corpus unchanged since the last pass"
                         );
+                        continue;
+                    }
+                    let t0 = std::time::Instant::now();
+                    match run_pass(&engine, &node_key_id, &cfg).await {
+                        Ok(emitted) => {
+                            last_watermark = current;
+                            last_pass_at = std::time::Instant::now();
+                            tracing::info!(
+                                decision = ?decision,
+                                emitted,
+                                elapsed_ms = t0.elapsed().as_millis() as u64,
+                                "capacity scorer pass done"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                elapsed_ms = t0.elapsed().as_millis() as u64,
+                                "capacity scorer pass failed (will retry next cadence)"
+                            );
+                        }
                     }
                 }
                 changed = config_rx.changed() => {
@@ -1623,6 +1722,54 @@ mod coalescing_tests {
     /// The dedup property this exists for: two passes inside one bucket, same
     /// score, must produce the SAME assertion instant — which is what makes the
     /// signed envelopes identical rather than merely similar.
+    /// The idle short-circuit never skips without a baseline, never skips a
+    /// moved corpus, and never skips past the refresh floor (CIRISServer#553).
+    #[test]
+    fn the_tick_skips_only_an_unchanged_recently_scored_corpus() {
+        use std::time::Duration;
+        let t = chrono::Utc::now();
+        let w = CorpusWatermark {
+            last_admitted_at: Some(t),
+            rows: 10,
+        };
+        let moved_row = CorpusWatermark {
+            last_admitted_at: Some(t),
+            rows: 11,
+        };
+        let moved_time = CorpusWatermark {
+            last_admitted_at: Some(t + chrono::Duration::seconds(1)),
+            rows: 10,
+        };
+        assert_eq!(
+            tick_decision(None, Some(w), Duration::ZERO),
+            TickDecision::RunNoBaseline
+        );
+        assert_eq!(
+            tick_decision(Some(w), None, Duration::ZERO),
+            TickDecision::RunNoBaseline
+        );
+        assert_eq!(
+            tick_decision(Some(w), Some(moved_row), Duration::ZERO),
+            TickDecision::RunCorpusChanged
+        );
+        assert_eq!(
+            tick_decision(Some(w), Some(moved_time), Duration::ZERO),
+            TickDecision::RunCorpusChanged
+        );
+        assert_eq!(
+            tick_decision(Some(w), Some(w), Duration::from_secs(60)),
+            TickDecision::Skip
+        );
+        assert_eq!(
+            tick_decision(Some(w), Some(w), IDLE_REFRESH),
+            TickDecision::RunIdleRefresh
+        );
+        assert!(
+            IDLE_REFRESH.as_secs() * 24 <= 24 * 3600 * 24,
+            "refresh floor sits well inside a day"
+        );
+    }
+
     #[test]
     fn passes_within_one_bucket_share_an_assertion_instant() {
         let bucket = chrono::Duration::seconds(SCORE_COALESCE_BASE);

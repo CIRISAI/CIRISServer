@@ -107,6 +107,33 @@
 //! contradiction, and it is: a peer holding both cannot tell which is current.
 //! There is no exemption for the local key here, deliberately — a detector that
 //! trusts its own node is not a detector.
+//!
+//! ## How a pass reads the corpus (0.5.200, CIRISServer#553)
+//!
+//! Until 0.5.199 a pass collected up to `max_rows` full rows — each carrying a
+//! parsed `serde_json::Value` envelope averaging 10 KiB on the canonical — into
+//! one `Vec<Attestation>` and compared them: ~54 MiB of raw envelopes and a few
+//! hundred MB of transient heap every fifteen minutes, freed into glibc's free
+//! lists and never returned (CIRISServer#552). And because every pass restarted
+//! its cursor from the beginning and stopped at `max_rows`, it scanned the SAME
+//! lowest-id rows forever and never saw the rest of the tier.
+//!
+//! Now a pass **streams one page at a time** and keeps only a [`RowClaim`] per
+//! row — the coordinate, the claim digest, the content hash, the signed instant
+//! and the row id, a few hundred bytes — digesting each page off the runtime
+//! workers (`spawn_blocking`) and dropping the envelopes before the next page is
+//! fetched. The claims accumulate in a [`ClaimIndex`] that lives for the life of
+//! the detector task; each pass walks a `max_rows` window from a **persisted
+//! cursor**, so consecutive passes cover the whole tier and keep covering it,
+//! and a wrap evicts the claims of rows the cycle no longer saw. A candidate
+//! contradiction found in the index is **verified before it is recorded**: both
+//! rows are fetched by id and must still be live federation-tier rows, so a
+//! stale claim can never accuse a key on the strength of a row that is gone.
+//!
+//! The pass also no longer fires in the same second as the trace-plane watch or
+//! on edge's 300 s announce grid ([`PHASE_OFFSET`]), and it says what it cost
+//! every time it runs (one INFO line per pass), because a silent-when-fine pass
+//! is how a 23 s boot phase and a fifteen-minute accept stall hid for days.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -143,13 +170,27 @@ pub struct DetectorConfig {
     /// both rows and the `event_id` is idempotent, so a slow cadence costs
     /// latency-to-notice and nothing else.
     pub cadence: Duration,
-    /// Rows per read page.
+    /// Rows per read page — and the size of the transient the pass holds at
+    /// once, since a page's envelopes are dropped before the next is fetched.
     pub page: i64,
-    /// Hard ceiling on rows scanned per pass. A pass that hits it is REPORTED
-    /// as truncated (never silently short): partial coverage that reads as full
-    /// coverage is the failure mode this codebase keeps paying for.
+    /// Rows scanned per PASS. The pass resumes from where the previous one
+    /// stopped and wraps at the end of the tier, so this bounds the cost of one
+    /// pass, not the coverage of the detector; a pass that stops here reports
+    /// `truncated` (more of the tier remains for the next pass), never silently
+    /// short.
     pub max_rows: usize,
 }
+
+/// How far past its own cadence the detector's first pass fires, and therefore
+/// the phase its ticks keep for the life of the process.
+///
+/// Two things must not share this pass's second (CIRISServer#553): the
+/// trace-plane watch, whose ticks sit at [`crate::trace_plane_watch::PHASE_OFFSET`]
+/// past boot, and edge's default 300 s announce grid, which `900 = 3 × 300`
+/// would otherwise land on every time. 150 s is half an announce interval, so
+/// the pass is as far from an announce as it can be; the test
+/// `the_two_timers_do_not_share_a_second` keeps the pair apart.
+pub const PHASE_OFFSET: Duration = Duration::from_secs(150);
 
 impl Default for DetectorConfig {
     fn default() -> Self {
@@ -217,26 +258,217 @@ pub fn classify_pair(a: &Attestation, b: &Attestation) -> PairVerdict {
     // the substrate's own canonicalizer so two nodes agree on the bytes. The
     // fallback to the stored hash keeps the old behaviour for an envelope that
     // will not canonicalize rather than silently calling such a pair distinct.
-    let same_claim = match (
-        claim_digest(&a.attestation_envelope),
-        claim_digest(&b.attestation_envelope),
-    ) {
+    //
+    // The predicate itself lives on the CLAIM (`classify_claims`): the streaming
+    // pass never holds two rows at once, so the rows' reduction is what gets
+    // compared, and this row-shaped door is that same comparison spelled over
+    // rows — one rule, one implementation.
+    classify_claims(&RowClaim::of(a), &RowClaim::of(b))
+}
+
+/// The coordinate two rows must share before they can contradict:
+/// `(attester, subject, dimension)`. The signed instant is compared inside the
+/// group, not keyed on, because a differing instant is a verdict
+/// ([`PairVerdict::Superseded`]) and not a different group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClaimCoordinate {
+    pub attesting_key_id: String,
+    pub subject_key_id: String,
+    pub dimension: String,
+}
+
+/// Everything the predicate needs from one row, and nothing else — a few
+/// hundred bytes against a parsed envelope's tens of KiB. This is what the
+/// [`ClaimIndex`] holds between passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowClaim {
+    pub attestation_id: String,
+    /// `original_content_hash` — the fallback comparison for an envelope that
+    /// will not canonicalize (see `classify_claims`).
+    pub content_hash: String,
+    /// [`claim_digest`] of the envelope, `None` when it would not canonicalize.
+    pub claim_digest: Option<String>,
+    /// The SIGNED assertion instant (module doc: "which `asserted_at`").
+    pub signed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The pass that last saw this row live. Eviction on wrap reads it.
+    pub seen_pass: u64,
+}
+
+impl RowClaim {
+    /// Reduce one row. Does the canonicalization — this is the CPU of a pass,
+    /// and the streaming scan runs it off the runtime workers.
+    #[must_use]
+    pub fn of(a: &Attestation) -> Self {
+        RowClaim {
+            attestation_id: a.attestation_id.clone(),
+            content_hash: a.original_content_hash.clone(),
+            claim_digest: claim_digest(&a.attestation_envelope),
+            signed_at: signed_instant(&a.attestation_envelope),
+            seen_pass: 0,
+        }
+    }
+}
+
+/// The coordinate a row claims at, or `None` for an undimensioned row (a
+/// structural composer): a statement ABOUT another row, whose grouping key
+/// would be a different one entirely.
+#[must_use]
+pub fn coordinate_of(a: &Attestation) -> Option<ClaimCoordinate> {
+    dimension_of(a).map(|dimension| ClaimCoordinate {
+        attesting_key_id: a.attesting_key_id.clone(),
+        subject_key_id: a.attested_key_id.clone(),
+        dimension,
+    })
+}
+
+/// THE predicate, over two claims that already share a [`ClaimCoordinate`].
+///
+/// Same digest (or, for an envelope that would not canonicalize, the same
+/// stored hash) is one statement however it is dated. Otherwise the two signed
+/// instants decide: different instants order the pair (a revision); equal
+/// instants with different content is the CC 6.1.1 N4 case; a missing instant
+/// on either side is counted as unmeasurable, never cleared.
+#[must_use]
+pub fn classify_claims(a: &RowClaim, b: &RowClaim) -> PairVerdict {
+    let same_claim = match (&a.claim_digest, &b.claim_digest) {
         (Some(da), Some(db)) => da == db,
-        _ => a.original_content_hash == b.original_content_hash,
+        _ => a.content_hash == b.content_hash,
     };
     if same_claim {
         return PairVerdict::SameStatement;
     }
-    let (Some(ta), Some(tb)) = (
-        signed_instant(&a.attestation_envelope),
-        signed_instant(&b.attestation_envelope),
-    ) else {
+    let (Some(ta), Some(tb)) = (a.signed_at, b.signed_at) else {
         return PairVerdict::NoSignedInstant;
     };
     if ta == tb {
         PairVerdict::Contradiction
     } else {
         PairVerdict::Superseded
+    }
+}
+
+/// A contradiction found among CLAIMS: the coordinate, the shared signed
+/// instant, and the two row ids (sorted). Not yet evidence — the pass turns it
+/// into a [`Contradiction`] only after fetching both rows and confirming they
+/// are still live (`verify_candidate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimContradiction {
+    pub coordinate: ClaimCoordinate,
+    pub signed_at: chrono::DateTime<chrono::Utc>,
+    /// Sorted, so a candidate's identity never depends on read order.
+    pub attestation_ids: (String, String),
+}
+
+/// What comparing a set of claims found — the counts of [`DetectorReport`]
+/// without the rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaimVerdicts {
+    pub pairs_compared: usize,
+    pub same_statement: usize,
+    pub superseded: usize,
+    pub no_signed_instant: usize,
+    pub candidates: Vec<ClaimContradiction>,
+}
+
+/// Compare every pair of claims within each coordinate group. Pure.
+/// Quadratic WITHIN a group only; group sizes are small by construction (one
+/// live row per coalescing bucket per coordinate).
+#[must_use]
+pub fn detect_claims<'a, I>(groups: I) -> ClaimVerdicts
+where
+    I: IntoIterator<Item = (&'a ClaimCoordinate, &'a [RowClaim])>,
+{
+    let mut out = ClaimVerdicts::default();
+    for (coord, group) in groups {
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (&group[i], &group[j]);
+                out.pairs_compared += 1;
+                match classify_claims(a, b) {
+                    PairVerdict::SameStatement => out.same_statement += 1,
+                    PairVerdict::Superseded => out.superseded += 1,
+                    PairVerdict::NoSignedInstant => out.no_signed_instant += 1,
+                    PairVerdict::Contradiction => {
+                        let at = a
+                            .signed_at
+                            .expect("classify_claims returns Contradiction only when both parse");
+                        let (lo, hi) = if a.attestation_id <= b.attestation_id {
+                            (a, b)
+                        } else {
+                            (b, a)
+                        };
+                        out.candidates.push(ClaimContradiction {
+                            coordinate: coord.clone(),
+                            signed_at: at,
+                            attestation_ids: (lo.attestation_id.clone(), hi.attestation_id.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The claims this detector holds between passes, grouped by coordinate.
+///
+/// One entry per live row id; an upsert replaces a row's claim (a re-recorded
+/// row lands in the same slot), and [`ClaimIndex::evict_unseen_since`] drops
+/// the rows a full cycle of passes no longer produced — expired, withdrawn,
+/// evicted by retention. Bounded by the size of the live federation tier at a
+/// few hundred bytes per row.
+#[derive(Debug, Default)]
+pub struct ClaimIndex {
+    groups: std::collections::BTreeMap<ClaimCoordinate, Vec<RowClaim>>,
+    rows: usize,
+}
+
+impl ClaimIndex {
+    /// Insert or replace one row's claim.
+    pub fn upsert(&mut self, coord: ClaimCoordinate, claim: RowClaim) {
+        let group = self.groups.entry(coord).or_default();
+        if let Some(slot) = group
+            .iter_mut()
+            .find(|c| c.attestation_id == claim.attestation_id)
+        {
+            *slot = claim;
+        } else {
+            group.push(claim);
+            self.rows += 1;
+        }
+    }
+
+    /// Drop every claim last seen BEFORE `pass` — called once per wrap, with
+    /// the pass number the finished cycle started at, so a row the cycle did
+    /// not re-produce leaves the index. Returns how many left.
+    pub fn evict_unseen_since(&mut self, pass: u64) -> usize {
+        let mut evicted = 0;
+        self.groups.retain(|_, group| {
+            let before = group.len();
+            group.retain(|c| c.seen_pass >= pass);
+            evicted += before - group.len();
+            !group.is_empty()
+        });
+        self.rows -= evicted;
+        evicted
+    }
+
+    /// Live row claims held.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Coordinates held.
+    #[must_use]
+    pub fn coordinates(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Compare everything held.
+    #[must_use]
+    pub fn verdicts(&self) -> ClaimVerdicts {
+        detect_claims(self.groups.iter().map(|(k, v)| (k, v.as_slice())))
     }
 }
 
@@ -397,9 +629,30 @@ pub struct DetectorReport {
     pub suspect_rows: usize,
     /// The contradictions, in a stable order.
     pub contradictions: Vec<Contradiction>,
-    /// The `max_rows` ceiling was hit: this pass did NOT see the whole live
-    /// corpus and its zero (or its count) is a floor, not a total.
+    /// The `max_rows` window ended before the tier did: this pass did NOT see
+    /// the whole live tier, its zero (or its count) is a floor, and the NEXT
+    /// pass continues from where this one stopped.
     pub truncated: bool,
+    /// Pages read this pass.
+    pub pages: usize,
+    /// This pass continued from a cursor left by the previous one.
+    pub resumed: bool,
+    /// This pass reached the end of the tier and the next starts over.
+    pub wrapped: bool,
+    /// Candidates found in the index whose rows were no longer both live when
+    /// fetched for verification — counted, never recorded.
+    pub candidates_unverified: usize,
+    /// Row claims held in the index after this pass (0 for a rowset-only
+    /// [`detect`]).
+    pub index_rows: usize,
+    /// Coordinates held in the index after this pass.
+    pub index_coordinates: usize,
+    /// Wall time reading pages.
+    pub read_ms: u64,
+    /// Wall time digesting rows (off the runtime workers).
+    pub digest_ms: u64,
+    /// Wall time of the whole pass.
+    pub elapsed_ms: u64,
 }
 
 /// Compare every pair of rows sharing `(attester, subject, dimension)`. Pure —
@@ -411,51 +664,73 @@ pub struct DetectorReport {
 /// `max_rows²`, once per cadence.
 #[must_use]
 pub fn detect(rows: &[&Attestation]) -> DetectorReport {
-    let mut groups: std::collections::BTreeMap<(String, String, String), Vec<&Attestation>> =
-        std::collections::BTreeMap::new();
+    let mut index = ClaimIndex::default();
+    let mut by_id: std::collections::BTreeMap<&str, &Attestation> = Default::default();
     for r in rows {
-        // An undimensioned row (a structural composer) has no claim coordinate
-        // to contradict at — it is a statement ABOUT another row, and its
-        // grouping key would be a different one entirely.
-        let Some(dim) = dimension_of(r) else { continue };
-        groups
-            .entry((r.attesting_key_id.clone(), r.attested_key_id.clone(), dim))
-            .or_default()
-            .push(r);
+        by_id.insert(r.attestation_id.as_str(), r);
+        let Some(coord) = coordinate_of(r) else {
+            continue;
+        };
+        index.upsert(coord, RowClaim::of(r));
     }
-
+    let verdicts = index.verdicts();
     let mut report = DetectorReport {
         rows_scanned: rows.len(),
+        pairs_compared: verdicts.pairs_compared,
+        same_statement: verdicts.same_statement,
+        superseded: verdicts.superseded,
+        no_signed_instant: verdicts.no_signed_instant,
         ..Default::default()
     };
-    for ((_, _, dim), group) in groups {
-        for i in 0..group.len() {
-            for j in (i + 1)..group.len() {
-                let (a, b) = (group[i], group[j]);
-                report.pairs_compared += 1;
-                match classify_pair(a, b) {
-                    PairVerdict::SameStatement => report.same_statement += 1,
-                    PairVerdict::Superseded => report.superseded += 1,
-                    PairVerdict::NoSignedInstant => report.no_signed_instant += 1,
-                    PairVerdict::Contradiction => {
-                        // `classify_pair` only reaches this arm with both
-                        // instants present and equal, so either one is THE
-                        // coordinate; taking `a`'s is not a choice between them.
-                        let at = signed_instant(&a.attestation_envelope)
-                            .expect("classify_pair returns Contradiction only when both parse");
-                        report
-                            .contradictions
-                            .push(Contradiction::new(a, b, dim.clone(), at));
-                    }
-                }
-            }
-        }
+    for c in verdicts.candidates {
+        // Both rows are in hand here; the streaming pass fetches them instead.
+        let (Some(a), Some(b)) = (
+            by_id.get(c.attestation_ids.0.as_str()),
+            by_id.get(c.attestation_ids.1.as_str()),
+        ) else {
+            report.candidates_unverified += 1;
+            continue;
+        };
+        report.contradictions.push(Contradiction::new(
+            a,
+            b,
+            c.coordinate.dimension,
+            c.signed_at,
+        ));
     }
     report
 }
 
-/// The live federation-tier rows this node holds, read with the filter PUSHED
-/// INTO THE QUERY (CIRISServer#343).
+/// Per-detector state that outlives a pass: where the next pass resumes, the
+/// pass counter, and the claims held so far.
+#[derive(Debug, Default)]
+pub struct ScanState {
+    cursor: Option<ciris_persist::ceg::AttestationCursor>,
+    pass: u64,
+    /// The pass number the current walk of the tier started at. On wrap, every
+    /// claim not seen since it leaves the index.
+    cycle_started_at: u64,
+    index: ClaimIndex,
+}
+
+impl ScanState {
+    /// Claims held.
+    #[must_use]
+    pub fn index(&self) -> &ClaimIndex {
+        &self.index
+    }
+}
+
+/// One page's reduction, computed off the runtime workers.
+struct DigestedPage {
+    claims: Vec<(ClaimCoordinate, RowClaim)>,
+    suspect_rows: usize,
+    undimensioned: usize,
+}
+
+/// Stream one `max_rows` window of live federation-tier rows from `state`'s
+/// cursor into `state`'s index, page by page — the filter PUSHED INTO THE
+/// QUERY (CIRISServer#343), one page of envelopes in memory at a time.
 ///
 /// Two narrowings, and they are not the same kind of thing:
 ///
@@ -463,30 +738,30 @@ pub fn detect(rows: &[&Attestation]) -> DetectorReport {
 ///   NULL OR expires_at > now)`) and it is also the semantic bound: rows live at
 ///   one instant all overlap at that instant, which is the "overlapping
 ///   validity" leg of the predicate.
-/// - `tier` is a REAL pushdown as of persist v30.0.0 (CIRISPersist#596 item 2).
-///   It used to be filtered in Rust on purpose, because `list_attestations`
-///   accepted the field and silently ignored it — honoured by the `list_scores`
-///   handles and dropped by this one, along with `window` and `attester_filter`
-///   — so setting it here would have read as a bound and been none. It binds
-///   now, and it is set EXPLICITLY (`Tier::Federation`, never `None`, whose
-///   meaning on this handle is deliberately "no predicate"). The restriction is
-///   right on its own merits: a local-tier row was never published to anyone, so
-///   it cannot be evidence that a key told two peers different things.
-///
-///   Pushing it down also fixes what `cfg.max_rows` counts. The scan bound used
-///   to be spent on local-tier rows that were then thrown away, so a corpus with
-///   many local rows could report `truncated` having examined almost no
-///   federation evidence.
+/// - `tier` is a REAL pushdown as of persist v30.0.0 (CIRISPersist#596 item 2),
+///   set EXPLICITLY (`Tier::Federation`, never `None`, whose meaning on this
+///   handle is deliberately "no predicate"). A local-tier row was never
+///   published to anyone, so it cannot be evidence that a key told two peers
+///   different things.
 ///
 /// The scope is the node authenticated AS ITSELF (`build_caller_admission` —
 /// the only public path to an admission, so this cannot fabricate reach it does
 /// not have). `Unauthenticated` would drop every `self`-scoped row, which is the
 /// narrowing-that-reads-as-healthy that cost `graph_config` a nine-test cut.
-async fn live_rows(
+///
+/// CIRISServer#355 / CIRISPersist#570 ask 4: a row whose attester's statements
+/// are revoked from an instant covering it is not evidence — it is the attack
+/// this detector would otherwise BUILD (steal a key, sign two contradictory
+/// rows at one instant, and the victim equivocates on every node holding
+/// both). Such rows are dropped per page before digesting and COUNTED
+/// (`suspect_rows`), never silently absent.
+async fn scan_window(
     engine: &Engine,
     node_key_id: &str,
     cfg: &DetectorConfig,
-) -> Result<(Vec<Attestation>, bool)> {
+    state: &mut ScanState,
+    report: &mut DetectorReport,
+) -> Result<()> {
     use ciris_persist::ceg::list::federation::AttestationFilter;
 
     let admission = ciris_persist::scope::build_caller_admission(engine, &node_key_id.to_owned())
@@ -494,91 +769,188 @@ async fn live_rows(
         .map_err(|e| anyhow::anyhow!("resolve equivocation-scan caller admission: {e}"))?;
     let scope = CallerScope::Authenticated { admission };
     let now = chrono::Utc::now();
+    let pass = state.pass;
 
-    let mut out: Vec<Attestation> = Vec::new();
+    report.resumed = state.cursor.is_some();
     let mut scanned = 0usize;
-    let mut cursor = None;
-    let truncated = loop {
+    loop {
         // `AttestationFilter` is #[non_exhaustive] — build-then-set so a new
         // predicate arrives as a default rather than a compile break.
         let mut filter = AttestationFilter::default();
         filter.valid_at = Some(now);
-        // EXPLICIT (persist v30.0.0 / #596 item 2). `None` on this handle keeps
-        // its historical "no predicate" meaning; an explicit tier is honoured
-        // identically across handles, which is what makes it safe to state.
         filter.tier = Some(ciris_persist::ceg::list::federation::Tier::Federation);
+        let t_read = std::time::Instant::now();
         let page = engine
-            .list_attestations(filter, cursor, cfg.page, scope.clone())
+            .list_attestations(filter, state.cursor.take(), cfg.page, scope.clone())
             .await
             .map_err(|e| anyhow::anyhow!("list live attestations: {e}"))?;
+        report.read_ms += t_read.elapsed().as_millis() as u64;
+        report.pages += 1;
         scanned += page.items.len();
+        report.rows_scanned += page.items.len();
+
         // The in-process re-check is kept as a WITNESS, not as the enforcement:
         // a local-tier row surviving the push-down would mean the axis stopped
-        // binding, and this detector must narrow correctly either way. It is
-        // asserted rather than silently dropped, because "the filter came back
-        // wrong" is a substrate defect an operator has to be able to see.
+        // binding, and this detector must narrow correctly either way.
         debug_assert!(
             page.items
                 .iter()
                 .all(|a| a.tier == attestation_tier::FEDERATION),
             "AttestationFilter::tier did not bind on list_attestations"
         );
-        out.extend(
-            page.items
-                .into_iter()
-                .filter(|a| a.tier == attestation_tier::FEDERATION),
-        );
-        match page.next_cursor {
-            None => break false,
-            Some(_) if scanned >= cfg.max_rows => break true,
-            Some(c) => cursor = Some(c),
+
+        // Revocation standing for the keys ON THIS PAGE only: the page is the
+        // unit of memory, so it is the unit of everything else too.
+        let held = HeldRevocations::for_keys(engine, key_standing::attesting_keys(&page.items))
+            .await
+            .context("equivocation detector: read held revocations")?;
+
+        // Reduce the page OFF the runtime workers: canonicalizing a few hundred
+        // 10 KiB envelopes is CPU, and on a two-vCPU node the acceptor was
+        // waiting behind it (CIRISServer#553). The envelopes move into the
+        // blocking task and are dropped there — they never outlive the page.
+        let t_digest = std::time::Instant::now();
+        let rows = page.items;
+        let digested = tokio::task::spawn_blocking(move || {
+            let mut out = DigestedPage {
+                claims: Vec::with_capacity(rows.len()),
+                suspect_rows: 0,
+                undimensioned: 0,
+            };
+            for a in &rows {
+                if a.tier != attestation_tier::FEDERATION {
+                    continue;
+                }
+                if held.suspects(a, now) {
+                    key_standing::warn_suspect("equivocation", a, &held.statement_standing(a, now));
+                    out.suspect_rows += 1;
+                    continue;
+                }
+                let Some(coord) = coordinate_of(a) else {
+                    out.undimensioned += 1;
+                    continue;
+                };
+                let mut claim = RowClaim::of(a);
+                claim.seen_pass = pass;
+                out.claims.push((coord, claim));
+            }
+            out
+        })
+        .await
+        .context("equivocation detector: digest page")?;
+        report.digest_ms += t_digest.elapsed().as_millis() as u64;
+        report.suspect_rows += digested.suspect_rows;
+        for (coord, claim) in digested.claims {
+            state.index.upsert(coord, claim);
         }
-    };
-    Ok((out, truncated))
+
+        match page.next_cursor {
+            None => {
+                // End of the tier: the cycle that started at `cycle_started_at`
+                // has now produced every live row once, so anything it did not
+                // produce is gone. Evict, and start the next cycle from the top.
+                let evicted = state.index.evict_unseen_since(state.cycle_started_at);
+                if evicted > 0 {
+                    tracing::debug!(
+                        evicted,
+                        "equivocation detector: index dropped rows the finished cycle no longer produced"
+                    );
+                }
+                state.cycle_started_at = pass + 1;
+                state.cursor = None;
+                report.wrapped = true;
+                report.truncated = false;
+                break;
+            }
+            Some(c) if scanned >= cfg.max_rows => {
+                state.cursor = Some(c);
+                report.truncated = true;
+                break;
+            }
+            Some(c) => state.cursor = Some(c),
+        }
+    }
+    report.index_rows = state.index.rows();
+    report.index_coordinates = state.index.coordinates();
+    Ok(())
 }
 
-/// Run one detection pass and record a `hard_case` for every contradiction
-/// found. Public so a test can drive one deterministic pass without the timer.
+/// Turn an index candidate into evidence — or refuse to. Both rows are fetched
+/// by id and must still be live federation-tier rows at `now`; a claim the
+/// index kept from an earlier pass may describe a row that has since expired
+/// or been withdrawn, and an accusation must rest on rows a third party can
+/// fetch and re-verify today.
+async fn verify_candidate(
+    engine: &Engine,
+    c: &ClaimContradiction,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<Contradiction>> {
+    let dir = engine.federation_directory();
+    let live = |a: &Attestation| {
+        a.tier == attestation_tier::FEDERATION
+            && a.asserted_at <= now
+            && a.expires_at.is_none_or(|e| e > now)
+    };
+    let (a, b) = (
+        dir.get_attestation(&c.attestation_ids.0).await?,
+        dir.get_attestation(&c.attestation_ids.1).await?,
+    );
+    Ok(match (a, b) {
+        (Some(a), Some(b)) if live(&a) && live(&b) => Some(Contradiction::new(
+            &a,
+            &b,
+            c.coordinate.dimension.clone(),
+            c.signed_at,
+        )),
+        _ => None,
+    })
+}
+
+/// Run one detection pass against `state` and record a `hard_case` for every
+/// contradiction found. The detector task calls this every cadence with the
+/// same `state`; [`run_pass`] is the one-shot form.
 ///
 /// Recording is idempotent on [`Contradiction::event_id`], so this re-records
 /// the same standing contradictions every cadence and writes nothing new. That
 /// is the intended steady state: the condition does not clear, and the pass
 /// re-asserting it costs one no-op INSERT.
-pub async fn run_pass(
+pub async fn run_pass_with(
     engine: &Engine,
     node_key_id: &str,
     cfg: &DetectorConfig,
+    state: &mut ScanState,
 ) -> Result<DetectorReport> {
-    let (rows, truncated) = live_rows(engine, node_key_id, cfg)
+    let t0 = std::time::Instant::now();
+    state.pass += 1;
+    let mut report = DetectorReport::default();
+    scan_window(engine, node_key_id, cfg, state, &mut report)
         .await
-        .context("equivocation detector: read live rows")?;
+        .context("equivocation detector: scan window")?;
 
-    // ── CIRISServer#355 / CIRISPersist#570 ask 4: `revoked_after` ───────────
-    //
-    // A row whose attester's statements are revoked from an instant is not
-    // evidence, and here that is not a nicety — it is the attack this detector
-    // would otherwise BUILD. Steal a key, sign two contradictory rows at one
-    // instant, and the victim's key equivocates on every node that holds both;
-    // a bounded revocation is exactly the instrument that says "nothing it
-    // signed after Tuesday counts", and a detector that ignored it would keep
-    // manufacturing hard_cases out of the thief's rows.
-    //
-    // Dropped rows are COUNTED (`suspect_rows`), never silently absent — a
-    // smaller `rows_scanned` with no explanation is the truncation defect one
-    // field over.
+    let verdicts = state.index.verdicts();
+    report.pairs_compared = verdicts.pairs_compared;
+    report.same_statement = verdicts.same_statement;
+    report.superseded = verdicts.superseded;
+    report.no_signed_instant = verdicts.no_signed_instant;
+
     let now = chrono::Utc::now();
-    let held = HeldRevocations::for_keys(engine, key_standing::attesting_keys(&rows))
-        .await
-        .context("equivocation detector: read held revocations")?;
-    let (standing, suspect): (Vec<&Attestation>, Vec<&Attestation>) =
-        rows.iter().partition(|a| !held.suspects(a, now));
-    for a in &suspect {
-        key_standing::warn_suspect("equivocation", a, &held.statement_standing(a, now));
+    for c in &verdicts.candidates {
+        match verify_candidate(engine, c, now).await {
+            Ok(Some(contradiction)) => report.contradictions.push(contradiction),
+            Ok(None) => report.candidates_unverified += 1,
+            Err(e) => {
+                report.candidates_unverified += 1;
+                tracing::warn!(
+                    error = %e,
+                    row_a = %c.attestation_ids.0,
+                    row_b = %c.attestation_ids.1,
+                    "equivocation detector: could not fetch a candidate pair for verification \
+                     (not recorded; the next pass retries)"
+                );
+            }
+        }
     }
 
-    let mut report = detect(&standing);
-    report.truncated = truncated;
-    report.suspect_rows = suspect.len();
     for c in &report.contradictions {
         // A pair that fails to record is NOT dropped from the report — the
         // contradiction was observed either way, and a failed write must not be
@@ -596,40 +968,62 @@ pub async fn run_pass(
             );
         }
     }
+    report.elapsed_ms = t0.elapsed().as_millis() as u64;
 
-    if report.contradictions.is_empty() {
-        tracing::debug!(
-            rows_scanned = report.rows_scanned,
-            pairs_compared = report.pairs_compared,
-            same_statement = report.same_statement,
-            superseded = report.superseded,
-            no_signed_instant = report.no_signed_instant,
-            suspect_rows = report.suspect_rows,
-            truncated = report.truncated,
-            "equivocation detector: no same-key contradictions in the live corpus"
+    // ONE line per pass, at INFO, whatever it found. A pass that is silent when
+    // fine is a pass whose cost nobody can see (CIRISServer#553).
+    tracing::info!(
+        pass = state.pass,
+        rows = report.rows_scanned,
+        pages = report.pages,
+        resumed = report.resumed,
+        wrapped = report.wrapped,
+        truncated = report.truncated,
+        index_rows = report.index_rows,
+        index_coordinates = report.index_coordinates,
+        pairs = report.pairs_compared,
+        contradictions = report.contradictions.len(),
+        candidates_unverified = report.candidates_unverified,
+        suspect_rows = report.suspect_rows,
+        no_signed_instant = report.no_signed_instant,
+        read_ms = report.read_ms,
+        digest_ms = report.digest_ms,
+        elapsed_ms = report.elapsed_ms,
+        "equivocation pass"
+    );
+    // WARN, not INFO: a standing contradiction is a claim by one key that no
+    // consumer can resolve, and it stays true until someone acts.
+    for c in &report.contradictions {
+        tracing::warn!(
+            attesting_key_id = %c.attesting_key_id,
+            subject_key_id = %c.subject_key_id,
+            dimension = %c.dimension,
+            signed_asserted_at = %c.asserted_at,
+            row_a = %c.attestation_ids.0,
+            row_b = %c.attestation_ids.1,
+            differing_fields = ?c.differing_fields,
+            "SAME-KEY EQUIVOCATION (CC 6.1.1 N4): one key signed two different claims about \
+             one subject at one instant — both rows retained as evidence, neither reconciled"
         );
-    } else {
-        // WARN, not INFO: a standing contradiction is a claim by one key that
-        // no consumer can resolve, and it stays true until someone acts.
-        for c in &report.contradictions {
-            tracing::warn!(
-                attesting_key_id = %c.attesting_key_id,
-                subject_key_id = %c.subject_key_id,
-                dimension = %c.dimension,
-                signed_asserted_at = %c.asserted_at,
-                row_a = %c.attestation_ids.0,
-                row_b = %c.attestation_ids.1,
-                differing_fields = ?c.differing_fields,
-                "SAME-KEY EQUIVOCATION (CC 6.1.1 N4): one key signed two different claims about \
-                 one subject at one instant — both rows retained as evidence, neither reconciled"
-            );
-        }
     }
     Ok(report)
 }
 
+/// One deterministic pass from the start of the tier with a fresh index —
+/// the form a test drives without the timer. For a tier smaller than
+/// `max_rows` this is the whole detector; for a larger one it is its first
+/// window.
+pub async fn run_pass(
+    engine: &Engine,
+    node_key_id: &str,
+    cfg: &DetectorConfig,
+) -> Result<DetectorReport> {
+    let mut state = ScanState::default();
+    run_pass_with(engine, node_key_id, cfg, &mut state).await
+}
+
 /// Spawn the periodic detector. Returns the join handle; the task runs for the
-/// node's lifetime.
+/// node's lifetime and keeps one [`ScanState`] across passes.
 pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The node's own derived key — needed for the read admission, not for
@@ -644,22 +1038,29 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
                 return;
             }
         };
-        let mut tick = tokio::time::interval(cfg.cadence);
-        // Skip missed ticks rather than burst-catch-up: a delayed pass has
-        // nothing to catch up on (the rows are still there).
+        // First pass one cadence PLUS the phase offset after spawn — the corpus
+        // at boot is whatever the last run left, and the offset keeps every
+        // later tick off the trace-plane watch's second and off edge's announce
+        // grid (`PHASE_OFFSET`). Skip missed ticks rather than burst-catch-up: a
+        // delayed pass has nothing to catch up on (the rows are still there).
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + cfg.cadence + PHASE_OFFSET,
+            cfg.cadence,
+        );
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Consume the immediate first tick — the corpus at boot is whatever the
-        // last run left; one cadence of patience costs nothing.
-        tick.tick().await;
         tracing::info!(
             cadence_secs = cfg.cadence.as_secs(),
-            max_rows = cfg.max_rows,
+            phase_offset_secs = PHASE_OFFSET.as_secs(),
+            rows_per_pass = cfg.max_rows,
+            page = cfg.page,
             "same-key equivocation detector started (CC 6.1.1 N4; local detection only — \
-             no consensus, no automatic penalty)"
+             no consensus, no automatic penalty; streams a window per pass from a persisted \
+             cursor, CIRISServer#553)"
         );
+        let mut state = ScanState::default();
         loop {
             tick.tick().await;
-            if let Err(e) = run_pass(&engine, &node_key_id, &cfg).await {
+            if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {
                 tracing::warn!(
                     error = %e,
                     "equivocation detector pass failed (will retry next cadence)"
@@ -925,6 +1326,16 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(
+            !code.contains("fn live_rows("),
+            "the collect-every-row scan is back. The pass streams one page at a time \
+             into the claim index (CIRISServer#553); do not rebuild the Vec<Attestation>."
+        );
+        assert!(
+            code.contains("spawn_blocking("),
+            "the page digest left the blocking pool: canonicalizing a page of 10 KiB \
+             envelopes on a runtime worker is what starved the acceptor on a two-vCPU node."
+        );
         for banned in ["list_attestations_by(", "list_attestations_for("] {
             assert!(
                 !code.contains(banned),
@@ -937,6 +1348,100 @@ mod tests {
             code.contains("filter.valid_at = Some("),
             "the live-validity predicate left the query. Without it this scans the whole \
              corpus and reports expired rows as live contradictions."
+        );
+    }
+
+    /// The row predicate and the claim predicate are ONE predicate: every row
+    /// pair classifies identically through either door.
+    #[test]
+    fn the_row_door_and_the_claim_door_agree() {
+        let a = row("a", "k", "s", claim(DIM, T0, 0.1));
+        let b = row("b", "k", "s", claim(DIM, T0, 0.9));
+        let c = row("c", "k", "s", claim(DIM, T1, 0.9));
+        let d = row("d", "k", "s", claim(DIM, T0, 0.1));
+        let mut e = row(
+            "e",
+            "k",
+            "s",
+            serde_json::json!({(paths::DIMENSION): DIM, "rating": 1.0}),
+        );
+        e.original_content_hash = "x".to_owned();
+        for (x, y) in [(&a, &b), (&b, &c), (&a, &d), (&a, &e), (&e, &c)] {
+            assert_eq!(
+                classify_pair(x, y),
+                classify_claims(&RowClaim::of(x), &RowClaim::of(y)),
+                "{} vs {}",
+                x.attestation_id,
+                y.attestation_id
+            );
+        }
+    }
+
+    /// An upsert replaces a row's claim in place, and a wrap evicts what the
+    /// finished cycle did not re-produce — the index tracks the live tier, it
+    /// does not accumulate its history.
+    #[test]
+    fn the_index_replaces_by_id_and_evicts_the_unseen() {
+        let mut ix = ClaimIndex::default();
+        let coord = coordinate_of(&row("a", "k", "s", claim(DIM, T0, 0.1))).unwrap();
+        let mut c1 = RowClaim::of(&row("a", "k", "s", claim(DIM, T0, 0.1)));
+        c1.seen_pass = 1;
+        let mut c2 = RowClaim::of(&row("b", "k", "s", claim(DIM, T0, 0.9)));
+        c2.seen_pass = 1;
+        ix.upsert(coord.clone(), c1.clone());
+        ix.upsert(coord.clone(), c2);
+        assert_eq!((ix.rows(), ix.coordinates()), (2, 1));
+        assert_eq!(ix.verdicts().candidates.len(), 1, "a and b contradict");
+        // Pass 2 re-sees `a` only (with a new digest); `b` is gone from the tier.
+        let mut c1b = RowClaim::of(&row("a", "k", "s", claim(DIM, T0, 0.5)));
+        c1b.seen_pass = 2;
+        ix.upsert(coord.clone(), c1b);
+        assert_eq!(ix.rows(), 2, "upsert replaced, did not add");
+        assert_eq!(ix.evict_unseen_since(2), 1, "b left");
+        assert_eq!((ix.rows(), ix.coordinates()), (1, 1));
+        assert!(
+            ix.verdicts().candidates.is_empty(),
+            "one row cannot contradict itself"
+        );
+        assert_eq!(
+            ix.evict_unseen_since(3),
+            1,
+            "and a wrap that saw nothing empties it"
+        );
+        assert_eq!((ix.rows(), ix.coordinates()), (0, 0));
+    }
+
+    /// The two 900 s timers must not share a second, and neither may sit on
+    /// edge's 300 s announce grid (CIRISServer#553). 300 is edge's default
+    /// `announce_interval`, stated here as the grid this repo phases against —
+    /// if edge changes it, this test is the reminder to re-phase.
+    #[test]
+    fn the_two_timers_do_not_share_a_second() {
+        const ANNOUNCE_GRID_SECS: u64 = 300;
+        let cadence = DetectorConfig::default().cadence.as_secs();
+        let here = PHASE_OFFSET.as_secs();
+        let watch = crate::trace_plane_watch::PHASE_OFFSET.as_secs();
+        assert_eq!(
+            cadence,
+            crate::trace_plane_watch::WATCH_CADENCE.as_secs(),
+            "same cadence, so phase is everything"
+        );
+        assert_ne!(
+            here % cadence,
+            watch % cadence,
+            "the two timers share a second"
+        );
+        assert!(
+            here % ANNOUNCE_GRID_SECS != 0,
+            "the detector sits on the announce grid"
+        );
+        assert!(
+            watch % ANNOUNCE_GRID_SECS != 0,
+            "the watch sits on the announce grid"
+        );
+        assert!(
+            cadence % ANNOUNCE_GRID_SECS == 0,
+            "if this stops being true, the offsets can be revisited"
         );
     }
 
