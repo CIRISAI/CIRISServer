@@ -69,7 +69,12 @@ pub async fn shutdown_requested() {
 /// Signal the running node to stop (does not wait). `shutdown_node()` layers the
 /// port-free wait on top of this.
 pub fn request_shutdown() {
-    let _ = latch().send(true);
+    // `send_replace`, not `send`: `watch::Sender::send` drops the value when no
+    // receiver is alive, and a `shutdown_node()` that lands after `arm()` but
+    // before the serve reaches its stop-select had no receiver yet — the
+    // request evaporated and the node kept serving. Same defect the SIGTERM
+    // latch had; `arm()` still resets a request that predates the bind.
+    latch().send_replace(true);
 }
 
 // ── SIGTERM, for the life of the PROCESS (CIRISServer#555, #556 review) ──────
@@ -91,6 +96,12 @@ pub fn request_shutdown() {
 // after the first is the operator insisting: the process exits at once (143),
 // which is what `docker stop`'s escalation and every init system expect.
 
+/// Diagnostics for the two halves of the broker: how many times the OS handler
+/// ran, and how many bytes the broker thread read. Read by the test and by an
+/// operator who wants to know whether a SIGTERM reached the handler.
+pub static HANDLER_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static BROKER_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The SIGTERM latch. `true` once the process has received SIGTERM; never
 /// reset — a terminated process does not un-terminate.
 fn terminated_latch() -> &'static watch::Sender<bool> {
@@ -103,62 +114,77 @@ fn terminated_latch() -> &'static watch::Sender<bool> {
 /// disposition from this line on. Where the platform has no SIGTERM, or the
 /// handler cannot be installed, this returns and [`terminated`] simply never
 /// resolves — the other stop triggers behave exactly as before.
+///
+/// No tokio in the path, deliberately: a `tokio::signal` stream is drained by
+/// whichever runtime's driver wakes first, and a receiver that must outlive
+/// every serve call and be observable from any of them cannot depend on which
+/// runtimes happen to be alive (the first version of this was flaky for
+/// exactly that reason). The OS handler is async-signal-safe — one `write(2)`
+/// of one byte to a socketpair — and a plain blocking thread reads it.
 pub fn install_terminate_broker() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
         #[cfg(unix)]
         {
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+            use std::io::Read as _;
+            use std::os::unix::io::{AsRawFd, IntoRawFd};
+            let (mut reader, writer) = match std::os::unix::net::UnixStream::pair() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM broker: no socketpair — SIGTERM will not stop this node cleanly");
+                    return;
+                }
+            };
+            // The handler owns the raw fd for the life of the process.
+            let wfd = writer.into_raw_fd();
+            // SAFETY: the handler does exactly one async-signal-safe call —
+            // `write(2)` of a single byte to an fd that is never closed — and
+            // touches nothing else. Registration chains with any handler tokio
+            // or a host has installed rather than replacing it.
+            let registered = unsafe {
+                signal_hook_registry::register(libc::SIGTERM, move || {
+                    // Async-signal-safe: one relaxed atomic add, one write(2).
+                    HANDLER_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = libc::write(wfd, b"t".as_ptr().cast(), 1);
+                })
+            };
+            if let Err(e) = registered {
+                tracing::warn!(
+                    error = %e,
+                    "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
+                     stop this node cleanly; SIGTERM will kill it abruptly"
+                );
+                return;
+            }
+            let _ = reader.as_raw_fd();
             let spawned = std::thread::Builder::new()
                 .name("sigterm-broker".into())
                 .spawn(move || {
-                    let rt = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "SIGTERM broker: no runtime — SIGTERM will not stop this node cleanly");
-                            let _ = ready_tx.send(false);
-                            return;
-                        }
-                    };
-                    rt.block_on(async move {
-                        use tokio::signal::unix::{signal, SignalKind};
-                        let mut sigterm = match signal(SignalKind::terminate()) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
-                                     stop this node cleanly; SIGTERM will kill it abruptly"
-                                );
-                                let _ = ready_tx.send(false);
-                                return;
-                            }
-                        };
-                        let _ = ready_tx.send(true);
-                        sigterm.recv().await;
-                        tracing::info!("SIGTERM received — latched; the serve stops cleanly (releasing :4243)");
-                        let _ = terminated_latch().send(true);
-                        // The operator insisting. Do not swallow it.
-                        sigterm.recv().await;
+                    let mut byte = [0u8; 1];
+                    // First byte: latch. The serve's select sees it and stops cleanly.
+                    if reader.read_exact(&mut byte).is_err() {
+                        return;
+                    }
+                    BROKER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("SIGTERM received — latched; the serve stops cleanly (releasing :4243)");
+                    // `send_replace`, NOT `send`: `watch::Sender::send` refuses to
+                    // store when no receiver is alive, and a SIGTERM that lands
+                    // before any serve is waiting (during boot, between the
+                    // fold's serve calls) has no receiver yet. The latch must
+                    // hold the value for whoever subscribes next; this is the
+                    // line the first two versions of this broker got wrong.
+                    terminated_latch().send_replace(true);
+                    // Second byte: the operator insisting. Do not swallow it.
+                    if reader.read_exact(&mut byte).is_ok() {
                         tracing::warn!("second SIGTERM — exiting immediately (143)");
                         std::process::exit(143);
-                    });
+                    }
                 });
             match spawned {
-                Ok(_) => {
-                    let registered = ready_rx
-                        .recv_timeout(Duration::from_secs(5))
-                        .unwrap_or(false);
-                    if registered {
-                        tracing::info!("SIGTERM broker installed — docker stop / systemd stop now end the node cleanly");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned");
-                }
+                Ok(_) => tracing::info!(
+                    "SIGTERM broker installed — docker stop / systemd stop now end the node cleanly"
+                ),
+                Err(e) => tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned"),
             }
         }
     });
@@ -244,11 +270,12 @@ mod tests {
         assert_eq!(bound_addr(), None);
     }
 
-    /// The broker is installed BEFORE the signal is raised (the install blocks
-    /// until the handler is registered), and a real SIGTERM to this process is
-    /// latched and observed by `terminated()` — proving both review findings
-    /// closed: no window before installation, and a receiver that outlives any
-    /// one serve. One raise only: the second SIGTERM exits the process.
+    /// The broker is installed BEFORE the signal is raised (the install returns
+    /// only after the OS handler is registered), and a real SIGTERM to this
+    /// process is latched and observed by `terminated()` from a runtime the
+    /// broker knows nothing about — proving both review findings closed: no
+    /// window before installation, and a receiver that outlives any one serve
+    /// and any one runtime. One raise only: the second SIGTERM exits the process.
     #[cfg(unix)]
     #[test]
     fn a_real_sigterm_is_latched_and_observed() {
@@ -263,9 +290,17 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), terminated())
+            if tokio::time::timeout(Duration::from_secs(5), terminated())
                 .await
-                .expect("terminated() resolves after SIGTERM");
+                .is_err()
+            {
+                panic!(
+                    "terminated() did not resolve after SIGTERM: handler_hits={} broker_reads={} latched={}",
+                    HANDLER_HITS.load(std::sync::atomic::Ordering::Relaxed),
+                    BROKER_READS.load(std::sync::atomic::Ordering::Relaxed),
+                    *terminated_latch().subscribe().borrow()
+                );
+            }
         });
         assert!(
             *terminated_latch().subscribe().borrow(),

@@ -66,7 +66,7 @@ fn the_stop_select_awaits_sigint_sigterm_and_shutdown_node() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        code.contains("SignalKind::terminate()"),
-        "node_control's broker must install a real SIGTERM handler (SignalKind::terminate())"
+        code.contains("signal_hook_registry::register(libc::SIGTERM"),
+        "node_control's broker must install a real OS-level SIGTERM handler"
     );
 }

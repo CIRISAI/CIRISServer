@@ -209,6 +209,14 @@ serde_json = "1"
 # CIRISStatus ships (its src/diag.rs, CIRISStatus#69) so the two nodes on the
 # canonical host are comparable. See `src/diag.rs` / CIRISServer#550.
 libc = "0.2"
+# The OS-level SIGTERM hook behind `node_control::install_terminate_broker`
+# (CIRISServer#555/#556). tokio's own signal streams are bound to the runtime
+# that created them and drained by whichever runtime's driver wakes first —
+# fine inside one runtime, not for a receiver that must outlive every serve
+# call and be observable from any of them. This is the crate tokio itself
+# registers through; the handler writes one byte to a socketpair and a plain
+# thread does the rest. Unix only in practice (no-op elsewhere).
+signal-hook-registry = "1"
 # Cosmetic v4 attestation-ids (the content hash is the integrity anchor). Direct
 # dep at the same major persist already pins transitively — no new resolution.
 uuid       = { version = "1", features = ["v4"] }
