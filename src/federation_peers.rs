@@ -66,7 +66,7 @@
 //! ## Sideband persistence (#261)
 //!
 //! Per-peer user sideband (trust override, appearance, SAS verification) is
-//! persisted through [`crate::graph_config`] — one signed `config:v1` CEG row
+//! persisted through [`crate::graph_config`] — one signed `config:{key}:v1` CEG row
 //! per peer under `federation.peer_sideband.<key_id>` (a `Dict` value). This
 //! deliberately reuses the config-as-CEG store instead of a bespoke table:
 //! the rows are owner-authored node-local annotations (exactly config's
@@ -224,7 +224,7 @@ async fn require_owner_bound(st: &PeersState) -> Result<(), Response> {
 const SIDEBAND_KEY_PREFIX: &str = "federation.peer_sideband.";
 
 /// The per-peer user sideband — the owner's LOCAL annotations on a peer.
-/// Persisted as one `config:v1` Dict row per peer (see module doc). All
+/// Persisted as one `config:{key}:v1` Dict row per peer (see module doc). All
 /// fields optional so a partial write (trust only, appearance only, SAS
 /// only) round-trips without clobbering siblings — the PUT handlers do a
 /// read-modify-write on the whole struct.
@@ -300,7 +300,7 @@ async fn load_all_sidebands(st: &PeersState) -> HashMap<String, PeerSideband> {
     out
 }
 
-/// Write the sideband row for one peer (signed `config:v1`, latest-wins).
+/// Write the sideband row for one peer (signed `config:{key}:v1`, latest-wins).
 async fn store_sideband(
     st: &PeersState,
     key_id: &str,

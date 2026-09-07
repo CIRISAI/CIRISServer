@@ -4302,7 +4302,7 @@ pub(crate) fn ip_addrs_from_hints(
 }
 
 /// `ciris-server config set <key> <value>` (console-trusted, node-signed). Writes a
-/// signed `config:v1` CEG object — the SAME path the node itself + `POST /v1/config`
+/// signed `config:{key}:v1` CEG object — the SAME path the node itself + `POST /v1/config`
 /// use — so a HEADLESS node (console-only, no app/session) can set `config:*` knobs
 /// like `net.bootstrap_peers`. Returns the freshly-written entry.
 pub async fn run_config_set(
@@ -4323,7 +4323,7 @@ pub async fn run_config_set(
 }
 
 /// `ciris-server config get <key>` (console). Reads the latest-wins value for `key`
-/// from the node's signed `config:v1` store (`None` if unset/tombstoned).
+/// from the node's signed `config:{key}:v1` store (`None` if unset/tombstoned).
 pub async fn run_config_get(
     cfg: ServerConfig,
     key: &str,

@@ -501,11 +501,11 @@ impl Emit {
 pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
     let id = row.attestation_id.clone();
     let kind = row.attestation_type.clone();
-    let touches_config = row
-        .attestation_envelope
-        .get(ciris_persist::federation::envelope::paths::DIMENSION)
-        .and_then(|d| d.as_str())
-        == Some(crate::graph_config::CONFIG_DIMENSION);
+    let touches_config = crate::graph_config::is_config_dimension(
+        row.attestation_envelope
+            .get(ciris_persist::federation::envelope::paths::DIMENSION)
+            .and_then(|d| d.as_str()),
+    );
     engine
         .federation_directory()
         .put_attestation_authored(SignedAttestation { attestation: row })

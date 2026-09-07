@@ -4,11 +4,12 @@
 //!
 //! ## The model (mirrors [`crate::peer`] exactly, different dimension)
 //!
-//! A config entry is a **self-attested `scores` attestation** authored by THIS
-//! node (`attesting_key_id == node_key_id`), carried on the open-vocab dimension
-//! [`CONFIG_DIMENSION`] (`config:v1`). The config KEY lives **in the envelope**
-//! (`envelope["key"]`), NOT as a federation `subject_key_id` — a config row is
-//! about the node's own runtime, not directed at a peer. The full
+//! A config entry is a **self-attested attestation** authored by THIS node
+//! (`attesting_key_id == node_key_id`), carried on the key's OWN leaf of the
+//! `config:` family — [`config_dimension`]`(key)` = `config:{key}:v1`. The config
+//! KEY lives **in the envelope** (`envelope["key"]`) as well, NOT as a federation
+//! `subject_key_id` — a config row is about the node's own runtime, not directed
+//! at a peer. The full
 //! [`ConfigEntry`] (`{key, value, version, updated_by, scope, previous_version}`)
 //! rides in the envelope as JSON so it round-trips byte-for-byte.
 //!
@@ -16,16 +17,33 @@
 //! uses: `ceg_produce_canonicalize` → `SHA-256` → `engine.sign_hybrid` →
 //! `put_attestation`. Reads mirror
 //! [`crate::peer::replication_peers_from_consent`]:
-//! `list_attestations_by(node) → filter SCORES && envelope["dimension"] ==
-//! CONFIG_DIMENSION`.
+//! ONE scan of `list_attestations(attesting = node, dimension_prefixes =
+//! ["config:"])`, folded per key into a process snapshot ([`ConfigSnapshot`]).
 //!
-//! ## Versioning (latest-wins)
+//! ## Versioning (latest-wins) and renewal (persist v42, CC 3.4.5.1)
 //!
-//! `scores` rows are NOT collapsed by dimension on the federation tier (each
-//! `put_attestation` mints a fresh `attestation_id`), so a `set_config` never
-//! mutates a prior row — it appends a NEW row with `version = prev + 1` and
-//! `previous_version = <prior row id>`. A read folds all rows for a key and
-//! returns the **highest `version`** (latest-wins, ties broken by `asserted_at`).
+//! A `set_config` never mutates a prior row — it appends a NEW row with
+//! `version = prev + 1` and `previous_version = <prior row id>`. A read folds all
+//! rows for a key and returns the **highest `version`** (latest-wins, ties broken
+//! by `asserted_at`).
+//!
+//! Since persist v42.0.0 (CIRISPersist#814 part 3) the substrate admits ONE live
+//! row per `(subject, cohort_scope, leaf)` in the `config:` family, where the
+//! leaf is the envelope dimension string: a second plain row is refused, and a
+//! renewal must be a `supersedes` whose `references_attestation_id` names the
+//! row it replaces on the SAME leaf. So the plane is shaped for it:
+//!
+//!   * **the leaf is the key** — `config:{key}:v1`, one leaf per key, so two
+//!     keys are never two live rows on one leaf;
+//!   * **the first write of a key is a `scores` row**, every later write of that
+//!     key is a **`supersedes`** naming the newest row on the key's leaf (the
+//!     chain head — revoked or not, because the substrate's check does not fold
+//!     a recant out of the live set), and the fold reads both types;
+//!   * **rows written before 0.5.201** all sit on the single legacy leaf
+//!     [`LEGACY_CONFIG_DIMENSION`] (`config:v1`). They still read (same prefix,
+//!     same envelope shape). A renewal cannot cross leaves, so the first write of
+//!     such a key after the move OPENS the key's own leaf with a `scores` row at
+//!     `version = legacy + 1`; the legacy row is shadowed by version, not retired.
 //!
 //! ## Revocation (stubbed — flagged)
 //!
@@ -56,12 +74,61 @@ use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::federation::EmitAttestationInput;
 use ciris_persist::prelude::{CallerScope, Engine};
 
-/// The open-vocab config dimension every config row rides on. **Versioned**
-/// (`:v1`) to satisfy persist's `DimensionAdmissionPolicy { require_version_segment:
-/// true }`, exactly like [`crate::peer::CONSENT_DIMENSION`]. `config:` is NOT a
-/// reserved prefix, so a node-keyed self-attestation on it is admitted without a
-/// reserved-prefix role.
-pub const CONFIG_DIMENSION: &str = "config:v1";
+/// The `config:` family prefix every config row rides under (persist's
+/// `CONFIG_DIMENSION_PREFIX`; catalogued as `config:{scope}` with the second
+/// segment classed `vocab`). The read scans this prefix on the indexed
+/// `dimension` column; the write puts each key on its own leaf below it.
+pub const CONFIG_DIMENSION_PREFIX: &str = "config:";
+
+/// The ONE leaf every config row rode on before 0.5.201 (`config:v1`). Read for
+/// compatibility — a node's corpus carries these rows for as long as it keeps
+/// its history — never written: persist v42 admits one live row per leaf, and
+/// this leaf already holds one per key ever written.
+pub const LEGACY_CONFIG_DIMENSION: &str = "config:v1";
+
+/// The leaf a config key lives on: `config:{key}:v1`. **Versioned** (`:v1`) to
+/// satisfy persist's `DimensionAdmissionPolicy { require_version_segment: true }`,
+/// exactly like [`crate::peer::CONSENT_DIMENSION`]; keyed per config key because
+/// persist v42 (CIRISPersist#814 part 3, CC 3.4.5.1) keys the config live set by
+/// the leaf, and a key is the unit this plane renews. `config:` is reserved as a
+/// SELF-REPORT (attester = subject, or its owner), which every write here is.
+#[must_use]
+pub fn config_dimension(key: &str) -> String {
+    format!("{CONFIG_DIMENSION_PREFIX}{key}:v1")
+}
+
+/// Whether an envelope dimension is a config row this plane reads: any leaf of
+/// the `config:` family — a per-key leaf or the legacy single leaf.
+#[must_use]
+pub fn is_config_dimension(dimension: Option<&str>) -> bool {
+    dimension.is_some_and(|d| d.starts_with(CONFIG_DIMENSION_PREFIX))
+}
+
+/// A config key must be able to name a leaf: one `vocab` segment of
+/// `config:{key}:v1` under CC 3.1.7 R3 (lowercase ASCII letters, digits, `_`,
+/// `.`, `-`; first character a letter or digit; never `:`, which would split the
+/// segment). persist v42 refuses a malformed segment at the door (CIRISPersist#815,
+/// "a wrong-case segment is malformed, never a sibling"), so the refusal is made
+/// here first, with the reason. Every key this node writes today fits
+/// (`net.radio.tx_power_dbm`, `federation.peer_sideband.<key_id>`, …).
+pub fn config_key_is_a_leaf(key: &str) -> Result<()> {
+    let first_ok = key
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let rest_ok = key
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'));
+    if first_ok && rest_ok {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "config key {key:?} cannot name a leaf: a key is one `vocab` segment of \
+         `config:{{key}}:v1` (CC 3.1.7 R3 — lowercase ASCII letters, digits, `_`, `.`, `-`, \
+         starting with a letter or digit; no `:`), because persist v42 keys the config live \
+         set by the leaf (CIRISPersist#814 part 3)"
+    )
+}
 
 /// The `cohort_scope` EVERY config row is authored at (CIRISServer#324). `self` —
 /// a config row is a self-report about THIS node's own runtime, so it is normatively
@@ -183,7 +250,7 @@ pub enum ConfigScope {
     Identity,
 }
 
-/// A resolved config entry — the latest-wins fold of a key's `config:v1` rows.
+/// A resolved config entry — the latest-wins fold of a key's `config:*` rows.
 /// Mirrors CIRISAgent's `ConfigNode`: the key, its typed value, a monotonically
 /// increasing `version`, who wrote it, its scope, and the prior row id it chains
 /// from (`None` for the first write).
@@ -204,14 +271,18 @@ pub struct ConfigEntry {
     pub previous_version: Option<String>,
 }
 
-/// Build the `config:v1` envelope for an entry — the JSON that is JCS-canonicalized
+/// Build the `config:{key}:v1` envelope for an entry — the JSON that is JCS-canonicalized
 /// into the signing basis. Mirrors [`crate::peer::emit_replication_consent`]'s
 /// envelope shape (same envelope fields: `dimension`, `attesting_key_id`,
 /// `score`, `cohort_scope`), plus the entry fields carried inline. The signed
 /// instant is NOT among them — the emit stamp owns it (CIRISPersist#598).
-fn config_envelope(node_key_id: &str, entry: &ConfigEntry) -> serde_json::Value {
-    serde_json::json!({
-        (paths::DIMENSION): CONFIG_DIMENSION,
+fn config_envelope(
+    node_key_id: &str,
+    entry: &ConfigEntry,
+    renews: Option<&str>,
+) -> serde_json::Value {
+    let mut env = serde_json::json!({
+        (paths::DIMENSION): config_dimension(&entry.key),
         "attesting_key_id": node_key_id,
         "score": 1.0,
         // Config-class content is normatively self-scoped — see [`CONFIG_COHORT_SCOPE`]
@@ -233,10 +304,17 @@ fn config_envelope(node_key_id: &str, entry: &ConfigEntry) -> serde_json::Value 
         "updated_by": entry.updated_by,
         "scope": entry.scope,
         "previous_version": entry.previous_version,
-    })
+    });
+    // A renewal is a `supersedes` and MUST name the row it replaces on this
+    // leaf (persist v42, CC 3.4.5.1) — the CEG §3.2 composer pointer, read by
+    // persist's `check_config_renewal_supersedes` and its precedence fold.
+    if let Some(prior) = renews {
+        env[paths::REFERENCES_ATTESTATION_ID] = serde_json::Value::String(prior.to_owned());
+    }
+    env
 }
 
-/// Parse a stored `config:v1` row's envelope back into a [`ConfigEntry`].
+/// Parse a stored config row's envelope back into a [`ConfigEntry`].
 /// Returns `None` for a row whose envelope is not a well-formed config entry
 /// (defensive — a malformed row is skipped, not fatal).
 fn entry_from_envelope(env: &serde_json::Value) -> Option<ConfigEntry> {
@@ -268,6 +346,14 @@ struct StoredRow {
     entry: ConfigEntry,
 }
 
+/// The newest row on one key's leaf (see [`ConfigSnapshot::heads`]).
+#[derive(Debug, Clone)]
+struct ChainHead {
+    attestation_id: String,
+    version: u64,
+    asserted_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// How long a loaded [`ConfigSnapshot`] serves reads before the next read
 /// re-scans (CIRISServer#557).
 ///
@@ -285,7 +371,7 @@ pub const CONFIG_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_s
 /// the per-scan log line to see whether a consumer is defeating the cache.
 pub static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The config plane as of one scan: every live `config:v1` row this node
+/// The config plane as of one scan: every live `config:*` row this node
 /// authored, folded for revocations, with the newest version per key
 /// resolvable without touching the store again.
 ///
@@ -299,6 +385,12 @@ pub static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub struct ConfigSnapshot {
     node_key_id: String,
     rows: Vec<StoredRow>,
+    /// Per key, the newest row on the key's OWN leaf whether or not it is still
+    /// live — the row the next renewal must supersede (persist v42, CC 3.4.5.1).
+    /// A recanted head is still the head: persist's renewal check does not fold
+    /// a recant out of the live set, so a plain `scores` after a recant is
+    /// refused; a `supersedes` naming the dead row is admitted.
+    heads: std::collections::HashMap<String, ChainHead>,
     loaded_at: std::time::Instant,
     /// Ordinal of the scan that produced this snapshot (see [`SCANS`]).
     pub scan: u64,
@@ -421,9 +513,9 @@ pub async fn snapshot(engine: &Arc<Engine>) -> Result<Arc<ConfigSnapshot>> {
     Ok(snap)
 }
 
-/// Read every LIVE (unrevoked) `config:v1` row this node authored, parsed into
+/// Read every LIVE (unrevoked) `config:*` row this node authored, parsed into
 /// [`StoredRow`]s. Mirrors [`crate::peer::replication_peers_from_consent`]'s read
-/// (`list_attestations_by(node) → filter SCORES && dimension`).
+/// (one prefix scan of the `config:` family, both `scores` and `supersedes`).
 /// The config plane's identity — resolved from the ONE authority (the engine's
 /// own signer), never caller-supplied. `set_config` emits via
 /// `Engine::emit_attestation_self`, which stamps the attester as the signer's
@@ -483,16 +575,19 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<ConfigSnapshot> {
     // not have to notice, rather than as a compile break on every consumer.
     let mut filter = AttestationFilter::default();
     filter.attesting_key_id = Some(node_key_id.to_owned());
-    filter.attestation_type = Some(attestation_type::SCORES.to_owned());
-    // EXACT dimension, not the family prefix (CIRISServer#557): every config
-    // row is `config:v1`, and a prefix `LIKE` over `json_extract(...)` was a
-    // per-row JSON parse of everything this node ever authored. The exact
-    // form is still `json_extract(...) = ?` on this handle (persist has the
-    // V106 subjects seek for the scores handles only), so the scan remains
-    // O(rows this node authored) — which is why it is cached, and why the
-    // indexed path is asked of persist rather than papered over here.
-    // Single-sourced from CONFIG_DIMENSION, never a literal beside it.
-    filter.dimension_exact = Some(CONFIG_DIMENSION.to_owned());
+    // The FAMILY prefix, not one exact leaf: since persist v42 every key is
+    // its own leaf (`config:{key}:v1`), and the legacy single leaf `config:v1`
+    // matches the same prefix, which is how a corpus written before 0.5.201
+    // keeps reading. On this handle persist compiles `dimension_prefixes` to
+    // `json_extract(attestation_envelope, '$.dimension') LIKE 'config:%'` —
+    // still a per-row JSON parse of everything this node authored, exactly as
+    // `dimension_exact` was (CIRISServer#557); the `attesting_key_id` predicate
+    // is what bounds it. That is why the result is cached as a snapshot, and
+    // why the indexed family seek is asked of persist (CIRISPersist#817)
+    // rather than papered over here. No type filter: the first write of a key
+    // is a `scores` row and every renewal is a `supersedes` (CC 3.4.5.1); both
+    // carry the entry and both are folded below.
+    filter.dimension_prefixes = vec![CONFIG_DIMENSION_PREFIX.to_owned()];
 
     // ── The scope gate is REAL and this read must pass it honestly ──────────
     //
@@ -515,78 +610,100 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<ConfigSnapshot> {
     let admission = ciris_persist::scope::build_caller_admission(engine, &node_key_id.to_owned())
         .await
         .map_err(|e| anyhow::anyhow!("resolve config-plane caller admission: {e}"))?;
-    let page = engine
-        .list_attestations(
-            filter,
-            None,
-            CONFIG_READ_LIMIT,
-            CallerScope::Authenticated { admission },
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("list config attestations for {node_key_id}: {e}"))?;
+    // Every page: the plane is small (a dozen keys, a few versions each) but
+    // the bound is a page size, not a promise about the corpus.
+    let mut items = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = engine
+            .list_attestations(
+                filter.clone(),
+                cursor,
+                CONFIG_READ_LIMIT,
+                CallerScope::Authenticated {
+                    admission: admission.clone(),
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("list config attestations for {node_key_id}: {e}"))?;
+        let got = page.items.len();
+        items.extend(page.items);
+        match page.next_cursor {
+            Some(next) if got > 0 => cursor = Some(next),
+            _ => break,
+        }
+    }
 
-    // ONE read for every retraction this node authored, hoisted out of the loop.
-    // This was called PER SURVIVING ROW — twelve config rows meant twelve more
-    // full scans, so pushing the config filter down only took the pass from
-    // fifteen scans to thirteen. The nested N+1 was the larger half.
     let revoked = revoked_config_rows(engine, node_key_id).await;
-
-    // ── `revoked_after` (CIRISServer#355 / CIRISPersist#570 ask 4) ──────────
-    //
-    // Every row this read returns was authored by THIS node's key, so one
-    // targeted `revocations_for` covers the whole page — hoisted, like
-    // `revoked_config_rows` above and for the same reason.
-    //
-    // What it buys: a node whose key is revoked from an instant stops reading
-    // its own post-bound configuration and falls back to the baked defaults,
-    // while the configuration it wrote before the compromise keeps resolving.
-    // Without the bound the only expressible answer was all-or-nothing, and
-    // "all" was what the config plane silently chose.
     let held = crate::key_standing::HeldRevocations::for_keys(engine, [node_key_id.to_owned()])
         .await
         .map_err(|e| anyhow::anyhow!("read revocations for the config-plane author: {e}"))?;
     let now = chrono::Utc::now();
 
     let mut out = Vec::new();
-    for a in page.items {
-        // `dimension_prefixes` matches a PREFIX; this plane wants the exact
-        // dimension, so the equality check stays. It now runs over the dozen
-        // rows the query returned rather than every row the node ever wrote.
-        if a.attestation_envelope
+    let mut heads: std::collections::HashMap<String, ChainHead> = std::collections::HashMap::new();
+    for a in items {
+        let Some(dimension) = a
+            .attestation_envelope
             .get(paths::DIMENSION)
             .and_then(|d| d.as_str())
-            != Some(CONFIG_DIMENSION)
+        else {
+            continue;
+        };
+        if !is_config_dimension(Some(dimension)) {
+            continue;
+        }
+        if a.attestation_type != attestation_type::SCORES
+            && a.attestation_type != attestation_type::SUPERSEDES
         {
             continue;
         }
-        // Revocation: a recanted/withdrawn config row reads as absent.
-        // Membership test against the HOISTED set — see `revoked_config_rows`.
+        let Some(entry) = entry_from_envelope(&a.attestation_envelope) else {
+            continue;
+        };
+        // The chain head is the newest row on the key's OWN leaf, revoked or
+        // not (see `ConfigSnapshot::heads`). A legacy `config:v1` row is never
+        // a head: a renewal cannot cross leaves, so the first write after the
+        // move opens the key's leaf with a `scores` row instead.
+        if dimension == config_dimension(&entry.key) {
+            let newer = heads
+                .get(&entry.key)
+                .is_none_or(|h| (entry.version, a.asserted_at) > (h.version, h.asserted_at));
+            if newer {
+                heads.insert(
+                    entry.key.clone(),
+                    ChainHead {
+                        attestation_id: a.attestation_id.clone(),
+                        version: entry.version,
+                        asserted_at: a.asserted_at,
+                    },
+                );
+            }
+        }
         if revoked.contains(a.attestation_id.as_str())
             || config_row_revoked_externally(engine, &a.attestation_id).await
         {
             continue;
         }
-        // The author's key was revoked from an instant this row falls after.
         {
+            // Fold the author's standing (CIRISServer#355): a row asserted after
+            // its author's key was revoked is not a live config value.
             let fold = held.statement_standing(&a, now);
             if fold.standing.is_suspect() {
                 crate::key_standing::warn_suspect("graph_config", &a, &fold);
                 continue;
             }
         }
-        if let Some(entry) = entry_from_envelope(&a.attestation_envelope) {
-            out.push(StoredRow {
-                attestation_id: a.attestation_id,
-                asserted_at: a.asserted_at,
-                entry,
-            });
-        }
+        out.push(StoredRow {
+            attestation_id: a.attestation_id,
+            asserted_at: a.asserted_at,
+            entry,
+        });
     }
-    // The cost, said every time it is paid (CIRISServer#557: a keyed read
-    // that costs a scan must at least say so).
     tracing::debug!(
         scan,
         config_rows = out.len(),
+        keys = heads.len(),
         elapsed_ms = t0.elapsed().as_millis() as u64,
         ttl_s = CONFIG_SNAPSHOT_TTL.as_secs(),
         "config plane scanned into a snapshot"
@@ -594,6 +711,7 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<ConfigSnapshot> {
     Ok(ConfigSnapshot {
         node_key_id: node_key_id.to_owned(),
         rows: out,
+        heads,
         loaded_at: std::time::Instant::now(),
         scan,
     })
@@ -713,7 +831,7 @@ pub async fn list_configs(
 }
 
 /// Write a config entry: compute `version = current.version + 1` (or `1`),
-/// `previous_version = current row id`, build the `config:v1` envelope, hybrid-sign
+/// `previous_version = prior row id`, build the `config:{key}:v1` envelope, hybrid-sign
 /// it (the SAME path [`crate::peer::emit_replication_consent`] uses), and
 /// `put_attestation` the row. Returns the freshly-written [`ConfigEntry`].
 ///
@@ -728,15 +846,29 @@ pub async fn set_config(
     updated_by: &str,
     scope: ConfigScope,
 ) -> Result<ConfigEntry> {
-    // Current latest (for version + previous_version chaining) — from the LIVE
-    // plane, never a snapshot up to a TTL old: two writes to one key inside one
-    // TTL must chain.
+    config_key_is_a_leaf(key)?;
+    // A write reads the plane first (the version chain and the head to
+    // supersede), and that read must not be a cached one another writer has
+    // since made stale — nor may the next read be served from before this row.
     invalidate();
     let snap = snapshot(engine).await?;
     let current = latest_for_key(&snap.rows, key);
-    let version = current.map(|r| r.entry.version + 1).unwrap_or(1);
-    let previous_version = current.map(|r| r.attestation_id.clone());
-
+    let head = snap.heads.get(key);
+    // The version advances past everything ever written for the key: the
+    // newest LIVE row (which may be a legacy `config:v1` row) and the head of
+    // the key's own leaf (which may be recanted, and so absent from `rows`).
+    let version = current
+        .map(|r| r.entry.version)
+        .into_iter()
+        .chain(head.map(|h| h.version))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    // `previous_version` is the row this one follows: the leaf head when the
+    // key's leaf is open, else the newest live row (a legacy-leaf row).
+    let previous_version = head
+        .map(|h| h.attestation_id.clone())
+        .or_else(|| current.map(|r| r.attestation_id.clone()));
     let entry = ConfigEntry {
         key: key.to_owned(),
         value,
@@ -745,57 +877,45 @@ pub async fn set_config(
         scope,
         previous_version,
     };
-
     let node_key_id = self_key_id(engine).await?;
-    let envelope = config_envelope(&node_key_id, &entry);
-
-    // ── Emit (CIRISPersist#253 collapse) ─────────────────────────────────────
-    // node-self emit over the engine's OWN composed signer: the hand-rolled
-    // canonicalize→hash→hybrid-sign→assemble→put recipe is now
-    // `Engine::emit_attestation_self`. Attester/scrub = the node's #247 DERIVED
-    // federation key_id (`local_derived_key_id()` == `node_key_id` here —
-    // wire-preserving). The config key lives in the envelope; the subject is the
-    // node itself; `weight = Some(1.0)` matches the prior row.
+    // persist v42 (CIRISPersist#814 part 3, CC 3.4.5.1): the first row on a leaf
+    // is a `scores`; every row after it is a `supersedes` naming the head. The
+    // leaf is `config:{key}:v1`, so a key written only before 0.5.201 (on the
+    // legacy `config:v1` leaf) has no head yet and opens its leaf with `scores`.
+    let renews = head.map(|h| h.attestation_id.as_str());
+    let kind = if renews.is_some() {
+        attestation_type::SUPERSEDES
+    } else {
+        attestation_type::SCORES
+    };
+    let dimension = config_dimension(key);
+    let envelope = config_envelope(&node_key_id, &entry, renews);
+    // Attester/scrub = the node's #247 DERIVED federation key_id, stamped by
+    // `Engine::emit_attestation_self` from the engine's own signer.
     let mut input = EmitAttestationInput::with_envelope(
-        attestation_type::SCORES,
+        kind,
         ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
-        // #324: node-local config is structurally invisible — SELF, never the
-        // old fail-open federation default. persist v21.11.0 (#527) made this a
-        // required argument precisely so it cannot be forgotten again.
         CONFIG_COHORT_SCOPE,
     );
     input.attested_key_id = Some(node_key_id.clone());
     input.subject_key_ids = vec![node_key_id.to_owned()];
     input.weight = Some(1.0);
-    // THE load-bearing scope fix (CIRISServer#324). The STORED, typed
-    // `Attestation.cohort_scope` — the value persist's admission,
-    // `cohort_scope::suppresses_holds_bytes`, the DEK cascade, and the directory
-    // projection actually read — is `EmitAttestationInput::cohort_scope`, NOT the
-    // envelope's inline `cohort_scope` JSON (which lands in `EnvelopeCore::extra`
-    // and is never lifted onto the row). `with_envelope` hardcodes this field to
-    // `federation`; left unset, `emit_attestation_assemble` stamps every config
-    // row `federation` — the ONE scope `suppresses_holds_bytes` (`SELF | FAMILY`)
-    // does NOT protect, so config was directory-advertised + cohort-replicable.
-    // Setting it to `self` (config is a self-report about THIS node's own runtime,
-    // CC 4.4.3.4.3) makes the row structurally invisible. UNIFORM across every
-    // config key; `check_write_cohort_scope` always permits SELF for the writer.
-    // This is the load-bearing half of the [`CONFIG_COHORT_SCOPE`] pair — the same
-    // const the envelope JSON above uses, so the two provenance points cannot drift.
+    // Typed cohort_scope — the field persist's admission actually reads (#324).
     input.cohort_scope = CONFIG_COHORT_SCOPE.to_string();
     let attestation_id = engine
         .emit_attestation_self(input)
         .await
-        .map_err(|e| anyhow::anyhow!("emit_attestation_self(config:v1): {e}"))?;
-    // The plane changed; the next read scans.
+        .map_err(|e| anyhow::anyhow!("emit_attestation_self({dimension}, {kind}): {e}"))?;
     invalidate();
-
     tracing::info!(
         key,
         version,
         updated_by,
-        dimension = CONFIG_DIMENSION,
+        dimension = %dimension,
+        kind,
+        renews = renews.unwrap_or("-"),
         attestation_id = %attestation_id,
-        "wrote config:v1 entry (signed, owner-gated at the API layer)"
+        "wrote config entry (signed, owner-gated at the API layer)"
     );
     Ok(entry)
 }

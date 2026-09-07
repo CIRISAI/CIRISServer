@@ -1445,8 +1445,13 @@ async fn add_contact(
                         .as_deref()
                         .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
                         .unwrap_or_default();
+                    // verify v15.0.0 (CIRISVerify#274): the ONLY constructor of a
+                    // hybrid registration input. It fails closed when the code
+                    // carries no commitment, and an unchecked input cannot exist
+                    // to be passed anywhere. Nothing is registered on this path
+                    // (the record is already held); the proof is what we want.
                     if let Err(e) =
-                        ciris_verify_core::fedcode::verify_pulled_ml_dsa_65_pubkey(&code, &pulled)
+                        ciris_verify_core::fedcode::AdmittedHybridKey::admit(&code, &pulled)
                     {
                         tracing::warn!(
                             key_id = %admission.key_id,

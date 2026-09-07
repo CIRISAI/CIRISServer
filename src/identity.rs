@@ -729,51 +729,50 @@ pub async fn mint_portable_software_occurrence(
     // The shareable usercode.
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let fedcode = fedcode::encode(&fedcode::FedCode {
-        kind: fedcode::FedKind::User,
-        key_id: key_id.clone(),
-        pubkey_ed25519_base64: b64.encode(&ed_pub),
-        transport_hint: None,
-        alias_hint: Some(alias.to_string()),
-        group_key_id: None,
-        // EMPTY, and deliberately so — verify v14.1.0 / CIRISVerify#269.
-        //
-        // A v3 code MAY embed the owner's nodes so a stranger can reach them
-        // without holding the federation directory (the phone-class case CC
-        // 5.4.6 names, where a peer "cannot hold the full directory"). This
-        // mint happens during first run, BEFORE any node is owner-bound, so
-        // there is nothing truthful to embed and a guess would be worse than
-        // silence.
-        //
-        // An empty list adds nothing to the code. (The code is v3 all the same
-        // since verify v14.2.0, because the PQC commitment below rides the v3
-        // tail; a v3 code with no nodes still resolves through the directory
-        // exactly as a v2 one did — see `resolve_contact`.)
-        //
-        // A populated one belongs where the owner's node set is known and
-        // current — the announce/promote path, not identity minting — and each
-        // entry must carry the NODE's transport Ed25519, never this user key.
-        // `encode` refuses the latter outright, which is CIRISServer#335 made
-        // unencodable rather than merely documented.
-        owned_nodes: Vec::new(),
-        // THE COMMITMENT to this identity's post-quantum half (verify v14.2.0,
-        // CIRISVerify#272 — ours). A code names an Ed25519 key, and persist
-        // takes `federation_keys` writes at `algorithm: "hybrid"` only, so a
-        // code with no way to bind the ML-DSA half could never produce a
-        // conformant registration: `ReadyFromCode` was unreachable in
-        // practice. The key itself (1952 bytes) cannot ride a scannable code;
-        // its SHA-256 can. A host that admits this code fetches the ML-DSA body
-        // through the Key Pull and calls `verify_pulled_ml_dsa_65_pubkey`
-        // against this digest before writing the hybrid row — and that check
-        // fails CLOSED when the commitment is absent, so a code minted without
-        // it is not a hybrid registration path at all. Same bytes as the
-        // record above: the commitment is over the pubkey the self-record
-        // registers, so first use proves joint control of both halves.
-        ml_dsa_65_pubkey_sha256: Some({
-            use sha2::Digest as _;
-            hex::encode(sha2::Sha256::digest(mldsa_pub_for_commitment.as_slice()))
-        }),
-    })
+    // EMPTY, and deliberately so — verify v14.1.0 / CIRISVerify#269.
+    //
+    // A v3 code MAY embed the owner's nodes so a stranger can reach them
+    // without holding the federation directory (the phone-class case CC
+    // 5.4.6 names, where a peer "cannot hold the full directory"). This
+    // mint happens during first run, BEFORE any node is owner-bound, so
+    // there is nothing truthful to embed and a guess would be worse than
+    // silence.
+    //
+    // An empty list adds nothing to the code. (The code is v3 all the same
+    // since verify v14.2.0, because the PQC commitment below rides the v3
+    // tail; a v3 code with no nodes still resolves through the directory
+    // exactly as a v2 one did — see `resolve_contact`.)
+    //
+    // A populated one belongs where the owner's node set is known and
+    // current — the announce/promote path, not identity minting — and each
+    // entry must carry the NODE's transport Ed25519, never this user key.
+    // `encode` refuses the latter outright, which is CIRISServer#335 made
+    // unencodable rather than merely documented.
+    // THE COMMITMENT to this identity's post-quantum half (verify v14.2.0,
+    // CIRISVerify#272 — ours). A code names an Ed25519 key, and persist
+    // takes `federation_keys` writes at `algorithm: "hybrid"` only, so a
+    // code with no way to bind the ML-DSA half could never produce a
+    // conformant registration: `ReadyFromCode` was unreachable in
+    // practice. The key itself (1952 bytes) cannot ride a scannable code;
+    // its SHA-256 can. A host that admits this code fetches the ML-DSA body
+    // through the Key Pull and calls `verify_pulled_ml_dsa_65_pubkey`
+    // against this digest before writing the hybrid row — and that check
+    // fails CLOSED when the commitment is absent, so a code minted without
+    // it is not a hybrid registration path at all. Same bytes as the
+    // record above: the commitment is over the pubkey the self-record
+    // registers, so first use proves joint control of both halves.
+    //
+    // verify v15.0.0: `FedCode` is `#[non_exhaustive]` (CIRISVerify#274), so the
+    // code is built through its constructor — `new` + the hints it carries. The
+    // owned-node list stays EMPTY here (see above) and is simply not set.
+    let fedcode = fedcode::encode(
+        &fedcode::FedCode::new(fedcode::FedKind::User, key_id.clone(), b64.encode(&ed_pub))
+            .with_alias_hint(alias.to_string())
+            .with_ml_dsa_65_pubkey_sha256({
+                use sha2::Digest as _;
+                hex::encode(sha2::Sha256::digest(mldsa_pub_for_commitment.as_slice()))
+            }),
+    )
     .map_err(|e| anyhow::anyhow!("encode portable fedcode: {e}"))?;
 
     // Persist BOTH seeds + the custody marker to the target dir (0600), keyed by the

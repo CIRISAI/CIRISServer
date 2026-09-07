@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.200" # 0.5.200 = THE PASS THAT STREAMS. Same substrate (persist v41.2.0 / edge v20.3.0 / verify v14.2.0); client floor 0.5.203. What the canonical's own numbers asked for after 0.5.199 landed with the instrument: (1) CIRISServer#553 — the read API stopped accepting for 8–40 s every 15 minutes, phase-locked to boot, because two node CONSTANTS run at 900 s and fired in the same second: the equivocation detector and the trace-plane watch. The detector was the load: it collected 4,096 parsed 10 KiB envelopes (54 MiB raw, a few hundred MB of transient heap) every pass, on the runtime workers, on a 2-vCPU box already 64% busy — and, because its cursor restarted from the top every time, it scanned the SAME lowest-id 4,096 rows forever, blind to 78% of the tier. It now STREAMS one page at a time, keeps only a claim (coordinate, digest, hash, signed instant, id) per row in an index that lives across passes, walks a max_rows window from a PERSISTED cursor so consecutive passes cover the whole tier, digests each page on the blocking pool, verifies a candidate pair by re-fetching both rows as live before recording it, and says what every pass cost. The watch keeps its (exonerated: 0.6 s cold over all 111 tables) summary but moves to +450 s and logs each tick; the detector to +150 s past its cadence — off each other and off edge's 300 s announce grid. (2) The capacity scorer's 60 s pass took 30–43 s of wall time authoring nothing on an idle node; a tick now reads the corpus watermark (MAX(ts) + COUNT(*), one aggregate) and SKIPS the pass while it is unchanged, audibly, with a one-hour refresh floor so standing scores are re-emitted before their bucket ages out. (3) CIRISServer#552 — the first mallinfo2 reading from inside the canonical (live_fraction 0.12: 121 MB live, 888 MB free lists in a 1009 MB brk arena) closed #550 as allocator churn, not retention; the arena cap that took the sister node −58% and this one 2.47 → 1.0 GB is now set in-process (mallopt(M_ARENA_MAX, 2) on glibc, an explicit MALLOC_ARENA_MAX still wins), and a loopback-only, switch-gated trim door (POST /v1/node/diagnostics/memory/trim) measures before/after so the remaining free list gets a number before anyone writes a trim policy. Gates: the two timers cannot share a second, the scan cannot regrow the Vec<Attestation>, the scorer skip is a pure decision with its four outcomes named.
+version = "0.5.201" # 0.5.201 = THE TRIPLE, AND THE NODE READS ITSELF CHEAPLY. Substrate: edge v21.0.0 / persist v42.0.0 / verify v15.0.0 (CIRISServer#559, from edge; a MAJOR on both substrates — the floor moves for the major, all four persist ABI constants unchanged). persist v42: #811 an agent member whose only incoming edge is an UNMARKED conferral is no longer steward-bound (this repo's three `is_steward_bound` sites are on node keys, which the rule exempts, and its conferrals carry `delegation_purpose: owner_binding`); #814 part 3 (CC 3.4.5.1) the `config:` live set is ONE row per (subject, scope, leaf) and a renewal MUST be a `supersedes` naming the row it replaces — this reddened four suites here, because the plane kept every key on one leaf `config:v1`, so the second key's write was refused; the plane now puts each key on its OWN leaf `config:{key}:v1`, the first write of a key is a `scores` row and every later write a `supersedes` of the leaf head (revoked or not — persist does not fold a recant out of its live set), the read is one prefix scan of the `config:` family on the `dimension` column reading both row types, rows written before 0.5.201 on the legacy leaf still read and are shadowed by version when the key is next written, and a key that cannot name a `vocab` segment is refused at the door with the reason; the `config:admission` / `config:transport` sensitive-leaf floor (`self` only) is met by every write here; #815 dimensions are case-sensitive per segment (every dimension here is lowercase). verify v15: `FedCode` and `OwnedNode` are `#[non_exhaustive]` — the mint builds its code through `FedCode::new(...).with_alias_hint(...).with_ml_dsa_65_pubkey_sha256(...)`; and `AdmittedHybridKey::admit(&code, pulled)` is the ONLY constructor of a hybrid registration input, fail-closed without a commitment — the fedcode v3 pull path (`POST /v1/contacts` with a code, 202 → pull → re-paste) binds the pulled ML-DSA-65 half through it. ALSO ON MAIN SINCE 0.5.200 and shipped here: the SIGTERM broker (#555/#556 — `docker stop` ends the node cleanly; a process-lifetime broker owns the signal, installed before the first boot phase, propagating termination after teardown unless a host owns SIGTERM) and the config snapshot (#557/#558 — `graph_config` reads are one scan per process with write invalidation, `ConfigSnapshot`; the status node's 20 s-of-a-core config resolve becomes one scan). Client floor 0.5.203.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -135,8 +135,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v41.2.0", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v20.3.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.0.0", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.0.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -168,16 +168,16 @@ ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v20.3
 #
 # What that ceiling costs us is recorded where it bites, not here:
 # src/hardware_attestation.rs (CIRISServer#339 / CIRISVerify#199).
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0" }
 # The hybrid crypto primitives (Ed25519 + ML-DSA-65 software signers) — used by
 # the portable software identity occurrence to build a `HybridSigningIdentity`
 # over two software seeds. Same tag as the rest of the verify family.
-ciris-crypto = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", features = ["pqc-ml-dsa", "self-enc"] }
+ciris-crypto = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["pqc-ml-dsa", "self-enc"] }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
 # `tpm` feature; runtime auto-detects hardware and falls back to software.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["software", "pqc-ml-dsa"] }
 # The verify FFI (C ABI) — folded into `ciris_server._native.so` (CIRISServer#232)
 # so the agent drops its standalone `ciris-verify` wheel and rides us for verify
 # too (kills the v9.0.0-vs-v5.1.3 wire/canonical-hash skew, CIRISAgent#917). v9.0.1
@@ -188,7 +188,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0
 # FFI version == the bundled substrate version by construction (no skew possible).
 # Default features (secp256k1, key-grant, hybrid-kex) + the crypto features unify
 # with ciris-crypto's above (self-enc, pqc-ml-dsa) across the graph.
-ciris-verify-ffi = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", optional = true }
+ciris-verify-ffi = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", optional = true }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
@@ -276,16 +276,16 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v41.2.0", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.0.0", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", features = ["tpm-plugin"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["tpm-plugin"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
 # Keystore/StrongBox); sqlite bundles, no postgres/tpm. Mirrors persist/edge.
 [target.'cfg(target_os = "android")'.dependencies]
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", features = ["android"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["android"] }
 
 # serialport (the RNode LoRa driver dep, src/radio.rs) pulls libudev-sys on Linux,
 # which only resolves where libudev exists: desktop/server Linux (gnu, x86_64 or
@@ -305,7 +305,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0
 # `full_traces` at Detailed and RELABELS the trace `detailed`, loudly. A mobile
 # node therefore never ships content claiming a scrub it did not receive; it
 # simply cannot offer the NER tier.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v41.2.0", features = ["scrub-ner"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.0.0", features = ["scrub-ner"] }
 serialport = "4"
 
 # libsqlite3-sys (pulled by persist's `sqlite` feature) links the SYSTEM libsqlite3
@@ -356,14 +356,14 @@ http-body-util   = "0.1"
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
-ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v14.2.0", version = "14", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa", "self-enc"] }
+ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa", "self-enc"] }
 # Enable edge's OWN fountain codec (`codec-fountain`, L1-A) for the survival-floor
 # proof — dev/test ONLY (feature unification applies to test/bench builds; the
 # shipped wheel stays codec-free, since a relay forwards sealed symbols opaquely
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v20.3.0", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.0.0", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN
@@ -375,7 +375,7 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v20.3.0",
 # without one. Pre-genesis is now a supported boot mode, not a test seam, and an Engine built
 # that way reports `GenesisPosture::PreGenesis` while every ROOT_REQUIRING_GATES gate refuses
 # with `NoConstitutionalRootYet`. A node that trusts nothing is not a node that checks nothing.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v41.2.0" }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.0.0" }
 
 # The QA runner exercises the family/accord ceremony surfaces against a
 # CONTROLLABLE roster — holders it can sign as. persist v31.0.0 made roster growth

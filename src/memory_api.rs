@@ -611,9 +611,12 @@ pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>) {
                     .attestation_envelope
                     .get(paths::DIMENSION)
                     .and_then(|v| v.as_str());
-                // config:* rows are already projected as richer config nodes.
-                if a.attestation_type == attestation_type::SCORES
-                    && dim == Some(crate::graph_config::CONFIG_DIMENSION)
+                // config:* rows are already projected as richer config nodes —
+                // the first write (`scores`) and every renewal (`supersedes`,
+                // persist v42 / CC 3.4.5.1) alike.
+                if (a.attestation_type == attestation_type::SCORES
+                    || a.attestation_type == attestation_type::SUPERSEDES)
+                    && crate::graph_config::is_config_dimension(dim)
                 {
                     continue;
                 }
