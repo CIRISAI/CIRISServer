@@ -997,7 +997,9 @@ mod scope_gate_tests {
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/graph_config.rs"),
         )
-        .expect("readable");
+        .expect("readable")
+        // A Windows checkout carries CRLF and the body is cut at "\n}\n".
+        .replace("\r\n", "\n");
         let code = src.split("#[cfg(test)]").next().expect("code");
         let body = code
             .split_once("fn live_config_rows")
