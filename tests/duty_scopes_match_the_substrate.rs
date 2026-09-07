@@ -159,11 +159,33 @@ fn the_list_is_the_substrates_own_array() {
         !body.contains('"'),
         "no string literals: a re-spelled scope is the hand-mirroring this exists to remove"
     );
-    // …and the re-export must actually carry all five at runtime.
-    assert_eq!(
-        ciris_server::accord_duty::CONFERRABLE_DUTIES.len(),
-        5,
-        "the substrate defines five delegated-duty scopes; got {:?}",
-        ciris_server::accord_duty::CONFERRABLE_DUTIES
-    );
+    // …and the re-export must actually carry EVERY scope the substrate defines
+    // at runtime. Not a literal count: persist v30.11 exported five, v42.0.0
+    // added `license` and `grant` (CIRISPersist#814 part 4, the issuance axis)
+    // and the re-export carried them with no change here — which is the whole
+    // point of the re-export, and exactly what a literal `5` would have called
+    // a failure. The count comes from persist's own source, the way the first
+    // test derives membership.
+    let ours = ciris_server::accord_duty::CONFERRABLE_DUTIES;
+    match persist_admission_source() {
+        Some(path) => {
+            let src = std::fs::read_to_string(&path).expect("read persist admission.rs");
+            let substrate = substrate_scopes(&src);
+            assert_eq!(
+                ours.len(),
+                substrate.len(),
+                "the substrate defines {} delegated-duty scopes {substrate:?}; the re-export \
+                 carries {:?}",
+                substrate.len(),
+                ours
+            );
+        }
+        None => {
+            eprintln!(
+                "SKIP (count not cross-checked): could not locate the vendored ciris-persist \
+                 checkout; asserting only that the re-export is non-empty"
+            );
+            assert!(!ours.is_empty(), "the re-export carries nothing: {ours:?}");
+        }
+    }
 }
