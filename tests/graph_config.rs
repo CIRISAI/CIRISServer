@@ -366,3 +366,108 @@ async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
     .await
     .expect("put recant attestation");
 }
+
+/// CIRISServer#557: fifty keyed reads are ONE scan, a write invalidates, and
+/// the snapshot handle and the per-key getters agree.
+#[tokio::test]
+async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
+    use std::sync::atomic::Ordering;
+    let engine = node().await;
+    register_self(&engine).await;
+    for (k, v) in [("a.one", 1), ("a.two", 2), ("b.three", 3)] {
+        graph_config::set_config(&engine, k, ConfigValue::I64(v), "owner", ConfigScope::Local)
+            .await
+            .expect("set_config");
+    }
+    graph_config::invalidate();
+    let before = graph_config::SCANS.load(Ordering::Relaxed);
+    for _ in 0..50 {
+        assert_eq!(
+            graph_config::get_i64(&engine, "a.one").await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            graph_config::get_i64(&engine, "b.three").await.unwrap(),
+            Some(3)
+        );
+        assert!(graph_config::get_str(&engine, "nope")
+            .await
+            .unwrap()
+            .is_none());
+    }
+    let listed = graph_config::list_configs(&engine, Some("a."))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    let after = graph_config::SCANS.load(Ordering::Relaxed);
+    assert_eq!(
+        after - before,
+        1,
+        "150 keyed reads + one list must cost ONE scan; got {}",
+        after - before
+    );
+
+    let snap = graph_config::snapshot(&engine).await.unwrap();
+    assert_eq!(snap.i64("a.two"), Some(2));
+    assert_eq!(snap.list(None).len(), 3);
+    assert_eq!(snap.rows(), 3);
+    assert_eq!(
+        graph_config::SCANS.load(Ordering::Relaxed),
+        after,
+        "the handle reused the cache"
+    );
+
+    graph_config::set_config(
+        &engine,
+        "a.one",
+        ConfigValue::I64(11),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("set_config");
+    assert_eq!(
+        graph_config::get_i64(&engine, "a.one").await.unwrap(),
+        Some(11)
+    );
+    assert!(
+        graph_config::SCANS.load(Ordering::Relaxed) > after,
+        "a write must make the next read scan"
+    );
+    assert_eq!(
+        snap.i64("a.one"),
+        Some(1),
+        "a snapshot is a snapshot: the old handle still says what it saw"
+    );
+}
+
+/// The TTL is the bound on writes this process cannot see; it must stay short
+/// enough that a burst is one scan and an external write is live promptly.
+#[tokio::test]
+async fn an_expired_snapshot_rescans() {
+    use std::sync::atomic::Ordering;
+    let engine = node().await;
+    register_self(&engine).await;
+    graph_config::set_config(
+        &engine,
+        "ttl.key",
+        ConfigValue::Bool(true),
+        "owner",
+        ConfigScope::Local,
+    )
+    .await
+    .expect("set_config");
+    let first = graph_config::snapshot(&engine).await.unwrap();
+    let n = graph_config::SCANS.load(Ordering::Relaxed);
+    assert!(
+        graph_config::CONFIG_SNAPSHOT_TTL.as_secs() <= 5,
+        "the staleness bound must stay small"
+    );
+    tokio::time::sleep(graph_config::CONFIG_SNAPSHOT_TTL + std::time::Duration::from_millis(200))
+        .await;
+    let second = graph_config::snapshot(&engine).await.unwrap();
+    assert!(
+        second.scan > first.scan && graph_config::SCANS.load(Ordering::Relaxed) > n,
+        "an expired snapshot rescans"
+    );
+}

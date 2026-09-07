@@ -395,54 +395,49 @@ impl ResolvedConfig {
 /// [`ResolvedConfig`].
 pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
     let d = ResolvedConfig::default();
+    // ONE scan for the whole struct (CIRISServer#557). Twelve per-key getters
+    // used to be twelve scans of everything this node ever authored, every
+    // tick; a read error falls back to every default, as each key did alone.
+    let snap = match graph_config::snapshot(engine).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = %e, "config resolve: snapshot failed — baked defaults this tick");
+            None
+        }
+    };
+    let snap = snap.as_deref();
 
-    let transport_node = graph_config::get_bool(engine, KEY_TRANSPORT_NODE)
-        .await
-        .ok()
-        .flatten()
+    let transport_node = snap
+        .and_then(|s| s.bool(KEY_TRANSPORT_NODE))
         .unwrap_or(d.transport_node);
-    let store_and_forward = graph_config::get_bool(engine, KEY_STORE_AND_FORWARD)
-        .await
-        .ok()
-        .flatten()
+    let store_and_forward = snap
+        .and_then(|s| s.bool(KEY_STORE_AND_FORWARD))
         .unwrap_or(d.store_and_forward);
-    let scorer_cadence_secs = graph_config::get_i64(engine, KEY_SCORER_CADENCE_SECS)
-        .await
-        .ok()
-        .flatten()
+    let scorer_cadence_secs = snap
+        .and_then(|s| s.i64(KEY_SCORER_CADENCE_SECS))
         .filter(|s| *s > 0)
         .map(|s| s as u64)
         .unwrap_or(d.scorer_cadence_secs);
-    let scorer_window = graph_config::get_i64(engine, KEY_SCORER_WINDOW)
-        .await
-        .ok()
-        .flatten()
+    let scorer_window = snap
+        .and_then(|s| s.i64(KEY_SCORER_WINDOW))
         .filter(|w| (1..=10_000).contains(w))
         .unwrap_or(d.scorer_window);
-    let scorer_sample_gate = graph_config::get_i64(engine, KEY_SCORER_SAMPLE_GATE)
-        .await
-        .ok()
-        .flatten()
+    let scorer_sample_gate = snap
+        .and_then(|s| s.i64(KEY_SCORER_SAMPLE_GATE))
         .filter(|g| (0..=u32::MAX as i64).contains(g))
         .map(|g| g as u32)
         .unwrap_or(d.scorer_sample_gate);
-    let scorer_target_n_eff = graph_config::get_f64(engine, KEY_SCORER_TARGET_N_EFF)
-        .await
-        .ok()
-        .flatten()
+    let scorer_target_n_eff = snap
+        .and_then(|s| s.f64(KEY_SCORER_TARGET_N_EFF))
         .filter(|t| t.is_finite() && *t > 0.0)
         .unwrap_or(d.scorer_target_n_eff);
-    let replication_reconcile_secs = graph_config::get_i64(engine, KEY_REPLICATION_RECONCILE_SECS)
-        .await
-        .ok()
-        .flatten()
+    let replication_reconcile_secs = snap
+        .and_then(|s| s.i64(KEY_REPLICATION_RECONCILE_SECS))
         .filter(|s| *s > 0)
         .map(|s| s as u64)
         .unwrap_or(d.replication_reconcile_secs);
-    let retention_cadence_secs = graph_config::get_i64(engine, KEY_RETENTION_CADENCE_SECS)
-        .await
-        .ok()
-        .flatten()
+    let retention_cadence_secs = snap
+        .and_then(|s| s.i64(KEY_RETENTION_CADENCE_SECS))
         .filter(|s| *s > 0)
         .map(|s| s as u64)
         .unwrap_or(d.retention_cadence_secs);
@@ -450,38 +445,27 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
     // not `> 0`. Using the cadence's `> 0` filter here would silently fall back
     // to the 90-day default on the one write an operator makes to turn eviction
     // OFF, and their sovereign archive would quietly start deleting.
-    let retention_max_age_days = graph_config::get_i64(engine, KEY_RETENTION_MAX_AGE_DAYS)
-        .await
-        .ok()
-        .flatten()
+    let retention_max_age_days = snap
+        .and_then(|s| s.i64(KEY_RETENTION_MAX_AGE_DAYS))
         .filter(|days| (0..=u32::MAX as i64).contains(days))
         .map(|days| days as u32)
         .unwrap_or(d.retention_max_age_days);
-    let retention_max_disk_gb = graph_config::get_i64(engine, KEY_RETENTION_MAX_DISK_GB)
-        .await
-        .ok()
-        .flatten()
+    let retention_max_disk_gb = snap
+        .and_then(|s| s.i64(KEY_RETENTION_MAX_DISK_GB))
         .filter(|g| *g >= 0)
         .map(|g| g as u64)
         .unwrap_or(d.retention_max_disk_gb);
-    let retention_audit_log_max_age_days =
-        graph_config::get_i64(engine, KEY_RETENTION_AUDIT_LOG_MAX_AGE_DAYS)
-            .await
-            .ok()
-            .flatten()
-            .filter(|days| (0..=u32::MAX as i64).contains(days))
-            .map(|days| days as u32)
-            .unwrap_or(d.retention_audit_log_max_age_days);
-    let mode = graph_config::get_str(engine, KEY_MODE)
-        .await
-        .ok()
-        .flatten()
+    let retention_audit_log_max_age_days = snap
+        .and_then(|s| s.i64(KEY_RETENTION_AUDIT_LOG_MAX_AGE_DAYS))
+        .filter(|days| (0..=u32::MAX as i64).contains(days))
+        .map(|days| days as u32)
+        .unwrap_or(d.retention_audit_log_max_age_days);
+    let mode = snap
+        .and_then(|s| s.str(KEY_MODE))
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.mode);
-    let listen_addr = graph_config::get_str(engine, KEY_LISTEN_ADDR)
-        .await
-        .ok()
-        .flatten()
+    let listen_addr = snap
+        .and_then(|s| s.str(KEY_LISTEN_ADDR))
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.listen_addr);
     let bootstrap_peers = graph_config::get_str_list(engine, KEY_BOOTSTRAP_PEERS)
@@ -489,39 +473,29 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         .ok()
         .flatten()
         .unwrap_or(d.bootstrap_peers);
-    let announce_ownership = graph_config::get_bool(engine, KEY_ANNOUNCE_OWNERSHIP)
-        .await
-        .ok()
-        .flatten()
+    let announce_ownership = snap
+        .and_then(|s| s.bool(KEY_ANNOUNCE_OWNERSHIP))
         .unwrap_or(d.announce_ownership);
     // `node.alias` defaults to empty (the build site falls back to key_id).
-    let node_alias = graph_config::get_str(engine, KEY_NODE_ALIAS)
-        .await
-        .ok()
-        .flatten()
+    let node_alias = snap
+        .and_then(|s| s.str(KEY_NODE_ALIAS))
         .unwrap_or(d.node_alias);
     let admin_key_ids = graph_config::get_str_list(engine, KEY_ADMIN_KEY_IDS)
         .await
         .ok()
         .flatten()
         .unwrap_or(d.admin_key_ids);
-    let oauth_callback_base_url = graph_config::get_str(engine, KEY_OAUTH_CALLBACK_BASE_URL)
-        .await
-        .ok()
-        .flatten()
+    let oauth_callback_base_url = snap
+        .and_then(|s| s.str(KEY_OAUTH_CALLBACK_BASE_URL))
         .unwrap_or(d.oauth_callback_base_url);
     // net.radio.* — serial LoRa/RNode radio transport (boot-structural; the build
     // site attaches it on desktop only). Integers come in via get_i64 (the config
     // store's numeric shape) and are range-clamped into u32/u8.
-    let radio_enabled = graph_config::get_bool(engine, KEY_RADIO_ENABLED)
-        .await
-        .ok()
-        .flatten()
+    let radio_enabled = snap
+        .and_then(|s| s.bool(KEY_RADIO_ENABLED))
         .unwrap_or(d.radio_enabled);
-    let radio_serial_port = graph_config::get_str(engine, KEY_RADIO_SERIAL_PORT)
-        .await
-        .ok()
-        .flatten()
+    let radio_serial_port = snap
+        .and_then(|s| s.str(KEY_RADIO_SERIAL_PORT))
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(d.radio_serial_port);
     let radio_u32 = |v: Option<i64>, dflt: u32| -> u32 {
@@ -533,38 +507,20 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
             .unwrap_or(dflt)
     };
     let radio_frequency_hz = radio_u32(
-        graph_config::get_i64(engine, KEY_RADIO_FREQUENCY)
-            .await
-            .ok()
-            .flatten(),
+        snap.and_then(|s| s.i64(KEY_RADIO_FREQUENCY)),
         d.radio_frequency_hz,
     );
     let radio_bandwidth_hz = radio_u32(
-        graph_config::get_i64(engine, KEY_RADIO_BANDWIDTH)
-            .await
-            .ok()
-            .flatten(),
+        snap.and_then(|s| s.i64(KEY_RADIO_BANDWIDTH)),
         d.radio_bandwidth_hz,
     );
     let radio_spreading_factor = radio_u8(
-        graph_config::get_i64(engine, KEY_RADIO_SF)
-            .await
-            .ok()
-            .flatten(),
+        snap.and_then(|s| s.i64(KEY_RADIO_SF)),
         d.radio_spreading_factor,
     );
-    let radio_coding_rate = radio_u8(
-        graph_config::get_i64(engine, KEY_RADIO_CR)
-            .await
-            .ok()
-            .flatten(),
-        d.radio_coding_rate,
-    );
+    let radio_coding_rate = radio_u8(snap.and_then(|s| s.i64(KEY_RADIO_CR)), d.radio_coding_rate);
     let radio_tx_power_dbm = radio_u8(
-        graph_config::get_i64(engine, KEY_RADIO_TXPOWER)
-            .await
-            .ok()
-            .flatten(),
+        snap.and_then(|s| s.i64(KEY_RADIO_TXPOWER)),
         d.radio_tx_power_dbm,
     );
 

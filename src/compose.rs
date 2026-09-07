@@ -93,6 +93,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     }
     let _serve_guard = ServeGuard;
 
+    // A re-serve in this process (the embedded fold's restart) may be another
+    // home: the config snapshot is process-global, so it is dropped here
+    // (CIRISServer#557).
+    crate::graph_config::invalidate();
+
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
     // fail-secure gate is live: if the OS entropy source is producing detectably
