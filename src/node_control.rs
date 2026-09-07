@@ -288,8 +288,11 @@ pub fn propagate_terminate() {
     // Raw stderr, never tracing: this runs on the broker thread when no serve
     // is active, and a blocking sink must not sit ahead of the exit.
     let say = |msg: &[u8]| {
-        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer.
-        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer. The count
+        // is `size_t` on unix and `c_uint` on windows (libc's `write` mirrors
+        // the C runtime), hence the inferred cast — every message here is a
+        // short literal, so it fits either.
+        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len() as _) };
     };
     if HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst) {
         say(

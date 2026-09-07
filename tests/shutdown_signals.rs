@@ -15,12 +15,17 @@
 //! signal the serve did not get to.
 
 fn compose_src() -> String {
-    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/compose.rs")).unwrap()
+    // A Windows checkout carries CRLF; the patterns below embed `\n`, so
+    // normalise first or the gate reads "no select" on one OS (0.5.202).
+    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/compose.rs"))
+        .unwrap()
+        .replace("\r\n", "\n")
 }
 
 fn node_control_code() -> String {
     std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/node_control.rs"))
         .unwrap()
+        .replace("\r\n", "\n")
         .split("#[cfg(test)]")
         .next()
         .unwrap()
