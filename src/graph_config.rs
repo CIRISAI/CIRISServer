@@ -261,10 +261,164 @@ fn entry_from_envelope(env: &serde_json::Value) -> Option<ConfigEntry> {
 
 /// A stored config row paired with the substrate row id + assertion time, so the
 /// version-fold can break version ties deterministically and chain `previous_version`.
+#[derive(Debug, Clone)]
 struct StoredRow {
     attestation_id: String,
     asserted_at: chrono::DateTime<chrono::Utc>,
     entry: ConfigEntry,
+}
+
+/// How long a loaded [`ConfigSnapshot`] serves reads before the next read
+/// re-scans (CIRISServer#557).
+///
+/// Every in-process write door invalidates the snapshot explicitly
+/// ([`set_config`], [`delete_config`], and `attest`'s withdraw/recant emits),
+/// so this bound only governs writes this process cannot see: the
+/// `ciris-server config set` CLI running against the same store, a revocation
+/// landing by a door that forgot to call [`invalidate`]. Two seconds is long
+/// enough that a consumer's burst of fifty reads is one scan, and short enough
+/// that an external write is live before anyone notices it was not.
+pub const CONFIG_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many times the config plane has been SCANNED from the store. A test
+/// asserts that fifty reads move it by one; an operator can read it beside
+/// the per-scan log line to see whether a consumer is defeating the cache.
+pub static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The config plane as of one scan: every live `config:v1` row this node
+/// authored, folded for revocations, with the newest version per key
+/// resolvable without touching the store again.
+///
+/// This is the shape that makes the cost visible (CIRISServer#557): one
+/// `load`, then any number of reads that are lookups. The per-key
+/// [`get_config`] / [`get_i64`] family still exists for callers that read one
+/// value once; they share this snapshot through the process cache, so fifty
+/// of them in a row are ALSO one scan — but a consumer that resolves a struct
+/// should hold a snapshot and say so.
+#[derive(Debug)]
+pub struct ConfigSnapshot {
+    node_key_id: String,
+    rows: Vec<StoredRow>,
+    loaded_at: std::time::Instant,
+    /// Ordinal of the scan that produced this snapshot (see [`SCANS`]).
+    pub scan: u64,
+}
+
+impl ConfigSnapshot {
+    /// The node whose config plane this is.
+    #[must_use]
+    pub fn node_key_id(&self) -> &str {
+        &self.node_key_id
+    }
+
+    /// Live rows held (every version of every key that has not been revoked).
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The newest live entry for `key`, unless it is a tombstone.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&ConfigEntry> {
+        latest_for_key(&self.rows, key)
+            .filter(|r| !matches!(r.entry.value, ConfigValue::Null))
+            .map(|r| &r.entry)
+    }
+
+    #[must_use]
+    pub fn str(&self, key: &str) -> Option<String> {
+        self.get(key)
+            .and_then(|e| e.value.as_str().map(str::to_owned))
+    }
+
+    #[must_use]
+    pub fn i64(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(|e| e.value.as_i64())
+    }
+
+    #[must_use]
+    pub fn f64(&self, key: &str) -> Option<f64> {
+        self.get(key).and_then(|e| e.value.as_f64())
+    }
+
+    #[must_use]
+    pub fn bool(&self, key: &str) -> Option<bool> {
+        self.get(key).and_then(|e| e.value.as_bool())
+    }
+
+    #[must_use]
+    pub fn str_list(&self, key: &str) -> Option<Vec<String>> {
+        self.get(key).and_then(|e| e.value.as_str_list())
+    }
+
+    /// Newest live entry per key, optionally under a key prefix.
+    #[must_use]
+    pub fn list(&self, prefix: Option<&str>) -> BTreeMap<String, ConfigEntry> {
+        let mut out = BTreeMap::new();
+        for r in &self.rows {
+            if let Some(p) = prefix {
+                if !r.entry.key.starts_with(p) {
+                    continue;
+                }
+            }
+            if out.contains_key(&r.entry.key) {
+                continue;
+            }
+            if let Some(latest) = latest_for_key(&self.rows, &r.entry.key) {
+                if matches!(latest.entry.value, ConfigValue::Null) {
+                    continue;
+                }
+                out.insert(latest.entry.key.clone(), latest.entry.clone());
+            }
+        }
+        out
+    }
+
+    fn fresh(&self) -> bool {
+        self.loaded_at.elapsed() < CONFIG_SNAPSHOT_TTL
+    }
+}
+
+/// The process-wide cache: one snapshot, replaced on scan, dropped on
+/// [`invalidate`]. A `Mutex<Option<Arc<_>>>` rather than an `RwLock`: the
+/// critical section is a pointer clone.
+/// (engine identity, snapshot) — the one cached slot.
+type CachedSnapshot = Option<(usize, Arc<ConfigSnapshot>)>;
+
+fn cache() -> &'static std::sync::Mutex<CachedSnapshot> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<CachedSnapshot>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The identity a snapshot is valid for: the `Engine` it was scanned from. A
+/// process normally holds one engine, but a test binary holds many at once
+/// (one `sqlite::memory:` each), and the embedded fold may re-serve on
+/// another home; a snapshot must never answer for a store it did not read.
+fn engine_identity(engine: &Arc<Engine>) -> usize {
+    Arc::as_ptr(engine) as usize
+}
+
+/// Drop the cached snapshot: the next read scans. Called by every in-process
+/// door that changes the config plane ([`set_config`], the withdraw/recant
+/// emits in `attest`), and by compose at serve start so an in-process
+/// re-serve on another home never reads the previous node's config.
+pub fn invalidate() {
+    *cache().lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// The current config snapshot: cached if fresh, else one scan. THE read
+/// door — every getter below goes through it.
+pub async fn snapshot(engine: &Arc<Engine>) -> Result<Arc<ConfigSnapshot>> {
+    let me = engine_identity(engine);
+    if let Some((owner, snap)) = cache().lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        if *owner == me && snap.fresh() {
+            return Ok(Arc::clone(snap));
+        }
+    }
+    let snap = Arc::new(live_config_rows(engine).await?);
+    *cache().lock().unwrap_or_else(|p| p.into_inner()) = Some((me, Arc::clone(&snap)));
+    Ok(snap)
 }
 
 /// Read every LIVE (unrevoked) `config:v1` row this node authored, parsed into
@@ -313,8 +467,13 @@ const CONFIG_READ_LIMIT: i64 = 512;
 ///
 /// `AttestationFilter` already carried every predicate this needs. The fix is
 /// to stop doing the substrate's job in application code.
-async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
+/// ONE scan of the config plane into a [`ConfigSnapshot`]. Callers go through
+/// [`snapshot`], which caches the result; this is the cost the cache amortises.
+async fn live_config_rows(engine: &Arc<Engine>) -> Result<ConfigSnapshot> {
     use ciris_persist::ceg::list::federation::AttestationFilter;
+
+    let t0 = std::time::Instant::now();
+    let scan = SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
     let node_key_id = self_key_id(engine).await?;
     let node_key_id = node_key_id.as_str();
@@ -325,13 +484,15 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
     let mut filter = AttestationFilter::default();
     filter.attesting_key_id = Some(node_key_id.to_owned());
     filter.attestation_type = Some(attestation_type::SCORES.to_owned());
-    // Derived from CONFIG_DIMENSION, never written twice. A prefix literal
-    // beside the dimension is the hand-mirrored-vocabulary shape
-    // tests/envelope_vocabulary_single_source.rs exists to stop.
-    filter.dimension_prefixes = vec![CONFIG_DIMENSION
-        .split_once(':')
-        .map(|(fam, _)| format!("{fam}:"))
-        .unwrap_or_else(|| CONFIG_DIMENSION.to_owned())];
+    // EXACT dimension, not the family prefix (CIRISServer#557): every config
+    // row is `config:v1`, and a prefix `LIKE` over `json_extract(...)` was a
+    // per-row JSON parse of everything this node ever authored. The exact
+    // form is still `json_extract(...) = ?` on this handle (persist has the
+    // V106 subjects seek for the scores handles only), so the scan remains
+    // O(rows this node authored) — which is why it is cached, and why the
+    // indexed path is asked of persist rather than papered over here.
+    // Single-sourced from CONFIG_DIMENSION, never a literal beside it.
+    filter.dimension_exact = Some(CONFIG_DIMENSION.to_owned());
 
     // ── The scope gate is REAL and this read must pass it honestly ──────────
     //
@@ -421,7 +582,21 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<Vec<StoredRow>> {
             });
         }
     }
-    Ok(out)
+    // The cost, said every time it is paid (CIRISServer#557: a keyed read
+    // that costs a scan must at least say so).
+    tracing::debug!(
+        scan,
+        config_rows = out.len(),
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        ttl_s = CONFIG_SNAPSHOT_TTL.as_secs(),
+        "config plane scanned into a snapshot"
+    );
+    Ok(ConfigSnapshot {
+        node_key_id: node_key_id.to_owned(),
+        rows: out,
+        loaded_at: std::time::Instant::now(),
+        scan,
+    })
 }
 
 /// Every config row id this node has retracted, in ONE pass.
@@ -521,11 +696,10 @@ fn latest_for_key<'a>(rows: &'a [StoredRow], key: &str) -> Option<&'a StoredRow>
 /// `None` if the key has no live row. A recanted/withdrawn key reads as absent
 /// (see [`config_key_revoked`]).
 pub async fn get_config(engine: &Arc<Engine>, key: &str) -> Result<Option<ConfigEntry>> {
-    let rows = live_config_rows(engine).await?;
-    Ok(latest_for_key(&rows, key)
-        // A Null-valued latest is a tombstone (deleted) — reads as absent.
-        .filter(|r| !matches!(r.entry.value, ConfigValue::Null))
-        .map(|r| r.entry.clone()))
+    // Reads the process snapshot ([`snapshot`]): fifty of these in a row are
+    // one scan. A consumer resolving a whole struct should hold a
+    // [`ConfigSnapshot`] and read from it — same cost, stated at the call site.
+    Ok(snapshot(engine).await?.get(key).cloned())
 }
 
 /// List the latest [`ConfigEntry`] per key (latest-wins fold), optionally filtered
@@ -534,28 +708,8 @@ pub async fn list_configs(
     engine: &Arc<Engine>,
     prefix: Option<&str>,
 ) -> Result<BTreeMap<String, ConfigEntry>> {
-    let rows = live_config_rows(engine).await?;
-
-    // Distinct keys (filtered by prefix), then latest-fold each.
-    let mut out = BTreeMap::new();
-    for r in &rows {
-        if let Some(p) = prefix {
-            if !r.entry.key.starts_with(p) {
-                continue;
-            }
-        }
-        if out.contains_key(&r.entry.key) {
-            continue;
-        }
-        if let Some(latest) = latest_for_key(&rows, &r.entry.key) {
-            // Skip a tombstoned key (latest value is Null = deleted).
-            if matches!(latest.entry.value, ConfigValue::Null) {
-                continue;
-            }
-            out.insert(latest.entry.key.clone(), latest.entry.clone());
-        }
-    }
-    Ok(out)
+    // Same snapshot as [`get_config`].
+    Ok(snapshot(engine).await?.list(prefix))
 }
 
 /// Write a config entry: compute `version = current.version + 1` (or `1`),
@@ -574,9 +728,12 @@ pub async fn set_config(
     updated_by: &str,
     scope: ConfigScope,
 ) -> Result<ConfigEntry> {
-    // Current latest (for version + previous_version chaining).
-    let rows = live_config_rows(engine).await?;
-    let current = latest_for_key(&rows, key);
+    // Current latest (for version + previous_version chaining) — from the LIVE
+    // plane, never a snapshot up to a TTL old: two writes to one key inside one
+    // TTL must chain.
+    invalidate();
+    let snap = snapshot(engine).await?;
+    let current = latest_for_key(&snap.rows, key);
     let version = current.map(|r| r.entry.version + 1).unwrap_or(1);
     let previous_version = current.map(|r| r.attestation_id.clone());
 
@@ -629,6 +786,8 @@ pub async fn set_config(
         .emit_attestation_self(input)
         .await
         .map_err(|e| anyhow::anyhow!("emit_attestation_self(config:v1): {e}"))?;
+    // The plane changed; the next read scans.
+    invalidate();
 
     tracing::info!(
         key,

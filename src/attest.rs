@@ -500,11 +500,26 @@ impl Emit {
 /// to anyone claiming the owner's key.
 pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
     let id = row.attestation_id.clone();
+    let kind = row.attestation_type.clone();
+    let touches_config = row
+        .attestation_envelope
+        .get(ciris_persist::federation::envelope::paths::DIMENSION)
+        .and_then(|d| d.as_str())
+        == Some(crate::graph_config::CONFIG_DIMENSION);
     engine
         .federation_directory()
         .put_attestation_authored(SignedAttestation { attestation: row })
         .await
         .map_err(|e| Error::Persist(e.to_string()))?;
+    // A config row written through this door, or a withdraw / recant that may
+    // retire one: the config snapshot folds all of that at scan time, so the
+    // next read must scan (CIRISServer#557).
+    if touches_config
+        || kind == ciris_persist::federation::types::attestation_type::WITHDRAWS
+        || kind == ciris_persist::federation::types::attestation_type::RECANTS
+    {
+        crate::graph_config::invalidate();
+    }
     Ok(id)
 }
 
