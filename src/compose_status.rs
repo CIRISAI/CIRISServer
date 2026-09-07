@@ -299,11 +299,18 @@ fn spawn_watchdog() {
 mod tests {
     use super::*;
 
+    /// The record is process-global, and `phase()` on a completed record
+    /// CLEARS it: two tests stamping concurrently can erase each other's
+    /// entries between a `mark` and the assertion that reads it (seen once in
+    /// the full lib binary). Serialize them.
+    static RECORD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Marks are silent until diagnostics are on, and then carry the three
     /// clocks. Enabling is process-global and one-way, so this test runs the
     /// "off" half first.
     #[test]
     fn marks_are_silent_off_and_carry_three_clocks_on() {
+        let _serial = RECORD.lock().unwrap_or_else(|p| p.into_inner());
         phase("test_mark_phase_off");
         // Cannot assert "off" if another test in this binary already enabled
         // diagnostics; only assert the shape is well-formed either way.
@@ -350,6 +357,7 @@ mod tests {
 
     #[test]
     fn phases_accumulate_and_complete() {
+        let _serial = RECORD.lock().unwrap_or_else(|p| p.into_inner());
         phase("test_alpha");
         phase("test_beta");
         let snap: serde_json::Value = serde_json::from_str(&snapshot_json()).unwrap();

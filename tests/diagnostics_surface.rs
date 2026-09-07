@@ -105,6 +105,47 @@ async fn the_memory_route_answers_loopback_and_refuses_everyone_else() {
     );
 }
 
+#[tokio::test]
+async fn the_trim_door_measures_and_refuses_everyone_but_loopback() {
+    let post = |from: Option<SocketAddr>| async move {
+        let mut req = Request::builder()
+            .uri(ciris_server::diag::ROUTE_TRIM)
+            .method("POST");
+        if let Some(addr) = from {
+            req = req.extension(ConnectInfo(addr));
+        }
+        let resp = ciris_server::diag::router()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    };
+    let (status, body) = post(Some(SocketAddr::from(([127, 0, 0, 1], 51424)))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["before"]["proc"].is_object() && body["after"]["proc"].is_object(),
+        "{body}"
+    );
+    assert!(body["delta"].is_object(), "the door reports deltas: {body}");
+    #[cfg(target_env = "gnu")]
+    {
+        assert!(
+            body["released"].is_boolean(),
+            "glibc reports whether it released: {body}"
+        );
+        assert!(body["delta"]["fordblks_bytes"].is_i64(), "{body}");
+    }
+    let (status, _) = post(Some(SocketAddr::from(([10, 0, 0, 7], 40000)))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = post(None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 #[test]
 fn the_listener_binds_before_the_loops_start() {
     let src = compose_src();
