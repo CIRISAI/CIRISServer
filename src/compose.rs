@@ -1745,6 +1745,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // clean restart, #276). The read-API addr was armed in node_control when
     // the listener bound, so shutdown_node() can wait for :4243 to actually
     // free after teardown below.
+    let mut stopped_by_sigterm = false;
     tokio::select! {
         r = tokio::signal::ctrl_c() => {
             r.context("await ctrl_c")?;
@@ -1752,6 +1753,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         }
         _ = crate::node_control::terminated() => {
             tracing::info!("SIGTERM — stopping the node cleanly (releasing :4243)");
+            stopped_by_sigterm = true;
         }
         _ = crate::node_control::shutdown_requested() => {
             tracing::info!("node shutdown requested (shutdown_node) — releasing :4243");
@@ -1793,6 +1795,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // `None` in the #221 fold — the agent owns the edge's run loop (init_edge_runtime).
     if let Some(edge_join) = edge_join {
         let _ = edge_join.await;
+    }
+    // A SIGTERM asked for the PROCESS to end, not only this serve. Now that
+    // the node has unwound cleanly, finish what the signal asked for unless an
+    // embedding host owns SIGTERM and decides for itself (#556 review): an
+    // embedded fold has no `main` to return to, and a host left alive with a
+    // stopped node inside it is what turns `docker stop` into SIGKILL.
+    if stopped_by_sigterm {
+        crate::node_control::propagate_terminate();
     }
     Ok(())
 }

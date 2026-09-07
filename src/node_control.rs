@@ -109,6 +109,14 @@ fn terminated_latch() -> &'static watch::Sender<bool> {
     TX.get_or_init(|| watch::channel(false).0)
 }
 
+/// Whether the process had its OWN SIGTERM handler before the broker chained
+/// onto it. `true` = a host (the agent's Python runtime, say) handles SIGTERM
+/// and decides what the process does after this node has stopped; `false` =
+/// the disposition was the default (terminate), so after a clean teardown the
+/// node must finish what the default would have done — see
+/// [`propagate_terminate`]. Read once at install; never changes after.
+static HOST_OWNS_SIGTERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Install the process-wide SIGTERM broker, once. Idempotent; returns when the
 /// handler is REGISTERED (not merely requested), so a caller may rely on the
 /// disposition from this line on. Where the platform has no SIGTERM, or the
@@ -118,9 +126,12 @@ fn terminated_latch() -> &'static watch::Sender<bool> {
 /// No tokio in the path, deliberately: a `tokio::signal` stream is drained by
 /// whichever runtime's driver wakes first, and a receiver that must outlive
 /// every serve call and be observable from any of them cannot depend on which
-/// runtimes happen to be alive (the first version of this was flaky for
-/// exactly that reason). The OS handler is async-signal-safe — one `write(2)`
-/// of one byte to a socketpair — and a plain blocking thread reads it.
+/// runtimes happen to be alive. The OS handler is async-signal-safe — one
+/// non-blocking `write(2)` of one byte to a socketpair — and a plain blocking
+/// thread reads it. Order of construction is load-bearing (#556 review): the
+/// reader thread exists BEFORE the handler is registered, so there is never a
+/// registered handler with nobody behind it; if the handler cannot be
+/// registered the writer is dropped and the reader exits.
 pub fn install_terminate_broker() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
@@ -135,59 +146,121 @@ pub fn install_terminate_broker() {
                     return;
                 }
             };
-            // The handler owns the raw fd for the life of the process.
-            let wfd = writer.into_raw_fd();
-            // SAFETY: the handler does exactly one async-signal-safe call —
-            // `write(2)` of a single byte to an fd that is never closed — and
-            // touches nothing else. Registration chains with any handler tokio
-            // or a host has installed rather than replacing it.
-            let registered = unsafe {
-                signal_hook_registry::register(libc::SIGTERM, move || {
-                    // Async-signal-safe: one relaxed atomic add, one write(2).
-                    HANDLER_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let _ = libc::write(wfd, b"t".as_ptr().cast(), 1);
-                })
-            };
-            if let Err(e) = registered {
-                tracing::warn!(
-                    error = %e,
-                    "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
-                     stop this node cleanly; SIGTERM will kill it abruptly"
-                );
+            // Non-blocking writer: the handler must never block inside a
+            // signal context. If the buffer is full the notification is
+            // already pending, and EAGAIN is the right answer.
+            if let Err(e) = writer.set_nonblocking(true) {
+                tracing::warn!(error = %e, "SIGTERM broker: cannot make the notifier non-blocking — not installing");
                 return;
             }
-            let _ = reader.as_raw_fd();
+            // Who owned SIGTERM before us? SIG_DFL means nobody: after a clean
+            // teardown the node finishes the default action itself.
+            // SAFETY: `sigaction` with a null new action only READS the current
+            // disposition into `old`, which is zero-initialised storage we own.
+            let host_owns = unsafe {
+                let mut old: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut old) == 0 {
+                    old.sa_sigaction != libc::SIG_DFL
+                } else {
+                    false
+                }
+            };
+            HOST_OWNS_SIGTERM.store(host_owns, std::sync::atomic::Ordering::SeqCst);
+
+            // 1. The reader, BEFORE the handler exists.
             let spawned = std::thread::Builder::new()
                 .name("sigterm-broker".into())
                 .spawn(move || {
                     let mut byte = [0u8; 1];
-                    // First byte: latch. The serve's select sees it and stops cleanly.
+                    // First byte: LATCH FIRST, log second. A stuck tracing sink
+                    // must not stand between the signal and the serve loop.
                     if reader.read_exact(&mut byte).is_err() {
                         return;
                     }
+                    terminated_latch().send_replace(true);
                     BROKER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!("SIGTERM received — latched; the serve stops cleanly (releasing :4243)");
-                    // `send_replace`, NOT `send`: `watch::Sender::send` refuses to
-                    // store when no receiver is alive, and a SIGTERM that lands
-                    // before any serve is waiting (during boot, between the
-                    // fold's serve calls) has no receiver yet. The latch must
-                    // hold the value for whoever subscribes next; this is the
-                    // line the first two versions of this broker got wrong.
-                    terminated_latch().send_replace(true);
-                    // Second byte: the operator insisting. Do not swallow it.
+                    // Second byte: the operator insisting. Exit BEFORE anything
+                    // that can block; one raw write to stderr is the whole log.
                     if reader.read_exact(&mut byte).is_ok() {
-                        tracing::warn!("second SIGTERM — exiting immediately (143)");
+                        let msg = b"ciris-server: second SIGTERM - exiting immediately (143)\n";
+                        // SAFETY: a plain write(2) to fd 2 of a static buffer.
+                        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
                         std::process::exit(143);
                     }
                 });
-            match spawned {
-                Ok(_) => tracing::info!(
-                    "SIGTERM broker installed — docker stop / systemd stop now end the node cleanly"
-                ),
-                Err(e) => tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned"),
+            if let Err(e) = spawned {
+                // No reader → no handler. The default disposition stays.
+                tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned — SIGTERM keeps its default action");
+                return;
+            }
+
+            // 2. The handler, now that the reader is waiting. The writer fd is
+            // owned by the handler for the life of the process on success; on
+            // failure it is dropped here, which ends the reader.
+            let wfd = writer.as_raw_fd();
+            // SAFETY: the handler does exactly one async-signal-safe call —
+            // a non-blocking `write(2)` of a single byte to an fd that is
+            // never closed — plus one relaxed atomic add. Registration chains
+            // with any handler a host had installed rather than replacing it.
+            let registered = unsafe {
+                signal_hook_registry::register(libc::SIGTERM, move || {
+                    HANDLER_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // EAGAIN = a byte is already queued = already notified.
+                    let _ = libc::write(wfd, b"t".as_ptr().cast(), 1);
+                })
+            };
+            match registered {
+                Ok(_) => {
+                    let _ = writer.into_raw_fd(); // leak: the handler owns it now
+                    tracing::info!(
+                        host_owns_sigterm = host_owns,
+                        "SIGTERM broker installed — docker stop / systemd stop now end the node cleanly"
+                    );
+                }
+                Err(e) => {
+                    drop(writer); // the reader's read_exact fails → thread exits
+                    tracing::warn!(
+                        error = %e,
+                        "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
+                         stop this node cleanly; SIGTERM keeps its default action"
+                    );
+                }
             }
         }
     });
+}
+
+/// After a SIGTERM-initiated teardown has COMPLETED: finish what the signal
+/// asked for. The broker's handler suppressed the default action so the node
+/// could unwind cleanly; if nobody else in this process handles SIGTERM (the
+/// standalone binary; an embedding host whose disposition was the default),
+/// the process must now terminate the way the default would have — restore
+/// `SIG_DFL` and re-raise, so the exit status is the conventional one and
+/// nothing above us keeps a stopped node's process alive until `docker stop`
+/// escalates to SIGKILL (#556 review). If a host DID own SIGTERM, its handler
+/// already ran (the registration chains) and the host decides; this returns.
+pub fn propagate_terminate() {
+    if HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst) {
+        tracing::info!(
+            "node stopped on SIGTERM; the embedding host owns SIGTERM and decides what the process does next"
+        );
+        return;
+    }
+    #[cfg(unix)]
+    {
+        tracing::info!(
+            "node stopped on SIGTERM — terminating the process (default action, after cleanup)"
+        );
+        // SAFETY: restoring the default disposition and re-raising a signal
+        // this process has already received and finished handling.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            libc::raise(libc::SIGTERM);
+        }
+    }
+    // Not reached on unix unless the raise was blocked; the conventional status.
+    std::process::exit(143);
 }
 
 /// Await the process's SIGTERM. Resolves at once if it has already arrived

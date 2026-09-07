@@ -69,4 +69,41 @@ fn the_stop_select_awaits_sigint_sigterm_and_shutdown_node() {
         code.contains("signal_hook_registry::register(libc::SIGTERM"),
         "node_control's broker must install a real OS-level SIGTERM handler"
     );
+    // #556 review, third round — the four shapes that must not regress:
+    let spawn_at = code
+        .find("Builder::new()\n                .name(\"sigterm-broker\"")
+        .or_else(|| code.find(".name(\"sigterm-broker\""))
+        .expect("broker thread");
+    let register_at = code
+        .find("signal_hook_registry::register(libc::SIGTERM")
+        .unwrap();
+    assert!(
+        spawn_at < register_at,
+        "the reader thread must exist BEFORE the handler is registered"
+    );
+    assert!(
+        code.contains("set_nonblocking(true)"),
+        "the handler's notifier must be non-blocking"
+    );
+    let latch_at = code
+        .find("terminated_latch().send_replace(true)")
+        .expect("the latch stores unconditionally");
+    let log_at = code.find("SIGTERM received — latched").unwrap();
+    assert!(
+        latch_at < log_at,
+        "latch BEFORE the log line: a stuck tracing sink must not delay the stop"
+    );
+    assert!(
+        src.contains("stopped_by_sigterm")
+            && src.contains("crate::node_control::propagate_terminate()"),
+        "after a SIGTERM-initiated teardown the serve must propagate termination to the process"
+    );
+    let prop_at = src
+        .find("crate::node_control::propagate_terminate()")
+        .unwrap();
+    let last_join = src.rfind("let _ = edge_join.await;").unwrap();
+    assert!(
+        prop_at > last_join,
+        "propagation must come AFTER the last teardown join"
+    );
 }
