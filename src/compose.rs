@@ -80,6 +80,18 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // and one between the embedded fold's serve calls is honoured by the next.
     // Idempotent across re-serves; returns once the handler is registered.
     crate::node_control::install_terminate_broker();
+    crate::node_control::serve_began();
+    // Every exit from here on — the stop-select's teardown or any `?` on a boot
+    // step — runs `serve_ended`, which propagates a latched SIGTERM the serve
+    // did not get to answer itself (#556 review: a boot that fails past the
+    // broker's installation must not leave a suppressed SIGTERM behind).
+    struct ServeGuard;
+    impl Drop for ServeGuard {
+        fn drop(&mut self) {
+            crate::node_control::serve_ended();
+        }
+    }
+    let _serve_guard = ServeGuard;
 
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
@@ -1801,7 +1813,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // embedding host owns SIGTERM and decides for itself (#556 review): an
     // embedded fold has no `main` to return to, and a host left alive with a
     // stopped node inside it is what turns `docker stop` into SIGKILL.
-    if stopped_by_sigterm {
+    // The LATCH decides, not the arm that won: a SIGTERM that landed during a
+    // teardown that SIGINT or shutdown_node() started is answered the same way.
+    if stopped_by_sigterm || crate::node_control::terminated_now() {
         crate::node_control::propagate_terminate();
     }
     Ok(())

@@ -42,7 +42,10 @@ static BOUND_ADDR: Mutex<Option<SocketAddr>> = Mutex::new(None);
 /// once the read-API listener is up, so `shutdown_node()` knows what port to
 /// free and can't act on a stale request from a previous serve.
 pub fn arm(read_api_addr: SocketAddr) {
-    let _ = latch().send(false);
+    // `send_replace`: `send` stores nothing when no receiver is alive, which is
+    // exactly the state before the stop-select is polled — a retained stale
+    // request would then stop every subsequent serve at once (#556 review).
+    latch().send_replace(false);
     *BOUND_ADDR.lock().unwrap_or_else(|p| p.into_inner()) = Some(read_api_addr);
 }
 
@@ -101,6 +104,36 @@ pub fn request_shutdown() {
 /// operator who wants to know whether a SIGTERM reached the handler.
 pub static HANDLER_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub static BROKER_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a serve is currently running (from `serve_with_adapter`'s first
+/// line to its return, success or error). The broker consults it: a SIGTERM
+/// that lands while a serve is active is latched for that serve to unwind on;
+/// one that lands with NO serve active — idle between the embedded fold's
+/// serve calls, or after a boot that failed past the broker's installation —
+/// has nothing to clean up and is propagated by the broker itself, so the
+/// process ends the way the default action would have (#556 review).
+static SERVE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark a serve as running. Paired with [`serve_ended`]; both idempotent.
+pub fn serve_began() {
+    SERVE_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Mark the serve as finished (however it finished). If SIGTERM arrived while
+/// it ran and it did not propagate itself, this does — a serve that returned
+/// on an error path still owes the signal its answer.
+pub fn serve_ended() {
+    SERVE_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    if terminated_now() {
+        propagate_terminate();
+    }
+}
+
+/// Has SIGTERM been latched? Readable from any thread, no runtime needed.
+#[must_use]
+pub fn terminated_now() -> bool {
+    *terminated_latch().subscribe().borrow()
+}
 
 /// The SIGTERM latch. `true` once the process has received SIGTERM; never
 /// reset — a terminated process does not un-terminate.
@@ -172,20 +205,31 @@ pub fn install_terminate_broker() {
                 .name("sigterm-broker".into())
                 .spawn(move || {
                     let mut byte = [0u8; 1];
-                    // First byte: LATCH FIRST, log second. A stuck tracing sink
-                    // must not stand between the signal and the serve loop.
+                    // NO tracing on this thread, ever: the repository's file
+                    // sink is synchronous, and a stuck sink between the first
+                    // byte and the second `read_exact` would turn the promised
+                    // immediate escalation into a hang. Raw stderr only.
+                    let say = |msg: &[u8]| {
+                        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer.
+                        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+                    };
+                    // First byte: LATCH, then decide who answers the signal.
                     if reader.read_exact(&mut byte).is_err() {
                         return;
                     }
                     terminated_latch().send_replace(true);
                     BROKER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!("SIGTERM received — latched; the serve stops cleanly (releasing :4243)");
-                    // Second byte: the operator insisting. Exit BEFORE anything
-                    // that can block; one raw write to stderr is the whole log.
+                    if SERVE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+                        say(b"ciris-server: SIGTERM - stopping the node cleanly\n");
+                    } else {
+                        // Nothing is serving: no cleanup to run, no select to
+                        // observe the latch. Finish what the signal asked for.
+                        say(b"ciris-server: SIGTERM with no serve active - terminating\n");
+                        propagate_terminate();
+                    }
+                    // Second byte: the operator insisting. Exit at once.
                     if reader.read_exact(&mut byte).is_ok() {
-                        let msg = b"ciris-server: second SIGTERM - exiting immediately (143)\n";
-                        // SAFETY: a plain write(2) to fd 2 of a static buffer.
-                        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+                        say(b"ciris-server: second SIGTERM - exiting immediately (143)\n");
                         std::process::exit(143);
                     }
                 });
@@ -241,17 +285,21 @@ pub fn install_terminate_broker() {
 /// escalates to SIGKILL (#556 review). If a host DID own SIGTERM, its handler
 /// already ran (the registration chains) and the host decides; this returns.
 pub fn propagate_terminate() {
+    // Raw stderr, never tracing: this runs on the broker thread when no serve
+    // is active, and a blocking sink must not sit ahead of the exit.
+    let say = |msg: &[u8]| {
+        // SAFETY: a plain write(2) to fd 2 of a caller-owned buffer.
+        let _ = unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
+    };
     if HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst) {
-        tracing::info!(
-            "node stopped on SIGTERM; the embedding host owns SIGTERM and decides what the process does next"
+        say(
+            b"ciris-server: node stopped on SIGTERM; the embedding host owns SIGTERM and decides\n",
         );
         return;
     }
     #[cfg(unix)]
     {
-        tracing::info!(
-            "node stopped on SIGTERM — terminating the process (default action, after cleanup)"
-        );
+        say(b"ciris-server: SIGTERM honoured - terminating the process (default action)\n");
         // SAFETY: restoring the default disposition and re-raising a signal
         // this process has already received and finished handling.
         unsafe {
@@ -312,11 +360,13 @@ pub fn shutdown_node_blocking(timeout: Duration) -> bool {
 mod tests {
     use super::*;
 
-    // One serial test: `arm`/`disarm`/`latch` are process-global, so parallel
-    // sub-tests would race the shared state. Exercise the whole contract in
-    // sequence instead.
+    /// `arm`/`disarm`/`latch` are process-global; the tests that touch them
+    /// run one at a time.
+    static LATCH_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn node_control_contract() {
+        let _serial = LATCH_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         // 1. No node serving → shutdown is an immediate no-op success.
         disarm();
         assert!(shutdown_node_blocking(Duration::from_secs(1)));
@@ -352,10 +402,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_real_sigterm_is_latched_and_observed() {
+        // A serve is "running" for the duration: with none active the broker
+        // would (correctly) terminate this test process on the raise.
+        serve_began();
         install_terminate_broker();
         install_terminate_broker(); // idempotent
                                     // SAFETY: raises SIGTERM in this process; the broker's handler is
-                                    // registered (install blocked on it), so the default action does not run.
+                                    // registered (install returns only after it is), so the default
+                                    // action does not run.
         let rc = unsafe { libc::raise(libc::SIGTERM) };
         assert_eq!(rc, 0, "raise(SIGTERM)");
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -376,8 +430,34 @@ mod tests {
             }
         });
         assert!(
-            *terminated_latch().subscribe().borrow(),
-            "latched, never reset"
+            terminated_now(),
+            "latched, readable without a runtime, never reset"
         );
+        assert!(
+            !HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst),
+            "a test binary has the default disposition, so the node would own termination"
+        );
+        assert_eq!(HANDLER_HITS.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(BROKER_READS.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // Neither serve_ended() nor propagate_terminate() is called here: with
+        // the latch set, either would end the test process — which is the
+        // contract, not a bug.
+    }
+
+    /// The regression the fourth review found: `arm()` reset the stop latch
+    /// with `send`, which stores nothing while no receiver is alive — the
+    /// normal state before the stop-select is polled — so a retained request
+    /// stopped every subsequent serve at once.
+    #[test]
+    fn arm_clears_a_retained_stop_request_even_with_no_receiver() {
+        let _serial = LATCH_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        request_shutdown(); // retained (send_replace)
+        assert!(*latch().subscribe().borrow(), "retained without a receiver");
+        arm("127.0.0.1:4243".parse().unwrap());
+        assert!(
+            !*latch().subscribe().borrow(),
+            "arm must clear it even with no receiver alive"
+        );
+        disarm();
     }
 }
