@@ -74,6 +74,13 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
+    // SIGTERM handling for the life of the PROCESS, installed before anything
+    // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`
+    // during boot is latched and honoured the moment the serve starts waiting,
+    // and one between the embedded fold's serve calls is honoured by the next.
+    // Idempotent across re-serves; returns once the handler is registered.
+    crate::node_control::install_terminate_broker();
+
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
     // fail-secure gate is live: if the OS entropy source is producing detectably
@@ -1731,17 +1738,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     crate::compose_status::complete();
     // Wait for a stop trigger: SIGINT (ctrl-c), SIGTERM (`docker stop`, systemd,
     // a launcher's kill — CIRISServer#555: until 0.5.201 only SIGINT was
-    // handled and SIGTERM killed the process abruptly, ports and WAL included)
-    // OR an in-process shutdown_node() request (the embedded fold's clean
-    // restart, #276). The read-API addr was armed in node_control when the
-    // listener bound, so shutdown_node() can wait for :4243 to actually free
-    // after teardown below.
+    // handled and SIGTERM killed the process abruptly, ports and WAL included;
+    // the broker installed at the top of this fn owns the receiver for the
+    // process lifetime, so a SIGTERM that arrived during boot resolves here at
+    // once) OR an in-process shutdown_node() request (the embedded fold's
+    // clean restart, #276). The read-API addr was armed in node_control when
+    // the listener bound, so shutdown_node() can wait for :4243 to actually
+    // free after teardown below.
     tokio::select! {
         r = tokio::signal::ctrl_c() => {
             r.context("await ctrl_c")?;
             tracing::info!("SIGINT — stopping the node cleanly (releasing :4243)");
         }
-        _ = terminate_signal() => {
+        _ = crate::node_control::terminated() => {
             tracing::info!("SIGTERM — stopping the node cleanly (releasing :4243)");
         }
         _ = crate::node_control::shutdown_requested() => {
@@ -1921,40 +1930,6 @@ pub async fn local_identity_json(
         );
     }
     serde_json::to_string(&v).context("serialize identity aggregate JSON")
-}
-
-/// SIGTERM, where the platform has it — the signal `docker stop`, systemd and
-/// every launcher's polite kill send first. Resolves when it arrives; never
-/// resolves where it cannot be installed (non-unix, or a host that already
-/// owns the handler), so the select above falls through to SIGINT and
-/// `shutdown_node()` exactly as before.
-///
-/// Installed lazily, at the point the serve starts waiting, which is after
-/// every boot phase: a SIGTERM during boot still terminates the process the
-/// default way, which is the right answer for a node that has not bound
-/// anything yet.
-async fn terminate_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                sigterm.recv().await;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
-                     stop this node cleanly; SIGTERM will kill it abruptly"
-                );
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        std::future::pending::<()>().await;
-    }
 }
 
 /// CIRISServer#410 — turn an opaque read-API start failure into a named

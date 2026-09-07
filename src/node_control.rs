@@ -72,6 +72,111 @@ pub fn request_shutdown() {
     let _ = latch().send(true);
 }
 
+// ── SIGTERM, for the life of the PROCESS (CIRISServer#555, #556 review) ──────
+//
+// Two things a per-serve `tokio::signal::unix::signal(...)` inside the stop
+// select gets wrong, both found by review: (1) an async fn installs its handler
+// only when the select first polls it, which is AFTER the listener is bound and
+// every loop is spawned, so a SIGTERM during boot still killed the process
+// abruptly; (2) the stream lived only as long as one serve call, and tokio
+// never restores the default disposition once a handler is registered, so a
+// SIGTERM between the embedded fold's serve calls was swallowed outright.
+//
+// So the receiver is owned by a dedicated OS thread with its own tiny runtime,
+// installed ONCE per process before the first boot phase, and it latches into a
+// `watch<bool>` that every serve's select awaits. A SIGTERM during boot is
+// latched and honoured the moment the serve starts waiting — a clean stop
+// right after boot instead of a corpse with half-written state. A SIGTERM
+// between serves is latched and honoured by the next serve. A SECOND SIGTERM
+// after the first is the operator insisting: the process exits at once (143),
+// which is what `docker stop`'s escalation and every init system expect.
+
+/// The SIGTERM latch. `true` once the process has received SIGTERM; never
+/// reset — a terminated process does not un-terminate.
+fn terminated_latch() -> &'static watch::Sender<bool> {
+    static TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    TX.get_or_init(|| watch::channel(false).0)
+}
+
+/// Install the process-wide SIGTERM broker, once. Idempotent; returns when the
+/// handler is REGISTERED (not merely requested), so a caller may rely on the
+/// disposition from this line on. Where the platform has no SIGTERM, or the
+/// handler cannot be installed, this returns and [`terminated`] simply never
+/// resolves — the other stop triggers behave exactly as before.
+pub fn install_terminate_broker() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+            let spawned = std::thread::Builder::new()
+                .name("sigterm-broker".into())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "SIGTERM broker: no runtime — SIGTERM will not stop this node cleanly");
+                            let _ = ready_tx.send(false);
+                            return;
+                        }
+                    };
+                    rt.block_on(async move {
+                        use tokio::signal::unix::{signal, SignalKind};
+                        let mut sigterm = match signal(SignalKind::terminate()) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "cannot install a SIGTERM handler — only SIGINT and shutdown_node() will \
+                                     stop this node cleanly; SIGTERM will kill it abruptly"
+                                );
+                                let _ = ready_tx.send(false);
+                                return;
+                            }
+                        };
+                        let _ = ready_tx.send(true);
+                        sigterm.recv().await;
+                        tracing::info!("SIGTERM received — latched; the serve stops cleanly (releasing :4243)");
+                        let _ = terminated_latch().send(true);
+                        // The operator insisting. Do not swallow it.
+                        sigterm.recv().await;
+                        tracing::warn!("second SIGTERM — exiting immediately (143)");
+                        std::process::exit(143);
+                    });
+                });
+            match spawned {
+                Ok(_) => {
+                    let registered = ready_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap_or(false);
+                    if registered {
+                        tracing::info!("SIGTERM broker installed — docker stop / systemd stop now end the node cleanly");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM broker thread could not be spawned");
+                }
+            }
+        }
+    });
+}
+
+/// Await the process's SIGTERM. Resolves at once if it has already arrived
+/// (during boot, or between serves); never resolves where no broker could be
+/// installed. Used inside `serve_with_adapter`'s stop select beside ctrl-c and
+/// [`shutdown_requested`].
+pub async fn terminated() {
+    let mut rx = terminated_latch().subscribe();
+    // `wait_for` returns immediately if the value is already `true`; the sender
+    // is a static, so this only errors if the process is tearing down.
+    if rx.wait_for(|v| *v).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// The `ciris_server.shutdown_node()` contract: request stop, then block until
 /// the read-API port is bindable again (or `timeout` elapses). Returns `true`
 /// once the port is free (or if nothing was serving — idempotent no-op), `false`
@@ -137,5 +242,34 @@ mod tests {
         // 4. disarm clears the recorded addr.
         disarm();
         assert_eq!(bound_addr(), None);
+    }
+
+    /// The broker is installed BEFORE the signal is raised (the install blocks
+    /// until the handler is registered), and a real SIGTERM to this process is
+    /// latched and observed by `terminated()` — proving both review findings
+    /// closed: no window before installation, and a receiver that outlives any
+    /// one serve. One raise only: the second SIGTERM exits the process.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_sigterm_is_latched_and_observed() {
+        install_terminate_broker();
+        install_terminate_broker(); // idempotent
+                                    // SAFETY: raises SIGTERM in this process; the broker's handler is
+                                    // registered (install blocked on it), so the default action does not run.
+        let rc = unsafe { libc::raise(libc::SIGTERM) };
+        assert_eq!(rc, 0, "raise(SIGTERM)");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), terminated())
+                .await
+                .expect("terminated() resolves after SIGTERM");
+        });
+        assert!(
+            *terminated_latch().subscribe().borrow(),
+            "latched, never reset"
+        );
     }
 }
