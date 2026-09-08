@@ -3,7 +3,7 @@
 ; Bundles two things into one .exe:
 ;   1. dist\ciris-server\  — the PyInstaller --onedir bundle: CPython + the
 ;      compiled Rust node (ciris_server._native) + the launcher. The per-platform
-;      Compose desktop JAR rides INSIDE this bundle (the wheel carries it under
+;      Compose desktop JAR rides INSIDE this bundle (the CLIENT package carries it under
 ;      ciris_server/desktop_app/, and ciris-server.spec collects it), so no
 ;      separate JAR Files entry is needed.
 ;   2. dist\runtime\ — a trimmed JRE from bundle-jre.ps1 (~30 MB). find_java()

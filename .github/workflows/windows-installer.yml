@@ -43,14 +43,15 @@ jobs:
     # reports as `cancelled`, not `failure`, which reads like someone stopped
     # it — so it is worth saying plainly here that LTO is what costs the time.
     timeout-minutes: 75
-    # NON-GATING (same rationale as publish-pypi.yml's windows wheel job): the
-    # installer must first build the ciris-server abi3 wheel on Windows, which
-    # fails today because the substrate (persist/edge) pulls openssl-src + has
-    # Unix-only paths that don't build on windows-msvc (CIRISPersist#200 /
-    # CIRISEdge#90). The installer machinery (PyInstaller spec, Inno Setup, jlink
-    # JRE) is complete and correct; this job will start producing an artifact the
-    # moment the upstream Windows wheel goes green. Remove continue-on-error then.
-    continue-on-error: true
+    # GATING since 0.5.203 (CIRISServer#562). This job carried
+    # `continue-on-error: true` from the day the Windows wheel could not build
+    # (CIRISPersist#200 / CIRISEdge#90); the wheel has published since 0.5.202,
+    # and under that flag the job failed on `cd client` on every run after the
+    # client tree was deleted (#471) while the run read `success` — no installer
+    # for months and nothing that said so. The first green artifact after the
+    # rebuild is run 34226383277 (CIRIS-Server-Setup-0.5.203-x64.exe, 117 MiB:
+    # the frozen node, the client package's 66 MB desktop JAR, a 51 MB jlink
+    # runtime). A failure here is now a failure.
     permissions:
       contents: read
       packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
@@ -119,10 +120,6 @@ jobs:
           distribution: 'liberica'
           java-version: '17'
 
-      - name: Set up Gradle (distribution + dependency cache)
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: false
 
       - name: Get version from Cargo.toml
         id: version
@@ -133,32 +130,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "ciris-server version: $VERSION"
 
-      - name: Build CIRIS Desktop UberJar
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 25
-          max_attempts: 3
-          retry_wait_seconds: 60
-          shell: bash
-          command: |
-            cd client
-            ./gradlew :desktopApp:packageUberJarForCurrentOS --no-daemon
-            ls -lh desktopApp/build/compose/jars/
-
-      - name: Stage the desktop JAR into the wheel tree
-        shell: bash
-        run: |
-          mkdir -p python/ciris_server/desktop_app
-          cp client/desktopApp/build/compose/jars/CIRIS-windows-*.jar \
-             python/ciris_server/desktop_app/
-          ls -lh python/ciris_server/desktop_app/
-
-      # Build the wheel via maturin-action — IDENTICAL to build-wheels.yml's
-      # windows leg (target x64, rust 1.97.0, sccache: true), so it shares that
-      # job's warmed sccache pool (CIRISServer#274). The wheel carries the staged
-      # JAR (pyproject [tool.maturin] include). `--strip` matches the publish
-      # wheel's compile flags for pool-identity; `--out dist-wheel` only sets the
-      # output dir (does not affect the sccache compile keys).
       - name: Build the ciris-server wheel (maturin-action, shared sccache)
         uses: PyO3/maturin-action@v1
         # The desktop installer IS the Google desktop client, so of all the
@@ -186,6 +157,25 @@ jobs:
           echo "installing $WHL"
           pip install "$WHL"
           python -c "import ciris_server; from ciris_server.cli import main; print('ciris_server import OK')"
+      # THE DESKTOP JAR COMES FROM THE CLIENT PACKAGE (CIRISServer#471 / #562).
+      #
+      # `client/` was deleted in 0.5.189; the wheel depends on `ciris-client`,
+      # whose win_amd64 wheel carries the Compose uber-jar under
+      # `ciris_client/_artifacts/` with a manifest, and `ciris_server.desktop_launcher`
+      # resolves it through `ciris_client.artifact_path("desktop-uber-jar")`. The
+      # `pip install` above pulled it; this step only asks where it landed, for the
+      # jlink trim below. The step that stood here used to `cd client && ./gradlew`,
+      # which failed on every run since 0.5.189 while the job read `success`
+      # (continue-on-error) — CIRISServer#562.
+      - name: Locate the desktop JAR in the installed client package
+        id: jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR=$(python -c "import ciris_client; print(ciris_client.artifact_path('desktop-uber-jar'))")
+          test -f "$JAR"
+          ls -lh "$JAR"
+          echo "path=$JAR" >> "$GITHUB_OUTPUT"
 
       - name: CIRISCache save (windows-x64 server layer)
         if: github.ref == 'refs/heads/main'
@@ -207,16 +197,17 @@ jobs:
         run: |
           mkdir -p dist
           mv installers/windows/dist/ciris-server dist/
-          # confirm the desktop JAR rode into the bundle
-          ls dist/ciris-server/_internal/ciris_server/desktop_app/ || \
-            echo "WARN: desktop JAR not found in bundle (launcher will fall back to system layout)"
+          # The bundle must carry the client package's artifact dir — the JAR
+          # and its manifest — or the frozen launcher finds no desktop to start.
+          ls -lh dist/ciris-server/_internal/ciris_client/_artifacts/
+          test -n "$(ls dist/ciris-server/_internal/ciris_client/_artifacts/*.jar)"
 
       - name: Trim JRE via jlink (Liberica)
         shell: pwsh
         run: |
-          $jar = Get-ChildItem -Path 'client\desktopApp\build\compose\jars' -Filter 'CIRIS-windows-*.jar' | Select-Object -First 1
-          if (-not $jar) { Write-Error "No CIRIS-windows-*.jar found"; exit 1 }
-          .\installers\windows\bundle-jre.ps1 -JarPath $jar.FullName -OutputDir dist\runtime
+          $jar = "${{ steps.jar.outputs.path }}"
+          if (-not (Test-Path $jar)) { Write-Error "desktop JAR not found at $jar"; exit 1 }
+          .\installers\windows\bundle-jre.ps1 -JarPath $jar -OutputDir dist\runtime
 
       # (Removed in 0.5.65: the Universal CRT redist fetch was a Win7 SP1
       # prerequisite — Win10+/Server 2016+ ship the UCRT in-box.)

@@ -10,7 +10,7 @@
 # under-trimming are catastrophic.
 #
 # Usage:
-#     .\bundle-jre.ps1 -JarPath ..\..\client\desktopApp\build\compose\jars\CIRIS-windows-x64-2.7.6.jar -OutputDir ..\..\dist\runtime
+#     .\bundle-jre.ps1 -JarPath (python -c "import ciris_client; print(ciris_client.artifact_path('desktop-uber-jar'))") -OutputDir ..\..\dist\runtime
 #
 # Prereqs:
 #     JAVA_HOME points to a JDK 17+ install (jlink is part of the JDK).
