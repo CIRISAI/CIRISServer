@@ -43,14 +43,15 @@ jobs:
     # reports as `cancelled`, not `failure`, which reads like someone stopped
     # it — so it is worth saying plainly here that LTO is what costs the time.
     timeout-minutes: 75
-    # NON-GATING (same rationale as publish-pypi.yml's windows wheel job): the
-    # installer must first build the ciris-server abi3 wheel on Windows, which
-    # fails today because the substrate (persist/edge) pulls openssl-src + has
-    # Unix-only paths that don't build on windows-msvc (CIRISPersist#200 /
-    # CIRISEdge#90). The installer machinery (PyInstaller spec, Inno Setup, jlink
-    # JRE) is complete and correct; this job will start producing an artifact the
-    # moment the upstream Windows wheel goes green. Remove continue-on-error then.
-    continue-on-error: true
+    # GATING since 0.5.203 (CIRISServer#562). This job carried
+    # `continue-on-error: true` from the day the Windows wheel could not build
+    # (CIRISPersist#200 / CIRISEdge#90); the wheel has published since 0.5.202,
+    # and under that flag the job failed on `cd client` on every run after the
+    # client tree was deleted (#471) while the run read `success` — no installer
+    # for months and nothing that said so. The first green artifact after the
+    # rebuild is run 34226383277 (CIRIS-Server-Setup-0.5.203-x64.exe, 117 MiB:
+    # the frozen node, the client package's 66 MB desktop JAR, a 51 MB jlink
+    # runtime). A failure here is now a failure.
     permissions:
       contents: read
       packages: write   # CIRISCache save (GHCR) on main — CIRISServer#99
