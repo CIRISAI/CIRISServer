@@ -46,6 +46,14 @@ on:
       - "src/peer.rs"
       - "src/federation_admin.rs"
       - "src/auth/**"
+      # The config plane and the write door: every node writes config at boot
+      # (net.*, the wizard's keys) through graph_config, and attest::put is the
+      # one door the harness's peering and claims go through. 0.5.201's per-key
+      # leaf and #570's per-engine snapshot cache were only PROVEN on real nodes
+      # by this ladder, so a change to either must run it.
+      - "src/graph_config.rs"
+      - "src/attest.rs"
+      - "src/node_key.rs"
       - "harness/mesh-repro/**"
       - ".github/workflows/mesh-harness.yml"
 
