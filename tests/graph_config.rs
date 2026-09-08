@@ -382,8 +382,15 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
             .await
             .expect("set_config");
     }
-    graph_config::invalidate();
-    let before = graph_config::SCANS.load(Ordering::Relaxed);
+    graph_config::invalidate_engine(&engine);
+    // THIS engine's snapshot ordinal — not the process counter. `SCANS` counts
+    // every engine in the binary, and the sibling tests here run their own
+    // engines on parallel threads; each engine now has its own cache slot, so
+    // a neighbour's read or write cannot evict ours (Codex on #570), and what
+    // this test asserts is that ITS reads were served by ONE snapshot.
+    let first = graph_config::snapshot(&engine).await.expect("snapshot");
+    let before = first.scan;
+    let t0 = std::time::Instant::now();
     for _ in 0..50 {
         assert_eq!(
             graph_config::get_i64(&engine, "a.one").await.unwrap(),
@@ -402,12 +409,22 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
         .await
         .unwrap();
     assert_eq!(listed.len(), 2);
-    let after = graph_config::SCANS.load(Ordering::Relaxed);
-    assert_eq!(
-        after - before,
-        1,
-        "150 keyed reads + one list must cost ONE scan; got {}",
-        after - before
+    let after = graph_config::snapshot(&engine)
+        .await
+        .expect("snapshot")
+        .scan;
+    // The SAME snapshot served everything — plus one rescan per snapshot TTL
+    // the loop itself outlived. On a cold macOS or Windows runner 150 awaits
+    // took longer than the 2 s TTL and the snapshot legitimately expired
+    // mid-loop (main 55b8c7a, both lanes); that is the cache working, not a
+    // scan per read. The budget is derived from the measured elapsed time.
+    let elapsed = t0.elapsed();
+    let budget = (elapsed.as_millis() / graph_config::CONFIG_SNAPSHOT_TTL.as_millis()) as u64;
+    let rescans = after - before;
+    assert!(
+        rescans <= budget,
+        "150 keyed reads + one list must be served by ONE snapshot (plus one rescan per TTL \
+         elapsed — {elapsed:?}, budget {budget}); this engine rescanned {rescans} time(s)"
     );
 
     let snap = graph_config::snapshot(&engine).await.unwrap();

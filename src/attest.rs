@@ -518,7 +518,7 @@ pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
         || kind == ciris_persist::federation::types::attestation_type::WITHDRAWS
         || kind == ciris_persist::federation::types::attestation_type::RECANTS
     {
-        crate::graph_config::invalidate();
+        crate::graph_config::invalidate_engine(engine);
     }
     Ok(id)
 }
