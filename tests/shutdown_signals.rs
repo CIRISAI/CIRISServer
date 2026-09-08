@@ -139,3 +139,113 @@ fn the_broker_owns_the_signal_and_never_blocks_on_a_log() {
         "propagate_terminate must not touch tracing"
     );
 }
+
+/// The serve marker brackets the listener: inspected once the first phase is
+/// open (so its status mark lands), written just BEFORE lens-core binds and
+/// exposes the accept loop, cleared only after the read API has DRAINED
+/// (CIRISServer#568). Order is the whole contract — a marker written after the
+/// bind leaves a window with a listener and no marker; one cleared before the
+/// drain would lie.
+#[test]
+fn the_serve_marker_brackets_the_listener() {
+    let src = compose_src();
+    let inspect = src
+        .find("crate::serve_marker::inspect_at_boot(")
+        .expect("compose inspects the previous serve's marker");
+    let bound = src
+        .find("crate::compose_status::mark(\"listener_bound\")")
+        .expect("the listener_bound mark");
+    let write = src
+        .find("crate::serve_marker::write(")
+        .expect("compose writes the marker");
+    let drain = src
+        .find("read.shutdown().await")
+        .expect("the read API drain");
+    // The bind-FAILURE arm also clears (no listener ever existed); the clear
+    // that closes a served life is the one AFTER the drain.
+    let clear = drain
+        + src[drain..]
+            .find("crate::serve_marker::clear(")
+            .expect("compose clears the marker after the drain");
+    let first_phase = src
+        .find("compose_status::phase(\"halt_gate\")")
+        .expect("the first boot phase is stamped");
+    assert!(
+        first_phase < inspect && inspect < write && write < bound && bound < drain && drain < clear,
+        "order must be first_phase < inspect < write < listener_bound < drain < clear — the \
+         marker is inspected once a phase can record it, written BEFORE lens-core binds and \
+         exposes the accept loop, and cleared only after the drain; got \
+         first_phase={first_phase} inspect={inspect} write={write} bound={bound} drain={drain} \
+         clear={clear}"
+    );
+    assert!(
+        src.contains("serve_marker::previous_still_running(&previous_serve)"),
+        "a live previous serve's marker is withheld from, not overwritten by, this serve"
+    );
+}
+
+/// Every stop request names its origin, and the embedding host's door names
+/// itself — a stop must not read like a crash one line later (CIRISServer#568).
+#[test]
+fn every_stop_request_says_who_asked() {
+    let code = node_control_code();
+    assert!(
+        code.contains("request_shutdown_from(\"shutdown_node() from the embedding host\")"),
+        "shutdown_node() must state its origin"
+    );
+    let body = code
+        .split_once("pub fn request_shutdown_from(")
+        .expect("request_shutdown_from exists")
+        .1;
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+    assert!(
+        body.contains("tracing::info!") && body.contains("origin"),
+        "request_shutdown_from must log the origin before latching:\n{body}"
+    );
+}
+
+/// After the read API drains, every teardown join goes through `stop_step`
+/// — timed, bounded, and named — and main bounds the runtime's own shutdown
+/// (CIRISServer#568). A bare `.await` on a join handle after the drain is the
+/// exact shape that held a stopped node open for eight minutes.
+#[test]
+fn every_teardown_step_after_the_drain_is_bounded_and_named() {
+    let src = compose_src();
+    let drain = src
+        .find("read.shutdown().await")
+        .expect("the read API drain");
+    let end = drain
+        + src[drain..]
+            .find("crate::node_control::propagate_terminate();")
+            .expect("the propagate at the end of the serve");
+    let teardown = &src[drain..end];
+    for bare in ["_join.await", "join.await;", "adapter.stop().await"] {
+        assert!(
+            !teardown.contains(bare),
+            "a bare `{bare}` after the drain is an unbounded stop step — route it through \
+             stop_step(name, ..):\n{teardown}"
+        );
+    }
+    for step in [
+        "stop_step(\"adapter.stop\"",
+        "stop_step(\"retention loop\"",
+        "stop_step(\"config reconciler\"",
+        "stop_step(\"edge run loop\"",
+    ] {
+        assert!(
+            teardown.contains(step),
+            "missing named teardown step {step}"
+        );
+    }
+    assert!(
+        teardown.contains("edge_join_abort.abort()"),
+        "an edge run loop that outlives its budget is aborted, not merely left"
+    );
+    let main_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert!(
+        main_rs.contains("runtime.shutdown_timeout("),
+        "main must bound the runtime's shutdown, or a parked blocking thread holds the process"
+    );
+}

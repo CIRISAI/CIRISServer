@@ -1069,6 +1069,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "hex",
+ "http-body",
  "proptest",
  "pyo3",
  "serde",

@@ -71,6 +71,55 @@ pub async fn serve(cfg: ServerConfig) -> Result<()> {
 /// `run_lifecycle` runs as a supervised background task, and its `stop` runs on
 /// shutdown. This is the "ciris-server + an adapter" seam (MISSION §1.2); the
 /// default [`serve`] passes [`NoopAdapter`], so existing behavior is unchanged.
+/// How long one teardown step may take before the stop proceeds without it.
+/// The read API drains under its own graceful shutdown before any of these
+/// run; what these bound is the node's OWN loops and the edge's run loop.
+pub const STOP_STEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One teardown step, TIMED and BOUNDED (CIRISServer#568).
+///
+/// The stop probe that found this: after SIGTERM the read API drained in
+/// under a millisecond and every loop logged "shutting down" — and the
+/// process lived on for eight minutes, the capacity scorer and the trace-plane
+/// watch still ticking, until SIGKILL. `edge_join.await` never returned
+/// (edge's `run` joins transport tasks that do not observe its shutdown), and
+/// nothing after it ran: no propagate, no exit, no line saying why. A `docker
+/// stop` of the same node ended in exit 137 for the same reason.
+///
+/// So every step says how long it took, and a step that outlives its budget
+/// is logged at ERROR by name and LEFT BEHIND: the stop proceeds, the process
+/// exits, and the runtime takes the straggler with it. A stop that can hang
+/// on one join is not a stop; a stop that names the straggler is one an
+/// operator can read.
+async fn stop_step<T>(name: &'static str, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    let t0 = std::time::Instant::now();
+    match tokio::time::timeout(STOP_STEP_BUDGET, fut).await {
+        // The step name is IN the message, not only a field: the log dedup
+        // collapses lines whose message normalises the same, and it hid the
+        // retention / mesh-config / config steps behind the first three "done"
+        // lines on the very probe that proved this path (CIRISServer#568).
+        Ok(out) => {
+            tracing::info!(
+                step = name,
+                took_ms = t0.elapsed().as_millis() as u64,
+                "teardown step done: {name}"
+            );
+            Some(out)
+        }
+        Err(_) => {
+            tracing::error!(
+                step = name,
+                budget_ms = STOP_STEP_BUDGET.as_millis() as u64,
+                "teardown step did NOT finish within its budget: {name} — proceeding without \
+                 it; the process will exit and the runtime takes the straggler with it. This \
+                 step is the reason a stop of this node used to hang until SIGKILL \
+                 (CIRISServer#568)"
+            );
+            None
+        }
+    }
+}
+
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
 
@@ -111,6 +160,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // exists. "Not a recoverable pause" — only a manual removal of the latch (the
     // human act a valid accord:lifecycle:active re-activation authorizes) clears it.
     crate::compose_status::phase("halt_gate");
+    // What did the PREVIOUS serve on this home leave? A marker still present
+    // means it did not stop through the door — replaced, killed or crashed —
+    // and this is where that becomes a line in THIS log rather than a guess
+    // from a caller's dropped connection (CIRISServer#568). After the first
+    // phase has opened, so its compose_status mark has somewhere to land.
+    let previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
     crate::accord_halt::check_halt_gate(&cfg.home)?;
 
     crate::compose_status::phase("capabilities");
@@ -998,6 +1053,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
              still serve on the read-API port [#279]"
         );
     }
+    // The serve marker goes down BEFORE the bind: lens-core binds and exposes
+    // the accept loop inside the call below, so a marker written after it
+    // returns would leave a window with a live listener and no marker
+    // (CIRISServer#568, Codex on #569). Withheld when a previous serve is
+    // still running — its marker is not ours to overwrite, and the bind is
+    // about to fail against it anyway. A bind failure clears ours again.
+    let marker_written = if crate::serve_marker::previous_still_running(&previous_serve) {
+        tracing::warn!(
+            "serve marker withheld — the previous serve on this home is still running; \
+             its marker stands until it stops (CIRISServer#568)"
+        );
+        false
+    } else {
+        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &cfg.key_id) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not write the serve marker");
+                false
+            }
+        }
+    };
     let read = {
         let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
@@ -1586,6 +1662,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         let read = match read {
             Ok(read) => read,
             Err(err) => {
+                // No listener ever existed: the marker written above must not
+                // read as an unclean stop at the next boot.
+                if marker_written {
+                    crate::serve_marker::clear(&cfg.data_dir);
+                }
                 return Err(enrich_read_api_bind_error(err, cfg.read_api_addr().port()).await);
             }
         };
@@ -1793,8 +1874,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     }
 
     if let Some(read) = read {
+        // Drains: every request already inside completes and its response is
+        // written before the listener closes; the handle logs the count.
         read.shutdown().await.context("shutdown lens read API")?;
     }
+    // The listener is closed and nothing is in flight: this stop went through
+    // the door. Clear the marker so the next boot reads a clean home.
+    crate::serve_marker::clear(&cfg.data_dir);
     // #276: read.shutdown() joined the accept task, so :4243 is released here.
     // Clear the recorded addr — shutdown_node() is now a no-op until the next
     // serve arms it, and its port-free probe will already be succeeding.
@@ -1803,31 +1889,47 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Signal the lifecycle to return, run the adapter's `stop()`, and join the
     // lifecycle task — around the edge teardown so the adapter unwinds with the
     // rest of the shared core.
+    let stop_began = std::time::Instant::now();
     let _ = adapter_sd_tx.send(true);
-    let _ = adapter.stop().await;
-    let _ = adapter_join.await;
+    stop_step("adapter.stop", adapter.stop()).await;
+    stop_step("adapter lifecycle", adapter_join).await;
     // Tear down the CEG-driven reconcile loop (if it was spawned).
     let _ = reconcile_sd_tx.send(true);
     if let Some(join) = reconcile_join {
-        let _ = join.await;
+        stop_step("replication reconciler", join).await;
     }
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.
     let _ = retention_sd_tx.send(true);
-    let _ = retention_join.await;
+    stop_step("retention loop", retention_join).await;
     // Tear down the mesh-config consumer refresh loop (CIRISServer#365). Its
     // readers (the read API, the ingest router) are already gone by here.
     let _ = mesh_config_sd_tx.send(true);
-    let _ = mesh_config_join.await;
+    stop_step("mesh-config consumer", mesh_config_join).await;
     // Tear down the CEG-driven config reconcile loop (Server 0.5 Phase 2).
     let _ = config_sd_tx.send(true);
-    let _ = config_reconcile_join.await;
+    stop_step("config reconciler", config_reconcile_join).await;
     let _ = edge_shutdown_tx.send(true);
     // `None` in the #221 fold — the agent owns the edge's run loop (init_edge_runtime).
     if let Some(edge_join) = edge_join {
-        let _ = edge_join.await;
+        // The step that hung: edge's `run` joins transport tasks that do not
+        // all observe its shutdown signal (CIRISEdge, filed from #568). When
+        // it outlives the budget the handle is aborted so the runtime's own
+        // shutdown is not held by it either.
+        let edge_join_abort = edge_join.abort_handle();
+        if stop_step("edge run loop", edge_join).await.is_none() {
+            edge_join_abort.abort();
+        }
     }
+    tracing::info!(
+        stopped_by_sigterm,
+        sigterm_latched = crate::node_control::terminated_now(),
+        took_ms = stop_began.elapsed().as_millis() as u64,
+        "node stopped — every teardown step above ran or was left behind by name; the \
+         process exits now (a SIGTERM is re-raised with the default action, any other \
+         stop returns to the host)"
+    );
     // A SIGTERM asked for the PROCESS to end, not only this serve. Now that
     // the node has unwound cleanly, finish what the signal asked for unless an
     // embedding host owns SIGTERM and decides for itself (#556 review): an
