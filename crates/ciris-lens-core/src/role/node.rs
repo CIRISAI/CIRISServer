@@ -1001,21 +1001,65 @@ pub fn in_flight() -> usize {
     IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// The counting layer. A guard, not a pair of calls, so a handler that panics
-/// or is cancelled still decrements.
+/// One request inside the read API, from accept to the LAST BYTE of its
+/// response. A guard, not a pair of calls, so a cancelled handler or a body
+/// the client stopped reading still decrements.
+struct Inside;
+impl Inside {
+    fn enter() -> Self {
+        IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for Inside {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A response body that carries the request's [`Inside`] guard until the body
+/// ends or is dropped. `next.run(..)` returns as soon as the handler has
+/// BUILT its response; a streaming body (the SSE route a host merges in) or a
+/// large one is still being written after that, and a drain that read the
+/// counter then would say `in_flight=0` while bytes were on the wire (Codex
+/// on CIRISServer#569). The guard rides the body instead.
+struct CountedBody<B> {
+    inner: B,
+    _inside: Inside,
+}
+impl<B> http_body::Body for CountedBody<B>
+where
+    B: http_body::Body + Unpin,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// The counting layer: enter on accept, leave when the response BODY ends.
 pub async fn track_in_flight(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    struct Inside;
-    impl Drop for Inside {
-        fn drop(&mut self) {
-            IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let _inside = Inside;
-    next.run(request).await
+    let inside = Inside::enter();
+    let response = next.run(request).await;
+    response.map(|body| {
+        axum::body::Body::new(CountedBody {
+            inner: body,
+            _inside: inside,
+        })
+    })
 }
 
 // ─── LensCore::node ────────────────────────────────────────────────
@@ -1899,10 +1943,19 @@ mod tests {
         GATE.add_permits(1);
         let resp = call.await.unwrap().unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        // The handler has returned, but the BODY has not been read: the
+        // request is still inside (the SSE / large-body case, Codex on #569).
+        assert_eq!(
+            in_flight(),
+            before + 1,
+            "a response whose body is unread is still inside"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], b"done");
         assert_eq!(
             in_flight(),
             before,
-            "the response was written and the count fell back"
+            "the body ended and the count fell back"
         );
     }
 }

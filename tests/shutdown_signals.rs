@@ -140,10 +140,12 @@ fn the_broker_owns_the_signal_and_never_blocks_on_a_log() {
     );
 }
 
-/// The serve marker brackets the listener: inspected before anything binds,
-/// written the instant the read API is bound, cleared only after the read API
-/// has DRAINED (CIRISServer#568). Order is the whole contract — a marker
-/// written before the bind, or cleared before the drain, would lie.
+/// The serve marker brackets the listener: inspected once the first phase is
+/// open (so its status mark lands), written just BEFORE lens-core binds and
+/// exposes the accept loop, cleared only after the read API has DRAINED
+/// (CIRISServer#568). Order is the whole contract — a marker written after the
+/// bind leaves a window with a listener and no marker; one cleared before the
+/// drain would lie.
 #[test]
 fn the_serve_marker_brackets_the_listener() {
     let src = compose_src();
@@ -159,13 +161,26 @@ fn the_serve_marker_brackets_the_listener() {
     let drain = src
         .find("read.shutdown().await")
         .expect("the read API drain");
-    let clear = src
-        .find("crate::serve_marker::clear(")
-        .expect("compose clears the marker");
+    // The bind-FAILURE arm also clears (no listener ever existed); the clear
+    // that closes a served life is the one AFTER the drain.
+    let clear = drain
+        + src[drain..]
+            .find("crate::serve_marker::clear(")
+            .expect("compose clears the marker after the drain");
+    let first_phase = src
+        .find("compose_status::phase(\"halt_gate\")")
+        .expect("the first boot phase is stamped");
     assert!(
-        inspect < bound && bound < write && write < drain && drain < clear,
-        "order must be inspect < listener_bound < write < drain < clear; got \
-         inspect={inspect} bound={bound} write={write} drain={drain} clear={clear}"
+        first_phase < inspect && inspect < write && write < bound && bound < drain && drain < clear,
+        "order must be first_phase < inspect < write < listener_bound < drain < clear — the \
+         marker is inspected once a phase can record it, written BEFORE lens-core binds and \
+         exposes the accept loop, and cleared only after the drain; got \
+         first_phase={first_phase} inspect={inspect} write={write} bound={bound} drain={drain} \
+         clear={clear}"
+    );
+    assert!(
+        src.contains("serve_marker::previous_still_running(&previous_serve)"),
+        "a live previous serve's marker is withheld from, not overwritten by, this serve"
     );
 }
 

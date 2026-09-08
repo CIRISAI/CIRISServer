@@ -44,6 +44,12 @@ pub struct Marker {
     pub listen_addr: String,
     /// The configured key the node serves as.
     pub key_id: String,
+    /// The process's start identity where the platform has one (Linux:
+    /// `/proc/<pid>/stat` starttime, in clock ticks since boot). A container
+    /// restart commonly re-uses the pid — often PID 1 — so pid alone cannot
+    /// tell "still running" from "replaced"; this can (Codex on #569).
+    #[serde(default)]
+    pub proc_start: Option<u64>,
 }
 
 /// What the previous serve on this home left behind.
@@ -83,13 +89,55 @@ pub fn inspect(data_dir: &Path) -> Previous {
     };
     match serde_json::from_slice::<Marker>(&bytes) {
         Ok(marker) => {
-            let pid_alive = pid_is_alive(marker.pid);
+            let pid_alive = previous_is_alive(&marker);
             Previous::Unclean { marker, pid_alive }
         }
         Err(e) => Previous::Unreadable {
             path: p,
             error: e.to_string(),
         },
+    }
+}
+
+/// Is the serve that wrote `marker` still running — the SAME process, not a
+/// later one that inherited its pid?
+///
+/// Three questions, in order: is the pid ours (a re-used pid after a restart
+/// — PID 1 in a container — is us, not a survivor); does the pid exist; and,
+/// where the platform records one, does its start identity match what the
+/// marker recorded. `None` where the platform can answer none of it.
+#[must_use]
+pub fn previous_is_alive(marker: &Marker) -> Option<bool> {
+    if marker.pid == std::process::id() {
+        return Some(false);
+    }
+    match pid_is_alive(marker.pid) {
+        Some(true) => match (marker.proc_start, proc_start_of(marker.pid)) {
+            (Some(recorded), Some(now)) if recorded != now => Some(false),
+            _ => Some(true),
+        },
+        other => other,
+    }
+}
+
+/// A process's start identity: Linux `/proc/<pid>/stat` field 22 (starttime,
+/// clock ticks since boot). `None` elsewhere or when unreadable.
+#[must_use]
+pub fn proc_start_of(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The comm field is parenthesised and may contain spaces: split after
+        // the LAST ')' so a process named "a b)" cannot shift the columns.
+        let rest = stat.rsplit_once(')')?.1;
+        // `rest` begins with the state field (3); starttime is field 22, so
+        // index 22 - 3 = 19 among the remaining whitespace-separated fields.
+        rest.split_whitespace().nth(19)?.parse().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
     }
 }
 
@@ -166,14 +214,35 @@ pub fn inspect_at_boot(data_dir: &Path) -> Previous {
             );
         }
     }
-    if !matches!(prev, Previous::Clean) {
+    // A marker owned by a LIVE serve is that serve's, not ours to clear: this
+    // boot will fail its bind, and if the survivor is later killed the next
+    // boot must still find its marker (Codex on #569). Only a dead or damaged
+    // one is cleared, so this serve can write its own.
+    let keep = previous_still_running(&prev);
+    if !keep && !matches!(prev, Previous::Clean) {
         let _ = std::fs::remove_file(path(data_dir));
     }
     prev
 }
 
-/// Write this serve's marker. Called once the read API is BOUND — the instant
-/// from which a response can be in flight.
+/// Whether [`inspect_at_boot`] found a previous serve still running — in which
+/// case this serve must NOT write a marker over it.
+#[must_use]
+pub fn previous_still_running(prev: &Previous) -> bool {
+    matches!(
+        prev,
+        Previous::Unclean {
+            pid_alive: Some(true),
+            ..
+        }
+    )
+}
+
+/// Write this serve's marker. Called just BEFORE the read API binds: lens-core
+/// binds and exposes the accept loop inside one call, so a marker written
+/// after it returns leaves a window in which a request can be accepted and the
+/// process killed with no marker on disk (Codex on #569). A bind failure
+/// clears it again (see `compose`).
 pub fn write(data_dir: &Path, listen_addr: SocketAddr, key_id: &str) -> std::io::Result<()> {
     let marker = Marker {
         pid: std::process::id(),
@@ -181,6 +250,7 @@ pub fn write(data_dir: &Path, listen_addr: SocketAddr, key_id: &str) -> std::io:
         started_at: crate::node_identity::started_at_rfc3339(),
         listen_addr: listen_addr.to_string(),
         key_id: key_id.to_owned(),
+        proc_start: proc_start_of(std::process::id()),
     };
     let p = path(data_dir);
     let tmp = p.with_extension("json.tmp");
@@ -238,10 +308,13 @@ mod tests {
                 assert_eq!(marker.pid, std::process::id());
                 assert_eq!(marker.listen_addr, "127.0.0.1:4243");
                 assert_eq!(marker.key_id, "ciris-server");
-                // Our own pid is alive; a platform that cannot say says None.
-                assert!(
-                    pid_alive != Some(false),
-                    "our own pid read as dead: {pid_alive:?}"
+                // A marker naming OUR OWN pid is by definition not a survivor
+                // (a re-used pid after a restart — Codex on #569), so the
+                // question "is the previous serve still running" is `false`.
+                assert_eq!(
+                    pid_alive,
+                    Some(false),
+                    "our own marker is a replaced serve, not a survivor"
                 );
             }
             other => panic!("expected the marker we just wrote, got {other:?}"),
@@ -260,6 +333,7 @@ mod tests {
             started_at: "2026-09-08T13:12:27Z".into(),
             listen_addr: "127.0.0.1:4243".into(),
             key_id: "ciris-server".into(),
+            proc_start: None,
         };
         std::fs::write(path(&d), serde_json::to_vec(&stale).unwrap()).unwrap();
         match inspect_at_boot(&d) {
@@ -273,6 +347,79 @@ mod tests {
             other => panic!("expected an unclean previous serve, got {other:?}"),
         }
         assert_eq!(inspect(&d), Previous::Clean, "boot clears the stale marker");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A container restart hands the new serve the old serve's pid (PID 1).
+    /// A marker naming OUR OWN pid is a replaced serve, never a survivor.
+    #[test]
+    fn a_marker_with_our_own_pid_is_a_replaced_serve_not_a_survivor() {
+        let d = scratch();
+        let reused = Marker {
+            pid: std::process::id(),
+            instance_id: "the-previous-life-of-pid-1".into(),
+            started_at: "2026-09-08T15:15:20Z".into(),
+            listen_addr: "0.0.0.0:4243".into(),
+            key_id: "ciris-server".into(),
+            proc_start: Some(1),
+        };
+        std::fs::write(path(&d), serde_json::to_vec(&reused).unwrap()).unwrap();
+        match inspect_at_boot(&d) {
+            Previous::Unclean { pid_alive, .. } => assert_eq!(pid_alive, Some(false)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            inspect(&d),
+            Previous::Clean,
+            "and it was cleared for this serve's own"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A marker owned by a LIVE, different process is left alone: the bind
+    /// will fail, and the survivor's marker must outlive this failed boot.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_previous_serve_keeps_its_marker() {
+        let d = scratch();
+        // pid 1 (init) is alive on every unix and is never us in a test.
+        let live = Marker {
+            pid: 1,
+            instance_id: "the-survivor".into(),
+            started_at: "2026-09-08T15:15:20Z".into(),
+            listen_addr: "0.0.0.0:4243".into(),
+            key_id: "ciris-server".into(),
+            proc_start: proc_start_of(1),
+        };
+        std::fs::write(path(&d), serde_json::to_vec(&live).unwrap()).unwrap();
+        let prev = inspect_at_boot(&d);
+        assert!(previous_still_running(&prev), "{prev:?}");
+        assert!(
+            path(&d).exists(),
+            "the survivor's marker is not ours to clear"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reused_pid_with_a_different_start_identity_is_not_alive() {
+        let d = scratch();
+        // pid 1 is alive; a marker claiming pid 1 with the WRONG start identity
+        // describes a process that no longer exists.
+        let stale = Marker {
+            pid: 1,
+            instance_id: "prev".into(),
+            started_at: "2026-09-08T15:15:20Z".into(),
+            listen_addr: "0.0.0.0:4243".into(),
+            key_id: "ciris-server".into(),
+            proc_start: Some(u64::MAX),
+        };
+        std::fs::write(path(&d), serde_json::to_vec(&stale).unwrap()).unwrap();
+        match inspect(&d) {
+            Previous::Unclean { pid_alive, .. } => assert_eq!(pid_alive, Some(false)),
+            other => panic!("{other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

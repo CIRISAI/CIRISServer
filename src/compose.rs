@@ -98,12 +98,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (CIRISServer#557).
     crate::graph_config::invalidate();
 
-    // What did the PREVIOUS serve on this home leave? A marker still present
-    // means it did not stop through the door — replaced, killed or crashed —
-    // and this is where that becomes a line in THIS log rather than a guess
-    // from a caller's dropped connection (CIRISServer#568).
-    let _previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
-
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
     // fail-secure gate is live: if the OS entropy source is producing detectably
@@ -117,6 +111,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // exists. "Not a recoverable pause" — only a manual removal of the latch (the
     // human act a valid accord:lifecycle:active re-activation authorizes) clears it.
     crate::compose_status::phase("halt_gate");
+    // What did the PREVIOUS serve on this home leave? A marker still present
+    // means it did not stop through the door — replaced, killed or crashed —
+    // and this is where that becomes a line in THIS log rather than a guess
+    // from a caller's dropped connection (CIRISServer#568). After the first
+    // phase has opened, so its compose_status mark has somewhere to land.
+    let previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
     crate::accord_halt::check_halt_gate(&cfg.home)?;
 
     crate::compose_status::phase("capabilities");
@@ -1004,6 +1004,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
              still serve on the read-API port [#279]"
         );
     }
+    // The serve marker goes down BEFORE the bind: lens-core binds and exposes
+    // the accept loop inside the call below, so a marker written after it
+    // returns would leave a window with a live listener and no marker
+    // (CIRISServer#568, Codex on #569). Withheld when a previous serve is
+    // still running — its marker is not ours to overwrite, and the bind is
+    // about to fail against it anyway. A bind failure clears ours again.
+    let marker_written = if crate::serve_marker::previous_still_running(&previous_serve) {
+        tracing::warn!(
+            "serve marker withheld — the previous serve on this home is still running; \
+             its marker stands until it stops (CIRISServer#568)"
+        );
+        false
+    } else {
+        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &cfg.key_id) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not write the serve marker");
+                false
+            }
+        }
+    };
     let read = {
         let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
@@ -1592,18 +1613,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         let read = match read {
             Ok(read) => read,
             Err(err) => {
+                // No listener ever existed: the marker written above must not
+                // read as an unclean stop at the next boot.
+                if marker_written {
+                    crate::serve_marker::clear(&cfg.data_dir);
+                }
                 return Err(enrich_read_api_bind_error(err, cfg.read_api_addr().port()).await);
             }
         };
         crate::compose_status::mark("listener_bound");
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
-        // From this instant a response can be in flight: write the serve
-        // marker, cleared only by a stop that drains the read API
-        // (CIRISServer#568). A write failure is logged, not fatal — the marker
-        // is legibility, not a lock.
-        if let Err(e) = crate::serve_marker::write(&cfg.data_dir, read.listen_addr(), &cfg.key_id) {
-            tracing::warn!(error = %e, "could not write the serve marker");
-        }
         // #279: the listener is now guaranteed BOUND here (lens-core binds
         // synchronously before spawning the accept loop and a bind failure is
         // the `?` above). Stamp the milestone so compose_status distinguishes

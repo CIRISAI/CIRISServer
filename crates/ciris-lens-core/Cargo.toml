@@ -93,6 +93,9 @@ hex  = "0.4"
 # path (which could change with an edge bump). Pin matches the version
 # edge's transport-http pulls in (0.8.x).
 axum = "0.8"
+# The in-flight body wrapper (`track_in_flight`) implements `http_body::Body`;
+# 1.x is axum 0.8's own body trait (already in the lock transitively).
+http-body = "1"
 
 # tower::ServiceExt is used in node mode tests for `oneshot` requests.
 tower = { version = "0.5", features = ["util"] }
