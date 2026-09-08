@@ -174,6 +174,24 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         node_signer.key_id()
     );
     assert_eq!(node_signer.derived_key_id(), node);
+    // The public record the split holds is the NODE's — what a peer registers
+    // to admit this node's rows (Codex on #564) — and a peer CAN register it.
+    let record_json = ciris_server::node_key::held_node_key_record_json()
+        .expect("the split holds the node's self-signed key record");
+    let record: ciris_persist::federation::SignedKeyRecord =
+        serde_json::from_str(&record_json).expect("a SignedKeyRecord");
+    assert_eq!(
+        record.record.key_id, node,
+        "the served record names the NODE key"
+    );
+    assert_eq!(record.record.identity_type, identity_type::NODE);
+    let peer_engine = Engine::with_signer(Arc::new(signer_for(PEER)), "sqlite::memory:")
+        .await
+        .expect("a peer's engine");
+    peer_engine
+        .register_federation_key(record)
+        .await
+        .expect("a peer admits the node key from the served record");
 
     // ── Phase 1: the boot re-author — the exact call that crashed the Android node.
     let moved = ciris_server::node_key::reauthor_consent_as_node(

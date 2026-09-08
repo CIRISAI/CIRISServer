@@ -505,6 +505,22 @@ pub async fn register_node_key(
     engine: &ciris_persist::prelude::Engine,
     identity: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
 ) -> Result<String> {
+    register_node_key_with_record(engine, identity)
+        .await
+        .map(|(key_id, _record_json)| key_id)
+}
+
+/// [`register_node_key`], also returning the node's self-signed
+/// `SignedKeyRecord` as JSON — the public record a peer registers to admit
+/// this node's rows, served by `GET /v1/federation/self-key-record` on a split
+/// node (Codex on #564).
+///
+/// # Errors
+/// As [`register_node_key`].
+pub async fn register_node_key_with_record(
+    engine: &ciris_persist::prelude::Engine,
+    identity: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+) -> Result<(String, String)> {
     use ciris_persist::federation::{Error as FederationError, SignedKeyRecord};
     use ciris_verify_core::federation_self_record::produce_self_key_record;
 
@@ -515,6 +531,8 @@ pub async fn register_node_key(
     let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist node SignedKeyRecord: {e}"))?;
     let key_id = signed.record.key_id.clone();
+    let record_json = serde_json::to_string(&signed)
+        .map_err(|e| anyhow::anyhow!("serialize node SignedKeyRecord: {e}"))?;
 
     match engine.register_federation_key(signed).await {
         Ok(()) => {
@@ -525,7 +543,7 @@ pub async fn register_node_key(
         }
         Err(e) => return Err(anyhow::anyhow!("register node key {key_id}: {e}")),
     }
-    Ok(key_id)
+    Ok((key_id, record_json))
 }
 
 /// **The structural gate: resolve the key this node will BE, and refuse an actor.**
@@ -579,9 +597,11 @@ pub async fn resolve_node_identity(
         | IdentityVerdict::Fused { roles }
         | IdentityVerdict::OtherInfrastructure { roles } => {
             let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
-            let node_key_id = register_node_key(engine, &identity).await?;
-            // The process holds the node's pen from here on (CIRISServer#563).
-            set_node_signer(signer.clone());
+            let (node_key_id, record_json) =
+                register_node_key_with_record(engine, &identity).await?;
+            // The process holds the node's pen — and its public record — from
+            // here on (CIRISServer#563).
+            set_node_signer(signer.clone(), record_json);
             tracing::warn!(
                 configured_key_id = %configured_key_id,
                 configured_roles = ?roles,
@@ -1042,9 +1062,7 @@ pub async fn provision_node_identity(
     actor_key_id: Option<&str>,
 ) -> Result<String> {
     let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
-    let key_id = register_node_key(engine, &identity).await?;
-    // The process holds the node's pen from here on (CIRISServer#563).
-    set_node_signer(signer);
+    let (key_id, record_json) = register_node_key_with_record(engine, &identity).await?;
 
     // ── The readiness gate: edge must not start on a half-provisioned identity ──
     //
@@ -1131,6 +1149,11 @@ pub async fn provision_node_identity(
     // un-de-admittable through it. Provisioning is the earliest point the node
     // key is known and it runs on every path that reaches edge, which makes it
     // the right place. compose sets the same value later; first-writer-wins.
+    // The pen and the public record are published ONLY here, after every
+    // readiness check above has passed, beside the wire identity — a signer
+    // published for an identity that then failed provisioning would remap
+    // consent through a key this node never came to serve as (Codex on #564).
+    set_node_signer(signer, record_json);
     set_wire_identity(&key_id);
 
     tracing::info!(
@@ -1176,15 +1199,29 @@ static WIRE_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static NODE_SIGNER: std::sync::OnceLock<std::sync::Arc<ciris_persist::prelude::LocalSigner>> =
     std::sync::OnceLock::new();
 
-/// Record the node's own signer for the process (CIRISServer#563).
+/// The node key's own self-signed `SignedKeyRecord`, as the JSON a peer
+/// registers to admit this node's rows — set beside the signer. On a split
+/// node the engine's record names the ACTOR, and a peer that registered it
+/// would refuse every node-signed row as an unknown attester (Codex on #564).
+static NODE_KEY_RECORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the node's own signer — and its public key record — for the process
+/// (CIRISServer#563).
 ///
-/// Set once, beside the wire identity, by the split that produced it. Read by
-/// [`crate::peer`]'s consent emit: on a split node the engine signs as the
-/// actor, so a grant named for the node needs THIS pen — and every runtime emit
-/// site gets it without knowing the split happened. A second set with a
-/// different key is the same boot-ordering bug `set_wire_identity` refuses.
-pub fn set_node_signer(signer: std::sync::Arc<ciris_persist::prelude::LocalSigner>) {
+/// Set once, beside the wire identity, by the split that produced it, and only
+/// AFTER provisioning has fully succeeded (a signer published for an identity
+/// that then failed its readiness check would remap consent through a key the
+/// node never came to serve as — Codex on #564). Read by [`crate::peer`]'s
+/// consent emit: on a split node the engine signs as the actor, so a grant
+/// named for the node needs THIS pen — and every runtime emit site gets it
+/// without knowing the split happened. A second set with a different key is
+/// the same boot-ordering bug `set_wire_identity` refuses.
+pub fn set_node_signer(
+    signer: std::sync::Arc<ciris_persist::prelude::LocalSigner>,
+    key_record_json: String,
+) {
     let attempted = signer.derived_key_id();
+    let _ = NODE_KEY_RECORD.set(key_record_json);
     if let Err(_rejected) = NODE_SIGNER.set(signer) {
         let already = NODE_SIGNER.get().map(|s| s.derived_key_id());
         if already.as_deref() != Some(attempted.as_str()) {
@@ -1202,6 +1239,14 @@ pub fn set_node_signer(signer: std::sync::Arc<ciris_persist::prelude::LocalSigne
 #[must_use]
 pub fn held_node_signer() -> Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>> {
     NODE_SIGNER.get().cloned()
+}
+
+/// The node key's self-signed `SignedKeyRecord` JSON, if this process split one
+/// off — what `GET /v1/federation/self-key-record` must serve on a split node,
+/// so a peer admits the key that actually signs this node's rows.
+#[must_use]
+pub fn held_node_key_record_json() -> Option<String> {
+    NODE_KEY_RECORD.get().cloned()
 }
 
 /// Record the wire identity. First writer wins; a second call with a DIFFERENT
