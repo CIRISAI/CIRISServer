@@ -384,6 +384,7 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
     }
     graph_config::invalidate();
     let before = graph_config::SCANS.load(Ordering::Relaxed);
+    let t0 = std::time::Instant::now();
     for _ in 0..50 {
         assert_eq!(
             graph_config::get_i64(&engine, "a.one").await.unwrap(),
@@ -403,11 +404,18 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
         .unwrap();
     assert_eq!(listed.len(), 2);
     let after = graph_config::SCANS.load(Ordering::Relaxed);
-    assert_eq!(
-        after - before,
-        1,
-        "150 keyed reads + one list must cost ONE scan; got {}",
-        after - before
+    // ONE scan — plus one per snapshot TTL the loop itself outlived. On a
+    // cold macOS or Windows runner 150 awaits took longer than the 2 s TTL
+    // and the snapshot legitimately expired mid-loop (main 55b8c7a, both
+    // lanes); that is the cache working, not a second scan per read. The
+    // budget is derived from the measured elapsed time, never a constant.
+    let elapsed = t0.elapsed();
+    let budget = 1 + (elapsed.as_millis() / graph_config::CONFIG_SNAPSHOT_TTL.as_millis()) as u64;
+    let scans = after - before;
+    assert!(
+        (1..=budget).contains(&scans),
+        "150 keyed reads + one list must cost ONE scan (plus one per TTL elapsed — {elapsed:?}, \
+         budget {budget}); got {scans}"
     );
 
     let snap = graph_config::snapshot(&engine).await.unwrap();
