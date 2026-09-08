@@ -30,7 +30,16 @@ hiddenimports += ["ciris_server._native"]
 # Grab the compiled _native.<abi3>.pyd and the per-platform desktop JAR that the
 # wheel bundles under ciris_server/desktop_app/.
 binaries = collect_dynamic_libs("ciris_server")
+# The desktop JAR is the CLIENT package's (CIRISServer#471): `ciris_client/_artifacts/`
+# holds the per-platform uber-jar and the manifest `artifact_path()` reads, and
+# `ciris_server.desktop_launcher.find_desktop_jar` resolves it through that
+# package. Collect the package's data (and its modules, below) so the frozen
+# launcher finds exactly what the installed wheel found. The old in-wheel
+# location (`ciris_server/desktop_app/`) is empty since 0.5.189; collecting it
+# is harmless and keeps a pre-#471 wheel buildable.
 datas = collect_data_files("ciris_server", includes=["desktop_app/CIRIS-*.jar"])
+datas += collect_data_files("ciris_client")
+hiddenimports += collect_submodules("ciris_client")
 
 a = Analysis(
     ["ciris-server-entry.py"],

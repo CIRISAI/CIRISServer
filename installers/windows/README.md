@@ -10,7 +10,7 @@ users who'd rather not touch Python.
 | Piece | Source | Lands at |
 |-------|--------|----------|
 | CPython + Rust node + launcher | PyInstaller `--onedir` of `ciris-server.spec` (after `pip install` of the maturin wheel) | `{app}\` |
-| Compose desktop JAR | rides inside the wheel (`ciris_server/desktop_app/CIRIS-*.jar`); collected by the spec | `{app}\_internal\ciris_server\desktop_app\` |
+| Compose desktop JAR | from the `ciris-client` win_amd64 wheel (`ciris_client/_artifacts/CIRIS-windows-*.jar` + manifest), pulled by `pip install` of the server wheel; collected by the spec | `{app}\_internal\ciris_client\_artifacts\` |
 | Trimmed JRE (~30 MB) | `bundle-jre.ps1` (jlink) | `{app}\runtime\` |
 
 `desktop_launcher.find_java()` prefers `{app}\runtime` when frozen, so the
@@ -29,19 +29,19 @@ bundled JRE is used; `cli._spawn_headless_node()` re-invokes the frozen exe with
 ## Build (locally, on Windows)
 
 ```powershell
-# 0. build + install the wheel (needs Rust + maturin), with the JAR staged first
-cd client; .\gradlew :desktopApp:packageUberJarForCurrentOS
-copy desktopApp\build\compose\jars\CIRIS-windows-*.jar ..\python\ciris_server\desktop_app\
+# 0. build + install the wheel (needs Rust + maturin); pip pulls ciris-client,
+#    whose win_amd64 wheel carries the desktop JAR (no Gradle, no client/ tree)
 cd ..; maturin build --release -o dist-wheel; pip install (Get-ChildItem dist-wheel\*.whl)
 # 1. PyInstaller bundle
 cd installers\windows; pyinstaller ciris-server.spec --noconfirm; mv dist\ciris-server ..\..\dist\
 # 2. trimmed JRE
-.\bundle-jre.ps1 -JarPath ..\..\client\desktopApp\build\compose\jars\CIRIS-windows-*.jar -OutputDir ..\..\dist\runtime
+$jar = python -c "import ciris_client; print(ciris_client.artifact_path('desktop-uber-jar'))"
+.\bundle-jre.ps1 -JarPath $jar -OutputDir ..\..\dist\runtime
 # 3. installer
 iscc ciris-server-installer.iss /DCirisVersion=0.5.38
 ```
 
-CI does all of this — see `.github/workflows/client-artifacts.yml`
+CI does all of this — see `.github/workflows/windows-installer.yml`
 (`windows-installer` job, Win8.1 floor) and `windows7-installer.yml` (the
 experimental, dispatch-only Win7 variant with a patched CPython).
 
