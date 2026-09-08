@@ -267,10 +267,33 @@ pub fn write(data_dir: &Path, listen_addr: SocketAddr, key_id: &str) -> std::io:
     Ok(())
 }
 
-/// Remove this serve's marker: the read API has drained and the listener is
-/// closed, so no response can be in flight any more.
+/// Remove this serve's marker — and ONLY this serve's: the file is read first
+/// and left alone unless its `pid` and `instance_id` are ours. Two boots
+/// racing for one home can both write before one loses the bind; the loser's
+/// clean-up must not take the winner's marker with it (Codex on #569). Called
+/// after the read API has drained (no response can be in flight) and on the
+/// bind-failure arm (no listener ever existed).
 pub fn clear(data_dir: &Path) {
     let p = path(data_dir);
+    match std::fs::read(&p)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Marker>(&b).ok())
+    {
+        Some(m)
+            if m.pid != std::process::id()
+                || m.instance_id != crate::node_identity::instance_id() =>
+        {
+            tracing::info!(
+                path = %p.display(),
+                owner_pid = m.pid,
+                owner_instance_id = %m.instance_id,
+                "serve marker left in place — it belongs to another serve on this home, not \
+                 to this one"
+            );
+            return;
+        }
+        _ => {}
+    }
     match std::fs::remove_file(&p) {
         Ok(()) => tracing::info!(
             path = %p.display(),
@@ -420,6 +443,30 @@ mod tests {
             Previous::Unclean { pid_alive, .. } => assert_eq!(pid_alive, Some(false)),
             other => panic!("{other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `clear` takes only its own marker: another serve's stays.
+    #[test]
+    fn clear_leaves_another_serves_marker_alone() {
+        let d = scratch();
+        let theirs = Marker {
+            pid: std::process::id().wrapping_add(1),
+            instance_id: "someone-else".into(),
+            started_at: "2026-09-08T16:00:00Z".into(),
+            listen_addr: "0.0.0.0:4243".into(),
+            key_id: "ciris-server".into(),
+            proc_start: None,
+        };
+        std::fs::write(path(&d), serde_json::to_vec(&theirs).unwrap()).unwrap();
+        clear(&d);
+        assert!(
+            path(&d).exists(),
+            "another serve's marker survives our clear"
+        );
+        write(&d, "127.0.0.1:4243".parse().unwrap(), "ciris-server").expect("write ours");
+        clear(&d);
+        assert!(!path(&d).exists(), "our own marker is cleared");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -13,7 +13,13 @@ fn main() -> Result<()> {
     // path on exactly the small hosts this exists for (CIRISServer#501).
     let workers = ciris_server::node_runtime::worker_threads();
     let runtime = ciris_server::node_runtime::build("ciris-node")?;
-    runtime.block_on(async_main(workers))
+    let result = runtime.block_on(async_main(workers));
+    // A bounded runtime shutdown (CIRISServer#568): a blocking-pool thread
+    // parked in a transport read would otherwise hold the process open after
+    // the serve has returned — the implicit `Drop` waits for it without limit.
+    // Every task the teardown left behind by name is cancelled here.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    result
 }
 
 async fn async_main(worker_threads: usize) -> Result<()> {

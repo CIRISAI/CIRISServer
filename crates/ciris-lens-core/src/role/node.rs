@@ -951,6 +951,10 @@ pub struct ReadApiHandle {
     http_shutdown_tx: watch::Sender<bool>,
     http_join: JoinHandle<()>,
     listen_addr: SocketAddr,
+    /// THIS listener's in-flight count — one per handle, not per process, so
+    /// a host running two read APIs sees each drain its own requests (Codex
+    /// on CIRISServer#569).
+    in_flight: InFlight,
 }
 
 impl ReadApiHandle {
@@ -969,7 +973,7 @@ impl ReadApiHandle {
     /// a caller's dropped connection can be placed on the right side of this
     /// door from the log alone (CIRISServer#568).
     pub async fn shutdown(self) -> Result<(), NodeError> {
-        let inside = in_flight();
+        let inside = self.in_flight.get();
         let t0 = std::time::Instant::now();
         tracing::info!(
             listen_addr = %self.listen_addr,
@@ -982,7 +986,7 @@ impl ReadApiHandle {
         tracing::info!(
             listen_addr = %self.listen_addr,
             drained = inside,
-            still_in_flight = in_flight(),
+            still_in_flight = self.in_flight.get(),
             took_ms = t0.elapsed().as_millis() as u64,
             "lens read API stopped — listener closed; no response was cut"
         );
@@ -990,30 +994,36 @@ impl ReadApiHandle {
     }
 }
 
-/// HTTP requests currently inside the read API: accepted, response not yet
-/// fully written. Counted by [`track_in_flight`] on every route, including the
-/// routes a host merges in. Read at shutdown so the drain is a number.
-pub static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// HTTP requests currently inside ONE read-API listener: accepted, response
+/// not yet fully written. Counted by [`track_in_flight`] on every route of that
+/// listener, including the routes a host merges in; read by
+/// [`ReadApiHandle::shutdown`] so the drain is a number. One per listener —
+/// a process-wide static would let a long response on listener B be reported
+/// as listener A's straggler (Codex on CIRISServer#569).
+#[derive(Clone, Default)]
+pub struct InFlight(Arc<std::sync::atomic::AtomicUsize>);
 
-/// Requests inside the read API right now.
-#[must_use]
-pub fn in_flight() -> usize {
-    IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+impl InFlight {
+    /// Requests inside this listener right now.
+    #[must_use]
+    pub fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
-/// One request inside the read API, from accept to the LAST BYTE of its
+/// One request inside a listener, from accept to the LAST BYTE of its
 /// response. A guard, not a pair of calls, so a cancelled handler or a body
 /// the client stopped reading still decrements.
-struct Inside;
+struct Inside(InFlight);
 impl Inside {
-    fn enter() -> Self {
-        IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self
+    fn enter(counter: &InFlight) -> Self {
+        counter.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(counter.clone())
     }
 }
 impl Drop for Inside {
     fn drop(&mut self) {
-        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0 .0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1048,11 +1058,13 @@ where
 }
 
 /// The counting layer: enter on accept, leave when the response BODY ends.
+/// Installed with `from_fn_with_state(counter, track_in_flight)` per listener.
 pub async fn track_in_flight(
+    State(counter): State<InFlight>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let inside = Inside::enter();
+    let inside = Inside::enter(&counter);
     let response = next.run(request).await;
     response.map(|body| {
         axum::body::Body::new(CountedBody {
@@ -1140,9 +1152,14 @@ impl LensCore {
         // The in-flight counter wraps the WHOLE router — the host's merged
         // routes included — so a drain at shutdown counts every response it
         // is about to finish writing (CIRISServer#568).
-        let router = extra
-            .merge(build_read_router(state))
-            .layer(axum::middleware::from_fn(track_in_flight));
+        let in_flight = InFlight::default();
+        let router =
+            extra
+                .merge(build_read_router(state))
+                .layer(axum::middleware::from_fn_with_state(
+                    in_flight.clone(),
+                    track_in_flight,
+                ));
         let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
         // Bind SYNCHRONOUSLY, before spawning the accept loop (CIRISServer#279).
         // The old shape bound inside the spawned task and swallowed the error
@@ -1177,6 +1194,7 @@ impl LensCore {
             http_shutdown_tx,
             http_join,
             listen_addr,
+            in_flight,
         })
     }
 
@@ -1913,6 +1931,7 @@ mod tests {
         use axum::{routing::get, Router};
         use tower::ServiceExt as _;
         static GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+        let counter = InFlight::default();
         let app = Router::new()
             .route(
                 "/slow",
@@ -1922,7 +1941,11 @@ mod tests {
                     "done"
                 }),
             )
-            .layer(axum::middleware::from_fn(track_in_flight));
+            .layer(axum::middleware::from_fn_with_state(
+                counter.clone(),
+                track_in_flight,
+            ));
+        let in_flight = move || counter.get();
         let before = in_flight();
         let call = tokio::spawn(
             app.oneshot(

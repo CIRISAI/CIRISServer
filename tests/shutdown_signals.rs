@@ -203,3 +203,49 @@ fn every_stop_request_says_who_asked() {
         "request_shutdown_from must log the origin before latching:\n{body}"
     );
 }
+
+/// After the read API drains, every teardown join goes through `stop_step`
+/// — timed, bounded, and named — and main bounds the runtime's own shutdown
+/// (CIRISServer#568). A bare `.await` on a join handle after the drain is the
+/// exact shape that held a stopped node open for eight minutes.
+#[test]
+fn every_teardown_step_after_the_drain_is_bounded_and_named() {
+    let src = compose_src();
+    let drain = src
+        .find("read.shutdown().await")
+        .expect("the read API drain");
+    let end = drain
+        + src[drain..]
+            .find("crate::node_control::propagate_terminate();")
+            .expect("the propagate at the end of the serve");
+    let teardown = &src[drain..end];
+    for bare in ["_join.await", "join.await;", "adapter.stop().await"] {
+        assert!(
+            !teardown.contains(bare),
+            "a bare `{bare}` after the drain is an unbounded stop step — route it through \
+             stop_step(name, ..):\n{teardown}"
+        );
+    }
+    for step in [
+        "stop_step(\"adapter.stop\"",
+        "stop_step(\"retention loop\"",
+        "stop_step(\"config reconciler\"",
+        "stop_step(\"edge run loop\"",
+    ] {
+        assert!(
+            teardown.contains(step),
+            "missing named teardown step {step}"
+        );
+    }
+    assert!(
+        teardown.contains("edge_join_abort.abort()"),
+        "an edge run loop that outlives its budget is aborted, not merely left"
+    );
+    let main_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert!(
+        main_rs.contains("runtime.shutdown_timeout("),
+        "main must bound the runtime's shutdown, or a parked blocking thread holds the process"
+    );
+}
