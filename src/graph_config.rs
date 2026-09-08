@@ -617,15 +617,15 @@ async fn live_config_rows(engine: &Arc<Engine>) -> Result<ConfigSnapshot> {
     // The FAMILY prefix, not one exact leaf: since persist v42 every key is
     // its own leaf (`config:{key}:v1`), and the legacy single leaf `config:v1`
     // matches the same prefix, which is how a corpus written before 0.5.201
-    // keeps reading. On this handle persist compiles `dimension_prefixes` to
-    // `json_extract(attestation_envelope, '$.dimension') LIKE 'config:%'` —
-    // still a per-row JSON parse of everything this node authored, exactly as
-    // `dimension_exact` was (CIRISServer#557); the `attesting_key_id` predicate
-    // is what bounds it. That is why the result is cached as a snapshot, and
-    // why the indexed family seek is asked of persist (CIRISPersist#817)
-    // rather than papered over here. No type filter: the first write of a key
-    // is a `scores` row and every renewal is a `supersedes` (CC 3.4.5.1); both
-    // carry the entry and both are folded below.
+    // keeps reading. Since persist v42.1.0 (CIRISPersist#817, filed from
+    // CIRISServer#557) this handle compiles `dimension_prefixes` to a RANGE on
+    // the indexed generated `dimension` column (V137) — the read is
+    // index-served, no longer a per-row `json_extract` over everything this
+    // node authored — and (#818) compares bytes, not case-folded LIKE. The
+    // snapshot cache stays: the point was fifty getters costing one read, and
+    // that is true whatever the read costs. No type filter: the first write of
+    // a key is a `scores` row and every renewal is a `supersedes` (CC 3.4.5.1);
+    // both carry the entry and both are folded below.
     filter.dimension_prefixes = vec![CONFIG_DIMENSION_PREFIX.to_owned()];
 
     // ── The scope gate is REAL and this read must pass it honestly ──────────
