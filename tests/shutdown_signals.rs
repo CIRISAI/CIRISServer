@@ -139,3 +139,52 @@ fn the_broker_owns_the_signal_and_never_blocks_on_a_log() {
         "propagate_terminate must not touch tracing"
     );
 }
+
+/// The serve marker brackets the listener: inspected before anything binds,
+/// written the instant the read API is bound, cleared only after the read API
+/// has DRAINED (CIRISServer#568). Order is the whole contract — a marker
+/// written before the bind, or cleared before the drain, would lie.
+#[test]
+fn the_serve_marker_brackets_the_listener() {
+    let src = compose_src();
+    let inspect = src
+        .find("crate::serve_marker::inspect_at_boot(")
+        .expect("compose inspects the previous serve's marker");
+    let bound = src
+        .find("crate::compose_status::mark(\"listener_bound\")")
+        .expect("the listener_bound mark");
+    let write = src
+        .find("crate::serve_marker::write(")
+        .expect("compose writes the marker");
+    let drain = src
+        .find("read.shutdown().await")
+        .expect("the read API drain");
+    let clear = src
+        .find("crate::serve_marker::clear(")
+        .expect("compose clears the marker");
+    assert!(
+        inspect < bound && bound < write && write < drain && drain < clear,
+        "order must be inspect < listener_bound < write < drain < clear; got \
+         inspect={inspect} bound={bound} write={write} drain={drain} clear={clear}"
+    );
+}
+
+/// Every stop request names its origin, and the embedding host's door names
+/// itself — a stop must not read like a crash one line later (CIRISServer#568).
+#[test]
+fn every_stop_request_says_who_asked() {
+    let code = node_control_code();
+    assert!(
+        code.contains("request_shutdown_from(\"shutdown_node() from the embedding host\")"),
+        "shutdown_node() must state its origin"
+    );
+    let body = code
+        .split_once("pub fn request_shutdown_from(")
+        .expect("request_shutdown_from exists")
+        .1;
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+    assert!(
+        body.contains("tracing::info!") && body.contains("origin"),
+        "request_shutdown_from must log the origin before latching:\n{body}"
+    );
+}

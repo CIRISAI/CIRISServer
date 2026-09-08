@@ -72,6 +72,19 @@ pub async fn shutdown_requested() {
 /// Signal the running node to stop (does not wait). `shutdown_node()` layers the
 /// port-free wait on top of this.
 pub fn request_shutdown() {
+    request_shutdown_from("request_shutdown()");
+}
+
+/// [`request_shutdown`], saying WHO asked. The origin is the first thing a
+/// reader of the node log needs when a serve ends: the embedding host's
+/// `shutdown_node()`, a signal, or a caller inside this process. Without it a
+/// stop reads the same as a crash one line later (CIRISServer#568).
+pub fn request_shutdown_from(origin: &'static str) {
+    tracing::info!(
+        origin,
+        "node stop requested — the serve's stop-select will drain the read API (every \
+         in-flight response is written), release the port, and clear the serve marker"
+    );
     // `send_replace`, not `send`: `watch::Sender::send` drops the value when no
     // receiver is alive, and a `shutdown_node()` that lands after `arm()` but
     // before the serve reaches its stop-select had no receiver yet — the
@@ -337,7 +350,7 @@ pub fn shutdown_node_blocking(timeout: Duration) -> bool {
         Some(a) => a,
         None => return true, // not serving — nothing to free
     };
-    request_shutdown();
+    request_shutdown_from("shutdown_node() from the embedding host");
     let start = Instant::now();
     loop {
         // Directly test the postcondition: can we bind the port? An ACTIVE

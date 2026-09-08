@@ -355,6 +355,7 @@ pub mod node_control;
 /// carries the superset.
 pub mod node_identity;
 pub mod node_key;
+pub mod serve_marker;
 
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
 pub mod node_runtime;

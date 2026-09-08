@@ -98,6 +98,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (CIRISServer#557).
     crate::graph_config::invalidate();
 
+    // What did the PREVIOUS serve on this home leave? A marker still present
+    // means it did not stop through the door — replaced, killed or crashed —
+    // and this is where that becomes a line in THIS log rather than a guess
+    // from a caller's dropped connection (CIRISServer#568).
+    let _previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
+
     // ── RNG startup health-check (CIRISServer#283 finding 2) ──────────────────
     // Arm the SP 800-90B latch ONCE at boot so `ciris_crypto::random::fill`'s
     // fail-secure gate is live: if the OS entropy source is producing detectably
@@ -1591,6 +1597,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         };
         crate::compose_status::mark("listener_bound");
         tracing::info!(read_api = %read.listen_addr(), "read API up — GET /lens/api/v1/* + GET /v1/identity");
+        // From this instant a response can be in flight: write the serve
+        // marker, cleared only by a stop that drains the read API
+        // (CIRISServer#568). A write failure is logged, not fatal — the marker
+        // is legibility, not a lock.
+        if let Err(e) = crate::serve_marker::write(&cfg.data_dir, read.listen_addr(), &cfg.key_id) {
+            tracing::warn!(error = %e, "could not write the serve marker");
+        }
         // #279: the listener is now guaranteed BOUND here (lens-core binds
         // synchronously before spawning the accept loop and a bind failure is
         // the `?` above). Stamp the milestone so compose_status distinguishes
@@ -1793,8 +1806,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     }
 
     if let Some(read) = read {
+        // Drains: every request already inside completes and its response is
+        // written before the listener closes; the handle logs the count.
         read.shutdown().await.context("shutdown lens read API")?;
     }
+    // The listener is closed and nothing is in flight: this stop went through
+    // the door. Clear the marker so the next boot reads a clean home.
+    crate::serve_marker::clear(&cfg.data_dir);
     // #276: read.shutdown() joined the accept task, so :4243 is released here.
     // Clear the recorded addr — shutdown_node() is now a no-op until the next
     // serve arms it, and its port-free probe will already be succeeding.
