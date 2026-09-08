@@ -31,19 +31,22 @@ bundled JRE is used; `cli._spawn_headless_node()` re-invokes the frozen exe with
 ```powershell
 # 0. build + install the wheel (needs Rust + maturin); pip pulls ciris-client,
 #    whose win_amd64 wheel carries the desktop JAR (no Gradle, no client/ tree)
-cd ..; maturin build --release -o dist-wheel; pip install (Get-ChildItem dist-wheel\*.whl)
+# (from the repository root)
+maturin build --release -o dist-wheel; pip install (Get-ChildItem dist-wheel\*.whl)
 # 1. PyInstaller bundle
 cd installers\windows; pyinstaller ciris-server.spec --noconfirm; mv dist\ciris-server ..\..\dist\
 # 2. trimmed JRE
 $jar = python -c "import ciris_client; print(ciris_client.artifact_path('desktop-uber-jar'))"
 .\bundle-jre.ps1 -JarPath $jar -OutputDir ..\..\dist\runtime
 # 3. installer
-iscc ciris-server-installer.iss /DCirisVersion=0.5.38
+iscc ciris-server-installer.iss /DCirisVersion=0.5.203
 ```
 
 CI does all of this — see `.github/workflows/windows-installer.yml`
-(`windows-installer` job, Win8.1 floor) and `windows7-installer.yml` (the
-experimental, dispatch-only Win7 variant with a patched CPython).
+(`windows-installer` job, Win8.1 floor; runs on main, on tags, and on a PR
+under `ci:full`; `workflow_dispatch` runs it on any branch). The Win7 variant
+(`windows7-installer.yml`) no longer exists; the `Win7Tier` define in the
+Inno script is kept for a future dispatch-only build.
 
 ## Windows 7
 
