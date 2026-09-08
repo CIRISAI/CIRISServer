@@ -304,7 +304,7 @@ async fn a_pass_with_nothing_to_evict_is_audible_and_not_an_alarm() {
         !log.at(Level::INFO).is_empty(),
         "the pass emitted no INFO line, so a node whose retention loop has DIED looks exactly \
          like one whose store is healthy. Silence is not a report.\n{}",
-        log.render()
+        log.render_or_explain()
     );
 }
 

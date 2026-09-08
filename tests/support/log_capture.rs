@@ -24,7 +24,6 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
-use tracing::instrument::WithSubscriber;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
@@ -109,41 +108,87 @@ impl Log {
     }
 }
 
-struct CaptureLayer(Log);
+/// The ONE process-global layer. It never filters (`Interest::always()` for
+/// every callsite) and routes each event to the capture that is active for
+/// the current TASK, dropping it when there is none.
+struct RoutingLayer;
 
-impl<S: Subscriber> Layer<S> for CaptureLayer {
+tokio::task_local! {
+    /// The capture a task is running under, if any.
+    static CURRENT: Log;
+}
+
+impl<S: Subscriber> Layer<S> for RoutingLayer {
+    fn register_callsite(
+        &self,
+        _meta: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _meta: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+        true
+    }
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         struct MessageVisitor<'a>(&'a mut String);
         impl Visit for MessageVisitor<'_> {
             fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                // The formatted `message` is the operator-facing text; the
-                // structured fields are deliberately ignored so an assertion on
-                // wording cannot be satisfied by a field that happens to
-                // contain it.
                 if field.name() == "message" {
                     self.0.push_str(&format!("{value:?}"));
                 }
             }
         }
-        let mut message = String::new();
-        event.record(&mut MessageVisitor(&mut message));
-        self.0
-             .0
-            .lock()
-            .expect("log capture mutex")
-            .push(CapturedEvent {
-                level: *event.metadata().level(),
-                target: event.metadata().target().to_string(),
-                message,
-            });
+        // No active capture on this task: not our event.
+        let _ = CURRENT.try_with(|log| {
+            let mut message = String::new();
+            event.record(&mut MessageVisitor(&mut message));
+            log.0
+                .lock()
+                .expect("log capture mutex")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    message,
+                });
+        });
     }
 }
 
-/// Run `fut` with every `tracing` event it emits captured, returning its output
-/// alongside the [`Log`].
+/// Install the routing layer as the process-global default, once.
+///
+/// # Why GLOBAL, and not a scoped `with_subscriber` (CIRISServer#542)
+///
+/// The first version wrapped the future in `with_subscriber(registry + layer)`
+/// — a SCOPED dispatcher, installed per poll. Three CI runs (and 1 in 4 local
+/// runs, once looked for) captured NOTHING for a pass whose INFO line is
+/// emitted inline, and the reason is in `tracing-core`, not in the code under
+/// test: a callsite's `Interest` is cached process-wide, and when exactly one
+/// scoped dispatcher is alive (`Dispatchers::has_just_one`), it is recomputed
+/// from *the registering thread's* current default. A sibling test's
+/// `tokio::spawn`ed retention loop hits `run_pass`'s callsites first, on a
+/// worker thread whose default is the global (or nothing), and caches them
+/// `never`; the scoped capture on this thread is then never consulted, because
+/// the `tracing::info!` macro returns before it asks. Forcing a rebuild from
+/// this thread makes it worse for the same reason. A global default that is
+/// always interested ends the question: interest is `always` from any thread,
+/// and WHERE an event goes is decided here, per task, at dispatch time.
+fn install_global() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+    let ours = *INSTALLED.get_or_init(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(RoutingLayer))
+            .is_ok()
+    });
+    assert!(
+        ours,
+        "log_capture: another global tracing subscriber was installed before the first \
+         capture in this process, so captured events cannot be routed. Tests in a binary \
+         that uses `log_capture::capture` must not install their own global subscriber."
+    );
+}
+
 pub async fn capture<F: Future>(fut: F) -> (F::Output, Log) {
+    install_global();
     let log = Log::default();
-    let subscriber = tracing_subscriber::registry().with(CaptureLayer(log.clone()));
-    let out = fut.with_subscriber(subscriber).await;
+    let out = CURRENT.scope(log.clone(), fut).await;
     (out, log)
 }
