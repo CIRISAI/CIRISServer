@@ -117,9 +117,22 @@ async fn fixture() -> Arc<Engine> {
         .await
         .expect("the engine's derived federation key_id");
     register(&engine, &signer_for(ACTOR), &derived, identity_type::AGENT).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    // The NODE too is registered under its DERIVED id, and every test below
+    // names it by that id. It used to be registered under the bare label, so
+    // the signer's `key_id()` (the label) and the node's id coincided here and
+    // nowhere in production — where `node_key::node_signer` builds the signer
+    // from an ALIAS and registers `derived_key_id()`. The consent guard compared
+    // the two and refused every real re-author (CIRISServer#563); this fixture
+    // was the reason the test did not see it.
+    register(&engine, &signer_for(NODE), &node_id(), identity_type::NODE).await;
     register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
     engine
+}
+
+/// The node key's REGISTERED id: `derive_key_id(<alias>, <pubkey>)`, exactly as
+/// `node_key::register_node_key` registers it in production.
+fn node_id() -> String {
+    signer_for(NODE).derived_key_id()
 }
 
 /// **The #312 regression, demonstrated — and the constraint that shapes the cure.**
@@ -152,7 +165,7 @@ async fn reading_consent_by_another_id_finds_nothing_the_engine_authored() {
         "sanity: the author sees its own grant"
     );
 
-    let as_node = ciris_server::peer::replication_peers_from_consent(&engine, NODE)
+    let as_node = ciris_server::peer::replication_peers_from_consent(&engine, &node_id())
         .await
         .expect("read as the node key");
     assert!(
@@ -183,7 +196,7 @@ async fn a_grant_cannot_be_authored_for_a_key_the_engine_does_not_sign_as() {
     let engine = fixture().await;
     let err = ciris_server::peer::emit_replication_consent(
         &engine,
-        NODE, // NOT the engine's identity
+        &node_id(), // NOT the engine's identity
         PEER,
         &ciris_server::peer::default_attestation_prefixes(),
     )
@@ -254,7 +267,8 @@ async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
     let engine = fixture().await;
     let engine_author = engine.local_derived_key_id().await.expect("derived");
     assert_ne!(
-        engine_author, NODE,
+        engine_author,
+        node_id(),
         "premise: the engine is NOT the node key — this is the embedded fold"
     );
 
@@ -264,7 +278,7 @@ async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
     };
     ciris_server::peer::emit_replication_consent_with_policy(
         &engine,
-        NODE,
+        &node_id(),
         PEER,
         &ciris_server::peer::default_attestation_prefixes(),
         &opts,
@@ -273,7 +287,7 @@ async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
     .expect("the node authors its own grant with the key it holds");
 
     assert_eq!(
-        ciris_server::peer::replication_peers_from_consent(&engine, NODE)
+        ciris_server::peer::replication_peers_from_consent(&engine, &node_id())
             .await
             .expect("read as the node"),
         vec![PEER.to_string()],
@@ -302,7 +316,7 @@ async fn an_author_signer_for_a_different_key_is_still_refused() {
     };
     let err = ciris_server::peer::emit_replication_consent_with_policy(
         &engine,
-        NODE,
+        &node_id(),
         PEER,
         &ciris_server::peer::default_attestation_prefixes(),
         &opts,
@@ -350,7 +364,7 @@ async fn a_narrowed_grant_is_not_widened_by_the_migration() {
         &engine,
         Arc::new(signer_for(NODE)),
         &author,
-        NODE,
+        &node_id(),
     )
     .await
     .expect("re-author");
@@ -359,7 +373,7 @@ async fn a_narrowed_grant_is_not_widened_by_the_migration() {
     // Read the NODE's grant back and compare its policy to what was authored.
     let grants = engine
         .federation_directory()
-        .list_live_consent_grants_by(NODE)
+        .list_live_consent_grants_by(&node_id())
         .await
         .expect("list the node's grants");
     let g = grants.first().expect("the node holds a grant");

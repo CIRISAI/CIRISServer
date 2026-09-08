@@ -270,7 +270,15 @@ jobs:
         # widening: it is the same audience reached by a different pen, and the
         # alternative was leaving a split node's topology unreadable by the
         # identity that reads it (CIRISServer#312).
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 44
+        # 44 -> 45 (0.5.203): the same pen, two more rows. `peer.rs` gained the
+        # node-signer branches for the consent-widening `supersedes` and the
+        # CC#46 `analyze` grant (CIRISServer#563, Codex on #564): on a split
+        # node the engine signs as the ACTOR, and a supersedes must carry the
+        # same attester as the grant it retires while the analyze grant is the
+        # NODE's consent to be scored — so both are stamped and signed with the
+        # held node key. Same rows, same MANDATORY federation scope as their
+        # engine-signed twins directly above each; no new audience.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 45
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one

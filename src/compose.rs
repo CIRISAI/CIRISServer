@@ -602,7 +602,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (stable for the node's lifetime), served verbatim by
     // GET /v1/federation/self-key-record and the public record a peer registers
     // to admit this node's replicated rows.
-    let self_key_record_json = self_key_record_json(&engine, &cfg).await?;
+    //
+    // On a SPLIT node the engine's record names the ACTOR; the peer that
+    // registers it would then refuse every node-signed row as an unknown
+    // attester. The record served is the one for the key that signs this
+    // node's rows — the held node key record (CIRISServer#563, Codex on #564).
+    let self_key_record_json = match crate::node_key::held_node_key_record_json() {
+        Some(node_record) => node_record,
+        None => self_key_record_json(&engine, &cfg).await?,
+    };
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -1226,7 +1234,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // POST peering (each node authors its OWN consent grant).
                     .merge(crate::federation_admin::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        // The NODE's identity: the wire identity the split
+                        // established, else the configured key (which then IS
+                        // the node). `cfg.key_id` is the ACTOR on a split node,
+                        // and the owner-binding and consent both live on the
+                        // node key (CC 3.4.7.3, CIRISServer#563).
+                        crate::node_key::wire_identity()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| cfg.key_id.clone()),
                         self_key_record_json.clone(),
                         // Nudge the reconciler after a consent write (CEG changed)
                         // — but ONLY when a runtime exists to converge. The handler
@@ -3253,7 +3268,16 @@ async fn node_self_code(
     cfg: &ServerConfig,
     alias_hint: Option<String>,
 ) -> Result<crate::nodecode::NodeCode> {
-    let record = build_self_key_record(engine, cfg).await?;
+    // Same rule as the self-key-record: on a split node the code carries the
+    // NODE's key (the transport identity peers dial), not the actor's.
+    let record = match crate::node_key::held_node_key_record_json() {
+        Some(json) => {
+            serde_json::from_str::<ciris_persist::federation::SignedKeyRecord>(&json)
+                .context("parse the held node SignedKeyRecord")?
+                .record
+        }
+        None => build_self_key_record(engine, cfg).await?,
+    };
     Ok(crate::federation_nodecode::build_node_code(
         &record.key_id,
         &record.pubkey_ed25519_base64,

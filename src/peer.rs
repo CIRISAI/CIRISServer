@@ -72,6 +72,12 @@ pub async fn emit_analyze_consent(
     use ciris_persist::federation::consent::consent_dimension;
     use ciris_persist::federation::hard_case::ConsentState;
 
+    // The SUBJECT is this node — the node key on a split node even when the
+    // caller named the actor — and the row is signed with the node's pen, or
+    // the peer's `capacity:*` gate looks for a consent the node never gave
+    // (Codex P1 on #564).
+    let author = consent_author(engine, subject_key_id, None).await?;
+    let subject_key_id = author.key_id.as_str();
     let now = chrono::Utc::now();
     if matches!(
         engine
@@ -93,16 +99,33 @@ pub async fn emit_analyze_consent(
         (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
         "scope": ANALYZE_CONSENT_SCOPE,
     });
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
-        .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
-    let mut input = EmitAttestationInput::with_envelope(
-        "consent",
-        core,
-        // See (1): read on the scoring node, so it MUST replicate.
-        cohort_scope::FEDERATION,
-    );
-    input.attested_key_id = Some(attester_key_id.to_string());
-    let id = engine.emit_attestation_self(input).await?;
+    let id = match author.signer.as_ref() {
+        None => {
+            let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+                .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
+            let mut input = EmitAttestationInput::with_envelope(
+                "consent",
+                core,
+                // See (1): read on the scoring node, so it MUST replicate.
+                cohort_scope::FEDERATION,
+            );
+            input.attested_key_id = Some(attester_key_id.to_string());
+            engine.emit_attestation_self(input).await?
+        }
+        Some(signer) => {
+            let mut spec = crate::attest::Spec::new("consent", cohort_scope::FEDERATION, envelope);
+            // (3): `subject_key_ids` stays EMPTY; the attested key is the peer.
+            spec.attested_key_id = Some(attester_key_id.to_string());
+            let row = crate::attest::Emit::stamp(subject_key_id, spec)
+                .map_err(|e| anyhow::anyhow!("stamp analyze consent for {subject_key_id}: {e}"))?
+                .sign_and_assemble(crate::attest::KeySigner::Local(signer))
+                .await
+                .map_err(|e| anyhow::anyhow!("sign analyze consent as {subject_key_id}: {e}"))?;
+            crate::attest::put(engine, row)
+                .await
+                .map_err(|e| anyhow::anyhow!("put analyze consent by {subject_key_id}: {e}"))?
+        }
+    };
 
     // Assert the FOLD, not the row (4). A grant that does not resolve is worse
     // than no grant: it reads as consented while the gate still refuses.
@@ -125,15 +148,17 @@ pub async fn emit_analyze_consent(
             "CC#46 `analyze` consent authored and RESOLVED — the attester may now author \
              capacity:* about this node"
         ),
-        Ok(other) => tracing::error!(
-            subject = %subject_key_id,
-            attester = %attester_key_id,
-            resolved = ?other,
-            "CC#46 `analyze` consent row authored but the scoped fold does NOT resolve to \
-             Granted — capacity:* will still be refused. Check the envelope scope shape and \
-             the row's tier/cohort_scope"
+        // A row that does not resolve is worse than no row: it reads as
+        // consented while the gate still refuses. That is an ERROR to the
+        // caller, not a log line beside an `Ok` (Codex P1 on #564).
+        Ok(other) => anyhow::bail!(
+            "CC#46 `analyze` consent row {id} authored by {subject_key_id} for {attester_key_id} \
+             but the scoped fold resolves to {other:?}, not Granted — capacity:* will still be \
+             refused. Check the envelope scope shape and the row's tier/cohort_scope"
         ),
-        Err(e) => tracing::error!(error = %e, "analyze consent: resolve_scoped_consent failed"),
+        Err(e) => anyhow::bail!(
+            "analyze consent row {id} authored but resolve_scoped_consent failed: {e}"
+        ),
     }
     Ok(Some(id))
 }
@@ -719,7 +744,10 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
 ) -> Result<ConsentGrant> {
     // Idempotency guard: does A hold a LIVE replication-consent grant to this
     // peer? See [`standing_live_grant`] for why "live" and not "present".
-    if let Some(existing) = standing_live_grant(engine, node_key_id, peer_key_id).await? {
+    // WHO authors this — resolved before the standing-grant lookup, so a caller
+    // that named the actor on a split node looks up (and writes) the NODE's grant.
+    let author = consent_author(engine, node_key_id, opts.author_signer.clone()).await?;
+    if let Some(existing) = standing_live_grant(engine, &author.key_id, peer_key_id).await? {
         tracing::debug!(
             peer_key_id,
             attestation_id = %existing.attestation_id,
@@ -732,7 +760,7 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
         });
     }
 
-    emit_grant_row(engine, node_key_id, peer_key_id, attestation_prefixes, opts).await
+    emit_grant_row(engine, &author, peer_key_id, attestation_prefixes, opts).await
 }
 
 /// **The standing grant this node holds for `peer_key_id`, or `None`.**
@@ -783,6 +811,123 @@ async fn standing_live_grant(
         .find(|a| a.subject_key_ids.iter().any(|s| s == peer_key_id)))
 }
 
+/// Does `signer` hold the key registered as `key_id`?
+///
+/// A `LocalSigner` names its key under one of TWO conventions, and a check that
+/// knows only one refuses real signers (CIRISServer#563):
+///
+/// * **the registered id verbatim** — a user's fed-ID, a test party:
+///   `key_id()` is the `federation_keys` id itself (the `attest::KeySigner`
+///   contract, which must not derive again or it would mint `<id>-<fp>-<fp>`);
+/// * **the keystore alias** — every signer `node_key::node_signer` builds:
+///   `key_id()` is `ciris-node-bootstrap` and the id the node is registered
+///   under, and authors rows as, is `derived_key_id()` =
+///   `ciris-node-bootstrap-<fp>` (FSD-003 #247).
+///
+/// The boot re-author (`node_key::reauthor_consent_as_node`) hands the second
+/// kind in, and the guard below compared its ALIAS to the node's DERIVED id — so
+/// the migration that makes a split node's topology visible (CIRISServer#312)
+/// refused every grant it was asked to move, and a node whose actor had peered
+/// before the split died on its next boot. The test that covered it registered
+/// its node under a bare label, so alias and id coincided there and nowhere else.
+#[must_use]
+pub fn signer_holds(signer: &ciris_persist::prelude::LocalSigner, key_id: &str) -> bool {
+    signer.key_id() == key_id || signer.derived_key_id() == key_id
+}
+
+/// Who a consent row is authored BY, and the pen that signs it — resolved once,
+/// before the standing-grant lookup, by every consent entry point.
+///
+/// Consent is the NODE's topology: `compose` reads it by the wire identity, so a
+/// grant authored under any other key is invisible where it is consulted
+/// (CIRISServer#312). On a standalone node the engine IS the node and there is
+/// nothing to resolve. On a split node (CC 3.4.7.3 Clause A: the engine signs
+/// as the ACTOR, boot minted the node its own key) three things are true at
+/// once and each caller used to get a different one wrong (Codex on #564):
+///
+/// * a caller naming the NODE with no signer must get the node's pen — the
+///   signer the split recorded for the process ([`crate::node_key::held_node_signer`]);
+/// * a caller naming the ACTOR — `self_identity::resolve` in the contacts
+///   surface, `cfg.key_id` in the admin router — means "this node", because
+///   there is no reading of "the actor's replication consent" that anyone
+///   consults; it is NORMALISED to the node, with the reason logged, rather
+///   than refused or, worse, authored under the actor;
+/// * an explicit `author_signer` must hold the named key, under either
+///   convention ([`signer_holds`]) — "I hold this key", never "sign as anyone".
+///
+/// Anything else is the #312 topology-that-reads-empty, and is refused with the
+/// message the tests pin.
+#[derive(Clone)]
+pub struct ConsentAuthor {
+    /// The registered id every consent row is authored under.
+    pub key_id: String,
+    /// The pen when the engine does not sign as `key_id`; `None` when it does.
+    pub signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
+}
+
+/// Resolve the author for a consent row a caller named `requested` for. See
+/// [`ConsentAuthor`].
+///
+/// # Errors
+/// The engine's identity cannot be resolved, or nobody in this process holds
+/// the key `requested` names.
+pub async fn consent_author(
+    engine: &Engine,
+    requested: &str,
+    explicit: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
+) -> Result<ConsentAuthor> {
+    let engine_author = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    if let Some(signer) = explicit {
+        if signer_holds(&signer, requested) {
+            return Ok(ConsentAuthor {
+                key_id: requested.to_owned(),
+                signer: Some(signer),
+            });
+        }
+        // An explicit pen that does not hold the named key falls through to
+        // the refusal — never silently swap in another author.
+    } else {
+        let held = crate::node_key::held_node_signer();
+        if engine_author == requested && held.is_none() {
+            return Ok(ConsentAuthor {
+                key_id: requested.to_owned(),
+                signer: None,
+            });
+        }
+        if let Some(held) = held {
+            let node = held.derived_key_id();
+            if signer_holds(&held, requested) {
+                return Ok(ConsentAuthor {
+                    key_id: node,
+                    signer: Some(held),
+                });
+            }
+            if engine_author == requested {
+                tracing::info!(
+                    requested = %requested,
+                    node_key_id = %node,
+                    "consent named for the ACTOR on a split node — authored as the NODE, \
+                     whose topology it is (CC 3.4.7.3 / CIRISServer#563)"
+                );
+                return Ok(ConsentAuthor {
+                    key_id: node,
+                    signer: Some(held),
+                });
+            }
+        }
+    }
+    anyhow::bail!(
+        "refusing to emit a consent grant naming {requested:?}: this engine signs as \
+         {engine_author:?}, and a consent grant is self-attested (CEG 1.0-RC29 §5.6.8.15). \
+         The row would be authored by the engine and invisible to {requested:?} — a \
+         topology that reads empty under a healthy transport (CIRISServer#312). To author \
+         as another identity, the ENGINE must sign as it, or this process must hold its key."
+    )
+}
+
 /// **The grant EMIT half, with no idempotency guard.**
 ///
 /// Split out of [`emit_replication_consent_with_policy`] because there are now
@@ -797,11 +942,14 @@ async fn standing_live_grant(
 /// authors and stores.
 async fn emit_grant_row<S: AsRef<str>>(
     engine: &Engine,
-    node_key_id: &str,
+    author: &ConsentAuthor,
     peer_key_id: &str,
     attestation_prefixes: &[S],
     opts: &ConsentGrantOptions,
 ) -> Result<ConsentGrant> {
+    // Resolved by `consent_author` — the id every row below is authored under
+    // and the pen that signs it. Nothing in here re-derives either.
+    let node_key_id = author.key_id.as_str();
     // ── The RC29 LOCKED consent:replication grant (CEG §5.6.8.15, resolves
     //    CIRISRegistry#98). A bare `scores` Attestation. ──────────────────────
     //
@@ -851,24 +999,6 @@ async fn emit_grant_row<S: AsRef<str>>(
     // Consent is SELF-attested by construction (CEG 1.0-RC29 §5.6.8.15 forecloses
     // third-party authorship so a grant cannot be produced on your behalf), so
     // "author this as someone else" has no valid reading. Refuse it.
-    let engine_author = engine
-        .local_derived_key_id()
-        .await
-        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
-    let signs_as_node = opts
-        .author_signer
-        .as_ref()
-        .is_some_and(|s| s.key_id() == node_key_id);
-    if engine_author != node_key_id && !signs_as_node {
-        anyhow::bail!(
-            "refusing to emit a consent grant naming {node_key_id:?}: this engine signs as \
-             {engine_author:?}, and a consent grant is self-attested (CEG 1.0-RC29 §5.6.8.15). \
-             The row would be authored by the engine and invisible to {node_key_id:?} — a \
-             topology that reads empty under a healthy transport (CIRISServer#312). To author \
-             as another identity, the ENGINE must sign as it."
-        );
-    }
-
     let prefixes = normalize_prefixes(attestation_prefixes);
     if prefixes.is_empty() {
         return Err(anyhow::anyhow!(
@@ -987,7 +1117,7 @@ async fn emit_grant_row<S: AsRef<str>>(
     input.attested_key_id = Some(peer_key_id.to_owned());
     input.subject_key_ids = vec![peer_key_id.to_owned()];
     input.weight = Some(1.0);
-    let attestation_id = match opts.author_signer.as_ref() {
+    let attestation_id = match author.signer.as_ref() {
         // The ordinary path: the engine self-attests. Unchanged.
         None => engine
             .emit_attestation_self(input)
@@ -1298,6 +1428,11 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
              — see the non-vacuous-prefix guard on emit_grant_row"
         ));
     }
+    // WHO this node is for consent purposes (the node key on a split node, even
+    // when the caller named the actor) and the pen — resolved ONCE, so the
+    // standing lookup, the widened grant and the supersedes all agree.
+    let author = consent_author(engine, node_key_id, None).await?;
+    let node_key_id = author.key_id.as_str();
     // The revocation-FOLDED standing grant — one predicate, shared with the
     // idempotency guard (see [`standing_live_grant`]).
     let Some(standing) = standing_live_grant(engine, node_key_id, peer_key_id).await? else {
@@ -1372,7 +1507,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
             .cloned()
             .collect::<Vec<String>>(),
     );
-    let grant = emit_grant_row(engine, node_key_id, peer_key_id, &union, &opts).await?;
+    let grant = emit_grant_row(engine, &author, peer_key_id, &union, &opts).await?;
     // THE GRANT IS COMMITTED THE MOMENT THE LINE ABOVE RETURNS: the projection
     // folds the upsert as replace-by-subject, so the widened coverage is
     // ALREADY the live consent state — the supersedes composer only makes the
@@ -1382,15 +1517,26 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
     // exact defect class the grant-outcome fix closed in the WA client. The
     // corpus legibility gap is real and is REPORTED (ERROR, both ids), but a
     // committed consent change outranks a missing footnote about it.
-    if let Err(e) = emit_grant_supersedes(engine, node_key_id, &standing.attestation_id).await {
-        tracing::error!(
-            peer_key_id,
-            committed_grant = %grant.attestation_id,
-            unretired_grant = %standing.attestation_id,
-            error = %e,
-            "consent widening COMMITTED but the supersedes composer failed — the              corpus lacks the audit row explaining why the narrower grant stopped              standing; the live projection is already correct"
-        );
-    }
+    // Reported honestly: `superseded_attestation_id` names a grant the corpus
+    // now says is retired. If the composer failed, nothing was retired in the
+    // corpus (the projection is already correct), so the answer is `None` and
+    // the ERROR line carries both ids — not `Some(..)` over a row that is not
+    // there (Codex P2 on #564).
+    let superseded = match emit_grant_supersedes(engine, &author, &standing.attestation_id).await {
+        Ok(_) => Some(standing.attestation_id.clone()),
+        Err(e) => {
+            tracing::error!(
+                peer_key_id,
+                committed_grant = %grant.attestation_id,
+                unretired_grant = %standing.attestation_id,
+                error = %e,
+                "consent widening COMMITTED but the supersedes composer failed — the corpus \
+                 lacks the audit row explaining why the narrower grant stopped standing; the \
+                 live projection is already correct"
+            );
+            None
+        }
+    };
     tracing::info!(
         peer_key_id,
         superseded = %standing.attestation_id,
@@ -1402,7 +1548,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
         attestation_id: grant.attestation_id,
         content_hash: grant.content_hash,
         freshly_emitted: true,
-        superseded_attestation_id: Some(standing.attestation_id),
+        superseded_attestation_id: superseded,
         prefixes: union,
     })
 }
@@ -1444,9 +1590,10 @@ fn enum_token<T: serde::Serialize>(value: &T) -> Option<String> {
 /// retirement of its own grant (§4.2.6 — subjects are who may revoke).
 async fn emit_grant_supersedes(
     engine: &Engine,
-    node_key_id: &str,
+    author: &ConsentAuthor,
     superseded_attestation_id: &str,
 ) -> Result<String> {
+    let node_key_id = author.key_id.as_str();
     // No `asserted_at` (CIRISServer#402 / CIRISPersist#598): the emit door
     // stamps it once, into the bytes it signs.
     let envelope = serde_json::json!({
@@ -1454,15 +1601,38 @@ async fn emit_grant_supersedes(
         "attesting_key_id": node_key_id,
         "cohort_scope": cohort_scope::FEDERATION,
     });
-    let input = EmitAttestationInput::with_envelope(
-        attestation_type::SUPERSEDES,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
-        cohort_scope::FEDERATION.to_owned(),
-    );
-    engine
-        .emit_attestation_self(input)
-        .await
-        .map_err(|e| anyhow::anyhow!("emit_attestation_self(supersedes consent grant): {e}"))
+    match author.signer.as_ref() {
+        None => {
+            let input = EmitAttestationInput::with_envelope(
+                attestation_type::SUPERSEDES,
+                ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+                cohort_scope::FEDERATION.to_owned(),
+            );
+            engine.emit_attestation_self(input).await.map_err(|e| {
+                anyhow::anyhow!("emit_attestation_self(supersedes consent grant): {e}")
+            })
+        }
+        // A supersedes must carry the SAME attester as the grant it retires
+        // (CC 2.4.1); on a split node that is the node's pen, not the engine's
+        // (Codex P2 on #564).
+        Some(signer) => {
+            let row = crate::attest::Emit::stamp(
+                node_key_id,
+                crate::attest::Spec::new(
+                    attestation_type::SUPERSEDES,
+                    cohort_scope::FEDERATION,
+                    envelope,
+                ),
+            )
+            .map_err(|e| anyhow::anyhow!("stamp consent supersedes for {node_key_id}: {e}"))?
+            .sign_and_assemble(crate::attest::KeySigner::Local(signer))
+            .await
+            .map_err(|e| anyhow::anyhow!("sign consent supersedes as {node_key_id}: {e}"))?;
+            crate::attest::put(engine, row)
+                .await
+                .map_err(|e| anyhow::anyhow!("put consent supersedes by {node_key_id}: {e}"))
+        }
+    }
 }
 
 /// Read this node's **desired replication topology back out of the corpus**: the
