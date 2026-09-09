@@ -465,12 +465,15 @@ pub fn spawn(
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Phased, not bare `interval`: this loop and the config reconciler both
+        // default to 30 s and on a plain interval ticked together every time.
+        // See `loop_cadence` and CIRISServer#575 — the collision is what stalls
+        // the node's own read API, not the work either loop does alone.
         let mut period = config_rx.borrow().replication_reconcile_interval();
-        let mut interval = tokio::time::interval(period);
-        // Skip missed ticks rather than burst-catch-up if a reconcile runs long.
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cadence = crate::loop_cadence::Cadence::new("replication_reconcile", period);
         tracing::info!(
             period_secs = period.as_secs(),
+            phase_secs = cadence.phase().as_secs_f64(),
             "CEG-driven replication reconciler started (consent objects are the topology; \
              API writes CEG, this loop converges the live runtime via set_peers — no restart, \
              CIRISEdge#173 resolved; cadence from config:* replication.reconcile_secs)"
@@ -485,7 +488,7 @@ pub fn spawn(
         let mut last_logged: Option<usize> = None;
         loop {
             tokio::select! {
-                _ = interval.tick() => {}
+                _ = cadence.tick() => {}
                 _ = notify.notified() => {
                     tracing::debug!("reconcile nudged (CEG changed) — reconciling now");
                 }
@@ -503,9 +506,7 @@ pub fn spawn(
             let live_period = config_rx.borrow().replication_reconcile_interval();
             if live_period != period {
                 period = live_period;
-                interval = tokio::time::interval(period);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await; // consume the immediate tick
+                cadence.retune(period);
                 tracing::info!(
                     period_secs = period.as_secs(),
                     "replication reconcile cadence retuned from config:* (hot)"

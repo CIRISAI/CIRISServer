@@ -1635,10 +1635,11 @@ pub async fn run_federation_delivery(
     let reconcile_runtime = Arc::clone(&runtime);
     let reconcile_node_key = node_key_id.clone();
     let reconcile_join = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(cadence);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Phased (see `loop_cadence`, CIRISServer#575).
+        let mut schedule = crate::loop_cadence::Cadence::new("federation_delivery", cadence);
         tracing::info!(
             cadence_secs = cadence.as_secs(),
+            phase_secs = schedule.phase().as_secs_f64(),
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
         let mut last_logged: Option<usize> = None;
@@ -1650,7 +1651,7 @@ pub async fn run_federation_delivery(
             crate::backoff::Backoff::new(cadence, Duration::from_secs(MAX_RECONCILE_BACKOFF_SECS));
         loop {
             tokio::select! {
-                _ = interval.tick() => {}
+                _ = schedule.tick() => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         tracing::info!("federation-delivery reconcile loop shutting down");
@@ -1725,14 +1726,14 @@ pub async fn run_federation_delivery(
                             }
                         }
                         // RESET, or the pause buys nothing (Codex, PR #502). The
-                        // interval's next deadline elapses DURING the sleep, so the
+                        // schedule's next deadline elapses DURING the sleep, so the
                         // following `tick()` is already ready and fires at once —
                         // the stall branch would shift a reconcile by a couple of
                         // seconds rather than omitting one, on exactly the hosts
                         // with no headroom to spare. `reset` puts the next deadline
                         // a full cadence from now, so a stalled node genuinely
                         // halves its reconcile rate.
-                        interval.reset();
+                        schedule.reset();
                     }
                     if last_logged != Some(count) {
                         if count == 0 {

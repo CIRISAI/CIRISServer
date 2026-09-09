@@ -569,12 +569,22 @@ pub fn spawn(
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let period = Duration::from_secs(CONFIG_RECONCILE_SECS);
-        let mut interval = tokio::time::interval(period);
-        // Skip missed ticks rather than burst-catch-up if a reconcile runs long.
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Phased, not bare `interval`: this loop and the replication reconciler
+        // both run at 30 s, so on a plain interval every tick of one landed on a
+        // tick of the other — and a collision is the node's own read API
+        // stalling, because each tick's reads run inline-sync on the
+        // request-serving runtime behind one connection mutex (CIRISServer#575
+        // measured `GET /v1/identity` p50 1.1 ms → 780 ms on 6.9% of wall time).
+        // `Cadence` keeps the average period and skips missed deadlines exactly
+        // as `MissedTickBehavior::Skip` did.
+        let mut cadence = crate::loop_cadence::Cadence::new(
+            "config_reconcile",
+            Duration::from_secs(CONFIG_RECONCILE_SECS),
+        );
+        let period = cadence.period();
         tracing::info!(
             period_secs = period.as_secs(),
+            phase_secs = cadence.phase().as_secs_f64(),
             "CEG-driven config reconciler started (config:* objects are the desired runtime config; \
              API writes CEG, this loop re-resolves + republishes the live snapshot — scorer knobs \
              are hot, transport/mode are boot-structural)"
@@ -584,7 +594,7 @@ pub fn spawn(
         // boot snapshot was already resolved in compose, so this just refreshes it.
         loop {
             tokio::select! {
-                _ = interval.tick() => {}
+                _ = cadence.tick() => {}
                 _ = notify.notified() => {
                     tracing::debug!("config reconcile nudged (CEG changed) — reconciling now");
                 }
