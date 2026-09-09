@@ -374,7 +374,6 @@ async fn recant_row(engine: &Arc<Engine>, target_attestation_id: &str) {
 /// the snapshot handle and the per-key getters agree.
 #[tokio::test]
 async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
-    use std::sync::atomic::Ordering;
     let engine = node().await;
     register_self(&engine).await;
     for (k, v) in [("a.one", 1), ("a.two", 2), ("b.three", 3)] {
@@ -431,10 +430,18 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
     assert_eq!(snap.i64("a.two"), Some(2));
     assert_eq!(snap.list(None).len(), 3);
     assert_eq!(snap.rows(), 3);
-    assert_eq!(
-        graph_config::SCANS.load(Ordering::Relaxed),
-        after,
-        "the handle reused the cache"
+    // THIS engine's ordinal again, for the reason stated above: `SCANS` counts
+    // every engine in the binary and the sibling tests run their own on
+    // parallel threads, so comparing the process counter to an engine ordinal
+    // asserts something about the neighbours. It held only while none of them
+    // happened to scan in this window, and on a Windows runner one did (PR
+    // #576). Same TTL budget as the read loop: an expiry between the two reads
+    // is the cache working.
+    let budget = (t0.elapsed().as_millis() / graph_config::CONFIG_SNAPSHOT_TTL.as_millis()) as u64;
+    assert!(
+        snap.scan - before <= budget,
+        "the handle reused the cache: this engine scanned {} time(s) over the whole test,          budget {budget}",
+        snap.scan - before
     );
 
     graph_config::set_config(
@@ -450,9 +457,15 @@ async fn fifty_reads_are_one_scan_and_a_write_invalidates() {
         graph_config::get_i64(&engine, "a.one").await.unwrap(),
         Some(11)
     );
+    // Engine-scoped for the same reason: a neighbour's scan must not be able to
+    // satisfy this, and its absence must not be able to fail it.
+    let after_write = graph_config::snapshot(&engine)
+        .await
+        .expect("snapshot")
+        .scan;
     assert!(
-        graph_config::SCANS.load(Ordering::Relaxed) > after,
-        "a write must make the next read scan"
+        after_write > after,
+        "a write must make the next read scan (this engine: {after} -> {after_write})"
     );
     assert_eq!(
         snap.i64("a.one"),
