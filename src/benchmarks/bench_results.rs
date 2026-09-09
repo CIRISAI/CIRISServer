@@ -417,10 +417,12 @@ pub fn build(
     // multi-thread runtime on a dedicated thread to avoid the "runtime within a runtime"
     // panic from `block_on`.
     let (cohort, replication) = std::thread::spawn(|| {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime for mesh measurements");
+        // Through the shared builder like every other runtime (CIRISServer#577).
+        // Default behaviour is unchanged — it still sizes to the host — but an
+        // explicit cap now reaches the benchmark too, so a measurement taken
+        // under a cap is taken under the cap.
+        let rt =
+            crate::node_runtime::build("ciris-bench").expect("tokio runtime for mesh measurements");
         rt.block_on(async {
             let mut cohort = Vec::new();
             for &n in &[50usize, 100, 200, 400] {

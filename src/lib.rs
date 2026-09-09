@@ -1565,13 +1565,24 @@ mod python {
     /// lifecycle. `home`/`key_id` default to the bare-node values, matching the
     /// flagless boot.
     #[pyfunction]
-    #[pyo3(name = "serve_with_python_adapter", signature = (adapter, home=None, key_id=None))]
+    #[pyo3(
+        name = "serve_with_python_adapter",
+        signature = (adapter, home=None, key_id=None, worker_threads=None)
+    )]
     fn py_serve_with_python_adapter(
         py: Python<'_>,
         adapter: Py<pyo3::PyAny>,
         home: Option<String>,
         key_id: Option<String>,
+        worker_threads: Option<usize>,
     ) -> PyResult<()> {
+        // BEFORE anything builds a runtime (CIRISServer#577). An embedded host
+        // on a phone caps this; tokio cannot resize a runtime afterwards, which
+        // is why it is an argument here rather than a call the host could make
+        // too late. The #501 floor still applies underneath.
+        if worker_threads.is_some() {
+            crate::node_runtime::set_worker_override(worker_threads);
+        }
         let home = home
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(crate::config::DEFAULT_CIRIS_HOME));
@@ -2003,12 +2014,21 @@ mod python {
     }
 
     #[pyfunction]
-    #[pyo3(name = "start_federation_delivery", signature = (cadence_seconds=None, announce_logger=true))]
+    #[pyo3(
+        name = "start_federation_delivery",
+        signature = (cadence_seconds=None, announce_logger=true, worker_threads=None)
+    )]
     fn py_start_federation_delivery(
         py: Python<'_>,
         cadence_seconds: Option<u64>,
         announce_logger: bool,
+        worker_threads: Option<usize>,
     ) -> PyResult<u64> {
+        // See `serve_with_python_adapter`: set before the delivery runtime is
+        // built (CIRISServer#577).
+        if worker_threads.is_some() {
+            crate::node_runtime::set_worker_override(worker_threads);
+        }
         // Release the GIL: the controller bring-up awaits async engine/edge I/O on
         // its own runtime and the spawned scheduler tasks run detached afterwards.
         let count = py.detach(|| {
