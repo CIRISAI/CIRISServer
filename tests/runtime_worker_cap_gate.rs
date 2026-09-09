@@ -16,9 +16,19 @@
 
 fn src_files() -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let mut stack = vec![std::path::PathBuf::from("src")];
+    // `benches/` as well as `src/`: a benchmark that reports RSS while ignoring
+    // the worker cap measures a thread count nobody asked for, and the gate
+    // claimed to cover every runtime in the crate while looking at one
+    // directory (Codex, PR #578).
+    let mut stack = vec![
+        std::path::PathBuf::from("src"),
+        std::path::PathBuf::from("benches"),
+    ];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read src") {
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in listing {
             let path = entry.expect("entry").path();
             if path.is_dir() {
                 stack.push(path);

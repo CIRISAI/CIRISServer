@@ -66,8 +66,18 @@ static WORKER_OVERRIDE: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// an argument rather than leaving it to a later call.
 ///
 /// `None` clears it, restoring the detected default.
+///
+/// `Some(0)` is a request, not a clearing: it stores 1, which
+/// [`resolve_workers`] then lifts to [`MIN_WORKER_THREADS`] like any other
+/// under-floor ask. Storing the 0 directly would have read back as "unset" and
+/// silently restored the detected core count — on a high-core embedded host,
+/// exactly the thread count the caller was trying to prevent (Codex, PR #578).
 pub fn set_worker_override(n: Option<usize>) {
-    WORKER_OVERRIDE.store(n.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    let stored = match n {
+        None => 0,
+        Some(v) => v.max(1),
+    };
+    WORKER_OVERRIDE.store(stored, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The override currently in force, if any.
@@ -207,6 +217,26 @@ mod tests {
         assert_eq!(resolve_requested(None, Some(8), Some(16)), Some(8));
         assert_eq!(resolve_requested(None, None, Some(16)), Some(16));
         assert_eq!(resolve_requested(None, None, None), None);
+    }
+
+    /// A zero request is an ASK for the floor, not a clearing of the override —
+    /// reading it back as "unset" would restore the detected core count on the
+    /// very hosts the cap exists for.
+    #[test]
+    fn a_zero_request_reaches_the_floor_rather_than_clearing() {
+        let restore = worker_override();
+        set_worker_override(Some(0));
+        assert_ne!(
+            worker_override(),
+            None,
+            "Some(0) must not read back as unset"
+        );
+        assert_eq!(
+            resolve_workers(worker_override(), 64),
+            MIN_WORKER_THREADS,
+            "a zero request must resolve to the floor, not to the host's 64 cores"
+        );
+        set_worker_override(restore);
     }
 
     /// The override is a process-global because the runtimes it sizes are built
