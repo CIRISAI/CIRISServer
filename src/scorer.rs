@@ -271,8 +271,12 @@ pub fn spawn(
         // multiple, and a collision stalls the node's own read API.
         let mut schedule = crate::loop_cadence::Cadence::new("scorer", cadence);
         // The first immediate tick fires at once; skip it so we don't score an
-        // empty just-booted corpus.
+        // empty just-booted corpus — then push the next deadline a full cadence
+        // out, because consuming the immediate tick is not by itself a delay on
+        // a grid schedule (see the same note in `retention_loop`; Codex,
+        // PR #576).
         schedule.tick().await;
+        schedule.reset();
         // The idle short-circuit's memory: the watermark the last pass ran
         // against, and when it ran (CIRISServer#553).
         let mut last_watermark: Option<CorpusWatermark> = None;

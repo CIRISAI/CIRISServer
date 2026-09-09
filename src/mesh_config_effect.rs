@@ -740,7 +740,11 @@ pub async fn spawn(
         // Phased (see `loop_cadence`, CIRISServer#575).
         let mut schedule =
             crate::loop_cadence::Cadence::new("mesh_config_effect", REFRESH_INTERVAL);
-        schedule.tick().await; // consume the immediate tick — we just folded.
+        // Consume the immediate tick — we just folded — and hold a full interval
+        // before re-folding, which consuming alone does not guarantee on a grid
+        // schedule (Codex, PR #576).
+        schedule.tick().await;
+        schedule.reset();
         loop {
             tokio::select! {
                 _ = schedule.tick() => {}

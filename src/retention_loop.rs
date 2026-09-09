@@ -741,8 +741,16 @@ pub fn spawn(
         let mut cadence = RetentionConfig::from_resolved(&config_rx.borrow()).cadence;
         // Phased (see `loop_cadence`, CIRISServer#575).
         let mut schedule = crate::loop_cadence::Cadence::new("retention", cadence);
-        // Consume the immediate first tick — see the boot note above.
+        // Consume the immediate first tick — see the boot note above — and then
+        // push the next deadline a FULL cadence out. Consuming alone is not
+        // enough on a grid schedule: `Cadence::new` picks the first grid
+        // deadline after now, which can be milliseconds away if the serve stack
+        // composed just before one. The interval this replaced guaranteed a
+        // whole cadence before its second tick, and this loop's documented
+        // requirement is not to delete anything during the boot storm (Codex,
+        // PR #576).
         schedule.tick().await;
+        schedule.reset();
         tracing::info!(
             cadence_secs = cadence.as_secs(),
             "retention loop started (CIRISServer#348: lens-core's eviction stack now has a \

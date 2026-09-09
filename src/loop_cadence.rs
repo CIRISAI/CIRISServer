@@ -18,13 +18,30 @@
 //! Nothing here makes a tick cheaper, and nothing here lets two ticks read at
 //! once — that is #829's half. This stops them from being scheduled together.
 //!
-//! # Slots, not hashes
+//! # Slots, not hashes — and a fixed spacing, not a fraction
 //!
 //! [`LOOPS`] lists every periodic loop in the node, and **the order is the
-//! allocation**: loop `i` of `n` sits `i/n` of the way through its period. Six
-//! loops on a 30 s period are 5 s apart, by construction, at every period.
+//! allocation**: loop `i` sits `i × `[`SLOT_SPACING`] past the epoch.
 //!
-//! The first version of this derived the phase by hashing the loop's name. It
+//! The spacing is a fixed duration rather than a fraction of each loop's
+//! period, and that distinction is the whole correctness argument. A fraction
+//! (`period × i / n`) spreads loops that share a period and silently *collides*
+//! loops that do not: the 60 s scorer at slot 2 lands on `60 × 2 / 6 = 20 s`
+//! and the 30 s delivery reconciler at slot 4 lands on `30 × 4 / 6 = 20 s`, so
+//! against a shared epoch they coincide **exactly**, once a minute, forever
+//! (Codex, PR #576).
+//!
+//! With a fixed spacing, two loops tick together only if
+//! `(i − j) × SLOT_SPACING` is a multiple of `gcd(period_i, period_j)`. Every
+//! cadence here defaults to a multiple of 30 s, so that gcd is at least 30 s
+//! while `(i − j) × SLOT_SPACING` is at most 15 s — the separation is never
+//! less than [`SLOT_SPACING`], at any of them.
+//!
+//! An operator who sets a cadence that shares no useful factor with the others
+//! (7 s, say) can still produce occasional coincidences. That is a much smaller
+//! claim than the one this replaced, and it is the honest one.
+//!
+//! An earlier version derived the phase by hashing the loop's name. It
 //! looked deterministic and was — deterministically *clustered*: six hashed
 //! points on a circle leave an expected smallest gap of about `period/n²`, and
 //! the committed names put `federation_delivery` and `mesh_config_effect`
@@ -76,7 +93,20 @@ fn epoch() -> Instant {
     *EPOCH.get_or_init(Instant::now)
 }
 
-/// This loop's offset into its period: slot `i` of [`LOOPS`] sits at `i/n`.
+/// The gap between consecutive loop slots.
+///
+/// Wide enough to clear the 1-2 s bursts CIRISServer#575 measured, and narrow
+/// enough that all of [`LOOPS`] fits well inside the shortest cadence the node
+/// runs (`5 × 3 s = 15 s` against 30 s) — the margin is what keeps the
+/// separation argument in the module docs true.
+pub const SLOT_SPACING: Duration = Duration::from_secs(3);
+
+/// This loop's offset into its period: slot `i` of [`LOOPS`] sits at
+/// `i ×` [`SLOT_SPACING`], wrapped into the period.
+///
+/// The wrap only bites for a cadence shorter than `LOOPS.len() × SLOT_SPACING`,
+/// which the node has none of; a 1 s cadence would put every loop back on
+/// slot 0, and is documented rather than defended against.
 ///
 /// An unregistered name gets slot 0 and warns rather than panicking. It is a
 /// programming error the gate catches before it can ship, and slot 0 is what
@@ -85,7 +115,14 @@ fn epoch() -> Instant {
 #[must_use]
 pub fn phase_for(name: &str, period: Duration) -> Duration {
     match LOOPS.iter().position(|n| *n == name) {
-        Some(slot) => period * slot as u32 / LOOPS.len() as u32,
+        Some(slot) => {
+            let offset = SLOT_SPACING * u32::try_from(slot).unwrap_or(0);
+            if offset < period {
+                offset
+            } else {
+                Duration::from_nanos((offset.as_nanos() % period.as_nanos().max(1)) as u64)
+            }
+        }
         None => {
             tracing::warn!(
                 loop_name = name,
@@ -138,15 +175,21 @@ impl Cadence {
     }
 
     /// The smallest ordinal whose deadline is strictly after `t`.
+    ///
+    /// Arithmetic, not a walk. `base` is the process epoch, so a loop
+    /// constructed or retuned on a node that has been up for months is millions
+    /// of periods along the grid; iterating to find the ordinal would run those
+    /// millions of steps synchronously on a request-serving worker, and would
+    /// get slower the longer the node stayed up (Codex, PR #576).
     fn first_seq_after(&self, t: Instant) -> u64 {
-        let mut n = 0u64;
-        // The grid starts at `base`, which is at most one period before now on
-        // construction and is re-derived on retune, so this walks a bounded
-        // number of steps in practice; the cap is belt and braces.
-        while n < u64::MAX && self.deadline(n) <= t {
-            n += 1;
+        if t <= self.base {
+            return 0;
         }
-        n
+        let elapsed = (t - self.base).as_nanos();
+        let period = self.period.as_nanos().max(1);
+        // deadline(n) > t  <=>  n > elapsed/period. An exact multiple lands ON
+        // t, which is not "after", so it advances too.
+        u64::try_from(elapsed / period + 1).unwrap_or(u64::MAX)
     }
 
     /// This loop's offset into its period.
@@ -156,8 +199,14 @@ impl Cadence {
     }
 
     /// The absolute deadline for tick `n`.
+    ///
+    /// Nanosecond arithmetic rather than `Duration * u32`: against a
+    /// process-lifetime epoch the ordinal outgrows `u32` on a short cadence.
     fn deadline(&self, n: u64) -> Instant {
-        self.base + self.period * u32::try_from(n.min(u64::from(u32::MAX))).unwrap_or(u32::MAX)
+        let nanos = u64::try_from(self.period.as_nanos())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(n);
+        self.base + Duration::from_nanos(nanos)
     }
 
     /// Wait for the next tick.
@@ -197,8 +246,17 @@ impl Cadence {
             return;
         }
         sleep_until(deadline).await;
-        // Only here — see the cancellation note.
-        self.seq += 1;
+        // Realign from the clock, not `seq + 1`, and only here — see the
+        // cancellation note.
+        //
+        // The runtime may not poll this future until well after `deadline`:
+        // that is precisely what happens when the request-serving workers are
+        // blocked on the database, which is the condition this whole module
+        // exists for. Advancing by one would leave the NEXT ordinal already
+        // overdue, so the following call would return at once and run two
+        // passes back to back — the burst Skip exists to prevent (Codex,
+        // PR #576).
+        self.seq = self.first_seq_after(Instant::now());
     }
 
     /// Put the next deadline a **full period or more** from now, keeping the
@@ -244,34 +302,89 @@ impl Cadence {
 mod tests {
     use super::*;
 
+    /// The node's real default cadences. Every one is a multiple of 30 s,
+    /// which is the premise the separation argument rests on — if a default
+    /// changes to something coprime, this list changing is the reminder.
+    const DEFAULT_PERIODS: [(&str, u64); 6] = [
+        ("config_reconcile", 30),
+        ("replication_reconcile", 30),
+        ("scorer", 60),
+        ("retention", 3600),
+        ("federation_delivery", 30),
+        ("mesh_config_effect", 60),
+    ];
+
+    /// The test that would have caught the fraction-based allocation: walk a
+    /// day of real tick instants for the real periods and assert no two loops
+    /// ever land on top of each other.
+    ///
+    /// The fraction put the 60 s scorer and the 30 s delivery reconciler both
+    /// at 20 s, coinciding exactly once a minute (Codex, PR #576). Checking the
+    /// spread *within* one period could never have seen it.
     #[test]
-    fn slots_are_evenly_spread_at_every_period() {
-        for secs in [30u64, 60, 300, 3600] {
-            let p = Duration::from_secs(secs);
-            let phases: Vec<Duration> = LOOPS.iter().map(|n| phase_for(n, p)).collect();
-            let slot = p / LOOPS.len() as u32;
-            for (i, a) in phases.iter().enumerate() {
-                for b in phases.iter().skip(i + 1) {
-                    let gap = a.abs_diff(*b);
-                    let gap = gap.min(p - gap);
-                    assert!(
-                        gap >= slot,
-                        "two loops sit {gap:?} apart in a {p:?} period; the slot width is \
-                         {slot:?} — hashed phases were what clustered (#575 review)"
-                    );
+    fn no_two_loops_ever_tick_together_at_the_default_periods() {
+        const DAY: u64 = 24 * 60 * 60;
+        let ticks = |name: &str, period: u64| -> Vec<u64> {
+            let phase = phase_for(name, Duration::from_secs(period)).as_secs();
+            (0..)
+                .map(|n| phase + n * period)
+                .take_while(|t| *t <= DAY)
+                .collect()
+        };
+        let all: Vec<(&str, Vec<u64>)> = DEFAULT_PERIODS
+            .iter()
+            .map(|(n, p)| (*n, ticks(n, *p)))
+            .collect();
+        let floor = SLOT_SPACING.as_secs();
+        for (i, (a, ta)) in all.iter().enumerate() {
+            for (b, tb) in all.iter().skip(i + 1) {
+                let mut closest = u64::MAX;
+                for x in ta {
+                    // Both series are sorted; a linear scan of a day is cheap
+                    // enough and obviously correct.
+                    for y in tb {
+                        closest = closest.min(x.abs_diff(*y));
+                    }
                 }
+                assert!(
+                    closest >= floor,
+                    "{a} and {b} come within {closest}s of each other over a day; the slot \
+                     spacing is {floor}s"
+                );
             }
         }
     }
 
-    /// The gap must clear the burst width #575 measured (1–2 s), not merely be
-    /// non-zero.
     #[test]
-    fn the_slot_width_clears_a_burst() {
-        let slot = Duration::from_secs(30) / LOOPS.len() as u32;
+    fn slots_are_one_spacing_apart() {
+        let p = Duration::from_secs(30);
+        for (i, a) in LOOPS.iter().enumerate() {
+            for b in LOOPS.iter().skip(i + 1) {
+                assert_ne!(phase_for(a, p), phase_for(b, p), "{a} and {b} share a slot");
+            }
+        }
+        assert_eq!(
+            phase_for(LOOPS[1], p) - phase_for(LOOPS[0], p),
+            SLOT_SPACING
+        );
+    }
+
+    /// The premise of the separation argument: every slot fits inside the
+    /// shortest cadence the node runs, so no phase has to wrap.
+    #[test]
+    fn every_slot_fits_inside_the_shortest_cadence() {
+        let shortest = Duration::from_secs(
+            DEFAULT_PERIODS
+                .iter()
+                .map(|(_, p)| *p)
+                .min()
+                .expect("periods"),
+        );
+        let widest = SLOT_SPACING * (LOOPS.len() as u32 - 1);
         assert!(
-            slot >= Duration::from_secs(2),
-            "slot width {slot:?} at the shortest period does not clear a 1-2 s burst"
+            widest < shortest,
+            "the slots span {widest:?} but the shortest cadence is {shortest:?} — phases \
+             would wrap and two loops could share one"
         );
     }
 

@@ -163,8 +163,9 @@ fn every_declared_loop_clears_a_burst_from_its_neighbours() {
             let gap = pa.abs_diff(*pb);
             let gap = gap.min(period - gap);
             assert!(
-                gap >= Duration::from_secs(2),
-                "{a} and {b} sit {gap:?} apart in a {period:?} period — #575 measured                  bursts 1-2 s wide"
+                gap >= ciris_server::loop_cadence::SLOT_SPACING,
+                "{a} and {b} sit {gap:?} apart in a {period:?} period — the slot spacing is {:?} and #575 measured bursts 1-2 s wide",
+                ciris_server::loop_cadence::SLOT_SPACING
             );
         }
     }
