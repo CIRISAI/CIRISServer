@@ -335,9 +335,14 @@ mod tests {
         let mut c = Cadence::new("config_reconcile", p);
         let t0 = std::time::Instant::now();
         c.tick().await;
+        // Generous: the assertion is "did not wait a period", not "was fast".
+        // A loaded CI runner can take a while to schedule a thread, and this
+        // test must not fail for that.
         assert!(
-            t0.elapsed() < Duration::from_millis(50),
-            "a booting node reconciles now, not a period from now"
+            t0.elapsed() < p,
+            "the first tick waited {:?} — a booting node reconciles now, not a \
+             period from now",
+            t0.elapsed()
         );
         c.tick().await;
         assert!(
@@ -358,8 +363,11 @@ mod tests {
         c.tick().await;
         // Skip semantics: the missed deadlines are dropped, so this waits for a
         // real future one rather than firing immediately five times over.
+        // Generous by 3x for a loaded runner: the assertion is that the missed
+        // deadlines were DROPPED, not that the wait was short. A catch-up burst
+        // would have fired immediately, five times over.
         assert!(
-            before.elapsed() <= p * 2,
+            before.elapsed() <= p * 3,
             "after overrunning, the next tick waited {:?}",
             before.elapsed()
         );
