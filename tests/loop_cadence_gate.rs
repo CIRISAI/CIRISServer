@@ -13,10 +13,7 @@
 //! a second copy of "which loops exist" is the one thing guaranteed to drift
 //! from the loops themselves.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
-
-use ciris_server::loop_cadence::Cadence;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The cadence names a file declares, in source order. Plain scanning rather
 /// than pulling in a pattern-matching dependency: the call shape is
@@ -90,7 +87,12 @@ fn no_periodic_loop_ticks_on_a_bare_interval() {
 }
 
 #[test]
-fn every_loop_declares_a_distinct_name() {
+fn no_two_loops_share_a_cadence_name() {
+    // ANY duplicate, including two in the same file. The name is the slot, so a
+    // duplicate is two loops ticking together — which is #575 exactly. The
+    // first version of this gate only rejected duplicates ACROSS files and
+    // would have passed the one case that matters least distinguishable from
+    // the bug (Codex, PR #576).
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for (file, body) in src_files() {
         if file.ends_with("loop_cadence.rs") {
@@ -98,12 +100,9 @@ fn every_loop_declares_a_distinct_name() {
         }
         for name in declared_names(&body) {
             if let Some(first) = seen.insert(name.clone(), file.clone()) {
-                if first != file {
-                    panic!(
-                        "two loops share the cadence name {name:?} ({first} and {file}) — \
-                         the name IS the phase, so they would tick together"
-                    );
-                }
+                panic!(
+                    "two loops declare the cadence name {name:?} ({first} and {file}) —                      the name IS the slot, so they would tick together"
+                );
             }
         }
     }
@@ -114,31 +113,49 @@ fn every_loop_declares_a_distinct_name() {
     );
 }
 
+/// The registry and the call sites must name the same set, in both directions.
+///
+/// `LOOPS` is the phase allocation: a loop missing from it silently shares slot
+/// 0, and a stale entry in it steals a slot from the loops that remain, spacing
+/// them further apart than they need to be. Checking only one direction would
+/// let either happen.
 #[test]
-fn declared_loops_are_spread_across_a_shared_period() {
-    // Every loop's phase is a pure function of its name, so the spread can be
-    // checked here without running any of them. The 30 s period is the one
-    // #575 measured: the two reconcilers share it.
-    let mut names: Vec<String> = Vec::new();
-    for (file, body) in src_files() {
-        if file.ends_with("loop_cadence.rs") {
-            continue;
-        }
-        for n in declared_names(&body) {
-            if !names.contains(&n) {
-                names.push(n);
-            }
-        }
-    }
+fn the_registry_and_the_call_sites_name_the_same_loops() {
+    let declared: BTreeSet<String> = src_files()
+        .into_iter()
+        .filter(|(f, _)| !f.ends_with("loop_cadence.rs"))
+        .flat_map(|(_, body)| declared_names(&body))
+        .collect();
+    let registered: BTreeSet<String> = ciris_server::loop_cadence::LOOPS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+
+    let unregistered: Vec<_> = declared.difference(&registered).collect();
+    assert!(
+        unregistered.is_empty(),
+        "these loops call Cadence::new with a name that is not in loop_cadence::LOOPS,          so they share slot 0 with the first registered loop: {unregistered:?}"
+    );
+    let unused: Vec<_> = registered.difference(&declared).collect();
+    assert!(
+        unused.is_empty(),
+        "these names are in loop_cadence::LOOPS but no loop uses them — they hold a slot          that spreads the real loops no further apart than they need: {unused:?}"
+    );
+}
+
+/// Slots are evenly spread by construction; this is the gate-level statement of
+/// it, against the loops that actually exist rather than the list in isolation.
+#[test]
+fn every_declared_loop_clears_a_burst_from_its_neighbours() {
+    use std::time::Duration;
     let period = Duration::from_secs(30);
-    // Leak is fine and deliberate: `Cadence::new` takes a `&'static str` because
-    // a loop's name is a fixed property of the binary, and this gate builds the
-    // list by scraping that same binary's source.
-    let phases: Vec<(String, Duration)> = names
+    let phases: Vec<(String, Duration)> = ciris_server::loop_cadence::LOOPS
         .iter()
         .map(|n| {
-            let leaked: &'static str = Box::leak(n.clone().into_boxed_str());
-            (n.clone(), Cadence::new(leaked, period).phase())
+            (
+                (*n).to_owned(),
+                ciris_server::loop_cadence::phase_for(n, period),
+            )
         })
         .collect();
     for (i, (a, pa)) in phases.iter().enumerate() {
@@ -146,9 +163,8 @@ fn declared_loops_are_spread_across_a_shared_period() {
             let gap = pa.abs_diff(*pb);
             let gap = gap.min(period - gap);
             assert!(
-                gap >= Duration::from_secs(1),
-                "{a} and {b} sit {gap:?} apart in a {period:?} period — a tick is \
-                 longer than that, so they would still overlap"
+                gap >= Duration::from_secs(2),
+                "{a} and {b} sit {gap:?} apart in a {period:?} period — #575 measured                  bursts 1-2 s wide"
             );
         }
     }
