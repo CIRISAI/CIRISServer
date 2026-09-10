@@ -158,6 +158,12 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # preflight, because it teaches people to trust it.
      "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 45"
      "localization"        "python3 tools/check_server_localization.py --strict"
+     # Pure python over synthetic Mach-O headers — it needs no iOS toolchain and
+     # no device, so it belongs here rather than in the gate's PLATFORM_ONLY
+     # exemption. It is the check that a wheel's PEP 730 tag matches the binary
+     # inside it, on the one platform where nothing in CI ever loads the
+     # artifact (CIRISServer#532).
+     "ios-wheel-tags"      "python3 tools/check_ios_wheel.py --self-test"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates"
      # The boundary gates are `#[ignore]`d — correctly, since they reach the
      # network — so `cargo test` skips them and nothing ran them until CI grew a
