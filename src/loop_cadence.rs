@@ -407,8 +407,19 @@ mod tests {
         );
     }
 
+    /// The first tick is immediate; from the first SCHEDULED tick onward the
+    /// cadence holds.
+    ///
+    /// Note what is deliberately not asserted: that the first scheduled tick is
+    /// a whole period away. The grid is anchored to the process epoch, not to
+    /// this constructor, so the next grid point can be moments off — which is
+    /// exactly why a loop that must not run at once (retention deleting during
+    /// the boot storm, the scorer scoring an empty corpus) asks for the delay
+    /// with `reset()` rather than assuming it. An earlier version of this test
+    /// asserted the second tick waited and failed on a Windows runner that
+    /// happened to construct just before a grid point (PR #576).
     #[tokio::test]
-    async fn first_tick_is_immediate_and_later_ticks_wait() {
+    async fn first_tick_is_immediate_and_the_cadence_holds_after_it() {
         let p = Duration::from_millis(120);
         let mut c = Cadence::new("config_reconcile", p);
         let t0 = std::time::Instant::now();
@@ -418,10 +429,13 @@ mod tests {
             "the first tick waited {:?} — a booting node reconciles now",
             t0.elapsed()
         );
+        c.tick().await; // lands on the next grid point, however near
+        let t1 = std::time::Instant::now();
         c.tick().await;
+        let step = t1.elapsed();
         assert!(
-            t0.elapsed() >= Duration::from_millis(20),
-            "the second tick returned immediately — the schedule is not waiting"
+            step > p / 2,
+            "consecutive scheduled ticks were {step:?} apart; the period is {p:?}"
         );
     }
 
@@ -469,12 +483,17 @@ mod tests {
             "the overdue tick waited {:?} instead of firing at once",
             t0.elapsed()
         );
-        // ...and does not then burst: the next one waits for the grid.
+        // ...and does not then burst. Asserted over the next TWO ticks, not one:
+        // realigning puts the next deadline somewhere in (0, p] — it can be
+        // moments away, which is the grid working, not a burst. Two consecutive
+        // scheduled ticks always span a whole period, and a catch-up burst
+        // would have returned both at once.
         let t1 = std::time::Instant::now();
         c.tick().await;
+        c.tick().await;
         assert!(
-            t1.elapsed() > p / 4,
-            "the tick after an overrun fired in {:?} — that is a catch-up burst",
+            t1.elapsed() >= p * 3 / 4,
+            "two ticks after an overrun spanned {:?} — that is a catch-up burst",
             t1.elapsed()
         );
     }
