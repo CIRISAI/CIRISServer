@@ -79,11 +79,39 @@ pub struct RawCapacityRow {
     pub score: Option<f64>,
     pub asserted_at: String,
     pub expires_at: Option<String>,
+    /// Why this row does or does not stand right now — decided by the caller
+    /// with the SAME rule the scorer applies, never re-derived here.
+    pub standing: Standing,
+}
+
+/// Whether a capacity row still counts, and if not, why not.
+///
+/// A surface that serves an expired or revoked score as though it were current
+/// is the dishonest metric CIRISServer#580 is about, one layer in: the client
+/// renders a confident number that the node itself would not act on. The
+/// scorer's own read treats a row as standing only when it is unexpired AND its
+/// attester's key has not been revoked, and this surface must not be looser —
+/// the ONE place that decides is `key_standing`, consulted by both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// Unexpired, and its attester holds standing.
+    Standing,
+    /// Past its `expires_at`. Capacity scores carry a 7-day validity, so this
+    /// is the ordinary fate of a subject that stopped being scored.
+    Expired,
+    /// Its ATTESTER's key was revoked. The row is still in the corpus and still
+    /// signed; what it lost is the standing of whoever said it.
+    AttesterRevoked,
 }
 
 /// One capacity attestation, flattened for the wire.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CapacityRow {
+    /// Whether this row still counts — see [`Standing`]. Served on every row so
+    /// a client never has to decide liveness itself, and never renders a dead
+    /// score as a current one.
+    pub standing: Standing,
     /// The subject — whose capacity this describes.
     pub attested_key_id: String,
     /// **Who says so.** Never omitted: see the CC 3.4.5 note in the module docs.
@@ -104,6 +132,11 @@ pub struct CapacityRow {
 /// What the surface knows about one subject.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CapacitySubject {
+    /// `true` when at least one row about this subject stands. Distinct from an
+    /// empty `rows`: "scored, and none of it counts any more" is a different
+    /// fact from "never scored", and CIRISServer#374 is the whole argument for
+    /// keeping those apart.
+    pub any_standing: bool,
     pub key_id: String,
     /// Why this key is ours: `"self"`, `"stewarded"`, or `"agent"`.
     pub relation: &'static str,
@@ -163,6 +196,22 @@ pub async fn report(engine: &Arc<Engine>, node_key_id: &str) -> Result<CapacityR
     // rename (`envelope_vocabulary_single_source`, CIRISServer#322). `score` is
     // this family's own payload field rather than envelope vocabulary, so it
     // has no constant to import.
+    // ── standing: the SAME rule the scorer applies, not a looser one ────────
+    //
+    // A capacity row counts only if it is unexpired AND its attester still
+    // holds standing. `key_standing` is the one place that decides the second
+    // half; this surface consults it rather than re-deriving it, so a surface
+    // and the scorer cannot come to different conclusions about the same row
+    // (the mirrored-rule trap: one rule, two implementations, and a drift test
+    // that can only compare a copy to itself).
+    let now = chrono::Utc::now();
+    let held = crate::key_standing::HeldRevocations::for_keys(
+        engine,
+        crate::key_standing::attesting_keys(&page.items),
+    )
+    .await
+    .map_err(|e| format!("revocations_for(attesters): {e}"))?;
+
     let raw: Vec<RawCapacityRow> = page
         .items
         .iter()
@@ -181,6 +230,13 @@ pub async fn report(engine: &Arc<Engine>, node_key_id: &str) -> Result<CapacityR
                 .and_then(serde_json::Value::as_f64),
             asserted_at: a.asserted_at.to_rfc3339(),
             expires_at: a.expires_at.map(|e| e.to_rfc3339()),
+            standing: if a.expires_at.is_some_and(|exp| exp <= now) {
+                Standing::Expired
+            } else if !held.is_empty() && held.suspects(a, now) {
+                Standing::AttesterRevoked
+            } else {
+                Standing::Standing
+            },
         })
         .collect();
 
@@ -230,6 +286,7 @@ pub fn project(
             .entry(r.attested_key_id.clone())
             .or_default()
             .push(CapacityRow {
+                standing: r.standing,
                 attested_key_id: r.attested_key_id.clone(),
                 attesting_key_id: r.attesting_key_id.clone(),
                 attested_by_this_node: r.attesting_key_id == node_key_id,
@@ -248,6 +305,7 @@ pub fn project(
     for (key_id, rel) in &relation {
         match by_subject.remove(key_id) {
             Some(rows) => subjects.push(CapacitySubject {
+                any_standing: rows.iter().any(|r| r.standing == Standing::Standing),
                 key_id: key_id.clone(),
                 relation: rel,
                 rows,
@@ -281,7 +339,18 @@ mod tests {
     const STRANGER: &str = "somebody-elses-agent";
 
     fn row(attesting: &str, attested: &str, at: &str, score: f64) -> RawCapacityRow {
+        row_with(attesting, attested, at, score, Standing::Standing)
+    }
+
+    fn row_with(
+        attesting: &str,
+        attested: &str,
+        at: &str,
+        score: f64,
+        standing: Standing,
+    ) -> RawCapacityRow {
         RawCapacityRow {
+            standing,
             attesting_key_id: attesting.to_owned(),
             attested_key_id: attested.to_owned(),
             dimension: crate::scorer::CAPACITY_DIMENSION.to_owned(),
@@ -426,5 +495,88 @@ mod tests {
         )];
         let report = project(&rows, NODE, &BTreeSet::new());
         assert!(find(&report, "agent-we-never-scored").is_none());
+    }
+
+    /// **The anti-Goodhart half of honesty.** An expired score must not render
+    /// as a current one: capacity scores carry a 7-day validity, and a subject
+    /// that stopped being scored keeps a stale number on the page unless the
+    /// surface says so. The scorer would not act on this row; neither should a
+    /// client.
+    #[test]
+    fn an_expired_row_is_served_but_marked_and_does_not_make_a_subject_standing() {
+        let rows = vec![row_with(
+            CANONICAL,
+            AGENT,
+            "2026-09-01T00:00:00Z",
+            0.9,
+            Standing::Expired,
+        )];
+        // The agent is ours only because we scored it; give it a row of ours too.
+        let mut rows = rows;
+        rows.push(row_with(
+            NODE,
+            AGENT,
+            "2026-09-01T00:00:00Z",
+            0.9,
+            Standing::Expired,
+        ));
+        let report = project(&rows, NODE, &BTreeSet::new());
+        let agent = find(&report, AGENT).expect("agent");
+        assert!(
+            !agent.any_standing,
+            "every row is expired — the subject must not read as currently scored"
+        );
+        assert!(agent.rows.iter().all(|r| r.standing == Standing::Expired));
+    }
+
+    /// A revoked attester's score is still in the corpus and still signed; what
+    /// it lost is the standing of whoever said it. Serving it as current would
+    /// let a key keep influencing a metric after the federation withdrew its
+    /// standing — which is exactly what revocation is for.
+    #[test]
+    fn a_revoked_attesters_row_does_not_count_as_standing() {
+        let rows = vec![
+            row(NODE, AGENT, "2026-09-10T01:00:00Z", 0.4),
+            row_with(
+                CANONICAL,
+                AGENT,
+                "2026-09-10T02:00:00Z",
+                0.99,
+                Standing::AttesterRevoked,
+            ),
+        ];
+        let report = project(&rows, NODE, &BTreeSet::new());
+        let agent = find(&report, AGENT).expect("agent");
+        let revoked = agent
+            .rows
+            .iter()
+            .find(|r| r.attesting_key_id == CANONICAL)
+            .expect("the row is still served");
+        assert_eq!(revoked.standing, Standing::AttesterRevoked);
+        assert!(
+            agent.any_standing,
+            "our own live row still stands — one revoked attester does not blank the subject"
+        );
+    }
+
+    /// "Scored, and none of it counts any more" is a THIRD state, distinct from
+    /// both "never scored" and "currently scored" (CIRISServer#374's three
+    /// zeroes, one surface out).
+    #[test]
+    fn none_standing_is_distinguishable_from_never_scored() {
+        let scored_but_dead = vec![row_with(
+            NODE,
+            AGENT,
+            "2026-09-01T00:00:00Z",
+            0.9,
+            Standing::Expired,
+        )];
+        let report = project(&scored_but_dead, NODE, &BTreeSet::new());
+        let agent = find(&report, AGENT).expect("still a subject: we scored it");
+        assert!(!agent.rows.is_empty(), "the rows are served, not hidden");
+        assert!(!agent.any_standing);
+
+        let never = project(&[], NODE, &BTreeSet::new());
+        assert!(never.unscored.iter().any(|k| k == NODE));
     }
 }
