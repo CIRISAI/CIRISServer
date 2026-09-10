@@ -813,10 +813,10 @@ async fn list_messages(
 
 fn main() {
     let cfg = Cfg::from_env();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    // Through the shared builder (CIRISServer#577). This benchmark reports RSS,
+    // which per-thread allocator caches move directly, so a run under
+    // CIRIS_RUNTIME_WORKERS must actually be a run under that cap.
+    let rt = ciris_server::node_runtime::build("ciris-bench").expect("tokio runtime");
     let code = rt.block_on(run(cfg));
     std::process::exit(code);
 }

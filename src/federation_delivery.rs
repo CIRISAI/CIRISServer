@@ -186,10 +186,11 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
         )
     })?;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("ciris-fed-delivery")
-        .build()
+    // Through the shared builder, not a bare `new_multi_thread()`: this runtime
+    // sized itself to `available_parallelism()`, so it was one of the four that
+    // multiplied by core count on an embedded host (CIRISServer#577), and it
+    // also missed the #501 floor on a small one. One builder, every runtime.
+    let rt = crate::node_runtime::build("ciris-fed-delivery")
         .context("build federation-delivery runtime")?;
     // #393 item 2 / #406: publish THIS node's SIGNED transport destination
     // before delivery rounds begin. compose::serve does this for served nodes;
