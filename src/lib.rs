@@ -303,6 +303,12 @@ pub mod key_standing;
 /// admission + consent-emit logic directly.
 pub mod location;
 
+/// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
+/// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);
+/// this serves them by SUBJECT, for every key this operator is responsible for,
+/// with the attester of each row visible (CC 3.4.5 no-self-emit).
+pub mod capacity_read;
+
 /// Periodic-loop cadence — a fixed average period with a per-loop phase and
 /// bounded jitter, so the node's long-lived loops do not all tick on the same
 /// instant. The two 30 s reconcilers colliding is what stalled this node's own

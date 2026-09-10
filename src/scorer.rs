@@ -65,7 +65,20 @@ use ciris_persist::federation::types::attestation_type::SCORES as ATTESTATION_TY
 /// manifold-conformity stability"). The other four factors (C / I_int / R /
 /// I_inc) need signals this scorer does not yet derive; emitting only S is the
 /// honest scope (the composite product would otherwise be fabricated).
-const CAPACITY_DIMENSION: &str = "capacity:sustained_coherence:v1";
+pub const CAPACITY_DIMENSION: &str = "capacity:sustained_coherence:v1";
+
+/// The `capacity:` FAMILY prefix, derived from [`CAPACITY_DIMENSION`] rather
+/// than written a second time — a hand-mirrored literal compiles and skews the
+/// wire (`envelope_vocabulary_single_source`). The read route
+/// (`GET /v1/my-data/capacity`, CIRISServer#580) filters on this, so the
+/// emitter and the reader cannot disagree about what "capacity" means.
+#[must_use]
+pub fn capacity_family_prefix() -> String {
+    CAPACITY_DIMENSION
+        .split_once(':')
+        .map(|(family, _)| format!("{family}:"))
+        .unwrap_or_else(|| CAPACITY_DIMENSION.to_owned())
+}
 
 /// Periodic-scorer configuration. Cadence + window + gates are sourced from the
 /// resolved `config:*` snapshot ([`crate::config_reconcile::ResolvedConfig`]) —
@@ -852,10 +865,7 @@ async fn live_capacity_rows(
     filter.attested_key_id = Some(attested_key_id.to_owned());
     filter.attestation_type = Some(ATTESTATION_TYPE_SCORES.to_owned());
     // Prefix derived from the dimension constant, never a second literal.
-    filter.dimension_prefixes = vec![CAPACITY_DIMENSION
-        .split_once(':')
-        .map(|(fam, _)| format!("{fam}:"))
-        .unwrap_or_else(|| CAPACITY_DIMENSION.to_owned())];
+    filter.dimension_prefixes = vec![capacity_family_prefix()];
 
     let page = match engine
         .list_attestations(
