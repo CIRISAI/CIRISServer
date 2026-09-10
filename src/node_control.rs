@@ -115,6 +115,14 @@ pub fn request_shutdown_from(origin: &'static str) {
 /// Diagnostics for the two halves of the broker: how many times the OS handler
 /// ran, and how many bytes the broker thread read. Read by the test and by an
 /// operator who wants to know whether a SIGTERM reached the handler.
+///
+/// **Both are published before the latch that wakes their reader.** The handler
+/// increments [`HANDLER_HITS`] before writing its byte, and the broker thread
+/// increments [`BROKER_READS`] before `send_replace`-ing the latch — so anyone
+/// woken by [`terminated`] sees counters that already account for the signal
+/// that woke them. Incrementing after the latch made these readable as 0 by an
+/// observer the latch had just woken, which is a diagnostic that lies at
+/// exactly the moment it is consulted (CIRISServer#579).
 pub static HANDLER_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub static BROKER_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -230,8 +238,20 @@ pub fn install_terminate_broker() {
                     if reader.read_exact(&mut byte).is_err() {
                         return;
                     }
-                    terminated_latch().send_replace(true);
+                    // COUNT FIRST, THEN LATCH. The order is load-bearing, not
+                    // cosmetic: `send_replace` is the release that publishes
+                    // this byte to every observer, and `terminated()` is their
+                    // acquire. Anything sequenced BEFORE the send is visible to
+                    // whoever sees the latch; anything after is a race with
+                    // them.
+                    //
+                    // Incrementing after the send meant an observer who had
+                    // just been woken by the latch could read this counter as
+                    // 0 — which is what CIRISServer#579 caught on a CI runner,
+                    // and what an operator reading the diagnostic while the
+                    // node stops would have seen too.
                     BROKER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    terminated_latch().send_replace(true);
                     if SERVE_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
                         say(b"ciris-server: SIGTERM - stopping the node cleanly\n");
                     } else {
@@ -453,6 +473,12 @@ mod tests {
             !HOST_OWNS_SIGTERM.load(std::sync::atomic::Ordering::SeqCst),
             "a test binary has the default disposition, so the node would own termination"
         );
+        // Exact counts, and they are sound rather than lucky: both are
+        // incremented before the latch this test just awaited is published, so
+        // observing the latch means observing them. When BROKER_READS was
+        // incremented AFTER the send this read 0 on a CI runner while
+        // HANDLER_HITS read 1 — the handler had run, the byte had been read,
+        // and the counter simply had not been published yet (CIRISServer#579).
         assert_eq!(HANDLER_HITS.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(BROKER_READS.load(std::sync::atomic::Ordering::Relaxed), 1);
         // Neither serve_ended() nor propagate_terminate() is called here: with
