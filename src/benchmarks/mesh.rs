@@ -90,7 +90,18 @@ impl Transport for BusTransport {
             routes.get(destination_key_id).cloned()
         };
         if let Some(rt) = runtime {
-            rt.register_observed_claim(claim).await;
+            // `SignatureOnly`, not `PossessionVerified` (edge v23.0.0 / CIRISEdge#582
+            // via CIRISServer#584): the claim's signature verified past the AV-9
+            // gate and nothing challenged possession, which is exactly what this
+            // in-memory bench link observes. `PossessionVerified` is worth DOUBLE
+            // weight in the count that authorises a delete, and nothing in the
+            // protocol produces it today — a bench asserting it would make the
+            // eviction threshold read as met on evidence nobody gathered.
+            rt.register_observed_claim(
+                claim,
+                ciris_edge::holonomic::swarm_rarity::HoldingClaimVerification::SignatureOnly,
+            )
+            .await;
             self.delivered.fetch_add(1, Ordering::Relaxed);
         }
         Ok(TransportSendOutcome::Delivered)

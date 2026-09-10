@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.204" # 0.5.204 = THE MINOR TRIPLE, AND THE STOP IS LEGIBLE. Substrate: edge v21.1.0 / persist v42.1.0 / verify v15.0.0 (CIRISServer#571, a minor on #559; leviculum unchanged). persist v42.1.0: #817 dimension reads are INDEX-SERVED (V137 indexes the generated `dimension` column and the prefix filter compiles to a range on it) — this closes CIRISServer#557 at the substrate, so `graph_config`'s `config:` prefix scan is no longer a per-row json_extract over everything the node authored; #818 a dimension-prefix filter compares BYTES on every backend (sqlite's LIKE was case-insensitive). edge v21.1.0: #579 the cohab lane injects verify beside persist (an explicit pin beats a transitive range). ON MAIN SINCE 0.5.203 and shipped here: #569 the stop is legible from the node's own log — a serve marker names a stop that skipped the door (`<data_dir>/serving.json`, WARN on the next boot with the dead pid), the read API's drain reports in_flight/drained per listener, every stop request names its origin, every teardown step is timed/named/bounded (10 s) and the edge run loop that never returned after its shutdown (CIRISEdge#578) no longer holds the process: SIGTERM → exit in ~10 s with status 143 instead of never; #570 the config snapshot cache is one slot per engine with per-engine invalidation (the one-scan flake on mac/win); #566 the Windows installer builds from the client package and its job is gating; #565 the test log capture is a process-global routing layer (#542). Client floor 0.5.203.
+version = "0.5.205" # 0.5.205 = THE READ POOL LANDS. Substrate: edge v23.0.0 / persist v44.0.0 / verify v15.1.0 / leviculum v0.26.0+ciris.1 (CIRISServer#584; two edge majors). THE HEADLINE IS persist v43.1.0, carried here: one writer connection plus a pool of read-only WAL connections, and every SQL call — AND THE WAIT FOR ITS CONNECTION — dispatched off the tokio worker onto the blocking pool (CIRISPersist#829, FSD/SQLITE_CONNECTION_MODEL.md). That is the substrate half of the read-API stalls CIRISServer#575 measured: GET /v1/identity p50 1.1 ms -> 780 ms on 6.9% of wall time, with zero non-200s. 0.5.204 phased the loops so they stopped colliding; this stops two readers serialising at all. AND THE THREAD CAP IS RE-AIMED: #577 capped worker_threads, which its own measurement shows was never where the threads were (ciris-edge-tran flat at 2/2 across a 32-core and a 4-core host); `max_blocking_threads` was at tokio's default 512 per runtime, and persist v43.1.0 is exactly what makes that pool load-bearing. Now 32 by default, hard floor 16 (block_in_place draws its replacement worker from it — starve it and the runtime WEDGES, the #446/#501 shape), CIRIS_RUNTIME_MAX_BLOCKING_THREADS spelled as edge spells it so one export governs the fold. edge v23.0.0: #582 a signed lie could make honest nodes delete real copies — register_observed_claim now names what a claim PROVED and a signature-only claim counts half; #591 a producer can learn it is being shed (AvDispatcherError::Congested is a DEFER, never a failure). Client floor 0.5.203.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -135,8 +135,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.1.0", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.1.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v44.0.0", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v23.0.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -168,16 +168,16 @@ ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.1
 #
 # What that ceiling costs us is recorded where it bites, not here:
 # src/hardware_attestation.rs (CIRISServer#339 / CIRISVerify#199).
-ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0" }
+ciris-verify-core = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0" }
 # The hybrid crypto primitives (Ed25519 + ML-DSA-65 software signers) — used by
 # the portable software identity occurrence to build a `HybridSigningIdentity`
 # over two software seeds. Same tag as the rest of the verify family.
-ciris-crypto = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["pqc-ml-dsa", "self-enc"] }
+ciris-crypto = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", features = ["pqc-ml-dsa", "self-enc"] }
 # Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99).
 # Base = software keystore + byte-identical migration of an existing .rid (works
 # everywhere, no libtss2). The real TPM-2.0 / SE / StrongBox backend rides the
 # `tpm` feature; runtime auto-detects hardware and falls back to software.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", features = ["software", "pqc-ml-dsa"] }
 # The verify FFI (C ABI) — folded into `ciris_server._native.so` (CIRISServer#232)
 # so the agent drops its standalone `ciris-verify` wheel and rides us for verify
 # too (kills the v9.0.0-vs-v5.1.3 wire/canonical-hash skew, CIRISAgent#917). v9.0.1
@@ -188,7 +188,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0
 # FFI version == the bundled substrate version by construction (no skew possible).
 # Default features (secp256k1, key-grant, hybrid-kex) + the crypto features unify
 # with ciris-crypto's above (self-enc, pqc-ml-dsa) across the graph.
-ciris-verify-ffi = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", optional = true }
+ciris-verify-ffi = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", optional = true }
 
 # PyO3 bindings for the abi3 wheel — optional, gated behind the `python` feature
 # so the binary never links them. 0.29 matches the persist/edge family floor.
@@ -276,16 +276,16 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.1.0", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v44.0.0", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["tpm-plugin"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", features = ["tpm-plugin"] }
 
 # Android (arm64/arm32/x86_64): the keyring `android` backend (JNI → Android
 # Keystore/StrongBox); sqlite bundles, no postgres/tpm. Mirrors persist/edge.
 [target.'cfg(target_os = "android")'.dependencies]
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["android"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", features = ["android"] }
 
 # serialport (the RNode LoRa driver dep, src/radio.rs) pulls libudev-sys on Linux,
 # which only resolves where libudev exists: desktop/server Linux (gnu, x86_64 or
@@ -305,7 +305,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0
 # `full_traces` at Detailed and RELABELS the trace `detailed`, loudly. A mobile
 # node therefore never ships content claiming a scrub it did not receive; it
 # simply cannot offer the NER tier.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.1.0", features = ["scrub-ner"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v44.0.0", features = ["scrub-ner"] }
 serialport = "4"
 
 # libsqlite3-sys (pulled by persist's `sqlite` feature) links the SYSTEM libsqlite3
@@ -356,14 +356,14 @@ http-body-util   = "0.1"
 # The PQC primitives the realtime-A/V E2E bench drives directly: hybrid KEX
 # (X25519 + ML-KEM-768) for the per-Link transit key, AES-256-GCM for the
 # two-layer chunk seal. Same pin/features edge composes (tag parity).
-ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.0.0", version = "15", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa", "self-enc"] }
+ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0", version = "15", features = ["hybrid-kex", "aes-gcm", "pqc-ml-dsa", "self-enc"] }
 # Enable edge's OWN fountain codec (`codec-fountain`, L1-A) for the survival-floor
 # proof — dev/test ONLY (feature unification applies to test/bench builds; the
 # shipped wheel stays codec-free, since a relay forwards sealed symbols opaquely
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.1.0", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v23.0.0", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN
@@ -375,7 +375,7 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v21.1.0",
 # without one. Pre-genesis is now a supported boot mode, not a test seam, and an Engine built
 # that way reports `GenesisPosture::PreGenesis` while every ROOT_REQUIRING_GATES gate refuses
 # with `NoConstitutionalRootYet`. A node that trusts nothing is not a node that checks nothing.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v42.1.0" }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v44.0.0" }
 
 # The QA runner exercises the family/accord ceremony surfaces against a
 # CONTROLLABLE roster — holders it can sign as. persist v31.0.0 made roster growth
