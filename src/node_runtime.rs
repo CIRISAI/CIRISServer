@@ -46,6 +46,41 @@
 /// Never fewer than this many workers, whatever the host reports.
 pub const MIN_WORKER_THREADS: usize = 4;
 
+/// The blocking-pool ceiling, and the knob that actually governs thread count
+/// since persist v43.1.0.
+///
+/// # Why this and not the worker count
+///
+/// CIRISServer#577 asked for a worker-thread cap and got one. It was aimed at
+/// the wrong pool, and #577's own measurement says so: its table shows
+/// `ciris-edge-tran` flat at **2 / 2** across a 32-core and a 4-core host, so
+/// the 64 unnamed `tokio-rt-worker` threads it counted were never edge's
+/// workers. What no runtime set — here or in edge — is
+/// `max_blocking_threads`, which tokio defaults to **512 per runtime**.
+///
+/// Before persist v43.1.0 that ceiling was mostly theoretical. It is not now:
+/// persist's connection model dispatches every SQL call **and the wait for its
+/// connection** onto the blocking pool, so this is the pool the node's storage
+/// traffic actually lands in (CIRISPersist#829, `FSD/SQLITE_CONNECTION_MODEL.md`).
+/// Thread count is the multiplier in every allocator's per-thread cache, which
+/// is what CIRISServer#577 was about — so this is where that cap belongs.
+///
+/// 32 matches the default edge chose, so one `CIRIS_RUNTIME_MAX_BLOCKING_THREADS`
+/// export governs the whole embedded fold rather than half of it.
+pub const DEFAULT_MAX_BLOCKING_THREADS: usize = 32;
+
+/// The blocking-pool floor, and it is HARD.
+///
+/// `block_in_place` draws its replacement worker from this same pool. Starve it
+/// and the runtime does not slow down — it **wedges**, which is the
+/// CIRISServer#446/#501 shape one pool over: the failure is not "requests are
+/// slow", it is "nothing is scheduled again". So an operator asking for 4 gets
+/// 16, exactly as an operator asking for 1 worker gets [`MIN_WORKER_THREADS`].
+pub const MIN_BLOCKING_THREADS: usize = 16;
+
+/// The env var for the blocking ceiling. Spelled the same as edge's, on purpose.
+pub const MAX_BLOCKING_ENV: &str = "CIRIS_RUNTIME_MAX_BLOCKING_THREADS";
+
 /// The env var an embedded host can set instead of passing `worker_threads=`.
 ///
 /// Distinct from `TOKIO_WORKER_THREADS`, which is tokio's own and tunes any
@@ -138,6 +173,30 @@ fn parse_env(name: &str) -> Option<usize> {
         .filter(|n| *n > 0)
 }
 
+/// The blocking-pool ceiling for a node runtime.
+#[must_use]
+pub fn max_blocking_threads() -> usize {
+    resolve_blocking(parse_env(MAX_BLOCKING_ENV))
+}
+
+/// The blocking decision, with the request passed in.
+///
+/// Separated for the same reason as [`resolve_workers`]: a rule that can only
+/// be tested by setting an environment variable is tested once, serially, or
+/// not at all.
+#[must_use]
+pub const fn resolve_blocking(requested: Option<usize>) -> usize {
+    let want = match requested {
+        Some(n) => n,
+        None => DEFAULT_MAX_BLOCKING_THREADS,
+    };
+    if want > MIN_BLOCKING_THREADS {
+        want
+    } else {
+        MIN_BLOCKING_THREADS
+    }
+}
+
 /// The decision itself, with both inputs passed in.
 ///
 /// Separated so it can be tested without an ambient `TOKIO_WORKER_THREADS` or a
@@ -167,6 +226,10 @@ pub const fn resolve_workers(requested: Option<usize>, detected: usize) -> usize
 pub fn build(thread_name: &str) -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads())
+        // The pool persist's SQL actually runs on since v43.1.0 — see
+        // `DEFAULT_MAX_BLOCKING_THREADS`. Left at tokio's default this is 512
+        // per runtime, several runtimes deep in the embedded fold.
+        .max_blocking_threads(max_blocking_threads())
         .enable_all()
         .thread_name(thread_name.to_owned())
         .build()
@@ -249,6 +312,46 @@ mod tests {
         set_worker_override(None);
         assert_eq!(worker_override(), None, "None must clear, not store zero");
         set_worker_override(restore);
+    }
+
+    /// The pool persist's SQL lands on since v43.1.0. Tokio's default is 512
+    /// PER RUNTIME, and the embedded fold runs several — which is the thread
+    /// count CIRISServer#577 was actually about.
+    #[test]
+    fn the_blocking_pool_is_capped_well_below_tokios_default() {
+        assert_eq!(resolve_blocking(None), DEFAULT_MAX_BLOCKING_THREADS);
+        // A const assertion, so it is checked at compile time and clippy is not
+        // asked to pretend a constant comparison is a runtime one. Tokio's
+        // default is 512 per runtime; the whole point of this knob is that 512
+        // is not a budget anyone chose.
+        const { assert!(DEFAULT_MAX_BLOCKING_THREADS < 512) };
+    }
+
+    /// The floor is HARD, and for a worse reason than the worker floor:
+    /// `block_in_place` takes its replacement worker from this pool, so
+    /// starving it wedges the runtime rather than slowing it.
+    #[test]
+    fn the_blocking_floor_cannot_be_undercut() {
+        assert_eq!(resolve_blocking(Some(1)), MIN_BLOCKING_THREADS);
+        assert_eq!(resolve_blocking(Some(4)), MIN_BLOCKING_THREADS);
+        assert_eq!(resolve_blocking(Some(16)), MIN_BLOCKING_THREADS);
+        assert_eq!(
+            resolve_blocking(Some(64)),
+            64,
+            "a deliberate raise is honoured"
+        );
+    }
+
+    /// The two pools are independent: capping workers must not cap the pool
+    /// persist actually uses, which is the mistake CIRISServer#577 shipped.
+    #[test]
+    fn the_worker_cap_and_the_blocking_cap_are_separate_decisions() {
+        assert_eq!(resolve_workers(Some(4), 32), 4);
+        assert_eq!(
+            resolve_blocking(None),
+            DEFAULT_MAX_BLOCKING_THREADS,
+            "a worker cap says nothing about the blocking pool"
+        );
     }
 
     /// A deliberate high override is honoured even above the detected core count:

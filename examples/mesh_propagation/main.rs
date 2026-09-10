@@ -122,7 +122,13 @@ impl Transport for BusTransport {
             routes.get(destination_key_id).cloned()
         };
         if let Some(rt) = runtime {
-            rt.register_observed_claim(claim).await;
+            // See the same call in `src/benchmarks/mesh.rs`: `SignatureOnly` is
+            // what an observed claim proves here (edge v23.0.0 / CIRISEdge#582).
+            rt.register_observed_claim(
+                claim,
+                ciris_edge::holonomic::swarm_rarity::HoldingClaimVerification::SignatureOnly,
+            )
+            .await;
             self.delivered
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
