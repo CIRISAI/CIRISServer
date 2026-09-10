@@ -737,12 +737,17 @@ pub async fn spawn(
     log_reading(&first, "mesh-config consumers primed");
     let (tx, rx) = watch::channel(Arc::new(first));
     let join = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(REFRESH_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await; // consume the immediate tick — we just folded.
+        // Phased (see `loop_cadence`, CIRISServer#575).
+        let mut schedule =
+            crate::loop_cadence::Cadence::new("mesh_config_effect", REFRESH_INTERVAL);
+        // Consume the immediate tick — we just folded — and hold a full interval
+        // before re-folding, which consuming alone does not guarantee on a grid
+        // schedule (Codex, PR #576).
+        schedule.tick().await;
+        schedule.reset();
         loop {
             tokio::select! {
-                _ = interval.tick() => {}
+                _ = schedule.tick() => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         tracing::info!("mesh-config consumer refresh loop shutting down");

@@ -739,9 +739,18 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cadence = RetentionConfig::from_resolved(&config_rx.borrow()).cadence;
-        let mut tick = tokio::time::interval(cadence);
-        // Consume the immediate first tick — see the boot note above.
-        tick.tick().await;
+        // Phased (see `loop_cadence`, CIRISServer#575).
+        let mut schedule = crate::loop_cadence::Cadence::new("retention", cadence);
+        // Consume the immediate first tick — see the boot note above — and then
+        // push the next deadline a FULL cadence out. Consuming alone is not
+        // enough on a grid schedule: `Cadence::new` picks the first grid
+        // deadline after now, which can be milliseconds away if the serve stack
+        // composed just before one. The interval this replaced guaranteed a
+        // whole cadence before its second tick, and this loop's documented
+        // requirement is not to delete anything during the boot storm (Codex,
+        // PR #576).
+        schedule.tick().await;
+        schedule.reset();
         tracing::info!(
             cadence_secs = cadence.as_secs(),
             "retention loop started (CIRISServer#348: lens-core's eviction stack now has a \
@@ -750,12 +759,11 @@ pub fn spawn(
 
         loop {
             tokio::select! {
-                _ = tick.tick() => {
+                _ = schedule.tick() => {
                     let cfg = RetentionConfig::from_resolved(&config_rx.borrow());
                     if cfg.cadence != cadence {
                         cadence = cfg.cadence;
-                        tick = tokio::time::interval(cadence);
-                        tick.tick().await;
+                        schedule.retune(cadence);
                         tracing::info!(
                             cadence_secs = cadence.as_secs(),
                             "retention cadence retuned from config:* (hot)"
@@ -793,8 +801,7 @@ pub fn spawn(
                     let cfg = RetentionConfig::from_resolved(&config_rx.borrow());
                     if cfg.cadence != cadence {
                         cadence = cfg.cadence;
-                        tick = tokio::time::interval(cadence);
-                        tick.tick().await;
+                        schedule.retune(cadence);
                         tracing::info!(
                             cadence_secs = cadence.as_secs(),
                             "retention cadence retuned from config:* (hot, mid-sleep re-arm)"

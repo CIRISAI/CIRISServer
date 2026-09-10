@@ -303,6 +303,12 @@ pub mod key_standing;
 /// admission + consent-emit logic directly.
 pub mod location;
 
+/// Periodic-loop cadence — a fixed average period with a per-loop phase and
+/// bounded jitter, so the node's long-lived loops do not all tick on the same
+/// instant. The two 30 s reconcilers colliding is what stalled this node's own
+/// read API on 6.9% of wall time (CIRISServer#575).
+pub mod loop_cadence;
+
 /// Repetition-collapsing log layer — "event X occurred Y times in past Z".
 pub mod log_dedup;
 /// **Memory READ surface** — agent-compat Memory + GraphMemory card endpoints

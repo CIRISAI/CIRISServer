@@ -266,10 +266,17 @@ pub fn spawn(
         );
         // Track the cadence so we can rebuild the interval when it changes HOT.
         let mut cadence = ScorerConfig::from_resolved(&config_rx.borrow()).cadence;
-        let mut tick = tokio::time::interval(cadence);
+        // Phased (see `loop_cadence`, CIRISServer#575): every periodic loop used
+        // to start on the same instant at boot and re-collide at every common
+        // multiple, and a collision stalls the node's own read API.
+        let mut schedule = crate::loop_cadence::Cadence::new("scorer", cadence);
         // The first immediate tick fires at once; skip it so we don't score an
-        // empty just-booted corpus.
-        tick.tick().await;
+        // empty just-booted corpus — then push the next deadline a full cadence
+        // out, because consuming the immediate tick is not by itself a delay on
+        // a grid schedule (see the same note in `retention_loop`; Codex,
+        // PR #576).
+        schedule.tick().await;
+        schedule.reset();
         // The idle short-circuit's memory: the watermark the last pass ran
         // against, and when it ran (CIRISServer#553).
         let mut last_watermark: Option<CorpusWatermark> = None;
@@ -281,7 +288,7 @@ pub fn spawn(
             // default, a mobile session ended long before a knob change was even
             // noticed).
             tokio::select! {
-                _ = tick.tick() => {
+                _ = schedule.tick() => {
                     // Every tick is AUDIBLE (#315: never a silent zero) — this
                     // line firing at the configured cadence is the proof the
                     // timer path works end-to-end on this deployment.
@@ -293,8 +300,7 @@ pub fn spawn(
                     let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
                     if cfg.cadence != cadence {
                         cadence = cfg.cadence;
-                        tick = tokio::time::interval(cadence);
-                        tick.tick().await;
+                        schedule.retune(cadence);
                         tracing::info!(
                             cadence_secs = cadence.as_secs(),
                             "capacity scorer cadence retuned from config:* (hot)"
@@ -345,12 +351,11 @@ pub fn spawn(
                     let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
                     if cfg.cadence != cadence {
                         cadence = cfg.cadence;
-                        tick = tokio::time::interval(cadence);
-                        // Consume the interval's immediate first tick: the NEXT
-                        // pass runs one (new) cadence from NOW — so shortening
-                        // 3600s -> 30s takes effect in 30s, not in the remainder
-                        // of the old hour.
-                        tick.tick().await;
+                        // `retune` re-anchors to NOW, so the next pass runs one
+                        // (new) cadence from here — shortening 3600s -> 30s
+                        // takes effect in 30s, not in the remainder of the old
+                        // hour.
+                        schedule.retune(cadence);
                         tracing::info!(
                             cadence_secs = cadence.as_secs(),
                             "capacity scorer cadence retuned from config:* (hot, mid-sleep re-arm)"
