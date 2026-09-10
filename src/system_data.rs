@@ -307,6 +307,42 @@ async fn wipe_signing_key(
 
 // ─── GET /v1/my-data/lens-identifier ──────────────────────────────────────────
 
+/// `GET /v1/my-data/capacity` — every `capacity:*` attestation about a key this
+/// operator is responsible for, whoever attested it.
+///
+/// The scorer wrote these and nothing served them back, so a client card built
+/// on capacity rendered a permanent "warming up" placeholder against a build
+/// where the answer would never arrive (CIRISServer#580). Mounted on the shared
+/// read-API router, so it answers in node mode and agent mode alike.
+///
+/// See [`crate::capacity_read`] for what counts as responsible and why the
+/// query is by subject rather than by attester.
+async fn capacity(State(st): State<SystemDataState>) -> Response {
+    let node_key_id = match crate::graph_config::self_key_id(&st.engine).await {
+        Ok(k) => k,
+        Err(e) => {
+            // Not a 500: a node that cannot resolve its own registered key has
+            // not federated yet, which is a state the Data page should render
+            // rather than an error it should raise.
+            return Json(json!({
+                "data": {
+                    "node_key_id": serde_json::Value::Null,
+                    "responsible_user_key_id": serde_json::Value::Null,
+                    "subjects": [],
+                    "unscored": [],
+                    "truncated": false,
+                    "unavailable": format!("this node has no registered federation key yet: {e}"),
+                }
+            }))
+            .into_response();
+        }
+    };
+    match crate::capacity_read::report(&st.engine, &node_key_id).await {
+        Ok(report) => Json(crate::capacity_read::to_json(&report)).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 async fn lens_identifier(State(st): State<SystemDataState>) -> Response {
     use sha2::{Digest, Sha256};
     let agent_id = st.cfg.key_id.clone();
@@ -347,5 +383,6 @@ pub fn router(engine: Arc<Engine>, cfg: ServerConfig) -> axum::Router {
             "/v1/my-data/lens-identifier",
             axum::routing::get(lens_identifier),
         )
+        .route("/v1/my-data/capacity", axum::routing::get(capacity))
         .with_state(SystemDataState { engine, cfg })
 }
