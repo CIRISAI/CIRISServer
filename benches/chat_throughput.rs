@@ -580,7 +580,19 @@ async fn serve(
     // from whatever it is handed, and an empty directory is `NoFedIdentity`.
     // No transport in-process, so the `discover` rung is skipped rather than
     // guessed at: a single-node fixture has no mesh to be reachable over.
-    let app = contacts_chat::router(engine, signer, seed_dir, None);
+    // The node's own sealed seed, same as the test harness and for the same
+    // reason (edge v24 derives content-KEM halves from the seed THIS process
+    // holds — CIRISEdge#599).
+    let node_alias = format!("chat-bench-node-{}", std::process::id());
+    let node_seed_dir = std::env::temp_dir().join(&node_alias);
+    std::fs::create_dir_all(&node_seed_dir).expect("bench node seed dir");
+    ciris_keyring::SealedEd25519Signer::open_or_create(
+        node_alias.clone(),
+        node_seed_dir.clone(),
+        None,
+    )
+    .expect("seal the bench node's seed");
+    let app = contacts_chat::router(engine, signer, seed_dir, node_alias, node_seed_dir, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

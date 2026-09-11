@@ -495,9 +495,31 @@ async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSig
 /// the same as having no owner key at all.
 async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::JoinHandle<()>) {
     let signer = node_edge_signer(&engine).await;
-    // No transport in-process, so the `discover` rung is skipped rather than
-    // guessed at: a single-node fixture has no mesh to be reachable over.
-    let app = contacts_chat::router(engine, signer, seed_dir, None);
+    // THE NODE'S OWN SEALED SEED, created the way COMPOSE creates it.
+    //
+    // Two details, and I had both wrong first time:
+    //
+    //  * NOT the owner's seed. edge derives content-KEM halves from whichever
+    //    sealed seed the process holds, and the occurrence it registers must be
+    //    a key this process can decrypt for. Using the owner's would pass on a
+    //    shortcut a real node never has — the fixture bug CIRISEdge#599 was.
+    //  * `SealedEd25519Signer::open_or_create`, NOT `mint_user_identity`. They
+    //    write different layouts (`{alias}.ed25519.seed.blob` + `.master.key`
+    //    versus `{alias}.ed25519.seed` + `.backend`), and only the first is what
+    //    `SelfEncKeys` reads. Minting a NODE seed with the USER tool produced a
+    //    seed no keyring reader could open, which I briefly mistook for a
+    //    keyring bug.
+    let node_alias = format!("chat-node-{}", std::process::id());
+    let node_seed_dir = ciris_home().join(&node_alias);
+    std::fs::create_dir_all(&node_seed_dir).expect("node seed dir");
+    ciris_keyring::SealedEd25519Signer::open_or_create(
+        node_alias.clone(),
+        node_seed_dir.clone(),
+        None,
+    )
+    .expect("seal the node's ed25519 seed the way compose does");
+
+    let app = contacts_chat::router(engine, signer, seed_dir, node_alias, node_seed_dir, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -769,6 +791,11 @@ async fn open_chat(
 /// of an MLS group built from the creator's Welcome and the SAME material whose
 /// KeyPackage [`open_chat`] published. A body it opens is a body the other member
 /// can genuinely read.
+// edge v24.0.0: reading a room takes no room key, so nothing calls this now.
+// Kept rather than deleted because the HANDSHAKE that derives it is still the
+// membership gate on the send path, and this is the only place that exercises
+// the contact's side of it.
+#[allow(dead_code)]
 async fn contact_room_key(
     engine: &Engine,
     owner_id: &OwnerIdentity,
@@ -1301,7 +1328,7 @@ async fn a_chat_with_a_non_contact_is_refused() {
 async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
-    let (community_id, contact_material) =
+    let (community_id, _contact_material) =
         open_chat(&client, &base, &owner, &engine, &owner_id).await;
 
     let resp = client
@@ -1377,42 +1404,95 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
         "the plane must never carry a community body in plaintext: {:?}",
         stored.attestation_envelope
     );
+    // edge v24.0.0 (CIRISEdge#586): there is no inline `sealed` header any more,
+    // because there is no inline body to seal. The row carries a POINTER into
+    // the room's encrypted blob store, and the content-sha + tier are what a
+    // reader resolves through. Asserting on the pointer keeps the property this
+    // line always meant — the plane carries a reference a reader can follow, not
+    // the bytes — against the shape that now expresses it.
+    let content = stored
+        .attestation_envelope
+        .get("content")
+        .unwrap_or_else(|| {
+            panic!(
+                "no content pointer on the row: {:?}",
+                stored.attestation_envelope
+            )
+        });
     assert!(
-        stored.attestation_envelope.get("sealed").is_some(),
-        "a sealed body must carry its seal header, or no reader can open it: {:?}",
-        stored.attestation_envelope
+        content
+            .get("content_sha256")
+            .and_then(|v| v.as_str())
+            .is_some_and(|h| h.len() == 64),
+        "the pointer must name the blob by sha256: {content:?}"
+    );
+    assert_eq!(
+        content.get("tier").and_then(|v| v.as_str()),
+        Some("community_dek"),
+        "a community body must be sealed under the ROOM's DEK, not a weaker tier: {content:?}"
     );
     assert_eq!(
         messages[0]["body"], "first",
         "the room's own member must READ what they sent — the projection opens \
          the seal (chat::ChatMessage::from_row): {messages:?}"
     );
-    let key = contact_room_key(&engine, &owner_id, &community_id, contact_material).await;
+    // edge v24.0.0: reading a room takes the content STORE and the viewer's
+    // OCCURRENCE key. An identity key here returns `NotGranted` for a full
+    // member and surfaces as `Body::Unopened` — the same shape as not reading
+    // at all, which is why this test asserts on the body below rather than on
+    // the message count (CIRISServer#590).
+    let store = ciris_edge::group_content::PersistGroupContentStore::new(
+        (*engine).clone(),
+        engine.federation_directory(),
+    );
+    let viewer_occ = engine
+        .federation_directory()
+        .list_identity_occurrences_active(CONTACT_KEY_ID)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| o.occurrence_key_id)
+        .next()
+        .unwrap_or_else(|| CONTACT_KEY_ID.to_string());
     let opened = ciris_edge::chat::messages_in_room(
         &*engine.federation_directory(),
         &[owner_id.key_id.clone(), CONTACT_KEY_ID.to_string()],
         &community_id,
-        &key,
+        &store,
+        &viewer_occ,
     )
     .await
     .expect("read the room as the contact");
-    assert_eq!(
-        opened
-            .iter()
-            .map(|m| (m.attestation_id.as_str(), m.body.clone()))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                first_id.as_str(),
-                ciris_edge::chat::Body::Text("first".to_string())
-            ),
-            (
-                second_id.as_str(),
-                ciris_edge::chat::Body::Text("second".to_string())
-            ),
-        ],
-        "both messages must open, in order, for the room's other member"
+
+    // THIS NODE CANNOT READ ON THE CONTACT'S BEHALF, AND THAT IS THE POINT.
+    //
+    // Under the old inline seal the whole room shared one key, so any holder
+    // could open every member's messages — and this test used to assert exactly
+    // that, by reading both bodies "as the contact" on the author's node.
+    //
+    // edge v24.0.0 wraps the room DEK PER OCCURRENCE. The contact's grant is
+    // sealed to the contact's content key, whose private half lives on the
+    // contact's device and nowhere else. So a node that could still open them
+    // would mean the confidentiality boundary was not real.
+    //
+    // The refusal is asserted BY REASON, not merely as "did not open": a body
+    // that stayed shut because we passed a wrong handle looks identical from
+    // here, and that ambiguity is what CIRISEdge#599 cost a day to.
+    assert!(
+        !opened.is_empty(),
+        "the rows must still be RECOGNISED for a member — recognition takes no          key in v24; only opening does: {opened:?}"
     );
+    for m in &opened {
+        match &m.body {
+            ciris_edge::chat::Body::Unopened { reason } => assert!(
+                reason.contains("not granted"),
+                "expected a grant refusal for a viewer whose private key this node                  does not hold, got: {reason}"
+            ),
+            other => panic!(
+                "this node opened a body sealed to the CONTACT's key — the per-occurrence                  wrap is not holding: {other:?}"
+            ),
+        }
+    }
 
     // THE HAMBURGER FIELDS. The client renders each message with the same
     // attestation card it uses everywhere else; a bespoke `{from,text,at}` would
@@ -2655,7 +2735,13 @@ async fn seed_message_attested_by(
         // returned `None` and the transcript simply did not contain it.
         (contacts_chat::FIELD_COMMUNITY_ID): community_id,
         (contacts_chat::FIELD_ON_BEHALF_OF): author,
-        (contacts_chat::FIELD_BODY): format!("as {author}"),
+        // NO BODY FIELD from edge v24.0.0 (CIRISEdge#586): content lives in the
+        // room's encrypted blob store and the row carries a pointer. This
+        // fixture deliberately carries NEITHER — it models a foreign row whose
+        // content this node cannot open, which is the honest shape for a row
+        // that arrived by replication without its blob. What the test proves is
+        // ATTRIBUTION (who signed vs who is claimed), and that is decided by the
+        // signature and the roster, not by whether the body opens.
         (contacts_chat::FIELD_CONTENT_TYPE): "text/plain",
         "score": 1.0,
     });
