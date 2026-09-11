@@ -303,6 +303,10 @@ pub mod key_standing;
 /// admission + consent-emit logic directly.
 pub mod location;
 
+/// Rendering an error with its whole cause chain, for the one line an operator
+/// reads (CIRISServer#586).
+pub mod error_chain;
+
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);
 /// this serves them by SUBJECT, for every key this operator is responsible for,
@@ -1329,7 +1333,7 @@ mod python {
     /// by `: `. A crash-looping node now says what actually failed on the line
     /// an operator is already reading.
     fn py_err(e: &anyhow::Error) -> pyo3::PyErr {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}"))
+        pyo3::exceptions::PyRuntimeError::new_err(crate::error_chain::render(e))
     }
 
     fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {

@@ -57,7 +57,7 @@ fn display_alone_hides_the_cause_which_is_why_this_test_exists() {
 /// What the boundary must send instead: the whole chain, outermost first.
 #[test]
 fn the_alternate_form_carries_every_layer() {
-    let rendered = format!("{:#}", layered());
+    let rendered = ciris_server::error_chain::render(&layered());
     for layer in [
         "build shared persist Engine (hybrid hardware signer)",
         "sqlite open readers",
@@ -79,7 +79,7 @@ fn the_root_cause_survives_arbitrary_wrapping() {
     for n in 0..12 {
         e = e.context(format!("layer {n}"));
     }
-    let rendered = format!("{e:#}");
+    let rendered = ciris_server::error_chain::render(&e);
     assert!(
         rendered.contains("the thing that actually broke"),
         "twelve layers of context buried the cause: {rendered}"
@@ -104,7 +104,7 @@ fn no_serve_path_converts_an_anyhow_error_by_display_alone() {
     assert!(
         offenders.is_empty(),
         "a serve path converts its anyhow error with Display alone, which drops the cause \
-         chain — use the `{{:#}}` helper (CIRISServer#586):\n  {}",
+         chain — use the `error_chain::render` helper (CIRISServer#586):\n  {}",
         offenders.join("\n  ")
     );
     assert!(
