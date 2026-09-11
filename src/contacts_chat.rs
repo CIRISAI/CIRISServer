@@ -132,8 +132,8 @@ use crate::auth::session::{resolve_bearer, SessionCaller};
 // `pub use`, not re-declaration: a rename in edge is now a compile error here
 // instead of a silent divergence on the wire.
 pub use ciris_edge::chat::{
-    pair_community_key_id, CHAT_ATTESTATION_PREFIX, CHAT_MESSAGE_DIMENSION, FIELD_BODY,
-    FIELD_COMMUNITY_ID, FIELD_CONTENT_TYPE, FIELD_ON_BEHALF_OF, PAIR_COMMUNITY_PREFIX,
+    pair_community_key_id, CHAT_ATTESTATION_PREFIX, CHAT_MESSAGE_DIMENSION, FIELD_COMMUNITY_ID,
+    FIELD_CONTENT_TYPE, FIELD_ON_BEHALF_OF, PAIR_COMMUNITY_PREFIX,
 };
 
 /// What an omitted `content_type` means.
@@ -150,6 +150,18 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 struct ChatState {
     engine: Arc<Engine>,
+    /// THIS NODE's keystore alias + identity dir — what
+    /// `ciris_keyring::self_enc_keys::SelfEncKeys::open` resolves the sealed
+    /// Ed25519 seed by. The content-KEM halves are HKDF-DERIVED from that same
+    /// seed (CIRISVerify `SelfEncKeys`), so nothing new is stored and a restored
+    /// node keeps every grant already wrapped to it.
+    ///
+    /// The NODE's seed, not the user's: the occurrence has to be a key whose
+    /// private half THIS PROCESS holds, or it can register a grant target it
+    /// cannot decrypt for. Deriving from the owner's seed would only work on a
+    /// harness that happens to hold the human's key (CIRISEdge#599).
+    node_keystore_alias: String,
+    node_identity_dir: std::path::PathBuf,
     /// The node's owner-seed location — what [`crate::owner_signer_capsule`]
     /// needs to re-open the responsible party's fed-ID under a live owner
     /// session. A chat row is signed by the PERSON, so the route has to be able
@@ -1899,6 +1911,65 @@ async fn start_chat(
     // Edge's own note: "Everything that opens a pair room — the mesh harness,
     // the tests, a consumer — builds it here, so the roster shape cannot drift
     // between them." We were the consumer that drifted.
+    // ── THE CONTENT-KEM OCCURRENCE, BEFORE THE ROOM EXISTS ─────────────────
+    //
+    // edge v24 seals every chat body under the room's community DEK, and the
+    // cascade wraps that DEK per ACTIVE IDENTITY OCCURRENCE carrying
+    // `encryption_pubkeys`. A node that has provisioned none produces
+    // `granted=[]` — content nobody can read, INCLUDING THE AUTHOR
+    // (CIRISServer#590, CIRISEdge#599).
+    //
+    // Nothing is minted or stored: `SelfEncKeys` HKDF-derives the x25519 and
+    // ML-KEM-768 halves from the SAME sealed Ed25519 seed the federation signer
+    // already uses, deterministically — so this is idempotent, and a restored
+    // node re-derives the identical keys and keeps its existing grants.
+    //
+    // Registered as an occurrence of the OWNER (the roster names people) whose
+    // key is THIS NODE's (the process must hold the private half to decrypt) —
+    // the shape edge's own `edge_node` provisions at start-up.
+    //
+    // A failure here is NOT fatal to starting a chat: it is reported and the
+    // send door refuses later with a message naming the cause, which is a
+    // better place to fail than a half-built room.
+    match ciris_keyring::self_enc_keys::SelfEncKeys::open(
+        st.node_keystore_alias.clone(),
+        st.node_identity_dir.clone(),
+    )
+    .and_then(|k| k.enc_pubkeys())
+    {
+        Ok(enc) => {
+            let enc = ciris_persist::federation::EncryptionPubkeys {
+                x25519_base64: enc.x25519_base64,
+                ml_kem_768_base64: enc.ml_kem_768_base64,
+            };
+            match ciris_edge::content_occurrence::ensure_content_occurrence(
+                &*st.engine.federation_directory(),
+                &owner.key_id,
+                &st.node_signer.key_id,
+                ciris_persist::federation::types::device_class::SERVER,
+                enc,
+            )
+            .await
+            {
+                Ok(outcome) => tracing::info!(
+                    identity = %owner.key_id,
+                    occurrence = %st.node_signer.key_id,
+                    ?outcome,
+                    "content-KEM occurrence provisioned — chat bodies can be sealed to a reader"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "content occurrence NOT provisioned — chat sends will refuse until it is"
+                ),
+            }
+        }
+        Err(e) => tracing::warn!(
+                error = %e,
+                alias = %st.node_keystore_alias,
+            "no sealed seed to derive content-KEM keys from — chat sends will refuse"
+        ),
+    }
+
     let signed = match ciris_edge::chat::signed_pair_community(
         &owner.key_id,
         &key_id,
@@ -2432,12 +2503,20 @@ async fn send_message(
         }
     };
 
-    let row = match ciris_edge::chat::chat_message_attestation(
+    // edge v24.0.0 (CIRISEdge#586): the body goes to the room's encrypted blob
+    // store and the row carries a pointer. The store is built from the handles
+    // we already hold — `Engine` is Clone and the directory is the same
+    // substrate, so this is no second connection and no migration.
+    let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
+        (*st.engine).clone(),
+        st.engine.federation_directory(),
+    );
+    let (row, sealed) = match ciris_edge::chat::chat_message_attestation(
         author,
         &contact_key_id,
         &req.body,
         chrono::Utc::now(),
-        &key,
+        &content_store,
     )
     .await
     {
@@ -2494,6 +2573,15 @@ async fn send_message(
             "community_id": community_id,
             "cohort_scope": cohort_scope::COMMUNITY,
             "message": message,
+            // WHO CANNOT READ WHAT WAS JUST SENT (edge v24.0.0 / CIRISEdge#586).
+            // Members with no usable encryption pubkey are dropped FAIL-SECURE
+            // when the content is sealed — the message is written, they simply
+            // cannot open it, and that fact exists nowhere else. Reporting it is
+            // the difference between a sender who knows and a sender who thinks
+            // the room heard them. `excluded` empty is the ordinary case, and
+            // `fully_readable` says so without the client comparing lengths.
+            "fully_readable": sealed.fully_readable(),
+            "excluded_key_ids": sealed.excluded,
         })),
     )
         .into_response()
@@ -2511,13 +2599,38 @@ async fn collect_messages(
     st: &ChatState,
     community_id: &str,
     owner: &Owner,
-    key: &ciris_edge::chat::RoomKey,
 ) -> Result<Vec<ChatMessage>, String> {
     let directory = st.engine.federation_directory();
     let members = directory
         .active_community_members(community_id)
         .await
         .map_err(|e| format!("active_community_members: {e}"))?;
+
+    // ── OPENING THE BODY NEEDS THE OCCURRENCE KEY, NOT THE IDENTITY KEY ─────
+    //
+    // edge v24.0.0 (CIRISEdge#586, CIRISServer#590): at-rest grants are wrapped
+    // PER OCCURRENCE, so passing an identity key returns `NotGranted` — for a
+    // FULL MEMBER of the room. `resolve_content` turns that refusal into
+    // `Body::Unopened { reason }` rather than an error, so the wrong key here
+    // does not fail loudly: it renders every message as not-yet-opened, which
+    // is indistinguishable from not calling it at all.
+    //
+    // Derived through the directory rather than by string convention
+    // (edge's own mesh binary uses `format!("{key_id}-occ")`, which is that
+    // binary's habit and not a contract). An owner with no ACTIVE occurrence
+    // gets `None` and every body reports why, which is the honest state — it is
+    // what a revoked or not-yet-registered occurrence actually means.
+    let viewer_occurrence: Option<String> = directory
+        .list_identity_occurrences_active(&owner.key_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| o.occurrence_key_id)
+        .next();
+    let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
+        (*st.engine).clone(),
+        st.engine.federation_directory(),
+    );
 
     // ── THE BODY IS OPENED BY EDGE, NOT READ BY US ──────────────────────────
     //
@@ -2599,10 +2712,21 @@ async fn collect_messages(
             continue;
         }
         // Edge decides whether this row belongs to the room AND opens it.
-        let Some(opened) = ciris_edge::chat::ChatMessage::from_row(row, community_id, key) else {
+        // Recognising a row needs no key and touches no store — that split is
+        // why listing a room no longer pays for content it will not show.
+        let Some(mut opened) = ciris_edge::chat::ChatMessage::from_row(row, community_id) else {
             not_this_room += 1;
             continue;
         };
+        // …and THIS is what fetches it. Without this call every body is a
+        // `Pointer` and the whole transcript renders as not-yet-opened, with no
+        // error anywhere (CIRISServer#590).
+        // Fetch the body. Without this every message is a `Pointer` and the
+        // whole transcript renders as not-yet-opened, with no error anywhere
+        // (CIRISServer#590).
+        if let Some(occ) = viewer_occurrence.as_deref() {
+            opened.resolve_content(&content_store, occ).await;
+        }
         let who = author_facts(
             &*directory,
             &mut who_cache,
@@ -2614,7 +2738,10 @@ async fn collect_messages(
         let (body, unopened_reason) = match opened.body {
             ciris_edge::chat::Body::Text(text) => (Some(text), None),
             ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason)),
-            // edge v23.1.0 (CIRISEdge#586) — the row points at content in the
+            // Still a pointer AFTER `resolve_content` — so the fetch did not
+            // happen or did not succeed. The commonest cause is no active
+            // occurrence for this viewer; saying so beats a blank message.
+            // (edge v24.0.0; the row points at content in the
             // room's encrypted blob store that this read has not fetched.
             //
             // Reported as NOT-YET-OPENED with that as the reason, rather than
@@ -2805,9 +2932,16 @@ async fn load_message(
     community_id: &str,
     attestation_id: &str,
     owner: &Owner,
-    key: &ciris_edge::chat::RoomKey,
+    // edge v24.0.0: READING no longer needs the room key — `from_row` recognises
+    // a row without one and the body comes from the blob store. The parameter
+    // stays because the caller still DERIVES the key, and that derivation is
+    // also how the route refuses a non-member (`chat.room_key_failed`); pulling
+    // it out would delete a gate along with the value. Whether the handshake is
+    // still load-bearing for a reader is a question for CIRISEdge#590 rather
+    // than something to decide by deleting it mid-adoption.
+    _key: &ciris_edge::chat::RoomKey,
 ) -> Result<Option<ChatMessage>, String> {
-    Ok(collect_messages(st, community_id, owner, key)
+    Ok(collect_messages(st, community_id, owner)
         .await?
         .into_iter()
         .find(|m| m.attestation_id == attestation_id))
@@ -2846,7 +2980,7 @@ async fn list_messages(
     // capsule. Only ADVANCING an unfinished handshake needs the person, and a
     // delegate cannot do that anyway; for them the honest answer is the same
     // "not keyed yet" the owner would get, not a permission error.
-    let key = 'key: {
+    let _key = 'key: {
         match room_key(&st, &owner.key_id, &peer, None).await {
             Ok((Some(k), _)) => break 'key k,
             // NOT KEYED — and that is a 200, not an error. The room exists, the
@@ -2891,7 +3025,7 @@ async fn list_messages(
             }
         }
     };
-    match collect_messages(&st, &community_id, &owner, &key).await {
+    match collect_messages(&st, &community_id, &owner).await {
         Ok(messages) => {
             let total = messages.len();
             (
@@ -2936,10 +3070,14 @@ pub fn router(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     user_seed_dir: std::path::PathBuf,
+    node_keystore_alias: String,
+    node_identity_dir: std::path::PathBuf,
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
 ) -> Router {
     let state = ChatState {
         engine,
+        node_keystore_alias,
+        node_identity_dir,
         user_seed_dir,
         rooms: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         node_signer,
