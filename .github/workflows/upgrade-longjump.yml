@@ -1,0 +1,209 @@
+# Long jump — boot THIS code against a database an OLDER RELEASE created.
+#
+# WHY THIS EXISTS. CIRISServer#586: 0.5.205 could not open a database with
+# history. CIRISPersist#840 had changed one word inside a SQL COMMENT in V070,
+# which changed its refinery checksum, so every node that applied V070 before
+# that edit failed validation before anything bound. It took the canonical down
+# and crash-looped it sixteen times.
+#
+# Nothing we own caught it, and could not have: a FRESH database applies the
+# current migration and records the current checksum, so there is nothing to
+# mismatch. The failure is structurally invisible to any node that starts from
+# an empty data dir — which is every test node, every harness node and every
+# other lane in this repo. 122 integration binaries and BOTH end-to-end ladders
+# were green on the pin that bricked production.
+#
+# The question none of that coverage asks is: what does this do to a database
+# that ALREADY EXISTS? This lane asks it.
+#
+# Modelled on CIRISAgent's `upgrade-longjump.yml`, which learned it the same way
+# and whose two lessons are kept here:
+#
+#   * SNAPSHOT THE BASELINE BEFORE THE UPGRADE. Without it, "no identity after"
+#     cannot be told from "no identity ever", and the job reports data loss
+#     against a fixture that never had any — a false alarm is how a job earns
+#     being ignored.
+#   * ASSERT ON IDENTITY, NOT JUST LIVENESS. The dangerous shape is not a crash.
+#     It is a node that comes up green wearing an old data directory's clothes,
+#     having minted a fresh identity — every health check passes and the node is
+#     a stranger to the mesh.
+#
+# WHERE OURS DIFFERS, deliberately: the agent reads a captured artifact, and
+# notes that retention silently shortens the jump over time. We build the
+# fixture by installing an OLD RELEASE FROM PyPI, which keeps every version
+# forever — so the jump cannot quietly get shorter, and any released version is
+# a legal starting point.
+
+name: Upgrade Long Jump
+
+on:
+  workflow_dispatch:
+    inputs:
+      from-version:
+        description: "Released ciris-server version to upgrade FROM"
+        required: false
+        default: "0.5.203"
+  pull_request:
+    paths:
+      # Anything that can change how an EXISTING database is read or migrated.
+      # `Cargo.toml`/`Cargo.lock` lead the list on purpose: a substrate repin is
+      # what did this, and it touches no .rs file of ours.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/compose.rs'
+      - 'src/config.rs'
+      - 'src/graph_config.rs'
+      - 'tools/release/check_longjump_state.py'
+      - '.github/workflows/upgrade-longjump.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: longjump-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  longjump:
+    name: Boot against an old release's database
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # The floor we claim to support upgrading from. Logged every run, so a
+      # jump that quietly shortens is visible rather than assumed.
+      FROM_VERSION: ${{ inputs.from-version || '0.5.203' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps (Linux)
+        run: |
+          set -uo pipefail
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y libsqlite3-dev libudev-dev patchelf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 1. lay down a real database with an OLD released wheel ────────────
+      - name: Create a home with ciris-server==${{ env.FROM_VERSION }}
+        id: fixture
+        run: |
+          set -uo pipefail
+          echo "Long jump FROM ciris-server==$FROM_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
+          python -m venv /tmp/venv-old
+          /tmp/venv-old/bin/pip -q install --upgrade pip
+          if ! /tmp/venv-old/bin/pip -q install "ciris-server==$FROM_VERSION"; then
+            echo "::error::ciris-server==$FROM_VERSION is not installable from PyPI. Pick a version that is — this lane cannot test a jump it cannot start."
+            exit 1
+          fi
+          mkdir -p /tmp/fixture
+          # A real boot, not a synthetic schema: the store is written by the
+          # release itself, so it carries the rows and the recorded migration
+          # checksums that release actually produces.
+          CIRIS_ENVIRONMENT=production timeout 300 /tmp/venv-old/bin/ciris-server \
+            --home /tmp/fixture --key-id longjump-node > /tmp/old-boot.log 2>&1 &
+          OLD_PID=$!
+          for _ in $(seq 1 60); do
+            sleep 3
+            grep -qE 'compose phase.*(transport|read_api|serve)|listening|bound' /tmp/old-boot.log && break
+            kill -0 $OLD_PID 2>/dev/null || break
+          done
+          kill $OLD_PID 2>/dev/null || true; wait $OLD_PID 2>/dev/null || true
+          find /tmp/fixture -name '*.db' -printf '  %p %s bytes\n' || true
+          if [ -z "$(find /tmp/fixture -name '*.db' -print -quit)" ]; then
+            echo "::error::the old release produced no database, so there is nothing to upgrade. Last lines:"
+            tail -40 /tmp/old-boot.log
+            exit 1
+          fi
+
+      - name: Record identity BEFORE the upgrade
+        id: baseline
+        run: |
+          set -uo pipefail
+          B=$(python tools/release/check_longjump_state.py --home /tmp/fixture --emit-baseline | grep '^BASELINE=' | cut -d= -f2-)
+          echo "baseline=$B" >> "$GITHUB_OUTPUT"
+
+      # ── 2. build THIS code and open that same home with it ────────────────
+      - name: Build this code's wheel (maturin)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          # Injected like every other wheel build, and the release ladder
+          # enforces it: a leg that omits them ships a wheel whose Google
+          # sign-in is silently absent on that platform alone. This lane boots
+          # the wheel rather than signing in with it, but building a DIFFERENT
+          # wheel than the one we ship makes it a weaker test of the one we do.
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.CIRIS_DESKTOP_GOOGLE_OAUTH_CLIENT_SECRET }}
+          CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_ANDROID_GOOGLE_OAUTH_CLIENT_ID }}
+          CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.CIRIS_WEB_GOOGLE_OAUTH_CLIENT_ID }}
+        run: |
+          set -uo pipefail
+          pip install "maturin>=1.7,<2"
+          maturin build --release --strip --out /tmp/dist
+          ls -la /tmp/dist
+
+      - name: Open the old home with this code
+        id: boot
+        run: |
+          set -uo pipefail
+          python -m venv /tmp/venv-new
+          /tmp/venv-new/bin/pip -q install --upgrade pip
+          /tmp/venv-new/bin/pip -q install /tmp/dist/*.whl
+          CIRIS_ENVIRONMENT=production timeout 300 /tmp/venv-new/bin/ciris-server \
+            --home /tmp/fixture --key-id longjump-node > /tmp/new-boot.log 2>&1 &
+          NEW_PID=$!
+          OPENED=false
+          for _ in $(seq 1 80); do
+            sleep 3
+            if grep -qiE 'checksum mismatch|divergent|RuntimeError|Traceback' /tmp/new-boot.log; then
+              echo "::error::FAILURE MODE 1 — this code could not open a database an older release created. This is the CIRISServer#586 shape: a node with history cannot start."
+              grep -iE 'checksum|divergent|RuntimeError|persist Engine' /tmp/new-boot.log | head -10
+              kill $NEW_PID 2>/dev/null || true
+              exit 1
+            fi
+            if grep -qE 'compose phase.*(transport|read_api|serve)|listening|bound' /tmp/new-boot.log; then
+              OPENED=true; break
+            fi
+            kill -0 $NEW_PID 2>/dev/null || break
+          done
+          kill $NEW_PID 2>/dev/null || true; wait $NEW_PID 2>/dev/null || true
+          if [ "$OPENED" != "true" ]; then
+            echo "::error::FAILURE MODE 1 — the node never got past the engine against an old database."
+            tail -60 /tmp/new-boot.log
+            exit 1
+          fi
+          echo "engine opened against a ${FROM_VERSION} database"
+
+      # ── 3. and it must still be the SAME NODE ─────────────────────────────
+      - name: Identity must survive the upgrade
+        run: |
+          # THE ASSERTION THAT MATTERS, and the reason liveness alone is not
+          # enough: a node that boots green having minted a fresh identity
+          # passes every health check and is a stranger to the mesh.
+          python tools/release/check_longjump_state.py \
+            --home /tmp/fixture --baseline '${{ steps.baseline.outputs.baseline }}'
+
+      - name: Surface both boot logs
+        if: always()
+        run: |
+          {
+            echo "### Long jump: ${FROM_VERSION} → this commit"
+            echo '```'
+            grep -aiE 'checksum|refinery|RuntimeError|ERROR' /tmp/new-boot.log | head -30 \
+              || echo "(no error lines — which is itself the finding if an assertion above failed)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: longjump-logs
+          path: |
+            /tmp/old-boot.log
+            /tmp/new-boot.log
+          retention-days: 14
