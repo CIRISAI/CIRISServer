@@ -1315,6 +1315,23 @@ mod python {
     /// console serve) — always fresh processes with no ambient runtime, and
     /// their futures need not be `Send` (import_traces holds a `dyn io::Read`
     /// across awaits). The EMBEDDED entry uses [`rt_block_on_reentrant`].
+    /// An `anyhow::Error` as a Python exception **with its whole cause chain**.
+    ///
+    /// `e.to_string()` renders only the OUTERMOST context and silently drops
+    /// every `source()` beneath it. So a boot that failed deep in the substrate
+    /// reached an operator as the one line we happened to wrap it in — for
+    /// CIRISServer#586, `build shared persist Engine (hybrid hardware signer)`,
+    /// which names a requirement and not one fact about what was missing. The
+    /// cause WAS produced; we threw it away at the FFI boundary, and the node
+    /// crash-looped sixteen times without ever saying why.
+    ///
+    /// `{:#}` is anyhow's alternate form: every layer, outermost first, joined
+    /// by `: `. A crash-looping node now says what actually failed on the line
+    /// an operator is already reading.
+    fn py_err(e: &anyhow::Error) -> pyo3::PyErr {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}"))
+    }
+
     fn rt_block_on<F: std::future::Future<Output = anyhow::Result<()>>>(fut: F) -> PyResult<()> {
         // FLOORED (CIRISServer#501). This hosts `serve_with_python_adapter` — the
         // embedded agent/fold topology, on exactly the small hosts the floor exists
@@ -1322,8 +1339,7 @@ mod python {
         // fix reported success.
         let rt = crate::node_runtime::build("ciris-node")
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        rt.block_on(fut)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        rt.block_on(fut).map_err(|e| py_err(&e))
     }
 
     fn rt_block_on_reentrant<F>(fut: F) -> PyResult<()>
@@ -1368,8 +1384,7 @@ mod python {
                     "serve runtime timer heartbeat OK — time driver delivering"
                 );
             });
-            rt.block_on(fut)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            rt.block_on(fut).map_err(|e| py_err(&e))
         };
         if tokio::runtime::Handle::try_current().is_err() {
             tracing::info!(
