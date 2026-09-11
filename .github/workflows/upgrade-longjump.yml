@@ -88,6 +88,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Set up sccache (compiler cache over GHA)
+        # Without this, `RUSTC_WRAPPER: sccache` names a binary that is not on
+        # PATH and cargo fails with "never executed" — which is a DIFFERENT
+        # failure from the service being unreachable ("Timed out waiting for
+        # server startup"), and the wording is the only thing that tells them
+        # apart. This lane's first run failed the first way; both were on the
+        # board the same afternoon.
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       # ── 1. lay down a real database with an OLD released wheel ────────────
       - name: Create a home with ciris-server==${{ env.FROM_VERSION }}
         id: fixture
