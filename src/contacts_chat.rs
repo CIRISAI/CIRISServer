@@ -2614,6 +2614,24 @@ async fn collect_messages(
         let (body, unopened_reason) = match opened.body {
             ciris_edge::chat::Body::Text(text) => (Some(text), None),
             ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason)),
+            // edge v23.1.0 (CIRISEdge#586) — the row points at content in the
+            // room's encrypted blob store that this read has not fetched.
+            //
+            // Reported as NOT-YET-OPENED with that as the reason, rather than
+            // resolved here. Resolving needs a `GroupContentStore` and the
+            // viewer's OCCURRENCE key — and an identity key returns
+            // `NotGranted` for a full member of the room, a refusal that reads
+            // as a permissions problem and is really a wrong handle
+            // (CIRISServer#587). Guessing at that inside an urgent unbrick
+            // release is how the next incident starts; the honest state is
+            // cheap and the row is never silently dropped.
+            ciris_edge::chat::Body::Pointer(_) => (
+                None,
+                Some(
+                    "content is in the room's blob store and was not fetched by this read"
+                        .to_owned(),
+                ),
+            ),
         };
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
