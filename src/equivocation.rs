@@ -1041,22 +1041,6 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
         // pass anywhere in (period, 2·period] — Codex, PR #592.)
         let mut state = ScanState::default();
         let mut cadence = crate::loop_cadence::Cadence::new("equivocation", cfg.cadence);
-        // One period PLUS this loop's phase: 900 s alone is three announce
-        // periods exactly, which is the collision the phase exists to avoid
-        // (Codex, PR #592, round 5).
-        tokio::time::sleep(cfg.cadence + cadence.phase()).await;
-        // The immediate first tick IS the one-period pass. Then `reset()`:
-        // without it the next grid point can be seconds away (the slot is a
-        // few seconds past the epoch), and two full scans would run back to
-        // back (Codex, PR #592, round 3).
-        cadence.tick().await;
-        if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {
-            tracing::warn!(
-                error = %e,
-                "equivocation detector first pass failed (will retry next cadence)"
-            );
-        }
-        cadence.reset();
         tracing::info!(
             cadence_secs = cfg.cadence.as_secs(),
             phase_secs = cadence.phase().as_secs_f64(),
@@ -1064,8 +1048,21 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
             page = cfg.page,
             "same-key equivocation detector started (CC 6.1.1 N4; local detection only — \
              no consensus, no automatic penalty; streams a window per pass from a persisted \
-             cursor, CIRISServer#553)"
+             cursor, CIRISServer#553; first pass on the grid, at least one cadence out)"
         );
+        // Every pass — the first included — sits on this loop's slot of the
+        // shared grid, one period apart. The registry's first tick is
+        // immediate: take it without a pass, then `reset()` so the next
+        // deadline is the first grid point at least a full period out. That
+        // keeps the first scan off boot (the corpus at boot is whatever the
+        // last run left, and boot is when the read API pays for everything
+        // else — CIRISServer#506), ON the grid rather than a relative offset
+        // from spawn, and every later scan exactly one cadence after it.
+        // The cost, stated: the first scan lands anywhere in [period,
+        // 2·period) after spawn, because grid alignment wins over "exactly
+        // one period" (Codex, PR #592, rounds 2, 5 and 6).
+        cadence.tick().await;
+        cadence.reset();
         loop {
             cadence.tick().await;
             if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {
