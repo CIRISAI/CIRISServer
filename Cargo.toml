@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.206" # 0.5.206 = THE UNBRICK. Substrate: edge v23.1.1 / persist v44.1.1 / verify v15.1.0 / leviculum v0.26.0+ciris.1 (CIRISServer#587). 0.5.205 SHIPPED A RELEASE THAT COULD NOT OPEN A DATABASE WITH HISTORY: CIRISPersist#840, a one-word edit inside a SQL COMMENT in V070 changed its refinery checksum, so every node that had applied V070 before 2026-09-09 failed validation inside `Engine::with_*` before anything bound — persist v43.0.0 through v44.1.0. It took the canonical down ~7 min and crash-looped it 16x. v44.1.1 reverts V070 to its v42.1.0 BYTES (verified byte-identical here), normalises the history row for nodes CREATED under the broken releases, and pins every migration checksum so the class cannot recur. WHY NOTHING CAUGHT IT: a fresh database applies the current migration and records the current checksum, so there is nothing to mismatch — the failure is invisible to every node that starts from an empty data dir, which is every test node, every harness node and every CI lane we own. 122 integration binaries and both ladders were green on the broken pin. THE ERROR ALSO HID ITSELF: our FFI boundary rendered only the outermost `.context()` and discarded the source() chain, so the node reported `build shared persist Engine (hybrid hardware signer)` and never said `migration checksum` — fixed here too (#586), and it is what found this. edge v23.1.1: #586 group content on blobs (chat::Body gains Pointer), #581 the store gate. Client floor 0.5.203.
+version = "0.5.207" # 0.5.207 = BLOB-BACKED CHAT. Substrate: edge v24.0.0 / persist v44.1.1 / verify v15.1.0 / leviculum v0.26.0+ciris.1 (CIRISServer#590). Chat content leaves the row: every body now lives in the room's ENCRYPTED BLOB STORE and the attestation carries a pointer, so the plane never carries the bytes. THE PRECONDITION IS PROVISIONING: the community DEK is wrapped PER ACTIVE IDENTITY OCCURRENCE, and a node with none produces `granted=[]` — content nobody can read, including its author. `start_chat` now provisions one before the room exists, deriving the content x25519 + ML-KEM-768 halves from THIS NODE's sealed Ed25519 seed via `ciris_keyring::SelfEncKeys` (HKDF, nothing stored, deterministic — a restored node keeps every grant). The node's seed, never the owner's: the occurrence must be a key this process can decrypt for. edge v24 also REFUSES a `readable_by_nobody()` write while the caller still holds the plaintext, so this fails loudly at send instead of as an empty transcript forever (CIRISEdge#599). AND THE ROOM NO LONGER SHARES ONE KEY: a member's content is readable only by that member, on their own device — this node cannot open a body sealed to a contact, which the chat suite now asserts BY REASON rather than by "did not open". Client floor 0.5.203.
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
@@ -136,7 +136,7 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
 ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v44.1.1", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v23.1.1", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v24.0.0", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -363,7 +363,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v15.1.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v23.1.1", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v24.0.0", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN

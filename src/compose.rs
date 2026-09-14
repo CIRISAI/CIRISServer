@@ -1484,6 +1484,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&chat_node_signer),
                         crate::user_seed_dir(&cfg),
+                        cfg.keystore_alias.clone(),
+                        cfg.identity_dir.clone(),
                         // The live transport, so the contact ladder can run its
                         // `discover` rung — "is there somewhere to send" — through
                         // edge's own `RouteLens` instead of this module deciding

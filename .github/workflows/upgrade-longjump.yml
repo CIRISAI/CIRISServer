@@ -88,7 +88,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `components:` is NOT decoration. The action installs `--profile minimal`
+      # (rustc/cargo/rust-std), while this repo's rust-toolchain.toml asks for
+      # clippy + rustfmt — so whatever runs cargo FIRST pays for installing
+      # them. In every other lane that is a single `cargo build`. Here it is
+      # maturin, which fires `cargo metadata` and `rustc -vV` concurrently: two
+      # rustup proxies open two component transactions, and the loser trips over
+      # the half-written file the winner just laid down ("failed to install
+      # component: 'rustfmt-preview…', detected conflict: 'bin/cargo-fmt'"),
+      # which surfaces as `cargo metadata` failing and reads like a broken
+      # crate. Installing them with the toolchain leaves nothing to install at
+      # build time.
       - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy, rustfmt
       - name: Set up sccache (compiler cache over GHA)
         # Without this, `RUSTC_WRAPPER: sccache` names a binary that is not on
         # PATH and cargo fails with "never executed" — which is a DIFFERENT
