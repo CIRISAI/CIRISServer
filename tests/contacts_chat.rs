@@ -509,7 +509,22 @@ async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::
     //    `SelfEncKeys` reads. Minting a NODE seed with the USER tool produced a
     //    seed no keyring reader could open, which I briefly mistook for a
     //    keyring bug.
-    let node_alias = format!("chat-node-{}", std::process::id());
+    //  * ONE ALIAS PER TEST, not per process. `open_or_create` stores through
+    //    `SoftwareSecureBlobStorage::store`, whose "atomic write" names its
+    //    temp file after the ALIAS (`{alias}.blob.tmp`) rather than uniquely.
+    //    Two threads creating the same alias at once therefore write the same
+    //    temp path, and the one that renames second fails ENOENT ("Failed to
+    //    rename blob: No such file or directory"). `cargo test` runs this
+    //    file's tests in parallel, so a per-process alias is a coin flip: it
+    //    passed 33/33 locally and failed one test in CI. Same reasoning as
+    //    `OwnerIdentity::mint` — the alias is what keeps two tests apart, not
+    //    the shared CIRIS_HOME.
+    static NODE_NTH: AtomicU32 = AtomicU32::new(0);
+    let node_alias = format!(
+        "chat-node-{}-{}",
+        std::process::id(),
+        NODE_NTH.fetch_add(1, Ordering::Relaxed)
+    );
     let node_seed_dir = ciris_home().join(&node_alias);
     std::fs::create_dir_all(&node_seed_dir).expect("node seed dir");
     ciris_keyring::SealedEd25519Signer::open_or_create(
