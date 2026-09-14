@@ -34,9 +34,9 @@
 //!
 //! * **the owner holds their key** — the message is signed by the PERSON, and
 //!   the route opens that key off disk ([`OwnerIdentity`]);
-//! * **the contact answers the handshake** — the body is sealed under the
-//!   room's MLS record secret, so this single-node fixture plays the far side
-//!   ([`open_chat`], [`contact_room_key`]).
+//! * **the contact answers the handshake** — the send door is gated on the
+//!   room's MLS handshake, so this single-node fixture plays the far side
+//!   ([`open_chat`]).
 //!
 //! Both are the same lesson as the control above, one rung down: a fixture that
 //! only looks like the other party keys no room and signs no words.
@@ -737,8 +737,10 @@ async fn share_as(
 /// (v39.0.0 will not let this node author another key's claim), and hands back
 /// the material the creator's Welcome is joined with.
 ///
-/// Returns the room id and that material; [`contact_room_key`] turns the material
-/// into the key that opens what the owner sends.
+/// Returns the room id and that material. Nothing consumes the material under
+/// edge v24 — a reader opens bodies through its content occurrence, not a room
+/// key — and the helper that used to join the far side from it is gone rather
+/// than kept as a promise nothing calls.
 async fn open_chat(
     client: &reqwest::Client,
     base: &str,
@@ -798,40 +800,6 @@ async fn open_chat(
     let node = node_edge_signer(engine).await;
     share_as(engine, row, &community_id, &node, &contact).await;
     (community_id, material)
-}
-
-/// The CONTACT's view of the room key, once the owner's Welcome has landed.
-///
-/// This is the far side actually joining, not a re-derivation: the key comes out
-/// of an MLS group built from the creator's Welcome and the SAME material whose
-/// KeyPackage [`open_chat`] published. A body it opens is a body the other member
-/// can genuinely read.
-// edge v24.0.0: reading a room takes no room key, so nothing calls this now.
-// Kept rather than deleted because the HANDSHAKE that derives it is still the
-// membership gate on the send path, and this is the only place that exercises
-// the contact's side of it.
-#[allow(dead_code)]
-async fn contact_room_key(
-    engine: &Engine,
-    owner_id: &OwnerIdentity,
-    community_id: &str,
-    material: ciris_edge::mls::cohort_group::CohortKeyMaterial,
-) -> ciris_edge::chat::RoomKey {
-    let dir = engine.federation_directory();
-    let (welcome, _epoch) = ciris_edge::chat::welcome_from(&*dir, &owner_id.key_id, community_id)
-        .await
-        .expect("read the creator's Welcome")
-        .expect("the owner's send must have admitted the contact and shared a Welcome");
-    let store = ciris_edge::mls::ScopeStateProvider::new(Arc::new(
-        ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(community_id.as_bytes())
-            .expect("the contact's own MLS store"),
-    ));
-    let group = ciris_edge::mls::CohortGroup::join(store, community_id, material, &welcome, 16)
-        .await
-        .expect("join the room from the Welcome");
-    ciris_edge::chat::RoomKey::of(&group)
-        .await
-        .expect("the room key, as the contact holds it")
 }
 
 // ─── 1. Add a contact by fedID ──────────────────────────────────────────────
