@@ -2092,9 +2092,9 @@ mod python {
     /// end of a run — it makes an HTTP round-trip per canonical, which is why
     /// it is not part of `delivery_status()`.
     #[pyfunction]
-    #[pyo3(name = "delivery_receipt")]
-    fn py_delivery_receipt(py: Python<'_>) -> String {
-        py.detach(crate::federation_delivery::delivery_receipt_json)
+    #[pyo3(name = "delivery_receipt", signature = (agent_id_hash=None))]
+    fn py_delivery_receipt(py: Python<'_>, agent_id_hash: Option<String>) -> String {
+        py.detach(move || crate::federation_delivery::delivery_receipt_json(agent_id_hash))
     }
 
     /// `ciris_server.node_state(self_key_id=None, root_key_id=None, now=None,

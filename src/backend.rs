@@ -114,3 +114,26 @@ pub async fn count_traces(
             .to_string(),
     ))
 }
+
+/// One trace summary by id, or `None` — the receipt's "do you hold THIS one"
+/// ([`crate::trace_receipt`]). Same door as the other two.
+pub async fn get_trace_summary(
+    engine: &Engine,
+    trace_id: &str,
+    scope: CallerScope,
+) -> Result<Option<ciris_persist::prelude::TraceSummary>, Error> {
+    use ciris_persist::prelude::ReadEngine as _;
+
+    #[cfg(target_os = "linux")]
+    if let Some(pg) = engine.postgres_backend() {
+        return pg.get_trace_summary(trace_id, scope).await;
+    }
+    if let Some(sq) = engine.sqlite_backend() {
+        return sq.get_trace_summary(trace_id, scope).await;
+    }
+    Err(Error::Backend(
+        "this Engine has no read-capable backend (expected SQLite or PostgreSQL) — \
+         trace lookups are unavailable on this node"
+            .to_string(),
+    ))
+}

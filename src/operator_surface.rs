@@ -2458,7 +2458,17 @@ struct OperatorState {
 /// `GET /v1/node/delivery-receipt` — the producer's receipt
 /// ([`crate::trace_receipt::delivery_receipt`]), behind the same owner gate as
 /// the state: which agents this node authored for is the node's business.
-async fn get_delivery_receipt(State(st): State<OperatorState>, headers: HeaderMap) -> Response {
+#[derive(serde::Deserialize)]
+struct DeliveryReceiptQuery {
+    /// Name the agent and skip discovery — the embedded agent knows its own.
+    agent_id_hash: Option<String>,
+}
+
+async fn get_delivery_receipt(
+    State(st): State<OperatorState>,
+    headers: HeaderMap,
+    Query(q): Query<DeliveryReceiptQuery>,
+) -> Response {
     if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
         .await
         .is_err()
@@ -2481,7 +2491,8 @@ async fn get_delivery_receipt(State(st): State<OperatorState>, headers: HeaderMa
         Err(resp) => return resp,
     }
     let reads = crate::trace_receipt::canonical_reads(&st.engine).await;
-    let view = crate::trace_receipt::delivery_receipt(&st.engine, reads).await;
+    let view =
+        crate::trace_receipt::delivery_receipt(&st.engine, reads, q.agent_id_hash.as_deref()).await;
     (StatusCode::OK, Json(json!({ "data": view }))).into_response()
 }
 

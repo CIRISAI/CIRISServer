@@ -1416,7 +1416,7 @@ pub fn delivery_status_json() -> String {
 /// The default reconcile cadence, matching the compose default
 /// ([`crate::config_reconcile::DEFAULT_REPLICATION_RECONCILE_SECS`]).
 #[cfg(feature = "python")]
-pub fn delivery_receipt_json() -> String {
+pub fn delivery_receipt_json(agent_id_hash: Option<String>) -> String {
     let Some(engine) = ciris_persist::ffi::pyo3::current_rust_engine() else {
         return serde_json::json!({
             "error": "no engine handle — this node's own trace store is not readable here",
@@ -1425,7 +1425,7 @@ pub fn delivery_receipt_json() -> String {
     };
     let fut = async move {
         let reads = crate::trace_receipt::canonical_reads(&engine).await;
-        crate::trace_receipt::delivery_receipt(&engine, reads).await
+        crate::trace_receipt::delivery_receipt(&engine, reads, agent_id_hash.as_deref()).await
     };
     let value = match HELD.get() {
         Some((rt, _)) => rt.block_on(fut),

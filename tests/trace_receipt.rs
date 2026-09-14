@@ -1,12 +1,24 @@
-//! **The receipt says what the canonical HOLDS, and unknown is not zero.**
+//! **The receipt says what the canonical HOLDS — signed — and unknown is not
+//! zero.**
 //!
 //! Two engines: a "canonical" that has admitted some of an agent's traces and a
 //! "producer" that authored more of them. The canonical door is served on a real
 //! socket; the producer's receipt asks it over HTTP the way a node would, and
-//! the numbers must come back as `authored / held / lag` — with an unreachable
-//! canonical reading `held: null`, never `held: 0` (CIRISServer#487 was answered
-//! by a database query because no surface said this; a surface that said "0"
-//! when it meant "could not ask" would be worse than none).
+//! verifies the answer against the canonical's REGISTERED key in the producer's
+//! own directory. The verdict is whether the newest trace the producer authored
+//! is held — asked by id — not whether the counts line up (Codex, PR #592: local
+//! retention or the canonical's history make counts agree while the newest
+//! trace never arrived).
+//!
+//! Pinned here, one test each:
+//!   * count + newest for one agent, and the by-id check;
+//!   * "authored here" is the SIGNER, not the store — a canonical asking itself
+//!     finds nothing, a node whose key signed the traces finds them;
+//!   * a signed receipt from a registered canonical VERIFIES; a tampered one
+//!     reads `failed`, an unsigned one `unavailable`, both with `held: null`;
+//!   * an unreachable canonical reads unknown, not zero;
+//!   * the verdict covers canonicals that ANSWERED — one dead beside one live
+//!     does not turn "delivered" into "not delivered".
 //!
 //! The key, trace-batch and engine helpers are the capacity scorer's
 //! (`tests/capacity_scorer.rs`), copied rather than shared: that file is the
@@ -37,8 +49,11 @@ use ciris_server::trace_receipt::{self, CanonicalRead, UrlSource};
 const AGENT_KEY_ID: &str = "agent-receipt";
 const AGENT_ID_HASH: &str = "agent-receipt-hash";
 
-fn agent_identity() -> (LocalSigner, String) {
-    let signer = LocalSigner::from_parts(
+/// The agent's hybrid signer and its DERIVED key id — the id its traces carry
+/// as `signature_key_id`, and the id a node whose engine signs as the agent
+/// reports as `local_derived_key_id()`.
+fn agent_signer() -> (Arc<LocalSigner>, String) {
+    let signer = Arc::new(LocalSigner::from_parts(
         SigningKey::from_bytes(&[0x11; 32]),
         AGENT_KEY_ID.to_string(),
         Some(Arc::new(
@@ -46,73 +61,97 @@ fn agent_identity() -> (LocalSigner, String) {
                 .expect("agent ml-dsa"),
         ) as Arc<dyn ciris_keyring::PqcSigner>),
         Some(format!("{AGENT_KEY_ID}-pqc")),
-    );
+    ));
     let key_id = signer.derived_key_id();
     (signer, key_id)
 }
 
-fn agent_pqc_pubkey_b64() -> String {
+fn agent_pubkeys_b64() -> (String, String) {
     use ciris_crypto::PqcSigner as _;
-    BASE64.encode(
+    let ed = BASE64.encode(
+        SigningKey::from_bytes(&[0x11; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    let pqc = BASE64.encode(
         ciris_crypto::MlDsa65Signer::from_seed(&[0x12; 32])
             .expect("agent ml-dsa seed")
             .public_key()
             .expect("agent ml-dsa pk"),
-    )
+    );
+    (ed, pqc)
 }
 
-/// One in-memory node keyed by a hybrid software signer, with the agent's key
-/// registered so its signed batches admit.
-async fn node(seed: u8, node_key_id: &str) -> Arc<Engine> {
+/// A node: its engine, its derived key id, and its two pubkeys (base64) so
+/// ANOTHER node can register it and verify what it signs.
+struct Node {
+    engine: Arc<Engine>,
+    key_id: String,
+    ed_pub_b64: String,
+    mldsa_pub_b64: String,
+}
+
+/// One in-memory node keyed by its OWN hybrid software signer (seeded from
+/// `seed`), with the agent's key registered so the agent's signed batches
+/// admit.
+async fn node(seed: u8, alias: &str) -> Node {
     use ciris_keyring::PqcSigner as _;
     let signing_key = SigningKey::from_bytes(&[seed; 32]);
     let ed_pub_b64 = BASE64.encode(signing_key.verifying_key().to_bytes());
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(
-            &[seed.wrapping_add(1); 32],
-            format!("{node_key_id}-pqc"),
-        )
-        .expect("node ML-DSA-65 seed"),
+        MlDsa65SoftwareSigner::from_seed_bytes(&[seed.wrapping_add(1); 32], format!("{alias}-pqc"))
+            .expect("node ML-DSA-65 seed"),
     );
     let mldsa_pub_b64 = BASE64.encode(pqc.public_key().await.expect("node ML-DSA-65 pubkey"));
     let signer = Arc::new(LocalSigner::from_parts(
         signing_key,
-        node_key_id.to_string(),
+        alias.to_string(),
         Some(pqc),
-        Some(format!("{node_key_id}-pqc")),
+        Some(format!("{alias}-pqc")),
     ));
     let engine = Arc::new(
         Engine::with_signer(signer, "sqlite::memory:")
             .await
             .expect("Engine::with_signer (sqlite::memory:)"),
     );
-    let derived = engine
+    let key_id = engine
         .local_derived_key_id()
         .await
         .expect("derive node federation key_id");
     register_key_hybrid(
         &engine,
-        &derived,
+        &key_id,
         &ed_pub_b64,
         Some(&mldsa_pub_b64),
         identity_type::NODE,
     )
     .await;
-    let (_, agent_key_id) = agent_identity();
-    let agent_pub_b64 = BASE64.encode(
-        SigningKey::from_bytes(&[0x11; 32])
-            .verifying_key()
-            .to_bytes(),
+    register_agent(&engine).await;
+    Node {
+        engine,
+        key_id,
+        ed_pub_b64,
+        mldsa_pub_b64,
+    }
+}
+
+/// A node whose engine signs AS THE AGENT — the embedded-agent shape, where
+/// the process's own federation key is the one on its traces.
+async fn node_signing_as_the_agent() -> Arc<Engine> {
+    let (signer, _) = agent_signer();
+    let engine = Arc::new(
+        Engine::with_signer(signer, "sqlite::memory:")
+            .await
+            .expect("Engine::with_signer (sqlite::memory:)"),
     );
-    register_key_hybrid(
-        &engine,
-        &agent_key_id,
-        &agent_pub_b64,
-        Some(&agent_pqc_pubkey_b64()),
-        identity_type::AGENT,
-    )
-    .await;
+    register_agent(&engine).await;
     engine
+}
+
+async fn register_agent(engine: &Engine) {
+    let (_, agent_key_id) = agent_signer();
+    let (ed, pqc) = agent_pubkeys_b64();
+    register_key_hybrid(engine, &agent_key_id, &ed, Some(&pqc), identity_type::AGENT).await;
 }
 
 async fn register_key_hybrid(
@@ -153,6 +192,18 @@ async fn register_key_hybrid(
         .await
         .expect("register key in federation directory");
     fixture_pqc::register(engine).await;
+}
+
+/// Make the producer able to VERIFY the canonical: its key, registered here.
+async fn trust(producer: &Engine, canonical: &Node) {
+    register_key_hybrid(
+        producer,
+        &canonical.key_id,
+        &canonical.ed_pub_b64,
+        Some(&canonical.mldsa_pub_b64),
+        identity_type::NODE,
+    )
+    .await;
 }
 
 /// One signed `CompleteTrace` batch; `idx` names the trace (`trace-rcpt-NNNN`)
@@ -238,7 +289,7 @@ fn build_trace_batch(agent_key_id: &str, agent_sk: &SigningKey, idx: usize) -> V
 
 /// Admit traces `0..n` into `engine` as the agent.
 async fn admit(engine: &Engine, n: usize) {
-    let (_, agent_key_id) = agent_identity();
+    let (_, agent_key_id) = agent_signer();
     let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
     let mut inserted = 0usize;
     for i in 0..n {
@@ -255,9 +306,8 @@ async fn admit(engine: &Engine, n: usize) {
     );
 }
 
-/// Serve the canonical door on an ephemeral port; returns its base URL.
-async fn serve_canonical(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
-    let app = trace_receipt::router(engine);
+/// Serve a router on an ephemeral port; returns its base URL.
+async fn serve(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -268,21 +318,49 @@ async fn serve_canonical(engine: Arc<Engine>) -> (String, tokio::task::JoinHandl
     (format!("http://{addr}"), handle)
 }
 
+fn read(url: String, key_id: Option<&str>) -> CanonicalRead {
+    CanonicalRead {
+        key_id: key_id.map(str::to_string),
+        url,
+        url_source: UrlSource::Config,
+    }
+}
+
+/// A "canonical" that serves a FIXED body at the receipt route — for the
+/// forged and unsigned cases.
+fn stub(body: serde_json::Value) -> axum::Router {
+    axum::Router::new().route(
+        trace_receipt::RECEIPT_ROUTE,
+        axum::routing::get(move || {
+            let body = body.clone();
+            async move { axum::Json(body) }
+        }),
+    )
+}
+
 // ─── the canonical door ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn the_canonical_counts_one_agents_traces_and_names_the_newest() {
+async fn the_canonical_counts_one_agents_traces_names_the_newest_and_answers_by_id() {
     let canonical = node(0xA1, "node-canonical").await;
-    admit(&canonical, 5).await;
-    let (base, _h) = serve_canonical(Arc::clone(&canonical)).await;
+    admit(&canonical.engine, 5).await;
+    let (base, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
     let client = reqwest::Client::new();
+    let get = |q: Vec<(&'static str, String)>| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}{}", trace_receipt::RECEIPT_ROUTE))
+                .query(&q)
+                .send()
+                .await
+                .expect("GET receipt")
+        }
+    };
 
-    let json: serde_json::Value = client
-        .get(format!("{base}{}", trace_receipt::RECEIPT_ROUTE))
-        .query(&[("agent_id_hash", AGENT_ID_HASH)])
-        .send()
+    let json: serde_json::Value = get(vec![("agent_id_hash", AGENT_ID_HASH.into())])
         .await
-        .expect("GET receipt")
         .json()
         .await
         .expect("receipt json");
@@ -296,15 +374,50 @@ async fn the_canonical_counts_one_agents_traces_and_names_the_newest() {
         data["newest"]["trace_id"], "trace-rcpt-0004",
         "newest is the latest started_at, not the first id: {json}"
     );
+    assert!(
+        data.get("holds_trace").is_none(),
+        "nothing asked by id: {json}"
+    );
+    assert_eq!(
+        json["signature"]["manifest"]["signer_key_id"], canonical.key_id,
+        "the receipt is signed by the canonical's own node key: {json}"
+    );
+
+    // By id: held for THIS agent, or not.
+    let json: serde_json::Value = get(vec![
+        ("agent_id_hash", AGENT_ID_HASH.into()),
+        ("trace_id", "trace-rcpt-0002".into()),
+    ])
+    .await
+    .json()
+    .await
+    .expect("json");
+    assert_eq!(json["data"]["holds_trace"], true, "{json}");
+    let json: serde_json::Value = get(vec![
+        ("agent_id_hash", AGENT_ID_HASH.into()),
+        ("trace_id", "trace-rcpt-0099".into()),
+    ])
+    .await
+    .json()
+    .await
+    .expect("json");
+    assert_eq!(json["data"]["holds_trace"], false, "{json}");
+    // A held id under ANOTHER agent's hash is not this agent's trace.
+    let json: serde_json::Value = get(vec![
+        ("agent_id_hash", "somebody-else".into()),
+        ("trace_id", "trace-rcpt-0002".into()),
+    ])
+    .await
+    .json()
+    .await
+    .expect("json");
+    assert_eq!(json["data"]["holds_trace"], false, "{json}");
+    assert_eq!(json["data"]["traces"], 0);
 
     // A hash nobody has written under: zero and NO newest — and that is an
     // answer, distinct from the 503 an unreadable store would give.
-    let json: serde_json::Value = client
-        .get(format!("{base}{}", trace_receipt::RECEIPT_ROUTE))
-        .query(&[("agent_id_hash", "nobody")])
-        .send()
+    let json: serde_json::Value = get(vec![("agent_id_hash", "nobody".into())])
         .await
-        .expect("GET receipt for unknown hash")
         .json()
         .await
         .expect("json");
@@ -320,63 +433,310 @@ async fn the_canonical_counts_one_agents_traces_and_names_the_newest() {
     assert_eq!(resp.status(), 400);
 }
 
+// ─── "authored here" is the signer, not the store ───────────────────────────
+
+#[tokio::test]
+async fn authored_here_is_decided_by_the_signing_key_not_by_what_the_store_holds() {
+    // A canonical asking itself: holds five of the agent's traces, signed by
+    // the AGENT's key, not its own. Authored here: none.
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, 5).await;
+    let mine = trace_receipt::authored_here(&canonical.engine, None)
+        .await
+        .expect("read");
+    assert!(
+        mine.is_empty(),
+        "a node reports only traces ITS key signed; these are the agent's: {mine:?}"
+    );
+
+    // The embedded-agent shape: the engine signs as the agent, so the traces'
+    // signing key IS this node's own key. Authored here: all of them.
+    let producer = node_signing_as_the_agent().await;
+    admit(&producer, 3).await;
+    let mine = trace_receipt::authored_here(&producer, None)
+        .await
+        .expect("read");
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0].agent_id_hash, AGENT_ID_HASH);
+    assert_eq!(mine[0].authored, 3);
+    assert_eq!(
+        mine[0]
+            .newest_authored
+            .as_ref()
+            .map(|n| n.trace_id.as_str()),
+        Some("trace-rcpt-0002")
+    );
+
+    // Naming the hash skips discovery entirely — the embedded agent knows its
+    // own — and works on a node whose key signed nothing.
+    let mine = trace_receipt::authored_here(&canonical.engine, Some(AGENT_ID_HASH))
+        .await
+        .expect("read");
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].authored, 5);
+}
+
 // ─── the producer's receipt ─────────────────────────────────────────────────
 
 #[tokio::test]
-async fn the_producer_reads_authored_against_held_and_reports_the_lag() {
+async fn the_producer_verifies_the_receipt_and_asks_whether_its_newest_trace_is_held() {
     let canonical = node(0xA1, "node-canonical").await;
-    admit(&canonical, 5).await;
-    let (base, _h) = serve_canonical(Arc::clone(&canonical)).await;
+    admit(&canonical.engine, 5).await;
+    let (base, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
 
     let producer = node(0xB1, "node-producer").await;
-    admit(&producer, 7).await;
+    trust(&producer.engine, &canonical).await;
+    admit(&producer.engine, 7).await;
 
     let view = trace_receipt::delivery_receipt(
-        &producer,
-        vec![CanonicalRead {
-            key_id: Some("ciris-canonical-stub".into()),
-            url: base.clone(),
-            url_source: UrlSource::Config,
-        }],
+        &producer.engine,
+        vec![read(base.clone(), Some(&canonical.key_id))],
+        Some(AGENT_ID_HASH),
     )
     .await;
 
     let agents = view["agents"].as_array().expect("agents");
-    assert_eq!(agents.len(), 1, "one agent authored here: {view}");
-    assert_eq!(agents[0]["agent_id_hash"], AGENT_ID_HASH);
+    assert_eq!(agents.len(), 1, "{view}");
     assert_eq!(agents[0]["authored"], 7);
     assert_eq!(agents[0]["newest_authored"]["trace_id"], "trace-rcpt-0006");
 
     let c = &view["canonicals"][0];
-    assert_eq!(c["url"], base);
     assert_eq!(c["reachable"], true, "{view}");
+    assert_eq!(c["signer_key_id"], canonical.key_id, "{view}");
     let a = &c["agents"][0];
-    assert_eq!(a["held"], 5, "the canonical's own count, not ours: {view}");
-    assert_eq!(a["lag"], 2, "seven authored, five held: {view}");
-    assert_eq!(a["shipped"], true);
-    assert_eq!(a["newest_held"]["trace_id"], "trace-rcpt-0004");
+    assert_eq!(a["verification"], "verified", "{view}");
+    assert_eq!(a["held"], 5, "the canonical's own count: {view}");
+    assert_eq!(a["count_gap"], 2, "context, not verdict: {view}");
+    assert_eq!(a["shipped_any"], true);
     assert_eq!(
-        a["newest_matches"], false,
-        "the newest thing we made is not the newest thing they hold: {view}"
+        a["newest_authored_held"], false,
+        "trace-rcpt-0006 was never admitted there — THE answer: {view}"
     );
+    assert_eq!(a["newest_held"]["trace_id"], "trace-rcpt-0004");
+    assert_eq!(a["newest_matches"], false);
 
     let v = &view["verdict"];
-    assert_eq!(v["any_canonical_reachable"], true);
-    assert_eq!(v["shipped_to_every_reachable_canonical"], false);
-    assert_eq!(v["worst_lag"], 2);
+    assert_eq!(v["canonicals_answered"], 1);
+    assert_eq!(v["canonicals_unreachable"], 0);
+    assert_eq!(
+        v["newest_authored_held_by_every_answering_canonical"],
+        false
+    );
     assert!(
         view["hint"]
             .as_str()
             .unwrap_or_default()
-            .contains("not held by a canonical"),
-        "the hint names the lag: {view}"
+            .contains("does NOT hold the newest trace"),
+        "{view}"
+    );
+
+    // Now the canonical catches up: the two it was missing land. The counts
+    // would have read "delivered" as soon as they matched; identity says it
+    // now, because THE trace is there.
+    let (_, agent_key_id) = agent_signer();
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    for i in [5usize, 6] {
+        canonical
+            .engine
+            .receive_and_persist(
+                &build_trace_batch(&agent_key_id, &agent_sk, i),
+                &NullScrubber,
+            )
+            .await
+            .expect("ingest");
+    }
+    let view = trace_receipt::delivery_receipt(
+        &producer.engine,
+        vec![read(base, Some(&canonical.key_id))],
+        Some(AGENT_ID_HASH),
+    )
+    .await;
+    let a = &view["canonicals"][0]["agents"][0];
+    assert_eq!(a["newest_authored_held"], true, "{view}");
+    assert_eq!(a["newest_matches"], true, "{view}");
+    assert_eq!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"], true,
+        "{view}"
+    );
+    assert!(
+        view["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the plane delivered"),
+        "{view}"
     );
 }
 
 #[tokio::test]
-async fn an_unreachable_canonical_reads_unknown_not_zero() {
+async fn counts_alone_never_say_delivered() {
+    // The canonical holds MORE of this agent's traces than the producer has
+    // (history from earlier runs; the producer pruned). Counts say "held ≥
+    // authored"; the newest authored trace is still not there.
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, 5).await; // trace-rcpt-0000..0004
+    let (base, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+
     let producer = node(0xB1, "node-producer").await;
-    admit(&producer, 3).await;
+    trust(&producer.engine, &canonical).await;
+    // Only the two newest ids, which the canonical does NOT hold.
+    let (_, agent_key_id) = agent_signer();
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    for i in [7usize, 8] {
+        producer
+            .engine
+            .receive_and_persist(
+                &build_trace_batch(&agent_key_id, &agent_sk, i),
+                &NullScrubber,
+            )
+            .await
+            .expect("ingest");
+    }
+
+    let view = trace_receipt::delivery_receipt(
+        &producer.engine,
+        vec![read(base, Some(&canonical.key_id))],
+        Some(AGENT_ID_HASH),
+    )
+    .await;
+    let a = &view["canonicals"][0]["agents"][0];
+    assert_eq!(a["authored"], 2);
+    assert_eq!(a["held"], 5);
+    assert_eq!(a["count_gap"], 0, "counts say nothing is missing: {view}");
+    assert_eq!(
+        a["newest_authored_held"], false,
+        "identity says trace-rcpt-0008 never arrived: {view}"
+    );
+    assert_eq!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"], false,
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn a_forged_receipt_reads_failed_and_an_unsigned_one_unavailable_both_with_held_null() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, 5).await;
+    let (real, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+
+    let producer = node(0xB1, "node-producer").await;
+    trust(&producer.engine, &canonical).await;
+    admit(&producer.engine, 2).await;
+
+    // Take a real, signed receipt and change the number.
+    let mut forged: serde_json::Value = reqwest::Client::new()
+        .get(format!("{real}{}", trace_receipt::RECEIPT_ROUTE))
+        .query(&[
+            ("agent_id_hash", AGENT_ID_HASH),
+            ("trace_id", "trace-rcpt-0001"),
+        ])
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(forged["data"]["traces"], 5);
+    forged["data"]["traces"] = serde_json::json!(500);
+    let (forged_url, _h2) = serve(stub(forged.clone())).await;
+
+    // And one that simply carries no signature at all.
+    let mut unsigned = forged.clone();
+    unsigned["data"]["traces"] = serde_json::json!(5);
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let (unsigned_url, _h3) = serve(stub(unsigned)).await;
+
+    let view = trace_receipt::delivery_receipt(
+        &producer.engine,
+        vec![
+            read(forged_url, Some(&canonical.key_id)),
+            read(unsigned_url, Some(&canonical.key_id)),
+        ],
+        Some(AGENT_ID_HASH),
+    )
+    .await;
+
+    let f = &view["canonicals"][0];
+    assert_eq!(f["reachable"], true, "{view}");
+    assert_eq!(f["agents"][0]["verification"], "failed", "{view}");
+    assert!(
+        f["agents"][0]["held"].is_null(),
+        "a forged count is not a count: {view}"
+    );
+    assert!(
+        f["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("does not verify")),
+        "{view}"
+    );
+
+    let u = &view["canonicals"][1];
+    assert_eq!(u["reachable"], true, "{view}");
+    assert_eq!(u["agents"][0]["verification"], "unavailable", "{view}");
+    assert!(u["agents"][0]["held"].is_null(), "{view}");
+    assert!(
+        u["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no signature")),
+        "{view}"
+    );
+
+    let v = &view["verdict"];
+    assert_eq!(
+        v["canonicals_answered"], 0,
+        "neither said anything usable: {view}"
+    );
+    assert!(
+        v["newest_authored_held_by_every_answering_canonical"].is_null(),
+        "{view}"
+    );
+    assert!(
+        view["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could verify"),
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn a_receipt_signed_by_someone_other_than_the_named_canonical_is_not_its_receipt() {
+    // A registered, honest node — that is not the canonical the producer
+    // asked for — serves receipts. Its signature verifies; it is still the
+    // wrong signer.
+    let impostor = node(0xC1, "node-impostor").await;
+    admit(&impostor.engine, 5).await;
+    let (url, _h) = serve(trace_receipt::router(Arc::clone(&impostor.engine))).await;
+
+    let producer = node(0xB1, "node-producer").await;
+    trust(&producer.engine, &impostor).await;
+    admit(&producer.engine, 2).await;
+
+    let view = trace_receipt::delivery_receipt(
+        &producer.engine,
+        vec![read(url, Some("ciris-canonical-1-d7bdeu223k"))],
+        Some(AGENT_ID_HASH),
+    )
+    .await;
+    let c = &view["canonicals"][0];
+    assert_eq!(c["agents"][0]["verification"], "failed", "{view}");
+    assert!(c["agents"][0]["held"].is_null(), "{view}");
+    assert!(
+        c["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not its receipt")),
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreachable_canonical_reads_unknown_not_zero_and_does_not_poison_the_verdict() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, 3).await;
+    let (live, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+
+    let producer = node(0xB1, "node-producer").await;
+    trust(&producer.engine, &canonical).await;
+    admit(&producer.engine, 3).await;
 
     // A port nothing listens on.
     let dead = {
@@ -386,41 +746,47 @@ async fn an_unreachable_canonical_reads_unknown_not_zero() {
         format!("http://{addr}")
     };
     let view = trace_receipt::delivery_receipt(
-        &producer,
-        vec![CanonicalRead {
-            key_id: Some("ciris-canonical-dead".into()),
-            url: dead.clone(),
-            url_source: UrlSource::DerivedFromIpHint,
-        }],
+        &producer.engine,
+        vec![
+            CanonicalRead {
+                key_id: Some("ciris-canonical-dead".into()),
+                url: dead.clone(),
+                url_source: UrlSource::DerivedFromIpHint,
+            },
+            read(live, Some(&canonical.key_id)),
+        ],
+        Some(AGENT_ID_HASH),
     )
     .await;
 
-    let c = &view["canonicals"][0];
-    assert_eq!(c["reachable"], false, "{view}");
-    assert_eq!(c["url"], dead, "the URL it tried is in the answer: {view}");
-    assert_eq!(c["url_source"], "derived_from_ip_hint");
+    let d = &view["canonicals"][0];
+    assert_eq!(d["reachable"], false, "{view}");
+    assert_eq!(d["url"], dead, "the URL it tried is in the answer: {view}");
+    assert_eq!(d["url_source"], "derived_from_ip_hint");
     assert!(
-        c["error"].as_str().is_some_and(|e| e.contains(&dead)),
+        d["error"].as_str().is_some_and(|e| e.contains(&dead)),
         "{view}"
     );
-    let a = &c["agents"][0];
-    assert_eq!(a["authored"], 3);
-    assert!(a["held"].is_null(), "unknown is not zero: {view}");
-    assert!(a["lag"].is_null(), "{view}");
-    assert!(a["shipped"].is_null(), "{view}");
+    assert!(
+        d["agents"][0]["held"].is_null(),
+        "unknown is not zero: {view}"
+    );
+    assert!(d["agents"][0]["newest_authored_held"].is_null(), "{view}");
 
+    // The live one answered and holds the newest trace: delivered THERE, and
+    // the dead one is counted apart rather than folded into "not delivered".
+    let l = &view["canonicals"][1];
+    assert_eq!(l["agents"][0]["newest_authored_held"], true, "{view}");
     let v = &view["verdict"];
-    assert_eq!(v["any_canonical_reachable"], false);
-    assert!(
-        v["shipped_to_every_reachable_canonical"].is_null(),
+    assert_eq!(v["canonicals_answered"], 1);
+    assert_eq!(v["canonicals_unreachable"], 1);
+    assert_eq!(
+        v["newest_authored_held_by_every_answering_canonical"], true,
         "{view}"
     );
-    assert!(v["worst_lag"].is_null(), "{view}");
+    let hint = view["hint"].as_str().unwrap_or_default();
     assert!(
-        view["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("UNKNOWN"),
+        hint.contains("the plane delivered") && hint.contains("1 canonical(s) did not answer"),
         "{view}"
     );
 }
@@ -428,7 +794,7 @@ async fn an_unreachable_canonical_reads_unknown_not_zero() {
 #[tokio::test]
 async fn a_node_with_no_canonical_and_no_traces_says_so_in_that_order() {
     let producer = node(0xB1, "node-producer").await;
-    let view = trace_receipt::delivery_receipt(&producer, Vec::new()).await;
+    let view = trace_receipt::delivery_receipt(&producer.engine, Vec::new(), None).await;
     assert!(
         view["agents"].as_array().is_some_and(Vec::is_empty),
         "{view}"
@@ -452,7 +818,7 @@ async fn canonical_reads_derive_the_read_api_from_an_ip_hint_unless_configured()
     // A stock node's baked record carries the canonical's Reticulum `ip` hint
     // and nothing else, so the read URL is derived — and says so.
     let producer = node(0xB1, "node-producer").await;
-    let reads = trace_receipt::canonical_reads(&producer).await;
+    let reads = trace_receipt::canonical_reads(&producer.engine).await;
     for r in &reads {
         assert_eq!(r.url_source, UrlSource::DerivedFromIpHint, "{r:?}");
         assert!(

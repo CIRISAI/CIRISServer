@@ -12,30 +12,46 @@
 //!     exactly that shape, and the question "did they land?" was answered by an
 //!     operator querying the canonical's database by key.
 //!
-//! What was missing is a number the producer can read that the RECEIVER
-//! asserts: *of the traces this agent authored, the canonical holds N.* This
-//! module is that number, on both sides:
+//! What was missing is a statement the producer can read that the RECEIVER
+//! asserts and SIGNS: *of the traces this agent authored, I hold N, and I hold
+//! the one you name.* This module is that statement, on both sides:
 //!
 //!   * **Canonical door** — [`router`] serves [`RECEIPT_ROUTE`]
-//!     (`GET /v1/traces/receipt?agent_id_hash=…`): count + newest trace for one
-//!     agent, index-served by persist's `trace_events_agenthash_ts`. No
-//!     payloads, no components — the asker names the hash, and gets back how
-//!     many and how recent. Unauthenticated on purpose: a producer proving its
-//!     own delivery holds no credential on the canonical, and the mesh already
-//!     replicates these rows to every consented peer. (AV-9 gates trace READS
-//!     on `agent_id_hash` at the caller's layer; this surface returns nothing
-//!     that read would — see the PR for the exposure argument.)
+//!     (`GET /v1/traces/receipt?agent_id_hash=…[&trace_id=…]`): count + newest
+//!     trace for one agent, and whether one named trace is held, index-served
+//!     by persist's `trace_events_agenthash_ts`. No payloads, no components.
+//!     Unauthenticated on purpose: a producer proving its own delivery holds no
+//!     credential on the canonical, and the mesh already replicates these rows
+//!     to every consented peer. The RESPONSE is signed with the canonical's
+//!     hybrid node key ([`crate::sign_object`]), because the default path to a
+//!     canonical is plain `http://` to a public address and an unsigned
+//!     receipt is one an intermediary could write.
 //!   * **Producer door** — [`delivery_receipt`] counts what this node authored
-//!     per agent, asks each canonical's receipt route for the same hashes, and
-//!     reports `authored / held / lag` per pair. Two front doors, one function:
-//!     `ciris_server.delivery_receipt()` in-process for the embedded agent
-//!     (the door its QA runner already uses for `delivery_status()`), and
-//!     `GET /v1/node/delivery-receipt` (owner-gated, on the operator surface)
-//!     for a compose node.
+//!     per agent, asks each canonical for the same hashes AND for the newest
+//!     trace by id, verifies each answer against the canonical's REGISTERED
+//!     pubkeys in this node's own directory (the baked record), and reports per
+//!     pair whether the newest authored trace is held. Two front doors, one
+//!     function: `ciris_server.delivery_receipt(agent_id_hash=None)` in-process
+//!     for the embedded agent (the door its QA runner already uses for
+//!     `delivery_status()`), and `GET /v1/node/delivery-receipt[?agent_id_hash=]`
+//!     (owner-gated, on the operator surface) for a compose node.
+//!
+//! **Delivery is a fact about identity, not cardinality.** `held >= authored`
+//! proves nothing when local retention has pruned rows or the canonical holds
+//! history from before this run (Codex, PR #592). The verdict is therefore
+//! "the newest trace this node authored is held by the canonical", asked by
+//! `trace_id`; the counts are reported beside it as context, never as the
+//! answer.
+//!
+//! **"Authored here" is a fact about the signer, not the store.** A node holds
+//! traces it replicated from peers too, and a canonical asking itself holds
+//! everyone's. Discovery keeps only summaries whose signing key is THIS
+//! process's own federation key; a caller that knows its agent hash names it
+//! and skips discovery altogether.
 //!
 //! Kept OUT of `delivery_status()` deliberately: that surface is polled in a
-//! wait loop, and this one makes an HTTP round-trip per canonical. A receipt is
-//! read once at the end of a run, not on every poll.
+//! wait loop, and this one makes HTTP round-trips. A receipt is read once at
+//! the end of a run, not on every poll.
 //!
 //! The canonical's read-API address is DERIVED unless configured: the baked
 //! record advertises only its Reticulum transport (`ip host:4242`), so the
@@ -57,7 +73,7 @@ use serde_json::{json, Value};
 
 use ciris_persist::prelude::{CallerScope, Engine, TraceFilter};
 
-/// The canonical door: `GET /v1/traces/receipt?agent_id_hash=…`.
+/// The canonical door: `GET /v1/traces/receipt?agent_id_hash=…[&trace_id=…]`.
 pub const RECEIPT_ROUTE: &str = "/v1/traces/receipt";
 
 /// The producer door on the operator surface (owner-gated, see
@@ -70,16 +86,24 @@ pub const PRODUCER_ROUTE: &str = "/v1/node/delivery-receipt";
 /// [`crate::config_reconcile::KEY_CANONICAL_READ_URLS`].
 pub const READ_API_PORT: u16 = 4243;
 
-/// How long one canonical gets to answer before `reachable: false`.
+/// Per-request timeout on one ask.
 pub const ASK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The deadline for EVERYTHING one canonical is asked, however many agents
+/// this node authored for. A canonical that accepts connections and answers
+/// slowly cannot hold the caller for `agents × ASK_TIMEOUT`.
+pub const CANONICAL_DEADLINE: Duration = Duration::from_secs(6);
+
+/// The label the canonical signs its receipts under ([`crate::sign_object`]).
+pub const SIGN_LABEL: &str = "trace-receipt";
 
 /// How many local summaries the producer pages to discover its agent hashes.
 /// Counts are exact regardless (`count_traces` per hash); this only bounds the
 /// discovery read.
 pub const LOCAL_WINDOW: i64 = 5_000;
 
-/// The newest trace the canonical holds for an agent — enough to recognise
-/// "the one I just sent", nothing of its content.
+/// The newest trace held for an agent — enough to recognise "the one I just
+/// sent", nothing of its content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Newest {
     pub trace_id: String,
@@ -87,8 +111,10 @@ pub struct Newest {
     pub completed_at: DateTime<Utc>,
 }
 
-/// What a canonical asserts about one agent's traces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What a canonical asserts about one agent's traces. This struct's
+/// `serde_json` bytes are what the canonical signs and what the producer
+/// re-derives to verify — see [`receipt_bytes`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Receipt {
     pub agent_id_hash: String,
     /// Distinct traces held for this agent.
@@ -96,11 +122,28 @@ pub struct Receipt {
     /// `None` when the canonical holds none — and, on the producer side, the
     /// reader must keep that apart from "could not ask".
     pub newest: Option<Newest>,
+    /// The `trace_id` the asker named, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_trace_id: Option<String>,
+    /// Whether that trace is held FOR THIS AGENT. `None` when none was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holds_trace: Option<bool>,
     pub read_at: DateTime<Utc>,
 }
 
+/// The bytes a receipt is signed over: its own `serde_json` encoding. Both
+/// sides compute this from the same struct, so the producer re-derives the
+/// canonical's bytes from the parsed `data` without a canonicalizer.
+pub fn receipt_bytes(r: &Receipt) -> Vec<u8> {
+    serde_json::to_vec(r).expect("a Receipt serializes")
+}
+
 /// One agent's receipt from THIS engine's store.
-pub async fn receipt_for(engine: &Engine, agent_id_hash: &str) -> Result<Receipt, String> {
+pub async fn receipt_for(
+    engine: &Engine,
+    agent_id_hash: &str,
+    trace_id: Option<&str>,
+) -> Result<Receipt, String> {
     let filter = TraceFilter {
         agent_id_hash: Some(agent_id_hash.to_string()),
         ..TraceFilter::default()
@@ -117,10 +160,23 @@ pub async fn receipt_for(engine: &Engine, agent_id_hash: &str) -> Result<Receipt
         started_at: s.started_at,
         completed_at: s.completed_at,
     });
+    let holds_trace = match trace_id {
+        None => None,
+        Some(id) => {
+            let held = crate::backend::get_trace_summary(engine, id, CallerScope::Unauthenticated)
+                .await
+                .map_err(|e| format!("look up trace {id}: {e}"))?;
+            // Held FOR THIS AGENT: a trace id is producer-chosen, and a row
+            // under the same id from another agent is not this agent's.
+            Some(held.is_some_and(|s| s.agent_id_hash == agent_id_hash))
+        }
+    };
     Ok(Receipt {
         agent_id_hash: agent_id_hash.to_string(),
         traces,
         newest,
+        asked_trace_id: trace_id.map(str::to_string),
+        holds_trace,
         read_at: Utc::now(),
     })
 }
@@ -128,6 +184,7 @@ pub async fn receipt_for(engine: &Engine, agent_id_hash: &str) -> Result<Receipt
 #[derive(Deserialize)]
 struct ReceiptQuery {
     agent_id_hash: Option<String>,
+    trace_id: Option<String>,
 }
 
 async fn get_receipt(State(engine): State<Arc<Engine>>, Query(q): Query<ReceiptQuery>) -> Response {
@@ -143,10 +200,38 @@ async fn get_receipt(State(engine): State<Arc<Engine>>, Query(q): Query<ReceiptQ
         )
             .into_response();
     }
-    match receipt_for(&engine, hash).await {
-        Ok(r) => (StatusCode::OK, Json(json!({ "data": r }))).into_response(),
-        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e }))).into_response(),
-    }
+    let trace_id = q
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let receipt = match receipt_for(&engine, hash, trace_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e }))).into_response()
+        }
+    };
+    // Signed by this node's hybrid key. A receipt that cannot be signed is not
+    // served unsigned: the producer would have to either trust it or discard
+    // it, and "trust it" is what an intermediary wants.
+    let signature =
+        match crate::sign_object::sign_object_bytes(&engine, &receipt_bytes(&receipt), SIGN_LABEL)
+            .await
+        {
+            Ok(doc) => doc,
+            Err(e) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": format!("sign the receipt: {e:#}") })),
+                )
+                    .into_response()
+            }
+        };
+    (
+        StatusCode::OK,
+        Json(json!({ "data": receipt, "signature": signature })),
+    )
+        .into_response()
 }
 
 /// The canonical door. Merge into the node's public router.
@@ -160,7 +245,9 @@ pub fn router(engine: Arc<Engine>) -> Router {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CanonicalRead {
     /// The canonical's federation `key_id` when known from the baked record;
-    /// `config` entries carry none.
+    /// `config` entries carry none. When known, the receipt's signer MUST be
+    /// this key — any other registered key signing "as the canonical" is a
+    /// forgery, not a receipt.
     pub key_id: Option<String>,
     /// Base URL of the canonical's read API, no trailing slash.
     pub url: String,
@@ -249,41 +336,74 @@ pub struct Authored {
     pub newest_authored: Option<Newest>,
 }
 
-/// Discover the agent hashes this node holds traces for, with exact counts.
-pub async fn authored_here(engine: &Engine) -> Result<Vec<Authored>, String> {
-    let page = crate::backend::list_trace_summaries(
-        engine,
-        TraceFilter::default(),
-        None,
-        LOCAL_WINDOW,
-        CallerScope::Unauthenticated,
-    )
-    .await
-    .map_err(|e| format!("list local traces: {e}"))?;
-    let mut order: Vec<String> = Vec::new();
+/// Which agents this node authored for, with exact counts.
+///
+/// `only`: the caller names its agent hash and discovery is skipped — the
+/// embedded agent knows its own. Otherwise discovery keeps summaries whose
+/// signing key is THIS process's own federation key; rows replicated from
+/// peers, and everyone's rows on a canonical asking itself, are not "authored
+/// here" however many of them the store holds.
+pub async fn authored_here(engine: &Engine, only: Option<&str>) -> Result<Vec<Authored>, String> {
+    let mut hashes: Vec<String> = Vec::new();
     let mut newest: std::collections::BTreeMap<String, Newest> = Default::default();
-    for s in &page.items {
-        if !order.contains(&s.agent_id_hash) {
-            order.push(s.agent_id_hash.clone());
+    match only.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(h) => hashes.push(h.to_string()),
+        None => {
+            let own_key = engine
+                .local_derived_key_id()
+                .await
+                .map_err(|e| format!("this node's own key id: {e}"))?;
+            let page = crate::backend::list_trace_summaries(
+                engine,
+                TraceFilter::default(),
+                None,
+                LOCAL_WINDOW,
+                CallerScope::Unauthenticated,
+            )
+            .await
+            .map_err(|e| format!("list local traces: {e}"))?;
+            for s in page
+                .items
+                .iter()
+                .filter(|s| s.agent_key_id.as_deref() == Some(own_key.as_str()))
+            {
+                if !hashes.contains(&s.agent_id_hash) {
+                    hashes.push(s.agent_id_hash.clone());
+                }
+            }
         }
-        // The page is newest-first, so the first sighting is the newest.
-        newest
-            .entry(s.agent_id_hash.clone())
-            .or_insert_with(|| Newest {
-                trace_id: s.trace_id.clone(),
-                started_at: s.started_at,
-                completed_at: s.completed_at,
-            });
     }
-    let mut out = Vec::with_capacity(order.len());
-    for hash in order {
+    let mut out = Vec::with_capacity(hashes.len());
+    for hash in hashes {
         let filter = TraceFilter {
             agent_id_hash: Some(hash.clone()),
             ..TraceFilter::default()
         };
-        let authored = crate::backend::count_traces(engine, filter, CallerScope::Unauthenticated)
-            .await
-            .map_err(|e| format!("count local traces for {hash}: {e}"))?;
+        let authored =
+            crate::backend::count_traces(engine, filter.clone(), CallerScope::Unauthenticated)
+                .await
+                .map_err(|e| format!("count local traces for {hash}: {e}"))?;
+        // Newest-first page of one, filtered to the hash — the same read the
+        // canonical makes, so the two `newest` values are comparable.
+        let page = crate::backend::list_trace_summaries(
+            engine,
+            filter,
+            None,
+            1,
+            CallerScope::Unauthenticated,
+        )
+        .await
+        .map_err(|e| format!("newest local trace for {hash}: {e}"))?;
+        if let Some(s) = page.items.first() {
+            newest.insert(
+                hash.clone(),
+                Newest {
+                    trace_id: s.trace_id.clone(),
+                    started_at: s.started_at,
+                    completed_at: s.completed_at,
+                },
+            );
+        }
         out.push(Authored {
             newest_authored: newest.remove(&hash),
             agent_id_hash: hash,
@@ -293,40 +413,117 @@ pub async fn authored_here(engine: &Engine) -> Result<Vec<Authored>, String> {
     Ok(out)
 }
 
-/// Ask one canonical for one agent's receipt.
-async fn ask(client: &reqwest::Client, base: &str, agent_id_hash: &str) -> Result<Receipt, String> {
-    let url = format!("{base}{RECEIPT_ROUTE}");
+/// How one canonical's answer for one agent checked out.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Verification {
+    /// Signature verifies against the named key's registered pubkeys, and the
+    /// key is the canonical's when the canonical is named.
+    Verified,
+    /// The signature did not verify, or a key other than the canonical's
+    /// signed it. The numbers were discarded.
+    Failed,
+    /// The check could not be performed (no signature document, signer not in
+    /// this node's directory, …). Distinct from `failed`: not proof of
+    /// forgery, not proof of anything.
+    Unavailable,
+}
+
+/// One ask, verified. `Err` carries why the numbers are NOT to be used.
+async fn ask(
+    engine: &Engine,
+    client: &reqwest::Client,
+    c: &CanonicalRead,
+    agent_id_hash: &str,
+    trace_id: Option<&str>,
+) -> Result<(Receipt, String), (Verification, String)> {
+    let url = format!("{}{RECEIPT_ROUTE}", c.url);
+    let mut query: Vec<(&str, &str)> = vec![("agent_id_hash", agent_id_hash)];
+    if let Some(id) = trace_id {
+        query.push(("trace_id", id));
+    }
     let resp = client
         .get(&url)
-        .query(&[("agent_id_hash", agent_id_hash)])
+        .query(&query)
         .send()
         .await
-        .map_err(|e| format!("{url}: {e}"))?;
+        .map_err(|e| (Verification::Unavailable, format!("{url}: {e}")))?;
     let status = resp.status();
     let body = resp
         .text()
         .await
-        .map_err(|e| format!("{url}: read body: {e}"))?;
+        .map_err(|e| (Verification::Unavailable, format!("{url}: read body: {e}")))?;
     if !status.is_success() {
-        return Err(format!(
-            "{url}: HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
+        return Err((
+            Verification::Unavailable,
+            format!(
+                "{url}: HTTP {status}: {}",
+                body.chars().take(200).collect::<String>()
+            ),
         ));
     }
-    let v: Value = serde_json::from_str(&body).map_err(|e| format!("{url}: not JSON: {e}"))?;
-    serde_json::from_value::<Receipt>(v.get("data").cloned().unwrap_or(Value::Null))
-        .map_err(|e| format!("{url}: not a receipt: {e}"))
+    let v: Value = serde_json::from_str(&body)
+        .map_err(|e| (Verification::Unavailable, format!("{url}: not JSON: {e}")))?;
+    let receipt: Receipt = serde_json::from_value(v.get("data").cloned().unwrap_or(Value::Null))
+        .map_err(|e| {
+            (
+                Verification::Unavailable,
+                format!("{url}: not a receipt: {e}"),
+            )
+        })?;
+    let Some(doc) = v.get("signature").filter(|d| d.is_object()) else {
+        return Err((
+            Verification::Unavailable,
+            format!("{url}: the receipt carries no signature — numbers discarded"),
+        ));
+    };
+    // `sign_object` names the signer inside its manifest — the part the
+    // signature covers — not beside it.
+    let signer = doc
+        .pointer("/manifest/signer_key_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if let Some(expected) = c.key_id.as_deref() {
+        if signer != expected {
+            return Err((
+                Verification::Failed,
+                format!(
+                    "{url}: receipt signed by `{signer}`, but this canonical is `{expected}` — \
+                     not its receipt"
+                ),
+            ));
+        }
+    }
+    match crate::sign_object::verify_object_bytes(engine, &receipt_bytes(&receipt), doc).await {
+        Ok(true) => Ok((receipt, signer)),
+        Ok(false) => Err((
+            Verification::Failed,
+            format!(
+                "{url}: receipt signature does not verify against `{signer}`'s registered keys"
+            ),
+        )),
+        Err(e) => Err((
+            Verification::Unavailable,
+            format!("{url}: could not verify the receipt (signer `{signer}`): {e:#}"),
+        )),
+    }
 }
 
 /// The producer's receipt: what this node authored, per agent, against what
-/// each canonical says it holds. One function behind two doors.
+/// each canonical says — and signs — it holds. One function behind two doors.
 ///
-/// Every number that could not be read is `null`, never `0`: an unreachable
-/// canonical is `reachable: false` with the URL it tried and the error, and
-/// `held`/`lag` stay absent for it.
-pub async fn delivery_receipt(engine: &Engine, canonicals: Vec<CanonicalRead>) -> Value {
+/// Every number that could not be read OR could not be verified is `null`,
+/// never `0`. An unreachable canonical is `reachable: false` with the URL it
+/// tried and the error; a canonical whose receipt did not verify is
+/// `reachable: true, verification: failed` with `held` absent.
+pub async fn delivery_receipt(
+    engine: &Engine,
+    canonicals: Vec<CanonicalRead>,
+    only_agent_id_hash: Option<&str>,
+) -> Value {
     let read_at = Utc::now();
-    let agents = match authored_here(engine).await {
+    let agents = match authored_here(engine, only_agent_id_hash).await {
         Ok(a) => a,
         Err(e) => {
             return json!({
@@ -339,74 +536,135 @@ pub async fn delivery_receipt(engine: &Engine, canonicals: Vec<CanonicalRead>) -
     let client = reqwest::Client::builder().timeout(ASK_TIMEOUT).build().ok();
 
     let mut canonical_views = Vec::with_capacity(canonicals.len());
-    let mut any_reachable = false;
-    let mut all_shipped_to_reachable = true;
-    let mut worst_lag: i64 = 0;
+    let mut answered = 0usize;
+    let mut unreachable = 0usize;
+    // Over canonicals that ANSWERED with a verified receipt: is every agent's
+    // newest trace held there?
+    let mut newest_held_everywhere_answered = true;
+    let mut worst_gap: i64 = 0;
     for c in &canonicals {
         let Some(client) = client.as_ref() else {
+            unreachable += 1;
             canonical_views.push(json!({
                 "key_id": c.key_id, "url": c.url, "url_source": c.url_source,
                 "reachable": false, "error": "http client could not be built",
             }));
-            all_shipped_to_reachable = false;
             continue;
         };
+        // One deadline for the whole canonical, asks in flight together.
+        let asks = agents.iter().map(|a| {
+            ask(
+                engine,
+                client,
+                c,
+                &a.agent_id_hash,
+                a.newest_authored.as_ref().map(|n| n.trace_id.as_str()),
+            )
+        });
+        let results: Option<Vec<_>> =
+            tokio::time::timeout(CANONICAL_DEADLINE, futures_util::future::join_all(asks))
+                .await
+                .ok();
+        let Some(results) = results else {
+            unreachable += 1;
+            canonical_views.push(json!({
+                "key_id": c.key_id, "url": c.url, "url_source": c.url_source,
+                "reachable": false,
+                "error": format!("no complete answer within {} s", CANONICAL_DEADLINE.as_secs()),
+                "agents": agents.iter().map(|a| json!({
+                    "agent_id_hash": a.agent_id_hash, "authored": a.authored,
+                    "newest_authored": a.newest_authored,
+                })).collect::<Vec<_>>(),
+            }));
+            continue;
+        };
+
         let mut per_agent = Vec::with_capacity(agents.len());
         let mut reachable = true;
+        let mut any_verified = false;
         let mut first_error: Option<String> = None;
-        for a in &agents {
-            match ask(client, &c.url, &a.agent_id_hash).await {
-                Ok(r) => {
-                    let lag = (a.authored - r.traces).max(0);
-                    if lag > 0 {
-                        all_shipped_to_reachable = false;
+        let mut signer: Option<String> = None;
+        for (a, r) in agents.iter().zip(results) {
+            match r {
+                Ok((rcpt, who)) => {
+                    any_verified = true;
+                    signer.get_or_insert(who);
+                    let gap = (a.authored - rcpt.traces).max(0);
+                    worst_gap = worst_gap.max(gap);
+                    // THE answer: is the newest thing we made there. A node with
+                    // nothing authored has nothing to deliver, which is not a
+                    // failure to deliver.
+                    let newest_held = match (&a.newest_authored, rcpt.holds_trace) {
+                        (None, _) => None,
+                        (Some(_), held) => Some(held.unwrap_or(false)),
+                    };
+                    if newest_held == Some(false) {
+                        newest_held_everywhere_answered = false;
                     }
-                    worst_lag = worst_lag.max(lag);
                     per_agent.push(json!({
                         "agent_id_hash": a.agent_id_hash,
+                        "verification": Verification::Verified,
                         "authored": a.authored,
-                        "held": r.traces,
-                        "lag": lag,
-                        // Landed at all — the yes/no #487 needed.
-                        "shipped": r.traces > 0,
+                        "held": rcpt.traces,
+                        // Context, not verdict: retention here or history there
+                        // makes counts disagree for benign reasons.
+                        "count_gap": gap,
+                        "shipped_any": rcpt.traces > 0,
                         "newest_authored": a.newest_authored,
-                        "newest_held": r.newest,
-                        // The strongest form of yes: the newest thing we made
-                        // is the newest thing they hold.
-                        "newest_matches": a.newest_authored.as_ref().map(|n| Some(n) == r.newest.as_ref()),
+                        "newest_authored_held": newest_held,
+                        "newest_held": rcpt.newest,
+                        "newest_matches": a.newest_authored.as_ref().map(|n| Some(n) == rcpt.newest.as_ref()),
                     }));
                 }
-                Err(e) => {
-                    reachable = false;
+                Err((verification, e)) => {
+                    if verification == Verification::Unavailable
+                        && e.contains(": error sending request")
+                    {
+                        reachable = false;
+                    }
                     first_error.get_or_insert(e);
                     per_agent.push(json!({
                         "agent_id_hash": a.agent_id_hash,
+                        "verification": verification,
                         "authored": a.authored,
                         "held": Value::Null,
-                        "lag": Value::Null,
-                        "shipped": Value::Null,
+                        "count_gap": Value::Null,
+                        "shipped_any": Value::Null,
                         "newest_authored": a.newest_authored,
+                        "newest_authored_held": Value::Null,
                     }));
                 }
             }
         }
         if agents.is_empty() {
-            // Nothing to ask about — probe reachability once so the URL guess
-            // is still verified.
-            if let Err(e) = ask(client, &c.url, "probe").await {
-                reachable = false;
-                first_error = Some(e);
+            // Nothing to ask about — probe once so the URL guess is still
+            // verified, and so a canonical whose receipts do not verify is
+            // reported even before anything is authored.
+            match ask(engine, client, c, "probe", None).await {
+                Ok((_, who)) => {
+                    any_verified = true;
+                    signer = Some(who);
+                }
+                Err((_, e)) => {
+                    reachable = !e.contains(": error sending request");
+                    first_error = Some(e);
+                }
             }
         }
-        any_reachable |= reachable;
         if !reachable {
-            all_shipped_to_reachable = false;
+            unreachable += 1;
+        } else if any_verified {
+            answered += 1;
+        } else {
+            // Reachable, but nothing it said could be used.
+            newest_held_everywhere_answered = false;
         }
         canonical_views.push(json!({
             "key_id": c.key_id,
             "url": c.url,
             "url_source": c.url_source,
             "reachable": reachable,
+            "signer_key_id": signer,
             "error": first_error,
             "agents": per_agent,
         }));
@@ -418,37 +676,47 @@ pub async fn delivery_receipt(engine: &Engine, canonicals: Vec<CanonicalRead>) -
          `federation.canonical_read_urls` is unset — there is nothing to ask. Set the \
          config key to the canonical's read API (e.g. http://host:4243)."
             .to_string()
+    } else if answered == 0 {
+        "no canonical answered with a receipt this node could verify: `held` is UNKNOWN \
+         for every one of them, not zero. Each `canonicals[].error` says which — \
+         unreachable (the URL was asked at is there, with how it was chosen; a derived \
+         one may be wrong — set `federation.canonical_read_urls`), or a receipt that \
+         could not be verified against this node's directory."
+            .to_string()
     } else if authored_total == 0 {
-        "this node has authored no traces yet — nothing to receipt. Emit first, then re-read."
+        "this node has authored no traces yet — a canonical answered, so the path is \
+         open, but there is nothing to deliver. Emit first, then re-read."
             .to_string()
-    } else if !any_reachable {
-        "no canonical answered: `held` is UNKNOWN for every one of them, not zero. The URL \
-         each was asked at is in `canonicals[].url` with how it was chosen; a derived one \
-         may be wrong — set `federation.canonical_read_urls` to the real read API."
-            .to_string()
-    } else if all_shipped_to_reachable {
-        "every trace authored here is held by every canonical that answered — the plane \
-         delivered."
-            .to_string()
+    } else if newest_held_everywhere_answered {
+        let tail = if unreachable > 0 {
+            format!(" ({unreachable} canonical(s) did not answer and are not counted.)")
+        } else {
+            String::new()
+        };
+        format!(
+            "the newest trace this node authored is held by every canonical that \
+             answered — the plane delivered.{tail}"
+        )
     } else {
         format!(
-            "up to {worst_lag} trace(s) authored here are not held by a canonical that \
-             answered. `shipped: true` with a lag means the plane works and is behind (a \
-             round has not run, or the newest rows were sealed after the last one); \
-             `shipped: false` on a canonical that answered means NOTHING from this agent has \
-             ever landed there — read `delivery_status().trace_plane.hint` and \
-             `round_diagnostics` for which gate."
+            "a canonical that answered does NOT hold the newest trace this node authored \
+             (`newest_authored_held: false`). `shipped_any: true` there means the plane has \
+             worked before and is behind — a round has not run since the newest row was \
+             sealed; `shipped_any: false` means NOTHING from this agent has ever landed there — \
+             read `delivery_status().trace_plane.hint` and `round_diagnostics` for which gate. \
+             (`count_gap` up to {worst_gap} is context: counts disagree for benign reasons.)"
         )
     };
 
     json!({
         "read_at": read_at,
+        "authored_as": only_agent_id_hash.map(|h| json!({ "agent_id_hash": h })).unwrap_or(json!({ "signing_key": "this node's own federation key" })),
         "agents": agents,
         "canonicals": canonical_views,
         "verdict": {
-            "any_canonical_reachable": any_reachable,
-            "shipped_to_every_reachable_canonical": if any_reachable { Value::Bool(all_shipped_to_reachable) } else { Value::Null },
-            "worst_lag": if any_reachable { json!(worst_lag) } else { Value::Null },
+            "canonicals_answered": answered,
+            "canonicals_unreachable": unreachable,
+            "newest_authored_held_by_every_answering_canonical": if answered > 0 && authored_total > 0 { Value::Bool(newest_held_everywhere_answered) } else { Value::Null },
         },
         "hint": hint,
     })
@@ -464,5 +732,32 @@ mod tests {
         assert_eq!(host_of("node.example:4242"), "node.example");
         assert_eq!(host_of("node.example"), "node.example");
         assert_eq!(host_of("[2001:db8::1]:4242"), "[2001:db8::1]");
+    }
+
+    /// The producer verifies the canonical's signature over bytes it RE-DERIVES
+    /// from the parsed `data`. That only works if serialize → parse →
+    /// serialize is byte-identical, nanosecond timestamps included.
+    #[test]
+    fn receipt_bytes_survive_a_wire_round_trip() {
+        let r = Receipt {
+            agent_id_hash: "h".into(),
+            traces: 3,
+            newest: Some(Newest {
+                trace_id: "t".into(),
+                started_at: DateTime::parse_from_rfc3339("2026-09-14T14:05:04.123456789Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                completed_at: DateTime::parse_from_rfc3339("2026-09-14T14:05:04.100000000Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }),
+            asked_trace_id: Some("t".into()),
+            holds_trace: Some(true),
+            read_at: Utc::now(),
+        };
+        let wire: Value = serde_json::from_slice(&receipt_bytes(&r)).unwrap();
+        let back: Receipt = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(receipt_bytes(&back), receipt_bytes(&r));
     }
 }
