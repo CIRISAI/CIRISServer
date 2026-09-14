@@ -1039,8 +1039,21 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
         // immediate, so the first pass lands at exactly one period and every
         // later one on this loop's slot. (`reset()` would have put the first
         // pass anywhere in (period, 2·period] — Codex, PR #592.)
+        let mut state = ScanState::default();
         tokio::time::sleep(cfg.cadence).await;
         let mut cadence = crate::loop_cadence::Cadence::new("equivocation", cfg.cadence);
+        // The immediate first tick IS the one-period pass. Then `reset()`:
+        // without it the next grid point can be seconds away (the slot is a
+        // few seconds past the epoch), and two full scans would run back to
+        // back (Codex, PR #592, round 3).
+        cadence.tick().await;
+        if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {
+            tracing::warn!(
+                error = %e,
+                "equivocation detector first pass failed (will retry next cadence)"
+            );
+        }
+        cadence.reset();
         tracing::info!(
             cadence_secs = cfg.cadence.as_secs(),
             phase_secs = cadence.phase().as_secs_f64(),
@@ -1050,7 +1063,6 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
              no consensus, no automatic penalty; streams a window per pass from a persisted \
              cursor, CIRISServer#553)"
         );
-        let mut state = ScanState::default();
         loop {
             cadence.tick().await;
             if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {

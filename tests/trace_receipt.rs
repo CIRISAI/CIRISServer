@@ -49,7 +49,7 @@ use ciris_persist::scrub::NullScrubber;
 use ciris_persist::verify::canonical::Canonicalizer;
 use ciris_persist::verify::{ed25519::canonical_payload_value, PythonJsonDumpsCanonicalizer};
 
-use ciris_server::trace_receipt::{self, CanonicalRead, CanonicalRoster, UrlSource};
+use ciris_server::trace_receipt::{self, CanonicalRead, CanonicalRoster, ReceiptGate, UrlSource};
 
 /// An agent: a hybrid software signer (Ed25519 seed `ed`, ML-DSA seed `pqc`)
 /// and the AV-9 hash its traces carry.
@@ -895,8 +895,12 @@ async fn an_unreachable_or_unverifiable_canonical_reads_unknown_and_does_not_poi
     // the other two are counted apart rather than folded into "not delivered".
     let l = &view["canonicals"][2];
     assert_eq!(l["agents"][0]["newest_authored_held"], true, "{view}");
+    assert_eq!(d["standing"], "unreachable", "{view}");
+    assert_eq!(u["standing"], "unverified", "{view}");
+    assert_eq!(l["standing"], "answered", "{view}");
     let v = &view["verdict"];
     assert_eq!(v["canonicals_answered"], 1);
+    assert_eq!(v["canonicals_partial"], 0);
     assert_eq!(v["canonicals_unverified"], 1);
     assert_eq!(v["canonicals_unreachable"], 1);
     assert_eq!(
@@ -1003,4 +1007,93 @@ async fn canonical_reads_derive_the_read_api_from_an_ip_hint_unless_configured()
         );
         assert!(!r.key_id.is_empty(), "a baked canonical is named: {r:?}");
     }
+}
+
+#[tokio::test]
+async fn the_canonical_door_is_metered_and_answers_429_before_it_signs() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, &AGENT_A, 0..1).await;
+    // Three tokens, no refill, one signing at a time — this test's own gate.
+    let gate = Arc::new(ReceiptGate::new(1, 3.0, 0.0));
+    let (base, _h) = serve(trace_receipt::router_with_gate(
+        Arc::clone(&canonical.engine),
+        gate,
+    ))
+    .await;
+    let mut statuses = Vec::new();
+    for i in 0..6 {
+        let resp = get_receipt(&base, AGENT_A.hash, None, &format!("n{i}")).await;
+        statuses.push(resp.status().as_u16());
+        if resp.status() == 429 {
+            assert!(
+                resp.headers().get("retry-after").is_some(),
+                "a 429 says when to come back"
+            );
+        }
+    }
+    assert_eq!(statuses, vec![200, 200, 200, 429, 429, 429], "{statuses:?}");
+}
+
+#[tokio::test]
+async fn a_truncated_discovery_makes_the_verdict_unknown_not_delivered() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, &AGENT_A, 0..4).await;
+    let (live, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+
+    // The producer signs as A, holds A's four rows and six NEWER foreign rows.
+    let producer = node_signing_as(&AGENT_A).await;
+    trust_engine(&producer, &canonical).await;
+    admit(&producer, &AGENT_A, 0..4).await;
+    admit(&producer, &AGENT_B, 10..16).await;
+
+    // Capped at four rows: A is never discovered, and the answer must NOT be
+    // "nothing authored, path open" — it must be "I did not look far enough".
+    let view = trace_receipt::delivery_receipt_with(
+        &producer,
+        roster(vec![read(live.clone(), &canonical.key_id)]),
+        None,
+        2,
+        4,
+    )
+    .await;
+    assert_eq!(view["discovery"]["truncated"], true, "{view}");
+    assert_eq!(view["verdict"]["discovery_incomplete"], true, "{view}");
+    assert!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"].is_null(),
+        "{view}"
+    );
+    assert!(
+        view["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("UNKNOWN"),
+        "{view}"
+    );
+
+    // Uncapped, the same node finds A and the canonical holds A's newest.
+    let view = trace_receipt::delivery_receipt_with(
+        &producer,
+        roster(vec![read(live, &canonical.key_id)]),
+        None,
+        2,
+        1_000,
+    )
+    .await;
+    assert_eq!(view["verdict"]["discovery_incomplete"], false, "{view}");
+    assert_eq!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"], true,
+        "{view}"
+    );
+}
+
+/// [`trust`] for an engine that is not a [`Node`].
+async fn trust_engine(producer: &Engine, canonical: &Node) {
+    register_key_hybrid(
+        producer,
+        &canonical.key_id,
+        &canonical.ed_pub_b64,
+        Some(&canonical.mldsa_pub_b64),
+        identity_type::NODE,
+    )
+    .await;
 }

@@ -77,8 +77,8 @@
 //! tried — never as "zero held" — and the config key
 //! [`crate::config_reconcile::KEY_CANONICAL_READ_URLS`] overrides it.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -110,6 +110,11 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(3);
 /// this node authored for. A canonical that accepts connections and answers
 /// slowly cannot hold the caller for `agents × ASK_TIMEOUT`.
 pub const CANONICAL_DEADLINE: Duration = Duration::from_secs(6);
+
+/// How many asks a producer keeps in flight per canonical. Discovery can name
+/// thousands of agent hashes on a busy node; one request each, all at once,
+/// is a connection flood against the canonical and a buffer flood here.
+pub const MAX_INFLIGHT_ASKS: usize = 8;
 
 /// The most a receipt body may be. A receipt is a few hundred bytes plus a
 /// signature document; anything larger is not one, and is not buffered.
@@ -223,7 +228,103 @@ fn nonblank(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }
 
-async fn get_receipt(State(engine): State<Arc<Engine>>, Query(q): Query<ReceiptQuery>) -> Response {
+/// Admission for the canonical door. Receipts are credential-free by design,
+/// and each one costs two indexed reads plus a hybrid signature (ML-DSA-65 is
+/// not cheap), so the door is metered rather than open: at most
+/// `max_inflight` signings at once, and a token bucket of `burst` refilled at
+/// `per_second`. Over either, the answer is `429` with `Retry-After`, before
+/// any read or signing happens. One gate per router, so a test's gate is its
+/// own.
+#[derive(Debug)]
+pub struct ReceiptGate {
+    inflight: tokio::sync::Semaphore,
+    max_inflight: usize,
+    bucket: Mutex<(f64, Instant)>,
+    burst: f64,
+    per_second: f64,
+}
+
+impl ReceiptGate {
+    pub const DEFAULT_MAX_INFLIGHT: usize = 4;
+    pub const DEFAULT_BURST: f64 = 30.0;
+    pub const DEFAULT_PER_SECOND: f64 = 10.0;
+
+    #[must_use]
+    pub fn new(max_inflight: usize, burst: f64, per_second: f64) -> Self {
+        Self {
+            inflight: tokio::sync::Semaphore::new(max_inflight.max(1)),
+            max_inflight: max_inflight.max(1),
+            bucket: Mutex::new((burst, Instant::now())),
+            burst,
+            per_second,
+        }
+    }
+
+    /// Take one token, or say how long until one exists.
+    fn take_token(&self) -> Result<(), u64> {
+        let mut b = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let refilled =
+            (b.0 + now.duration_since(b.1).as_secs_f64() * self.per_second).min(self.burst);
+        b.1 = now;
+        if refilled >= 1.0 {
+            b.0 = refilled - 1.0;
+            Ok(())
+        } else {
+            b.0 = refilled;
+            let wait = if self.per_second > 0.0 {
+                ((1.0 - refilled) / self.per_second).ceil() as u64
+            } else {
+                60
+            };
+            Err(wait.max(1))
+        }
+    }
+}
+
+impl Default for ReceiptGate {
+    fn default() -> Self {
+        Self::new(
+            Self::DEFAULT_MAX_INFLIGHT,
+            Self::DEFAULT_BURST,
+            Self::DEFAULT_PER_SECOND,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct DoorState {
+    engine: Arc<Engine>,
+    gate: Arc<ReceiptGate>,
+}
+
+fn too_many(retry_after_secs: u64, why: &str) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            retry_after_secs.to_string(),
+        )],
+        Json(json!({ "error": why })),
+    )
+        .into_response()
+}
+
+async fn get_receipt(State(st): State<DoorState>, Query(q): Query<ReceiptQuery>) -> Response {
+    // Metered before anything is read or signed.
+    if let Err(wait) = st.gate.take_token() {
+        return too_many(wait, "receipt rate limit — try again shortly");
+    }
+    let Ok(_permit) = st.gate.inflight.try_acquire() else {
+        return too_many(
+            1,
+            &format!(
+                "{} receipts are being signed right now — try again shortly",
+                st.gate.max_inflight
+            ),
+        );
+    };
+    let engine = st.engine;
     let Some(hash) = nonblank(q.agent_id_hash.as_deref()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -268,11 +369,17 @@ async fn get_receipt(State(engine): State<Arc<Engine>>, Query(q): Query<ReceiptQ
         .into_response()
 }
 
-/// The canonical door. Merge into the node's public router.
+/// The canonical door with the default gate. Merge into the node's public
+/// router.
 pub fn router(engine: Arc<Engine>) -> Router {
+    router_with_gate(engine, Arc::new(ReceiptGate::default()))
+}
+
+/// The canonical door with an explicit gate — a test's own, or an operator's.
+pub fn router_with_gate(engine: Arc<Engine>, gate: Arc<ReceiptGate>) -> Router {
     Router::new()
         .route(RECEIPT_ROUTE, axum::routing::get(get_receipt))
-        .with_state(engine)
+        .with_state(DoorState { engine, gate })
 }
 
 /// Where the producer will ask, whose signature it will accept, and how it
@@ -347,8 +454,17 @@ pub async fn canonical_reads(engine: &Arc<Engine>) -> Result<CanonicalRoster, St
         Ok(Some(entries)) => {
             for e in entries.iter().filter(|e| !e.trim().is_empty()) {
                 match parse_config_entry(e) {
-                    Ok(r) if !roster.reads.iter().any(|x| x.url == r.url) => roster.reads.push(r),
-                    Ok(_) => {}
+                    // One read per canonical KEY: two URLs for one key would be
+                    // two "canonicals" whose disagreement fails the verdict.
+                    Ok(r) if roster.reads.iter().any(|x| x.key_id == r.key_id) => {
+                        roster.refused.push(format!(
+                            "`{}`: a second url for canonical `{}` — one read per canonical; the \
+                             first entry wins",
+                            e.trim(),
+                            r.key_id
+                        ))
+                    }
+                    Ok(r) => roster.reads.push(r),
                     Err(why) => roster.refused.push(why),
                 }
             }
@@ -367,6 +483,19 @@ pub async fn canonical_reads(engine: &Arc<Engine>) -> Result<CanonicalRoster, St
         .canonical_bootstrap_hints()
         .await
         .map_err(|e| format!("read the baked canonical records: {e}"))?;
+    roster.reads = roster_from_hints(hints);
+    Ok(roster)
+}
+
+/// One read per canonical KEY from its transport hints: an explicit
+/// `http`/`https` hint wins over a URL derived from an `ip` hint, and a second
+/// usable hint for the same key is not a second canonical. A canonical that
+/// advertises a stale endpoint beside a current one must not be able to fail
+/// its own verdict by disagreeing with itself.
+pub fn roster_from_hints(
+    hints: Vec<(String, ciris_persist::federation::types::TransportHint)>,
+) -> Vec<CanonicalRead> {
+    let mut out: Vec<CanonicalRead> = Vec::new();
     for (key_id, hint) in hints {
         let read = match hint.kind.as_str() {
             "http" | "https" => CanonicalRead {
@@ -384,11 +513,18 @@ pub async fn canonical_reads(engine: &Arc<Engine>) -> Result<CanonicalRoster, St
             }
             _ => continue,
         };
-        if !roster.reads.iter().any(|r| r.url == read.url) {
-            roster.reads.push(read);
+        match out.iter_mut().find(|r| r.key_id == read.key_id) {
+            None => out.push(read),
+            Some(existing) => {
+                if existing.url_source == UrlSource::DerivedFromIpHint
+                    && read.url_source == UrlSource::HttpHint
+                {
+                    *existing = read;
+                }
+            }
         }
     }
-    Ok(roster)
+    out
 }
 
 /// `host:port` → `host`; a bracketed IPv6 literal keeps its brackets.
@@ -572,6 +708,9 @@ async fn bounded_body(mut resp: reqwest::Response, url: &str) -> Result<Vec<u8>,
     Ok(body)
 }
 
+/// What one ask yields: the bound receipt, or why its numbers are not to be used.
+pub type AskResult = Result<Receipt, (Verification, String)>;
+
 /// One ask, verified and bound. `Err` carries why the numbers are NOT to be
 /// used; `Verification::Unavailable` with a transport error is how
 /// "unreachable" is told apart from "answered badly".
@@ -581,7 +720,7 @@ async fn ask(
     c: &CanonicalRead,
     agent_id_hash: &str,
     trace_id: Option<&str>,
-) -> Result<Receipt, (Verification, String)> {
+) -> AskResult {
     let url = format!("{}{RECEIPT_ROUTE}", c.url);
     let nonce = crate::ids::new_id();
     let mut query: Vec<(&str, &str)> = vec![("agent_id_hash", agent_id_hash), ("nonce", &nonce)];
@@ -702,8 +841,59 @@ pub async fn delivery_receipt(
     roster: Result<CanonicalRoster, String>,
     only_agent_id_hash: Option<&str>,
 ) -> Value {
+    delivery_receipt_with(
+        engine,
+        roster,
+        only_agent_id_hash,
+        DISCOVERY_PAGE,
+        DISCOVERY_MAX_ROWS,
+    )
+    .await
+}
+
+/// How one canonical stood at the end of its asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalStanding {
+    /// A verified, bound receipt for EVERY authored agent. Only these move
+    /// the verdict.
+    Answered,
+    /// Verified for some agents, not for others. Something is unknown, so
+    /// the verdict cannot be "delivered" — it is unknown.
+    Partial,
+    /// Reachable, nothing usable.
+    Unverified,
+    /// Did not answer.
+    Unreachable,
+}
+
+/// Fold one canonical's per-agent outcomes into its standing.
+pub fn standing_of(verified: usize, total: usize, reachable: bool) -> CanonicalStanding {
+    match (reachable, verified) {
+        (false, _) => CanonicalStanding::Unreachable,
+        (true, 0) => CanonicalStanding::Unverified,
+        (true, n) if n == total => CanonicalStanding::Answered,
+        (true, _) => CanonicalStanding::Partial,
+    }
+}
+
+/// [`delivery_receipt`] with discovery's page size and cap as parameters.
+pub async fn delivery_receipt_with(
+    engine: &Engine,
+    roster: Result<CanonicalRoster, String>,
+    only_agent_id_hash: Option<&str>,
+    page_size: i64,
+    max_rows: usize,
+) -> Value {
     let read_at = Utc::now();
-    let (agents, discovery) = match authored_here(engine, only_agent_id_hash).await {
+    let (agents, discovery) = match authored_here_with(
+        engine,
+        only_agent_id_hash,
+        page_size,
+        max_rows,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => {
             return json!({
@@ -721,6 +911,7 @@ pub async fn delivery_receipt(
 
     let mut canonical_views = Vec::with_capacity(canonicals.len());
     let mut answered = 0usize;
+    let mut partial = 0usize;
     let mut unverified = 0usize;
     let mut unreachable = 0usize;
     // Over canonicals that ANSWERED with a verified receipt: is every agent's
@@ -737,19 +928,37 @@ pub async fn delivery_receipt(
             continue;
         };
         // One deadline for the whole canonical, asks in flight together.
-        let asks = agents.iter().map(|a| {
-            ask(
-                engine,
-                client,
-                c,
-                &a.agent_id_hash,
-                a.newest_authored.as_ref().map(|n| n.trace_id.as_str()),
+        // Boxed: a stream of borrowing async-fn futures trips the handler's
+        // higher-ranked `Send` bound; the box pins the lifetime down.
+        let asks: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = AskResult> + Send + '_>>> =
+            agents
+                .iter()
+                .map(|a| {
+                    Box::pin(ask(
+                        engine,
+                        client,
+                        c,
+                        &a.agent_id_hash,
+                        a.newest_authored.as_ref().map(|n| n.trace_id.as_str()),
+                    ))
+                        as std::pin::Pin<
+                            Box<dyn std::future::Future<Output = AskResult> + Send + '_>,
+                        >
+                })
+                .collect();
+        // One deadline for the whole canonical, at most MAX_INFLIGHT_ASKS in
+        // flight, results in agent order.
+        let results: Option<Vec<AskResult>> = {
+            use futures_util::StreamExt as _;
+            tokio::time::timeout(
+                CANONICAL_DEADLINE,
+                futures_util::stream::iter(asks)
+                    .buffered(MAX_INFLIGHT_ASKS)
+                    .collect::<Vec<_>>(),
             )
-        });
-        let results: Option<Vec<_>> =
-            tokio::time::timeout(CANONICAL_DEADLINE, futures_util::future::join_all(asks))
-                .await
-                .ok();
+            .await
+            .ok()
+        };
         let Some(results) = results else {
             unreachable += 1;
             canonical_views.push(json!({
@@ -766,12 +975,12 @@ pub async fn delivery_receipt(
 
         let mut per_agent = Vec::with_capacity(agents.len());
         let mut reachable = true;
-        let mut any_verified = false;
+        let mut verified = 0usize;
         let mut first_error: Option<String> = None;
         for (a, r) in agents.iter().zip(results) {
             match r {
                 Ok(rcpt) => {
-                    any_verified = true;
+                    verified += 1;
                     let gap = (a.authored - rcpt.traces).max(0);
                     worst_gap = worst_gap.max(gap);
                     // THE answer: is the newest thing we made there. A node with
@@ -817,38 +1026,47 @@ pub async fn delivery_receipt(
                 }
             }
         }
+        let mut total = agents.len();
         if agents.is_empty() {
             // Nothing to ask about — probe once so the URL guess is still
             // verified, and so a canonical whose receipts do not verify is
             // reported even before anything is authored.
+            total = 1;
             match ask(engine, client, c, "probe", None).await {
-                Ok(_) => any_verified = true,
+                Ok(_) => verified = 1,
                 Err((_, e)) => {
                     reachable = !e.contains(": error sending request");
                     first_error = Some(e);
                 }
             }
         }
-        if !reachable {
-            unreachable += 1;
-        } else if any_verified {
-            answered += 1;
-        } else {
-            // Reachable, but nothing it said could be used. Unknown — and
-            // unknown leaves the verdict alone.
-            unverified += 1;
+        // A canonical ANSWERED only if every agent's receipt verified. One
+        // verified beside one unknown is not "answered": the verdict would
+        // be true over an unknown (Codex, PR #592, round 3).
+        let standing = standing_of(verified, total, reachable);
+        match standing {
+            CanonicalStanding::Answered => answered += 1,
+            CanonicalStanding::Partial => partial += 1,
+            CanonicalStanding::Unverified => unverified += 1,
+            CanonicalStanding::Unreachable => unreachable += 1,
         }
         canonical_views.push(json!({
             "key_id": c.key_id,
             "url": c.url,
             "url_source": c.url_source,
             "reachable": reachable,
+            "standing": standing,
             "error": first_error,
             "agents": per_agent,
         }));
     }
 
     let authored_total: i64 = agents.iter().map(|a| a.authored).sum();
+    // Discovery that stopped early may have missed agents this node authored
+    // for; a verdict over the visible subset is not a verdict. Explicit hashes
+    // are never truncated.
+    let discovery_incomplete = discovery.truncated && only_agent_id_hash.is_none();
+    let verdict_known = answered > 0 && authored_total > 0 && partial == 0 && !discovery_incomplete;
     let not_counted = |n: usize, what: &str| -> String {
         if n > 0 {
             format!(" {n} canonical(s) {what} and are not counted.")
@@ -880,6 +1098,20 @@ pub async fn delivery_receipt(
              this node's directory.{}{}",
             not_counted(unreachable, "were unreachable"),
             not_counted(unverified, "answered but could not be verified")
+        )
+    } else if discovery_incomplete {
+        format!(
+            "discovery stopped after {} rows without reaching the end of this node's corpus, \
+             so agents this node authored for may be missing from the receipt — the verdict is \
+             UNKNOWN, not a pass. Name the agent hash (`agent_id_hash=`) to skip discovery.",
+            discovery.rows_scanned
+        )
+    } else if partial > 0 {
+        format!(
+            "{partial} canonical(s) answered for SOME agents and not others (`standing: partial`): \
+             one verified receipt beside one that could not be verified is an unknown, so the \
+             verdict is UNKNOWN. Read `canonicals[].agents[].verification` for which ask failed \
+             and why."
         )
     } else if authored_total == 0 {
         let scan = if discovery.truncated {
@@ -923,9 +1155,11 @@ pub async fn delivery_receipt(
         "canonicals": canonical_views,
         "verdict": {
             "canonicals_answered": answered,
+            "canonicals_partial": partial,
             "canonicals_unverified": unverified,
             "canonicals_unreachable": unreachable,
-            "newest_authored_held_by_every_answering_canonical": if answered > 0 && authored_total > 0 { Value::Bool(newest_held_everywhere_answered) } else { Value::Null },
+            "discovery_incomplete": discovery_incomplete,
+            "newest_authored_held_by_every_answering_canonical": if verdict_known { Value::Bool(newest_held_everywhere_answered) } else { Value::Null },
         },
         "hint": hint,
     })
@@ -957,6 +1191,39 @@ mod tests {
         assert!(parse_config_entry("k=").is_err());
         assert!(parse_config_entry("=http://x").is_err());
         assert!(parse_config_entry("k=ftp://x").is_err());
+    }
+
+    #[test]
+    fn a_canonical_answered_only_when_every_agent_verified() {
+        use CanonicalStanding::*;
+        assert_eq!(standing_of(0, 2, false), Unreachable);
+        assert_eq!(standing_of(0, 2, true), Unverified);
+        assert_eq!(standing_of(1, 2, true), Partial);
+        assert_eq!(standing_of(2, 2, true), Answered);
+        assert_eq!(standing_of(1, 1, true), Answered);
+    }
+
+    #[test]
+    fn one_read_per_canonical_key_preferring_an_explicit_http_hint() {
+        use ciris_persist::federation::types::TransportHint;
+        let h = |kind: &str, dest: &str| TransportHint {
+            kind: kind.into(),
+            destination: dest.into(),
+        };
+        let reads = roster_from_hints(vec![
+            ("c1".into(), h("ip", "10.0.0.5:4242")),
+            ("c1".into(), h("https", "https://c1.example/")),
+            ("c1".into(), h("ip", "10.0.0.6:4242")),
+            ("c2".into(), h("reticulum", "abcd")),
+            ("c2".into(), h("ip", "10.0.0.7:4242")),
+        ]);
+        assert_eq!(reads.len(), 2, "{reads:?}");
+        assert_eq!(reads[0].key_id, "c1");
+        assert_eq!(reads[0].url, "https://c1.example");
+        assert_eq!(reads[0].url_source, UrlSource::HttpHint);
+        assert_eq!(reads[1].key_id, "c2");
+        assert_eq!(reads[1].url, "http://10.0.0.7:4243");
+        assert_eq!(reads[1].url_source, UrlSource::DerivedFromIpHint);
     }
 
     /// The producer verifies the canonical's signature over bytes it RE-DERIVES
