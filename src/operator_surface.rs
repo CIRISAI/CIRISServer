@@ -2490,9 +2490,10 @@ async fn get_delivery_receipt(
         }
         Err(resp) => return resp,
     }
-    let reads = crate::trace_receipt::canonical_reads(&st.engine).await;
+    let roster = crate::trace_receipt::canonical_reads(&st.engine).await;
     let view =
-        crate::trace_receipt::delivery_receipt(&st.engine, reads, q.agent_id_hash.as_deref()).await;
+        crate::trace_receipt::delivery_receipt(&st.engine, roster, q.agent_id_hash.as_deref())
+            .await;
     (StatusCode::OK, Json(json!({ "data": view }))).into_response()
 }
 

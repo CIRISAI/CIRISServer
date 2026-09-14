@@ -1424,8 +1424,8 @@ pub fn delivery_receipt_json(agent_id_hash: Option<String>) -> String {
         .to_string();
     };
     let fut = async move {
-        let reads = crate::trace_receipt::canonical_reads(&engine).await;
-        crate::trace_receipt::delivery_receipt(&engine, reads, agent_id_hash.as_deref()).await
+        let roster = crate::trace_receipt::canonical_reads(&engine).await;
+        crate::trace_receipt::delivery_receipt(&engine, roster, agent_id_hash.as_deref()).await
     };
     let value = match HELD.get() {
         Some((rt, _)) => rt.block_on(fut),

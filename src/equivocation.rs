@@ -1032,14 +1032,15 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
         // later tick off the trace-plane watch's second and off edge's announce
         // grid (its registry slot). Skip missed ticks rather than burst-catch-up: a
         // delayed pass has nothing to catch up on (the rows are still there).
+        // This loop's first pass is ONE PERIOD after spawn — the corpus at boot
+        // is whatever the last run left, and boot is when the read API is
+        // already paying for everything else (CIRISServer#506). Sleep that
+        // period out-of-band, THEN join the grid: the registry's first tick is
+        // immediate, so the first pass lands at exactly one period and every
+        // later one on this loop's slot. (`reset()` would have put the first
+        // pass anywhere in (period, 2·period] — Codex, PR #592.)
+        tokio::time::sleep(cfg.cadence).await;
         let mut cadence = crate::loop_cadence::Cadence::new("equivocation", cfg.cadence);
-        // The registry's first tick is immediate; this loop's first pass is a
-        // period out (the corpus at boot is whatever the last run left, and
-        // boot is when the read API is already paying for everything else —
-        // CIRISServer#506). Take the immediate tick without a pass, then push
-        // the next deadline a full period away.
-        cadence.tick().await;
-        cadence.reset();
         tracing::info!(
             cadence_secs = cfg.cadence.as_secs(),
             phase_secs = cadence.phase().as_secs_f64(),
