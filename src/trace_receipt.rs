@@ -1109,33 +1109,46 @@ pub async fn delivery_receipt_with(
                     .collect()
             };
         let total = asks.len();
-        // At most MAX_INFLIGHT_ASKS in flight, results in order, and the
-        // deadline cuts the STREAM, not the collected results: an agent
-        // verified before it stays verified, the rest read unavailable, and
-        // the standing fold sees both (Codex, PR #592, round 5).
-        let mut results: Vec<AskResult> = Vec::with_capacity(total);
+        // At most MAX_INFLIGHT_ASKS in flight, UNORDERED, each result filed by
+        // its index: the deadline cuts the stream, and whatever has answered
+        // by then is kept wherever it sits in the order. (Ordered buffering
+        // hid a fast answer behind a slow earlier one and the deadline swept
+        // both — the round-5 fix's own bug, caught by CI.)
+        let mut slots: Vec<Option<AskResult>> = (0..total).map(|_| None).collect();
         {
             use futures_util::StreamExt as _;
-            let mut stream = futures_util::stream::iter(asks).buffered(MAX_INFLIGHT_ASKS);
+            type Indexed<'a> = std::pin::Pin<
+                Box<dyn std::future::Future<Output = (usize, AskResult)> + Send + 'a>,
+            >;
+            let indexed: Vec<Indexed<'_>> = asks
+                .into_iter()
+                .enumerate()
+                .map(|(i, fut)| Box::pin(async move { (i, fut.await) }) as Indexed<'_>)
+                .collect();
+            let mut stream =
+                futures_util::stream::iter(indexed).buffer_unordered(MAX_INFLIGHT_ASKS);
             loop {
                 match tokio::time::timeout_at(deadline, stream.next()).await {
-                    Ok(Some(r)) => results.push(r),
+                    Ok(Some((i, r))) => slots[i] = Some(r),
                     Ok(None) => break,
-                    Err(_) => {
-                        while results.len() < total {
-                            results.push(Err((
-                                Verification::Unavailable,
-                                format!(
-                                    "no answer within the {} s canonical deadline",
-                                    canonical_deadline.as_secs()
-                                ),
-                            )));
-                        }
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
         }
+        let results: Vec<AskResult> = slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err((
+                        Verification::Unavailable,
+                        format!(
+                            "no answer within the {} s canonical deadline",
+                            canonical_deadline.as_secs()
+                        ),
+                    ))
+                })
+            })
+            .collect();
 
         let mut per_agent = Vec::with_capacity(agents.len());
         let mut reachable = true;
