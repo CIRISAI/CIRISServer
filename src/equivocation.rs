@@ -131,7 +131,7 @@
 //! stale claim can never accuse a key on the strength of a row that is gone.
 //!
 //! The pass also no longer fires in the same second as the trace-plane watch or
-//! on edge's 300 s announce grid ([`PHASE_OFFSET`]), and it says what it cost
+//! on edge's 300 s announce grid (its slot in [`crate::loop_cadence::LOOPS`]), and it says what it cost
 //! every time it runs (one INFO line per pass), because a silent-when-fine pass
 //! is how a 23 s boot phase and a fifteen-minute accept stall hid for days.
 
@@ -180,17 +180,6 @@ pub struct DetectorConfig {
     /// short.
     pub max_rows: usize,
 }
-
-/// How far past its own cadence the detector's first pass fires, and therefore
-/// the phase its ticks keep for the life of the process.
-///
-/// Two things must not share this pass's second (CIRISServer#553): the
-/// trace-plane watch, whose ticks sit at [`crate::trace_plane_watch::PHASE_OFFSET`]
-/// past boot, and edge's default 300 s announce grid, which `900 = 3 × 300`
-/// would otherwise land on every time. 150 s is half an announce interval, so
-/// the pass is as far from an announce as it can be; the test
-/// `the_two_timers_do_not_share_a_second` keeps the pair apart.
-pub const PHASE_OFFSET: Duration = Duration::from_secs(150);
 
 impl Default for DetectorConfig {
     fn default() -> Self {
@@ -1041,25 +1030,41 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
         // First pass one cadence PLUS the phase offset after spawn — the corpus
         // at boot is whatever the last run left, and the offset keeps every
         // later tick off the trace-plane watch's second and off edge's announce
-        // grid (`PHASE_OFFSET`). Skip missed ticks rather than burst-catch-up: a
+        // grid (its registry slot). Skip missed ticks rather than burst-catch-up: a
         // delayed pass has nothing to catch up on (the rows are still there).
-        let mut tick = tokio::time::interval_at(
-            tokio::time::Instant::now() + cfg.cadence + PHASE_OFFSET,
-            cfg.cadence,
-        );
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // This loop's first pass is ONE PERIOD after spawn — the corpus at boot
+        // is whatever the last run left, and boot is when the read API is
+        // already paying for everything else (CIRISServer#506). Sleep that
+        // period out-of-band, THEN join the grid: the registry's first tick is
+        // immediate, so the first pass lands at exactly one period and every
+        // later one on this loop's slot. (`reset()` would have put the first
+        // pass anywhere in (period, 2·period] — Codex, PR #592.)
+        let mut state = ScanState::default();
+        let mut cadence = crate::loop_cadence::Cadence::new("equivocation", cfg.cadence);
         tracing::info!(
             cadence_secs = cfg.cadence.as_secs(),
-            phase_offset_secs = PHASE_OFFSET.as_secs(),
+            phase_secs = cadence.phase().as_secs_f64(),
             rows_per_pass = cfg.max_rows,
             page = cfg.page,
             "same-key equivocation detector started (CC 6.1.1 N4; local detection only — \
              no consensus, no automatic penalty; streams a window per pass from a persisted \
-             cursor, CIRISServer#553)"
+             cursor, CIRISServer#553; first pass on the grid, at least one cadence out)"
         );
-        let mut state = ScanState::default();
+        // Every pass — the first included — sits on this loop's slot of the
+        // shared grid, one period apart. The registry's first tick is
+        // immediate: take it without a pass, then `reset()` so the next
+        // deadline is the first grid point at least a full period out. That
+        // keeps the first scan off boot (the corpus at boot is whatever the
+        // last run left, and boot is when the read API pays for everything
+        // else — CIRISServer#506), ON the grid rather than a relative offset
+        // from spawn, and every later scan exactly one cadence after it.
+        // The cost, stated: the first scan lands anywhere in [period,
+        // 2·period) after spawn, because grid alignment wins over "exactly
+        // one period" (Codex, PR #592, rounds 2, 5 and 6).
+        cadence.tick().await;
+        cadence.reset();
         loop {
-            tick.tick().await;
+            cadence.tick().await;
             if let Err(e) = run_pass_with(&engine, &node_key_id, &cfg, &mut state).await {
                 tracing::warn!(
                     error = %e,
@@ -1417,20 +1422,19 @@ mod tests {
     /// if edge changes it, this test is the reminder to re-phase.
     #[test]
     fn the_two_timers_do_not_share_a_second() {
+        // Both 15-minute readers sit on the registry's grid now; the claim is
+        // the same as when they de-phased by hand: not the same second as
+        // each other, and not on edge's 300 s announce grid.
         const ANNOUNCE_GRID_SECS: u64 = 300;
-        let cadence = DetectorConfig::default().cadence.as_secs();
-        let here = PHASE_OFFSET.as_secs();
-        let watch = crate::trace_plane_watch::PHASE_OFFSET.as_secs();
+        let cadence = DetectorConfig::default().cadence;
         assert_eq!(
-            cadence,
+            cadence.as_secs(),
             crate::trace_plane_watch::WATCH_CADENCE.as_secs(),
             "same cadence, so phase is everything"
         );
-        assert_ne!(
-            here % cadence,
-            watch % cadence,
-            "the two timers share a second"
-        );
+        let here = crate::loop_cadence::phase_for("equivocation", cadence).as_secs();
+        let watch = crate::loop_cadence::phase_for("trace_plane_watch", cadence).as_secs();
+        assert_ne!(here, watch, "the two timers share a second");
         assert!(
             here % ANNOUNCE_GRID_SECS != 0,
             "the detector sits on the announce grid"
@@ -1438,10 +1442,6 @@ mod tests {
         assert!(
             watch % ANNOUNCE_GRID_SECS != 0,
             "the watch sits on the announce grid"
-        );
-        assert!(
-            cadence % ANNOUNCE_GRID_SECS == 0,
-            "if this stops being true, the offsets can be revisited"
         );
     }
 

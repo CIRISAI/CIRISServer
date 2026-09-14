@@ -2455,6 +2455,48 @@ struct OperatorState {
     refusals: Option<crate::ingest_http::IngestRefusals>,
 }
 
+/// `GET /v1/node/delivery-receipt` — the producer's receipt
+/// ([`crate::trace_receipt::delivery_receipt`]), behind the same owner gate as
+/// the state: which agents this node authored for is the node's business.
+#[derive(serde::Deserialize)]
+struct DeliveryReceiptQuery {
+    /// Name the agent and skip discovery — the embedded agent knows its own.
+    agent_id_hash: Option<String>,
+}
+
+async fn get_delivery_receipt(
+    State(st): State<OperatorState>,
+    headers: HeaderMap,
+    Query(q): Query<DeliveryReceiptQuery>,
+) -> Response {
+    if crate::auth::gate::require_owner_bound(&st.engine, &st.node_key_id)
+        .await
+        .is_err()
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this node has no responsible party (owner-binding) — the operator surface is \
+             refused. Claim ownership first via POST /v1/setup/root.",
+        );
+    }
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) = crate::auth::gate::require_verb(
+                &caller,
+                crate::auth::gate::CapabilityVerb::ReadNodeState,
+            ) {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+    let roster = crate::trace_receipt::canonical_reads(&st.engine).await;
+    let view =
+        crate::trace_receipt::delivery_receipt(&st.engine, roster, q.agent_id_hash.as_deref())
+            .await;
+    (StatusCode::OK, Json(json!({ "data": view }))).into_response()
+}
+
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
@@ -2591,6 +2633,10 @@ pub fn router(
 ) -> Router {
     Router::new()
         .route(ROUTE, axum::routing::get(get_state))
+        .route(
+            crate::trace_receipt::PRODUCER_ROUTE,
+            axum::routing::get(get_delivery_receipt),
+        )
         .with_state(OperatorState {
             engine,
             node_key_id,

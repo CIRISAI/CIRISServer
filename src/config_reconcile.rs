@@ -198,6 +198,12 @@ pub const KEY_MODE: &str = "mode";
 pub const KEY_LISTEN_ADDR: &str = "net.listen_addr";
 /// `net.bootstrap_peers` — Reticulum mesh entry addresses (boot-structural, list).
 pub const KEY_BOOTSTRAP_PEERS: &str = "net.bootstrap_peers";
+/// `federation.canonical_read_urls` (read at call time, string list). Where the
+/// producer's delivery receipt asks each canonical for what it holds
+/// ([`crate::trace_receipt`]). Unset, the URL is DERIVED from the baked
+/// record's `ip` hint (host kept, port → the read API's 4243) and the receipt
+/// says so; set it when the canonical's read API is not on that host:port.
+pub const KEY_CANONICAL_READ_URLS: &str = "federation.canonical_read_urls";
 /// `net.announce_ownership` — the "announce yourself to the federation" opt-in
 /// (boot-structural). DEFAULT FALSE: a fresh / self-scoped node does NOT advertise
 /// its federation IDENTITY on the Reticulum announce (CIRISServer#125). When the

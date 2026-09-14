@@ -462,6 +462,7 @@ mod test_bless;
 /// writes the verdict to the node log — edge-triggered, so it cannot become the
 /// log volume nobody read.
 pub mod trace_plane_watch;
+pub mod trace_receipt;
 pub mod trust_root_api;
 /// The wire vocabularies, served to the operator UI so no picker ever
 /// hardcodes a member (CIRISPersist#625).
@@ -2086,6 +2087,16 @@ mod python {
         py.detach(crate::federation_delivery::delivery_status_json)
     }
 
+    /// The receipt: what this node authored, against what each canonical says
+    /// it holds ([`crate::trace_receipt::delivery_receipt`]). Read once at the
+    /// end of a run — it makes an HTTP round-trip per canonical, which is why
+    /// it is not part of `delivery_status()`.
+    #[pyfunction]
+    #[pyo3(name = "delivery_receipt", signature = (agent_id_hash=None))]
+    fn py_delivery_receipt(py: Python<'_>, agent_id_hash: Option<String>) -> String {
+        py.detach(move || crate::federation_delivery::delivery_receipt_json(agent_id_hash))
+    }
+
     /// `ciris_server.node_state(self_key_id=None, root_key_id=None, now=None,
     /// sla_seconds=None)` — **CIRISServer#356: how is this node?**, as a JSON
     /// string. Read-only on every arm; it writes NOTHING and may be polled at
@@ -2470,6 +2481,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_delivery_receipt, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_state, m)?)?;
         m.add_function(wrap_pyfunction!(py_sign_object, m)?)?;
