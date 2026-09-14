@@ -267,6 +267,13 @@ pub fn spawn(engine: Arc<Engine>, refusals: Option<IngestRefusals>) -> tokio::ta
         // detector and of edge's announce. A stalled tick realigns to the grid
         // rather than shifting it.
         let mut cadence = crate::loop_cadence::Cadence::new("trace_plane_watch", WATCH_CADENCE);
+        // The first reading at once — then `reset()`, because the next grid
+        // point can be seconds away and `storage_summary` over a large
+        // corpus is exactly the read that must not run twice at boot
+        // (CIRISServer#506; Codex, PR #592, round 4).
+        cadence.tick().await;
+        timed_tick(&mut watch, &engine, refusals.as_ref()).await;
+        cadence.reset();
         loop {
             cadence.tick().await;
             timed_tick(&mut watch, &engine, refusals.as_ref()).await;

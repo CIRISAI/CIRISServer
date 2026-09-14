@@ -114,7 +114,15 @@ pub const CANONICAL_DEADLINE: Duration = Duration::from_secs(6);
 /// How many asks a producer keeps in flight per canonical. Discovery can name
 /// thousands of agent hashes on a busy node; one request each, all at once,
 /// is a connection flood against the canonical and a buffer flood here.
-pub const MAX_INFLIGHT_ASKS: usize = 8;
+pub const MAX_INFLIGHT_ASKS: usize = 2;
+
+/// How long the canonical door waits for a signing permit before answering
+/// 429 — a legitimate burst of a few asks queues, a flood does not.
+pub const PERMIT_WAIT: Duration = Duration::from_secs(2);
+
+/// How many times one ask retries a 429, honouring `Retry-After`, inside
+/// the canonical's deadline.
+pub const MAX_429_RETRIES: usize = 3;
 
 /// The most a receipt body may be. A receipt is a few hundred bytes plus a
 /// signature document; anything larger is not one, and is not buffered.
@@ -315,7 +323,10 @@ async fn get_receipt(State(st): State<DoorState>, Query(q): Query<ReceiptQuery>)
     if let Err(wait) = st.gate.take_token() {
         return too_many(wait, "receipt rate limit — try again shortly");
     }
-    let Ok(_permit) = st.gate.inflight.try_acquire() else {
+    // A permit, waited for briefly: a burst of a few asks queues behind the
+    // signer; only a queue that does not drain inside PERMIT_WAIT is refused.
+    let Ok(Ok(_permit)) = tokio::time::timeout(PERMIT_WAIT, st.gate.inflight.acquire()).await
+    else {
         return too_many(
             1,
             &format!(
@@ -711,10 +722,52 @@ async fn bounded_body(mut resp: reqwest::Response, url: &str) -> Result<Vec<u8>,
 /// What one ask yields: the bound receipt, or why its numbers are not to be used.
 pub type AskResult = Result<Receipt, (Verification, String)>;
 
+/// Whether a statement by a key with this standing may be believed.
+pub fn standing_permits(
+    standing: ciris_persist::federation::register::KeyStatementStanding,
+) -> Result<(), &'static str> {
+    use ciris_persist::federation::register::KeyStatementStanding as S;
+    match standing {
+        S::Stands => Ok(()),
+        S::SuspectAfterBound => Err("is revoked as of before this receipt was signed"),
+        S::SuspectUnbounded => Err("is revoked without a bound: nothing it signed is believed"),
+    }
+}
+
+/// One ask with 429s retried per `Retry-After` (bounded by
+/// [`MAX_429_RETRIES`] and the caller's deadline): the door meters itself,
+/// and a producer that treated "come back in a second" as "unavailable"
+/// would grade a healthy canonical `partial`.
+async fn ask(
+    engine: &Engine,
+    client: &reqwest::Client,
+    c: &CanonicalRead,
+    agent_id_hash: &str,
+    trace_id: Option<&str>,
+) -> AskResult {
+    let mut attempt = 0usize;
+    loop {
+        match ask_once(engine, client, c, agent_id_hash, trace_id).await {
+            Err((Verification::Unavailable, e))
+                if e.contains(": HTTP 429") && attempt < MAX_429_RETRIES =>
+            {
+                attempt += 1;
+                let wait = e
+                    .rsplit_once("retry-after=")
+                    .and_then(|(_, t)| t.trim().parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 2);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// One ask, verified and bound. `Err` carries why the numbers are NOT to be
 /// used; `Verification::Unavailable` with a transport error is how
 /// "unreachable" is told apart from "answered badly".
-async fn ask(
+async fn ask_once(
     engine: &Engine,
     client: &reqwest::Client,
     c: &CanonicalRead,
@@ -734,14 +787,22 @@ async fn ask(
         )
     })?;
     let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let body = bounded_body(resp, &url)
         .await
         .map_err(|e| (Verification::Unavailable, e))?;
     if !status.is_success() {
+        let tail = retry_after
+            .map(|r| format!(" retry-after={r}"))
+            .unwrap_or_default();
         return Err((
             Verification::Unavailable,
             format!(
-                "{url}: HTTP {status}: {}",
+                "{url}: HTTP {status}: {}{tail}",
                 String::from_utf8_lossy(&body)
                     .chars()
                     .take(200)
@@ -780,7 +841,32 @@ async fn ask(
         ));
     }
     match crate::sign_object::verify_object_bytes(engine, &receipt_bytes(&receipt), doc).await {
-        Ok(true) => {}
+        Ok(true) => {
+            // The signature is mathematically the canonical's. Does the KEY
+            // still stand at the instant it signed? A revoked canonical key
+            // verifies just as well (Codex, PR #592, round 4); the standing
+            // fold honours history-bounded revocations, so a receipt signed
+            // before a bound still stands.
+            match engine
+                .resolve_key_statement_standing(signer, receipt.read_at, Utc::now())
+                .await
+            {
+                Ok(fold) => {
+                    if let Err(why) = standing_permits(fold.standing) {
+                        return Err((
+                            Verification::Failed,
+                            format!("{url}: signer `{signer}` {why} — receipt discarded"),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err((
+                        Verification::Unavailable,
+                        format!("{url}: could not read signer `{signer}`'s standing: {e}"),
+                    ))
+                }
+            }
+        }
         Ok(false) => {
             return Err((
                 Verification::Failed,
@@ -869,11 +955,15 @@ pub enum CanonicalStanding {
 
 /// Fold one canonical's per-agent outcomes into its standing.
 pub fn standing_of(verified: usize, total: usize, reachable: bool) -> CanonicalStanding {
-    match (reachable, verified) {
-        (false, _) => CanonicalStanding::Unreachable,
-        (true, 0) => CanonicalStanding::Unverified,
-        (true, n) if n == total => CanonicalStanding::Answered,
-        (true, _) => CanonicalStanding::Partial,
+    // Some verified and some not is PARTIAL whatever the failure was — a
+    // connection error on one agent must not relabel a canonical that
+    // answered for another as "unreachable" and drop the unknown (Codex,
+    // PR #592, round 4).
+    match verified {
+        n if n > 0 && n == total => CanonicalStanding::Answered,
+        n if n > 0 => CanonicalStanding::Partial,
+        _ if reachable => CanonicalStanding::Unverified,
+        _ => CanonicalStanding::Unreachable,
     }
 }
 
@@ -1065,7 +1155,7 @@ pub async fn delivery_receipt_with(
     // Discovery that stopped early may have missed agents this node authored
     // for; a verdict over the visible subset is not a verdict. Explicit hashes
     // are never truncated.
-    let discovery_incomplete = discovery.truncated && only_agent_id_hash.is_none();
+    let discovery_incomplete = discovery.truncated && discovery.mode == "signing_key";
     let verdict_known = answered > 0 && authored_total > 0 && partial == 0 && !discovery_incomplete;
     let not_counted = |n: usize, what: &str| -> String {
         if n > 0 {
@@ -1194,11 +1284,24 @@ mod tests {
     }
 
     #[test]
+    fn a_revoked_signer_is_refused_and_a_bounded_revocation_honours_its_bound() {
+        use ciris_persist::federation::register::KeyStatementStanding as S;
+        assert!(standing_permits(S::Stands).is_ok());
+        assert!(standing_permits(S::SuspectAfterBound).is_err());
+        assert!(standing_permits(S::SuspectUnbounded).is_err());
+    }
+
+    #[test]
     fn a_canonical_answered_only_when_every_agent_verified() {
         use CanonicalStanding::*;
         assert_eq!(standing_of(0, 2, false), Unreachable);
         assert_eq!(standing_of(0, 2, true), Unverified);
         assert_eq!(standing_of(1, 2, true), Partial);
+        assert_eq!(
+            standing_of(1, 2, false),
+            Partial,
+            "one verified, one connection error: partial, not unreachable"
+        );
         assert_eq!(standing_of(2, 2, true), Answered);
         assert_eq!(standing_of(1, 1, true), Answered);
     }
