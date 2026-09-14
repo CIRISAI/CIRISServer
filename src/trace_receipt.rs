@@ -136,6 +136,13 @@ pub const MAX_RECEIPT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 /// The label the canonical signs its receipts under ([`crate::sign_object`]).
 pub const SIGN_LABEL: &str = "trace-receipt";
 
+/// Discovery keeps at most this many agent hashes: each costs one exact
+/// count read, and a node that authored for thousands of agents would turn
+/// the receipt into thousands of reads before a single canonical is asked.
+/// Past the cap the receipt says `agents_truncated` and the verdict is
+/// unknown.
+pub const MAX_DISCOVERED_AGENTS: usize = 50;
+
 /// Discovery pages this many summaries per read…
 pub const DISCOVERY_PAGE: i64 = 1_000;
 /// …and stops after this many rows in total, SAYING it stopped.
@@ -568,6 +575,9 @@ pub struct Discovery {
     /// The scan hit [`DISCOVERY_MAX_ROWS`] before the corpus ended; locally
     /// authored rows older than that are not represented.
     pub truncated: bool,
+    /// More than [`MAX_DISCOVERED_AGENTS`] hashes were found; only the newest
+    /// are represented.
+    pub agents_truncated: bool,
 }
 
 /// Which agents this node authored for, with exact counts.
@@ -582,7 +592,14 @@ pub async fn authored_here(
     engine: &Engine,
     only: Option<&str>,
 ) -> Result<(Vec<Authored>, Discovery), String> {
-    authored_here_with(engine, only, DISCOVERY_PAGE, DISCOVERY_MAX_ROWS).await
+    authored_here_with(
+        engine,
+        only,
+        DISCOVERY_PAGE,
+        DISCOVERY_MAX_ROWS,
+        MAX_DISCOVERED_AGENTS,
+    )
+    .await
 }
 
 /// [`authored_here`] with the page size and cap as parameters, so the paging
@@ -592,12 +609,19 @@ pub async fn authored_here_with(
     only: Option<&str>,
     page_size: i64,
     max_rows: usize,
+    max_agents: usize,
 ) -> Result<(Vec<Authored>, Discovery), String> {
     let mut hashes: Vec<String> = Vec::new();
+    // The newest row per hash, as seen during the newest-first scan: the
+    // first sighting IS the newest, under the same ordering the canonical's
+    // limit-1 read uses, so the two `newest` values stay comparable without
+    // a second read per hash.
+    let mut newest: std::collections::BTreeMap<String, Newest> = Default::default();
     let mut discovery = Discovery {
         mode: "explicit",
         rows_scanned: 0,
         truncated: false,
+        agents_truncated: false,
     };
     match nonblank(only) {
         Some(h) => hashes.push(h.to_string()),
@@ -625,7 +649,19 @@ pub async fn authored_here_with(
                     .filter(|s| s.agent_key_id.as_deref() == Some(own_key.as_str()))
                 {
                     if !hashes.contains(&s.agent_id_hash) {
+                        if hashes.len() >= max_agents {
+                            discovery.agents_truncated = true;
+                            continue;
+                        }
                         hashes.push(s.agent_id_hash.clone());
+                        newest.insert(
+                            s.agent_id_hash.clone(),
+                            Newest {
+                                trace_id: s.trace_id.clone(),
+                                started_at: s.started_at,
+                                completed_at: s.completed_at,
+                            },
+                        );
                     }
                 }
                 match page.next_cursor {
@@ -649,22 +685,29 @@ pub async fn authored_here_with(
             crate::backend::count_traces(engine, filter.clone(), CallerScope::Unauthenticated)
                 .await
                 .map_err(|e| format!("count local traces for {hash}: {e}"))?;
-        // Newest-first page of one, filtered to the hash — the same read the
-        // canonical makes, so the two `newest` values are comparable.
-        let page = crate::backend::list_trace_summaries(
-            engine,
-            filter,
-            None,
-            1,
-            CallerScope::Unauthenticated,
-        )
-        .await
-        .map_err(|e| format!("newest local trace for {hash}: {e}"))?;
-        let newest_authored = page.items.first().map(|s| Newest {
-            trace_id: s.trace_id.clone(),
-            started_at: s.started_at,
-            completed_at: s.completed_at,
-        });
+        // An explicitly named hash was not scanned: one newest-first read for
+        // it — the same read the canonical makes, so the two `newest` values
+        // are comparable. A discovered hash already has its newest from the
+        // scan.
+        let newest_authored = match newest.remove(&hash) {
+            Some(n) => Some(n),
+            None => {
+                let page = crate::backend::list_trace_summaries(
+                    engine,
+                    filter,
+                    None,
+                    1,
+                    CallerScope::Unauthenticated,
+                )
+                .await
+                .map_err(|e| format!("newest local trace for {hash}: {e}"))?;
+                page.items.first().map(|s| Newest {
+                    trace_id: s.trace_id.clone(),
+                    started_at: s.started_at,
+                    completed_at: s.completed_at,
+                })
+            }
+        };
         out.push(Authored {
             agent_id_hash: hash,
             authored,
@@ -744,6 +787,7 @@ async fn ask(
     c: &CanonicalRead,
     agent_id_hash: &str,
     trace_id: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> AskResult {
     let mut attempt = 0usize;
     loop {
@@ -752,12 +796,22 @@ async fn ask(
                 if e.contains(": HTTP 429") && attempt < MAX_429_RETRIES =>
             {
                 attempt += 1;
-                let wait = e
-                    .rsplit_once("retry-after=")
-                    .and_then(|(_, t)| t.trim().parse::<u64>().ok())
-                    .unwrap_or(1)
-                    .clamp(1, 2);
-                tokio::time::sleep(Duration::from_secs(wait)).await;
+                // The stated delay, or nothing: retrying EARLY is a guaranteed
+                // second refusal, so a Retry-After that does not fit the
+                // deadline ends the ask as unavailable instead.
+                let wait = Duration::from_secs(
+                    e.rsplit_once("retry-after=")
+                        .and_then(|(_, t)| t.trim().parse::<u64>().ok())
+                        .unwrap_or(1)
+                        .max(1),
+                );
+                if tokio::time::Instant::now() + wait > deadline {
+                    return Err((
+                        Verification::Unavailable,
+                        format!("{e} (Retry-After does not fit the canonical deadline)"),
+                    ));
+                }
+                tokio::time::sleep(wait).await;
             }
             other => return other,
         }
@@ -776,6 +830,10 @@ async fn ask_once(
 ) -> AskResult {
     let url = format!("{}{RECEIPT_ROUTE}", c.url);
     let nonce = crate::ids::new_id();
+    // The instant THIS ask was made. The nonce proves the signature was
+    // produced after it, so this — not the signer's own `read_at` — is the
+    // instant the signer's standing is judged at.
+    let asked_at = Utc::now();
     let mut query: Vec<(&str, &str)> = vec![("agent_id_hash", agent_id_hash), ("nonce", &nonce)];
     if let Some(id) = trace_id {
         query.push(("trace_id", id));
@@ -848,7 +906,7 @@ async fn ask_once(
             // fold honours history-bounded revocations, so a receipt signed
             // before a bound still stands.
             match engine
-                .resolve_key_statement_standing(signer, receipt.read_at, Utc::now())
+                .resolve_key_statement_standing(signer, asked_at, Utc::now())
                 .await
             {
                 Ok(fold) => {
@@ -933,6 +991,8 @@ pub async fn delivery_receipt(
         only_agent_id_hash,
         DISCOVERY_PAGE,
         DISCOVERY_MAX_ROWS,
+        MAX_DISCOVERED_AGENTS,
+        CANONICAL_DEADLINE,
     )
     .await
 }
@@ -974,6 +1034,8 @@ pub async fn delivery_receipt_with(
     only_agent_id_hash: Option<&str>,
     page_size: i64,
     max_rows: usize,
+    max_agents: usize,
+    canonical_deadline: Duration,
 ) -> Value {
     let read_at = Utc::now();
     let (agents, discovery) = match authored_here_with(
@@ -981,6 +1043,7 @@ pub async fn delivery_receipt_with(
         only_agent_id_hash,
         page_size,
         max_rows,
+        max_agents,
     )
     .await
     {
@@ -1018,59 +1081,72 @@ pub async fn delivery_receipt_with(
             continue;
         };
         // One deadline for the whole canonical, asks in flight together.
-        // Boxed: a stream of borrowing async-fn futures trips the handler's
-        // higher-ranked `Send` bound; the box pins the lifetime down.
+        // The asks — or, on a node that authored nothing, one probe, so the
+        // URL guess is still verified and a canonical whose receipts do not
+        // verify is reported before anything is authored. The probe runs
+        // INSIDE the deadline like any ask.
+        let deadline = tokio::time::Instant::now() + canonical_deadline;
+        let probe_only = agents.is_empty();
         let asks: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = AskResult> + Send + '_>>> =
-            agents
-                .iter()
-                .map(|a| {
-                    Box::pin(ask(
-                        engine,
-                        client,
-                        c,
-                        &a.agent_id_hash,
-                        a.newest_authored.as_ref().map(|n| n.trace_id.as_str()),
-                    ))
-                        as std::pin::Pin<
-                            Box<dyn std::future::Future<Output = AskResult> + Send + '_>,
-                        >
-                })
-                .collect();
-        // One deadline for the whole canonical, at most MAX_INFLIGHT_ASKS in
-        // flight, results in agent order.
-        let results: Option<Vec<AskResult>> = {
+            if probe_only {
+                vec![Box::pin(ask(engine, client, c, "probe", None, deadline))]
+            } else {
+                agents
+                    .iter()
+                    .map(|a| {
+                        Box::pin(ask(
+                            engine,
+                            client,
+                            c,
+                            &a.agent_id_hash,
+                            a.newest_authored.as_ref().map(|n| n.trace_id.as_str()),
+                            deadline,
+                        ))
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = AskResult> + Send + '_>,
+                            >
+                    })
+                    .collect()
+            };
+        let total = asks.len();
+        // At most MAX_INFLIGHT_ASKS in flight, results in order, and the
+        // deadline cuts the STREAM, not the collected results: an agent
+        // verified before it stays verified, the rest read unavailable, and
+        // the standing fold sees both (Codex, PR #592, round 5).
+        let mut results: Vec<AskResult> = Vec::with_capacity(total);
+        {
             use futures_util::StreamExt as _;
-            tokio::time::timeout(
-                CANONICAL_DEADLINE,
-                futures_util::stream::iter(asks)
-                    .buffered(MAX_INFLIGHT_ASKS)
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .ok()
-        };
-        let Some(results) = results else {
-            unreachable += 1;
-            canonical_views.push(json!({
-                "key_id": c.key_id, "url": c.url, "url_source": c.url_source,
-                "reachable": false,
-                "error": format!("no complete answer within {} s", CANONICAL_DEADLINE.as_secs()),
-                "agents": agents.iter().map(|a| json!({
-                    "agent_id_hash": a.agent_id_hash, "authored": a.authored,
-                    "newest_authored": a.newest_authored,
-                })).collect::<Vec<_>>(),
-            }));
-            continue;
-        };
+            let mut stream = futures_util::stream::iter(asks).buffered(MAX_INFLIGHT_ASKS);
+            loop {
+                match tokio::time::timeout_at(deadline, stream.next()).await {
+                    Ok(Some(r)) => results.push(r),
+                    Ok(None) => break,
+                    Err(_) => {
+                        while results.len() < total {
+                            results.push(Err((
+                                Verification::Unavailable,
+                                format!(
+                                    "no answer within the {} s canonical deadline",
+                                    canonical_deadline.as_secs()
+                                ),
+                            )));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
         let mut per_agent = Vec::with_capacity(agents.len());
         let mut reachable = true;
         let mut verified = 0usize;
         let mut first_error: Option<String> = None;
-        for (a, r) in agents.iter().zip(results) {
+        for (i, r) in results.into_iter().enumerate() {
+            let a = if probe_only { None } else { agents.get(i) };
             match r {
                 Ok(rcpt) => {
                     verified += 1;
+                    let Some(a) = a else { continue };
                     let gap = (a.authored - rcpt.traces).max(0);
                     worst_gap = worst_gap.max(gap);
                     // THE answer: is the newest thing we made there. A node with
@@ -1103,6 +1179,7 @@ pub async fn delivery_receipt_with(
                         reachable = false;
                     }
                     first_error.get_or_insert(e);
+                    let Some(a) = a else { continue };
                     per_agent.push(json!({
                         "agent_id_hash": a.agent_id_hash,
                         "verification": verification,
@@ -1116,23 +1193,9 @@ pub async fn delivery_receipt_with(
                 }
             }
         }
-        let mut total = agents.len();
-        if agents.is_empty() {
-            // Nothing to ask about — probe once so the URL guess is still
-            // verified, and so a canonical whose receipts do not verify is
-            // reported even before anything is authored.
-            total = 1;
-            match ask(engine, client, c, "probe", None).await {
-                Ok(_) => verified = 1,
-                Err((_, e)) => {
-                    reachable = !e.contains(": error sending request");
-                    first_error = Some(e);
-                }
-            }
-        }
-        // A canonical ANSWERED only if every agent's receipt verified. One
-        // verified beside one unknown is not "answered": the verdict would
-        // be true over an unknown (Codex, PR #592, round 3).
+        // A canonical ANSWERED only if every ask verified. One verified beside
+        // one unknown is not "answered": the verdict would be true over an
+        // unknown (Codex, PR #592, rounds 3–5).
         let standing = standing_of(verified, total, reachable);
         match standing {
             CanonicalStanding::Answered => answered += 1,
@@ -1155,8 +1218,19 @@ pub async fn delivery_receipt_with(
     // Discovery that stopped early may have missed agents this node authored
     // for; a verdict over the visible subset is not a verdict. Explicit hashes
     // are never truncated.
-    let discovery_incomplete = discovery.truncated && discovery.mode == "signing_key";
-    let verdict_known = answered > 0 && authored_total > 0 && partial == 0 && !discovery_incomplete;
+    let discovery_incomplete =
+        (discovery.truncated || discovery.agents_truncated) && discovery.mode == "signing_key";
+    // A count without a newest identity (retention took the last row between
+    // the two reads) leaves nothing to ask the canonical about by id, and a
+    // verdict on the count alone is the round-1 mistake again.
+    let identity_unavailable = agents
+        .iter()
+        .any(|a| a.authored > 0 && a.newest_authored.is_none());
+    let verdict_known = answered > 0
+        && authored_total > 0
+        && partial == 0
+        && !discovery_incomplete
+        && !identity_unavailable;
     let not_counted = |n: usize, what: &str| -> String {
         if n > 0 {
             format!(" {n} canonical(s) {what} and are not counted.")
@@ -1191,11 +1265,21 @@ pub async fn delivery_receipt_with(
         )
     } else if discovery_incomplete {
         format!(
-            "discovery stopped after {} rows without reaching the end of this node's corpus, \
-             so agents this node authored for may be missing from the receipt — the verdict is \
-             UNKNOWN, not a pass. Name the agent hash (`agent_id_hash=`) to skip discovery.",
-            discovery.rows_scanned
+            "discovery stopped early ({} rows scanned{}), so agents this node authored for may \
+             be missing from the receipt — the verdict is UNKNOWN, not a pass. Name the agent \
+             hash (`agent_id_hash=`) to skip discovery.",
+            discovery.rows_scanned,
+            if discovery.agents_truncated {
+                format!(", more than {MAX_DISCOVERED_AGENTS} agents found")
+            } else {
+                String::new()
+            }
         )
+    } else if identity_unavailable {
+        "an agent has a positive authored count but no newest trace to name — the local rows \
+         moved between two reads (retention) — so nothing was asked by id and the verdict is \
+         UNKNOWN. Re-read."
+            .to_string()
     } else if partial > 0 {
         format!(
             "{partial} canonical(s) answered for SOME agents and not others (`standing: partial`): \
@@ -1249,6 +1333,7 @@ pub async fn delivery_receipt_with(
             "canonicals_unverified": unverified,
             "canonicals_unreachable": unreachable,
             "discovery_incomplete": discovery_incomplete,
+            "identity_unavailable": identity_unavailable,
             "newest_authored_held_by_every_answering_canonical": if verdict_known { Value::Bool(newest_held_everywhere_answered) } else { Value::Null },
         },
         "hint": hint,

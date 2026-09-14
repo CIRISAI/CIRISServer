@@ -1040,8 +1040,11 @@ pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandl
         // later one on this loop's slot. (`reset()` would have put the first
         // pass anywhere in (period, 2·period] — Codex, PR #592.)
         let mut state = ScanState::default();
-        tokio::time::sleep(cfg.cadence).await;
         let mut cadence = crate::loop_cadence::Cadence::new("equivocation", cfg.cadence);
+        // One period PLUS this loop's phase: 900 s alone is three announce
+        // periods exactly, which is the collision the phase exists to avoid
+        // (Codex, PR #592, round 5).
+        tokio::time::sleep(cfg.cadence + cadence.phase()).await;
         // The immediate first tick IS the one-period pass. Then `reset()`:
         // without it the next grid point can be seconds away (the slot is a
         // few seconds past the epoch), and two full scans would run back to

@@ -66,6 +66,14 @@ const AGENT_A: Agent = Agent {
     ed: 0x11,
     pqc: 0x12,
 };
+/// A's key under a SECOND agent hash — authored here (same signer), a
+/// different agent to the canonical.
+const AGENT_A2: Agent = Agent {
+    alias: "agent-receipt",
+    hash: "agent-receipt-hash-2",
+    ed: 0x11,
+    pqc: 0x12,
+};
 /// Another agent entirely — its rows are FOREIGN to a node signing as A.
 const AGENT_B: Agent = Agent {
     alias: "agent-other",
@@ -522,7 +530,7 @@ async fn discovery_pages_past_newer_foreign_rows_and_says_when_it_stopped_early(
     admit(&producer, &AGENT_B, 10..16).await;
 
     // Paging on: A is found behind B's rows.
-    let (mine, d) = trace_receipt::authored_here_with(&producer, None, 2, 1_000)
+    let (mine, d) = trace_receipt::authored_here_with(&producer, None, 2, 1_000, 50)
         .await
         .expect("read");
     assert_eq!(mine.len(), 1, "{mine:?}");
@@ -533,7 +541,7 @@ async fn discovery_pages_past_newer_foreign_rows_and_says_when_it_stopped_early(
 
     // Capped before A's rows: nothing found — and the scan SAYS it stopped,
     // which is the difference between "nothing authored" and "did not look".
-    let (mine, d) = trace_receipt::authored_here_with(&producer, None, 2, 4)
+    let (mine, d) = trace_receipt::authored_here_with(&producer, None, 2, 4, 50)
         .await
         .expect("read");
     assert!(mine.is_empty(), "{mine:?}");
@@ -1054,6 +1062,8 @@ async fn a_truncated_discovery_makes_the_verdict_unknown_not_delivered() {
         None,
         2,
         4,
+        50,
+        trace_receipt::CANONICAL_DEADLINE,
     )
     .await;
     assert_eq!(view["discovery"]["truncated"], true, "{view}");
@@ -1077,6 +1087,8 @@ async fn a_truncated_discovery_makes_the_verdict_unknown_not_delivered() {
         None,
         2,
         1_000,
+        50,
+        trace_receipt::CANONICAL_DEADLINE,
     )
     .await;
     assert_eq!(view["verdict"]["discovery_incomplete"], false, "{view}");
@@ -1096,4 +1108,158 @@ async fn trust_engine(producer: &Engine, canonical: &Node) {
         identity_type::NODE,
     )
     .await;
+}
+
+/// A "canonical" that FORWARDS to a real one, except it sleeps `slow_for`
+/// seconds on asks about `slow_hash` — the shape of a canonical that answers
+/// for one agent and hangs on another.
+fn slow_proxy(real: String, slow_hash: &'static str, slow_for: u64) -> axum::Router {
+    axum::Router::new().route(
+        trace_receipt::RECEIPT_ROUTE,
+        axum::routing::get(move |axum::extract::RawQuery(q): axum::extract::RawQuery| {
+            let real = real.clone();
+            async move {
+                let q = q.unwrap_or_default();
+                if q.contains(&format!("agent_id_hash={slow_hash}")) {
+                    tokio::time::sleep(std::time::Duration::from_secs(slow_for)).await;
+                }
+                let resp = reqwest::Client::new()
+                    .get(format!("{real}{}?{q}", trace_receipt::RECEIPT_ROUTE))
+                    .send()
+                    .await
+                    .expect("forward");
+                let status = axum::http::StatusCode::from_u16(resp.status().as_u16()).unwrap();
+                let body = resp.bytes().await.expect("body");
+                (status, [("content-type", "application/json")], body)
+            }
+        }),
+    )
+}
+
+#[tokio::test]
+async fn a_deadline_keeps_the_agents_that_answered_and_grades_the_rest_partial() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, &AGENT_A, 0..2).await;
+    // Distinct ids: a trace id is producer-chosen and persist deduplicates on it.
+    admit(&canonical.engine, &AGENT_A2, 100..102).await;
+    let (real, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+    // Asks about A2 hang past the deadline; asks about A answer at once.
+    let (proxy, _h2) = serve(slow_proxy(real, AGENT_A2.hash, 8)).await;
+
+    let producer = node_signing_as(&AGENT_A).await;
+    trust_engine(&producer, &canonical).await;
+    admit(&producer, &AGENT_A, 0..2).await;
+    admit(&producer, &AGENT_A2, 100..102).await;
+
+    let started = std::time::Instant::now();
+    let view = trace_receipt::delivery_receipt_with(
+        &producer,
+        roster(vec![read(proxy, &canonical.key_id)]),
+        None,
+        1_000,
+        50_000,
+        50,
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(7),
+        "the deadline held: {view}"
+    );
+    let c = &view["canonicals"][0];
+    assert_eq!(
+        c["standing"], "partial",
+        "one verified, one timed out: {view}"
+    );
+    let by_hash: std::collections::HashMap<&str, &serde_json::Value> = c["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["agent_id_hash"].as_str().unwrap(), a))
+        .collect();
+    assert_eq!(by_hash[AGENT_A.hash]["verification"], "verified", "{view}");
+    assert_eq!(
+        by_hash[AGENT_A.hash]["newest_authored_held"], true,
+        "kept, not erased: {view}"
+    );
+    assert_eq!(
+        by_hash[AGENT_A2.hash]["verification"], "unavailable",
+        "{view}"
+    );
+    assert!(by_hash[AGENT_A2.hash]["held"].is_null(), "{view}");
+    assert!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"].is_null(),
+        "partial is unknown: {view}"
+    );
+    assert_eq!(view["verdict"]["canonicals_partial"], 1);
+}
+
+#[tokio::test]
+async fn a_retry_after_that_does_not_fit_the_deadline_ends_the_ask_instead_of_retrying_early() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, &AGENT_A, 0..1).await;
+    // One token, refilled at 0.1/s: the second ask is told to come back in 10 s.
+    let gate = Arc::new(ReceiptGate::new(4, 1.0, 0.1));
+    let (base, _h) = serve(trace_receipt::router_with_gate(
+        Arc::clone(&canonical.engine),
+        gate,
+    ))
+    .await;
+    let producer = node(0xB1, "node-producer").await;
+    trust(&producer.engine, &canonical).await;
+    admit(&producer.engine, &AGENT_A, 0..1).await;
+    // Spend the token.
+    let first = get_receipt(&base, AGENT_A.hash, None, "spend").await;
+    assert_eq!(first.status(), 200);
+
+    let started = std::time::Instant::now();
+    let view = trace_receipt::delivery_receipt(
+        &producer.engine,
+        roster(vec![read(base, &canonical.key_id)]),
+        Some(AGENT_A.hash),
+    )
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "no early retries were spent: {view}"
+    );
+    let a = &view["canonicals"][0]["agents"][0];
+    assert_eq!(a["verification"], "unavailable", "{view}");
+    assert!(
+        view["canonicals"][0]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("HTTP 429") && e.contains("does not fit")),
+        "{view}"
+    );
+}
+
+#[tokio::test]
+async fn more_agents_than_the_cap_makes_the_verdict_unknown() {
+    let canonical = node(0xA1, "node-canonical").await;
+    admit(&canonical.engine, &AGENT_A, 0..1).await;
+    admit(&canonical.engine, &AGENT_A2, 100..101).await;
+    let (live, _h) = serve(trace_receipt::router(Arc::clone(&canonical.engine))).await;
+    let producer = node_signing_as(&AGENT_A).await;
+    trust_engine(&producer, &canonical).await;
+    admit(&producer, &AGENT_A, 0..1).await;
+    admit(&producer, &AGENT_A2, 100..101).await;
+
+    // Cap of one: one agent represented, and the receipt says so.
+    let view = trace_receipt::delivery_receipt_with(
+        &producer,
+        roster(vec![read(live, &canonical.key_id)]),
+        None,
+        1_000,
+        50_000,
+        1,
+        trace_receipt::CANONICAL_DEADLINE,
+    )
+    .await;
+    assert_eq!(view["agents"].as_array().unwrap().len(), 1, "{view}");
+    assert_eq!(view["discovery"]["agents_truncated"], true, "{view}");
+    assert_eq!(view["verdict"]["discovery_incomplete"], true, "{view}");
+    assert!(
+        view["verdict"]["newest_authored_held_by_every_answering_canonical"].is_null(),
+        "{view}"
+    );
 }
