@@ -1415,6 +1415,31 @@ pub fn delivery_status_json() -> String {
 
 /// The default reconcile cadence, matching the compose default
 /// ([`crate::config_reconcile::DEFAULT_REPLICATION_RECONCILE_SECS`]).
+#[cfg(feature = "python")]
+pub fn delivery_receipt_json() -> String {
+    let Some(engine) = ciris_persist::ffi::pyo3::current_rust_engine() else {
+        return serde_json::json!({
+            "error": "no engine handle — this node's own trace store is not readable here",
+        })
+        .to_string();
+    };
+    let fut = async move {
+        let reads = crate::trace_receipt::canonical_reads(&engine).await;
+        crate::trace_receipt::delivery_receipt(&engine, reads).await
+    };
+    let value = match HELD.get() {
+        Some((rt, _)) => rt.block_on(fut),
+        None => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(fut),
+            Err(e) => serde_json::json!({ "error": format!("delivery_receipt runtime: {e}") }),
+        },
+    };
+    value.to_string()
+}
+
 pub const DEFAULT_DELIVERY_CADENCE_SECS: u64 =
     crate::config_reconcile::DEFAULT_REPLICATION_RECONCILE_SECS;
 

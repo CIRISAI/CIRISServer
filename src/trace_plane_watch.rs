@@ -67,17 +67,6 @@ use crate::operator_surface::{
 /// [`TRACE_GREEN_MAX_HOURS`]: crate::operator_surface::TRACE_GREEN_MAX_HOURS
 pub const WATCH_CADENCE: Duration = Duration::from_secs(15 * 60);
 
-/// Where in the cadence this watch's ticks sit, measured from boot.
-///
-/// The equivocation detector also runs at 900 s, and until 0.5.199 the two
-/// fired in the same second every fifteen minutes — the second the canonical's
-/// read API stopped accepting (CIRISServer#553). The first reading still
-/// happens at once (a watch that waits seven minutes to say the plane is dark
-/// is a watch that missed the boot); every later tick sits 450 s past boot,
-/// which is half a cadence from the detector's [`crate::equivocation::PHASE_OFFSET`]
-/// and 150 s off edge's 300 s announce grid.
-pub const PHASE_OFFSET: Duration = Duration::from_secs(450);
-
 /// How long a *standing* condition goes unrestated before the watch says it
 /// again.
 ///
@@ -272,15 +261,14 @@ pub async fn tick(
 pub fn spawn(engine: Arc<Engine>, refusals: Option<IngestRefusals>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut watch = Watch::new();
-        // The first reading at once; every later one on the offset grid.
-        timed_tick(&mut watch, &engine, refusals.as_ref()).await;
-        let mut interval =
-            tokio::time::interval_at(tokio::time::Instant::now() + PHASE_OFFSET, WATCH_CADENCE);
-        // The default `Burst` behaviour would fire the missed ticks back to back
-        // after a stall; `Delay` keeps the cadence a cadence.
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The registry allocates the phase (CIRISServer#575): the first tick is
+        // immediate — the first reading at once, as before — and every later
+        // one sits on this loop's slot of the shared grid, clear of the
+        // detector and of edge's announce. A stalled tick realigns to the grid
+        // rather than shifting it.
+        let mut cadence = crate::loop_cadence::Cadence::new("trace_plane_watch", WATCH_CADENCE);
         loop {
-            interval.tick().await;
+            cadence.tick().await;
             timed_tick(&mut watch, &engine, refusals.as_ref()).await;
         }
     })

@@ -89,3 +89,28 @@ pub async fn list_trace_summaries(
             .to_string(),
     ))
 }
+
+/// Exact distinct-trace count for a filter — the receipt's number
+/// ([`crate::trace_receipt`]). Same one door as
+/// [`list_trace_summaries`]: asking a backend by name here is how a postgres
+/// node came to answer `Err` on every scorer pass.
+pub async fn count_traces(
+    engine: &Engine,
+    filter: TraceFilter,
+    scope: CallerScope,
+) -> Result<i64, Error> {
+    use ciris_persist::prelude::ReadEngine as _;
+
+    #[cfg(target_os = "linux")]
+    if let Some(pg) = engine.postgres_backend() {
+        return pg.count_traces(filter, scope).await;
+    }
+    if let Some(sq) = engine.sqlite_backend() {
+        return sq.count_traces(filter, scope).await;
+    }
+    Err(Error::Backend(
+        "this Engine has no read-capable backend (expected SQLite or PostgreSQL) — \
+         trace counts are unavailable on this node"
+            .to_string(),
+    ))
+}

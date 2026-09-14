@@ -78,13 +78,20 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 6] = [
+pub const LOOPS: [&str; 8] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
     "retention",
     "federation_delivery",
     "mesh_config_effect",
+    // The two 15-minute readers. They de-phased themselves by hand against
+    // each other and edge's 300 s announce grid (CIRISServer#553) before this
+    // registry existed, on `interval_at` — which the gate's bare-`interval(`
+    // scrape could not see, so the allocation claimed to be complete and was
+    // short by two.
+    "trace_plane_watch",
+    "equivocation",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.
