@@ -56,8 +56,12 @@ const RATIFIED_VENDORED_MANIFEST_VERSION: &str = "0.3.0";
 /// wire-grammar manifest hash. Flips when the set/shape of consent grant
 /// dimensions changes (which cohorts route which kinds). A silent change would
 /// re-scope who may replicate what → this must be a reviewed re-pin.
+// v44.3.0 (CIRISPersist#848, adopted 0.5.209 / CIRISServer#596): the 16th
+// wire kind `KeyGrant` (StructuralPlane) joined `kind_transferability`, which
+// the grammar hash covers. Principles, restriction ops and audiences are
+// unchanged. Previous value b66870da… (v31.1.0 – v44.2.1).
 const RATIFIED_CONSENT_GRAMMAR_HASH: &str =
-    "b66870da9639c8560538a26c566168fea9759139eaa67ad4116ff8a5f290d69f";
+    "79c74e4d4d04aeb624a7139d705d4882c25f32f6654e5bf017e2f5b99eec38ac";
 
 // ─────────────────────────── persist: transform algebra ────────────────────
 

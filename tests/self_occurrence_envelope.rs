@@ -64,7 +64,12 @@ fn envelope_as_production_builds_it(key_id: &str) -> serde_json::Value {
         &td,
         "eA==",
         "bQ==",
-        chrono::Utc::now(),
+        // Millisecond-exact: the builder renders `asserted_at` at millisecond
+        // precision and debug-asserts the instant it is handed has no finer
+        // digits, because persist v44.4.0's signed door (`same_instant_ms`)
+        // refuses a typed row that diverges from its envelope below the ms.
+        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
+            .expect("millisecond instant in range"),
     )
 }
 

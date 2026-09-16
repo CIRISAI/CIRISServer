@@ -137,15 +137,22 @@ async fn node_key_id(engine: &Engine) -> String {
         .expect("derive node federation key_id")
 }
 
-/// Register this node's own steward key through the canonical admission gate
-/// (the `put_attestation` attesting-key FK precondition).
+/// Register this node's own key through the canonical admission gate (the
+/// `put_attestation` attesting-key FK precondition) — as a NODE, the way
+/// compose's boot does. The type matters since edge v24.2.0: the node's
+/// content-only occurrence for its owner is admitted through persist's SIGNED
+/// door, whose signer-standing rule (`check_signer_acts_for`) accepts a
+/// non-owner signer only if the directory says it is a `node` AND `owner_of`
+/// walks back to the identity. Registered as `steward` (what this harness did
+/// through 0.5.208) the same key is refused as "neither identity … nor a node
+/// it owns", and every chat send fails with "sealed with NO grants".
 async fn register_self(engine: &Engine) {
     let key_id = node_key_id(engine).await;
     ciris_server::attest::register_key(
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
         &key_id,
-        identity_type::STEWARD,
+        identity_type::NODE,
         serde_json::Value::Null,
     )
     .await
@@ -495,46 +502,13 @@ async fn node_edge_signer(engine: &Engine) -> Arc<ciris_edge::identity::LocalSig
 /// the same as having no owner key at all.
 async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::JoinHandle<()>) {
     let signer = node_edge_signer(&engine).await;
-    // THE NODE'S OWN SEALED SEED, created the way COMPOSE creates it.
-    //
-    // Two details, and I had both wrong first time:
-    //
-    //  * NOT the owner's seed. edge derives content-KEM halves from whichever
-    //    sealed seed the process holds, and the occurrence it registers must be
-    //    a key this process can decrypt for. Using the owner's would pass on a
-    //    shortcut a real node never has — the fixture bug CIRISEdge#599 was.
-    //  * `SealedEd25519Signer::open_or_create`, NOT `mint_user_identity`. They
-    //    write different layouts (`{alias}.ed25519.seed.blob` + `.master.key`
-    //    versus `{alias}.ed25519.seed` + `.backend`), and only the first is what
-    //    `SelfEncKeys` reads. Minting a NODE seed with the USER tool produced a
-    //    seed no keyring reader could open, which I briefly mistook for a
-    //    keyring bug.
-    //  * ONE ALIAS PER TEST, not per process. `open_or_create` stores through
-    //    `SoftwareSecureBlobStorage::store`, whose "atomic write" names its
-    //    temp file after the ALIAS (`{alias}.blob.tmp`) rather than uniquely.
-    //    Two threads creating the same alias at once therefore write the same
-    //    temp path, and the one that renames second fails ENOENT ("Failed to
-    //    rename blob: No such file or directory"). `cargo test` runs this
-    //    file's tests in parallel, so a per-process alias is a coin flip: it
-    //    passed 33/33 locally and failed one test in CI. Same reasoning as
-    //    `OwnerIdentity::mint` — the alias is what keeps two tests apart, not
-    //    the shared CIRIS_HOME.
-    static NODE_NTH: AtomicU32 = AtomicU32::new(0);
-    let node_alias = format!(
-        "chat-node-{}-{}",
-        std::process::id(),
-        NODE_NTH.fetch_add(1, Ordering::Relaxed)
-    );
-    let node_seed_dir = ciris_home().join(&node_alias);
-    std::fs::create_dir_all(&node_seed_dir).expect("node seed dir");
-    ciris_keyring::SealedEd25519Signer::open_or_create(
-        node_alias.clone(),
-        node_seed_dir.clone(),
-        None,
-    )
-    .expect("seal the node's ed25519 seed the way compose does");
+    // The node's content occurrence is provisioned from the ENGINE — persist's
+    // own content-KEM identity — by `provision_engine_occurrence` at the chat
+    // doors (CIRISServer#596). 0.5.207 minted a sealed node seed here for
+    // `SelfEncKeys`; that was #590's mistake, and the read door never unwrapped
+    // with those keys. Nothing keystore-side is needed.
 
-    let app = contacts_chat::router(engine, signer, seed_dir, node_alias, node_seed_dir, None);
+    let app = contacts_chat::router(engine, signer, seed_dir, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -555,6 +529,16 @@ async fn fixture() -> (
     OwnerIdentity,
     tokio::task::JoinHandle<()>,
 ) {
+    // Surface the node's own refusals (content-occurrence provisioning, chat
+    // sealing) in a failing run: without a subscriber every `tracing::warn!`
+    // from the code under test is silently dropped. `RUST_LOG` overrides.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ciris_server=warn".into()),
+        )
+        .with_test_writer()
+        .try_init();
     let engine = node().await;
     let owner_id = OwnerIdentity::mint().await;
     register_self(&engine).await;

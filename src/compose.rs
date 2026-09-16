@@ -1484,8 +1484,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&chat_node_signer),
                         crate::user_seed_dir(&cfg),
-                        cfg.keystore_alias.clone(),
-                        cfg.identity_dir.clone(),
                         // The live transport, so the contact ladder can run its
                         // `discover` rung — "is there somewhere to send" — through
                         // edge's own `RouteLens` instead of this module deciding
@@ -2292,6 +2290,13 @@ pub(crate) async fn publish_self_transport_destination(
     }
 }
 
+/// Truncate an instant to whole milliseconds — the precision every signed
+/// `asserted_at` in this file is rendered at, and the precision persist's
+/// signed identity-occurrence door requires of the TYPED value too.
+pub(crate) fn ms_exact(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp_millis(t.timestamp_millis()).unwrap_or(t)
+}
+
 /// **Boot self-publish of THIS node's SIGNED identity occurrence** — the sealability
 /// twin of [`publish_self_transport_destination`] (CIRISServer#227 S1, occurrence-KEX
 /// arc 4/4). The transport binding says *how to reach me*; the occurrence says *how to
@@ -2345,6 +2350,10 @@ pub(crate) fn self_occurrence_envelope(
     enc_ml_kem_768_base64: &str,
     asserted_at: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
+    debug_assert!(
+        asserted_at.timestamp_subsec_nanos() % 1_000_000 == 0,
+        "self_occurrence_envelope: pass an ms_exact() instant — the typed row must match this envelope"
+    );
     serde_json::json!({
         "attesting_key_id": key_id,
         "identity_key_id": key_id,
@@ -2413,7 +2422,13 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
 
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let now = chrono::Utc::now();
+    // Millisecond-exact on purpose: the envelope below renders `asserted_at` at
+    // millisecond precision, and persist v44.4.0's signed door
+    // (`same_instant_ms`) refuses any typed row whose instant carries
+    // sub-millisecond digits as "typed asserted_at diverges from the signed
+    // envelope" — a nanosecond `Utc::now()` here left the node's own
+    // self-occurrence unpublished every boot (found adopting CIRISServer#596).
+    let now = ms_exact(chrono::Utc::now());
     // Envelope member names byte-match persist's admission parse + the producer the
     // gate verifies (verify_signed_identity_occurrence). app_name/aspects are edge's
     // RNS destination constants ("ciris"."edge") — the gate recomputes dest_hash from
@@ -4590,5 +4605,37 @@ mod self_key_record_identity_tests {
             })
             .await
             .expect("the engine-signed self-record passes the admission gate");
+    }
+}
+
+#[cfg(test)]
+mod self_occurrence_instant_tests {
+    use super::{ms_exact, self_occurrence_envelope};
+
+    /// persist v44.4.0's signed identity-occurrence door admits a row only when
+    /// the TYPED `asserted_at` is millisecond-exact AND agrees to the millisecond
+    /// with the envelope string it signed (`same_instant_ms`). Pin both halves
+    /// against the builder compose runs at boot, with a nanosecond `now`.
+    #[test]
+    fn boot_self_occurrence_instant_is_ms_exact_and_matches_its_envelope() {
+        let nano_now = chrono::DateTime::from_timestamp(1_800_000_000, 123_456_789).unwrap();
+        let now = ms_exact(nano_now);
+        assert_eq!(
+            now.timestamp_subsec_nanos() % 1_000_000,
+            0,
+            "typed instant must be ms-exact"
+        );
+        assert_eq!(
+            now.timestamp_millis(),
+            nano_now.timestamp_millis(),
+            "truncation, not rounding"
+        );
+        let env = self_occurrence_envelope("k", &serde_json::json!({}), "x", "m", now);
+        let rendered = env["asserted_at"]
+            .as_str()
+            .expect("asserted_at is a string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(rendered).expect("rfc3339");
+        assert_eq!(parsed.timestamp_millis(), now.timestamp_millis());
+        assert_eq!(rendered, "2027-01-15T08:00:00.123Z");
     }
 }
