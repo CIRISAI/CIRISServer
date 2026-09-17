@@ -849,6 +849,15 @@ async fn gather_delivery_status(
         .iter()
         .any(|p| p["knows_peer"] == json!(true) && p["kex_present"] == json!(false));
 
+    // Every grantor a consent row for this node may be authored under (owner
+    // first, machine keys as legacy) — awaited here: this future is already
+    // driven by the held runtime, and a nested block_on panics (CIRISServer#599).
+    let consent_grantors = match engine.as_ref() {
+        Some(e) => crate::peer::consent_grantors_for(e, &node_key_id)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     json!({
         "delivery_started": started,
         // Held-pending-claim is NOT "not started": the node is healthy and waiting
@@ -859,14 +868,7 @@ async fn gather_delivery_status(
         "node_key_id": node_key_id,
         // Every grantor a consent row for this node may be authored under — owner
         // first, machine keys as legacy — the set the reconciler reads (CIRISServer#599).
-        "consent_grantor_key_ids": engine
-            .as_ref()
-            .zip(HELD.get())
-            .map(|(e, (rt, _))| {
-                rt.block_on(crate::peer::consent_grantors_for(e, &node_key_id))
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default(),
+        "consent_grantor_key_ids": consent_grantors,
         "transport_present": edge.reticulum_transport().is_some(),
         "canonical_targets": targets,
         "peers": peers,
