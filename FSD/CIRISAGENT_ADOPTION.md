@@ -374,6 +374,36 @@ the ordinary CEG withdraw of that grant. There is no contacts table.
   / `GET /v1/node/delivery-receipt` — the canonical's own signed answer to
   "did my newest trace arrive" (0.5.208, CIRISServer#369).
 
+### 6c′. Consent is by humans — what 0.5.210 changes about the grant you already write
+
+Your wizard is correct and always was: the human's "Send traces" opt-in is
+what authors the `consent:replication` grant, replayed by the fold
+(`author_federation_consent`) and, in-band, by the setup-complete path. What
+was wrong sat in the server (CIRISServer#599): from 0.5.203 to 0.5.209 the
+node **signed that grant with a machine key** (the node key on a split-key
+home) and **read consent back under a different machine key** (the engine
+key), so every desktop/Android node converged to zero consent peers and
+shipped nothing while the canonical saw it root, get admitted, and go quiet.
+
+**0.5.210** (floor for this section from here on):
+- The grant is **signed by the owner's fedID** — the steward the owner-binding
+  names — using the software seed the wizard minted. A node or agent key holds
+  topology, never consent. Nothing changes in what you call.
+- Machine-authored grants from earlier wheels are **re-signed by the owner** at
+  boot and after your fold's author door; the old rows stay as legacy grantors.
+- Every read (delivery reconcile, `delivery_status`, the analyze-stance probe,
+  the canonical's scorer) resolves a machine key to its steward first.
+  `delivery_status` now reports `consent_grantor_key_ids`.
+- Your `stance='unspecified' … ship=MISSING` was the same mismatch on the
+  stance read; it reads `granted` under 0.5.210.
+- A **hardware-custodied owner** (no software seed on the node) is refused,
+  not downgraded to a machine key; the 2-phase client-signed consent door is
+  not wired yet.
+- Requisites in flight: CIRISEdge#609 (edge's own per-plane send set must union
+  the steward's grants; until then server's `set_peers` drives delivery and
+  traces ship), CIRISPersist#857 (a split home's AGENT key has no CEG link to
+  its host node, so capacity scoring of such agents waits on it).
+
 ### 6d. Not in this cut (tracked)
 
 - Rooms are **pairs only**: no create/invite/revoke, roster check is exactly
@@ -384,6 +414,7 @@ the ordinary CEG withdraw of that grant. There is no contacts table.
   until that hook exists.
 - The user-signer alias flip (edge v24.2.0 §4) is deferred to CIRISServer#597;
   production is unaffected.
+- Client-signed (2-phase) consent for hardware-custodied owners — CIRISServer#599.
 
 ## Top 3 gaps where Rust does NOT yet fully cover Python (block clean deletion)
 

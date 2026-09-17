@@ -865,6 +865,24 @@ pub struct ConsentAuthor {
     pub signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
 }
 
+/// **Consent is by humans, not infrastructure (CIRISServer#599).** A
+/// `consent:replication` / `analyze` grant records the OWNER's act (the wizard's
+/// opt-in, a peering the owner requested, a contact the owner added), so on an
+/// OWNED node it is authored BY THE OWNER — the steward the owner-binding names
+/// (`owner_of(node)`) — with the owner's own pen ([`owner_consent_pen`]). A node
+/// or agent key holds TOPOLOGY, never consent. 0.5.203's "authored as the NODE,
+/// whose topology it is" and the pre-0.5.203 engine-key rows were both wrong
+/// on this axis; [`crate::node_key::migrate_consent_to_owner`] re-signs them.
+///
+/// Only an UNOWNED node (boot-environment peering, the test-anchor harness)
+/// still authors as a machine key, loudly, as a PROVISIONAL row that the
+/// migration re-signs the moment the node is claimed. An owned node whose
+/// owner's pen this process cannot reach (hardware custody, no software seed)
+/// is REFUSED — never silently downgraded to a machine key.
+///
+/// The paragraphs below are the 0.5.203 rules for the machine-key fallback and
+/// for an explicit `author_signer`; they still govern those two paths.
+///
 /// Resolve the author for a consent row a caller named `requested` for. See
 /// [`ConsentAuthor`].
 ///
@@ -881,65 +899,163 @@ pub async fn consent_author(
         .await
         .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
     if let Some(signer) = explicit {
+        // An explicit pen must hold the named key, under either convention —
+        // "I hold this key", never "sign as anyone". This is how the owner
+        // migration and the harness author: the caller names the author.
         if signer_holds(&signer, requested) {
             return Ok(ConsentAuthor {
                 key_id: requested.to_owned(),
                 signer: Some(signer),
             });
         }
-        // An explicit pen that does not hold the named key falls through to
-        // the refusal — never silently swap in another author.
-    } else {
-        let held = crate::node_key::held_node_signer();
-        if engine_author == requested && held.is_none() {
-            return Ok(ConsentAuthor {
-                key_id: requested.to_owned(),
-                signer: None,
-            });
-        }
-        if let Some(held) = held {
-            let node = held.derived_key_id();
-            if signer_holds(&held, requested) {
-                return Ok(ConsentAuthor {
-                    key_id: node,
-                    signer: Some(held),
-                });
-            }
-            if engine_author == requested {
-                tracing::info!(
-                    requested = %requested,
-                    node_key_id = %node,
-                    "consent named for the ACTOR on a split node — authored as the NODE, \
-                     whose topology it is (CC 3.4.7.3 / CIRISServer#563)"
-                );
-                return Ok(ConsentAuthor {
-                    key_id: node,
-                    signer: Some(held),
-                });
-            }
-        }
+        anyhow::bail!(
+            "refusing to emit a consent grant naming {requested:?}: the explicit signer \
+             holds {:?}/{:?}, not that key — a consent grant is self-attested \
+             (CEG 1.0-RC29 §5.6.8.15) and nobody signs as anyone else",
+            signer.key_id(),
+            signer.derived_key_id()
+        );
     }
-    anyhow::bail!(
-        "refusing to emit a consent grant naming {requested:?}: this engine signs as \
-         {engine_author:?}, and a consent grant is self-attested (CEG 1.0-RC29 §5.6.8.15). \
-         The row would be authored by the engine and invisible to {requested:?} — a \
-         topology that reads empty under a healthy transport (CIRISServer#312). To author \
-         as another identity, the ENGINE must sign as it, or this process must hold its key."
-    )
+    // Which NODE is this consent about? The held node key on a split node, else
+    // the engine. A caller may name it under either convention (actor / node).
+    let held = crate::node_key::held_node_signer();
+    let node_key_id = held
+        .as_ref()
+        .map(|h| h.derived_key_id())
+        .unwrap_or_else(|| engine_author.clone());
+    if requested != engine_author && requested != node_key_id {
+        anyhow::bail!(
+            "refusing to emit a consent grant naming {requested:?}: this process is node \
+             {node_key_id:?} (engine {engine_author:?}); a consent grant is self-attested \
+             (CEG 1.0-RC29 §5.6.8.15) and authored by that node's OWNER, and nobody here \
+             holds {requested:?} (CIRISServer#312 / #599)"
+        );
+    }
+    // THE HUMAN CONSENTS. An owned node authors as its owner or not at all.
+    if let Some(owner) = owner_consent_pen(engine, &node_key_id).await? {
+        tracing::info!(
+            requested = %requested,
+            node_key_id = %node_key_id,
+            owner_key_id = %owner.key_id,
+            "consent authored by the node's OWNER — the human consents, the node holds \
+             topology (CIRISServer#599)"
+        );
+        return Ok(owner);
+    }
+    // UNOWNED: nobody to consent for yet. Provisional, machine-authored, loud;
+    // re-signed by the owner at claim (`migrate_consent_to_owner`).
+    tracing::warn!(
+        requested = %requested,
+        node_key_id = %node_key_id,
+        "consent authored by INFRASTRUCTURE: this node has no owner binding yet, so the \
+         grant is PROVISIONAL and will be re-signed by the owner once the node is claimed \
+         (CIRISServer#599). If this node IS claimed, the owner's seed is not where compose \
+         registered it — check active_user_alias under the user seed dir"
+    );
+    match held {
+        Some(held) => Ok(ConsentAuthor {
+            key_id: node_key_id,
+            signer: Some(held),
+        }),
+        None => Ok(ConsentAuthor {
+            key_id: engine_author,
+            signer: None,
+        }),
+    }
 }
 
-/// **The grant EMIT half, with no idempotency guard.**
+/// The OWNER's pen for `node_key_id`, resolved the way compose resolves it to
+/// move the owner-binding: steward via `owner_of` (the live `delegates_to(user →
+/// node, infra:*)`), alias via the `active_user_alias` pointer under the
+/// registered user seed dir, signer via `resolve_user_signer` (CIRISServer#599).
 ///
-/// Split out of [`emit_replication_consent_with_policy`] because there are now
-/// TWO conditions under which a grant must be written, and only one of them is
-/// "no grant exists". The other is [`ensure_replication_consent_covers`]:
-/// a standing grant whose prefix set is too NARROW is superseded by a wider
-/// one, and that emit must not consult the guard it is deliberately stepping
-/// past. Keeping the recipe here means the two callers cannot author two
-/// different shapes of the same object.
-///
-/// Every caller is responsible for its own precondition; this function only
-/// authors and stores.
+/// * `Ok(None)` — the node is UNOWNED, or this process registered no user seed
+///   dir (a bare harness engine): there is no human to author as.
+/// * `Ok(Some)` — the owner and a pen that holds the owner's key.
+/// * `Err` — the node IS owned and the pen cannot be reached (hardware custody
+///   with no software seed; an alias that derives a different key). Callers
+///   refuse; they do not fall back to a machine key.
+pub async fn owner_consent_pen(
+    engine: &Engine,
+    node_key_id: &str,
+) -> Result<Option<ConsentAuthor>> {
+    let owner = match ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        node_key_id,
+    )
+    .await
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Ok(None),
+        Err(e) => anyhow::bail!("resolve the steward (owner_of) of {node_key_id}: {e}"),
+    };
+    let Some((seed_dir, default_alias)) = crate::node_key::held_user_seed_dir() else {
+        tracing::warn!(
+            node_key_id = %node_key_id,
+            owner_key_id = %owner,
+            "node is owned but this process registered no user seed dir — the owner's pen \
+             cannot be resolved here (compose registers it at boot; a bare harness engine \
+             does not), so consent falls to the provisional machine path"
+        );
+        return Ok(None);
+    };
+    let alias = crate::active_user_alias(&seed_dir, &default_alias);
+    let signer = crate::compose::resolve_user_signer(
+        engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &alias,
+        seed_dir.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("resolve the owner's ({owner}) signer at alias {alias:?}: {e}"))?;
+    match signer {
+        Some(signer) if signer_holds(&signer, &owner) => Ok(Some(ConsentAuthor {
+            key_id: owner,
+            signer: Some(signer),
+        })),
+        Some(signer) => anyhow::bail!(
+            "consent refused: node {node_key_id} is owned by {owner}, but the user seed at \
+             alias {alias:?} derives {:?} — a different person; not signing consent as anyone \
+             but the owner (CIRISServer#599)",
+            signer.derived_key_id()
+        ),
+        None => anyhow::bail!(
+            "consent refused: node {node_key_id} is owned by {owner}, but no software seed \
+             for that key is under {} (alias {alias:?}). A hardware-custodied owner must sign \
+             consent on the client (2-phase, like the owner-binding claim) — that door is \
+             not wired yet (CIRISServer#599); the node will not sign consent as itself",
+            seed_dir.display()
+        ),
+    }
+}
+
+/// Every key a consent row for THIS node may be authored under, owner first
+/// (CIRISServer#599): the steward (`owner_of(node)`), then the node key and the
+/// engine key as LEGACY grantors (0.5.203–0.5.209 authored as the node; earlier
+/// as the engine). Readers union over the set; the write side authors only as
+/// the first entry that exists.
+pub async fn consent_grantors_for(engine: &Engine, node_key_id: &str) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = Vec::new();
+    let held_node = crate::node_key::held_node_signer().map(|h| h.derived_key_id());
+    let node = held_node.clone().unwrap_or_else(|| node_key_id.to_owned());
+    match ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        &node,
+    )
+    .await
+    {
+        Ok(Some(owner)) => keys.push(owner),
+        Ok(None) => {}
+        Err(e) => anyhow::bail!("resolve the steward (owner_of) of {node}: {e}"),
+    }
+    for k in [node_key_id.to_owned()].into_iter().chain(held_node) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    Ok(keys)
+}
+
 async fn emit_grant_row<S: AsRef<str>>(
     engine: &Engine,
     author: &ConsentAuthor,
@@ -1666,11 +1782,24 @@ pub async fn replication_peers_from_consent(
     // (a projection maintained by the Registry-of-Record), so this is a direct
     // read — no client-side re-filtering of LIVENESS that could re-introduce
     // the drift.
-    let subjects = engine
-        .federation_directory()
-        .list_consent_peers(node_key_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("list consent peers for {node_key_id}: {e}"))?;
+    // Unioned over every grantor a row for this node may be authored under —
+    // the OWNER first, then the machine keys as legacy (CIRISServer#599). From
+    // 0.5.203 to 0.5.209 this read asked with the engine key alone while the
+    // write went under the node key: zero peers on every split-key home.
+    let mut subjects: Vec<String> = Vec::new();
+    for grantor in consent_grantors_for(engine, node_key_id).await? {
+        let found = engine
+            .federation_directory()
+            .list_consent_peers(&grantor)
+            .await
+            .map_err(|e| anyhow::anyhow!("list consent peers for {grantor}: {e}"))?;
+        for subject in found {
+            if !subjects.contains(&subject) {
+                subjects.push(subject);
+            }
+        }
+    }
+    subjects.sort();
     // ── CIRISServer#472 — coordinators are for TRANSPORT peers only ──
     //
     // A consent subject may be a PERSON (the contact-grant fallback for an

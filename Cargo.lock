@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.209"
+version = "0.5.210"
 dependencies = [
  "anyhow",
  "async-trait",

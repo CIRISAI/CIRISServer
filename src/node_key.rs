@@ -823,6 +823,95 @@ pub async fn reauthor_consent_as_node(
 /// Every payload member `emit_replication_consent_with_policy` can reproduce.
 /// A grant carrying anything else is REFUSED rather than migrated with that
 /// member dropped — see [`policy_of`].
+/// Re-sign every live `consent:replication` grant this process authored as
+/// INFRASTRUCTURE (the engine/actor key, or the node key 0.5.203 chose) as the
+/// node's OWNER — the human whose act it records (CIRISServer#599).
+///
+/// "Consent is by humans, not infrastructure." A grant the wizard's opt-in
+/// produced was signed by whichever machine key the fold held at the time:
+/// the engine key before 0.5.203, the node key from 0.5.203 to 0.5.209. Both
+/// are topology keys. The owner's pen is resolved the way `compose` resolves
+/// it for the owner-binding move ([`crate::peer::owner_consent_pen`]); the
+/// policy is carried off each live row, never rebuilt from defaults (Codex P1
+/// on #489, see [`policy_of`]); the old rows are left in place and read as
+/// LEGACY grantors by [`crate::peer::consent_grantors_for`] until a withdraw
+/// door exists. Idempotent: a peer the owner already consents to is skipped.
+///
+/// `Ok(empty)` when the node is unowned (nothing to re-sign as), when no
+/// owner seed is registered in this process, or when everything already
+/// moved. `Err` only when the owner IS resolvable and a re-sign failed.
+pub async fn migrate_consent_to_owner(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> Result<Vec<String>> {
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    let node_key = held_node_signer()
+        .map(|h| h.derived_key_id())
+        .unwrap_or_else(|| engine_key.clone());
+    let Some(owner) = crate::peer::owner_consent_pen(engine, &node_key).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(owner_signer) = owner.signer.clone() else {
+        return Ok(Vec::new());
+    };
+    let already: std::collections::BTreeSet<String> = engine
+        .federation_directory()
+        .list_consent_peers(&owner.key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("list consent peers for {}: {e}", owner.key_id))?
+        .into_iter()
+        .collect();
+    let mut from_keys = vec![engine_key.clone()];
+    if node_key != engine_key {
+        from_keys.push(node_key.clone());
+    }
+    let mut moved: Vec<String> = Vec::new();
+    for from in &from_keys {
+        let grants = engine
+            .federation_directory()
+            .list_live_consent_grants_by(from)
+            .await
+            .map_err(|e| anyhow::anyhow!("list live consent grants by {from}: {e}"))?;
+        for grant in &grants {
+            let Some(peer) = grant.subject_key_ids.first().cloned() else {
+                continue;
+            };
+            if already.contains(&peer) || moved.contains(&peer) {
+                continue;
+            }
+            let (opts, prefixes) = policy_of(grant, &owner_signer)?;
+            crate::peer::emit_replication_consent_with_policy(
+                engine,
+                &owner.key_id,
+                &peer,
+                &prefixes,
+                &opts,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "re-sign consent {from} -> {peer} as owner {}: {e}",
+                    owner.key_id
+                )
+            })?;
+            moved.push(peer);
+        }
+    }
+    if !moved.is_empty() {
+        tracing::info!(
+            owner_key_id = %owner.key_id,
+            from_keys = ?from_keys,
+            peers = ?moved,
+            "consent re-signed by the node's OWNER, policy preserved — the human's act \
+             now carries the human's signature; the machine-authored rows stay as legacy \
+             grantors (CIRISServer#599)"
+        );
+    }
+    Ok(moved)
+}
+
 const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[
     "grants",
     "direction",
@@ -1204,6 +1293,25 @@ static NODE_SIGNER: std::sync::OnceLock<std::sync::Arc<ciris_persist::prelude::L
 /// node the engine's record names the ACTOR, and a peer that registered it
 /// would refuse every node-signed row as an unknown attester (Codex on #564).
 static NODE_KEY_RECORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Where the OWNER's software seed lives and the alias to fall back to when the
+/// mint wrote no `active_user_alias` pointer — registered by compose at boot
+/// (CIRISServer#599). Consent is the human's act: the paths that author it
+/// without an HTTP owner session (the fold's author door, the boot migration)
+/// resolve the owner's pen through this, the same way `compose` resolves it to
+/// move the owner-binding onto the node key.
+static USER_SEED: std::sync::OnceLock<(std::path::PathBuf, String)> = std::sync::OnceLock::new();
+
+/// Register the owner seed location for this process (see [`USER_SEED`]).
+/// First writer wins; a second call is a no-op.
+pub fn set_user_seed_dir(dir: std::path::PathBuf, default_alias: String) {
+    let _ = USER_SEED.set((dir, default_alias));
+}
+
+/// The registered owner seed location, if compose (or a harness) set one.
+pub fn held_user_seed_dir() -> Option<(std::path::PathBuf, String)> {
+    USER_SEED.get().cloned()
+}
 
 /// Record the node's own signer — and its public key record — for the process
 /// (CIRISServer#563).
