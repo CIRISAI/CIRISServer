@@ -46,6 +46,16 @@ engine's own signing identity, so every plane (claim, NodeCode, owned-nodes,
 self-publish, edge signer) agrees on who this node is. Library composition, not
 sidecars: the agent links the same wheel instead of assembling cores itself.
 
+**Contacts and chat are the same substrate, not a new plane** (0.5.185 →
+0.5.209): a contact is a `consent:replication:v1` grant covering `chat:`, a
+room is a 2-member community whose id both ends *derive*, and a message is a
+`chat:message:v1` attestation whose body is a sealed blob under the room's
+community DEK, wrapped per identity occurrence — the attestation is both the
+authorization to fetch the blob and the only way it is known to exist. The
+node provisions its owner's content-KEM occurrence itself. Routes and adopter
+notes: `FSD/CIRISAGENT_ADOPTION.md` §6; the gaps (pair-only rooms, text-only)
+are CIRISServer#594 and CIRISEdge#601.
+
 ## What this is, relative to its siblings
 
 The three cores are **libraries that decide**. Server is **the node that answers
