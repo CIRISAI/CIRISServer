@@ -250,7 +250,10 @@ async fn register_self(engine: &Engine) {
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
         &key_id,
-        identity_type::STEWARD,
+        // NODE, as compose registers it: persist's signed occurrence door
+        // (`check_signer_acts_for`) only walks owner_of for a `node`; a `steward`
+        // key is refused and every send fails "sealed with NO grants" (#596).
+        identity_type::NODE,
         serde_json::Value::Null,
     )
     .await
@@ -580,19 +583,10 @@ async fn serve(
     // from whatever it is handed, and an empty directory is `NoFedIdentity`.
     // No transport in-process, so the `discover` rung is skipped rather than
     // guessed at: a single-node fixture has no mesh to be reachable over.
-    // The node's own sealed seed, same as the test harness and for the same
-    // reason (edge v24 derives content-KEM halves from the seed THIS process
-    // holds — CIRISEdge#599).
-    let node_alias = format!("chat-bench-node-{}", std::process::id());
-    let node_seed_dir = std::env::temp_dir().join(&node_alias);
-    std::fs::create_dir_all(&node_seed_dir).expect("bench node seed dir");
-    ciris_keyring::SealedEd25519Signer::open_or_create(
-        node_alias.clone(),
-        node_seed_dir.clone(),
-        None,
-    )
-    .expect("seal the bench node's seed");
-    let app = contacts_chat::router(engine, signer, seed_dir, node_alias, node_seed_dir, None);
+    // No node keystore seed here since edge v24.2.0: the owner's content-only
+    // occurrence is provisioned on persist's content-KEM identity by
+    // `provision_engine_occurrence` from the engine itself (CIRISServer#596).
+    let app = contacts_chat::router(engine, signer, seed_dir, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
