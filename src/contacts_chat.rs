@@ -150,18 +150,10 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 struct ChatState {
     engine: Arc<Engine>,
-    /// THIS NODE's keystore alias + identity dir — what
-    /// `ciris_keyring::self_enc_keys::SelfEncKeys::open` resolves the sealed
-    /// Ed25519 seed by. The content-KEM halves are HKDF-DERIVED from that same
-    /// seed (CIRISVerify `SelfEncKeys`), so nothing new is stored and a restored
-    /// node keeps every grant already wrapped to it.
-    ///
-    /// The NODE's seed, not the user's: the occurrence has to be a key whose
-    /// private half THIS PROCESS holds, or it can register a grant target it
-    /// cannot decrypt for. Deriving from the owner's seed would only work on a
-    /// harness that happens to hold the human's key (CIRISEdge#599).
-    node_keystore_alias: String,
-    node_identity_dir: std::path::PathBuf,
+    /// This node's content occurrence for its owner is provisioned through
+    /// edge's `provision_engine_occurrence`, from the ENGINE (the content-KEM
+    /// identity persist mints and seals itself) — nothing about the keystore
+    /// is needed here (CIRISServer#596, superseding #590).
     /// The node's owner-seed location — what [`crate::owner_signer_capsule`]
     /// needs to re-open the responsible party's fed-ID under a live owner
     /// session. A chat row is signed by the PERSON, so the route has to be able
@@ -1710,91 +1702,51 @@ struct StartChatResponse {
 
 /// Make sure THIS NODE holds a content-KEM occurrence for `owner_key_id`, so
 /// that a chat body sealed anywhere in the mesh has a wrap target this process
-/// can open. Idempotent (edge checks before it writes); called at every
-/// owner-facing chat door rather than only when a room is created, because
-/// three rooms reach the send path without ever passing through `start_chat`
-/// on this node:
+/// can open. Idempotent; called at every owner-facing chat door rather than
+/// only when a room is created, because three rooms reach the send path
+/// without ever passing through `start_chat` on this node:
 ///
 ///   * a room created under edge v23, reopened after the upgrade — `start_chat`
 ///     takes the existing-community return before it would provision;
 ///   * a room the CONTACT started, which arrives here by replication;
-///   * a room whose first `start_chat` warned-and-continued (seed unavailable
-///     for a moment) after the community row was already written.
+///   * a room whose first `start_chat` warned-and-continued after the
+///     community row was already written.
 ///
-/// Cost per call: one sealed-seed open + HKDF, one directory read. Doing it at
-/// send time also puts this occurrence in the directory BEFORE the sender's
-/// grant set is built, which is the order edge's flag #1 on the v24.0.0 tag
-/// requires.
+/// **The keys are the ENGINE's, not the keystore's** (CIRISServer#596,
+/// superseding #590). 0.5.207 registered this occurrence with pubkeys
+/// HKDF-derived from the node's sealed seed (`SelfEncKeys`). persist's read
+/// door unwraps a grant with `load_content_kem_private_halves()` — the
+/// content-KEM identity persist mints and seals itself on first use
+/// (CIRISPersist#848) — and knows nothing of `SelfEncKeys`. So the cascade
+/// wrapped to keys nobody held: `granted` was non-empty, and nothing opened,
+/// the author included. Edge's `provision_engine_occurrence` does the whole
+/// job with the right keys: registers `engine.local_derived_key_id()` as a
+/// node key if absent, makes it an occurrence of the owner carrying the
+/// content-KEM pubkeys, and PUBLISHES it through persist's gated door (§20.3)
+/// so it rides the signed occurrence plane — which requires a live owner
+/// binding naming the node key (§20.2; ours does by construction,
+/// `cfg.key_id == local_derived_key_id()`, and every chat door checks
+/// `require_owner_bound` before reaching here).
+///
+/// The node's SELF-occurrence (identity = node key), published at boot by
+/// compose with `SelfEncKeys` pubkeys, is a different row for a different
+/// reader — edge's occurrence KEX, which decrypts with
+/// `SelfEncKeys::kex_respond` — and is correct as it is.
+///
+/// A failure here is NOT fatal to starting a chat: it is reported, and the
+/// send door refuses later with a message naming the cause, which is a better
+/// place to fail than a half-built room.
 async fn ensure_owner_content_occurrence(st: &ChatState, owner_key_id: &str) {
-    // ── THE CONTENT-KEM OCCURRENCE, AT EVERY OWNER DOOR ────────────────────
-    //
-    // edge v24 seals every chat body under the room's community DEK, and the
-    // cascade wraps that DEK per ACTIVE IDENTITY OCCURRENCE carrying
-    // `encryption_pubkeys`. A node that has provisioned none produces
-    // `granted=[]` — content nobody can read, INCLUDING THE AUTHOR
-    // (CIRISServer#590, CIRISEdge#599).
-    //
-    // Nothing is minted or stored: `SelfEncKeys` HKDF-derives the x25519 and
-    // ML-KEM-768 halves from the SAME sealed Ed25519 seed the federation signer
-    // already uses, deterministically — so this is idempotent, and a restored
-    // node re-derives the identical keys and keeps its existing grants.
-    //
-    // Registered as an occurrence of the OWNER (the roster names people) whose
-    // key is THIS NODE's (the process must hold the private half to decrypt) —
-    // the shape edge's own `edge_node` provisions at start-up.
-    //
-    // A failure here is NOT fatal to starting a chat: it is reported and the
-    // send door refuses later with a message naming the cause, which is a
-    // better place to fail than a half-built room.
-    match ciris_keyring::self_enc_keys::SelfEncKeys::open(
-        st.node_keystore_alias.clone(),
-        st.node_identity_dir.clone(),
-    ) {
-        Ok(keys) => match keys.enc_pubkeys() {
-            Ok(enc) => provision(st, owner_key_id, enc).await,
-            // Seed opened, derivation failed — a different fault from a missing
-            // seed, and a log that says "no seed" sends the operator to look
-            // for a file that is there.
-            Err(e) => tracing::warn!(
-                error = %e,
-                alias = %st.node_keystore_alias,
-                "sealed seed opened but content-KEM keys could not be derived from it — chat sends will refuse"
-            ),
-        },
-        Err(e) => tracing::warn!(
-            error = %e,
-            alias = %st.node_keystore_alias,
-            "no sealed seed to derive content-KEM keys from — chat sends will refuse"
-        ),
-    }
-}
-
-async fn provision(
-    st: &ChatState,
-    owner_key_id: &str,
-    enc: ciris_keyring::self_enc_keys::EncryptionPubkeysOut,
-) {
-    let enc = ciris_persist::federation::EncryptionPubkeys {
-        x25519_base64: enc.x25519_base64,
-        ml_kem_768_base64: enc.ml_kem_768_base64,
-    };
-    match ciris_edge::content_occurrence::ensure_content_occurrence(
-        &*st.engine.federation_directory(),
-        owner_key_id,
-        &st.node_signer.key_id,
-        ciris_persist::federation::types::device_class::SERVER,
-        enc,
-    )
-    .await
-    {
-        Ok(outcome) => tracing::debug!(
+    match crate::backend::provision_engine_occurrence(&st.engine, owner_key_id).await {
+        Ok((me, how)) => tracing::debug!(
             identity = %owner_key_id,
-            occurrence = %st.node_signer.key_id,
-            ?outcome,
+            occurrence = %me,
+            how,
             "content-KEM occurrence ensured — chat bodies can be sealed to this reader"
         ),
         Err(e) => tracing::warn!(
             error = %e,
+            identity = %owner_key_id,
             "content occurrence NOT provisioned — chat sends will refuse until it is"
         ),
     }
@@ -3130,14 +3082,10 @@ pub fn router(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     user_seed_dir: std::path::PathBuf,
-    node_keystore_alias: String,
-    node_identity_dir: std::path::PathBuf,
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
 ) -> Router {
     let state = ChatState {
         engine,
-        node_keystore_alias,
-        node_identity_dir,
         user_seed_dir,
         rooms: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         node_signer,

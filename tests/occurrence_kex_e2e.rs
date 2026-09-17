@@ -147,6 +147,13 @@ async fn signed_self_occurrence(
     transport_ed: [u8; 32],
     asserted_at: chrono::DateTime<chrono::Utc>,
 ) -> SignedIdentityOccurrence {
+    // Millisecond-exact, like compose::publish_self_identity_occurrence: the
+    // envelope renders `asserted_at` at millisecond precision and persist
+    // v44.4.0's signed door (`same_instant_ms`) refuses a typed row carrying
+    // sub-millisecond digits as "typed asserted_at diverges from the signed
+    // envelope". Both the envelope and the typed row below use this value.
+    let asserted_at = chrono::DateTime::from_timestamp_millis(asserted_at.timestamp_millis())
+        .expect("millisecond instant in range");
     let app = "ciris";
     let aspects = vec!["edge".to_string()];
     let dest_hash =

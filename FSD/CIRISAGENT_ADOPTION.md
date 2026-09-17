@@ -251,6 +251,7 @@ ciris-server node with no brain still answers on 4243 — exactly the
 | Config | `/v1/config/{key}`, `/v1/setup/config` | 4243 (`config_api.rs`/`graph_config.rs`) | `ConfigViewModel` |
 | Capacity scores | `/v1/my-data/capacity` (substrate `n_eff`/`sustained_coherence` half) | 4243 (`scorer.rs`) | `HealthReputationScreen` |
 | Setup / owned-nodes | `/v1/setup/{status,owned-nodes,root,claim-remote}` | 4243 (`auth/bootstrap.rs`, `claim_remote.rs`) | `SetupViewModel`, `NodeSwitcherViewModel` |
+| Contacts / chat (person-to-person, **node chat — not the brain's `/v1/chat/completions`**) | `GET/POST /v1/contacts`, `POST /v1/chat`, `GET/POST /v1/chat/{community_id}/messages` | 4243 (`contacts_chat.rs`) | `ContactsScreen`, chat room screens — see §6 |
 | Safety | `/v1/safety/{moderation,watchlist,age-assurance}` | 4243 (`safety/*.rs`) | `SafetyViewModel`, `ModerationScreen` |
 
 **Stays on 8080 (brain):** `/v1/memory/*` (loop-written), `/v1/system/{llm,adapters,
@@ -316,6 +317,73 @@ With the above green, the agent is `node + brain`. This is `stage8` (agent 2.9.7
 (`tests/release_gates.rs`) stage7/stage8 flip green.
 
 ---
+
+## 6. Chat on the node — adopting 0.5.209 (added 2026-09-16)
+
+Everything above is the June inventory. This section is the one the agent
+team needs for the 0.5.207 → 0.5.209 train: **person-to-person chat is a node
+surface on 4243**, distinct from the brain's `/v1/chat/completions` on 8080.
+Floor for this section: **ciris-server 0.5.209 = persist v44.4.0 / edge
+v24.2.0 / verify v15.1.0** (CIRISServer#596). Do not land on 0.5.205
+(CIRISServer#586).
+
+### 6a. The surface (five routes, five capability verbs)
+
+| route | verb | the CEG object it moves |
+|---|---|---|
+| `GET /v1/contacts` | `ChatRead` | live `consent:replication:v1` grants whose scope covers `chat:` |
+| `POST /v1/contacts` | `Peer` | one `consent:replication:v1` grant (emitted, or a narrower standing one widened) |
+| `POST /v1/chat` | `ChatCreate` | a 2-member `Community` row, id **derived** as `chat:pair:v1:<sha256(lo ‖ "\n" ‖ hi)>` from the two sorted key_ids — both ends compute it, nobody mints it |
+| `POST /v1/chat/{community_id}/messages` | `ChatAuthor` | a `chat:message:v1` attestation in the community cohort; the **body is a sealed blob** under the room's community DEK and the attestation carries only the pointer |
+| `GET /v1/chat/{community_id}/messages` | `ChatRead` | the same rows read back, hamburger-folded |
+
+A contact **is** a replication-consent grant covering `chat:`; un-contacting is
+the ordinary CEG withdraw of that grant. There is no contacts table.
+
+### 6b. Preconditions the agent must satisfy once
+
+1. **Owner claimed** (`POST /v1/setup/root` or claim-remote) — every chat route
+   is an owner door (`dgrant:` delegates need the verb; an announce-only
+   delegate reaches none of them).
+2. **Announced** (`POST /v1/federation/announce`, loopback-only). An
+   un-announced node is P2P-only: its owner→node binding is not federation
+   visible, so no peer can put it in a room's audience and every room row is
+   withheld both ways. The chat ladder's `bound` stage names exactly this.
+3. **Both sides contacts of each other** — the grant is what carries the
+   message to the other side.
+
+### 6c. What the node does for you (and what changed at 0.5.209)
+
+- **The reader is provisioned by the node; the agent provisions nothing.** At
+  every owner door the node ensures its owner has a *content-only identity
+  occurrence* carrying content-KEM pubkeys (x25519 + ML-KEM-768). Since
+  0.5.209 this runs through edge's `provision_engine_occurrence` on persist's
+  content-KEM identity; a 0.5.207 row is migrated in place (CIRISServer#596 §1).
+- **The node's own boot self-occurrence is admitted again.** persist v44.4.0
+  requires the typed `asserted_at` to be millisecond-exact and to match the
+  signed envelope; 0.5.209 stamps it that way. (Under 0.5.207/0.5.208 on this
+  persist the row would have been refused every boot.)
+- **Grants are per identity occurrence.** The DEK is wrapped for every active
+  occurrence of every member; the send response carries `fully_readable` and
+  `excluded_key_ids` so the sender knows who cannot read.
+- **A transcript row is either `body` or `unopened_reason`, never `""`.** A body
+  sealed to the contact stays shut on your node by design; `status` is
+  `live | superseded | withdrawn | recanted` from the same hamburger the memory
+  projection uses.
+- **Delivery of traces** (unrelated to chat, same train): `ciris_server.delivery_receipt(agent_id_hash=…)`
+  / `GET /v1/node/delivery-receipt` — the canonical's own signed answer to
+  "did my newest trace arrive" (0.5.208, CIRISServer#369).
+
+### 6d. Not in this cut (tracked)
+
+- Rooms are **pairs only**: no create/invite/revoke, roster check is exactly
+  two — CIRISServer#594.
+- **Text only**: `send_message` refuses any other content type; file sharing
+  waits on edge's chunk-DAG store gate and the pull-on-attestation hook
+  (CIRISEdge#601). A member who missed roster anti-entropy sees `unopened_reason`
+  until that hook exists.
+- The user-signer alias flip (edge v24.2.0 §4) is deferred to CIRISServer#597;
+  production is unaffected.
 
 ## Top 3 gaps where Rust does NOT yet fully cover Python (block clean deletion)
 

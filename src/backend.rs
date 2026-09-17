@@ -55,6 +55,8 @@
 //! deletes cleanly.
 
 use ciris_persist::ceg::{Error, TraceCursor, TraceListPage};
+use std::sync::Arc;
+
 use ciris_persist::prelude::{CallerScope, Engine, TraceFilter};
 
 /// Page trace summaries on whichever backend this Engine actually has.
@@ -136,4 +138,90 @@ pub async fn get_trace_summary(
          trace lookups are unavailable on this node"
             .to_string(),
     ))
+}
+
+/// This node's content-KEM occurrence for `owner_key_id`, provisioned through
+/// edge's `provision_engine_occurrence` — which needs
+/// `FederationDirectory + BlobStorage` (the content-KEM identity lives on the
+/// blob side), and `Engine::federation_directory()` is only the former. The
+/// concrete-backend reach lives here, behind the one door, like every other
+/// (`tests/backend_parity.rs`). Returns `(me, how)`: the occurrence key and
+/// `created` / `already_current` / `migrated`. See
+/// `contacts_chat::ensure_owner_content_occurrence` for why the keys are the
+/// engine's and not the keystore's (CIRISServer#596).
+pub async fn provision_engine_occurrence(
+    engine: &Arc<Engine>,
+    owner_key_id: &str,
+) -> Result<(String, &'static str), String> {
+    #[cfg(target_os = "linux")]
+    if let Some(pg) = engine.postgres_backend() {
+        return provision_with(engine, &**pg, owner_key_id).await;
+    }
+    if let Some(sq) = engine.sqlite_backend() {
+        return provision_with(engine, &**sq, owner_key_id).await;
+    }
+    Err("this Engine has no read-capable backend (expected SQLite or PostgreSQL)".into())
+}
+
+async fn provision_with<B>(
+    engine: &Engine,
+    backend: &B,
+    owner_key_id: &str,
+) -> Result<(String, &'static str), String>
+where
+    B: ciris_persist::federation::FederationDirectory
+        + ciris_persist::federation::blobs::BlobStorage,
+{
+    use ciris_edge::content_occurrence::{provision_engine_occurrence, Provisioned};
+    use ciris_persist::federation::types::device_class::SERVER;
+    let (me, outcome) = provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?;
+    match outcome {
+        Provisioned::Created => Ok((me, "created")),
+        Provisioned::AlreadyCurrent => Ok((me, "already_current")),
+        // A node that provisioned under 0.5.207: the row under `me` carries the
+        // SelfEncKeys pubkeys, and the helper refuses to overwrite a drifted
+        // row — an operator decides which keys are authoritative. Here the
+        // decision is made: that row went through the local door and never
+        // replicated, and every grant wrapped to it is unopenable by anyone,
+        // so replacing it loses nothing. Overwrite it once through the local
+        // door with the content-KEM pubkeys (the upsert holds because the
+        // row's signature is NULL), then provision again — it reads
+        // `AlreadyCurrent` and heals the row onto the plane.
+        Provisioned::Drifted => {
+            let kem = backend
+                .load_or_init_content_kem_identity()
+                .await
+                .map_err(|e| format!("load the content-KEM identity: {e}"))?;
+            let enc = ciris_persist::federation::EncryptionPubkeys {
+                x25519_base64: kem.x25519_pubkey_b64,
+                ml_kem_768_base64: kem.ml_kem_768_pubkey_b64,
+            };
+            backend
+                .put_identity_occurrence_local(
+                    ciris_persist::federation::types::IdentityOccurrence {
+                        identity_key_id: owner_key_id.to_owned(),
+                        occurrence_key_id: me.clone(),
+                        device_class: SERVER.to_owned(),
+                        hardware_attestation: None,
+                        asserted_at: chrono::Utc::now(),
+                        valid_until: None,
+                        encryption_pubkeys: Some(enc),
+                        transport_binding: None,
+                        persist_row_hash: String::new(),
+                    },
+                )
+                .await
+                .map_err(|e| format!("overwrite the drifted 0.5.207 occurrence {me}: {e}"))?;
+            let (me2, again) =
+                provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?;
+            tracing::info!(
+                identity = %owner_key_id,
+                occurrence = %me2,
+                ?again,
+                "content occurrence migrated from 0.5.207's SelfEncKeys pubkeys to the \
+                 content-KEM identity (CIRISServer#596)"
+            );
+            Ok((me2, "migrated"))
+        }
+    }
 }
