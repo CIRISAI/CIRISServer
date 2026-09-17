@@ -494,7 +494,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
     // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
     // nodes and bare harnesses are a no-op here (CIRISServer#599).
-    match crate::node_key::migrate_consent_to_owner(&engine).await {
+    match if crate::peer::owner_authored_consent_enabled() {
+        crate::node_key::migrate_consent_to_owner(&engine).await
+    } else {
+        Ok(Vec::new())
+    } {
         Ok(moved) if !moved.is_empty() => {
             tracing::info!(peers = ?moved, "boot: machine-authored consent re-signed by the owner")
         }

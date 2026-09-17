@@ -865,6 +865,36 @@ pub struct ConsentAuthor {
     pub signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
 }
 
+/// Whether an OWNED node authors consent AS ITS OWNER (CIRISServer#599).
+///
+/// `false` until the edge this server pins reads the steward's consent peers
+/// (CIRISEdge#609): edge resolves a plane's send set with
+/// `list_consent_peers(local)` through persist's 208-method directory trait,
+/// which this composition root cannot interpose, so an owner-authored grant is
+/// invisible to edge and every plane — traces included — is withheld. Flipping
+/// this before that edge lands would blind every node that delivers today.
+/// The whole owner path (pen resolution, authoring, migration, steward-first
+/// reads) is built and pinned by `tests/consent_is_authored_by_the_owner.rs`,
+/// which enables it explicitly; production flips at the edge#609 adoption.
+pub const OWNER_AUTHORED_CONSENT: bool = false;
+
+static OWNER_AUTHORED_CONSENT_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Set the owner-authored-consent gate for this process (first writer wins).
+/// Tests enable the owner path with it; compose will set it once the pinned
+/// edge honours steward-authored grants.
+pub fn set_owner_authored_consent(enabled: bool) {
+    let _ = OWNER_AUTHORED_CONSENT_OVERRIDE.set(enabled);
+}
+
+/// The gate as it applies to this process: the override if set, else the const.
+pub fn owner_authored_consent_enabled() -> bool {
+    OWNER_AUTHORED_CONSENT_OVERRIDE
+        .get()
+        .copied()
+        .unwrap_or(OWNER_AUTHORED_CONSENT)
+}
+
 /// **Consent is by humans, not infrastructure (CIRISServer#599).** A
 /// `consent:replication` / `analyze` grant records the OWNER's act (the wizard's
 /// opt-in, a peering the owner requested, a contact the owner added), so on an
@@ -923,7 +953,20 @@ pub async fn consent_author(
         .as_ref()
         .map(|h| h.derived_key_id())
         .unwrap_or_else(|| engine_author.clone());
-    if requested != engine_author && requested != node_key_id {
+    // THE HUMAN CONSENTS. An owned node authors as its owner or not at all —
+    // once the pinned edge can read a steward-authored grant (see
+    // [`OWNER_AUTHORED_CONSENT`]); until then the pen is resolved only to accept
+    // the owner's key as a name for this node (a re-emit that widens a standing
+    // owner grant names its author).
+    let owner = if owner_authored_consent_enabled() {
+        owner_consent_pen(engine, &node_key_id).await?
+    } else {
+        None
+    };
+    let names_this_node = requested == engine_author
+        || requested == node_key_id
+        || owner.as_ref().is_some_and(|o| o.key_id == requested);
+    if !names_this_node {
         anyhow::bail!(
             "refusing to emit a consent grant naming {requested:?}: this process is node \
              {node_key_id:?} (engine {engine_author:?}); a consent grant is self-attested \
@@ -931,8 +974,7 @@ pub async fn consent_author(
              holds {requested:?} (CIRISServer#312 / #599)"
         );
     }
-    // THE HUMAN CONSENTS. An owned node authors as its owner or not at all.
-    if let Some(owner) = owner_consent_pen(engine, &node_key_id).await? {
+    if let Some(owner) = owner {
         tracing::info!(
             requested = %requested,
             node_key_id = %node_key_id,
@@ -941,6 +983,21 @@ pub async fn consent_author(
              topology (CIRISServer#599)"
         );
         return Ok(owner);
+    }
+    if !owner_authored_consent_enabled() {
+        // The 0.5.203 rule, until the pinned edge reads steward-authored
+        // grants (CIRISEdge#609): the node authors as itself. The read side
+        // already resolves the steward, so the flip is one const.
+        return Ok(match held {
+            Some(held) => ConsentAuthor {
+                key_id: node_key_id,
+                signer: Some(held),
+            },
+            None => ConsentAuthor {
+                key_id: engine_author,
+                signer: None,
+            },
+        });
     }
     // UNOWNED: nobody to consent for yet. Provisional, machine-authored, loud;
     // re-signed by the owner at claim (`migrate_consent_to_owner`).

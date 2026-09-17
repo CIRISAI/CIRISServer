@@ -116,6 +116,9 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
     use ciris_persist::federation::hard_case::ConsentState;
 
+    // The owner path is gated off in production until the pinned edge reads
+    // steward-authored grants (CIRISEdge#609); this test pins the path itself.
+    ciris_server::peer::set_owner_authored_consent(true);
     let node_signer = Arc::new(signer_for(NODE));
     let engine = Arc::new(
         Engine::with_signer(node_signer.clone(), "sqlite::memory:")

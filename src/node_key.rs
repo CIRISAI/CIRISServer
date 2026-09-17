@@ -843,6 +843,9 @@ pub async fn reauthor_consent_as_node(
 pub async fn migrate_consent_to_owner(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
 ) -> Result<Vec<String>> {
+    if !crate::peer::owner_authored_consent_enabled() {
+        return Ok(Vec::new());
+    }
     let engine_key = engine
         .local_derived_key_id()
         .await

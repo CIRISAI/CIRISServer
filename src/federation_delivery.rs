@@ -1348,7 +1348,11 @@ pub fn author_consent_embedded(
 
     // Any grant a machine key authored before the claim (or under 0.5.203–0.5.209)
     // is re-signed by the owner now that one exists (CIRISServer#599). Non-fatal.
-    match rt.block_on(crate::node_key::migrate_consent_to_owner(&engine)) {
+    match if crate::peer::owner_authored_consent_enabled() {
+        rt.block_on(crate::node_key::migrate_consent_to_owner(&engine))
+    } else {
+        Ok(Vec::new())
+    } {
         Ok(moved) if !moved.is_empty() => {
             tracing::info!(peers = ?moved, "machine-authored consent re-signed by the owner")
         }

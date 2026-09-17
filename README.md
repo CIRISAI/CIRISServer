@@ -53,8 +53,9 @@ room is a 2-member community whose id both ends *derive*, and a message is a
 community DEK, wrapped per identity occurrence — the attestation is both the
 authorization to fetch the blob and the only way it is known to exist. The
 node provisions its owner's content-KEM occurrence itself. Consent is by
-humans: a `consent:replication` grant is signed by the owner's fedID, never by a
-node or agent key (0.5.210, CIRISServer#599). Routes and adopter
+humans: a `consent:replication` grant is the owner's act, and 0.5.210 builds the
+owner's pen and steward-first reads; the owner signs from the cut that adopts
+CIRISEdge#609 (CIRISServer#599). Routes and adopter
 notes: `FSD/CIRISAGENT_ADOPTION.md` §6; the gaps (pair-only rooms, text-only)
 are CIRISServer#594 and CIRISEdge#601.
 
