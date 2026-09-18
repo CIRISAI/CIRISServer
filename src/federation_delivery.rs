@@ -1527,7 +1527,19 @@ async fn prime_canonicals(
     //    reads that grant via `list_consent_peers` and converges the runtime to it.
     let directory = engine.federation_directory();
     let mut admitted_targets: Vec<String> = Vec::with_capacity(canonical_key_ids.len());
+    // Never ourselves: a node that is itself a canonical hint must not become
+    // its own peer (CIRISServer#607 — every inbound link would attribute to us
+    // and the responder would reply to our own key). Same rule as compose's
+    // boot primes (`own_key_ids`).
+    let own_key = edge.signer_key_id().to_string();
     for canonical in &canonical_key_ids {
+        if canonical == &own_key || crate::node_key::actor_identity() == Some(canonical.as_str()) {
+            tracing::info!(
+                canonical = %canonical,
+                "federation delivery: this node IS that canonical — not priming itself (CIRISServer#607)"
+            );
+            continue;
+        }
         match directory.lookup_public_key(canonical).await {
             Ok(Some(_)) => admitted_targets.push(canonical.clone()),
             Ok(None) => tracing::warn!(

@@ -2601,6 +2601,38 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
 /// keeps a growing directory from turning into a growing starvation window.
 const PRIME_YIELD_EVERY: usize = 16;
 
+/// The key ids that are THIS node, for the boot primes to skip (CIRISServer#607).
+///
+/// A node must never hold itself in its edge peers map. Edge attributes an
+/// inbound link by matching the link's DESTINATION against that map (Branch B
+/// of `resolve_link_attribution`), and every link a peer dials to us carries
+/// our own announced destination — so a self-entry makes every inbound round
+/// resolve to us, fail `Rooted∧owns_key`, and (for bootstrap kinds) build a
+/// responder that sends its reply to our own key: "no route to peer". The
+/// production canonical served ZERO anti-entropy rounds from 0.5.107 to
+/// 0.5.211 because `prime_canonical_bootstrap_peers` primed its own key under
+/// a comment that called the self-entry benign — true for the SEND side it was
+/// written against, false for the attribution side added later.
+///
+/// Both of the node's identities are excluded: the wire identity (the Reticulum
+/// signer — the node key on a three-key install) and the actor identity (the
+/// engine's key, distinct from the node key on such an install).
+pub(crate) fn own_key_ids(edge: &Edge) -> Vec<String> {
+    let mut own = vec![edge.signer_key_id().to_string()];
+    if let Some(actor) = crate::node_key::actor_identity() {
+        if !own.iter().any(|k| k == actor) {
+            own.push(actor.to_string());
+        }
+    }
+    if let Some(held) = crate::node_key::held_node_signer() {
+        let node = held.derived_key_id();
+        if !own.contains(&node) {
+            own.push(node);
+        }
+    }
+    own
+}
+
 async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     use ciris_persist::federation::self_at_login::BindingProvenance;
     let Some(transport) = edge.reticulum_transport() else {
@@ -2636,7 +2668,13 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     let mut primed = 0usize;
     let mut refused = 0usize;
     let directory = engine.federation_directory();
+    let own = own_key_ids(edge);
     for (i, (key_id, peer_dests)) in trusted.iter().enumerate() {
+        // Our own published transport row is Rooted too; it must not become a
+        // peer entry (CIRISServer#607 — see `own_key_ids`).
+        if own.iter().any(|k| k == key_id) {
+            continue;
+        }
         // Tokio only reschedules at an await that actually PENDS. Every await in
         // this loop can resolve ready (cached lookup, in-memory transport), so
         // without an explicit yield the loop owns its worker until the last peer —
@@ -2749,11 +2787,20 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
     };
     let canonical_key_ids = crate::federation_delivery::distinct_canonical_key_ids(&hints);
     let mut primed = 0usize;
+    let own = own_key_ids(edge);
     for key_id in &canonical_key_ids {
-        // NB: on the canonical node ITSELF this primes its own key_id. That is
-        // benign (a self-entry in the peers map is never a delivery target) and is
-        // the same behaviour `prime_trusted_peers` already has — so we don't special
-        // -case it rather than thread the node's own key_id down here for nothing.
+        // On the canonical node ITSELF the hint list names this node. It is NOT
+        // primed: a self-entry in the peers map turns every inbound link into a
+        // link "from ourselves" and the responder replies to its own key
+        // (CIRISServer#607 — see `own_key_ids`).
+        if own.iter().any(|k| k == key_id) {
+            tracing::info!(
+                canonical = %key_id,
+                "canonical prime: this node IS that canonical — not priming itself as a peer \
+                 (CIRISServer#607)"
+            );
+            continue;
+        }
         let rec = match engine
             .federation_directory()
             .lookup_public_key(key_id)
@@ -4696,5 +4743,40 @@ mod self_occurrence_instant_tests {
         let parsed = chrono::DateTime::parse_from_rfc3339(rendered).expect("rfc3339");
         assert_eq!(parsed.timestamp_millis(), now.timestamp_millis());
         assert_eq!(rendered, "2027-01-15T08:00:00.123Z");
+    }
+}
+
+#[cfg(test)]
+mod own_key_ids_tests {
+    /// The two boot primes and the runtime re-prime must all consult the node's
+    /// own identities before rooting a hint as a peer (CIRISServer#607). Pinned
+    /// by source because the peers map is only reachable through a live
+    /// Reticulum transport no in-process fixture builds; the traceflow ladder
+    /// asserts the live half (the canonical serves the agent's round).
+    #[test]
+    fn every_prime_skips_the_nodes_own_keys() {
+        let compose = include_str!("compose.rs");
+        for f in [
+            "async fn prime_trusted_peers(",
+            "async fn prime_canonical_bootstrap_peers(",
+        ] {
+            let start = compose.find(f).unwrap_or_else(|| panic!("{f} exists"));
+            let body = &compose[start..start + 4_000];
+            assert!(
+                body.contains("own_key_ids(edge)"),
+                "{f} must consult own_key_ids before rooting a hint as a peer (#607)"
+            );
+        }
+        let delivery = include_str!("federation_delivery.rs");
+        let start = delivery
+            .find("for canonical in &canonical_key_ids {")
+            .expect("the runtime re-prime loop");
+        assert!(
+            delivery[start.saturating_sub(600)..start + 400].contains("own_key"),
+            "the runtime re-prime must skip the node's own key (#607)"
+        );
+        // (A negative check on the old "benign" comment cannot live in the file
+        // it scrapes — its own needle is a match. The positive checks above are
+        // the teeth; the traceflow ladder's `served` stage is the live one.)
     }
 }
