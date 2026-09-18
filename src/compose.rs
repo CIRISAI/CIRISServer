@@ -3616,7 +3616,7 @@ pub(crate) async fn build_self_key_record(
 /// off the live Edge.
 async fn setup_peer_replication(
     engine: &Arc<Engine>,
-    edge: &Edge,
+    edge: &Arc<Edge>,
 ) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
     // Server 0.5 (zero env): there is NO env peer-bootstrap branch. The replication
     // topology is owner-authored consent ONLY — a peer is admitted + a
@@ -3788,7 +3788,7 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
 /// [`crate::federation_delivery`] for the full ordering note.
 pub(crate) async fn start_replication_runtime(
     engine: &Arc<Engine>,
-    edge: &Edge,
+    edge: &Arc<Edge>,
     node_key_id: &str,
 ) -> Result<Option<Arc<ciris_edge::replication::ReplicationRuntime>>> {
     use ciris_edge::replication::{ReplicationRuntime, ReplicationRuntimeConfig};
@@ -3945,7 +3945,8 @@ pub(crate) async fn start_replication_runtime(
     // are available on demand; the commons stays declined until an operator
     // opts in. The revocation register lets an authorized `withdraws` make the
     // chunk source refuse and the backend evict (CIRISEdge#614).
-    let (pull_sink, revocations) = crate::backend::spawn_blob_puller(engine, node_key_id).await;
+    let (pull_sink, revocations) =
+        crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(node_key_id.to_string()),
