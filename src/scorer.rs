@@ -1304,16 +1304,15 @@ async fn score_and_emit(
     // Fail-closed is preserved in every arm — nothing is emitted unless the fold
     // returns `Granted`. What changes is what the instrument SAYS about the two
     // ways it can fail to.
-    let stance = engine
-        .federation_directory()
-        .resolve_scoped_consent(
-            node_key_id,
-            attested_key_id,
-            ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
-            None,
-            now,
-        )
-        .await;
+    // Consent is by humans (CIRISServer#599): the subject's STEWARD — the owner
+    // the subject's owner-binding names — is asked first; the subject itself is
+    // the legacy fallback (grants authored by a machine key before 0.5.210). A
+    // split-key home's AGENT key carries no owner-binding of its own today (the
+    // binding names the node), so for those the steward hop needs the substrate
+    // to link agent → host node → owner (CIRISPersist, filed with #599); until
+    // then such an agent scores only on a legacy machine-authored grant.
+    let stance =
+        resolve_analyze_stance_via_steward(engine, node_key_id, attested_key_id, now).await;
     match stance {
         Ok(ConsentState::Granted) => {}
         Ok(declined) => return Ok(ScoreOutcome::NotConsented { stance: declined }),
@@ -1850,4 +1849,37 @@ mod coalescing_tests {
              still true. Narrow SCORE_COALESCE_MAX or widen the validity — deliberately, together."
         );
     }
+}
+
+/// The CC#46 `analyze` stance for `subject`, steward first, subject second
+/// (CIRISServer#599). `Granted` from either wins; otherwise the SUBJECT's own
+/// stance is reported (so a decline reads as the subject's decline), and a read
+/// error on either hop is the error.
+async fn resolve_analyze_stance_via_steward(
+    engine: &Engine,
+    attester_key_id: &str,
+    subject_key_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ciris_persist::federation::hard_case::ConsentState, ciris_persist::federation::Error> {
+    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
+    use ciris_persist::federation::hard_case::ConsentState;
+    let dir = engine.federation_directory();
+    let steward =
+        ciris_persist::federation::admission::owner_of(dir.as_ref(), subject_key_id).await?;
+    if let Some(steward) = steward {
+        if let ConsentState::Granted = dir
+            .resolve_scoped_consent(attester_key_id, &steward, ANALYZE_CONSENT_SCOPE, None, now)
+            .await?
+        {
+            return Ok(ConsentState::Granted);
+        }
+    }
+    dir.resolve_scoped_consent(
+        attester_key_id,
+        subject_key_id,
+        ANALYZE_CONSENT_SCOPE,
+        None,
+        now,
+    )
+    .await
 }

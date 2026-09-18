@@ -419,6 +419,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     ) {
         crate::node_key::set_actor_identity(actor);
     }
+    // Where the OWNER's pen lives, for every consent path that has no HTTP owner
+    // session — the fold's author door, the migration below (CIRISServer#599).
+    crate::node_key::set_user_seed_dir(
+        crate::user_seed_dir(&cfg),
+        format!("{}-user", cfg.keystore_alias),
+    );
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
@@ -484,6 +490,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         }
     }
 
+    // Consent is by humans: any live grant a machine key authored (the engine key
+    // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
+    // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
+    // nodes and bare harnesses are a no-op here (CIRISServer#599).
+    match if crate::peer::owner_authored_consent_enabled() {
+        crate::node_key::migrate_consent_to_owner(&engine).await
+    } else {
+        Ok(Vec::new())
+    } {
+        Ok(moved) if !moved.is_empty() => {
+            tracing::info!(peers = ?moved, "boot: machine-authored consent re-signed by the owner")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            "boot: consent re-sign as owner failed — machine-authored grants stay as \
+             legacy grantors until the owner's pen is reachable"
+        ),
+    }
     // STAGE 1 (FSD/GENESIS_TO_SCORE.md) — install the baked trust root and accept
     // it. Two acts on purpose: installing records makes the root KNOWN; accepting
     // it is this node's own signed `trust:accepts` edge, and the one row an

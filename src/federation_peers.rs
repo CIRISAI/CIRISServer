@@ -1074,14 +1074,14 @@ async fn test_admit_peer(
     // TESTING-MODE FENCE. Even in a test-anchor build this auto-grant fires ONLY
     // under `CIRIS_TESTING_MODE=true`, mirroring the agent's `author_consent_testing`
     // posture: production consent is exclusively the owner-gated
-    // `POST /v1/federation/consent`. A self-attested admission proves key custody,
+    // `POST /v1/federation/peering`. A self-attested admission proves key custody,
     // not authorization to replicate — so auto-consent stays a fixture behavior.
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         tracing::warn!(
             peer = %key_id,
             "TEST-ANCHOR: peer admitted but CIRIS_TESTING_MODE!=true — NOT auto-authoring the \
              reciprocal consent:replication grant (production consent is the owner-gated \
-             POST /v1/federation/consent); this node's plane toward the peer stays closed"
+             POST /v1/federation/peering); this node's plane toward the peer stays closed"
         );
         return (
             StatusCode::OK,

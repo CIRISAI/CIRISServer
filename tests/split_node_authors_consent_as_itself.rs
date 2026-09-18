@@ -117,6 +117,10 @@ fn scratch_identity_dir() -> std::path::PathBuf {
     dir
 }
 
+// CIRISServer#599 (0.5.210): this node is never CLAIMED, so every grant here is
+// the PROVISIONAL machine-authored kind an unowned node may still write — the
+// split node's own pen, re-signed by the owner at claim. An OWNED node authors
+// as its owner: see tests/consent_is_authored_by_the_owner.rs.
 #[tokio::test]
 async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     // The engine signs as the ACTOR — the embedded fold and the headless boot alike.
@@ -243,13 +247,19 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     let mut want = vec![PEER.to_string(), PEER_2.to_string()];
     want.sort();
     assert_eq!(peers, want);
+    // CIRISServer#599: this assertion used to pin the OPPOSITE — that a read with
+    // the actor (engine) key did NOT see the node's grant. That was the axis
+    // that shipped nothing from every split-key home for six releases: the
+    // runtime reads with the engine key. The read now unions every key this
+    // node's consent may be authored under (owner, node, engine), so the actor's
+    // read DOES see it.
     assert!(
         ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
-            .expect("read as the actor")
+            .expect("read as the actor — the production read")
             .iter()
-            .all(|p| p != PEER_2),
-        "the runtime grant did NOT land under the actor"
+            .any(|p| p == PEER_2),
+        "the production read (engine key) must resolve the node-authored grant (#599)"
     );
 
     // ── Phase 3: a caller that names the ACTOR — the contacts surface's
@@ -271,12 +281,25 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .contains(&PEER_3.to_string()),
         "the node reads the grant the actor-naming caller asked for"
     );
+    // "Did not land under the actor" is a statement about the ROW's author, so
+    // it is asserted on the grant rows — the unioned production read now sees
+    // every grantor for this node by design (CIRISServer#599).
     assert!(
-        !ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+        !engine
+            .federation_directory()
+            .list_live_consent_grants_by(&actor)
             .await
-            .expect("read as the actor")
+            .expect("grants by the actor")
+            .iter()
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_3)),
+        "and it was NOT authored under the actor"
+    );
+    assert!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+            .await
+            .expect("read as the actor — the production read")
             .contains(&PEER_3.to_string()),
-        "and it did NOT land under the actor"
+        "yet the production read (engine key) resolves it (#599)"
     );
 
     // ── Phase 4: widening coverage (adding a contact) supersedes the node's
