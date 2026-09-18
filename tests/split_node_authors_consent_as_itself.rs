@@ -117,10 +117,10 @@ fn scratch_identity_dir() -> std::path::PathBuf {
     dir
 }
 
-// CIRISServer#599 (0.5.210): this node is never CLAIMED, so every grant here is
-// the PROVISIONAL machine-authored kind an unowned node may still write — the
-// split node's own pen, re-signed by the owner at claim. An OWNED node authors
-// as its owner: see tests/consent_is_authored_by_the_owner.rs.
+// CIRISServer#599/#601 (0.5.211): the first half of this test is the UNCLAIMED
+// split home — every grant is the provisional machine-authored kind, signed as
+// the key that was NAMED (no 0.5.203 redirect). The second half claims the node,
+// anchors the agent to the human, and shows the human's grant naming the agent.
 #[tokio::test]
 async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     // The engine signs as the ACTOR — the embedded fold and the headless boot alike.
@@ -198,40 +198,27 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .expect("a peer admits the node key from the served record");
 
     // ── Phase 1: the boot re-author — the exact call that crashed the Android node.
-    let moved = ciris_server::node_key::reauthor_consent_as_node(
-        &engine,
-        node_signer.clone(),
-        &actor,
-        &node,
-    )
-    .await
-    .expect("the boot re-author must move the actor's grant onto the node key (#563)");
-    assert_eq!(moved, vec![PEER.to_string()]);
+    // ── 0.5.211 (CIRISServer#601): NO redirect. A machine author signs as the
+    // key that was named, and every read is persist's by-principals fold. ──
+    //
+    // The grant authored BEFORE the split (as the actor) is still the actor's:
+    // nothing moves it onto the node, because the node key is not a principal
+    // of the agent and every runtime read is keyed by the engine's key.
     assert_eq!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+            .await
+            .expect("read as the actor — the production read"),
+        vec![PEER.to_string()],
+        "the pre-split grant stays where the reads look"
+    );
+    assert!(
         ciris_server::peer::replication_peers_from_consent(&engine, &node)
             .await
-            .expect("read as the node"),
-        vec![PEER.to_string()],
-        "the node reads the topology it now authors — no #312 under a healthy transport"
+            .expect("read as the node")
+            .is_empty(),
+        "the node has no consent of its own yet"
     );
-    let again = ciris_server::node_key::reauthor_consent_as_node(
-        &engine,
-        node_signer.clone(),
-        &actor,
-        &node,
-    )
-    .await
-    .expect("second boot");
-    assert!(again.is_empty(), "a second boot moves nothing: {again:?}");
-
-    // ── Phase 2: a runtime emit on the split node — `POST /v1/federation/peers`,
-    //    the edge's consent callback, the coverage top-up — names the NODE and
-    //    passes no signer. The engine still signs as the actor; the pen the
-    //    process holds for the node key authors it.
-    assert!(
-        ciris_server::node_key::held_node_signer().is_some(),
-        "the split records the node's signer for the process"
-    );
+    // Naming the NODE explicitly authors as the node, through the held signer.
     ciris_server::peer::emit_replication_consent(
         &engine,
         &node,
@@ -240,32 +227,20 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     )
     .await
     .expect("a runtime emit naming the node authors as the node through the held signer");
-    let mut peers = ciris_server::peer::replication_peers_from_consent(&engine, &node)
-        .await
-        .expect("read as the node");
-    peers.sort();
-    let mut want = vec![PEER.to_string(), PEER_2.to_string()];
-    want.sort();
-    assert_eq!(peers, want);
-    // CIRISServer#599: this assertion used to pin the OPPOSITE — that a read with
-    // the actor (engine) key did NOT see the node's grant. That was the axis
-    // that shipped nothing from every split-key home for six releases: the
-    // runtime reads with the engine key. The read now unions every key this
-    // node's consent may be authored under (owner, node, engine), so the actor's
-    // read DOES see it.
-    assert!(
-        ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+    assert_eq!(
+        ciris_server::peer::replication_peers_from_consent(&engine, &node)
             .await
-            .expect("read as the actor — the production read")
-            .iter()
-            .any(|p| p == PEER_2),
-        "the production read (engine key) must resolve the node-authored grant (#599)"
+            .expect("read as the node"),
+        vec![PEER_2.to_string()]
     );
-
-    // ── Phase 3: a caller that names the ACTOR — the contacts surface's
-    //    `self_identity::resolve`, the admin router's configured key — means
-    //    "this node". It is normalised to the node, not refused and not authored
-    //    under the actor (Codex P1 on #564).
+    assert!(
+        !ciris_server::peer::replication_peers_from_consent(&engine, &actor)
+            .await
+            .expect("read as the actor")
+            .contains(&PEER_2.to_string()),
+        "a row the NODE authored is the node's, not the agent's — no cross-machine blanket"
+    );
+    // Naming the ACTOR authors as the actor — the engine's own key.
     ciris_server::peer::emit_replication_consent(
         &engine,
         &actor,
@@ -273,38 +248,39 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
-    .expect("a grant named for the actor on a split node is authored as the node");
+    .expect("a grant named for the actor on a split node is authored AS the actor");
     assert!(
-        ciris_server::peer::replication_peers_from_consent(&engine, &node)
+        !ciris_server::peer::replication_peers_from_consent(&engine, &node)
             .await
             .expect("read as the node")
             .contains(&PEER_3.to_string()),
-        "the node reads the grant the actor-naming caller asked for"
+        "the actor's grant is not the node's (0.5.211: no redirect, no blanket)"
     );
     // "Did not land under the actor" is a statement about the ROW's author, so
     // it is asserted on the grant rows — the unioned production read now sees
     // every grantor for this node by design (CIRISServer#599).
     assert!(
-        !engine
+        engine
             .federation_directory()
             .list_live_consent_grants_by(&actor)
             .await
             .expect("grants by the actor")
             .iter()
             .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_3)),
-        "and it was NOT authored under the actor"
+        "and it IS authored under the actor — the key every read uses"
     );
     assert!(
         ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
             .expect("read as the actor — the production read")
             .contains(&PEER_3.to_string()),
-        "yet the production read (engine key) resolves it (#599)"
+        "and the production read (engine key) resolves it (#599 / #601)"
     );
 
-    // ── Phase 4: widening coverage (adding a contact) supersedes the node's
-    //    standing grant with a row the NODE signs — same attester as the grant
-    //    it retires (Codex P2 on #564). Named for the actor, like the contacts
+    // ── Phase 4: widening coverage (adding a contact) supersedes the ACTOR's
+    //    standing grant (PEER, authored before the split and never moved) with a
+    //    row the same attester signs — the actor (Codex P2 on #564, read under
+    //    0.5.211's no-redirect rule). Named for the actor, like the contacts
     //    surface does.
     let defaults = ciris_server::peer::default_attestation_prefixes();
     let extra = ["hard_case:", "location:", "capacity:", "trace:"]
@@ -327,9 +303,9 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     );
     let rows = engine
         .federation_directory()
-        .list_attestations_by(&node)
+        .list_attestations_by(&actor)
         .await
-        .expect("the node's rows");
+        .expect("the actor's rows");
     let supersedes: Vec<_> = rows
         .iter()
         .filter(|a| {
@@ -339,7 +315,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     assert_eq!(
         supersedes.len(),
         1,
-        "exactly one supersedes row, authored by the node"
+        "exactly one supersedes row, authored by the actor — the grant's own attester"
     );
     assert_eq!(
         supersedes[0]
@@ -350,24 +326,25 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         "and it retires the grant the coverage call says it retired"
     );
     assert!(
-        ciris_server::peer::replication_peers_from_consent(&engine, &node)
+        ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
-            .expect("read as the node")
+            .expect("read as the actor")
             .contains(&PEER.to_string()),
         "consent to the peer is never momentarily absent across the widening"
     );
 
-    // ── Phase 5: the CC#46 `analyze` grant is the NODE's consent to be scored,
-    //    signed with the node's pen, and it must RESOLVE (Codex P1 on #564).
+    // ── Phase 5: the CC#46 `analyze` grant is the ACTOR's consent to be scored
+    //    (the machine named, signed by the machine named — no redirect), and it
+    //    must RESOLVE through the by-principals fold keyed by the actor, which
+    //    is what the canonical's scorer asks (Codex P1 on #564, 0.5.211 reading).
     let analyze = ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
         .await
-        .expect("the analyze grant authors as the node and resolves");
+        .expect("the analyze grant authors as the actor and resolves");
     assert!(analyze.is_some(), "a fresh analyze grant was written");
     let resolved = engine
-        .federation_directory()
-        .resolve_scoped_consent(
+        .resolve_scoped_consent_by_principals(
             PEER,
-            &node,
+            &actor,
             ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
             None,
             chrono::Utc::now(),
@@ -379,7 +356,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             resolved,
             ciris_persist::federation::hard_case::ConsentState::Granted
         ),
-        "the peer may now score THIS NODE (the node key, not the actor): {resolved:?}"
+        "the peer may now score THIS AGENT (the actor — the key the scorer is handed): {resolved:?}"
     );
     assert!(
         ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
@@ -406,5 +383,113 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .to_string()
         .contains("refusing to emit a consent grant naming"));
 
+    // ── CIRISServer#601 (0.5.211): the CLAIMED split home ──────────────────
+    // The human claims the NODE; the agent (the engine's key) must then become
+    // an occurrence of the human — the login ceremony — or persist's
+    // by-principals fold finds no human behind the agent, and the human's
+    // grant, which names the AGENT, is invisible to every read keyed by it.
+    let seed_dir = std::env::temp_dir().join(format!(
+        "ciris-split-owner-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&seed_dir).expect("owner seed dir");
+    let alias = format!("split-owner-{}", std::process::id());
+    let minted = ciris_server::identity::mint_user_identity(
+        ciris_server::identity::UserIdentityBackend::Software,
+        &alias,
+        Some("Split Owner"),
+        seed_dir.clone(),
+        ciris_server::identity::ActiveAlias::Adopt,
+    )
+    .await
+    .expect("mint the owner");
+    let owner = minted.key_id.clone();
+    let owner_signer = ciris_server::identity::hardware_user_signers(
+        ciris_server::identity::UserIdentityBackend::Software,
+        &alias,
+        seed_dir.clone(),
+    )
+    .await
+    .expect("re-open the owner")
+    .0;
+    register(&engine, &owner_signer, &owner, identity_type::USER).await;
+    ciris_server::node_key::set_user_seed_dir(seed_dir.clone(), alias.clone());
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ciris_server::auth::ownership::emit_steward_binding(&engine, &owner_signer, &node, &scopes)
+        .await
+        .expect("the human claims the NODE");
+    assert!(
+        engine
+            .steward_bindings_of(&actor)
+            .await
+            .expect("stewards of the agent")
+            .is_empty(),
+        "before the ceremony nobody stands behind the agent"
+    );
+    let pair = ciris_server::node_key::anchor_agent_to_owner(&engine)
+        .await
+        .expect("the login ceremony runs with the owner's pen");
+    assert!(pair.is_some(), "a claimed split home anchors its agent");
+    assert!(
+        engine
+            .steward_bindings_of(&actor)
+            .await
+            .expect("stewards of the agent")
+            .contains(&owner),
+        "the human now stands behind the agent (occurrence anchor)"
+    );
+    assert!(
+        ciris_server::node_key::anchor_agent_to_owner(&engine)
+            .await
+            .expect("second pass")
+            .is_none(),
+        "idempotent"
+    );
+    // The human consents FOR THIS AGENT, and the agent's own read finds it.
+    const PEER_4: &str = "a-peer-consented-by-the-human-for-the-agent";
+    register(&engine, &signer_for(PEER_4), PEER_4, identity_type::NODE).await;
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &actor,
+        PEER_4,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("the owner authors, naming the agent");
+    let by_owner = engine
+        .federation_directory()
+        .list_live_consent_grants_by(&owner)
+        .await
+        .expect("grants by the owner");
+    let row = by_owner
+        .iter()
+        .find(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_4))
+        .expect("the grant is the HUMAN's");
+    assert_eq!(
+        ciris_persist::federation::consent_by_humans::for_key_id_of(&row.attestation_envelope),
+        Some(actor.as_str()),
+        "and it names THIS agent — never a blanket"
+    );
+    assert!(
+        engine
+            .consent_peers_by_principals(&actor)
+            .await
+            .expect("by-principals read for the agent")
+            .contains(&PEER_4.to_string()),
+        "the read every runtime path uses (keyed by the agent) resolves the human's grant"
+    );
+    assert!(
+        !engine
+            .consent_peers_by_principals(&node)
+            .await
+            .expect("by-principals read for the node")
+            .contains(&PEER_4.to_string()),
+        "a grant FOR the agent is not the node's consent — no blanket across the human's machines"
+    );
+    let _ = std::fs::remove_dir_all(&seed_dir);
     let _ = std::fs::remove_dir_all(&identity_dir);
 }

@@ -77,14 +77,23 @@ pub async fn emit_analyze_consent(
     // the peer's `capacity:*` gate looks for a consent the node never gave
     // (Codex P1 on #564).
     let author = consent_author(engine, subject_key_id, None).await?;
+    // The row is STAMPED and SIGNED as the author — the owner on an owned node,
+    // the machine otherwise; `subject_key_id` below is that id.
     let subject_key_id = author.key_id.as_str();
+    // The SUBJECT of the analyze consent is the machine being scored — the
+    // agent (`for_key_id`) when the owner authors, the author itself otherwise;
+    // read through persist's by-principals fold (v44.6.0), which walks a
+    // machine key to the humans standing behind it on rows that name it.
+    let subject_machine = author
+        .for_key_id
+        .clone()
+        .unwrap_or_else(|| author.key_id.clone());
     let now = chrono::Utc::now();
     if matches!(
         engine
-            .federation_directory()
-            .resolve_scoped_consent(
+            .resolve_scoped_consent_by_principals(
                 attester_key_id,
-                subject_key_id,
+                &subject_machine,
                 ANALYZE_CONSENT_SCOPE,
                 None,
                 now,
@@ -95,10 +104,14 @@ pub async fn emit_analyze_consent(
         return Ok(None);
     }
 
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
         "scope": ANALYZE_CONSENT_SCOPE,
     });
+    // persist v44.6.0: the human's analyze consent names the agent it is for.
+    if let Some(for_key_id) = author.for_key_id.as_deref() {
+        envelope["for_key_id"] = serde_json::json!(for_key_id);
+    }
     let id = match author.signer.as_ref() {
         None => {
             let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
@@ -488,6 +501,12 @@ pub struct ConsentGrant {
 /// (CIRISServer#327 §2 / #510 P2).
 #[derive(Debug, Clone, Default)]
 pub struct ConsentGrantOptions {
+    /// The machine this consent is FOR — persist v44.6.0's `for_key_id`
+    /// (CIRISPersist#857, CIRISServer#601 item 4). A human names the agent whose
+    /// wizard they consented in; a machine may name only itself. `None` = a
+    /// legacy machine-authored row (about its author by construction). When
+    /// `None`, [`ConsentAuthor::for_key_id`] fills it.
+    pub for_key_id: Option<String>,
     /// **Author this grant with a key the ENGINE does not sign as** (CC 3.4.7.3).
     ///
     /// A consent grant is self-attested — CEG 1.0-RC29 §5.6.8.15 forecloses
@@ -747,7 +766,14 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
     // WHO authors this — resolved before the standing-grant lookup, so a caller
     // that named the actor on a split node looks up (and writes) the NODE's grant.
     let author = consent_author(engine, node_key_id, opts.author_signer.clone()).await?;
-    if let Some(existing) = standing_live_grant(engine, &author.key_id, peer_key_id).await? {
+    if let Some(existing) = standing_live_grant_for(
+        engine,
+        &author.key_id,
+        peer_key_id,
+        opts.for_key_id.as_deref().or(author.for_key_id.as_deref()),
+    )
+    .await?
+    {
         tracing::debug!(
             peer_key_id,
             attestation_id = %existing.attestation_id,
@@ -802,13 +828,28 @@ async fn standing_live_grant(
     node_key_id: &str,
     peer_key_id: &str,
 ) -> Result<Option<ciris_persist::federation::types::Attestation>> {
-    Ok(engine
+    standing_live_grant_for(engine, node_key_id, peer_key_id, None).await
+}
+
+/// [`standing_live_grant`] narrowed to the row FOR `for_key_id` when given: an
+/// owner holds one grant per (peer, agent), and a grant for a sibling agent is
+/// not this agent's standing grant (CIRISServer#601 item 4).
+async fn standing_live_grant_for(
+    engine: &Engine,
+    node_key_id: &str,
+    peer_key_id: &str,
+    for_key_id: Option<&str>,
+) -> Result<Option<ciris_persist::federation::types::Attestation>> {
+    use ciris_persist::federation::consent_by_humans::for_key_id_of;
+    let rows = engine
         .federation_directory()
         .list_live_consent_grants_by(node_key_id)
         .await
-        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({node_key_id}): {e}"))?
-        .into_iter()
-        .find(|a| a.subject_key_ids.iter().any(|s| s == peer_key_id)))
+        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({node_key_id}): {e}"))?;
+    Ok(rows.into_iter().find(|a| {
+        a.subject_key_ids.iter().any(|s| s == peer_key_id)
+            && for_key_id.is_none_or(|k| for_key_id_of(&a.attestation_envelope) == Some(k))
+    }))
 }
 
 /// Does `signer` hold the key registered as `key_id`?
@@ -824,7 +865,7 @@ async fn standing_live_grant(
 ///   under, and authors rows as, is `derived_key_id()` =
 ///   `ciris-node-bootstrap-<fp>` (FSD-003 #247).
 ///
-/// The boot re-author (`node_key::reauthor_consent_as_node`) hands the second
+/// The owner's re-sign (`node_key::migrate_consent_to_owner`) hands the second
 /// kind in, and the guard below compared its ALIAS to the node's DERIVED id — so
 /// the migration that makes a split node's topology visible (CIRISServer#312)
 /// refused every grant it was asked to move, and a node whose actor had peered
@@ -863,12 +904,18 @@ pub struct ConsentAuthor {
     pub key_id: String,
     /// The pen when the engine does not sign as `key_id`; `None` when it does.
     pub signer: Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>>,
+    /// The machine the row is FOR (`for_key_id`, persist v44.6.0): the agent —
+    /// the engine's own key — when the OWNER authors; `None` for a machine
+    /// author, whose row is about itself (CIRISServer#601 item 4).
+    pub for_key_id: Option<String>,
 }
 
 /// Whether an OWNED node authors consent AS ITS OWNER (CIRISServer#599).
 ///
-/// `false` until the edge this server pins reads the steward's consent peers
-/// (CIRISEdge#609): edge resolves a plane's send set with
+/// `true` since 0.5.211: the pinned edge (v24.3.0+, CIRISEdge#609) reads its
+/// send set through persist's by-principals fold, so an owner-signed grant
+/// that names this agent is visible to every plane. It was `false` in 0.5.210
+/// because edge resolved a plane's send set with
 /// `list_consent_peers(local)` through persist's 208-method directory trait,
 /// which this composition root cannot interpose, so an owner-authored grant is
 /// invisible to edge and every plane — traces included — is withheld. Flipping
@@ -876,7 +923,7 @@ pub struct ConsentAuthor {
 /// The whole owner path (pen resolution, authoring, migration, steward-first
 /// reads) is built and pinned by `tests/consent_is_authored_by_the_owner.rs`,
 /// which enables it explicitly; production flips at the edge#609 adoption.
-pub const OWNER_AUTHORED_CONSENT: bool = false;
+pub const OWNER_AUTHORED_CONSENT: bool = true;
 
 static OWNER_AUTHORED_CONSENT_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -936,6 +983,7 @@ pub async fn consent_author(
             return Ok(ConsentAuthor {
                 key_id: requested.to_owned(),
                 signer: Some(signer),
+                for_key_id: None,
             });
         }
         anyhow::bail!(
@@ -974,30 +1022,44 @@ pub async fn consent_author(
              holds {requested:?} (CIRISServer#312 / #599)"
         );
     }
-    if let Some(owner) = owner {
+    if let Some(mut owner) = owner {
+        // The human consents FOR THIS AGENT — the engine's own key (the agent on
+        // a split home; the node itself otherwise). Never a blanket
+        // (CIRISServer#601 item 4, CIRISPersist#857).
+        owner.for_key_id = Some(engine_author.clone());
         tracing::info!(
             requested = %requested,
             node_key_id = %node_key_id,
             owner_key_id = %owner.key_id,
-            "consent authored by the node's OWNER — the human consents, the node holds \
-             topology (CIRISServer#599)"
+            for_key_id = ?owner.for_key_id,
+            "consent authored by the node's OWNER, for this agent — the human consents, \
+             the node holds topology (CIRISServer#599 / #601)"
         );
         return Ok(owner);
     }
-    if !owner_authored_consent_enabled() {
-        // The 0.5.203 rule, until the pinned edge reads steward-authored
-        // grants (CIRISEdge#609): the node authors as itself. The read side
-        // already resolves the steward, so the flip is one const.
-        return Ok(match held {
-            Some(held) => ConsentAuthor {
-                key_id: node_key_id,
-                signer: Some(held),
+    // A MACHINE author signs as the key that was NAMED — never redirected.
+    // 0.5.203 sent a request naming the engine/actor to the node's pen ("whose
+    // topology it is"); under persist's by-principals fold a node key is not a
+    // principal of the agent, and every runtime read is keyed by the engine's
+    // key, so that redirect made the row invisible where it was consulted.
+    let machine = |requested_is_node: bool| -> ConsentAuthor {
+        match (&held, requested_is_node) {
+            (Some(held), true) => ConsentAuthor {
+                key_id: node_key_id.clone(),
+                signer: Some(std::sync::Arc::clone(held)),
+                for_key_id: None,
             },
-            None => ConsentAuthor {
-                key_id: engine_author,
+            _ => ConsentAuthor {
+                key_id: engine_author.clone(),
                 signer: None,
+                for_key_id: None,
             },
-        });
+        }
+    };
+    if !owner_authored_consent_enabled() {
+        return Ok(machine(
+            requested == node_key_id && requested != engine_author,
+        ));
     }
     // UNOWNED: nobody to consent for yet. Provisional, machine-authored, loud;
     // re-signed by the owner at claim (`migrate_consent_to_owner`).
@@ -1009,16 +1071,9 @@ pub async fn consent_author(
          (CIRISServer#599). If this node IS claimed, the owner's seed is not where compose \
          registered it — check active_user_alias under the user seed dir"
     );
-    match held {
-        Some(held) => Ok(ConsentAuthor {
-            key_id: node_key_id,
-            signer: Some(held),
-        }),
-        None => Ok(ConsentAuthor {
-            key_id: engine_author,
-            signer: None,
-        }),
-    }
+    Ok(machine(
+        requested == node_key_id && requested != engine_author,
+    ))
 }
 
 /// The OWNER's pen for `node_key_id`, resolved the way compose resolves it to
@@ -1069,6 +1124,7 @@ pub async fn owner_consent_pen(
         Some(signer) if signer_holds(&signer, &owner) => Ok(Some(ConsentAuthor {
             key_id: owner,
             signer: Some(signer),
+            for_key_id: None,
         })),
         Some(signer) => anyhow::bail!(
             "consent refused: node {node_key_id} is owned by {owner}, but the user seed at \
@@ -1092,22 +1148,25 @@ pub async fn owner_consent_pen(
 /// as the engine). Readers union over the set; the write side authors only as
 /// the first entry that exists.
 pub async fn consent_grantors_for(engine: &Engine, node_key_id: &str) -> Result<Vec<String>> {
-    let mut keys: Vec<String> = Vec::new();
-    let held_node = crate::node_key::held_node_signer().map(|h| h.derived_key_id());
-    let node = held_node.clone().unwrap_or_else(|| node_key_id.to_owned());
-    match ciris_persist::federation::admission::owner_of(
-        engine.federation_directory().as_ref(),
-        &node,
-    )
-    .await
-    {
-        Ok(Some(owner)) => keys.push(owner),
-        Ok(None) => {}
-        Err(e) => anyhow::bail!("resolve the steward (owner_of) of {node}: {e}"),
+    // persist v44.6.0: the principals of `k` are `k` itself plus the humans
+    // `steward_bindings_of(k)` resolves (owner-binding for a node, the login
+    // ceremony's occurrence anchor for an agent). Kept for diagnostics
+    // (`delivery_status`) and the reconcile's "ours" test; the peer READ is
+    // persist's fold, not this list.
+    let mut keys: Vec<String> = vec![node_key_id.to_owned()];
+    if let Some(held) = crate::node_key::held_node_signer() {
+        let node = held.derived_key_id();
+        if !keys.contains(&node) {
+            keys.push(node);
+        }
     }
-    for k in [node_key_id.to_owned()].into_iter().chain(held_node) {
-        if !keys.contains(&k) {
-            keys.push(k);
+    for steward in engine
+        .steward_bindings_of(node_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("steward_bindings_of({node_key_id}): {e}"))?
+    {
+        if !keys.contains(&steward) {
+            keys.push(steward);
         }
     }
     Ok(keys)
@@ -1221,6 +1280,11 @@ async fn emit_grant_row<S: AsRef<str>>(
     });
     if let Some(purpose) = opts.purpose.as_deref() {
         payload["purpose"] = serde_json::json!(purpose);
+    }
+    // persist v44.6.0: the machine this consent is FOR. Emitted only under the
+    // v44.6.0 grammar (deny_unknown_fields on older nodes — CIRISServer#601 item 2).
+    if let Some(for_key_id) = opts.for_key_id.as_deref().or(author.for_key_id.as_deref()) {
+        payload["for_key_id"] = serde_json::json!(for_key_id);
     }
     if let Some(valid_until) = opts.valid_until {
         payload["valid_until"] = serde_json::json!(valid_until);
@@ -1346,6 +1410,41 @@ fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Opti
         .map(|policy| normalize_prefixes(&policy.attestation_prefixes))
 }
 
+/// The live `consent:replication` rows that stand FOR machine `k` — the
+/// grant-level twin of persist's `consent_peers_by_principals` (v44.6.0,
+/// CIRISPersist#857): `k`'s own rows (legacy, machine-authored) plus every row
+/// one of `k`'s stewards signed that names `k` in `for_key_id`. A steward's row
+/// for a sibling machine contributes nothing. Every READ of "what does this
+/// node consent to, and covering which prefixes" goes through here; the WRITE
+/// path's standing-grant lookup stays author-keyed (`standing_live_grant_for`).
+pub async fn live_consent_grants_for_machine(
+    engine: &Engine,
+    k: &str,
+) -> Result<Vec<ciris_persist::federation::types::Attestation>> {
+    use ciris_persist::federation::consent_by_humans::for_key_id_of;
+    let dir = engine.federation_directory();
+    let mut rows = dir
+        .list_live_consent_grants_by(k)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?;
+    let stewards = engine
+        .steward_bindings_of(k)
+        .await
+        .map_err(|e| anyhow::anyhow!("steward_bindings_of({k}): {e}"))?;
+    for steward in stewards {
+        let theirs = dir
+            .list_live_consent_grants_by(&steward)
+            .await
+            .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({steward}): {e}"))?;
+        rows.extend(
+            theirs
+                .into_iter()
+                .filter(|g| for_key_id_of(&g.attestation_envelope) == Some(k)),
+        );
+    }
+    Ok(rows)
+}
+
 /// **What this node's LIVE grant to `peer_key_id` actually covers.**
 ///
 /// The sibling of [`standing_live_grant`] on the same revocation-folded read —
@@ -1360,8 +1459,10 @@ pub async fn live_grant_prefixes(
     node_key_id: &str,
     peer_key_id: &str,
 ) -> Result<Option<Vec<String>>> {
-    Ok(standing_live_grant(engine, node_key_id, peer_key_id)
+    Ok(live_consent_grants_for_machine(engine, node_key_id)
         .await?
+        .into_iter()
+        .find(|g| g.subject_key_ids.iter().any(|s| s == peer_key_id))
         .map(|g| grant_prefixes(&g).unwrap_or_default()))
 }
 
@@ -1376,11 +1477,7 @@ pub async fn live_consent_grants(
     engine: &Engine,
     node_key_id: &str,
 ) -> Result<Vec<(String, Vec<String>)>> {
-    let grants = engine
-        .federation_directory()
-        .list_live_consent_grants_by(node_key_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({node_key_id}): {e}"))?;
+    let grants = live_consent_grants_for_machine(engine, node_key_id).await?;
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for grant in &grants {
         let prefixes = grant_prefixes(grant).unwrap_or_default();
@@ -1633,6 +1730,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
         // policy axes below need the whole parsed struct, so this arm keeps it.
         Ok(policy) => {
             let opts = ConsentGrantOptions {
+                for_key_id: None,
                 author_signer: None,
                 audience: Some(policy.audience.clone()),
                 valid_until: policy.valid_until,
@@ -1839,24 +1937,15 @@ pub async fn replication_peers_from_consent(
     // (a projection maintained by the Registry-of-Record), so this is a direct
     // read — no client-side re-filtering of LIVENESS that could re-introduce
     // the drift.
-    // Unioned over every grantor a row for this node may be authored under —
-    // the OWNER first, then the machine keys as legacy (CIRISServer#599). From
-    // 0.5.203 to 0.5.209 this read asked with the engine key alone while the
-    // write went under the node key: zero peers on every split-key home.
-    let mut subjects: Vec<String> = Vec::new();
-    for grantor in consent_grantors_for(engine, node_key_id).await? {
-        let found = engine
-            .federation_directory()
-            .list_consent_peers(&grantor)
-            .await
-            .map_err(|e| anyhow::anyhow!("list consent peers for {grantor}: {e}"))?;
-        for subject in found {
-            if !subjects.contains(&subject) {
-                subjects.push(subject);
-            }
-        }
-    }
-    subjects.sort();
+    // persist v44.6.0 (CIRISPersist#857): the by-principals fold — this
+    // machine's own (legacy) grants ∪ its stewards' grants that NAME it
+    // (`for_key_id`). A steward's grant for a sibling agent contributes
+    // nothing; there is no blanket form. Edge computes its send set the same
+    // way (CIRISEdge#609), which is what made owner-authored consent shippable.
+    let subjects = engine
+        .consent_peers_by_principals(node_key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("consent_peers_by_principals({node_key_id}): {e}"))?;
     // ── CIRISServer#472 — coordinators are for TRANSPORT peers only ──
     //
     // A consent subject may be a PERSON (the contact-grant fallback for an

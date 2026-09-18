@@ -140,9 +140,21 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
 
     // ── 1. UNOWNED: provisional, authored as the node itself ──────────────
-    let pre = ciris_server::peer::emit_replication_consent(&engine, &node, PEER_PRE, PREFIXES)
-        .await
-        .expect("an unowned node may still peer (boot-environment peering)");
+    // Narrowed AND time-boxed, so the migration below is proven to carry the
+    // operator's policy rather than rebuild it (Codex P1 on #489).
+    let pre_expiry = chrono::Utc::now() + chrono::Duration::days(30);
+    let pre = ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        &node,
+        PEER_PRE,
+        PREFIXES,
+        &ciris_server::peer::ConsentGrantOptions {
+            valid_until: Some(pre_expiry),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an unowned node may still peer (boot-environment peering)");
     assert!(pre.freshly_emitted);
     let by_node = engine
         .federation_directory()
@@ -249,8 +261,8 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
         ciris_server::peer::consent_grantors_for(&engine, &node)
             .await
             .expect("grantor set"),
-        vec![owner.clone(), node.clone()],
-        "owner first, then the machine key as legacy"
+        vec![node.clone(), owner.clone()],
+        "the machine itself, then the humans steward_bindings_of resolves"
     );
     assert_eq!(
         ciris_server::peer::replication_peers_from_consent(&engine, &node)
@@ -263,6 +275,34 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
         },
         "the owner's grant AND the provisional one both resolve for the node — this \
          is the read that returned nothing on every split-key home 0.5.203–0.5.209"
+    );
+
+    // The GRANT-level reads (contacts, the chat guard, delivery status) go
+    // through the machine's principals too: the owner's row naming this node
+    // is this node's coverage. The chat ladder found the one reader that did
+    // not (CIRISServer#601: "not a contact" right after POST /v1/contacts).
+    assert_eq!(
+        ciris_server::peer::live_grant_prefixes(&engine, &node, PEER)
+            .await
+            .expect("prefix read")
+            .map(|mut p| {
+                p.sort();
+                p
+            }),
+        Some({
+            let mut p: Vec<String> = PREFIXES.iter().map(|s| s.to_string()).collect();
+            p.sort();
+            p
+        }),
+        "the owner's grant for this node IS this node's coverage of the peer"
+    );
+    assert!(
+        ciris_server::peer::live_consent_grants(&engine, &node)
+            .await
+            .expect("grant list")
+            .iter()
+            .any(|(peer, _)| peer == PEER),
+        "and it lists as one of this node's contacts-grade grants"
     );
 
     // ── 4. MIGRATION: the provisional row is re-signed by the owner ───────
@@ -290,6 +330,22 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     assert_eq!(
         prefixes, expected,
         "the policy is carried off the live row, not rebuilt"
+    );
+    let carried_until = re_signed.attestation_envelope["payload"]["valid_until"]
+        .as_str()
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .expect("valid_until carried onto the human-signed row");
+    assert_eq!(
+        carried_until.timestamp_millis(),
+        pre_expiry.timestamp_millis(),
+        "the time-box is the operator's, not dropped or widened"
+    );
+    assert_eq!(
+        ciris_persist::federation::consent_by_humans::for_key_id_of(
+            &re_signed.attestation_envelope
+        ),
+        Some(node.as_str()),
+        "the human's re-signed row names the machine it is for"
     );
     assert!(
         ciris_server::node_key::migrate_consent_to_owner(&engine)

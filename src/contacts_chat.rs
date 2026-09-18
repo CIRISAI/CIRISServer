@@ -181,7 +181,8 @@ struct ChatState {
 
 /// Where a room's MLS handshake has got to on THIS node.
 ///
-/// The conversation key is derived from a live `CohortGroup` (`RoomKey::of`), and
+/// The room's membership gate is a live `CohortGroup` (edge v25.0.0 deleted `RoomKey`;
+/// content is sealed under persist's community DEK), and
 /// the group is built by a two-row handshake OVER the room: the joiner publishes
 /// a `chat:key_package:v1`, the creator answers with a `chat:welcome:v1`. Which
 /// side we are is decided from the two fed-IDs alone — `PairRole::of` is
@@ -799,8 +800,14 @@ async fn room_key(
     me: &str,
     peer: &str,
     author: Option<&ciris_edge::identity::LocalSigner>,
-) -> Result<(Option<ciris_edge::chat::RoomKey>, RoomHandshake), String> {
-    use ciris_edge::chat::{self, PairRole, RoomKey};
+) -> Result<RoomHandshake, String> {
+    // edge v25.0.0 (CIRISEdge#612 / #604): `RoomKey` is gone — content is sealed
+    // under persist's community DEK, not an MLS-exporter key. What this fn
+    // still does is the MEMBERSHIP gate: create or join the room's CohortGroup
+    // and hold it, so a non-member is refused (`chat.room_key_failed`) exactly
+    // as before. The value it used to derive from the group is no longer needed
+    // by any reader or writer, so it returns the handshake state alone.
+    use ciris_edge::chat::{self, PairRole};
     use ciris_edge::mls::cohort_group::{
         key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
     };
@@ -811,10 +818,8 @@ async fn room_key(
     let dir = st.engine.federation_directory();
     let mut rooms = st.rooms.lock().await;
 
-    if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
-        return RoomKey::of(group)
-            .await
-            .map(|k| (Some(k), RoomHandshake::Ready));
+    if let Some(RoomState::Keyed(_group)) = rooms.get(&room) {
+        return Ok(RoomHandshake::Ready);
     }
     // ADVANCING the handshake needs the person's signer; READING a room whose
     // handshake already finished does not. A delegate granted `chat_read` holds
@@ -832,7 +837,7 @@ async fn room_key(
              could not be opened: check the seed dir, the `.backend` marker and \
              the `active_user_alias` pointer"
         );
-        return Ok((None, RoomHandshake::NoAuthorSigner));
+        return Ok(RoomHandshake::NoAuthorSigner);
     };
 
     // The MLS store is keyed by the room and lives for the process. State that
@@ -868,7 +873,7 @@ async fn room_key(
                         .await
                         .log("room_key:creator", &room);
                 }
-                return Ok((None, RoomHandshake::AwaitingPeer));
+                return Ok(RoomHandshake::AwaitingPeer);
             };
             let group = CohortGroup::create(store, &room, me, 16)
                 .await
@@ -895,9 +900,8 @@ async fn room_key(
                 },
             )
             .await?;
-            let key = RoomKey::of(&group).await?;
             rooms.insert(room, RoomState::Keyed(Arc::new(group)));
-            Ok((Some(key), RoomHandshake::Ready))
+            Ok(RoomHandshake::Ready)
         }
         PairRole::Joiner => {
             let material = match rooms.remove(&room) {
@@ -947,14 +951,13 @@ async fn room_key(
                         .log("room_key:joiner", &room);
                 }
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
-                return Ok((None, RoomHandshake::JoinRequested));
+                return Ok(RoomHandshake::JoinRequested);
             };
             let group = CohortGroup::join(store, &room, material, &welcome, 16)
                 .await
                 .map_err(|e| format!("CohortGroup::join: {e}"))?;
-            let key = RoomKey::of(&group).await?;
             rooms.insert(room, RoomState::Keyed(Arc::new(group)));
-            Ok((Some(key), RoomHandshake::Ready))
+            Ok(RoomHandshake::Ready)
         }
     }
 }
@@ -2465,9 +2468,9 @@ async fn send_message(
     // of the MLS handshake has not replicated yet. Say so plainly — the mesh
     // converges on its own, and a client that retries in a loop is the wrong
     // answer (edge's `LadderStall` vocabulary, §3 of its integration guide).
-    let key = match room_key(&st, &owner.key_id, &contact_key_id, Some(author)).await {
-        Ok((Some(k), _)) => k,
-        Ok((None, state)) => {
+    match room_key(&st, &owner.key_id, &contact_key_id, Some(author)).await {
+        Ok(RoomHandshake::Ready) => {}
+        Ok(state) => {
             // THE STATE, NOT A GENERIC STALL. Same table the transcript renders,
             // so the note the sender sees here is the note already sitting in
             // their chat history — one sentence, not two descriptions of one
@@ -2543,7 +2546,7 @@ async fn send_message(
     // way, and who cannot read it is a fact about the send, not the read-back.
     let fully_readable = sealed.fully_readable();
     let excluded_key_ids = sealed.excluded;
-    let message = match load_message(&st, &community_id, &attestation_id, &owner, &key).await {
+    let message = match load_message(&st, &community_id, &attestation_id, &owner).await {
         Ok(Some(m)) => m,
         Ok(None) | Err(_) => {
             // The row landed; only the read-back projection did not. Say so
@@ -2744,7 +2747,7 @@ async fn collect_messages(
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
         let (body, unopened_reason) = match opened.body {
             ciris_edge::chat::Body::Text(text) => (Some(text), None),
-            ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason)),
+            ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason.to_string())),
             // Still a pointer AFTER `resolve_content` — so the fetch did not
             // happen or did not succeed. The commonest cause is no active
             // occurrence for this viewer; saying so beats a blank message.
@@ -2939,14 +2942,8 @@ async fn load_message(
     community_id: &str,
     attestation_id: &str,
     owner: &Owner,
-    // edge v24.0.0: READING no longer needs the room key — `from_row` recognises
-    // a row without one and the body comes from the blob store. The parameter
-    // stays because the caller still DERIVES the key, and that derivation is
-    // also how the route refuses a non-member (`chat.room_key_failed`); pulling
-    // it out would delete a gate along with the value. Whether the handshake is
-    // still load-bearing for a reader is a question for CIRISEdge#590 rather
-    // than something to decide by deleting it mid-adoption.
-    _key: &ciris_edge::chat::RoomKey,
+    // edge v25.0.0: the room key is gone (CIRISEdge#612); the membership gate
+    // that used to ride on deriving it is `room_key`'s handshake, run by the caller.
 ) -> Result<Option<ChatMessage>, String> {
     Ok(
         collect_messages(st, community_id, owner, Some(attestation_id))
@@ -2992,15 +2989,15 @@ async fn list_messages(
     // capsule. Only ADVANCING an unfinished handshake needs the person, and a
     // delegate cannot do that anyway; for them the honest answer is the same
     // "not keyed yet" the owner would get, not a permission error.
-    let _key = 'key: {
+    'key: {
         match room_key(&st, &owner.key_id, &peer, None).await {
-            Ok((Some(k), _)) => break 'key k,
+            Ok(RoomHandshake::Ready) => break 'key,
             // NOT KEYED — and that is a 200, not an error. The room exists, the
             // conversation has simply not finished starting, and the transcript
             // says so in its own voice. A 503 here made every client invent its
             // own wording for a state the server can name exactly, and gave the
             // user a failure where the truth is "waiting for them".
-            Ok((None, first)) => {
+            Ok(first) => {
                 // One attempt to ADVANCE the handshake with the owner's signer:
                 // reading needs no fed-ID, authoring our half does. A delegate
                 // reaches neither, and gets the same note the owner would.
@@ -3008,8 +3005,8 @@ async fn list_messages(
                     room_context(&st, &headers, &owner, &community_id).await
                 {
                     match room_key(&st, &owner.key_id, &peer, Some(capsule.edge_signer())).await {
-                        Ok((Some(k), _)) => break 'key k,
-                        Ok((None, state)) => {
+                        Ok(RoomHandshake::Ready) => break 'key,
+                        Ok(state) => {
                             let standing =
                                 DiscoveryStanding::of(&st.engine, &owner.node_key_id, &peer).await;
                             standing.log("transcript", &community_id);
