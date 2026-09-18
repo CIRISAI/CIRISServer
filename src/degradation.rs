@@ -282,6 +282,24 @@ pub fn reset_for_test() {
     write_registry().clear();
 }
 
+/// Host-pressure probes (memory, CPU/IO PSI) still READ and report under this
+/// switch, but do not RAISE into the registry. For test binaries that assert
+/// the FOLD of a brain's verdict into the node's: on a loaded CI runner the
+/// memory and `resource.cpu_stall` warnings are real, `degraded_mode` is
+/// honestly `true`, and four `folded_health` cases asserting `false` failed
+/// (CIRISServer#605, 2026-09-18). Their subject is the fold, not the host.
+/// Never set in production; the switch has no setter outside `for_test`.
+static HOST_PROBES_RAISE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// See [`HOST_PROBES_RAISE`]. Test-only by name; process-wide.
+pub fn set_host_probes_raise_for_test(raise_into_registry: bool) {
+    HOST_PROBES_RAISE.store(raise_into_registry, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn host_probes_raise() -> bool {
+    HOST_PROBES_RAISE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 // ─── The memory probe ────────────────────────────────────────────────────────
 
 /// What this process is using against what it is allowed — or why we cannot say.
@@ -781,7 +799,9 @@ fn bounded(usage_bytes: u64, limit_bytes: u64, limit_source: &str) -> MemoryRead
 /// without seeing the other.
 pub fn probe_memory() -> MemoryReading {
     let reading = read_memory();
-    probe_verdict_for(&reading);
+    if host_probes_raise() {
+        probe_verdict_for(&reading);
+    }
     reading
 }
 
@@ -1128,6 +1148,9 @@ pub fn probe_contention() -> (Pressure, Pressure) {
 /// Split, each scope owns its own code and can neither clear nor overwrite the
 /// other's. A scope we did not read this pass gets `no_evidence`, not a clear.
 fn judge(resource: &str, code: &'static str, host_code: &'static str, p: &Pressure, remedy: &str) {
+    if !host_probes_raise() {
+        return;
+    }
     let Pressure::Measured {
         scope,
         some_avg10,
