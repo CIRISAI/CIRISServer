@@ -937,8 +937,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "15.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.1.0#cbd75fed3e7513eed53a0c34a0b232a6430105ad"
+version = "15.2.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.2.0#3c7115e6782f432f9d4a03dde9bd0d93767f5923"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "24.2.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v24.2.0#647271edc3b8c4003d784788d5cabfdcf6e92f3d"
+version = "25.0.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v25.0.0#60771b1390fe9961b90b36ac01969788592fa039"
 dependencies = [
  "async-trait",
  "axum",
@@ -1019,8 +1019,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "15.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.1.0#cbd75fed3e7513eed53a0c34a0b232a6430105ad"
+version = "15.2.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.2.0#3c7115e6782f432f9d4a03dde9bd0d93767f5923"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1086,8 +1086,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "44.4.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v44.4.0#2136da8b49052cb37c250af07a2d54551c4f9845"
+version = "44.6.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v44.6.0#bb084188330e8f55181a0ae0470089996d5fa4ef"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.210"
+version = "0.5.211"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1181,8 +1181,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "15.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.1.0#cbd75fed3e7513eed53a0c34a0b232a6430105ad"
+version = "15.2.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.2.0#3c7115e6782f432f9d4a03dde9bd0d93767f5923"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1223,8 +1223,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "15.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.1.0#cbd75fed3e7513eed53a0c34a0b232a6430105ad"
+version = "15.2.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v15.2.0#3c7115e6782f432f9d4a03dde9bd0d93767f5923"
 dependencies = [
  "aes-gcm",
  "android_logger",

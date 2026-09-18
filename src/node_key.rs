@@ -209,7 +209,7 @@ fn legacy_node_alias(host_alias: &str) -> String {
 /// and therefore a different node `key_id`. For a node that already split under the
 /// old `{host}-node` derivation that is not a rename — it is a silent identity
 /// change, and the boot migration would not follow it: `move_owner_binding_to_node_key`
-/// queries `owner_of(actor_key_id)` and `reauthor_consent_as_node` lists grants
+/// queries `owner_of(actor_key_id)` and `migrate_consent_to_owner` lists grants
 /// authored by the ACTOR, but after the original split both already belong to the
 /// LEGACY node key. The node would come back unowned with its replication peers
 /// invisible (Codex, PR #508).
@@ -742,84 +742,6 @@ pub async fn move_owner_binding_to_node_key(
     }))
 }
 
-/// **Re-author the actor's replication consent as the node.**
-///
-/// The half CIRISServer#312 makes mandatory: `compose` reads the topology by ONE
-/// identity, so when that becomes the node key every grant the actor authored
-/// goes invisible — zero peers, zero envelopes, fully green transport, no error.
-///
-/// Authored with the node's OWN signer via
-/// [`crate::peer::ConsentGrantOptions::author_signer`], so this works with the
-/// engine still signing as the actor (CIRISServer#221 keeps one engine in the
-/// embedded fold). Self-attestation is preserved — the signature really is the
-/// node's — which is the property CEG 1.0-RC29 §5.6.8.15 protects.
-///
-/// Returns the peers moved THIS pass; empty on a second boot.
-///
-/// # Errors
-/// Directory reads, or a grant emission that is not a benign duplicate.
-pub async fn reauthor_consent_as_node(
-    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
-    node_signer: std::sync::Arc<ciris_persist::prelude::LocalSigner>,
-    actor_key_id: &str,
-    node_key_id: &str,
-) -> Result<Vec<String>> {
-    let grants = engine
-        .federation_directory()
-        .list_live_consent_grants_by(actor_key_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("list live consent grants by {actor_key_id}: {e}"))?;
-    if grants.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Read ONCE before the loop so the skip set cannot drift as we write into it.
-    let already: std::collections::BTreeSet<String> =
-        crate::peer::replication_peers_from_consent(engine, node_key_id)
-            .await?
-            .into_iter()
-            .collect();
-
-    let mut moved = Vec::new();
-    for grant in &grants {
-        let Some(peer) = grant.subject_key_ids.first().cloned() else {
-            continue;
-        };
-        if already.contains(&peer) {
-            continue;
-        }
-        // **Carry the POLICY, never the defaults** (Codex P1 on #489).
-        //
-        // The first version rebuilt each grant from `ConsentGrantOptions::default()`
-        // plus the global default prefixes, keeping only the peer id. An operator
-        // grant with a narrowed prefix set, an expiry, an audience or a restriction
-        // would have come back UNRESTRICTED — the migration authorizing data the
-        // owner never consented to share. Widening consent silently is the worst
-        // outcome available here, so the original policy is read off the live row
-        // and reproduced.
-        let (opts, prefixes) = policy_of(grant, &node_signer)?;
-        crate::peer::emit_replication_consent_with_policy(
-            engine,
-            node_key_id,
-            &peer,
-            &prefixes,
-            &opts,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("re-author consent {node_key_id} -> {peer}: {e}"))?;
-        moved.push(peer);
-    }
-    if !moved.is_empty() {
-        tracing::info!(
-            from_key_id = %actor_key_id,
-            to_key_id = %node_key_id,
-            peers = ?moved,
-            "consent re-authored as the node key, policy preserved — the replication \
-             topology now resolves for the identity that reads it (CIRISServer#312)"
-        );
-    }
-    Ok(moved)
-}
-
 /// Every payload member `emit_replication_consent_with_policy` can reproduce.
 /// A grant carrying anything else is REFUSED rather than migrated with that
 /// member dropped — see [`policy_of`].
@@ -833,9 +755,12 @@ pub async fn reauthor_consent_as_node(
 /// are topology keys. The owner's pen is resolved the way `compose` resolves
 /// it for the owner-binding move ([`crate::peer::owner_consent_pen`]); the
 /// policy is carried off each live row, never rebuilt from defaults (Codex P1
-/// on #489, see [`policy_of`]); the old rows are left in place and read as
-/// LEGACY grantors by [`crate::peer::consent_grantors_for`] until a withdraw
-/// door exists. Idempotent: a peer the owner already consents to is skipped.
+/// on #489, see [`policy_of`]). It writes NEW human-signed rows naming the
+/// machine (`for_key_id` = the key whose legacy row it replaces) and MOVES NO
+/// SIGNATURE: persist's retraction fold admits a `withdraws` only from a row's
+/// own attester, so the machine-signed row stays until the machine withdraws
+/// it, and under the by-principals fold it keeps counting as that machine's
+/// own consent (CIRISServer#601 item 6). Idempotent per (machine, peer).
 ///
 /// `Ok(empty)` when the node is unowned (nothing to re-sign as), when no
 /// owner seed is registered in this process, or when everything already
@@ -859,13 +784,26 @@ pub async fn migrate_consent_to_owner(
     let Some(owner_signer) = owner.signer.clone() else {
         return Ok(Vec::new());
     };
-    let already: std::collections::BTreeSet<String> = engine
+    // What the owner already consents to FOR EACH MACHINE: (for_key_id, peer).
+    let owner_rows = engine
         .federation_directory()
-        .list_consent_peers(&owner.key_id)
+        .list_live_consent_grants_by(&owner.key_id)
         .await
-        .map_err(|e| anyhow::anyhow!("list consent peers for {}: {e}", owner.key_id))?
-        .into_iter()
+        .map_err(|e| anyhow::anyhow!("list live consent grants by {}: {e}", owner.key_id))?;
+    let already: std::collections::BTreeSet<(String, String)> = owner_rows
+        .iter()
+        .filter_map(|g| {
+            let peer = g.subject_key_ids.first()?.clone();
+            let for_key = ciris_persist::federation::consent_by_humans::for_key_id_of(
+                &g.attestation_envelope,
+            )?
+            .to_owned();
+            Some((for_key, peer))
+        })
         .collect();
+    // Legacy rows may sit under the engine key (pre-0.5.203, and the
+    // provisional pre-claim path) or the node key (0.5.203–0.5.209's redirect on
+    // a split home). Both were the fold's opt-in for THIS AGENT's traces.
     let mut from_keys = vec![engine_key.clone()];
     if node_key != engine_key {
         from_keys.push(node_key.clone());
@@ -881,10 +819,17 @@ pub async fn migrate_consent_to_owner(
             let Some(peer) = grant.subject_key_ids.first().cloned() else {
                 continue;
             };
-            if already.contains(&peer) || moved.contains(&peer) {
+            if already.contains(&(engine_key.clone(), peer.clone())) || moved.contains(&peer) {
                 continue;
             }
-            let (opts, prefixes) = policy_of(grant, &owner_signer)?;
+            let (mut opts, prefixes) = policy_of(grant, &owner_signer)?;
+            // The human's row names THE AGENT — the engine's key, the one every
+            // consent read is keyed by — never a blanket, and never the node key
+            // that 0.5.203's redirect happened to sign the legacy row with: the
+            // consent was for this agent's traces (CIRISServer#601 item 6 read
+            // through item 8 — the agent, not the node, is what the human's grant
+            // is for).
+            opts.for_key_id = Some(engine_key.clone());
             crate::peer::emit_replication_consent_with_policy(
                 engine,
                 &owner.key_id,
@@ -915,6 +860,121 @@ pub async fn migrate_consent_to_owner(
     Ok(moved)
 }
 
+/// On a SPLIT home, anchor the agent to the human: the login ceremony,
+/// `self_at_login(identity_signer: Some(human), agent: <engine key>)`, run with
+/// the same human whose owner-binding names the node (CIRISServer#601 items 7
+/// and 8; CIRISPersist#857 ask 1; persist `FSD/CONSENT_BY_HUMANS.md` §3).
+///
+/// Why it is load-bearing: the engine signs as the AGENT on a split home, so
+/// every consent read is keyed by the agent, and persist's by-principals fold
+/// finds the human's grant for it only if the human is a steward of the agent
+/// — which, for an agent, is the occurrence anchor this ceremony writes
+/// (`steward_bindings_of` clause 2). No second owner-binding is written (item
+/// 8). The `app` occurrence is this node's own key, `device_class: server`:
+/// the machine the human is on IS the node on a desktop install. With the
+/// engine's content-KEM pubkeys the occurrence publishes through the gated
+/// door, identity-signed, so a far cascade can wrap to it.
+///
+/// `Ok(None)` when: not a split home; the node is unowned; no user seed dir
+/// registered; the human already anchors the agent (idempotent). `Err` when the
+/// node IS owned and split and the ceremony fails.
+pub async fn anchor_agent_to_owner(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> Result<Option<String>> {
+    use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
+    use ciris_persist::federation::types::device_class;
+
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    let Some(held) = held_node_signer() else {
+        return Ok(None);
+    };
+    let node_key = held.derived_key_id();
+    if node_key == engine_key {
+        return Ok(None);
+    }
+    let agent_key = engine_key;
+    let owner = match ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        &node_key,
+    )
+    .await
+    {
+        Ok(Some(o)) => o,
+        Ok(None) => return Ok(None),
+        Err(e) => anyhow::bail!("owner_of({node_key}): {e}"),
+    };
+    let stewards = engine
+        .steward_bindings_of(&agent_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("steward_bindings_of({agent_key}): {e}"))?;
+    if stewards.iter().any(|s| s == &owner) {
+        return Ok(None);
+    }
+    let Some((seed_dir, default_alias)) = held_user_seed_dir() else {
+        tracing::warn!(
+            agent_key_id = %agent_key,
+            owner_key_id = %owner,
+            "split home is owned but no user seed dir is registered — the agent stays \
+             un-anchored to its human (consent reads for the agent find no steward)"
+        );
+        return Ok(None);
+    };
+    let alias = crate::active_user_alias(&seed_dir, &default_alias);
+    let backend = crate::identity::read_user_backend_marker(&seed_dir, &alias)
+        .map(|l| crate::identity::user_backend_from_label(&l))
+        .unwrap_or(crate::identity::UserIdentityBackend::Software);
+    let login_signer =
+        crate::identity::hardware_user_login_signer(backend, &alias, seed_dir).await?;
+    if login_signer.derived_key_id() != owner {
+        anyhow::bail!(
+            "the user seed at alias {alias:?} derives {:?}, not the steward {owner:?} of \
+             {node_key} — not running a login ceremony as anyone but the owner",
+            login_signer.derived_key_id()
+        );
+    }
+    let enc = crate::backend::content_kem_pubkeys(engine)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pair_id = format!("fold:{owner}:{agent_key}");
+    let outcome = engine
+        .self_at_login(SelfAtLoginInput {
+            identity_key_id: owner.clone(),
+            identity_signer: Some(std::sync::Arc::new(login_signer)),
+            app: SelfAtLoginOccurrence {
+                occurrence_key_id: node_key.clone(),
+                device_class: device_class::SERVER.to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc.clone(),
+                transport_destinations: Vec::new(),
+            },
+            agent: SelfAtLoginOccurrence {
+                occurrence_key_id: agent_key.clone(),
+                device_class: device_class::AGENT.to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc,
+                transport_destinations: Vec::new(),
+            },
+            bilateral_pair_id: pair_id.clone(),
+            delegation_scope: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("self_at_login(owner={owner}, agent={agent_key}): {e}"))?;
+    tracing::info!(
+        owner_key_id = %owner,
+        agent_key_id = %agent_key,
+        node_key_id = %node_key,
+        delegation_promoted = outcome.delegation_promoted,
+        occurrences_published = outcome.occurrences_published.len(),
+        occurrences_local_only = outcome.occurrences_local_only.len(),
+        "split home: the agent is now an OCCURRENCE of its human — the login ceremony \
+         anchors it, so consent for this agent resolves to the person (CIRISServer#601)"
+    );
+    Ok(Some(pair_id))
+}
+
 const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[
     "grants",
     "direction",
@@ -925,6 +985,7 @@ const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[
     "restrictions",
     "purpose",
     "valid_until",
+    "for_key_id",
 ];
 
 /// Read a live grant's policy back into the options that reproduce it.
@@ -1020,6 +1081,7 @@ fn policy_of(
             direction: s("direction"),
             principle: s("principle"),
             purpose: s("purpose"),
+            for_key_id: s("for_key_id"),
         },
         prefixes,
     ))

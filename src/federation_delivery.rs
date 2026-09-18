@@ -1194,18 +1194,15 @@ pub fn analyze_consent_stance(
     let (rt, _controller) = HELD
         .get()
         .context("analyze_consent_stance: federation delivery not started")?;
-    // The default subject is who the grant was AUTHORED by — the node's OWNER on
-    // an owned node (CIRISServer#599), resolved by the same `consent_author` the
-    // write side uses — never an alias (the 0.5.138 lesson still holds).
+    // The subject is the MACHINE being analyzed — the engine's own key, which is
+    // the agent on a split home — read through persist's by-principals fold
+    // (v44.6.0): the humans standing behind it, on rows that name it, plus its
+    // own legacy rows (CIRISServer#601 item 5). No alias, no author walk.
     let subject = match subject_key_id {
         Some(s) => s.to_string(),
-        None => {
-            let engine_key = rt.block_on(engine.local_derived_key_id())?;
-            rt.block_on(crate::peer::consent_author(&engine, &engine_key, None))?
-                .key_id
-        }
+        None => rt.block_on(engine.local_derived_key_id())?,
     };
-    let stance = rt.block_on(engine.federation_directory().resolve_scoped_consent(
+    let stance = rt.block_on(engine.resolve_scoped_consent_by_principals(
         attester_key_id,
         &subject,
         ANALYZE_CONSENT_SCOPE,
@@ -1348,6 +1345,13 @@ pub fn author_consent_embedded(
         None
     };
 
+    // Split home: the agent must be an occurrence of its human before its
+    // consent can resolve to the person (CIRISServer#601 items 7–8). Non-fatal.
+    match rt.block_on(crate::node_key::anchor_agent_to_owner(&engine)) {
+        Ok(Some(pair)) => tracing::info!(bilateral_pair_id = %pair, "agent anchored to owner"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "agent login ceremony failed (non-fatal)"),
+    }
     // Any grant a machine key authored before the claim (or under 0.5.203–0.5.209)
     // is re-signed by the owner now that one exists (CIRISServer#599). Non-fatal.
     match if crate::peer::owner_authored_consent_enabled() {

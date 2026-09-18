@@ -374,37 +374,41 @@ the ordinary CEG withdraw of that grant. There is no contacts table.
   / `GET /v1/node/delivery-receipt` — the canonical's own signed answer to
   "did my newest trace arrive" (0.5.208, CIRISServer#369).
 
-### 6c′. Consent is by humans — 0.5.210 (part 1) and the flip that follows
+### 6c′. Consent is by humans — live in 0.5.211, tied to THIS agent
 
 Your wizard is correct and always was: the human's "Send traces" opt-in is
 what authors the `consent:replication` grant, replayed by the fold
 (`author_federation_consent`) and, in-band, by the setup-complete path. What
 was wrong sat in the server (CIRISServer#599): from 0.5.203 to 0.5.209 the
-node **signed that grant with a machine key** (the node key on a split-key
-home) and **read consent back under a different machine key** (the engine
-key), so every desktop/Android node converged to zero consent peers and
-shipped nothing while the canonical saw it root, get admitted, and go quiet.
+node signed that grant with a machine key and read consent back under a
+different machine key, so every desktop/Android node converged to zero
+consent peers and shipped nothing.
 
-**0.5.210 (part 1, adopt now):**
-- Every read resolves a machine key to its steward and unions the legacy
-  grantors, so the grant your fold writes today is found under the key the
-  runtime reads with. Split-key homes converge to their consent peer and ship.
-  `delivery_status` now reports `consent_grantor_key_ids`.
-- Your `stance='unspecified' … ship=MISSING` was the same mismatch on the
-  stance read; it reads `granted` under 0.5.210. Nothing changes in what you call.
-- The owner's pen is built and pinned by a test but **gated off**
-  (`OWNER_AUTHORED_CONSENT = false`): edge resolves its per-plane send set with
-  `list_consent_peers(local)`, so an owner-signed grant would be invisible to
-  the edge you ship with and every plane would be withheld.
-
-**Part 2 (the next server cut, with the edge from CIRISEdge#609):** the grant
-is **signed by the owner's fedID** — the steward the owner-binding names —
-using the software seed the wizard minted; machine-authored grants from earlier
-wheels are re-signed by the owner at boot and after your fold's author door.
-A hardware-custodied owner (no software seed on the node) is refused, not
-downgraded; the 2-phase client-signed door is not wired yet. CIRISPersist#857
-links a split home's AGENT key to its host node so capacity scoring of such
-agents resolves through the steward.
+**0.5.211 (floor for this section; edge v25.0.0 / persist v44.6.0 / verify v15.2.0).**
+Nothing changes in what you call. What changes underneath:
+- **The grant is signed by the owner's fedID and names THIS agent.** The
+  human's row carries `for_key_id = <agent key>` (persist v44.6.0's grammar
+  member). A grant a person gave in one agent's wizard is consent for that
+  agent only — never for every agent they steward. A machine key holds
+  topology, not consent.
+- **Reads are persist's by-principals fold.** A machine key resolves to the
+  humans standing behind it, on rows that name it, plus its own legacy rows.
+  Edge computes its per-plane send set the same way (CIRISEdge#609 shipped in
+  v24.3.0), which is what made owner-signed consent shippable.
+- **On a split home the node anchors the agent to the human.** The engine
+  signs as the AGENT on a desktop/Android install; the human's claim names the
+  NODE. At claim and after your fold's author door, the server runs the login
+  ceremony for the agent with the human's own pen (`self_at_login`, the agent
+  as an occurrence of the human, the node as the `server` device), so the fold
+  finds the person behind the agent. No second owner-binding is written.
+- **Earlier machine-authored grants are re-signed by the owner** at boot and
+  after your author door, each new row naming the agent, policy carried off
+  the live row. The machine-signed rows stay until the machine withdraws them.
+- Your `stance='unspecified' … ship=MISSING` was the old read-side mismatch;
+  it reads `granted` now. `delivery_status` reports `consent_grantor_key_ids`
+  (the machine plus its stewards).
+- A **hardware-custodied owner** (no software seed on the node) is refused,
+  not downgraded to a machine key; the 2-phase client-signed door is not wired.
 
 ### 6d. Not in this cut (tracked)
 
@@ -416,7 +420,7 @@ agents resolves through the steward.
   until that hook exists.
 - The user-signer alias flip (edge v24.2.0 §4) is deferred to CIRISServer#597;
   production is unaffected.
-- Client-signed (2-phase) consent for hardware-custodied owners — CIRISServer#599.
+- Client-signed (2-phase) consent for hardware-custodied owners — CIRISServer#599 (open for that item).
 
 ## Top 3 gaps where Rust does NOT yet fully cover Python (block clean deletion)
 

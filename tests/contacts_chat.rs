@@ -1451,8 +1451,11 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     );
     for m in &opened {
         match &m.body {
+            // edge v25.0.0 (CIRISEdge#615, CIRISServer#601 ask 3): the reason is a
+            // TYPED state — `NotGranted` is the confidentiality boundary, distinct
+            // from `NotFetched` (bytes not here yet), which the old string blurred.
             ciris_edge::chat::Body::Unopened { reason } => assert!(
-                reason.contains("not granted"),
+                matches!(reason, ciris_edge::chat::UnopenedReason::NotGranted { .. }),
                 "expected a grant refusal for a viewer whose private key this node                  does not hold, got: {reason}"
             ),
             other => panic!(

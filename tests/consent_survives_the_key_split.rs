@@ -330,77 +330,14 @@ async fn an_author_signer_for_a_different_key_is_still_refused() {
     );
 }
 
-/// **A restricted grant must survive migration RESTRICTED** (Codex P1 on #489).
-///
-/// The first version rebuilt each grant from `ConsentGrantOptions::default()` +
-/// the global default prefixes, keeping only the peer id. An operator grant with
-/// a narrowed prefix set or an expiry would have come back unrestricted — the
-/// migration authorizing data the owner never consented to share.
-///
-/// Widening a consent grant silently is the worst outcome available here, so this
-/// pins the narrow shape end to end.
-#[tokio::test]
-async fn a_narrowed_grant_is_not_widened_by_the_migration() {
-    let engine = fixture().await;
-    let author = engine.local_derived_key_id().await.expect("derived");
-
-    // Deliberately NARROWER than the defaults, plus an expiry.
-    let narrow = vec!["trace:".to_string()];
-    let expiry = chrono::Utc::now() + chrono::Duration::days(30);
-    ciris_server::peer::emit_replication_consent_with_policy(
-        &engine,
-        &author,
-        PEER,
-        &narrow,
-        &ciris_server::peer::ConsentGrantOptions {
-            valid_until: Some(expiry),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("the operator authors a narrowed, expiring grant");
-
-    let moved = ciris_server::node_key::reauthor_consent_as_node(
-        &engine,
-        Arc::new(signer_for(NODE)),
-        &author,
-        &node_id(),
-    )
-    .await
-    .expect("re-author");
-    assert_eq!(moved, vec![PEER.to_string()]);
-
-    // Read the NODE's grant back and compare its policy to what was authored.
-    let grants = engine
-        .federation_directory()
-        .list_live_consent_grants_by(&node_id())
-        .await
-        .expect("list the node's grants");
-    let g = grants.first().expect("the node holds a grant");
-    let payload = g
-        .attestation_envelope
-        .get("payload")
-        .and_then(|v| v.as_object())
-        .expect("payload");
-
-    let prefixes: Vec<String> = payload["attestation_prefixes"]
-        .as_array()
-        .expect("prefixes")
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(
-        prefixes, narrow,
-        "the migrated grant must carry the OPERATOR'S prefixes, not the defaults. \
-         Got {prefixes:?} — if this is the default set, the migration just widened a \
-         consent the owner deliberately narrowed"
-    );
-    assert!(
-        payload.get("valid_until").is_some_and(|v| !v.is_null()),
-        "and it must keep the expiry — dropping one turns a time-boxed grant into a \
-         permanent one"
-    );
-}
+// `a_narrowed_grant_is_not_widened_by_the_migration` lived here until 0.5.211:
+// it exercised `reauthor_consent_as_node`, the 0.5.203 actor→node redirect,
+// which is gone (CIRISServer#601 — a node key is not a principal of the agent,
+// so that migration moved rows OFF the key every read uses). The property —
+// the migration carries the operator's policy, never rebuilds it from
+// defaults — is pinned against the migration that replaced it,
+// `node_key::migrate_consent_to_owner`, in tests/consent_is_authored_by_the_owner.rs
+// (narrowed prefixes AND `valid_until` carried onto the human-signed row).
 
 /// A grant carrying a payload member this build cannot reproduce is REFUSED, not
 /// migrated with the member dropped.

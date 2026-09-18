@@ -1851,35 +1851,24 @@ mod coalescing_tests {
     }
 }
 
-/// The CC#46 `analyze` stance for `subject`, steward first, subject second
-/// (CIRISServer#599). `Granted` from either wins; otherwise the SUBJECT's own
-/// stance is reported (so a decline reads as the subject's decline), and a read
-/// error on either hop is the error.
+/// The CC#46 `analyze` stance for `subject` through persist's by-principals
+/// fold (v44.6.0, CIRISPersist#857): the subject's own rows plus its stewards'
+/// rows that name it — the owner-binding for a node, the login ceremony's
+/// occurrence anchor for an agent (CIRISServer#601 items 5 and 8). Combine rule
+/// is persist's: any revoked → revoked; else any granted → granted.
 async fn resolve_analyze_stance_via_steward(
     engine: &Engine,
     attester_key_id: &str,
     subject_key_id: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ciris_persist::federation::hard_case::ConsentState, ciris_persist::federation::Error> {
-    use ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE;
-    use ciris_persist::federation::hard_case::ConsentState;
-    let dir = engine.federation_directory();
-    let steward =
-        ciris_persist::federation::admission::owner_of(dir.as_ref(), subject_key_id).await?;
-    if let Some(steward) = steward {
-        if let ConsentState::Granted = dir
-            .resolve_scoped_consent(attester_key_id, &steward, ANALYZE_CONSENT_SCOPE, None, now)
-            .await?
-        {
-            return Ok(ConsentState::Granted);
-        }
-    }
-    dir.resolve_scoped_consent(
-        attester_key_id,
-        subject_key_id,
-        ANALYZE_CONSENT_SCOPE,
-        None,
-        now,
-    )
-    .await
+    engine
+        .resolve_scoped_consent_by_principals(
+            attester_key_id,
+            subject_key_id,
+            ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
+            None,
+            now,
+        )
+        .await
 }

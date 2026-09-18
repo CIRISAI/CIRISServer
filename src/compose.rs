@@ -425,6 +425,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         crate::user_seed_dir(&cfg),
         format!("{}-user", cfg.keystore_alias),
     );
+    // Where the OWNER's pen lives, for every consent path that has no HTTP owner
+    // session — the fold's author door, the migration below (CIRISServer#599).
+    crate::node_key::set_user_seed_dir(
+        crate::user_seed_dir(&cfg),
+        format!("{}-user", cfg.keystore_alias),
+    );
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
@@ -469,27 +475,43 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             ),
         }
 
-        // The topology follows the identity that reads it (CIRISServer#312), and
-        // it needs only the NODE's signer — NOT the owner's.
-        //
-        // This was nested inside the owner-signer arm above, so a split node with
-        // existing actor-authored grants and no owner seed on disk skipped it
-        // entirely: the wire identity moved to the node key while the grants
-        // stayed under the actor, and consent lookup returned zero peers under a
-        // healthy transport. Boot-environment peering can create grants before a
-        // node is ever claimed, so that is a reachable state, not a hypothetical
-        // (Codex on #489).
-        if let Some(node_signer) = node_resolution.signer.clone() {
-            crate::node_key::reauthor_consent_as_node(
-                &engine,
-                node_signer,
-                &actor_key_id,
-                &node_resolution.node_key_id,
-            )
-            .await?;
-        }
+        // 0.5.203 re-authored the actor's consent onto the node key here. Gone in
+        // 0.5.211 (CIRISServer#601): every consent read is keyed by the engine's
+        // (actor's) key, and persist's by-principals fold does not count a node's
+        // row for the agent — the redirect moved rows OFF the key that reads
+        // them. The owner's re-sign below (`migrate_consent_to_owner`) is the
+        // migration.
     }
 
+    // Consent is by humans: any live grant a machine key authored (the engine key
+    // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
+    // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
+    // nodes and bare harnesses are a no-op here (CIRISServer#599).
+    match if crate::peer::owner_authored_consent_enabled() {
+        crate::node_key::migrate_consent_to_owner(&engine).await
+    } else {
+        Ok(Vec::new())
+    } {
+        Ok(moved) if !moved.is_empty() => {
+            tracing::info!(peers = ?moved, "boot: machine-authored consent re-signed by the owner")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            error = %e,
+            "boot: consent re-sign as owner failed — machine-authored grants stay as \
+             legacy grantors until the owner's pen is reachable"
+        ),
+    }
+    // Split home: anchor the agent to its human before consent is re-signed —
+    // the human's grant names the agent, and the fold finds it only through
+    // this anchor (CIRISServer#601 items 7–8). No-op elsewhere.
+    match crate::node_key::anchor_agent_to_owner(&engine).await {
+        Ok(Some(pair)) => {
+            tracing::info!(bilateral_pair_id = %pair, "boot: agent anchored to owner")
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "boot: agent login ceremony failed (non-fatal)"),
+    }
     // Consent is by humans: any live grant a machine key authored (the engine key
     // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
     // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
@@ -3915,9 +3937,20 @@ pub(crate) async fn start_replication_runtime(
     // withheld from every peer (it logs "replication runtime has no local_key_id").
     // Same `node_key_id` already threaded into `replication_peers_from_consent` and
     // the publish-own `self_provider` above.
+    // edge v25.0.0 (CIRISServer#602 items 5 + 6): the BlobPuller and the
+    // revocation wiring. Nothing pulls a blob until the puller is spawned; an
+    // attestation carrying a BlobPointer in this node's audience is what
+    // triggers a gated fetch (CIRISEdge#601/#615). Community and family
+    // content is held and announced — blobs anti-entropy into the roster and
+    // are available on demand; the commons stays declined until an operator
+    // opts in. The revocation register lets an authorized `withdraws` make the
+    // chunk source refuse and the backend evict (CIRISEdge#614).
+    let (pull_sink, revocations) = crate::backend::spawn_blob_puller(engine, node_key_id).await;
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(node_key_id.to_string()),
+        pull_sink,
+        revocations,
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(

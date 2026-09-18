@@ -1017,6 +1017,41 @@ pub async fn hardware_user_edge_signer(
     Ok(edge_signer_from(parts))
 }
 
+/// The owner's persist signer NAMED BY ALIAS, for the one door that compares
+/// `derived_key_id()` to the registered identity: persist's `self_at_login`
+/// (`signer.derived_key_id() != identity_key_id` ⇒ `CustodyIsNotTheActor`).
+///
+/// [`hardware_user_local_signer`] hands `from_hardware_parts` the DERIVED id,
+/// so that signer's `derived_key_id()` is `<alias>-<fp>-<fp>` (CIRISServer#597
+/// §4); every existing caller reads `key_id()` and is self-consistent. This
+/// variant hands it the ALIAS, so `derived_key_id()` is the registered
+/// `<alias>-<fp>` — asserted against the parts' own derivation before it is
+/// returned. Use it ONLY where persist checks the derived id.
+pub async fn hardware_user_login_signer(
+    backend: UserIdentityBackend,
+    alias: &str,
+    seed_dir: PathBuf,
+) -> Result<ciris_persist::prelude::LocalSigner> {
+    let parts = user_signer_parts(backend, alias, seed_dir).await?;
+    let expected = parts.derived_key_id.clone();
+    let signer = ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        parts.classical,
+        alias.to_string(),
+        Some(parts.pqc),
+        Some(parts.pqc_key_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose alias-named user LocalSigner: {e}"))?;
+    if signer.derived_key_id() != expected {
+        anyhow::bail!(
+            "alias-named user signer derives {:?}, the mint recorded {expected:?} — refusing \
+             to run a login ceremony as an identity the directory does not know",
+            signer.derived_key_id()
+        );
+    }
+    Ok(signer)
+}
+
 /// BOTH signer types for one identity, from ONE open of the hardware.
 ///
 /// The capsule needs both — persist's to sign bytes a caller canonicalized,

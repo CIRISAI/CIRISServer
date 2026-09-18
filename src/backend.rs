@@ -225,3 +225,124 @@ where
         }
     }
 }
+
+/// Spawn edge's blob puller over this Engine's read-capable backend and build
+/// the revocation wiring for the replication runtime (edge v25.0.0,
+/// CIRISServer#602 items 5–6). Returns `(None, None)` when the Engine has no
+/// SQLite/PostgreSQL backend to store blobs in, or no shared Edge handle yet —
+/// the runtime then runs as it did on v24, with no pulls.
+pub async fn spawn_blob_puller(
+    engine: &Arc<Engine>,
+    local_key_id: &str,
+) -> (
+    Option<ciris_edge::blob_swarm::PullSink>,
+    Option<ciris_edge::replication::RevocationWiring>,
+) {
+    #[cfg(target_os = "linux")]
+    if let Some(pg) = engine.postgres_backend() {
+        return spawn_puller_with(engine, Arc::clone(pg), local_key_id);
+    }
+    if let Some(sq) = engine.sqlite_backend() {
+        return spawn_puller_with(engine, Arc::clone(sq), local_key_id);
+    }
+    tracing::warn!(
+        "blob puller NOT spawned — this Engine has no read-capable backend; blobs will not \
+         be pulled on this node (edge v25.0.0, CIRISServer#602)"
+    );
+    (None, None)
+}
+
+fn spawn_puller_with<B>(
+    engine: &Arc<Engine>,
+    backend: Arc<B>,
+    local_key_id: &str,
+) -> (
+    Option<ciris_edge::blob_swarm::PullSink>,
+    Option<ciris_edge::replication::RevocationWiring>,
+)
+where
+    B: ciris_persist::federation::blobs::BlobStorage
+        + ciris_persist::federation::FederationDirectory
+        + Send
+        + Sync
+        + 'static,
+{
+    use ciris_edge::blob_swarm::store_gate::{ConsentDisposition, OperatorStoreConsent};
+    use ciris_edge::blob_swarm::{BlobPuller, PullConfig, RevocationRegister};
+    use ciris_edge::replication::RevocationWiring;
+
+    let edge_arc: Arc<ciris_edge::Edge> = match ciris_edge::current_edge() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "blob puller NOT spawned — no shared Edge handle yet");
+            return (None, None);
+        }
+    };
+    let config = PullConfig {
+        consent: OperatorStoreConsent {
+            own: ConsentDisposition::Announce,
+            family: ConsentDisposition::Announce,
+            community: ConsentDisposition::Announce,
+            commons: ConsentDisposition::Decline,
+        },
+        ..PullConfig::default()
+    };
+    let (sink, _puller) = BlobPuller::spawn(
+        edge_arc,
+        (**engine).clone(),
+        Arc::clone(&backend),
+        engine.federation_directory(),
+        local_key_id,
+        config,
+    );
+    let register = Arc::new(RevocationRegister::new(1024, 256));
+    let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = backend;
+    tracing::info!(
+        local_key_id,
+        "blob puller spawned — community/family/own content is held and announced, the \
+         commons declined; revocation register armed (edge v25.0.0)"
+    );
+    (
+        Some(sink),
+        Some(RevocationWiring {
+            register,
+            evictor: Some(evictor),
+        }),
+    )
+}
+
+/// This engine's content-KEM pubkeys (the identity persist mints and seals
+/// itself, CIRISPersist#848) — what a signed occurrence carries as
+/// `encryption_pubkeys` so a far node's DEK cascade can wrap to it. `None` when
+/// the Engine has no read-capable backend.
+pub async fn content_kem_pubkeys(
+    engine: &Arc<Engine>,
+) -> Result<Option<ciris_persist::federation::EncryptionPubkeys>, String> {
+    use ciris_persist::federation::blobs::BlobStorage;
+    let kem = {
+        #[cfg(target_os = "linux")]
+        if let Some(pg) = engine.postgres_backend() {
+            return pg
+                .load_or_init_content_kem_identity()
+                .await
+                .map(|k| {
+                    Some(ciris_persist::federation::EncryptionPubkeys {
+                        x25519_base64: k.x25519_pubkey_b64,
+                        ml_kem_768_base64: k.ml_kem_768_pubkey_b64,
+                    })
+                })
+                .map_err(|e| format!("load the content-KEM identity: {e}"));
+        }
+        match engine.sqlite_backend() {
+            Some(sq) => sq
+                .load_or_init_content_kem_identity()
+                .await
+                .map_err(|e| format!("load the content-KEM identity: {e}"))?,
+            None => return Ok(None),
+        }
+    };
+    Ok(Some(ciris_persist::federation::EncryptionPubkeys {
+        x25519_base64: kem.x25519_pubkey_b64,
+        ml_kem_768_base64: kem.ml_kem_768_pubkey_b64,
+    }))
+}
