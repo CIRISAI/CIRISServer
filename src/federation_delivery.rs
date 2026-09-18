@@ -515,11 +515,10 @@ async fn gather_delivery_status(
     let trace_plane = match &engine {
         Some(eng) => {
             let node = node_key_id.clone();
-            match eng
-                .federation_directory()
-                .list_live_consent_grants_by(&node)
-                .await
-            {
+            // The rows that stand for THIS machine — its own plus its stewards'
+            // rows naming it (CIRISServer#601); a reader keyed by the node alone
+            // reported an empty trace plane once the owner signed the grant.
+            match crate::peer::live_consent_grants_for_machine(eng, &node).await {
                 Ok(grants) => {
                     let mut prefixes: Vec<String> = Vec::new();
                     let mut audiences: Vec<String> = Vec::new();

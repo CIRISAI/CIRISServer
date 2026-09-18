@@ -1410,6 +1410,41 @@ fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Opti
         .map(|policy| normalize_prefixes(&policy.attestation_prefixes))
 }
 
+/// The live `consent:replication` rows that stand FOR machine `k` — the
+/// grant-level twin of persist's `consent_peers_by_principals` (v44.6.0,
+/// CIRISPersist#857): `k`'s own rows (legacy, machine-authored) plus every row
+/// one of `k`'s stewards signed that names `k` in `for_key_id`. A steward's row
+/// for a sibling machine contributes nothing. Every READ of "what does this
+/// node consent to, and covering which prefixes" goes through here; the WRITE
+/// path's standing-grant lookup stays author-keyed (`standing_live_grant_for`).
+pub async fn live_consent_grants_for_machine(
+    engine: &Engine,
+    k: &str,
+) -> Result<Vec<ciris_persist::federation::types::Attestation>> {
+    use ciris_persist::federation::consent_by_humans::for_key_id_of;
+    let dir = engine.federation_directory();
+    let mut rows = dir
+        .list_live_consent_grants_by(k)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?;
+    let stewards = engine
+        .steward_bindings_of(k)
+        .await
+        .map_err(|e| anyhow::anyhow!("steward_bindings_of({k}): {e}"))?;
+    for steward in stewards {
+        let theirs = dir
+            .list_live_consent_grants_by(&steward)
+            .await
+            .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({steward}): {e}"))?;
+        rows.extend(
+            theirs
+                .into_iter()
+                .filter(|g| for_key_id_of(&g.attestation_envelope) == Some(k)),
+        );
+    }
+    Ok(rows)
+}
+
 /// **What this node's LIVE grant to `peer_key_id` actually covers.**
 ///
 /// The sibling of [`standing_live_grant`] on the same revocation-folded read —
@@ -1424,8 +1459,10 @@ pub async fn live_grant_prefixes(
     node_key_id: &str,
     peer_key_id: &str,
 ) -> Result<Option<Vec<String>>> {
-    Ok(standing_live_grant(engine, node_key_id, peer_key_id)
+    Ok(live_consent_grants_for_machine(engine, node_key_id)
         .await?
+        .into_iter()
+        .find(|g| g.subject_key_ids.iter().any(|s| s == peer_key_id))
         .map(|g| grant_prefixes(&g).unwrap_or_default()))
 }
 
@@ -1440,11 +1477,7 @@ pub async fn live_consent_grants(
     engine: &Engine,
     node_key_id: &str,
 ) -> Result<Vec<(String, Vec<String>)>> {
-    let grants = engine
-        .federation_directory()
-        .list_live_consent_grants_by(node_key_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({node_key_id}): {e}"))?;
+    let grants = live_consent_grants_for_machine(engine, node_key_id).await?;
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for grant in &grants {
         let prefixes = grant_prefixes(grant).unwrap_or_default();

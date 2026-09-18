@@ -277,6 +277,34 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
          is the read that returned nothing on every split-key home 0.5.203–0.5.209"
     );
 
+    // The GRANT-level reads (contacts, the chat guard, delivery status) go
+    // through the machine's principals too: the owner's row naming this node
+    // is this node's coverage. The chat ladder found the one reader that did
+    // not (CIRISServer#601: "not a contact" right after POST /v1/contacts).
+    assert_eq!(
+        ciris_server::peer::live_grant_prefixes(&engine, &node, PEER)
+            .await
+            .expect("prefix read")
+            .map(|mut p| {
+                p.sort();
+                p
+            }),
+        Some({
+            let mut p: Vec<String> = PREFIXES.iter().map(|s| s.to_string()).collect();
+            p.sort();
+            p
+        }),
+        "the owner's grant for this node IS this node's coverage of the peer"
+    );
+    assert!(
+        ciris_server::peer::live_consent_grants(&engine, &node)
+            .await
+            .expect("grant list")
+            .iter()
+            .any(|(peer, _)| peer == PEER),
+        "and it lists as one of this node's contacts-grade grants"
+    );
+
     // ── 4. MIGRATION: the provisional row is re-signed by the owner ───────
     let moved = ciris_server::node_key::migrate_consent_to_owner(&engine)
         .await
