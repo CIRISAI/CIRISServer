@@ -233,6 +233,7 @@ where
 /// the runtime then runs as it did on v24, with no pulls.
 pub async fn spawn_blob_puller(
     engine: &Arc<Engine>,
+    edge: Arc<ciris_edge::Edge>,
     local_key_id: &str,
 ) -> (
     Option<ciris_edge::blob_swarm::PullSink>,
@@ -240,10 +241,10 @@ pub async fn spawn_blob_puller(
 ) {
     #[cfg(target_os = "linux")]
     if let Some(pg) = engine.postgres_backend() {
-        return spawn_puller_with(engine, Arc::clone(pg), local_key_id);
+        return spawn_puller_with(engine, edge, Arc::clone(pg), local_key_id);
     }
     if let Some(sq) = engine.sqlite_backend() {
-        return spawn_puller_with(engine, Arc::clone(sq), local_key_id);
+        return spawn_puller_with(engine, edge, Arc::clone(sq), local_key_id);
     }
     tracing::warn!(
         "blob puller NOT spawned — this Engine has no read-capable backend; blobs will not \
@@ -254,6 +255,7 @@ pub async fn spawn_blob_puller(
 
 fn spawn_puller_with<B>(
     engine: &Arc<Engine>,
+    edge: Arc<ciris_edge::Edge>,
     backend: Arc<B>,
     local_key_id: &str,
 ) -> (
@@ -271,13 +273,12 @@ where
     use ciris_edge::blob_swarm::{BlobPuller, PullConfig, RevocationRegister};
     use ciris_edge::replication::RevocationWiring;
 
-    let edge_arc: Arc<ciris_edge::Edge> = match ciris_edge::current_edge() {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(error = %e, "blob puller NOT spawned — no shared Edge handle yet");
-            return (None, None);
-        }
-    };
+    // The Edge compose holds — never the process-global handle. The standalone
+    // binary builds its own `Arc<Edge>` and never publishes the global (only the
+    // #221 embedded fold does), so a global lookup failed on every standalone
+    // node — the canonical's first boot on 0.5.211 logged "blob puller NOT
+    // spawned — no shared Edge handle yet" (CIRISServer#604). The gate
+    // `tests/blob_puller_uses_compose_edge.rs` scrapes this fn for the lookup.
     let config = PullConfig {
         consent: OperatorStoreConsent {
             own: ConsentDisposition::Announce,
@@ -288,7 +289,7 @@ where
         ..PullConfig::default()
     };
     let (sink, _puller) = BlobPuller::spawn(
-        edge_arc,
+        edge,
         (**engine).clone(),
         Arc::clone(&backend),
         engine.federation_directory(),

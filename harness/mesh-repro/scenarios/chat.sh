@@ -178,7 +178,7 @@ SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived r
 # row crosses only if the joiner's node can place the creator's node in the
 # room's audience — which is the owner-binding walk `bound` measures. That
 # ordering rule is the whole reason this ladder is not simply the narrative order.
-STAGES=(rooted peered contact room dark one_sided bound sent arrived hamburger)
+STAGES=(rooted peered pulling contact room dark one_sided bound sent arrived hamburger)
 # (The definitions below are grouped by topic, not by ladder position — each
 #  header carries its own number, and THIS array is the running order.)
 
@@ -696,6 +696,27 @@ _chat_bound_one() {
     "attestation_type='delegates_to' AND attesting_key_id='${2:-none}' \
      AND attested_key_id='${3:-none}' AND cohort_scope='federation'"
 }
+# pulling — edge v25.0.0 (CIRISServer#602/#604): every node spawns the blob
+# puller at compose. Nothing pulls a blob until it does, and a puller that
+# resolved the process-global Edge spawned on agent (embedded) nodes only — the
+# canonical's first boot on 0.5.211 logged "NOT spawned" while these ladders,
+# then embedded on both roles, stayed green. Both STANDALONE nodes must log the
+# spawn line exactly once per boot.
+stage_pulling() {
+  local n ok=1
+  for n in "$CHAT_SENDER" "${CHAT_RECIPIENT_SVC:-node-b}"; do
+    if [ "$(compose logs "$n" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'blob puller spawned')" -lt 1 ]; then ok=0; fi
+    if [ "$(compose logs "$n" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'blob puller NOT spawned')" -gt 0 ]; then ok=0; fi
+  done
+  echo "$ok"
+}
+HINT_pulling="a node booted without its blob puller (\"blob puller NOT spawned\" in its log, or no
+     \"blob puller spawned\" line). No attestation carrying a BlobPointer will ever be fetched on
+     that node — every far member's chat body reads NotFetched forever. On a standalone node the
+     usual cause is backend::spawn_blob_puller reaching for ciris_edge::current_edge(), which only
+     the embedded fold publishes (CIRISServer#604)."
+EXIT_pulling=40
+
 stage_bound() {
   _chat_load
   local recip="${CHAT_RECIPIENT_SVC:-node-b}" a_holds_b b_holds_a

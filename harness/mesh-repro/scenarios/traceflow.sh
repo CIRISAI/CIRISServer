@@ -25,7 +25,7 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml"
 SUCCESS_STAGE="score"
 SUCCESS_MESSAGE="full chain — trace sealed, consented, shipped, arrived, materialized, summarized, and SCORED by a distinct identity."
 
-STAGES=(seal trace_att offerable consent converge ship arrive summarize score)
+STAGES=(seal trace_att offerable consent converge served ship arrive summarize score)
 
 # ── 1. seal — the agent's LensClient sealed and persisted a trace ────────────
 stage_seal() { harness_log_count agent "sealed_and_persisted"; }
@@ -116,6 +116,21 @@ DIAG_ship() {
 }
 
 # ── 5. arrive — rows landed at the canonical (DIRECT DB, no log dependency) ──
+# served — the canonical ANSWERED a round from the agent (CIRISServer#607). This
+# is the rung that was missing for two months: `arrive` is satisfied by the
+# push path (UNSOLICITED Deliver needs no round), so a canonical that primed
+# ITSELF as a peer — every inbound link attributed to self, every responder
+# reply sent to its own key, zero rounds served since 0.5.107 — still passed
+# this ladder. Pull-based planes (the identity sync every new agent starts
+# with) need a served round; without one, real agents time out forever.
+stage_served() { harness_log_count canonical "responder served an anti-entropy round"; }
+HINT_served="the canonical served NO anti-entropy round to the agent. Read the canonical's log for
+     'responder reply send failed … no route to peer: key_id=<the canonical's OWN key>' — that is
+     the canonical holding ITSELF in its peers map (boot prime rooted its own hint), so every
+     inbound link attributes to self and the reply goes nowhere (CIRISServer#607). If the reply
+     names the AGENT instead, read 'inbound frame NOT attributed' for the real operands."
+EXIT_served=19
+
 stage_arrive() { harness_db_count canonical trace_events; }
 HINT_arrive="envelopes left the agent but no trace_events row exists at the canonical. Suspect attribution (inbound frames dropped unattributed) or a signed-row divergence refusing the binding."
 # The diagnosis this stage never had. `ship` counts frames LEAVING; `arrive`

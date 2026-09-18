@@ -29,6 +29,17 @@ use tower::ServiceExt as _;
 /// this repo paid for a leaked process-global.
 static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Every case here reasons about how a BRAIN's verdict folds into the node's.
+/// The node's health GET also probes the host (cgroup memory, CPU/IO PSI) and
+/// raises real warnings into the same registry; on a loaded CI runner those
+/// are genuinely critical and `degraded_mode` is honestly `true`, which is
+/// not what these cases are about (four of them failed that way on
+/// 2026-09-18). Quiet the host probes for this binary; they still report.
+fn quiet_host_probes() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| ciris_server::degradation::set_host_probes_raise_for_test(false));
+}
+
 /// Serve a fake brain on a loopback port and return its base URL.
 async fn spawn_brain(body: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
     let app = axum::Router::new().route(
@@ -88,6 +99,7 @@ async fn get_health(router: axum::Router) -> serde_json::Value {
 /// than by omission.
 #[tokio::test]
 async fn a_bare_node_reports_no_agent_and_no_cognitive_state() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let v = get_health(ciris_server::health::router()).await;
     // Not `== "ok"`: this node's own probes decide that, and a loaded runner is
@@ -116,6 +128,7 @@ async fn a_folded_brain_enriches_the_nodes_own_health() {
     // compares that stale baseline against an `ok` folded response and fails
     // nondeterministically. The lock has to span BOTH reads or it is not
     // protecting the comparison, only one half of it.
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
     let (base, h) = spawn_brain(serde_json::json!({
@@ -172,6 +185,7 @@ async fn an_unreachable_brain_is_distinguished_from_no_brain() {
     // compares that stale baseline against an `ok` folded response and fails
     // nondeterministically. The lock has to span BOTH reads or it is not
     // protecting the comparison, only one half of it.
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
     // A port nobody is listening on: bind then drop, so the address is dead.
@@ -220,6 +234,7 @@ async fn an_unreachable_brain_is_distinguished_from_no_brain() {
 /// cognitive fields; this pins that `node` never joins it.
 #[tokio::test]
 async fn a_folded_brain_cannot_overwrite_the_nodes_own_name() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
@@ -261,6 +276,7 @@ async fn a_folded_brain_cannot_overwrite_the_nodes_own_name() {
 /// a real agent rendered as a bare node — over a shape difference.
 #[tokio::test]
 async fn a_brain_answering_without_the_data_envelope_still_contributes() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "status": "ok",
@@ -284,6 +300,7 @@ async fn a_brain_answering_without_the_data_envelope_still_contributes() {
 /// condition the node had no way to report.
 #[tokio::test]
 async fn a_degraded_brain_degrades_the_folded_pair() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": {
@@ -330,6 +347,7 @@ async fn a_degraded_brain_degrades_the_folded_pair() {
 /// alarm — that would be #480 with an extra hop in it.
 #[tokio::test]
 async fn a_healthy_brain_cannot_clear_the_nodes_own_degradation() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
         "test.node_tier_fault",
@@ -374,6 +392,7 @@ async fn a_healthy_brain_cannot_clear_the_nodes_own_degradation() {
 /// through the health probe, caused by the thing watching for one.
 #[tokio::test]
 async fn a_malformed_or_flooding_brain_cannot_break_the_nodes_liveness_answer() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let mut flood: Vec<serde_json::Value> = (0..500)
         .map(|i| serde_json::json!({"code": format!("flood.{i}"), "message": "x"}))
@@ -420,6 +439,7 @@ async fn a_malformed_or_flooding_brain_cannot_break_the_nodes_liveness_answer() 
 /// `status: "degraded"` with no `degraded_mode` had a valid verdict discarded.
 #[tokio::test]
 async fn a_brain_that_reports_only_a_bad_status_still_degrades_the_pair() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": { "status": "degraded", "cognitive_state": "WORK" }
@@ -440,6 +460,7 @@ async fn a_brain_that_reports_only_a_bad_status_still_degrades_the_pair() {
 /// entirely must change nothing, or every bare-object brain degrades the node.
 #[tokio::test]
 async fn a_brain_that_omits_status_entirely_changes_nothing() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
     let (base, h) = spawn_brain(serde_json::json!({
@@ -468,6 +489,7 @@ async fn a_brain_that_omits_status_entirely_changes_nothing() {
 /// notice — the one actionable warning lost to noise.
 #[tokio::test]
 async fn junk_entries_cannot_crowd_out_a_real_warning() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let mut ws: Vec<serde_json::Value> = (0..40)
         .map(|_| serde_json::json!({"message": "no code, nothing to act on"}))
@@ -515,6 +537,7 @@ async fn junk_entries_cannot_crowd_out_a_real_warning() {
 /// the noise.
 #[tokio::test]
 async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": { "cognitive_state": "WORK", "warnings": [{
@@ -571,6 +594,7 @@ async fn one_enormous_warning_cannot_bloat_the_liveness_answer() {
 /// each case actually cares about still hold.
 #[tokio::test]
 async fn folding_still_behaves_when_the_node_itself_is_degraded() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     ciris_server::degradation::raise(ciris_server::degradation::Warning::critical(
         "test.forced_node_fault",
@@ -615,6 +639,7 @@ async fn folding_still_behaves_when_the_node_itself_is_degraded() {
 /// every public health request.
 #[tokio::test]
 async fn an_enormous_code_or_severity_cannot_bypass_the_entry_bound() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let (base, h) = spawn_brain(serde_json::json!({
         "data": { "cognitive_state": "WORK", "warnings": [{
@@ -661,6 +686,7 @@ async fn an_enormous_code_or_severity_cannot_bypass_the_entry_bound() {
 /// condition visible three lines below it in the same response.
 #[tokio::test]
 async fn a_brain_warning_alone_degrades_the_folded_pair() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
     assert!(!baseline.1, "fixture: this case needs an undegraded node");
@@ -694,6 +720,7 @@ async fn a_brain_warning_alone_degrades_the_folded_pair() {
 /// the distinction the severity field exists to carry.
 #[tokio::test]
 async fn an_informational_brain_warning_does_not_degrade_the_pair() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
 
@@ -734,6 +761,7 @@ async fn an_informational_brain_warning_does_not_degrade_the_pair() {
 /// condition counted and discarded while the verdict read `ok`.
 #[tokio::test]
 async fn a_critical_warning_past_the_cap_still_degrades_the_pair() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let baseline = bare_node_verdict().await;
     assert!(!baseline.1, "fixture: this case needs an undegraded node");
@@ -773,6 +801,7 @@ async fn a_critical_warning_past_the_cap_still_degrades_the_pair() {
 /// on" are different questions.
 #[tokio::test]
 async fn empty_codes_are_not_valid_and_cannot_consume_the_cap() {
+    quiet_host_probes();
     let _registry = REGISTRY_LOCK.lock().await;
     let mut ws: Vec<serde_json::Value> = (0..40)
         .map(|_| serde_json::json!({"code": "", "message": "nothing to group on", "severity": "info"}))
