@@ -24,7 +24,7 @@ use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
-use ciris_keyring::{MlDsa65SoftwareSigner, PqcSigner as _};
+use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::admission::verify_envelope_binds_subject;
 use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};

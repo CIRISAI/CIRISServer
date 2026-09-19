@@ -2188,6 +2188,7 @@ mod tests {
 /// READ-ONLY: does the owner's registration record bind its subject?
 /// `bound` / `unbound` / `absent` / `unknown` (no owner, or a read failed).
 /// Never heals — `node_key::heal_owner_key_record` does, from the owner's pen.
+#[cfg(feature = "python")]
 async fn owner_key_record_state(engine: &Engine, node_key_id: &str) -> String {
     use ciris_persist::federation::admission::{owner_of, verify_envelope_binds_subject};
     let dir = engine.federation_directory();

@@ -771,7 +771,7 @@ async fn record_claimed_target_locally(
         Ok(applied) => {
             // The owner's pen is in hand: heal a pre-#659 registration record
             // now, before this node's first identity round carries it (#606).
-            heal_owner_record_with(&st.engine, &user_signer).await;
+            heal_owner_record_with(&st.engine, user_signer).await;
             tracing::info!(
             target = %nc.key_id,
             owner = %applied.responsible_user_key_id,
@@ -1231,6 +1231,25 @@ pub fn router(
         .with_state(state)
 }
 
+/// Heal the owner's registration record with the pen a claim just used
+/// (CIRISServer#606). Logged, never fatal: the claim succeeded; a record the
+/// door refuses stays as it is and `delivery_status.owner_key_record` says so.
+async fn heal_owner_record_with(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    user_signer: &ciris_persist::prelude::LocalSigner,
+) {
+    match crate::auth::ownership::rebind_owner_key_record(engine, user_signer).await {
+        Ok(crate::auth::ownership::OwnerKeyRecordState::Rebound) => {
+            tracing::info!("claim: the owner's registration record was rebound (#606)")
+        }
+        Ok(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal }) => {
+            tracing::warn!(%refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (#606)")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "claim: owner key record heal failed (non-fatal)"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{rns_seed_from_target, with_local_flag};
@@ -1279,24 +1298,5 @@ mod tests {
         let wrapped = with_local_flag(serde_json::json!("ok"), false);
         assert_eq!(wrapped["target"], "ok");
         assert_eq!(wrapped["local_directory_updated"], false);
-    }
-}
-
-/// Heal the owner's registration record with the pen a claim just used
-/// (CIRISServer#606). Logged, never fatal: the claim succeeded; a record the
-/// door refuses stays as it is and `delivery_status.owner_key_record` says so.
-async fn heal_owner_record_with(
-    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
-    user_signer: &ciris_persist::prelude::LocalSigner,
-) {
-    match crate::auth::ownership::rebind_owner_key_record(engine, user_signer).await {
-        Ok(crate::auth::ownership::OwnerKeyRecordState::Rebound) => {
-            tracing::info!("claim: the owner's registration record was rebound (#606)")
-        }
-        Ok(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal }) => {
-            tracing::warn!(%refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (#606)")
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "claim: owner key record heal failed (non-fatal)"),
     }
 }
