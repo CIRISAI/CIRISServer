@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 
 use ciris_edge::replication::{
-    EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig,
+    EnvelopeKind, ReplicationPeer, ReplicationRuntime, ReplicationRuntimeConfig, SessionRole,
 };
 use ciris_edge::transport::{
     InboundFrame, Transport, TransportError, TransportId, TransportSendOutcome,
@@ -213,33 +213,35 @@ async fn runtime_for(engine: &Arc<Engine>, peers: Vec<&str>) -> Arc<ReplicationR
     )
 }
 
-/// The Attestation-kind keys currently registered on the runtime, sorted.
-async fn attestation_keys(runtime: &ReplicationRuntime) -> Vec<String> {
+/// The peers registered on the runtime as INITIATORS of `kind`, sorted.
+///
+/// Edge v26.0.0 (CIRISEdge#634) keys the registry by `(peer, kind, role)`:
+/// the reconciler's product is the initiator set (the consent-driven SEND
+/// plane); a responder is built when a peer's round-open arrives and is not
+/// what a reconcile step converges. Reading only the initiator rows keeps
+/// this test on the axis it proves.
+async fn registered_initiators(runtime: &ReplicationRuntime, kind: EnvelopeKind) -> Vec<String> {
     let mut v: Vec<String> = runtime
         .registry()
         .registered_keys()
         .await
         .into_iter()
-        .filter(|(_, kind)| *kind == EnvelopeKind::Attestation)
-        .map(|(p, _)| p)
+        .filter(|(_, k, role)| *k == kind && *role == SessionRole::Initiator)
+        .map(|(p, _, _)| p)
         .collect();
     v.sort();
     v
 }
 
-/// The Key-kind keys currently registered on the runtime, sorted (#144 — the
+/// The Attestation-kind initiator peers currently registered, sorted.
+async fn attestation_keys(runtime: &ReplicationRuntime) -> Vec<String> {
+    registered_initiators(runtime, EnvelopeKind::Attestation).await
+}
+
+/// The Key-kind initiator peers currently registered, sorted (#144 — the
 /// KERI publish-own key plane converges alongside Attestation).
 async fn key_keys(runtime: &ReplicationRuntime) -> Vec<String> {
-    let mut v: Vec<String> = runtime
-        .registry()
-        .registered_keys()
-        .await
-        .into_iter()
-        .filter(|(_, kind)| *kind == EnvelopeKind::Key)
-        .map(|(p, _)| p)
-        .collect();
-    v.sort();
-    v
+    registered_initiators(runtime, EnvelopeKind::Key).await
 }
 
 // ── Test 1: replication_peers_from_consent reads back consent subjects only ───

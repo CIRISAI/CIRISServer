@@ -1148,6 +1148,16 @@ pub fn round_diagnostics_json(
             "round_outcomes": round_outcomes,
             // CIRISEdge#373 (v13.6.0): the trace-loss tripwire — should be 0.
             "inbound_backpressure_drops": backpressure_drops,
+            // CIRISServer#612 / CIRISEdge#634 (edge v26.0.0): where each inbound
+            // CRPL frame went now that the registry is keyed by role. Both
+            // `routed_to_*` climb on both nodes of a healthy pair; a
+            // `reply_dropped` names the drop that used to masquerade as "a
+            // responder reply stalled" and misdirected the #607/#609 RCA twice.
+            "round_routing": {
+                "routed_to_responder": snap.replication_routed_to_responder_total,
+                "routed_to_initiator": snap.replication_routed_to_initiator_total,
+                "reply_dropped": snap.replication_reply_dropped_total,
+            },
         },
         // ── the application/durable plane (edge.rs `send_*`) ─────────────────
         // These counters do NOT observe replication carriage. Keying trace-plane

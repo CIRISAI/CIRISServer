@@ -410,6 +410,49 @@ Nothing changes in what you call. What changes underneath:
 - A **hardware-custodied owner** (no software seed on the node) is refused,
   not downgraded to a machine key; the 2-phase client-signed door is not wired.
 
+**0.5.213 (edge v26.0.0 / persist v44.8.0 / verify v15.2.0) — the round finally
+serves.** Still nothing changes in what you call. What changed underneath, and
+what to expect on a fleet that crosses it:
+- **Why every agent read `held 0` through 0.5.212.** Four layers, found in
+  order and each real: the canonical primed its own key as a peer
+  (CIRISServer#607, 0.5.212); edge attributed a dialed-to-us link to self
+  (CIRISEdge#623, v25.2.0); the first-contact carve-out keyed on that
+  attribution (CIRISServer#609 / CIRISEdge#624, v25.3.0); and the replication
+  registry keyed coordinators by `(peer, kind)` with no role, so a peer's
+  round-open on a plane we also initiate to queued into our initiator's
+  undrained channel and no responder was ever built (CIRISServer#612 /
+  CIRISEdge#634, v26.0.0). The last one is why `responder served` stayed at 0
+  on the real canonical after the first three fixes.
+- **Version floor.** CRPL frames now carry the round id + direction (wire v3,
+  `0x03`), which a pre-v26 edge refuses. A v26 node *initiates* only to v26
+  peers (an older peer shows as `timed_out`) and still *answers* every older
+  initiator on the legacy path. Nothing is isolated, but a mixed fleet shows
+  one-directional `timed_out` until it crosses — ship every agent on the same
+  server cut, and read the canonical's version before reading your receipt.
+- **Three new counters** in `metrics_snapshot()`:
+  `replication_routed_to_responder_total`,
+  `replication_routed_to_initiator_total`, `replication_reply_dropped_total`.
+  On a healthy mutual pair both `routed_to_*` climb on both nodes; a
+  `reply_dropped` names the reason (a `BackPressure` names the role whose
+  inbox is full). `ciris_server.delivery_receipt(…)` / `GET /v1/node/delivery-receipt`
+  (§6c, "Delivery of traces") is still the answer to "did MY traces land";
+  the counters say *why not* when it is 0.
+- **The owner's key record heals itself** (CIRISServer#606, persist v44.7.0's
+  `rebind_key_record`): a fedID registered before persist #659 carried an
+  envelope of `{key_id}` only and every verify v15.2.0 peer refused it — which
+  stalled the identity round for every node that owner stewards. The server
+  rebuilds the bound envelope from the row's own pubkeys and re-signs it with
+  the owner's pen at boot, at claim and after your author door.
+  `delivery_status().owner_key_record` reads `bound | rebound | unbound |
+  absent`; `unbound` means the heal could not run (hardware custody, or the
+  pen does not hold those pubkeys) and is worth surfacing to the operator.
+- **Consent scope tokens are a grammar now** (persist v44.8.0): the envelope
+  `scope` member is normative; `share:cohort:<scope>`, `analyze:<family>`,
+  `retain:<n>d|<n>h` have closed sub forms and a malformed one is refused by
+  name (`federation_consent_scope_token_invalid`). The server's bare `analyze`
+  / `share` / `view` tokens are unchanged and cover every narrower ask. If you
+  mint your own tokens, keep to the grammar; an unknown *kind* is still yours.
+
 ### 6d. Not in this cut (tracked)
 
 - Rooms are **pairs only**: no create/invite/revoke, roster check is exactly

@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "25.3.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v25.3.0#9638d3dfa10c41e9a879f72b4f8616cc154eadb7"
+version = "26.0.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v26.0.0#f798d2bae80a72c2f1a4ca8809fe44c4bf417d62"
 dependencies = [
  "async-trait",
  "axum",
@@ -1086,8 +1086,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "44.7.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v44.7.0#1dda109df2b1c08e2d609c2baaf5079c7d22f4c5"
+version = "44.8.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v44.8.0#9179fa421e3a901b7b60824039d43acc4fae12a5"
 dependencies = [
  "anyhow",
  "async-trait",

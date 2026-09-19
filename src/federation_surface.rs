@@ -264,6 +264,22 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), serde_json::json!(v)))
         .collect();
+    // CIRISServer#612 / CIRISEdge#634 — the round-ROUTING axis (edge v26.0.0).
+    // The registry is keyed by role now; these three say where each inbound
+    // CRPL frame went. On a healthy mutual pair both `routed_to_*` climb on
+    // both nodes; `reply_dropped` is the drop that used to read as "a responder
+    // reply stalled" and sent the #607/#609 RCA to the wrong layer twice, and
+    // `inbound_backpressure_drops` is the coordinator-channel-full count that
+    // was #634's tell. They were in the bundle and NOT in this fold on the
+    // first v26 ladder run, so the health signal edge named was invisible
+    // from the node's own API — the operator saw round_outcomes and nothing
+    // that said why half of them timed out.
+    let round_routing = serde_json::json!({
+        "routed_to_responder": bundle.replication_routed_to_responder_total,
+        "routed_to_initiator": bundle.replication_routed_to_initiator_total,
+        "reply_dropped": bundle.replication_reply_dropped_total,
+        "inbound_backpressure_drops": bundle.replication_inbound_backpressure_drops,
+    });
 
     (
         StatusCode::OK,
@@ -286,6 +302,7 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_applied_total": applied,
                 "replication_duplicate_total": duplicates,
                 "replication_round_outcomes_total": round_outcomes,
+                "replication_round_routing": round_routing,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
                 "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
                 "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),
