@@ -975,6 +975,35 @@ pub async fn anchor_agent_to_owner(
     Ok(Some(pair_id))
 }
 
+/// Heal the OWNER's registration record if it predates persist #659
+/// (CIRISServer#606) — resolved through the same pen `consent_author` uses.
+///
+/// `Ok(None)` when the node is unowned, no user seed dir is registered in this
+/// process, or the owner's pen is unreachable (hardware custody: the pen
+/// resolution refuses and the record stays as it is — nobody re-signs a key
+/// they do not hold). Otherwise the record's state after this call.
+pub async fn heal_owner_key_record(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> Result<Option<crate::auth::ownership::OwnerKeyRecordState>> {
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    let node_key = held_node_signer()
+        .map(|h| h.derived_key_id())
+        .unwrap_or(engine_key);
+    let Some(pen) = crate::peer::owner_consent_pen(engine, &node_key).await? else {
+        return Ok(None);
+    };
+    let Some(signer) = pen.signer.as_ref() else {
+        return Ok(None);
+    };
+    let state = crate::auth::ownership::rebind_owner_key_record(engine, signer)
+        .await
+        .map_err(|e| anyhow::anyhow!("rebind the owner's key record: {e}"))?;
+    Ok(Some(state))
+}
+
 const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[
     "grants",
     "direction",

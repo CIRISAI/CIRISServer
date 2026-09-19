@@ -851,6 +851,10 @@ async fn gather_delivery_status(
     // Every grantor a consent row for this node may be authored under (owner
     // first, machine keys as legacy) — awaited here: this future is already
     // driven by the held runtime, and a nested block_on panics (CIRISServer#599).
+    let owner_key_record = match engine.as_ref() {
+        Some(e) => owner_key_record_state(e, &node_key_id).await,
+        None => "unknown".to_string(),
+    };
     let consent_grantors = match engine.as_ref() {
         Some(e) => crate::peer::consent_grantors_for(e, &node_key_id)
             .await
@@ -868,6 +872,10 @@ async fn gather_delivery_status(
         // Every grantor a consent row for this node may be authored under — owner
         // first, machine keys as legacy — the set the reconciler reads (CIRISServer#599).
         "consent_grantor_key_ids": consent_grantors,
+        // The owner's registration record: `bound` | `unbound` | `absent` |
+        // `unknown`. A ladder reading `KEX yes · replication —` with `unbound`
+        // here has its answer without a canonical log (CIRISServer#606).
+        "owner_key_record": owner_key_record,
         "transport_present": edge.reticulum_transport().is_some(),
         "canonical_targets": targets,
         "peers": peers,
@@ -1346,6 +1354,19 @@ pub fn author_consent_embedded(
 
     // Split home: the agent must be an occurrence of its human before its
     // consent can resolve to the person (CIRISServer#601 items 7–8). Non-fatal.
+    // On an agent install the claim happens AFTER boot, so this door is the
+    // first place the owner's pen exists; heal the owner's registration record
+    // here too (CIRISServer#606). Non-fatal.
+    match rt.block_on(crate::node_key::heal_owner_key_record(&engine)) {
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Rebound)) => {
+            tracing::info!("the owner's registration record was rebound (#606)")
+        }
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal })) => {
+            tracing::warn!(%refusal, "the owner's registration record is UNBOUND and could not be rebound (#606)")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "owner key record heal failed (non-fatal)"),
+    }
     match rt.block_on(crate::node_key::anchor_agent_to_owner(&engine)) {
         Ok(Some(pair)) => tracing::info!(bilateral_pair_id = %pair, "agent anchored to owner"),
         Ok(None) => {}
@@ -2162,4 +2183,28 @@ mod tests {
         let dests = vec![dest("reticulum", &good_hex_16(), Some("!!!not base64!!!"))];
         assert!(resolve_reticulum_prime_binding(&dests).is_err());
     }
+}
+
+/// READ-ONLY: does the owner's registration record bind its subject?
+/// `bound` / `unbound` / `absent` / `unknown` (no owner, or a read failed).
+/// Never heals — `node_key::heal_owner_key_record` does, from the owner's pen.
+async fn owner_key_record_state(engine: &Engine, node_key_id: &str) -> String {
+    use ciris_persist::federation::admission::{owner_of, verify_envelope_binds_subject};
+    let dir = engine.federation_directory();
+    let owner = match owner_of(dir.as_ref(), node_key_id).await {
+        Ok(Some(o)) => o,
+        _ => return "unknown".to_string(),
+    };
+    match dir.lookup_public_key(&owner).await {
+        Ok(Some(row)) => {
+            if verify_envelope_binds_subject(&row).is_ok() {
+                "bound"
+            } else {
+                "unbound"
+            }
+        }
+        Ok(None) => "absent",
+        Err(_) => "unknown",
+    }
+    .to_string()
 }
