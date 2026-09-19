@@ -505,6 +505,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Split home: anchor the agent to its human before consent is re-signed —
     // the human's grant names the agent, and the fold finds it only through
     // this anchor (CIRISServer#601 items 7–8). No-op elsewhere.
+    // The owner's registration record must bind its subject or no verify
+    // v15.2.0 peer admits it — and it rides the first identity round to every
+    // node this owner stewards (CIRISServer#606). Healed here, from the
+    // owner's own pen, before anything below replicates it.
+    match crate::node_key::heal_owner_key_record(&engine).await {
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Rebound)) => {
+            tracing::info!("boot: the owner's registration record was rebound (#606)")
+        }
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal })) => {
+            tracing::warn!(%refusal, "boot: the owner's registration record is UNBOUND and could not be rebound (#606)")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "boot: owner key record heal failed (non-fatal)"),
+    }
     match crate::node_key::anchor_agent_to_owner(&engine).await {
         Ok(Some(pair)) => {
             tracing::info!(bilateral_pair_id = %pair, "boot: agent anchored to owner")

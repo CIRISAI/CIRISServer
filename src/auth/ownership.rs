@@ -776,6 +776,134 @@ pub async fn apply_signed_owner_binding(
     })
 }
 
+/// What [`rebind_owner_key_record`] found and did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerKeyRecordState {
+    /// The owner's stored registration envelope already binds its subject.
+    Bound,
+    /// It did not; this call re-signed it bound through persist's rebind door.
+    Rebound,
+    /// It did not, and the door refused (reason carried); the row is untouched.
+    Unbound { refusal: String },
+    /// No registration row for the owner on this node.
+    Absent,
+}
+
+/// Heal an UNBOUND owner registration record through persist's same-key
+/// rebind door (v44.7.0, CIRISPersist#864; CIRISServer#606).
+///
+/// A registration record minted before persist #659 (v31.0.0) carries an
+/// envelope of `{key_id}` only. Every verify v15.2.0 peer refuses such a
+/// record at admission ("does not bind identity_type"), so it can never
+/// replicate — and an OWNER's record rides the first identity round to every
+/// node the owner stewards. The production canonical held exactly one such
+/// row, the operator's portable identity, stewarding nine nodes.
+///
+/// The rebind is the holder re-signing the SAME claim with a bound envelope:
+/// same `key_id`, same pubkeys, same `identity_type` / `identity_ref` /
+/// `valid_from` / `valid_until` / roles / evidence as the stored row — persist
+/// refuses anything else (`RebindChangesRecord`). Only the envelope, its hash,
+/// and the self-signature move. So this runs only where the owner's own pen is
+/// in hand, and only after `verify_envelope_binds_subject` fails on the stored
+/// row; a bound row is `Bound` and nothing is written. A hardware-custodied
+/// owner with no software seed never reaches here (the pen resolution refuses
+/// first) — nobody re-signs a key they do not hold.
+pub async fn rebind_owner_key_record(
+    engine: &Engine,
+    owner_signer: &LocalSigner,
+) -> Result<OwnerKeyRecordState, OwnershipError> {
+    use ciris_persist::federation::admission::{
+        bind_subject_into_envelope, verify_envelope_binds_subject,
+    };
+    use ciris_persist::federation::register::RebindOutcome;
+
+    let owner_key_id = owner_signer.derived_key_id();
+    let stored = engine
+        .federation_directory()
+        .lookup_public_key(&owner_key_id)
+        .await
+        .map_err(|e| OwnershipError::Persist(format!("lookup_public_key({owner_key_id}): {e}")))?;
+    let Some(stored) = stored else {
+        return Ok(OwnerKeyRecordState::Absent);
+    };
+    if verify_envelope_binds_subject(&stored).is_ok() {
+        return Ok(OwnerKeyRecordState::Bound);
+    }
+    // The same binder the registration path uses (#659): the bound envelope is
+    // DERIVED from the stored row's own pubkeys, never supplied.
+    let Some(stored_pqc) = stored.pubkey_ml_dsa_65_base64.as_deref() else {
+        return Ok(OwnerKeyRecordState::Unbound {
+            refusal: "stored record carries no ML-DSA-65 half; a hybrid rebind cannot be built"
+                .into(),
+        });
+    };
+    let mut envelope = serde_json::json!({ "key_id": owner_key_id });
+    bind_subject_into_envelope(
+        &mut envelope,
+        &owner_key_id,
+        &stored.identity_type,
+        &stored.pubkey_ed25519_base64,
+        Some(stored_pqc),
+        None,
+    )
+    .map_err(OwnershipError::Sign)?;
+    let canonical = canonicalize_owner_binding_envelope(&envelope)?;
+    let sig = owner_signer
+        .sign_hybrid(&canonical)
+        .await
+        .map_err(|e| OwnershipError::Sign(format!("sign the rebound envelope: {e}")))?;
+    // Proof of possession is the same pubkeys the row already carries; the
+    // door checks that, so a pen for a different key is refused, never stored.
+    if B64.encode(&sig.classical.public_key) != stored.pubkey_ed25519_base64
+        || B64.encode(&sig.pqc.public_key) != stored_pqc
+    {
+        return Err(OwnershipError::Verify(format!(
+            "the pen for {owner_key_id} does not hold the pubkeys registered for it — \
+             refusing to re-sign a record this signer does not own"
+        )));
+    }
+    let now = chrono::Utc::now();
+    let mut record = stored.clone();
+    record.registration_envelope = envelope;
+    record.original_content_hash = hex::encode(Sha256::digest(&canonical));
+    record.scrub_signature_classical = B64.encode(&sig.classical.signature);
+    record.scrub_signature_pqc = Some(B64.encode(&sig.pqc.signature));
+    record.scrub_key_id = owner_key_id.clone();
+    record.scrub_timestamp = now;
+    record.pqc_completed_at = Some(now);
+    record.persist_row_hash = String::new();
+    record.additional_scrubs = Vec::new();
+    match engine
+        .rebind_key_record(SignedKeyRecord { record })
+        .await
+        .map_err(|e| OwnershipError::Persist(format!("rebind_key_record({owner_key_id}): {e}")))?
+    {
+        RebindOutcome::Rebound => {
+            tracing::info!(
+                owner_key_id = %owner_key_id,
+                identity_type = %stored.identity_type,
+                "owner registration record REBOUND — the pre-#659 envelope now binds its \
+                 subject; the row re-serves past every replication cursor and verify \
+                 v15.2.0 peers admit it (CIRISServer#606 / CIRISPersist#864)"
+            );
+            Ok(OwnerKeyRecordState::Rebound)
+        }
+        RebindOutcome::Unchanged => Ok(OwnerKeyRecordState::Bound),
+        RebindOutcome::Refused { reason } => {
+            tracing::warn!(
+                owner_key_id = %owner_key_id,
+                refusal = ?reason,
+                "owner registration record is UNBOUND and the rebind door refused — the \
+                 record stays refused by every verify v15.2.0 peer (CIRISServer#606)"
+            );
+            Ok(OwnerKeyRecordState::Unbound {
+                refusal: format!("{reason:?}"),
+            })
+        }
+    }
+}
+
 /// Register the claiming user's hybrid key in `federation_keys` as
 /// `identity_type "user"` (CC 3.2: ownership roots in an accountable human) via
 /// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key).
