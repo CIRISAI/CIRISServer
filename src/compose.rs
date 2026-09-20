@@ -1550,6 +1550,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // edge's own `RouteLens` instead of this module deciding
                         // what reachable means.
                         edge.reticulum_transport(),
+                        // CIRISEdge#499 — the host drives the scope-address
+                        // plane it armed: a keyed room is installed, advanced
+                        // on every epoch, sealed on the cadence loop below.
+                        edge.scope_lifecycle().cloned(),
                     ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
@@ -3822,6 +3826,52 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
     RUNTIME.get().map(Arc::clone)
 }
 
+/// CIRISEdge#636 (edge v26.1.0) — the publish-side KICK. A caller that just
+/// authored rows the federation should see (the claim/announce bundle, a
+/// consent grant, an owner-binding, a chat KeyPackage / Welcome / message)
+/// calls this so they cross on the next round-trip instead of the next 30 s
+/// cadence tick: the first v26.0.0 ladder measured node-b's rows landing at
+/// +30.8 s / +61 s, and every one of those seconds was a tick, not a byte.
+///
+/// Fire-and-forget by design: the caller is an HTTP handler or a boot step
+/// and must not wait on a round. `round_now_all` is coalesced per coordinator
+/// in edge's scheduler, so a burst of kicks is at most one round per
+/// (peer, kind). No runtime (no Reticulum transport) is not an error — the
+/// row is held locally and there is nothing to kick; a stopped scheduler is
+/// logged at debug because the shutdown path already said so.
+pub(crate) fn kick_replication(reason: &'static str) {
+    let Some(runtime) = held_replication_runtime() else {
+        return;
+    };
+    // Callers are async handlers, but the fold's author door reaches here from
+    // a `block_on` — spawn on whatever runtime is current rather than assume
+    // one (a bare `tokio::spawn` outside a context panics the caller).
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!(
+            reason,
+            "replication kick skipped — no runtime context; the cadence carries it"
+        );
+        return;
+    };
+    handle.spawn(async move {
+        match runtime.round_now_all().await {
+            // INFO, not debug: a handful of lines per session (claim, announce,
+            // each grant, each chat row) and each one is a timestamp the ladder's
+            // timeline reads — "the row crossed 0.16 s after the kick" is only
+            // legible if the kick is on the record.
+            Ok(()) => tracing::info!(
+                reason,
+                "replication kicked — a round toward every peer now (CIRISEdge#636)"
+            ),
+            Err(e) => tracing::debug!(
+                reason,
+                error = %e,
+                "replication kick skipped — scheduler not running"
+            ),
+        }
+    });
+}
+
 /// Core replication-runtime bring-up, shared by the compose boot path
 /// ([`setup_peer_replication`]) AND the agent-embedded federation-delivery
 /// controller ([`crate::federation_delivery`]) — and since CIRISServer#312 the two
@@ -4011,8 +4061,29 @@ pub(crate) async fn start_replication_runtime(
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(node_key_id.to_string()),
-        pull_sink,
-        revocations,
+        // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
+        // that only make sense together, spelled as one type so the half-wired
+        // node cannot be built — `pull_sink ⇒ engine`, `revocations ⇒ engine`.
+        //
+        // - `engine`: THE KEY-GRANT DOOR (edge v24.1.0, CIRISPersist#848 /
+        //   CIRISEdge#601). A `key_grant:epoch:v1` row — the community DEK
+        //   wrap a room's sealer publishes for each member — is routed through
+        //   `Engine::apply_replicated_key_grant`, which admits the carrier AND
+        //   projects the wraps addressed to this node's occurrences. Without it
+        //   every member read `NotGranted` with the row present: the message
+        //   ARRIVED and would not OPEN, on every chat-ladder run from 0.5.207 to
+        //   0.5.213 (`arrived=0 hamburger=1`, mis-read as green until the rung
+        //   was made REQUIRED). The compose engine is the same substrate the
+        //   bridge's directory reads and carries the node's hybrid pen.
+        // - `pull_sink`: the BlobPuller's intake — an admitted row that
+        //   references a blob is offered here and the bytes are fetched.
+        // - `revocations`: the withdrawals observer, the SAME register the blob
+        //   chunk source refuses against (`backend::revocation_register`).
+        sealed_content: Some(ciris_edge::replication::SealedContentWiring {
+            engine: ciris_edge::replication::bridge::BridgeEngine(Engine::clone(engine)),
+            pull_sink,
+            revocations,
+        }),
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(
@@ -4031,9 +4102,12 @@ pub(crate) async fn start_replication_runtime(
 
     tracing::info!(
         initiator_peers = desired.len(),
+        key_grant_door = true,
         "CEG-driven replication runtime started + routed into the shared Edge ({} consent-derived \
          Initiator peers; reconciler converges the rest at runtime via set_peers — no restart, \
-         CIRISEdge#173 resolved)",
+         CIRISEdge#173 resolved). key_grant_door=true: key_grant rows project their wraps \
+         through Engine::apply_replicated_key_grant (CIRISPersist#848) — a member reads \
+         NotGranted with the row present only when the wrap was not addressed to it",
         desired.len(),
     );
     anyhow::Ok(Arc::new(runtime))
@@ -4397,7 +4471,27 @@ async fn build_edge(
         // it both wires the transport for run/dispatch AND records it so
         // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
         // populate the RET-transport role of GET /v1/identity.
-        .reticulum_transport(transport);
+        .reticulum_transport(transport)
+        // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
+        // row pointing at bytes this node has asks for them with a
+        // `BlobChunkFetch`; without a source wired here edge drops it —
+        // `BlobChunkFetch received but no BlobChunkSource wired; dropping` —
+        // and the peer's puller times out on a holder that answered nothing.
+        // That is what the first scope-native chat fetch did on 0.5.213
+        // (CIRISServer#612): every blob-backed body this node authored was
+        // held, announced, routed to, and never served. Persist's source
+        // answers through the gated peer-serve door (store gate + AV-13 caps)
+        // and, with the register the apply path writes withdrawals to, refuses
+        // a blob whose every reference has been withdrawn (CIRISEdge#606).
+        .blob_chunk_source(Arc::new(crate::backend::ServerBlobChunkSource::new(engine)));
+    tracing::info!(
+        "blob chunk source wired — this node SERVES the bytes it holds to a peer's \
+         BlobChunkFetch through persist's gated peer-serve door, answers the blob's SCOPE \
+         from its referencing row (edge's own BlobMeaning, so pull and serve agree) and \
+         refuses a blob whose references were all withdrawn (CIRISEdge#55 / #499 / #606). \
+         Without this line in a boot log every blob-backed body this node authors is \
+         held, announced, routed to, and never served"
+    );
 
     // CIRISServer 0.5.58 — attach a serial LoRa/RNode radio transport when
     // `net.radio.enabled` is set (Transport card). SERIAL-CAPABLE TARGETS ONLY
@@ -4489,6 +4583,31 @@ async fn build_edge(
         "scope-native addressing ARMED — scoped flows are one-hop and their \
          destinations are never announced (CC 5.4.6)"
     );
+    // CIRISEdge#499 — the third verb of the plane the line above armed. A
+    // group's superseded epoch stays reachable for the convergence window and
+    // is then SEALED; edge's contract is that the host calls `seal_due` on a
+    // timer ("…and on a timer: life.seal_due(Instant::now())"). Install and
+    // advance happen where rooms are keyed (`contacts_chat::ensure_room_addresses`);
+    // nothing else calls this, so without it a rotated-away address would stay
+    // live forever. Named phase + jitter per `loop_cadence` (CIRISServer#575).
+    if let Some(life) = edge.scope_lifecycle().cloned() {
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(60);
+            let mut schedule = crate::loop_cadence::Cadence::new("scope_seal", period);
+            loop {
+                schedule.tick().await;
+                let out = life.seal_due(std::time::Instant::now());
+                if out.sealed > 0 || out.unretired > 0 {
+                    tracing::info!(
+                        sealed = out.sealed,
+                        unretired = out.unretired,
+                        "scope-address seal pass: superseded epochs past the convergence \
+                         window retired (CIRISEdge#499)"
+                    );
+                }
+            }
+        });
+    }
     tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
     Ok(edge)
 }

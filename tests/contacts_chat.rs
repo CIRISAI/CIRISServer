@@ -508,7 +508,7 @@ async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::
     // `SelfEncKeys`; that was #590's mistake, and the read door never unwrapped
     // with those keys. Nothing keystore-side is needed.
 
-    let app = contacts_chat::router(engine, signer, seed_dir, None);
+    let app = contacts_chat::router(engine, signer, seed_dir, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -863,6 +863,35 @@ async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
         row["pubkey_ed25519_base64"].is_string(),
         "a contact card must carry the peer projection's fields: {row}"
     );
+    // CIRISServer#616 — the receipt: the grant's envelope rides the row, SENT,
+    // so the client renders "who sent it / the rule it follows" from the row
+    // and never from a rule it assumed.
+    let grant = &row["grant"];
+    assert!(
+        grant.is_object(),
+        "every contact row carries its live grant: {row}"
+    );
+    assert_eq!(grant["dimension"], "consent:replication:v1");
+    assert_eq!(grant["cohort_scope"], "federation");
+    assert!(
+        grant["attesting_key_id"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty()),
+        "who signed the grant is sent, not inferred: {grant}"
+    );
+    assert!(
+        grant["subject_key_ids"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == CONTACT_KEY_ID)),
+        "the grant names the contact: {grant}"
+    );
+    assert!(
+        grant["consent_prefixes"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|p| p == "chat:")),
+        "the rule it follows covers chat: {grant}"
+    );
+    assert!(grant["asserted_at"].is_string(), "when: {grant}");
 }
 
 #[tokio::test]

@@ -1390,6 +1390,10 @@ async fn emit_grant_row<S: AsRef<str>>(
         attestation_id = %attestation_id,
         "emitted directed replication-consent grant (this node consents to replicate to peer)"
     );
+    // The grant row itself should cross now (CIRISEdge#636). The NEW peer it
+    // names is not an initiator yet — the peering API nudges the reconciler,
+    // and the reconcile loop kicks again once the peer set has converged.
+    crate::compose::kick_replication("consent grant emitted");
     Ok(ConsentGrant {
         attestation_id,
         content_hash,
@@ -1404,6 +1408,29 @@ async fn emit_grant_row<S: AsRef<str>>(
 /// about, while an empty set would claim it was read and found bare. Callers
 /// treat `None` as "covers nothing" — the same verdict `promote_consented_backlog`
 /// reaches when it warns and skips.
+/// CIRISServer#616 — the grant as a RECEIPT: the CC 2.1 envelope members the
+/// client's receipt sheet renders in plain words ("who it is about / who sent
+/// it / who can see it / what it is / the rule it follows"), read off the row
+/// and never inferred. `attesting_key_id` is whoever actually signed — since
+/// 0.5.211 that is the OWNER's fed-ID, not this node (consent is by humans),
+/// which is exactly why the client must be sent it rather than assume CC 3.3.7's
+/// `G` is the node. `for_key_id` names the one agent the consent is FOR
+/// (persist v44.6.0); `consent_prefixes` is the same normalised set the POST
+/// returns.
+pub fn grant_receipt(grant: &ciris_persist::federation::types::Attestation) -> serde_json::Value {
+    serde_json::json!({
+        "attestation_id": grant.attestation_id,
+        "attesting_key_id": grant.attesting_key_id,
+        (paths::DIMENSION): ciris_persist::federation::admission::envelope_dimension(&grant.attestation_envelope),
+        "subject_key_ids": grant.subject_key_ids,
+        "cohort_scope": grant.cohort_scope,
+        "for_key_id": grant.attestation_envelope.get("for_key_id").and_then(|v| v.as_str()),
+        "consent_prefixes": grant_prefixes(grant).unwrap_or_default(),
+        "asserted_at": grant.asserted_at.to_rfc3339(),
+        "valid_until": grant.expires_at.map(|t| t.to_rfc3339()),
+    })
+}
+
 fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
     ciris_persist::federation::consent_grammar::parse_grant_payload(&grant.attestation_envelope)
         .ok()

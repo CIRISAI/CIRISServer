@@ -772,6 +772,7 @@ async fn record_claimed_target_locally(
             // The owner's pen is in hand: heal a pre-#659 registration record
             // now, before this node's first identity round carries it (#606).
             heal_owner_record_with(&st.engine, user_signer).await;
+            crate::compose::kick_replication("claim applied");
             tracing::info!(
             target = %nc.key_id,
             owner = %applied.responsible_user_key_id,
@@ -913,6 +914,7 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
     {
         Ok(applied) => {
             heal_owner_record_with(&st.engine, &user_signer).await;
+            crate::compose::kick_replication("claim applied");
             tracing::info!(
                 responsible_user = %applied.responsible_user_key_id,
                 node_key_id = %st.node_key_id,
@@ -1170,6 +1172,11 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
         &st.node_key_id,
     )
     .await;
+    // The owner-binding just became federation-visible: this is the row every
+    // peer needs before it can place this node in any audience (the chat
+    // ladder's `bound` stage). Cross it now, not at the next tick
+    // (CIRISEdge#636, edge v26.1.0).
+    crate::compose::kick_replication("owner-binding announced");
     (
         StatusCode::OK,
         Json(serde_json::json!({

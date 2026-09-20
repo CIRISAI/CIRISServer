@@ -554,6 +554,13 @@ pub fn spawn(
                             "replication converged to {count} consent peers",
                         );
                         last_logged = Some(count);
+                        // The peer set just changed: the newly registered
+                        // initiators would otherwise sit until their first
+                        // cadence tick. One coalesced round toward everyone,
+                        // now (CIRISEdge#636, edge v26.1.0).
+                        if count > 0 {
+                            crate::compose::kick_replication("consent peer set changed");
+                        }
                     }
                 }
                 Err(e) => {

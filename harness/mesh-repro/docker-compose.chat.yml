@@ -51,7 +51,12 @@ services:
       mesh:
         ipv4_address: 172.29.77.10
     tmpfs:
-      - /var/lib/ciris:mode=1777,size=2g
+      # 12g, not 2g: `caps.lens_store` needs ≥ 5 GiB free or the node boots as
+      # a relay (ingest slice, scorer and holonomic OFF, one WARN on a dark
+      # sink). Every chat-ladder node through 0.5.213 ran that way — found in
+      # the 0.5.213 log audit. tmpfs only consumes what is written; traceflow
+      # already sizes it so. Same reasoning, same number.
+      - /var/lib/ciris:mode=1777,size=12g
 
   # Node A — the SENDER. An ordinary owner-claimed node: no canonical bless, no
   # `infra:serve` role. That is deliberate and it is a finding in itself: a chat
@@ -80,7 +85,12 @@ services:
       mesh:
         ipv4_address: 172.29.77.11
     tmpfs:
-      - /var/lib/ciris:mode=1777,size=2g
+      # 12g, not 2g: `caps.lens_store` needs ≥ 5 GiB free or the node boots as
+      # a relay (ingest slice, scorer and holonomic OFF, one WARN on a dark
+      # sink). Every chat-ladder node through 0.5.213 ran that way — found in
+      # the 0.5.213 log audit. tmpfs only consumes what is written; traceflow
+      # already sizes it so. Same reasoning, same number.
+      - /var/lib/ciris:mode=1777,size=12g
 
   # Node B — the RECIPIENT. It additionally dials node-a directly.
   #
@@ -115,7 +125,12 @@ services:
       mesh:
         ipv4_address: 172.29.77.12
     tmpfs:
-      - /var/lib/ciris:mode=1777,size=2g
+      # 12g, not 2g: `caps.lens_store` needs ≥ 5 GiB free or the node boots as
+      # a relay (ingest slice, scorer and holonomic OFF, one WARN on a dark
+      # sink). Every chat-ladder node through 0.5.213 ran that way — found in
+      # the 0.5.213 log audit. tmpfs only consumes what is written; traceflow
+      # already sizes it so. Same reasoning, same number.
+      - /var/lib/ciris:mode=1777,size=12g
 
   # Node C — the THIRD party, behind a compose PROFILE so it costs nothing until
   # it is asked for. This ladder is the seed of the scale harness for voting and
@@ -151,7 +166,12 @@ services:
       mesh:
         ipv4_address: 172.29.77.13
     tmpfs:
-      - /var/lib/ciris:mode=1777,size=2g
+      # 12g, not 2g: `caps.lens_store` needs ≥ 5 GiB free or the node boots as
+      # a relay (ingest slice, scorer and holonomic OFF, one WARN on a dark
+      # sink). Every chat-ladder node through 0.5.213 ran that way — found in
+      # the 0.5.213 log audit. tmpfs only consumes what is written; traceflow
+      # already sizes it so. Same reasoning, same number.
+      - /var/lib/ciris:mode=1777,size=12g
 
 networks:
   mesh:

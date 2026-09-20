@@ -280,6 +280,27 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         "reply_dropped": bundle.replication_reply_dropped_total,
         "inbound_backpressure_drops": bundle.replication_inbound_backpressure_drops,
     });
+    // CIRISEdge#636 (edge v26.1.0) — the bootstrap door's decisions:
+    // `attributed` (a first-contact link bound to its record through the
+    // SignedTransportDestination) / `unbound` / `not_applicable`. Never a
+    // drop: `bootstrap_key_not_this_link` cannot occur on v26.1.0, and a
+    // fleet where `attributed` never climbs is one where no first contact
+    // ever completed.
+    let bootstrap_door: serde_json::Map<_, _> = bundle
+        .bootstrap_door_outcomes
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
+    // CIRISEdge#640 (edge v26.2.0) — why a blob holder could not be routed,
+    // by BRANCH: `group_not_installed` (the host never drove the scope-address
+    // lifecycle for this room — ours), `holder_not_in_group`, `holder_sealed_out`.
+    // Zero everywhere on a healthy node; a climbing `group_not_installed` is a
+    // room keyed without `contacts_chat::ensure_room_addresses` having run.
+    let blob_route_refusals: serde_json::Map<_, _> = bundle
+        .blob_route_refusals
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
 
     (
         StatusCode::OK,
@@ -303,6 +324,8 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_duplicate_total": duplicates,
                 "replication_round_outcomes_total": round_outcomes,
                 "replication_round_routing": round_routing,
+                "bootstrap_door_outcomes": bootstrap_door,
+                "blob_route_refusals": blob_route_refusals,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
                 "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
                 "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),

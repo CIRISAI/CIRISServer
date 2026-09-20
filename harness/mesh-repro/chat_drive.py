@@ -497,6 +497,20 @@ def probe_arrived(base, token, cid, att_id):
     return 0
 
 
+def probe_arrived_reason(base, token, cid, att_id):
+    """The recipient's own word for why the body is shut: `unopened_reason` for
+    the row, or `open` when the body is there, or `absent` when the row is not.
+    Read by DIAG_arrived so the diagnosis quotes the node instead of guessing."""
+    _, _, msgs = _messages(base, token, cid)
+    for m in msgs:
+        if m.get("attestation_id") != att_id:
+            continue
+        if m.get("body"):
+            return "open"
+        return m.get("unopened_reason") or "unopened:<no reason given>"
+    return "absent"
+
+
 def probe_hamburger(base, token, cid, att_id, owner, node_key, author_field, world):
     """THE TWO-FACT ASSERTION: who SIGNED and who AUTHORED are separate fields,
     and both must be right.
@@ -579,6 +593,7 @@ def main():
         return 0
     table = {
         "arrived": (4, probe_arrived),
+        "arrived_reason": (4, probe_arrived_reason),
         "hamburger": (8, probe_hamburger),
         "dark": (4, probe_dark),
     }

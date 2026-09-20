@@ -774,13 +774,22 @@ DIAG_sent() {
 # "A's message arrived": that id is minted in node A's substrate and node B has
 # no way to produce it. Body non-empty and status `live` are part of arrival —
 # a row that landed stripped or already superseded is not a delivered message.
+#
+# REQUIRED: `hamburger` (the next rung) reads the row's IDENTITY fields and
+# passes with the body sealed shut, so the verdict's "proven by downstream
+# evidence" inference does not hold between these two. It swallowed
+# `arrived=0` on every run from 0.5.207 to 0.5.213 — the recipient held the
+# message and could not open it (edge's key-grant door had no engine installed
+# on the server side, CIRISEdge#601 / CIRISPersist#848) while the ladder read
+# "cross-node chat PROVEN". A red `arrived` is a BREAK wherever it sits.
+REQUIRED_arrived=1
 stage_arrived() {
   _chat_load
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
   compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python /opt/harness/chat_drive.py arrived \
     "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" 2>/dev/null | tr -d '[:space:]'
 }
-HINT_arrived="the sender's message never reached the recipient. The diagnosis below says WHICH of the three it is — never served, refused at the recipient, or admitted-but-not-projected. The three readings, and what each one asks for:
+HINT_arrived="the sender's message never reached the recipient READABLE. The diagnosis below says WHICH of the four it is — never served, refused at the recipient, admitted-but-not-projected, or admitted-and-sealed. The fourth first, because \`hamburger\` passing beside a red \`arrived\` IS this case: the recipient's transcript log reads \`projected=1 unopened=1\` and the node logs \`key_grant row received with NO ENGINE installed\` — the community DEK grant was stored through the general attestation door and never projected, so the body is \`Unopened{NotGranted}\`; the server must install \`ReplicationRuntimeConfig::engine\` (compose.rs start_replication_runtime). The other three readings, and what each one asks for:
 
  (1) IS THE ROW SIGNED BY ITS OWN ATTESTER? Compare \`attesting_key_id\` and
      \`scrub_key_id\` on the sender's copy (the DIAG prints both). \`send_message\`
@@ -831,8 +840,43 @@ DIAG_arrived() {
     | grep -c "REFUSED.*${CHAT_ATT_ID:-none}" || true)"
   served="$(compose logs "$recip" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
     | grep -c "${CHAT_ATT_ID:-none}" || true)"
-  echo "  ── which of the three? ──"
-  if [ "${at_b:-0}" -gt 0 ]; then
+  # The row is held but its BODY did not open: the four sealed-body readings,
+  # each a line the recipient's or the sender's log prints, in the order the
+  # pull fails. Read from the logs so the diagnosis names the layer, not a
+  # guess (0.5.213: every one of these was hit in turn — CIRISPersist#870, the
+  # scope-address table, the chunk source).
+  local unopened_reason no_holders not_in_group no_source fetch_timeout
+  unopened_reason="$(compose exec -T "$recip" python /opt/harness/chat_drive.py arrived_reason \
+    "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$CHAT_ATT_ID" 2>/dev/null | tr -d '\r' | head -1)"
+  no_holders="$(compose logs "$recip" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'outcome=NoHolders' || true)"
+  not_in_group="$(compose logs "$recip" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -cE 'blob_holder_not_in_group|GroupNotInstalled|group never installed' || true)"
+  no_source="$(compose logs "$CHAT_SENDER" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'no BlobChunkSource wired' || true)"
+  fetch_timeout="$(compose logs "$recip" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'fetch_blob_chunk_scoped timeout' || true)"
+  echo "  ── which of the seven? ──"
+  if [ "${at_b:-0}" -gt 0 ] && [ -n "$unopened_reason" ]; then
+    echo "  HELD, SEALED SHUT: the row is on ${recip} and its body reads unopened_reason=${unopened_reason}"
+    if [ "${no_holders:-0}" -gt 0 ]; then
+      echo "    NO HOLDERS (${no_holders}×): ${recip}'s puller found no holds_bytes claim for the blob — the"
+      echo "    sender's holder claim never replicated (persist wire index, CIRISPersist#870) or never existed."
+    fi
+    if [ "${not_in_group:-0}" -gt 0 ]; then
+      echo "    NOT ROUTABLE (${not_in_group}×): the holder has no derived address in this room's scope group —"
+      echo "    the room was never installed in ${recip}'s scope-address table (the host's install verb,"
+      echo "    contacts_chat::ensure_room_addresses) or the holder's node is not in the member set."
+    fi
+    if [ "${no_source:-0}" -gt 0 ]; then
+      echo "    NOT SERVED (${no_source}×): ${CHAT_SENDER} received the BlobChunkFetch and dropped it — no"
+      echo "    BlobChunkSource wired on the sender (compose::build_edge .blob_chunk_source)."
+    fi
+    if [ "${fetch_timeout:-0}" -gt 0 ] && [ "${no_source:-0}" -eq 0 ]; then
+      echo "    FETCH TIMED OUT (${fetch_timeout}×) with the sender NOT logging a drop: the scoped link established"
+      echo "    and the request went unanswered — read the sender's dispatch_inbound lines for the serve refusal."
+    fi
+    if [ "${no_holders:-0}" -eq 0 ] && [ "${not_in_group:-0}" -eq 0 ] && [ "${no_source:-0}" -eq 0 ] && [ "${fetch_timeout:-0}" -eq 0 ]; then
+      echo "    none of the four pull signatures in the logs — the reason string above is the whole fact;"
+      echo "    not_granted = no key_grant wrap for this reader (key_grant_door on the recipient?)."
+    fi
+  elif [ "${at_b:-0}" -gt 0 ]; then
     echo "  NOT PROJECTED: the row IS in ${recip}'s directory and the route does not"
     echo "    return it. Look at collect_messages: it anchors on"
     echo "    active_community_members, so the roster and the author's membership"
@@ -1005,6 +1049,15 @@ DIAG_one_sided() {
 # ── evidence tail (always printed) ─────────────────────────────────────────
 harness_scenario_evidence() {
   _chat_load
+  # THE TIMELINE FIRST. Every event the chat arc depends on, across the three
+  # nodes, merged and time-sorted from the nodes' own logs: claim → announce →
+  # consent authored → converged → room installed in the scope-address table →
+  # KeyPackage / Welcome / message crossing the wire → key_grant projected →
+  # holds_bytes → the puller's outcome → the body opened or why not. A red rung
+  # reads its cause off this list; a green one shows the seconds it took.
+  echo "── timeline (UTC; node clocks = docker logs -t) ──"
+  harness_timeline "first-run ROOT claim|announce COMPLETE|consent authored by the node's OWNER|replication converged to [0-9]+ consent peers|replication kicked|room addresses in the scope-address table|scope-address table refused|CROSSING THE WIRE — sender=.*type=Chat|key_grant set admitted|key_grant row received with NO ENGINE|blob_swarm::pull: pull blob=.*outcome=|blob holder DROPPED|BlobChunkFetch received but no BlobChunkSource|holder retired for this fetch|room not keyed|handshake cannot complete|send refused|transcript is empty or partly unreadable|chat: message sent|chat: body opened|scoped destination did not establish" 2>/dev/null | sed 's/^/  /'
+  echo
   echo "· owners:      A=${CHAT_A_OWNER:-<none>}  B=${CHAT_B_OWNER:-<none>}"
   echo "· node keys:   A=${CHAT_A_NODE_KEY:-<none>}  B=${CHAT_B_NODE_KEY:-<none>}  canonical=${CHAT_CANON_NODE_KEY:-<none>}"
   echo "· community:   A=${CHAT_CID_A:-<none>}"

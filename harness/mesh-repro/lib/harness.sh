@@ -27,6 +27,13 @@
 #     because the whole point is that the union of a ladder's expected reds is a
 #     readable list of asks. A stage whose redness you cannot explain is a
 #     BREAK, not an XFAIL.
+#  7. A stage may be declared REQUIRED (`REQUIRED_<id>=1`). The verdict normally
+#     treats a red stage BELOW the highest green one as "proven by downstream
+#     evidence" — sound when a later rung cannot pass without it. It is NOT
+#     sound when a later rung measures a different fact: chat's `hamburger`
+#     (the row's identity) passed on every run while `arrived` (the row's BODY
+#     opens at the recipient) read 0, and the inference swallowed it for six
+#     releases. A REQUIRED stage that is red is a BREAK wherever it sits.
 
 set -euo pipefail
 
@@ -231,7 +238,9 @@ harness_has_xfail() {
 }
 
 harness_print_ladder() {
-  local out="  [ladder]" i=1 s
+  # Stamped so the samples read as a timeline against the nodes' own log
+  # times (UTC, same clock as `docker logs -t`).
+  local out="  [ladder $(date -u +%H:%M:%S)]" i=1 s
   for s in "${STAGES[@]}"; do
     out="$out $i.$s=${COUNT[$s]}"
     i=$((i+1))
@@ -317,10 +326,11 @@ harness_verdict() {
     # stage nobody has measured; it is a FALSE one for a stage we have declared
     # known-red, and letting it swallow the ⚠ would hide the very ask the marking
     # exists to publish — worst exactly when everything else has gone green.
+    req="REQUIRED_$s"
     if [ -n "${!xf:-}" ]; then
       echo "  ⚠ RED-EXPECTED at $s — ${!xf}"
       expected=$((expected+1))
-    elif [ "$((idx - 1))" -le "$hi" ]; then
+    elif [ "$((idx - 1))" -le "$hi" ] && [ -z "${!req:-}" ]; then
       continue
     elif [ -n "$first_break" ]; then
       # Downstream of a break already named. Reporting it as a second BROKEN AT
@@ -356,6 +366,30 @@ harness_verdict() {
   exit 4
 }
 
+
+# ── The timeline: what happened, on which node, when ─────────────────────────
+#
+# One merged, time-sorted list of the events a scenario names, read from
+# `docker logs -t` on every service, so a verdict is followed by the story
+# behind it rather than by a grep the reader has to run. `harness_timeline
+# <regex> [service…]` prints `HH:MM:SS.mmm  service  <line tail>` for every
+# matching line; ANSI stripped, the tracing span prefix dropped, the tail cut
+# to one terminal line. Scenarios pass the regex that names THEIR events (the
+# chat ladder passes the handshake, kick, install, serve and pull lines).
+harness_timeline() {
+  local pat="$1"; shift
+  local svcs=("$@")
+  [ "${#svcs[@]}" -eq 0 ] && svcs=($(compose ps --services 2>/dev/null))
+  local svc
+  for svc in "${svcs[@]}"; do
+    compose logs -t --no-log-prefix "$svc" 2>/dev/null \
+      | sed -E 's/\x1b\[[0-9;]*m//g' \
+      | grep -E "$pat" \
+      | sed -E "s/^([0-9-]+T)([0-9:.]{12})[0-9]*Z\s+\S+Z?\s*(INFO|WARN|ERROR|DEBUG)?\s*/\2  $svc  /" \
+      | sed -E 's/[a-z_]+\{[^}]*\}(:[a-z_]+\{[^}]*\})*: //' \
+      | cut -c1-230
+  done | sort -k1,1 | uniq
+}
 
 # ── CIRISServer#487 — printing the diagnostic that actually decides ──────────
 #

@@ -231,6 +231,157 @@ where
 /// CIRISServer#602 items 5–6). Returns `(None, None)` when the Engine has no
 /// SQLite/PostgreSQL backend to store blobs in, or no shared Edge handle yet —
 /// the runtime then runs as it did on v24, with no pulls.
+/// The server's [`BlobChunkSource`]: persist's gated peer-serve door for the
+/// bytes, and the blob's SCOPE answered from the row that references it.
+///
+/// `PersistBlobChunkSource::chunk_scope` is left `None` upstream on purpose —
+/// persist's blob columns carry a cohort scope but not the MLS group id the
+/// scope-native gate keys on, and edge refuses to guess. On a node that armed
+/// scope-native addressing (this one, `compose::build_edge`) `None` means every
+/// inbound `BlobChunkFetch` is `WITHHELD on scope admission — blob scope could
+/// not be determined` (0.5.213, the last rung under `arrived`): the bytes are
+/// held, the requester arrived on the room's own derived address, and the
+/// responder cannot say which room the bytes belong to.
+///
+/// The row knows. Every blob-backed body is referenced by an attestation whose
+/// pointer names `community_key_id` and `tier`, and edge's
+/// [`BlobMeaning::project`] is the ONE projection from that row to a
+/// [`ContentScope`] — the same one the PULLER runs to route the fetch. Serving
+/// through it means the two sides agree on the scope by construction; a
+/// second spelling here would be the axis-fusion this arc kept finding.
+///
+/// [`BlobChunkSource`]: ciris_edge::blob_swarm::BlobChunkSource
+/// [`BlobMeaning::project`]: ciris_edge::blob_swarm::BlobMeaning::project
+/// [`ContentScope`]: ciris_edge::blob_swarm::ContentScope
+pub(crate) struct ServerBlobChunkSource {
+    inner: ciris_edge::blob_swarm::PersistBlobChunkSource,
+    directory: Arc<dyn ciris_persist::federation::FederationDirectory>,
+    /// The blob store itself, for the community-DEK epoch binding — the
+    /// `(community, minter, epoch)` a sealed blob belongs to (persist #848 §17).
+    /// `None` only on a non-SQLite engine, where the meaning path still answers.
+    blobs: Option<Arc<ciris_persist::store::sqlite::SqliteBackend>>,
+}
+
+impl ServerBlobChunkSource {
+    pub(crate) fn new(engine: &Engine) -> Self {
+        Self {
+            inner: ciris_edge::blob_swarm::PersistBlobChunkSource::new(Engine::clone(engine))
+                .with_revocations(Some(revocation_register())),
+            directory: engine.federation_directory(),
+            blobs: engine.sqlite_backend().cloned(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
+    async fn read_chunk(
+        &self,
+        blob_sha256: [u8; 32],
+        chunk_sha256: [u8; 32],
+        requesting_peer_key_id: &str,
+    ) -> Result<Option<Vec<u8>>, ciris_edge::blob_swarm::ChunkSourceRefusal> {
+        self.inner
+            .read_chunk(blob_sha256, chunk_sha256, requesting_peer_key_id)
+            .await
+    }
+
+    /// Two readers, one answer, in this order:
+    ///
+    /// 1. **The bytes' own key identity.** A community-DEK blob carries its
+    ///    `(community, minter, epoch)` binding in persist (`community_dek_blob_
+    ///    epoch`, #848 §17) — a fact about which DEK sealed the bytes, present
+    ///    even when the referencing row is not held here. It projects to the
+    ///    SAME `ContentScope::Group { Cohort { community }, community }` the
+    ///    puller's `BlobMeaning` builds for a community pointer, spelled once
+    ///    there and copied here by shape, not by hand: a different group id on
+    ///    the serve side is a fetch that arrives on the right address and is
+    ///    refused as the wrong room.
+    /// 2. **A referencing row.** For a plaintext or self/family blob the
+    ///    binding table is silent; any attestation whose `evidence_refs`
+    ///    cites the sha projects through `BlobMeaning` (a `holds_bytes` claim
+    ///    is possession, not meaning, and `project` refuses it itself).
+    ///
+    /// `None` means the serve is WITHHELD on a scope-native node — the right
+    /// posture for bytes nothing this node holds can place in a room.
+    /// Declared, so a scope-native build is admitted (edge v27.0.0,
+    /// CIRISEdge#640): `chunk_scope` below answers from the blob's own
+    /// community-DEK binding and, failing that, a referencing row — never
+    /// `None` for bytes this node can place in a room.
+    fn answers_scope(&self) -> bool {
+        true
+    }
+
+    async fn chunk_scope(
+        &self,
+        blob_sha256: [u8; 32],
+    ) -> Option<ciris_edge::blob_swarm::ContentScope> {
+        use ciris_persist::federation::BlobStorage;
+        let sha_hex = hex::encode(blob_sha256);
+        if let Some(blobs) = self.blobs.as_ref() {
+            match blobs.community_dek_blob_epoch(&blob_sha256).await {
+                Ok(Some((community, _minter, epoch))) => {
+                    tracing::debug!(
+                        blob = %sha_hex,
+                        community = %community,
+                        epoch,
+                        "blob chunk source: scope from the bytes' community-DEK binding"
+                    );
+                    return Some(ciris_edge::blob_swarm::ContentScope::Group {
+                        scope: ciris_edge::cohort_scope::CohortScope::Cohort {
+                            cohort_id: community.clone(),
+                        },
+                        group_id: community,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    blob = %sha_hex,
+                    error = %e,
+                    "blob chunk source: the community-DEK binding could not be read"
+                ),
+            }
+        }
+        let rows = match self.directory.attestations_binding_content(&sha_hex).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    blob = %sha_hex,
+                    error = %e,
+                    "blob chunk source: the rows referencing this blob could not be read — \
+                     scope undeterminable, the serve will be withheld"
+                );
+                return None;
+            }
+        };
+        for row in &rows {
+            if let Ok(meaning) = ciris_edge::blob_swarm::BlobMeaning::project(row, &blob_sha256) {
+                return Some(meaning.scope().clone());
+            }
+        }
+        tracing::warn!(
+            blob = %sha_hex,
+            referencing_rows = rows.len(),
+            "blob chunk source: no community-DEK binding and no referencing row projects a \
+             scope for this blob — scope undeterminable, the serve will be withheld (a \
+             holds_bytes claim alone is possession, not meaning)"
+        );
+        None
+    }
+}
+
+/// The process-wide serve/apply revocation register (CIRISEdge#606). Built on
+/// first use; the edge's blob-chunk source is wired at `Edge::builder()` time,
+/// before the puller exists, so both reach it through this accessor.
+pub(crate) fn revocation_register() -> Arc<ciris_edge::blob_swarm::RevocationRegister> {
+    static REGISTER: std::sync::OnceLock<Arc<ciris_edge::blob_swarm::RevocationRegister>> =
+        std::sync::OnceLock::new();
+    Arc::clone(
+        REGISTER
+            .get_or_init(|| Arc::new(ciris_edge::blob_swarm::RevocationRegister::new(1024, 256))),
+    )
+}
+
 pub async fn spawn_blob_puller(
     engine: &Arc<Engine>,
     edge: Arc<ciris_edge::Edge>,
@@ -270,7 +421,7 @@ where
         + 'static,
 {
     use ciris_edge::blob_swarm::store_gate::{ConsentDisposition, OperatorStoreConsent};
-    use ciris_edge::blob_swarm::{BlobPuller, PullConfig, RevocationRegister};
+    use ciris_edge::blob_swarm::{BlobPuller, PullConfig};
     use ciris_edge::replication::RevocationWiring;
 
     // The Edge compose holds — never the process-global handle. The standalone
@@ -296,7 +447,11 @@ where
         local_key_id,
         config,
     );
-    let register = Arc::new(RevocationRegister::new(1024, 256));
+    // ONE register per process: the apply path writes withdrawals here and the
+    // serve door (`PersistBlobChunkSource::with_revocations`, wired in
+    // `compose::build_edge`) reads it. Two registers would let a withdrawn blob
+    // keep being served — CIRISEdge#606's exact defect, one Arc away.
+    let register = revocation_register();
     let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = backend;
     tracing::info!(
         local_key_id,
