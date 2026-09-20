@@ -89,8 +89,21 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// producer-chosen wall clock. Reviewed and accepted — the key lives only inside
 /// the signed envelope, so it has no unsigned column twin to diverge from, which
 /// is why persist shipped it with no migration.
+///
+/// Re-pinned at the v45 adopt (0.5.213): persist v45.0.0 (CIRISPersist#871, CC
+/// 3.3.13 / CIRISConstitution#104 rc5) added the typed `media` member — the
+/// multimedia Source struct (`digest`, REQUIRED `size`, RFC 6838 `format`,
+/// `codec`, dimensions, `placeholder`, `name`, `content_digest`,
+/// `derived_from`, `captions`, `digital_source_type`, `init_segment`),
+/// refused by member name at every door — and made `size` REQUIRED on every
+/// `holds_bytes` holder claim (a puller caps its read before it hashes,
+/// AV-88/89). Reviewed and accepted: the server emits no `media` member yet
+/// (CIRISServer#614 will), its bare `analyze` / `share` / `view` tokens and
+/// every envelope key it spells through `paths::*` are unchanged, and the
+/// holder claims it relies on are minted by persist's own blob doors, which
+/// now carry the stored length. `e7135559…` → `4d7054a6…`.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "e7135559a3d843ecff3ad34ee3b1a10acf92b33f199a327758139969e19f5699";
+    "4d7054a6e05306e7b37d30ab2d25c43625a4f382021f39191f55a2c1f833589b";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 
