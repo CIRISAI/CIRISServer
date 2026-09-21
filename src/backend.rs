@@ -286,7 +286,8 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
             .await
     }
 
-    /// Two readers, one answer, in this order:
+    /// **The binding first, a referencing row second** — two readers, one
+    /// answer, and the order is the point:
     ///
     /// 1. **The bytes' own key identity.** A community-DEK blob carries its
     ///    `(community, minter, epoch)` binding in persist (`community_dek_blob_
@@ -297,10 +298,21 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
     ///    there and copied here by shape, not by hand: a different group id on
     ///    the serve side is a fetch that arrives on the right address and is
     ///    refused as the wrong room.
-    /// 2. **A referencing row.** For a plaintext or self/family blob the
-    ///    binding table is silent; any attestation whose `evidence_refs`
-    ///    cites the sha projects through `BlobMeaning` (a `holds_bytes` claim
-    ///    is possession, not meaning, and `project` refuses it itself).
+    /// 2. **A referencing row** — THE FALLBACK, for the tiers (1) does not
+    ///    cover. A plaintext or self/family blob has no community-DEK binding,
+    ///    so any attestation whose `evidence_refs` cites the sha projects
+    ///    through `BlobMeaning` (a `holds_bytes` claim is possession, not
+    ///    meaning, and `project` refuses it itself).
+    ///
+    ///    Worth knowing what this arm could NOT do until recently: it reads
+    ///    `attestations_binding_content`, and a chat row did not cite its blob
+    ///    in `evidence_refs` before CIRISEdge#646 — so for chat this arm was
+    ///    dead and (1) answered every time (the 2026-09-20 ladder logged
+    ///    `scope from the bytes' community-DEK binding`, and the serve
+    ///    happened). Now both answer for chat and must agree. Summarising this
+    ///    function as "project over a referencing row" — which I did, to edge,
+    ///    on CIRISEdge#640 — describes the fallback and not the mechanism; the
+    ///    binding is what makes a community blob servable.
     ///
     /// `None` means the serve is WITHHELD on a scope-native node — the right
     /// posture for bytes nothing this node holds can place in a room.
