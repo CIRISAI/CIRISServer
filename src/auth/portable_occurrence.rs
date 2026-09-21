@@ -552,12 +552,24 @@ async fn open_hardware_authorizer(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if pqc_name == "usb" && usb_dir.is_none() {
-        return Err(bad(
-            "pqc:\"usb\" needs mldsa_usb_dir — the folder holding the ML-DSA-65 seed \
-             wrapped under this token's own signature. Nothing was asked of the token"
-                .into(),
-        ));
+    if pqc_name == "usb" {
+        let Some(dir) = usb_dir else {
+            return Err(bad(
+                "pqc:\"usb\" needs mldsa_usb_dir — the folder holding the ML-DSA-65 seed \
+                 wrapped under this token's own signature. Nothing was asked of the token"
+                    .into(),
+            ));
+        };
+        // The PATH too, not just the string: an unmounted stick or a typo would
+        // otherwise be discovered after the token had been opened and a PIN
+        // attempt spent (Codex review on PR #620). The directory arm and the
+        // accord path both check this before they touch anything.
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(bad(format!(
+                "mldsa_usb_dir is not a directory: {dir} — insert the USB key and name its \
+                 folder. Nothing was asked of the token"
+            )));
+        }
     }
 
     // ── the CLASSICAL half ──────────────────────────────────────────────────
@@ -580,6 +592,19 @@ async fn open_hardware_authorizer(
             };
             match crate::identity::open_yubikey_ed25519_signer(opts) {
                 Ok(s) => Arc::from(s),
+                // A build without the `pkcs11` feature cannot open ANY token, which
+                // is a property of the server, not of the request: 501, exactly as
+                // the accord endpoints answer and as this route answered before
+                // #618. Anything else is the operator's to fix: 400.
+                Err(e) if e.to_string().contains("not supported") => {
+                    return Err(Box::new(http_err(
+                        StatusCode::NOT_IMPLEMENTED,
+                        format!(
+                            "this server was built without the `pkcs11` feature, so it cannot \
+                             open a hardware token: {e}"
+                        ),
+                    )))
+                }
                 Err(e) => {
                     return Err(bad(format!(
                         "could not open the token's PIV key for {key_id}: {e} — check the \
@@ -607,6 +632,20 @@ async fn open_hardware_authorizer(
         "software" => {
             let backend = crate::identity::UserIdentityBackend::Software;
             let seed_dir = pqc_or_seed_dir(req, cfg);
+            // EXISTENCE FIRST. `open_user_signer` delegates software custody to
+            // `open_software_ed25519_signer`, which MINTS a random seed when the
+            // file is absent — `create: false` does not reach it. A path meant to
+            // PROVE possession must never manufacture the thing it is proving
+            // (Codex review on PR #620); without this, a typo'd key_id would
+            // silently enrol a brand-new identity and leave an orphan seed.
+            let seed_path = seed_dir.join(format!("{key_id}.ed25519.seed"));
+            if !seed_path.is_file() {
+                return Err(bad(format!(
+                    "no software Ed25519 seed for {key_id} at {} — this arm opens an existing \
+                     key, it never mints one",
+                    seed_path.display()
+                )));
+            }
             let ucfg = crate::identity::user_identity_config(&backend, key_id, seed_dir.clone());
             match crate::identity::open_user_signer(&backend, &ucfg, false) {
                 Ok(s) => Arc::from(s),
@@ -697,18 +736,36 @@ async fn open_hardware_authorizer(
 }
 
 /// `"<classical>+<pqc>"` — what actually authorized, for the log and the
-/// response. Derived from the SAME defaults the opener applies, so the label
-/// cannot claim a custody the opener did not use.
-fn hardware_custody_label(req: &AssociateRequest) -> String {
-    let classical = req.classical.as_deref().map_or("yubikey", str::trim);
-    let pqc = req.pqc.as_deref().map(str::trim).unwrap_or({
+/// response.
+///
+/// Taken from the OPENED signers, not the request's words. `PlatformSealed`
+/// degrades to encrypted software when no TPM/SE is present — documented and
+/// tested in `identity.rs` — so echoing `"tpm"` back would report a
+/// software-custodied enrolment as hardware-backed, in the log and on the
+/// wire, which is the one thing this field exists to prevent (Codex review on
+/// PR #620). `hardware_type()` is exposed for exactly this question; the
+/// requested names only fill in what it cannot distinguish (a USB-wrapped PQC
+/// half and a locally-sealed one are both "sealed" to it).
+fn hardware_custody_label(
+    req: &AssociateRequest,
+    id: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
+) -> String {
+    let asked_classical = req.classical.as_deref().map_or("yubikey", str::trim);
+    let asked_pqc = req.pqc.as_deref().map(str::trim).unwrap_or({
         if req.mldsa_usb_dir.is_some() {
             "usb"
         } else {
             "tpm"
         }
     });
-    format!("{classical}+{pqc}")
+    // What the classical signer says it IS. A token reports a hardware type; a
+    // sealed seed that fell back to software reports SoftwareOnly, and then the
+    // label says `software` however the request was spelled.
+    let actual_classical = match id.hardware_type() {
+        ciris_keyring::HardwareType::SoftwareOnly => "software",
+        _ => asked_classical,
+    };
+    format!("{actual_classical}+{asked_pqc}")
 }
 
 /// Where a `tpm` / `software` half is read from: the caller's `seed_dir` when
@@ -808,10 +865,15 @@ async fn associate_handler(
     let (authorizer, custody): (
         Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
         String,
-    ) = if req.yubikey || req.classical.is_some() {
+    ) = if req.yubikey
+        || req.classical.is_some()
+        || req.pqc.is_some()
+        || req.mldsa_usb_dir.is_some()
+        || (req.key_id.is_some() && req.source_dir.is_none())
+    {
         match open_hardware_authorizer(&req, &st.cfg).await {
             Ok(id) => {
-                let label = hardware_custody_label(&req);
+                let label = hardware_custody_label(&req, &id);
                 (
                     Box::new(id) as Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
                     label,
@@ -1132,30 +1194,44 @@ mod custody_matrix_tests {
         );
     }
 
-    /// The label the response reports is derived from the SAME defaults the
-    /// opener applies, so it cannot claim a custody that was not used.
-    #[test]
-    fn the_custody_label_follows_the_openers_own_defaults() {
-        let token_and_host = AssociateRequest {
+    /// The label reports what the SIGNERS are, not what the request said. A
+    /// software-backed classical half labels `software+…` however it was asked
+    /// for — `PlatformSealed` silently degrades to encrypted software with no
+    /// TPM present, and reporting that as `tpm` would make a software-custodied
+    /// enrolment look hardware-backed in the log and on the wire (Codex review
+    /// on PR #620).
+    #[tokio::test]
+    async fn the_custody_label_reports_the_signer_not_the_request() {
+        use std::sync::Arc;
+
+        use ciris_keyring::{Ed25519SoftwareSigner, MlDsa65SoftwareSigner};
+
+        let ed: Arc<dyn ciris_keyring::HardwareSigner> =
+            Arc::new(Ed25519SoftwareSigner::from_bytes(&[7u8; 32], "label-test").expect("ed"));
+        let mldsa: Arc<dyn ciris_keyring::PqcSigner> = Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[9u8; 32], "label-test").expect("pqc"),
+        );
+        let id = ciris_verify_core::self_at_login::HardwareRootedIdentity::new("k", ed, mldsa)
+            .expect("compose");
+
+        // Asked for a token; the signer says software. The label says software.
+        let asked_token = AssociateRequest {
             yubikey: true,
             key_id: Some("k".into()),
             ..AssociateRequest::default()
         };
-        assert_eq!(hardware_custody_label(&token_and_host), "yubikey+tpm");
+        assert_eq!(hardware_custody_label(&asked_token, &id), "software+tpm");
 
-        let token_and_usb = AssociateRequest {
+        // The PQC side still follows the request, because `hardware_type()`
+        // cannot tell a USB-wrapped half from a locally-sealed one — both are
+        // "sealed" to it — and the request is the only thing that distinguishes
+        // them. Stated here so the asymmetry is deliberate rather than noticed.
+        let asked_usb = AssociateRequest {
             yubikey: true,
             key_id: Some("k".into()),
             mldsa_usb_dir: Some("/media/usb".into()),
             ..AssociateRequest::default()
         };
-        assert_eq!(hardware_custody_label(&token_and_usb), "yubikey+usb");
-
-        let all_local = AssociateRequest {
-            classical: Some("tpm".into()),
-            key_id: Some("k".into()),
-            ..AssociateRequest::default()
-        };
-        assert_eq!(hardware_custody_label(&all_local), "tpm+tpm");
+        assert_eq!(hardware_custody_label(&asked_usb, &id), "software+usb");
     }
 }
