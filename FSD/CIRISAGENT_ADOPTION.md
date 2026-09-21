@@ -410,7 +410,7 @@ Nothing changes in what you call. What changes underneath:
 - A **hardware-custodied owner** (no software seed on the node) is refused,
   not downgraded to a machine key; the 2-phase client-signed door is not wired.
 
-**0.5.213 (edge v29.0.0 / persist v46.0.0 / verify v15.2.0) — the round finally
+**0.5.213 (edge v29.1.0 / persist v46.1.0 / verify v15.2.0) — the round finally
 serves.** Still nothing changes in what you call. What changed underneath, and
 what to expect on a fleet that crosses it:
 - **Why every agent read `held 0` through 0.5.212.** Four layers, found in
