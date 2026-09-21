@@ -876,6 +876,26 @@ async fn associate_handler(
         }
     };
 
+    // THE DEVICE CUSTODY IS PARSED FIRST. A typo like `device:"tpn"` used to be
+    // discovered after the authorizer had been opened — a YubiKey PIN and touch
+    // spent, and for an unknown identity a self-signed record already registered
+    // into the federation directory — before answering 400 (Codex review on
+    // PR #620). Nothing is opened, signed or written until every argument has
+    // been read.
+
+    let device_custody = match req.device.as_deref().map(str::trim) {
+        None | Some("software") => crate::identity::DeviceCustody::Software,
+        Some("tpm" | "platform-sealed" | "platform_sealed") => {
+            crate::identity::DeviceCustody::PlatformSealed
+        }
+        Some(other) => {
+            return http_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown device custody {other:?} — use tpm | software"),
+            )
+        }
+    };
+
     // ── (1+2) WHICH identity, and PROVE possession of it ────────────────────
     //
     // Two custodies, one authorization. Both arms end at a `&dyn SelfSigner`
@@ -995,18 +1015,6 @@ async fn associate_handler(
     // both custodies and is what a second device under the same identity reads
     // as, which is the point of the name.
     let device_alias = format!("{}-device-{}", slug(&supplied_key_id), short_unique());
-    let device_custody = match req.device.as_deref().map(str::trim) {
-        None | Some("software") => crate::identity::DeviceCustody::Software,
-        Some("tpm" | "platform-sealed" | "platform_sealed") => {
-            crate::identity::DeviceCustody::PlatformSealed
-        }
-        Some(other) => {
-            return http_err(
-                StatusCode::BAD_REQUEST,
-                format!("unknown device custody {other:?} — use tpm | software"),
-            )
-        }
-    };
     let keyset = match crate::identity::mint_local_device_occurrence_with(
         &dest_dir,
         &device_alias,
@@ -1031,7 +1039,14 @@ async fn associate_handler(
         &st.engine,
         &identity_key_id,
         &keyset.key_id,
-        "portable_software",
+        // `laptop`, from persist's CLOSED set (§5.6.8.8:
+        // phone|laptop|server|embedded|agent|service). This passed
+        // `"portable_software"` — not in the set — so `check_device_class`
+        // refused and the route answered 500 AFTER minting and registering the
+        // occurrence key, leaving an orphan. Latent on main and untested end to
+        // end; the response object next to it had already been corrected to
+        // `laptop` and the bind was left behind (Codex review on PR #620).
+        crate::auth::occurrence::DEVICE_CLASS_LAPTOP,
         None,
         keyset.encryption_pubkeys.clone(),
         Some(keyset.key_record.clone()),
@@ -1086,9 +1101,14 @@ async fn associate_handler(
             // classical half is sealed to this host with no seed at rest;
             // `software` means a seed file. Reported because "enrolled" says
             // nothing about what the enrolled key is (CIRISServer#621).
-            "device_custody": match device_custody {
-                crate::identity::DeviceCustody::PlatformSealed => "tpm",
-                crate::identity::DeviceCustody::Software => "software",
+            "device_custody": match keyset.device_hardware_type {
+                // What the SEAL is, not what was asked for:
+                // `SealedEd25519Signer::open_or_create` falls back to encrypted
+                // software where there is no TPM/SE, and reporting `tpm` anyway
+                // would let an audit log call a software-custodied occurrence
+                // hardware-backed (Codex review on PR #620).
+                Some(ciris_keyring::HardwareType::SoftwareOnly) | None => "software",
+                Some(_) => "tpm",
             },
             // The wire contract keeps this key; it now names what was MINTED here
             // rather than what was copied, and copying is no longer a thing that

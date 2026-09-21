@@ -238,6 +238,25 @@ pub struct MintedUserIdentity {
 /// rather than re-minting, CIRISVerify#134). A dedicated home is supposed to be
 /// a dedicated identity; now it is.
 ///
+/// # What this does NOT reach: a NEWLY MINTED user identity
+///
+/// `create_federation_identity` seals the ML-DSA half itself, into the global
+/// `keys_dir()`, with no parameter for where (CIRISVerify#285). That happens
+/// before any code here runs, so a fresh mint writes globally and the resolver
+/// below then finds that marker and keeps using it — correctly, because the
+/// alternative is minting a second PQC half for a live identity. So today:
+///
+/// - a DEVICE occurrence (`mint_local_device_occurrence_with`) is fully
+///   home-scoped — it does not go through `create_federation_identity`, and
+///   both halves land in this home;
+/// - a newly minted USER identity still seals globally until CIRISVerify#285
+///   takes a directory. `--home` isolates its database, config, logs and
+///   Ed25519 seed; its post-quantum half is shared with every other home on
+///   the machine, keyed by alias.
+///
+/// Stated here rather than discovered: an operator who reads "dedicated home,
+/// dedicated identity" deserves to know which half that is not true of yet.
+///
 /// # The fallback is deliberate, and it never re-mints
 ///
 /// An identity sealed before this change lives in the legacy directory. When
@@ -634,6 +653,12 @@ pub async fn mint_user_identity(
 /// BOTH halves to the target directory so the keyset is genuinely portable to
 /// another device — the explicitly-accepted INSECURE software trade-off.
 pub struct PortableSoftwareKeyset {
+    /// CIRISServer#621 — what the DEVICE key's classical half actually is, when
+    /// this keyset was minted with [`DeviceCustody::PlatformSealed`]. `None` for
+    /// a software keyset (nothing was sealed) — and never the REQUESTED custody:
+    /// `SealedEd25519Signer::open_or_create` falls back to encrypted software
+    /// where there is no TPM/SE, so this carries the seal's own answer.
+    pub device_hardware_type: Option<ciris_keyring::HardwareType>,
     /// The derived federation `key_id` (`derive_key_id(alias, ed_pub)`).
     pub key_id: String,
     /// The keystore **alias** the seeds are named/keyed under (`derive_key_id`'s
@@ -857,6 +882,7 @@ pub async fn mint_portable_software_occurrence(
         .with_context(|| format!("write {}", marker_path.display()))?;
 
     Ok(PortableSoftwareKeyset {
+        device_hardware_type: None,
         key_id,
         alias: alias.to_string(),
         fedcode,
@@ -942,6 +968,7 @@ pub async fn mint_local_device_occurrence_with(
     use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
 
     let mut keyset = mint_portable_software_occurrence(seed_dir, alias).await?;
+    let mut sealed_hardware_type: Option<ciris_keyring::HardwareType> = None;
 
     let raw_pqc = seed_dir.join(portable_mldsa_seed_name(alias));
     let seed_bytes = zeroize::Zeroizing::new(
@@ -975,9 +1002,25 @@ pub async fn mint_local_device_occurrence_with(
             zeroize::Zeroizing::new(<[u8; 32]>::try_from(ed_bytes.as_slice()).map_err(|_| {
                 anyhow::anyhow!("freshly-minted Ed25519 seed is not 32 bytes — refusing to seal")
             })?);
-        SealedEd25519Signer::open_or_create(alias, &keys_dir, Some(&*ed32)).map_err(|e| {
-            anyhow::anyhow!("seal this device's own Ed25519 half under {alias}: {e}")
-        })?;
+        // INTO `seed_dir`, NOT `keys_dir`. The two halves have two resolvers and
+        // they look in different places: `open_user_signer(PlatformSealed)` opens
+        // the Ed25519 seal from `UserIdentityConfig.seed_dir`
+        // (`<home>/identity/user`), while the PQC half is re-opened from
+        // `sealed_keys_dir_for` (`<home>/identity/keys`). Sealing the classical
+        // half into the PQC store would leave the resolver with nothing to open —
+        // an enrolment that reports success and hands back an occurrence that
+        // cannot sign, after the raw seed has already been deleted (Codex review
+        // on PR #620). Both are home-scoped; each goes where its own re-open
+        // looks.
+        let sealed =
+            SealedEd25519Signer::open_or_create(alias, seed_dir, Some(&*ed32)).map_err(|e| {
+                anyhow::anyhow!("seal this device's own Ed25519 half under {alias}: {e}")
+            })?;
+        // What the seal ACTUALLY is: `open_or_create` falls back to encrypted
+        // software where there is no TPM/SE, and a response that reported `tpm`
+        // regardless would let an audit log call a software-custodied occurrence
+        // hardware-backed.
+        sealed_hardware_type = Some(ciris_keyring::HardwareSigner::hardware_type(&sealed));
         std::fs::remove_file(&raw_ed).with_context(|| {
             format!(
                 "remove the raw Ed25519 seed {} after sealing",
@@ -1003,6 +1046,7 @@ pub async fn mint_local_device_occurrence_with(
     }
     // Remove the raw half ONLY after the seal round-trips — a failed seal must not
     // leave the device with neither copy.
+    keyset.device_hardware_type = sealed_hardware_type;
     std::fs::remove_file(&raw_pqc)
         .with_context(|| format!("remove the raw pqc seed {}", raw_pqc.display()))?;
     keyset
