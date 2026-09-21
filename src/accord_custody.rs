@@ -35,13 +35,28 @@
 //!
 //! ## Why the YubiKey signer is caller-supplied
 //!
-//! Opening the real FIPS YubiKey PIV token as a `HardwareSigner` is **blocked
-//! on CIRISVerify#62** (`get_token_signer` is stubbed `NotSupported`). So this
-//! function takes the Ed25519 `HardwareSigner` as a parameter rather than
-//! opening the token itself: a software stand-in
-//! ([`ciris_keyring::Ed25519SoftwareSigner`]) today, the real FIPS YubiKey
-//! once #62 ships. The rest of the flow — USB wrap, identity, holder record,
-//! custody attestation — is the real path and does not change.
+//! This function takes the Ed25519 `HardwareSigner` as a parameter rather than
+//! opening the token itself, so the SAME code path serves the production route
+//! and the unit tests without a branch on custody.
+//!
+//! **The production caller passes the real token.**
+//! [`crate::accord_provision`]'s `POST /v1/accord/provision-holder` opens it
+//! with [`crate::identity::open_yubikey_ed25519_signer`] →
+//! `UserIdentityBackend::Pkcs11` → keyring `pkcs11::open_pkcs11_signer` →
+//! `Pkcs11Signer::open`: real `cryptoki`, `C_Sign` on the token, under the
+//! `pkcs11` feature that is in this crate's DEFAULT set. That is the backend
+//! the six-key ceremony ran on physical YubiKey 5 FIPS hardware. Only the unit
+//! test below passes [`ciris_keyring::Ed25519SoftwareSigner`], which is what a
+//! test on a box with no reader must do.
+//!
+//! This paragraph used to say the opener was "blocked on CIRISVerify#62
+//! (`get_token_signer` is stubbed `NotSupported`)" — true of
+//! `hw_token::get_token_signer`, which **nothing calls**: zero callers in
+//! server, verify, persist or edge. #62 closed 2026-06-18 and the real opener
+//! shipped under a different name the same week, so the comment described a
+//! path the code never took and read as "this runs on a software stand-in".
+//! It misled a review on 2026-09-21. A stale comment beside a live call is the
+//! mirrored-rule class: trace the call, do not read the prose.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,8 +97,11 @@ pub struct ProvisionedHolder {
 /// 4. Produce the `portable_2fa` custody attestation from the YubiKey PIV
 ///    attestation chain.
 ///
-/// `yubikey_ed` is the Ed25519 `HardwareSigner` (a software stand-in today; the
-/// real FIPS YubiKey once CIRISVerify#62 ships `get_token_signer`).
+/// `yubikey_ed` is the Ed25519 `HardwareSigner` for the holder's PIV slot. The
+/// production caller (`POST /v1/accord/provision-holder`) opens the REAL token
+/// through [`crate::identity::open_yubikey_ed25519_signer`] (keyring
+/// `pkcs11::open_pkcs11_signer`, `C_Sign` on-device); the unit test below
+/// passes a software signer because CI has no reader. See the module doc.
 /// `attestation_9c_der` is the slot-9c PIV attestation certificate (DER);
 /// `attestation_chain_ders` is its issuing chain (DER, leaf-to-root order).
 ///
@@ -136,8 +154,12 @@ mod tests {
 
     #[tokio::test]
     async fn provision_portable_holder_roundtrips_software_standin() {
-        // Software stand-in for the FIPS YubiKey (the real token open is
-        // CIRISVerify#62-gated). `from_bytes` requires a 32-byte seed.
+        // Software stand-in for the FIPS YubiKey — because CI has no PC/SC
+        // reader, NOT because the real open is unavailable: production opens
+        // the token through `identity::open_yubikey_ed25519_signer` (real
+        // cryptoki `C_Sign`). This test covers the wrap → identity → holder
+        // record → custody attestation chain, which is signer-agnostic by
+        // construction. `from_bytes` requires a 32-byte seed.
         let ed: Arc<dyn HardwareSigner> = Arc::new(
             Ed25519SoftwareSigner::from_bytes(&[0x42; 32], "accord-holder-portable").unwrap(),
         );
