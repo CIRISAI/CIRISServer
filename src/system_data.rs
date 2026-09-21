@@ -124,6 +124,10 @@ fn data_paths(cfg: &ServerConfig) -> Vec<std::path::PathBuf> {
 fn key_paths(cfg: &ServerConfig) -> Vec<std::path::PathBuf> {
     vec![
         cfg.identity_dir.clone(),
+        // BOTH stores: this home's (CIRISServer#621) and the legacy global one,
+        // because an identity sealed before the home-scoping still lives there
+        // and a data export that misses it exports an identity that cannot sign.
+        cfg.identity_dir.join("keys"),
         ciris_verify_core::ceg_outbox::keys_dir(),
     ]
 }

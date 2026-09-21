@@ -413,6 +413,17 @@ struct AssociateRequest {
     /// laptop case, and `usb` is the portable high-secure one.
     #[serde(default)]
     pqc: Option<String>,
+    /// The custody of the DEVICE key this enrolment MINTS — `tpm` seals its
+    /// classical half to this host (nothing at rest in the clear), `software`
+    /// writes a seed file. Default `software`, which is today's behaviour; see
+    /// `identity::DeviceCustody` for why `tpm` is not yet the default.
+    ///
+    /// Independent of every field above: those say who AUTHORIZES, this says
+    /// what the device will hold afterwards. A manager-client enrolled from a
+    /// portable keypair on a USB stick wants `device: "tpm"` — the authorizing
+    /// keypair stays on the stick, the key this host acts with is sealed here.
+    #[serde(default)]
+    device: Option<String>,
     /// Hardware shape: where a `tpm` / `software` half lives. Defaults to THIS
     /// home's user-seed directory (`<home>/identity/user`), which is what makes
     /// a dedicated `--home` a dedicated identity: the TPM-sealed master is
@@ -492,7 +503,13 @@ fn open_directory_authorizer(
 async fn open_hardware_authorizer(
     req: &AssociateRequest,
     cfg: &ServerConfig,
-) -> Result<ciris_verify_core::self_at_login::HardwareRootedIdentity, Box<Response>> {
+) -> Result<
+    (
+        ciris_verify_core::self_at_login::HardwareRootedIdentity,
+        String,
+    ),
+    Box<Response>,
+> {
     use std::sync::Arc;
 
     use ciris_keyring::PqcSigner;
@@ -571,6 +588,57 @@ async fn open_hardware_authorizer(
             )));
         }
     }
+
+    // ── the POST-QUANTUM half, WHEN IT DOES NOT NEED THE TOKEN ──────────────
+    //
+    // `tpm` and `software` read local material and depend on nothing the token
+    // provides, so they are resolved BEFORE it is opened: a missing or corrupt
+    // local half would otherwise cost a PIN interaction to discover, for a
+    // request that was going to fail either way (Codex review on PR #620). Only
+    // `usb` is ordered after the classical open, because its wrap key IS the
+    // token's signature.
+    let local_mldsa: Option<Arc<dyn PqcSigner>> = if pqc_name == "usb" {
+        None
+    } else {
+        Some(match pqc_name {
+            "tpm" | "platform-sealed" | "platform_sealed" => {
+                let seed_dir = pqc_or_seed_dir(req, cfg);
+                match ciris_keyring::get_platform_sealed_mldsa65_signer(key_id, seed_dir.clone()) {
+                    Ok(s) => Arc::from(s),
+                    Err(e) => {
+                        return Err(bad(format!(
+                            "no TPM/SE-sealed ML-DSA-65 for {key_id} in {}: {e} — a token carries \
+                         the classical half only, so the post-quantum half must be sealed on \
+                         this host (pqc:\"tpm\"), wrapped on a USB (pqc:\"usb\" + \
+                         mldsa_usb_dir), or a seed file (pqc:\"software\"). It is never \
+                         derived from the token, and enrolling without it would register a \
+                         classical-only identity that verify refuses",
+                            seed_dir.display()
+                        )))
+                    }
+                }
+            }
+            "software" => {
+                let seed_dir = pqc_or_seed_dir(req, cfg);
+                let path = seed_dir.join(format!("{key_id}.mldsa65.seed"));
+                match ciris_keyring::MlDsa65SoftwareSigner::from_seed_file(path.clone(), key_id) {
+                    Ok(s) => Arc::new(s) as Arc<dyn PqcSigner>,
+                    Err(e) => {
+                        return Err(bad(format!(
+                            "no ML-DSA-65 seed file at {}: {e}",
+                            path.display()
+                        )))
+                    }
+                }
+            }
+            // Unreachable: checked above, before anything was touched.
+            other => {
+                return Err(bad(format!(
+                    "unknown pqc custody {other:?} — use usb | tpm | software"
+                )))
+            }
+        })
+    };
 
     // ── the CLASSICAL half ──────────────────────────────────────────────────
     let ed: Arc<dyn ciris_keyring::HardwareSigner> = match classical_name {
@@ -667,11 +735,10 @@ async fn open_hardware_authorizer(
 
     // ── the POST-QUANTUM half ───────────────────────────────────────────────
     //
-    // Defaulted to `usb` ONLY when a usb dir was named, and to `tpm` otherwise:
-    // a token user who says nothing almost always means "the sealed half is on
-    // this host", and a wrong guess here is a clear refusal, never a downgrade.
-    let mldsa: Arc<dyn PqcSigner> = match pqc_name {
-        "usb" => {
+    // ── the POST-QUANTUM half, WHEN IT DOES need the token ──────────────────
+    let mldsa: Arc<dyn PqcSigner> = match local_mldsa {
+        Some(m) => m,
+        None => {
             let usb = usb_dir.unwrap_or_default();
             match ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer::open(
                 ed.as_ref(),
@@ -690,82 +757,36 @@ async fn open_hardware_authorizer(
                 }
             }
         }
-        "tpm" | "platform-sealed" | "platform_sealed" => {
-            let seed_dir = pqc_or_seed_dir(req, cfg);
-            match ciris_keyring::get_platform_sealed_mldsa65_signer(key_id, seed_dir.clone()) {
-                Ok(s) => Arc::from(s),
-                Err(e) => {
-                    return Err(bad(format!(
-                        "no TPM/SE-sealed ML-DSA-65 for {key_id} in {}: {e} — a token carries \
-                         the classical half only, so the post-quantum half must be sealed on \
-                         this host (pqc:\"tpm\"), wrapped on a USB (pqc:\"usb\" + \
-                         mldsa_usb_dir), or a seed file (pqc:\"software\"). It is never \
-                         derived from the token, and enrolling without it would register a \
-                         classical-only identity that verify refuses",
-                        seed_dir.display()
-                    )))
-                }
-            }
-        }
-        "software" => {
-            let seed_dir = pqc_or_seed_dir(req, cfg);
-            let path = seed_dir.join(format!("{key_id}.mldsa65.seed"));
-            match ciris_keyring::MlDsa65SoftwareSigner::from_seed_file(path.clone(), key_id) {
-                Ok(s) => Arc::new(s) as Arc<dyn PqcSigner>,
-                Err(e) => {
-                    return Err(bad(format!(
-                        "no ML-DSA-65 seed file at {}: {e}",
-                        path.display()
-                    )))
-                }
-            }
-        }
-        // Unreachable: checked above, before the token was touched.
-        other => {
-            return Err(bad(format!(
-                "unknown pqc custody {other:?} — use usb | tpm | software"
-            )))
-        }
     };
 
-    HardwareRootedIdentity::new(key_id, ed, mldsa).map_err(|e| {
+    // THE LABEL COMES FROM BOTH SIGNERS, not from the request's words. A sealed
+    // half falls back to encrypted software where there is no TPM/SE and says
+    // so through `hardware_type()`; echoing the request would report
+    // software-custodied material as `tpm` in the log and on the wire (Codex
+    // review on PR #620, twice — once per half).
+    let label = format!(
+        "{}+{}",
+        custody_word(ed.hardware_type(), classical_name),
+        custody_word(mldsa.hardware_type(), pqc_name)
+    );
+
+    let id = HardwareRootedIdentity::new(key_id, ed, mldsa).map_err(|e| {
         bad(format!(
             "compose the hardware-rooted identity for {key_id}: {e}"
         ))
-    })
+    })?;
+    Ok((id, label))
 }
 
-/// `"<classical>+<pqc>"` — what actually authorized, for the log and the
-/// response.
-///
-/// Taken from the OPENED signers, not the request's words. `PlatformSealed`
-/// degrades to encrypted software when no TPM/SE is present — documented and
-/// tested in `identity.rs` — so echoing `"tpm"` back would report a
-/// software-custodied enrolment as hardware-backed, in the log and on the
-/// wire, which is the one thing this field exists to prevent (Codex review on
-/// PR #620). `hardware_type()` is exposed for exactly this question; the
-/// requested names only fill in what it cannot distinguish (a USB-wrapped PQC
-/// half and a locally-sealed one are both "sealed" to it).
-fn hardware_custody_label(
-    req: &AssociateRequest,
-    id: &ciris_verify_core::self_at_login::HardwareRootedIdentity,
-) -> String {
-    let asked_classical = req.classical.as_deref().map_or("yubikey", str::trim);
-    let asked_pqc = req.pqc.as_deref().map(str::trim).unwrap_or({
-        if req.mldsa_usb_dir.is_some() {
-            "usb"
-        } else {
-            "tpm"
-        }
-    });
-    // What the classical signer says it IS. A token reports a hardware type; a
-    // sealed seed that fell back to software reports SoftwareOnly, and then the
-    // label says `software` however the request was spelled.
-    let actual_classical = match id.hardware_type() {
+/// The honest custody word for one half: what the SIGNER reports, falling back
+/// to the requested name only when the signer says "hardware" and cannot say
+/// which kind. `SoftwareOnly` always wins — a seal that degraded to encrypted
+/// software is software, whatever was asked for.
+fn custody_word(actual: ciris_keyring::HardwareType, asked: &str) -> &str {
+    match actual {
         ciris_keyring::HardwareType::SoftwareOnly => "software",
-        _ => asked_classical,
-    };
-    format!("{actual_classical}+{asked_pqc}")
+        _ => asked,
+    }
 }
 
 /// Where a `tpm` / `software` half is read from: the caller's `seed_dir` when
@@ -872,13 +893,10 @@ async fn associate_handler(
         || (req.key_id.is_some() && req.source_dir.is_none())
     {
         match open_hardware_authorizer(&req, &st.cfg).await {
-            Ok(id) => {
-                let label = hardware_custody_label(&req, &id);
-                (
-                    Box::new(id) as Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
-                    label,
-                )
-            }
+            Ok((id, label)) => (
+                Box::new(id) as Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
+                label,
+            ),
             Err(resp) => return *resp,
         }
     } else {
@@ -977,7 +995,24 @@ async fn associate_handler(
     // both custodies and is what a second device under the same identity reads
     // as, which is the point of the name.
     let device_alias = format!("{}-device-{}", slug(&supplied_key_id), short_unique());
-    let keyset = match crate::identity::mint_local_device_occurrence(&dest_dir, &device_alias).await
+    let device_custody = match req.device.as_deref().map(str::trim) {
+        None | Some("software") => crate::identity::DeviceCustody::Software,
+        Some("tpm" | "platform-sealed" | "platform_sealed") => {
+            crate::identity::DeviceCustody::PlatformSealed
+        }
+        Some(other) => {
+            return http_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown device custody {other:?} — use tpm | software"),
+            )
+        }
+    };
+    let keyset = match crate::identity::mint_local_device_occurrence_with(
+        &dest_dir,
+        &device_alias,
+        device_custody,
+    )
+    .await
     {
         Ok(k) => k,
         Err(e) => {
@@ -1047,6 +1082,14 @@ async fn associate_handler(
             // as secure as that USB was). The operator asked for one of them;
             // the response says which one answered (CIRISServer#618).
             "authorized_by": custody,
+            // And what this device now HOLDS — the other axis. `tpm` means the
+            // classical half is sealed to this host with no seed at rest;
+            // `software` means a seed file. Reported because "enrolled" says
+            // nothing about what the enrolled key is (CIRISServer#621).
+            "device_custody": match device_custody {
+                crate::identity::DeviceCustody::PlatformSealed => "tpm",
+                crate::identity::DeviceCustody::Software => "software",
+            },
             // The wire contract keeps this key; it now names what was MINTED here
             // rather than what was copied, and copying is no longer a thing that
             // happens.
@@ -1194,44 +1237,22 @@ mod custody_matrix_tests {
         );
     }
 
-    /// The label reports what the SIGNERS are, not what the request said. A
-    /// software-backed classical half labels `software+…` however it was asked
-    /// for — `PlatformSealed` silently degrades to encrypted software with no
-    /// TPM present, and reporting that as `tpm` would make a software-custodied
-    /// enrolment look hardware-backed in the log and on the wire (Codex review
-    /// on PR #620).
-    #[tokio::test]
-    async fn the_custody_label_reports_the_signer_not_the_request() {
-        use std::sync::Arc;
-
-        use ciris_keyring::{Ed25519SoftwareSigner, MlDsa65SoftwareSigner};
-
-        let ed: Arc<dyn ciris_keyring::HardwareSigner> =
-            Arc::new(Ed25519SoftwareSigner::from_bytes(&[7u8; 32], "label-test").expect("ed"));
-        let mldsa: Arc<dyn ciris_keyring::PqcSigner> = Arc::new(
-            MlDsa65SoftwareSigner::from_seed_bytes(&[9u8; 32], "label-test").expect("pqc"),
+    /// The custody word is what the SIGNER reports, not what was asked for. A
+    /// seal that degraded to encrypted software is software, on either half
+    /// (Codex review on PR #620 — raised once per half, fixed once here).
+    #[test]
+    fn a_degraded_seal_labels_as_software_however_it_was_asked_for() {
+        use ciris_keyring::HardwareType;
+        assert_eq!(custody_word(HardwareType::SoftwareOnly, "tpm"), "software");
+        assert_eq!(
+            custody_word(HardwareType::SoftwareOnly, "yubikey"),
+            "software"
         );
-        let id = ciris_verify_core::self_at_login::HardwareRootedIdentity::new("k", ed, mldsa)
-            .expect("compose");
-
-        // Asked for a token; the signer says software. The label says software.
-        let asked_token = AssociateRequest {
-            yubikey: true,
-            key_id: Some("k".into()),
-            ..AssociateRequest::default()
-        };
-        assert_eq!(hardware_custody_label(&asked_token, &id), "software+tpm");
-
-        // The PQC side still follows the request, because `hardware_type()`
-        // cannot tell a USB-wrapped half from a locally-sealed one — both are
-        // "sealed" to it — and the request is the only thing that distinguishes
-        // them. Stated here so the asymmetry is deliberate rather than noticed.
-        let asked_usb = AssociateRequest {
-            yubikey: true,
-            key_id: Some("k".into()),
-            mldsa_usb_dir: Some("/media/usb".into()),
-            ..AssociateRequest::default()
-        };
-        assert_eq!(hardware_custody_label(&asked_usb, &id), "software+usb");
+        assert_eq!(custody_word(HardwareType::SoftwareOnly, "usb"), "software");
+        // Real hardware keeps the requested word, which is the only thing that
+        // distinguishes a USB-wrapped half from a locally-sealed one — both are
+        // "sealed" to `hardware_type()`.
+        assert_eq!(custody_word(HardwareType::TpmDiscrete, "tpm"), "tpm");
+        assert_eq!(custody_word(HardwareType::TpmDiscrete, "usb"), "usb");
     }
 }
