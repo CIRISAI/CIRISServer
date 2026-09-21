@@ -1983,6 +1983,31 @@ pub(crate) fn resolve_reticulum_prime_binding(
     Ok(Some((dest_hash, ed25519)))
 }
 
+/// READ-ONLY: does the owner's registration record bind its subject?
+/// `bound` / `unbound` / `absent` / `unknown` (no owner, or a read failed).
+/// Never heals — `node_key::heal_owner_key_record` does, from the owner's pen.
+#[cfg(feature = "python")]
+async fn owner_key_record_state(engine: &Engine, node_key_id: &str) -> String {
+    use ciris_persist::federation::admission::{owner_of, verify_envelope_binds_subject};
+    let dir = engine.federation_directory();
+    let owner = match owner_of(dir.as_ref(), node_key_id).await {
+        Ok(Some(o)) => o,
+        _ => return "unknown".to_string(),
+    };
+    match dir.lookup_public_key(&owner).await {
+        Ok(Some(row)) => {
+            if verify_envelope_binds_subject(&row).is_ok() {
+                "bound"
+            } else {
+                "unbound"
+            }
+        }
+        Ok(None) => "absent",
+        Err(_) => "unknown",
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2183,29 +2208,4 @@ mod tests {
         let dests = vec![dest("reticulum", &good_hex_16(), Some("!!!not base64!!!"))];
         assert!(resolve_reticulum_prime_binding(&dests).is_err());
     }
-}
-
-/// READ-ONLY: does the owner's registration record bind its subject?
-/// `bound` / `unbound` / `absent` / `unknown` (no owner, or a read failed).
-/// Never heals — `node_key::heal_owner_key_record` does, from the owner's pen.
-#[cfg(feature = "python")]
-async fn owner_key_record_state(engine: &Engine, node_key_id: &str) -> String {
-    use ciris_persist::federation::admission::{owner_of, verify_envelope_binds_subject};
-    let dir = engine.federation_directory();
-    let owner = match owner_of(dir.as_ref(), node_key_id).await {
-        Ok(Some(o)) => o,
-        _ => return "unknown".to_string(),
-    };
-    match dir.lookup_public_key(&owner).await {
-        Ok(Some(row)) => {
-            if verify_envelope_binds_subject(&row).is_ok() {
-                "bound"
-            } else {
-                "unbound"
-            }
-        }
-        Ok(None) => "absent",
-        Err(_) => "unknown",
-    }
-    .to_string()
 }

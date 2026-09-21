@@ -216,7 +216,7 @@ pub struct MintedUserIdentity {
 
 /// Build the [`UserIdentityConfig`] for `backend` under the user-identity alias
 /// `key_id` and its (distinct-from-the-node) `seed_dir`.
-fn user_identity_config(
+pub(crate) fn user_identity_config(
     backend: &UserIdentityBackend,
     key_id: &str,
     seed_dir: PathBuf,
@@ -265,7 +265,7 @@ fn user_identity_config(
 /// re-open) rather than `get_user_identity_signer(Software)`. The
 /// `PlatformSealed` / `Pkcs11` backends go through `get_user_identity_signer`
 /// (both yield Ed25519).
-fn open_user_signer(
+pub(crate) fn open_user_signer(
     backend: &UserIdentityBackend,
     cfg: &UserIdentityConfig,
     create: bool,

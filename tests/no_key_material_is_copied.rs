@@ -95,12 +95,15 @@ fn the_authorizer_is_read_into_memory_and_zeroized() {
 #[test]
 fn associate_enrols_an_occurrence() {
     let code = code_only(&src("src/auth/portable_occurrence.rs"));
-    let i = code
-        .find("async fn associate_handler")
-        .expect("the associate handler");
-    let body = &code[i..];
-    let end = body.find("\npub fn router").unwrap_or(body.len());
-    let body = &body[..end];
+    // THE WINDOW IS THE MODULE, not one function. This scraped
+    // `associate_handler`'s body alone and went red the day CIRISServer#618
+    // factored the two custody arms out of it into `open_directory_authorizer`
+    // / `open_hardware_authorizer` — the property held throughout, the window
+    // did not. The property is "this module enrols by minting here and opening
+    // the supplied material transiently", and it is a property of the module.
+    let body = code
+        .split_once("async fn associate_handler")
+        .map_or(code.as_str(), |_| code.as_str());
     assert!(
         body.contains("bind_occurrence_core"),
         "associate must BIND the device as an occurrence — that is what gives it the identity's \
@@ -118,4 +121,18 @@ fn associate_enrols_an_occurrence() {
         "associate must open the supplied keyset TRANSIENTLY to authorize with — possession of \
          the identity key IS the authorization, and it must not be persisted."
     );
+    // CIRISServer#618 — the HARDWARE arm authorizes with material that was
+    // never on this host at all: the classical half signs on the token, the
+    // post-quantum half is unwrapped from a USB or read from THIS home's
+    // sealed store. It composes them and hands the composition to the same
+    // steps; nothing about the enrolled identity is written here.
+    assert!(
+        body.contains("HardwareRootedIdentity::new"),
+        "the hardware arm must COMPOSE the two custodied halves into an authorizer rather than \
+         import them — a token that exported its key would not be a token."
+    );
+    // (No "the module never mints a portable keyset" assertion: `POST
+    // /v1/self/occurrence/portable` lives in this same module and minting one
+    // is exactly its job. Asserting otherwise was a false property — caught by
+    // running it, which is the only reason to write a gate that can fail.)
 }
