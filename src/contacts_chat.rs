@@ -2160,6 +2160,14 @@ async fn start_chat(
             format!("put_community: {e}"),
         );
     }
+    // The ROSTER is a row too. `share_in_room` kicks for every chat row that
+    // goes through it (KeyPackage, Welcome, message), but the `Community`
+    // record is written straight to the directory here and returns — so
+    // without this the invitation itself was the one row in the conversation
+    // that waited for a cadence tick, while the KeyPackage sent milliseconds
+    // later did not. Fresh create only: the idempotent second arrival above
+    // returns early, so a client retry does not re-round.
+    crate::compose::kick_replication("chat room roster created");
     (
         StatusCode::OK,
         Json(StartChatResponse {

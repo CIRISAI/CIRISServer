@@ -1176,6 +1176,17 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
     // peer needs before it can place this node in any audience (the chat
     // ladder's `bound` stage). Cross it now, not at the next tick
     // (CIRISEdge#636, edge v26.1.0).
+    //
+    // ORDER MATTERS. A round publishes a self-plane row only if its attester is
+    // in the publish-own set, and the rows this kick exists to carry are
+    // attested by the OWNER — who is resolvable only now, since claiming
+    // happens after boot. Kicking first rounds toward every peer carrying none
+    // of them and then waits up to 30s for the poll to admit the owner, which
+    // is exactly the +41s the v26.1.0 ladder measured for `bound`. So: admit,
+    // then kick. A `false` here means replication was never composed (no
+    // transport) or the owner is not resolvable yet — the kick below is still
+    // correct for the node-attested half of the bundle.
+    crate::compose::publish_own_set_admit_owner(&st.engine, &st.node_key_id).await;
     crate::compose::kick_replication("owner-binding announced");
     (
         StatusCode::OK,

@@ -256,10 +256,18 @@ where
 pub(crate) struct ServerBlobChunkSource {
     inner: ciris_edge::blob_swarm::PersistBlobChunkSource,
     directory: Arc<dyn ciris_persist::federation::FederationDirectory>,
-    /// The blob store itself, for the community-DEK epoch binding — the
+    /// The engine itself, for the community-DEK epoch binding — the
     /// `(community, minter, epoch)` a sealed blob belongs to (persist #848 §17).
-    /// `None` only on a non-SQLite engine, where the meaning path still answers.
-    blobs: Option<Arc<ciris_persist::store::sqlite::SqliteBackend>>,
+    ///
+    /// Held as the ENGINE, not as one backend handle: `community_dek_blob_epoch`
+    /// is a `BlobStorage` method both stores implement, but the trait returns
+    /// `impl Future` and so cannot be a `dyn` object — the dispatch has to
+    /// happen at the call site, per backend. Reaching for `sqlite_backend()`
+    /// alone made this whole path dead on a Postgres node (the deployment
+    /// shape: persist's `postgres` feature is unioned in on Linux), where it
+    /// would fall through to the referencing-row arm and serve nothing for a
+    /// blob whose citing row this node does not hold.
+    engine: Engine,
 }
 
 impl ServerBlobChunkSource {
@@ -268,8 +276,33 @@ impl ServerBlobChunkSource {
             inner: ciris_edge::blob_swarm::PersistBlobChunkSource::new(Engine::clone(engine))
                 .with_revocations(Some(revocation_register())),
             directory: engine.federation_directory(),
-            blobs: engine.sqlite_backend().cloned(),
+            engine: Engine::clone(engine),
         }
+    }
+
+    /// The `(community, minter, epoch)` binding for these bytes, from whichever
+    /// backend this engine actually has.
+    ///
+    /// Same shape as the reads at the top of this file: persist's `postgres`
+    /// feature is enabled ONLY on Linux (Cargo.toml
+    /// `[target.'cfg(target_os = "linux")'.dependencies]`), so `PostgresBackend`
+    /// does not exist elsewhere and neither may this arm.
+    async fn dek_binding(
+        &self,
+        blob_sha256: &[u8; 32],
+    ) -> Result<Option<(String, String, u64)>, ciris_persist::federation::BlobError> {
+        use ciris_persist::federation::BlobStorage;
+        #[cfg(target_os = "linux")]
+        if let Some(pg) = self.engine.postgres_backend() {
+            return pg.community_dek_blob_epoch(blob_sha256).await;
+        }
+        if let Some(sq) = self.engine.sqlite_backend() {
+            return sq.community_dek_blob_epoch(blob_sha256).await;
+        }
+        // No blob-capable backend at all. Not an error: the referencing-row arm
+        // is still allowed to answer, and a node with neither store is not
+        // serving bytes in the first place.
+        Ok(None)
     }
 }
 
@@ -328,31 +361,28 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
         &self,
         blob_sha256: [u8; 32],
     ) -> Option<ciris_edge::blob_swarm::ContentScope> {
-        use ciris_persist::federation::BlobStorage;
         let sha_hex = hex::encode(blob_sha256);
-        if let Some(blobs) = self.blobs.as_ref() {
-            match blobs.community_dek_blob_epoch(&blob_sha256).await {
-                Ok(Some((community, _minter, epoch))) => {
-                    tracing::debug!(
-                        blob = %sha_hex,
-                        community = %community,
-                        epoch,
-                        "blob chunk source: scope from the bytes' community-DEK binding"
-                    );
-                    return Some(ciris_edge::blob_swarm::ContentScope::Group {
-                        scope: ciris_edge::cohort_scope::CohortScope::Cohort {
-                            cohort_id: community.clone(),
-                        },
-                        group_id: community,
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
+        match self.dek_binding(&blob_sha256).await {
+            Ok(Some((community, _minter, epoch))) => {
+                tracing::debug!(
                     blob = %sha_hex,
-                    error = %e,
-                    "blob chunk source: the community-DEK binding could not be read"
-                ),
+                    community = %community,
+                    epoch,
+                    "blob chunk source: scope from the bytes' community-DEK binding"
+                );
+                return Some(ciris_edge::blob_swarm::ContentScope::Group {
+                    scope: ciris_edge::cohort_scope::CohortScope::Cohort {
+                        cohort_id: community.clone(),
+                    },
+                    group_id: community,
+                });
             }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                blob = %sha_hex,
+                error = %e,
+                "blob chunk source: the community-DEK binding could not be read"
+            ),
         }
         let rows = match self.directory.attestations_binding_content(&sha_hex).await {
             Ok(rows) => rows,

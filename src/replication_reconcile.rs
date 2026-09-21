@@ -172,11 +172,35 @@ async fn explain_awaiting_actor(engine: &Engine, node_key_id: &str, awaiting: u6
 /// Returns the number of converged consent peers so the controller loop can log
 /// at INFO only on a genuine change (and `debug!` otherwise — a steady count
 /// every cadence is noise on an idle node).
+/// What one reconcile tick converged to: the admitted consent peers
+/// THEMSELVES, not just how many there were.
+///
+/// The set, not the count, is what the controller loop compares. A swap in one
+/// tick — peer A withdrew, peer B was admitted — leaves `len()` identical, and
+/// a count-keyed comparison reads that as "nothing changed": no INFO line, and
+/// (worse) no kick, so the newly admitted peer waits a full cadence for its
+/// first round when it is exactly the peer with everything still to learn.
+/// Ordered so the comparison is by membership, not by the directory's
+/// discovery order, which it does not promise to keep stable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Reconciled {
+    /// Admitted peer key ids — verified `federation_keys` rows that survived
+    /// this tick's rolling `withdraws`-arbitrage filter.
+    pub peers: std::collections::BTreeSet<String>,
+}
+
+impl Reconciled {
+    /// The number this loop has always logged as `consent_peers`.
+    pub fn count(&self) -> usize {
+        self.peers.len()
+    }
+}
+
 pub async fn reconcile_once(
     engine: &Arc<Engine>,
     node_key_id: &str,
     runtime: &Arc<ReplicationRuntime>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Reconciled> {
     // ── The #530 REPAIR motion (persist v39.0.0) ───────────────────────────
     // Was `repair_stranded_scope_backlog`, which persist shipped but never
     // called, leaving the (a)+(c) pair with only (a) wired — this loop was its
@@ -371,7 +395,7 @@ pub async fn reconcile_once(
     // health:liveness in).
     let directory = engine.federation_directory();
     let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 4);
-    let mut admitted_peers: usize = 0;
+    let mut admitted_peers: std::collections::BTreeSet<String> = Default::default();
     for peer in consented {
         // Fail closed: an over-threshold attester — or one whose behavioral ledger
         // we cannot read at all — is dropped from the desired set this tick.
@@ -405,7 +429,7 @@ pub async fn reconcile_once(
                 desired.extend(crate::compose::build_replication_peers(
                     std::slice::from_ref(&peer),
                 ));
-                admitted_peers += 1;
+                admitted_peers.insert(peer.clone());
             }
             Ok(None) => tracing::warn!(
                 peer_key_id = %peer,
@@ -429,7 +453,7 @@ pub async fn reconcile_once(
     // plane count into a denominator two files away from the plane list — it
     // was already stale at four planes and reported 2x peers at six. The
     // admitted-peer counter cannot drift with the fan-out.
-    let count = admitted_peers;
+    let count = admitted_peers.len();
     if let Err(e) = runtime.set_peers(desired).await {
         // The runtime's scheduler has stopped (shutdown) — surface so the caller
         // logs + skips; the controller never panics.
@@ -443,7 +467,9 @@ pub async fn reconcile_once(
         "replication reconcile tick: converged to {count} consent peers",
     );
 
-    Ok(count)
+    Ok(Reconciled {
+        peers: admitted_peers,
+    })
 }
 
 /// Spawn the reconcile controller loop. Returns the task handle (held by the
@@ -482,10 +508,11 @@ pub fn spawn(
         // An initial reconcile is already implied by the first immediate
         // interval.tick(); no extra pass needed.
         //
-        // Only log the converged-peers INFO line when the count CHANGES from the
-        // previous cycle (e.g. 0→2, 2→0); a steady count logs at debug! inside
-        // reconcile_once so an idle node doesn't spam INFO every cadence.
-        let mut last_logged: Option<usize> = None;
+        // Only log the converged-peers INFO line when the admitted SET changes
+        // from the previous cycle (a gain, a loss, or a swap that keeps the
+        // count); a steady set logs at debug! inside reconcile_once so an idle
+        // node doesn't spam INFO every cadence.
+        let mut last_logged: Option<Reconciled> = None;
         loop {
             tokio::select! {
                 _ = cadence.tick() => {}
@@ -536,7 +563,9 @@ pub fn spawn(
                 // they just fixed would stand forever (PR #483 review).
                 Ok(e) => crate::degradation::report_edge_metrics_with_topology(
                     &e.metrics().snapshot(),
-                    last_logged,
+                    // The topology reporter wants the SIZE of the last converged
+                    // set; the loop keeps the set itself so it can see a swap.
+                    last_logged.as_ref().map(Reconciled::count),
                 ),
                 Err(e) => tracing::debug!(
                     error = %e,
@@ -545,22 +574,50 @@ pub fn spawn(
             }
 
             match reconcile_once(&engine, &node_key_id, &runtime).await {
-                Ok(count) => {
-                    // INFO only on a genuine transition; otherwise the per-tick
-                    // detail already went to debug! inside reconcile_once.
-                    if last_logged != Some(count) {
+                Ok(reconciled) => {
+                    // COMPARE THE SET, NOT ITS SIZE. Keyed on the count, a swap
+                    // inside one tick (A withdrew, B was admitted) is invisible:
+                    // same number, so no INFO and no kick, and B — the peer with
+                    // everything still to learn — waits a full cadence for its
+                    // first round. INFO only on a genuine transition; otherwise
+                    // the per-tick detail already went to debug! inside
+                    // reconcile_once.
+                    let count = reconciled.count();
+                    if last_logged.as_ref() != Some(&reconciled) {
+                        // Name who moved, in both directions. A bare count
+                        // ("converged to 2") cannot answer the question an
+                        // operator actually has at this line, which is *which*
+                        // peer appeared or left.
+                        let previous = last_logged.unwrap_or_default();
+                        let gained: Vec<&str> = reconciled
+                            .peers
+                            .difference(&previous.peers)
+                            .map(String::as_str)
+                            .collect();
+                        let lost: Vec<&str> = previous
+                            .peers
+                            .difference(&reconciled.peers)
+                            .map(String::as_str)
+                            .collect();
                         tracing::info!(
                             consent_peers = count,
+                            gained = ?gained,
+                            lost = ?lost,
                             "replication converged to {count} consent peers",
                         );
-                        last_logged = Some(count);
-                        // The peer set just changed: the newly registered
+                        // The peer set just changed: the newly admitted
                         // initiators would otherwise sit until their first
                         // cadence tick. One coalesced round toward everyone,
-                        // now (CIRISEdge#636, edge v26.1.0).
-                        if count > 0 {
-                            crate::compose::kick_replication("consent peer set changed");
+                        // now (CIRISEdge#636, edge v26.1.0). Gated on a GAIN,
+                        // not on a non-empty set: a tick that only lost a peer
+                        // has nothing new to carry, and re-kicking on every
+                        // departure would round toward the remaining peers for
+                        // rows they already hold.
+                        if !gained.is_empty() {
+                            crate::compose::kick_replication("consent peer set gained a peer");
                         }
+                        // After the diff, which borrows it.
+                        last_logged = Some(reconciled);
                     }
                 }
                 Err(e) => {

@@ -1770,8 +1770,15 @@ pub async fn run_federation_delivery(
             )
             .await
             {
-                Ok(count) => {
+                Ok(reconciled) => {
                     backoff.succeed();
+                    // This loop keys its logging on the SIZE of the admitted set
+                    // (the "0 peers" warn below is the line that matters here).
+                    // The kick-on-change decision is the reconcile controller's
+                    // job and is keyed on the set itself — see
+                    // `replication_reconcile::Reconciled`; one kicker, so a gain
+                    // observed by both loops is still one coalesced round.
+                    let count = reconciled.count();
                     // ROOTING, per consent peer, on BOTH nodes — the ladder's
                     // `arrive` diagnosis needs the canonical's view of the agent
                     // as much as the agent's view of the canonical, and only
