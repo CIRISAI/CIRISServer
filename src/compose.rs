@@ -4112,7 +4112,15 @@ pub(crate) async fn start_replication_runtime(
                 if owed && kick_replication("publish-own set gained the owner") {
                     owed = false;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                // AND RETRY IT PROMPTLY. Retaining the debt across a full 30s
+                // sleep leaves the delay this exists to remove: the owner is
+                // resolvable at startup, the kick finds no runtime, and the
+                // retry then waits a cadence anyway. While a kick is owed this
+                // polls every second instead — a bounded, startup-only window
+                // that ends on the first dispatch, since `owed` can only be set
+                // by a set that GAINED the owner and that happens once.
+                let wait = if owed { 1 } else { 30 };
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
         }
     });

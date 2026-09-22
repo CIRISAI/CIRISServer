@@ -870,8 +870,15 @@ DIAG_arrived() {
       echo "    attestation id it was told to look for — check CHAT_ATT_ID against what was sent."
       ;;
   esac
+  # `absent` belongs to the NOT PROJECTED branch below, not here. With the row
+  # in `federation_attestations` (`at_b > 0`) and the API omitting it — a
+  # missing roster or active-member projection — the reason is `absent`, and
+  # classifying that as a sealed body made the projection diagnosis below
+  # unreachable while pointing at the blob and key-grant layers. Third of three:
+  # the previous revision excluded `open` and `open-not-live` and stopped there.
   if [ "${at_b:-0}" -gt 0 ] && [ -n "$unopened_reason" ] && \
-     [ "${unopened_reason%%:*}" != "open-not-live" ] && [ "$unopened_reason" != "open" ]; then
+     [ "${unopened_reason%%:*}" != "open-not-live" ] && [ "$unopened_reason" != "open" ] && \
+     [ "$unopened_reason" != "absent" ]; then
     echo "  HELD, SEALED SHUT: the row is on ${recip} and its body reads unopened_reason=${unopened_reason}"
     if [ "${no_holders:-0}" -gt 0 ]; then
       echo "    NO HOLDERS (${no_holders}×): ${recip}'s puller found no holds_bytes claim for the blob — the"
