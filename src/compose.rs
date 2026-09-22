@@ -3842,11 +3842,26 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
 /// (peer, kind). No runtime (no Reticulum transport) is not an error — the
 /// row is held locally and there is nothing to kick; a stopped scheduler is
 /// logged at debug because the shutdown path already said so.
-/// The process-wide publish-own set (see `start_replication_runtime`), so the
-/// claim/announce path can add the owner BEFORE it kicks rather than waiting
-/// for the 30s poll to notice. `None` until replication has been composed.
-static SELF_PUBLISH: std::sync::OnceLock<Arc<std::sync::RwLock<Vec<String>>>> =
-    std::sync::OnceLock::new();
+/// The process-wide publish-own set and what it takes to refresh it (see
+/// `start_replication_runtime`). `None` until replication has been composed.
+///
+/// The ENGINE is held beside the set so [`kick_replication`] can admit the
+/// owner ITSELF. Requiring each caller to admit first was correct and
+/// unkeepable: the announce handler did it, the fold's post-claim author door
+/// did not, and there is no way to tell from a call site whether the rows it
+/// just authored are owner-attested. One kick, one ordering, no call site to
+/// forget it.
+struct PublishOwn {
+    keys: Arc<std::sync::RwLock<Vec<String>>>,
+    engine: Arc<Engine>,
+    node_key_id: String,
+    /// Once the owner is in the set, no kick needs to resolve them again — this
+    /// is what keeps "every kick admits the owner" down to one atomic load on
+    /// the hot path (a kick fires for every chat row).
+    owner_admitted: std::sync::atomic::AtomicBool,
+}
+
+static SELF_PUBLISH: std::sync::OnceLock<PublishOwn> = std::sync::OnceLock::new();
 
 /// Resolve this node's owner and add them to the publish-own set.
 ///
@@ -3860,17 +3875,19 @@ static SELF_PUBLISH: std::sync::OnceLock<Arc<std::sync::RwLock<Vec<String>>>> =
 /// the OWNER, not by the node — with a node-only set they are held locally and
 /// advertised to nobody, and every person→node resolution walk on every other
 /// node starves (CIRISServer#472 arc).
-async fn refresh_publish_own_set(
-    engine: &Engine,
-    node_key_id: &str,
-    keys: &Arc<std::sync::RwLock<Vec<String>>>,
-) -> bool {
-    let Ok(Some(owner)) = engine.owner_of(node_key_id).await else {
+async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
+    use std::sync::atomic::Ordering;
+    if held.owner_admitted.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Ok(Some(owner)) = held.engine.owner_of(&held.node_key_id).await else {
         return false;
     };
+    let keys = &held.keys;
     // Taken after the last await, so this blocking lock never spans one.
     let mut w = keys.write().expect("self_publish_keys poisoned");
     if w.contains(&owner) {
+        held.owner_admitted.store(true, Ordering::Relaxed);
         return false;
     }
     tracing::info!(
@@ -3880,25 +3897,8 @@ async fn refresh_publish_own_set(
          (CIRISServer#472 arc)"
     );
     w.push(owner);
+    held.owner_admitted.store(true, Ordering::Relaxed);
     true
-}
-
-/// Add this node's owner to the publish-own set NOW, for a caller that just
-/// authored the owner-binding and is about to kick.
-///
-/// The kick alone is not enough: a round selects self-plane rows through the
-/// publish-own set, so kicking while that set still holds only the node key
-/// rounds toward every peer carrying none of the rows the caller means to send.
-/// Ordering is the whole point — refresh, THEN kick.
-///
-/// `false` when replication was never composed (no transport) or the owner is
-/// not resolvable yet; in both cases there is nothing to carry and the poll
-/// will pick the owner up when there is.
-pub(crate) async fn publish_own_set_admit_owner(engine: &Engine, node_key_id: &str) -> bool {
-    let Some(keys) = SELF_PUBLISH.get() else {
-        return false;
-    };
-    refresh_publish_own_set(engine, node_key_id, keys).await
 }
 
 pub(crate) fn kick_replication(reason: &'static str) -> bool {
@@ -3916,6 +3916,26 @@ pub(crate) fn kick_replication(reason: &'static str) -> bool {
         return false;
     };
     handle.spawn(async move {
+        // ADMIT THE OWNER FIRST, HERE, so no caller has to remember. A round
+        // publishes a self-plane row only if its attester is in the publish-own
+        // set, and the rows that matter most — the owner-binding, the owner's
+        // occurrences — are attested by the OWNER, who is resolvable only after
+        // the claim. Kicking before they are admitted rounds toward every peer
+        // carrying none of them.
+        //
+        // This was each caller's job for exactly one revision. The announce
+        // handler did it; the fold's post-claim author door did not, and a call
+        // site cannot tell whether the rows it just wrote are owner-attested.
+        // After the first admission this is one atomic load.
+        if let Some(held) = SELF_PUBLISH.get() {
+            if refresh_publish_own_set(held).await {
+                tracing::info!(
+                    reason,
+                    "publish-own set admitted the owner as part of this kick — their \
+                     self-plane rows ride THIS round rather than the next poll"
+                );
+            }
+        }
         match runtime.round_now_all().await {
             // INFO, not debug: a handful of lines per session (claim, announce,
             // each grant, each chat row) and each one is a timestamp the ladder's
@@ -4072,15 +4092,19 @@ pub(crate) async fn start_replication_runtime(
     // on the poll below. Set once per process; a second replication bring-up
     // (the agent-embedded controller) receives the same runtime and the same
     // set, so `set` losing the race is correct, not an error.
-    let _ = SELF_PUBLISH.set(Arc::clone(&self_publish_keys));
+    let _ = SELF_PUBLISH.set(PublishOwn {
+        keys: Arc::clone(&self_publish_keys),
+        engine: Arc::clone(engine),
+        node_key_id: node_key_id.to_string(),
+        owner_admitted: std::sync::atomic::AtomicBool::new(false),
+    });
     let self_provider: ciris_edge::replication::CohortProvider = {
         let keys = Arc::clone(&self_publish_keys);
         Arc::new(move || keys.read().expect("self_publish_keys poisoned").clone())
     };
     tokio::spawn({
-        let engine = Arc::clone(engine);
-        let keys = Arc::clone(&self_publish_keys);
-        let node = node_key_id.to_string();
+        // Nothing to capture: the engine, the node key and the set all live in
+        // `SELF_PUBLISH` now, because `kick_replication` needs them too.
         async move {
             // Detached by design: it only reads the directory and updates a
             // Vec; on shutdown the runtime drop aborts it mid-sleep. Re-checks
@@ -4106,8 +4130,10 @@ pub(crate) async fn start_replication_runtime(
                 // and the kick is never retried: the owner-authored binding and
                 // occurrences wait for the ordinary cadence on exactly the nodes
                 // that were ready for them soonest. Hold the debt instead.
-                if refresh_publish_own_set(&engine, &node, &keys).await {
-                    owed = true;
+                if let Some(held) = SELF_PUBLISH.get() {
+                    if refresh_publish_own_set(held).await {
+                        owed = true;
+                    }
                 }
                 if owed && kick_replication("publish-own set gained the owner") {
                     owed = false;

@@ -27,52 +27,88 @@
 //! asserting on a timing difference — exactly the kind of test that goes flaky
 //! and gets deleted. The order is cheap to read and cheap to keep.
 
-/// The announce handler admits the owner into the publish-own set BEFORE it
-/// kicks — not after, and not only via the 30s poll.
+/// THE KICK ITSELF ADMITS THE OWNER — one place, no call site to forget.
+///
+/// This test used to assert an ORDER between two statements in the announce
+/// handler: admit, then kick. That was true and unkeepable. The announce
+/// handler spelled it; the fold's post-claim author door
+/// (`federation_delivery`) did not, and authored the heal, the owner anchor and
+/// the migrated grants before kicking against a set that still held only the
+/// node key. A call site cannot tell whether the rows it just wrote are
+/// owner-attested, so the ordering does not belong to call sites.
+///
+/// So the property is now structural: `kick_replication` refreshes the
+/// publish-own set inside its own task, before `round_now_all`. Every kick
+/// carries the owner's rows whether or not its author thought about it, and the
+/// assertion is about one function instead of N handlers.
 #[test]
-fn announce_admits_the_owner_before_it_kicks() {
-    let src = std::fs::read_to_string("src/claim_remote.rs").expect("read src/claim_remote.rs");
-    let admit = src.find("publish_own_set_admit_owner").expect(
-        "the announce path must admit this node's owner into the publish-own set; \
-                 without it the kick below rounds toward every peer carrying none of the \
-                 owner-attested rows the announce exists to cross",
+fn the_kick_admits_the_owner_before_it_rounds() {
+    let src = std::fs::read_to_string("src/compose.rs").expect("read src/compose.rs");
+    let start = src
+        .find("pub(crate) fn kick_replication(")
+        .expect("kick_replication must exist");
+    let body = &src[start..];
+    let end = body.find("\n}\n").map_or(body.len(), |j| j + 2);
+    let body = &body[..end];
+
+    let admit = body.find("refresh_publish_own_set").expect(
+        "kick_replication must refresh the publish-own set itself — a round publishes a \
+             self-plane row only if its attester is in that set, and the owner is resolvable \
+             only after the claim. Pushing this back out to the callers is what left the \
+             fold's author door kicking against a node-only set.",
     );
-    let kick = src
-        .find(r#"kick_replication("owner-binding announced")"#)
-        .expect("the announce path must still kick");
+    let round = body
+        .find("round_now_all")
+        .expect("kick_replication must still round");
     assert!(
-        admit < kick,
-        "publish_own_set_admit_owner must come BEFORE kick_replication in the announce \
-         handler (found admit at {admit}, kick at {kick}). Kicking first is not a \
-         smaller version of the fix — it is the bug: the round is selected against the \
-         publish-own set as it stands AT THE KICK."
+        admit < round,
+        "the owner must be admitted BEFORE the round is requested (admit at {admit}, round at \
+         {round}) — a round selects its rows against the set as it stands when it starts"
     );
 }
 
-/// The poll that admits the owner kicks when it actually gains them.
+/// The poll still carries a gain, and a kick it could not dispatch stays owed.
 ///
-/// The announce path is not the only way an owner appears (a re-rooted
-/// ownership, a claim that lands by another door), so the task that notices is
-/// the task that must round. Silent-gain was the original defect: the set grew
-/// and nothing carried what it unlocked until the next unrelated tick.
+/// The kick admits the owner itself now, but the poll is still the only thing
+/// that NOTICES an owner arriving by a door that does not kick (a re-rooted
+/// ownership, a claim landing elsewhere). Two failure modes, both seen:
+///
+/// * silent gain — the set grew and nothing carried what it unlocked until some
+///   unrelated round happened by;
+/// * a lost kick — the updater is spawned from inside `RUNTIME.get_or_try_init`,
+///   so at startup it can gain the owner while the runtime is still
+///   unpublished. The kick then returns false, and because the owner is now IN
+///   the set, no later poll sees a gain to retry. Permanently lost, on the nodes
+///   that were readiest.
+///
+/// Asserted as three facts rather than a brace window, since the same refresh
+/// call appears in `kick_replication` too and a positional scan matched the
+/// wrong one.
 #[test]
-fn the_publish_own_poll_kicks_when_the_set_gains_the_owner() {
+fn the_publish_own_poll_carries_a_gain_and_retries_a_lost_kick() {
     let src = std::fs::read_to_string("src/compose.rs").expect("read src/compose.rs");
-    let refresh = src
-        .find("if refresh_publish_own_set(&engine, &node, &keys).await {")
-        .expect(
-            "the publish-own updater must branch on whether the set actually GAINED the \
-             owner — an unconditional kick every 30s is a round per tick forever, and no \
-             kick at all leaves the owner's rows unadvertised until something else rounds",
+    for (needle, why) in [
+        (
+            "if refresh_publish_own_set(held).await {\n                        owed = true;",
+            "a GAIN must record a debt — an unconditional kick every 30s is a round per tick \
+             forever, and no kick at all leaves the owner's rows unadvertised",
+        ),
+        (
+            "if owed && kick_replication(",
+            "the debt must be paid by an actual kick, and cleared only when that kick \
+             reports it dispatched",
+        ),
+        (
+            "let wait = if owed { 1 } else { 30 };",
+            "an owed kick must be retried PROMPTLY — sleeping the full cadence before the \
+             retry leaves exactly the delay this exists to remove",
+        ),
+    ] {
+        assert!(
+            src.contains(needle),
+            "{why}\n\nexpected to find: {needle:?}"
         );
-    let tail = &src[refresh..];
-    let kick = tail
-        .find("kick_replication")
-        .expect("the publish-own updater must kick when it gains the owner");
-    assert!(
-        kick < tail.find("\n            }").unwrap_or(usize::MAX),
-        "the kick must be INSIDE the gained-the-owner branch"
-    );
+    }
 }
 
 /// The community-DEK binding is read from whichever store the node has.
