@@ -469,10 +469,16 @@ fn code_only(src: &str) -> String {
 
 /// `reconcile_once`'s body, comments removed.
 fn reconcile_once_code() -> String {
+    // CRLF-normalised: the window below ends at `"\npub fn "`, and on a Windows
+    // checkout that needle matches nothing — `split_once` then falls through to
+    // "the rest of the file", so the scan silently WIDENS instead of failing.
+    // A gate that is weaker on one platform and says so nowhere is the worst of
+    // the three outcomes.
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replication_reconcile.rs"),
     )
-    .expect("readable");
+    .expect("readable")
+    .replace("\r\n", "\n");
     let code = code_only(&src);
     let body = code
         .split_once("pub async fn reconcile_once")

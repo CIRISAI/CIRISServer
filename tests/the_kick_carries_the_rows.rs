@@ -27,6 +27,23 @@
 //! asserting on a timing difference — exactly the kind of test that goes flaky
 //! and gets deleted. The order is cheap to read and cheap to keep.
 
+/// Read a source file with LINE ENDINGS NORMALISED.
+///
+/// Every scan in this file looks for shapes that span lines — a needle
+/// containing `\n`, a `"\n}"` to find where a function body ends. On Windows
+/// git checks the tree out with CRLF, so those needles match nothing and the
+/// gate fails with "expected to find …" against source that is perfectly
+/// correct. That is what happened: three lanes green, windows-latest red, on a
+/// property that holds on every platform.
+///
+/// Normalising here rather than in each test, because the next scan added to
+/// this file will have the same problem and will not remember.
+fn read_src(path: &str) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {path}: {e}"))
+        .replace("\r\n", "\n")
+}
+
 /// THE KICK ITSELF ADMITS THE OWNER — one place, no call site to forget.
 ///
 /// This test used to assert an ORDER between two statements in the announce
@@ -43,7 +60,7 @@
 /// assertion is about one function instead of N handlers.
 #[test]
 fn the_kick_admits_the_owner_before_it_rounds() {
-    let src = std::fs::read_to_string("src/compose.rs").expect("read src/compose.rs");
+    let src = read_src("src/compose.rs");
     let start = src
         .find("pub(crate) fn kick_replication(")
         .expect("kick_replication must exist");
@@ -86,7 +103,7 @@ fn the_kick_admits_the_owner_before_it_rounds() {
 /// wrong one.
 #[test]
 fn the_publish_own_poll_carries_a_gain_and_retries_a_lost_kick() {
-    let src = std::fs::read_to_string("src/compose.rs").expect("read src/compose.rs");
+    let src = read_src("src/compose.rs");
     for (needle, why) in [
         (
             "if refresh_publish_own_set(held).await {\n                        owed = true;",
@@ -122,7 +139,7 @@ fn the_publish_own_poll_carries_a_gain_and_retries_a_lost_kick() {
 /// deployment shape.
 #[test]
 fn the_dek_binding_is_read_from_both_backends() {
-    let src = std::fs::read_to_string("src/backend.rs").expect("read src/backend.rs");
+    let src = read_src("src/backend.rs");
     let start = src
         .find("async fn dek_binding(")
         .expect("ServerBlobChunkSource must resolve the community-DEK binding in one place");
@@ -166,7 +183,7 @@ fn both_reconcile_loops_route_through_one_decision() {
             "the agent-embedded delivery controller",
         ),
     ] {
-        let src = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        let src = read_src(file);
         assert!(
             src.contains("note_convergence"),
             "{what} ({file}) drives reconcile_once, so it must record the converged set \
@@ -175,7 +192,7 @@ fn both_reconcile_loops_route_through_one_decision() {
              a peer, and carried nothing."
         );
     }
-    let recon = std::fs::read_to_string("src/replication_reconcile.rs").expect("read");
+    let recon = read_src("src/replication_reconcile.rs");
     let body_start = recon
         .find("pub fn note_convergence(")
         .expect("note_convergence must exist");
