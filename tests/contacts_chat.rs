@@ -277,6 +277,25 @@ impl OwnerIdentity {
     /// assertion in `open_chat` is where that is stated out loud.
     async fn mint() -> Self {
         static NTH: AtomicU32 = AtomicU32::new(0);
+        // A UNIQUE ALIAS IS NOT ENOUGH, and macOS is where that shows. The
+        // alias and the seed dir are already per-test (above), but
+        // `create_federation_identity` seals the ML-DSA half into the
+        // PROCESS-GLOBAL keyring directory, and that directory has material of
+        // its OWN — a master key the software seal creates on first use. Six
+        // tests in this binary mint in parallel; when several create that
+        // material at once, one wins and the others' blobs no longer open
+        // against the key that landed. The symptom is `Key not found:
+        // mldsa65.seed` from a mint that just succeeded, on a DIFFERENT test
+        // each run (two CI runs on two branches failed at this same line under
+        // two different test names) and never locally, where the box is faster
+        // than the race.
+        //
+        // So the mint is serialized. Only the mint: once the directory's
+        // material exists, distinct aliases read back independently, and
+        // holding this any longer would serialize the whole file for nothing.
+        // A `tokio::sync::Mutex` because the guard spans an `.await`.
+        static MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _minting = MINT.lock().await;
         let alias = format!(
             "alice-owner-{}-{}",
             std::process::id(),
