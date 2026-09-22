@@ -1067,15 +1067,16 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
             // addressed — its blobs stay unroutable for the life of the epoch
             // while the room looks completely healthy from here.
             //
-            // Detected, not repaired: edge's `install_group` refuses a group it
-            // already holds (`GroupAlreadyInstalled`) and `advance` installs a
-            // NEW epoch, so there is no make-before-break verb for "same epoch,
-            // more members". Removing and re-installing would drop every
-            // member's address — including our own listen registration — in a
-            // window where a frame is simply lost, to repair a table that is
-            // merely incomplete. Asked for upstream as CIRISEdge#648; until
-            // then this says exactly which member is dark and why, instead of
-            // logging "room addresses current" over a table that is not.
+            // REPAIRED, since edge v29.2.0 (CIRISEdge#648, asked from here):
+            // `ScopeLifecycle::refresh_members` is the make-before-break verb
+            // for "same epoch, more members" — it derives and admits only the
+            // members the current slot lacks, re-derives every held member
+            // against the exporter secret (a mismatch refuses the whole call
+            // before anything moves), and never rotates. Before it existed the
+            // only door was remove + reinstall, which drops every member's
+            // address — including our own listen registration — in a window
+            // where a frame is simply lost, so this arm used to only NAME the
+            // dark member. Now it addresses them.
             let missing: Vec<&str> = installed
                 .members
                 .iter()
@@ -1093,17 +1094,30 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
                     "chat: room addresses current"
                 );
             } else {
-                tracing::warn!(
-                    room = %room,
-                    epoch = installed.epoch,
-                    missing = ?missing,
-                    "chat: these room members resolve to a node NOW but hold no scoped \
-                     address at the installed epoch — they resolved after the install and \
-                     MLS did not rotate, so nothing re-addressed them. Bodies they hold \
-                     cannot be fetched and bodies we send do not reach them until the \
-                     next real epoch change (a join, a leave, a rekey). CIRISEdge#648 \
-                     asks for a same-epoch membership refresh"
-                );
+                match life.refresh_members(&scope, installed) {
+                    Ok(o) => tracing::info!(
+                        room = %room,
+                        epoch = o.epoch,
+                        admitted = o.derived,
+                        members = ?missing,
+                        "chat: room membership REFRESHED at the same epoch — these members \
+                         resolved to a node after the install and MLS did not rotate; they \
+                         are addressed now, nothing else moved (CIRISEdge#648, edge v29.2.0)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        room = %room,
+                        epoch = installed.epoch,
+                        missing = ?missing,
+                        error = %e,
+                        "chat: these room members resolve to a node NOW but hold no scoped \
+                         address at the installed epoch, and the same-epoch refresh was \
+                         REFUSED — bodies they hold cannot be fetched and bodies we send do \
+                         not reach them until the next real epoch change. `SelfNotInRoster` \
+                         means the roster no longer names this node (that is a leave, not a \
+                         refresh); `ExporterSecretMismatch` means the snapshot's secret is not \
+                         the one the table was installed with"
+                    ),
+                }
             }
             return;
         }
@@ -2472,7 +2486,7 @@ async fn require_member(st: &ChatState, owner: &Owner, community_id: &str) -> Re
             format!("build_caller_admission: {e}"),
         )
     })?;
-    if !scope.admits(cohort_scope::COMMUNITY, community_id) {
+    if !scope.admits(cohort_scope::COMMUNITY, community_id, None) {
         // The contextual-integrity line. Owning the node is not membership in
         // the cohort, and the tier means nothing if this arm is skipped.
         return Err(refuse(
