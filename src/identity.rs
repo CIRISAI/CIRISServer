@@ -249,13 +249,17 @@ pub struct MintedUserIdentity {
 /// - a DEVICE occurrence (`mint_local_device_occurrence_with`) is fully
 ///   home-scoped — it does not go through `create_federation_identity`, and
 ///   both halves land in this home;
-/// - a newly minted USER identity still seals globally until CIRISVerify#285
-///   takes a directory. `--home` isolates its database, config, logs and
-///   Ed25519 seed; its post-quantum half is shared with every other home on
-///   the machine, keyed by alias.
+/// - a newly minted USER identity is sealed globally by
+///   `create_federation_identity` and then RELOCATED into this home by
+///   [`relocate_sealed_pqc_into_home`], which copies, proves the copy opens to
+///   the same public key, and only then removes the global original. Relocating
+///   is what the server can do without that parameter; re-minting is what it
+///   must never do, since the seed IS the identity (CIRISVerify#134).
 ///
-/// Stated here rather than discovered: an operator who reads "dedicated home,
-/// dedicated identity" deserves to know which half that is not true of yet.
+/// So `--home` now isolates the database, config, logs, the Ed25519 seed AND
+/// the post-quantum half. If the relocation cannot complete — the home store
+/// cannot be written, or the copy does not verify — the identity keeps working
+/// from the global store, untouched, and says so at WARN.
 ///
 /// # The fallback is deliberate, and it never re-mints
 ///
@@ -265,23 +269,201 @@ pub struct MintedUserIdentity {
 /// node that finds no sealed half and mints a fresh one, silently replacing a
 /// live identity's post-quantum key (the #134 footgun that corrupted the prior
 /// fedID). New material always lands in the home.
+/// `<home>/identity/user` → `<home>/identity/keys`, unconditionally.
+///
+/// The RAW path, with no fallback logic — [`sealed_keys_dir_for`] answers "where
+/// is this alias's sealed half actually kept", which may still be the legacy
+/// global store. This answers "where does this home keep keys", which is what a
+/// relocation needs to know.
+fn home_keys_dir(seed_dir: &std::path::Path) -> std::path::PathBuf {
+    seed_dir
+        .parent()
+        .map_or_else(|| seed_dir.join("keys"), |p| p.join("keys"))
+}
+
+/// Is a sealed ML-DSA-65 half for `alias` present in `dir`? One question, one
+/// spelling — the software seal, its master key, and the TPM plugin's marker.
+fn sealed_half_present(dir: &std::path::Path, alias: &str) -> bool {
+    dir.join(format!("{alias}.mldsa65.seed.blob")).exists()
+        || dir.join(format!("{alias}.master.key")).exists()
+        || dir.join(format!("{alias}.tpmplugin_seal")).exists()
+}
+
+/// **Move a freshly minted identity's sealed PQC half into THIS home.**
+///
+/// `create_federation_identity` seals the ML-DSA half itself, into the global
+/// `keys_dir()`, with no parameter for where (CIRISVerify#285). So a fresh mint
+/// always writes globally, and `sealed_keys_dir_for` then finds that marker and
+/// keeps using it — correctly, since the alternative is minting a SECOND PQC
+/// half for a live identity. The consequence was that `--home` isolated the
+/// database, config, logs and Ed25519 seed while the post-quantum half stayed
+/// shared with every other home on the machine, keyed by alias: two homes using
+/// the same alias would collide on one file, and "a dedicated home for this
+/// identity" was not true of the half that makes it a hybrid identity.
+///
+/// Relocating is what the server can do without that parameter. RELOCATE, never
+/// re-mint: the seed is the identity, so this copies, PROVES the copy opens to
+/// the same public key, and only then removes the original.
+///
+/// Returns the directory the half now lives in. Never fatal — on any doubt the
+/// legacy copy is left exactly as it was and the identity keeps working from
+/// there; the caller resolves through `sealed_keys_dir_for` either way.
+/// `legacy` is passed in rather than looked up so this is testable without
+/// setting `CIRIS_HOME` — a process-global that races every other test in the
+/// binary. The global lookup stays at the call site, where it belongs.
+pub async fn relocate_sealed_pqc_into_home(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    legacy: &std::path::Path,
+) -> std::path::PathBuf {
+    use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
+
+    let home = home_keys_dir(seed_dir);
+    let legacy = legacy.to_path_buf();
+    // Already home-scoped, already in the home store, or nothing was sealed
+    // globally: three different reasons to do nothing, all of them fine.
+    if home == legacy || sealed_half_present(&home, alias) || !sealed_half_present(&legacy, alias) {
+        return sealed_keys_dir_in(seed_dir, alias, &legacy);
+    }
+
+    let mut copied: Vec<std::path::PathBuf> = Vec::new();
+    let relocate = |copied: &mut Vec<std::path::PathBuf>| -> Result<()> {
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("create home key store {}", home.display()))?;
+        let prefix = format!("{alias}.");
+        for entry in std::fs::read_dir(&legacy)
+            .with_context(|| format!("read legacy key store {}", legacy.display()))?
+        {
+            let entry = entry.context("read an entry of the legacy key store")?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // EVERY file this alias owns, not just the blob: the software seal
+            // keeps its master key beside it and the TPM plugin its own marker,
+            // and a half-copied keyset opens to nothing.
+            if !name.starts_with(&prefix) || !entry.path().is_file() {
+                continue;
+            }
+            let dest = home.join(name);
+            std::fs::copy(entry.path(), &dest)
+                .with_context(|| format!("copy {} into {}", name, home.display()))?;
+            copied.push(dest);
+        }
+        Ok(())
+    };
+
+    if let Err(e) = relocate(&mut copied) {
+        for c in &copied {
+            let _ = std::fs::remove_file(c);
+        }
+        tracing::warn!(
+            alias,
+            error = %format!("{e:#}"),
+            legacy = %legacy.display(),
+            "could not move this identity's sealed ML-DSA-65 half into the home key store —              it stays in the global one and the identity is unaffected (CIRISVerify#285)"
+        );
+        return sealed_keys_dir_in(seed_dir, alias, &legacy);
+    }
+
+    // PROVE IT BEFORE DELETING ANYTHING. `open_existing` is load-only and errors
+    // rather than fabricating a seed, which matters more here than anywhere:
+    // `open_or_create` against a bad copy would MINT a fresh PQC half, and the
+    // identity would be silently replaced by one no peer can verify
+    // (CIRISVerify#134). Both halves are opened and their public keys compared,
+    // so "the file copied" is not mistaken for "the key survived".
+    let verdict = async {
+        let from_home = SealedMlDsa65Signer::open_existing(alias, &home)
+            .map_err(|e| anyhow::anyhow!("re-open the copied half from {}: {e}", home.display()))?;
+        let from_legacy = SealedMlDsa65Signer::open_existing(alias, &legacy).map_err(|e| {
+            anyhow::anyhow!("re-open the original half from {}: {e}", legacy.display())
+        })?;
+        let a = from_home
+            .public_key()
+            .await
+            .map_err(|e| anyhow::anyhow!("public key of the copied half: {e}"))?;
+        let b = from_legacy
+            .public_key()
+            .await
+            .map_err(|e| anyhow::anyhow!("public key of the original half: {e}"))?;
+        if a != b {
+            anyhow::bail!("the copied half opens to a DIFFERENT public key than the original");
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(e) = verdict {
+        for c in &copied {
+            let _ = std::fs::remove_file(c);
+        }
+        tracing::warn!(
+            alias,
+            error = %format!("{e:#}"),
+            "the copied sealed half did not verify — the copy has been removed and the \
+             identity keeps using the global key store, untouched. Nothing was re-minted"
+        );
+        return sealed_keys_dir_in(seed_dir, alias, &legacy);
+    }
+
+    // Verified. Now the originals — best-effort: a leftover file in the legacy
+    // store is untidy, and `sealed_keys_dir_for` prefers the home copy anyway.
+    let prefix = format!("{alias}.");
+    if let Ok(entries) = std::fs::read_dir(&legacy) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(&prefix))
+                && entry.path().is_file()
+            {
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        error = %e,
+                        "the sealed half was copied into this home but its global original \
+                         could not be removed — delete it by hand; two homes sharing this \
+                         alias would otherwise still find it"
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!(
+        alias,
+        home = %home.display(),
+        legacy = %legacy.display(),
+        "this identity's sealed ML-DSA-65 half now lives in THIS home's key store — verified \
+         by public key before the global original was removed, never re-minted \
+         (CIRISServer#621, CIRISVerify#285)"
+    );
+    home
+}
+
 pub(crate) fn sealed_keys_dir_for(seed_dir: &std::path::Path, alias: &str) -> std::path::PathBuf {
     // `<home>/identity/user` → `<home>/identity/keys`. Deriving from the seed
     // dir rather than threading a `ServerConfig` keeps this callable from the
     // mint paths, which take a seed dir and nothing else.
-    let home_keys = seed_dir
-        .parent()
-        .map_or_else(|| seed_dir.join("keys"), |p| p.join("keys"));
-    let marker = |dir: &std::path::Path| {
-        dir.join(format!("{alias}.mldsa65.seed.blob")).exists()
-            || dir.join(format!("{alias}.master.key")).exists()
-            || dir.join(format!("{alias}.tpmplugin_seal")).exists()
-    };
+    sealed_keys_dir_in(seed_dir, alias, &ciris_verify_core::ceg_outbox::keys_dir())
+}
+
+/// The same resolution against a GIVEN legacy store.
+///
+/// [`sealed_keys_dir_for`] is this with the global one. The split exists because
+/// the relocation takes its legacy store as an argument, and answering "where
+/// does this alias live" against a different directory than the one being
+/// relocated from is how a failed relocation reported a path with nothing in it
+/// — one question, two spellings, and the parameterised caller reading the
+/// global anyway. One implementation; the global is a caller's choice.
+fn sealed_keys_dir_in(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    legacy: &std::path::Path,
+) -> std::path::PathBuf {
+    let home_keys = home_keys_dir(seed_dir);
+    let marker = |dir: &std::path::Path| sealed_half_present(dir, alias);
     if marker(&home_keys) {
         return home_keys;
     }
-    let legacy = ciris_verify_core::ceg_outbox::keys_dir();
-    if marker(&legacy) {
+    if marker(legacy) {
         tracing::info!(
             alias,
             legacy = %legacy.display(),
@@ -292,7 +474,7 @@ pub(crate) fn sealed_keys_dir_for(seed_dir: &std::path::Path, alias: &str) -> st
              copied or re-sealed automatically, because re-minting a live PQC half \
              silently replaces the identity (CIRISVerify#134)"
         );
-        return legacy;
+        return legacy.to_path_buf();
     }
     home_keys
 }
@@ -582,11 +764,19 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user Ed25519 public key: {e}"))?;
-    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
+    // BEFORE the first re-open: move the half verify just sealed globally into
+    // this home, so everything downstream — this open, the resolver, a later
+    // device enrolment — finds it where this home keeps keys. Returns whichever
+    // directory the half actually lives in, so a relocation that did not happen
+    // (or did not verify) still resolves.
+    let pqc_dir = relocate_sealed_pqc_into_home(
+        &cfg.seed_dir,
         key_id_alias,
-        sealed_keys_dir_for(&cfg.seed_dir, key_id_alias),
+        &ciris_verify_core::ceg_outbox::keys_dir(),
     )
-    .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
+    .await;
+    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(key_id_alias, pqc_dir)
+        .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
     let ml_pub = pqc
         .public_key()
         .await
