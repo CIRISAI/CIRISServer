@@ -47,21 +47,86 @@ fn home_keys(seed_dir: &std::path::Path) -> std::path::PathBuf {
         .join("keys")
 }
 
-/// The half moves, and it is the SAME key on the other side.
+/// The three cases, decided from the two directories and nothing else.
+///
+/// This is the whole safety argument in one assertion: after
+/// `create_federation_identity` has run you cannot tell a half it minted from
+/// one that was already there, because `open_or_create` does not say which it
+/// did. Everything below depends on this being decided FIRST.
+#[test]
+fn the_plan_is_decided_from_what_is_on_disk_before_the_mint() {
+    use ciris_server::identity::{plan_sealed_half, SealedHalfPlan};
+    let root = tmp("plan");
+    let seed_dir = root.join("identity").join("user");
+    std::fs::create_dir_all(&seed_dir).expect("seed dir");
+    let legacy = root.join("global-keys");
+    std::fs::create_dir_all(&legacy).expect("legacy dir");
+    let alias = "planned";
+
+    assert_eq!(
+        plan_sealed_half(&seed_dir, alias, &legacy),
+        SealedHalfPlan::CreatorWillMint,
+        "nothing sealed anywhere: what the creator mints belongs to this mint"
+    );
+
+    std::fs::write(legacy.join(format!("{alias}.mldsa65.seed.blob")), b"x").expect("legacy blob");
+    assert_eq!(
+        plan_sealed_half(&seed_dir, alias, &legacy),
+        SealedHalfPlan::LeaveLegacy,
+        "a half in the global store that this home does not have predates home scoping — \
+         another home may resolve through it, so it is NOT ours to move"
+    );
+
+    std::fs::create_dir_all(home_keys(&seed_dir)).expect("home dir");
+    std::fs::write(
+        home_keys(&seed_dir).join(format!("{alias}.mldsa65.seed.blob")),
+        b"y",
+    )
+    .expect("home blob");
+    assert_eq!(
+        plan_sealed_half(&seed_dir, alias, &legacy),
+        SealedHalfPlan::ReuseHome,
+        "this home already holds it: the creator must be handed OUR key, not left to mint a \
+         second one"
+    );
+
+    // The degenerate shape: a seed dir whose sibling `keys` IS the global store,
+    // which is what an un-homed node looks like. `home_keys_dir` derives
+    // `<parent>/keys`, so the two coincide only when the global store is that
+    // directory — nothing to decide, and nothing to move.
+    let unhomed_root = tmp("unhomed");
+    let unhomed_seed = unhomed_root.join("user");
+    let unhomed_keys = unhomed_root.join("keys");
+    std::fs::create_dir_all(&unhomed_seed).expect("seed dir");
+    std::fs::create_dir_all(&unhomed_keys).expect("keys dir");
+    assert_eq!(
+        plan_sealed_half(&unhomed_seed, alias, &unhomed_keys),
+        SealedHalfPlan::NotApplicable,
+        "home and global being the same directory is nothing to decide"
+    );
+}
+
+/// The half this mint created moves, and it is the SAME key on the other side.
 #[tokio::test]
 async fn the_half_moves_and_stays_the_same_key() {
+    use ciris_server::identity::SealedHalfPlan;
     let root = tmp("move");
     let seed_dir = root.join("identity").join("user");
     std::fs::create_dir_all(&seed_dir).expect("seed dir");
     let legacy = root.join("global-keys");
-    // A distinctive alias per test process: the key store is keyed by alias and
-    // a fixed one would collide between parallel runs.
     let alias = format!("relocate-{}-{}", std::process::id(), line!());
 
+    // The order the real call site follows: plan (nothing anywhere), then the
+    // creator seals globally, then settle.
     let before = seal(&legacy, &alias, &[7u8; 32]).await;
 
-    let landed =
-        ciris_server::identity::relocate_sealed_pqc_into_home(&seed_dir, &alias, &legacy).await;
+    let landed = ciris_server::identity::relocate_sealed_pqc_into_home(
+        &seed_dir,
+        &alias,
+        &legacy,
+        SealedHalfPlan::CreatorWillMint,
+    )
+    .await;
 
     assert_eq!(
         landed,
@@ -85,35 +150,116 @@ async fn the_half_moves_and_stays_the_same_key() {
     );
 }
 
-/// Nothing to move is not a failure, and must not disturb what is already home.
+/// **A half that predates home scoping is never moved.**
+///
+/// The dangerous case, and the reason the plan exists. An identity created
+/// before home scoping lives in the global store and its home resolves through
+/// it. A SECOND `--home` minting the same alias makes
+/// `create_federation_identity` OPEN that half rather than mint one — and a
+/// relocation that could not tell the difference would move it and delete the
+/// original, leaving the first home with neither a local nor a global half and
+/// an established identity that can no longer sign.
 #[tokio::test]
-async fn a_half_already_in_this_home_is_left_alone() {
-    let root = tmp("athome");
+async fn a_legacy_half_another_home_may_use_is_never_moved() {
+    use ciris_server::identity::{plan_sealed_half, SealedHalfPlan};
+    let root = tmp("legacy");
+    let seed_dir = root.join("identity").join("user");
+    std::fs::create_dir_all(&seed_dir).expect("seed dir");
+    let legacy = root.join("global-keys");
+    let alias = format!("prehome-{}-{}", std::process::id(), line!());
+
+    let established = seal(&legacy, &alias, &[11u8; 32]).await;
+    let plan = plan_sealed_half(&seed_dir, &alias, &legacy);
+    assert_eq!(
+        plan,
+        SealedHalfPlan::LeaveLegacy,
+        "the fixture must be the legacy case"
+    );
+
+    let landed =
+        ciris_server::identity::relocate_sealed_pqc_into_home(&seed_dir, &alias, &legacy, plan)
+            .await;
+
+    assert_eq!(
+        landed, legacy,
+        "the resolution must keep pointing at the store the half is actually in"
+    );
+    assert_eq!(
+        SealedMlDsa65Signer::open_existing(&alias, &legacy)
+            .expect("THE OTHER HOME'S IDENTITY MUST STILL OPEN")
+            .public_key()
+            .await
+            .expect("public key"),
+        established,
+        "the pre-home-scoping half was moved or altered — the home that was resolving \
+         through it can no longer sign, which is worse than never isolating it"
+    );
+    assert!(
+        !home_keys(&seed_dir)
+            .join(format!("{alias}.mldsa65.seed.blob"))
+            .exists(),
+        "nothing may be copied into this home either: a second copy of a live PQC half is \
+         the duplication the occurrence model exists to prevent"
+    );
+}
+
+/// **A retried provision reuses this home's half, and takes the staging down.**
+///
+/// `POST /v1/self/identity` is documented as repeatable. Once the first call has
+/// relocated the half into this home, the global store is empty — so a second
+/// call would have the creator mint a FRESH global half, build the CEG object
+/// and fedcode from it, and leave the response and every later signer
+/// resolution using the old home key: an identity that disagrees with itself.
+/// Staging the home half for the creator is what keeps the operation idempotent.
+#[tokio::test]
+async fn a_retried_mint_reuses_this_homes_half() {
+    use ciris_server::identity::{plan_sealed_half, stage_home_half_into, SealedHalfPlan};
+    let root = tmp("retry");
     let seed_dir = root.join("identity").join("user");
     std::fs::create_dir_all(&seed_dir).expect("seed dir");
     let legacy = root.join("global-keys");
     std::fs::create_dir_all(&legacy).expect("legacy dir");
-    let alias = format!("athome-{}-{}", std::process::id(), line!());
+    let alias = format!("retried-{}-{}", std::process::id(), line!());
 
     let home = home_keys(&seed_dir);
-    let before = seal(&home, &alias, &[9u8; 32]).await;
+    let ours = seal(&home, &alias, &[13u8; 32]).await;
 
-    let landed =
-        ciris_server::identity::relocate_sealed_pqc_into_home(&seed_dir, &alias, &legacy).await;
-
-    assert_eq!(
-        landed, home,
-        "an already-home half resolves to the home store"
+    let plan = plan_sealed_half(&seed_dir, &alias, &legacy);
+    assert_eq!(plan, SealedHalfPlan::ReuseHome);
+    let staged = stage_home_half_into(&seed_dir, &alias, &legacy);
+    assert!(
+        !staged.is_empty(),
+        "the staging must actually put files there"
     );
+    // What the creator would do with the staging present: open it, not mint.
     assert_eq!(
-        SealedMlDsa65Signer::open_existing(&alias, &home)
-            .expect("still there")
+        SealedMlDsa65Signer::open_existing(&alias, &legacy)
+            .expect("the staged copy must open — that is what makes the creator reuse it")
             .public_key()
             .await
             .expect("public key"),
-        before,
-        "a no-op must be a NO-OP: re-sealing what is already here would mint a second half \
-         for a live identity"
+        ours,
+        "the staged copy must be OUR key, or the creator records one we cannot sign with"
+    );
+
+    let landed =
+        ciris_server::identity::relocate_sealed_pqc_into_home(&seed_dir, &alias, &legacy, plan)
+            .await;
+
+    assert_eq!(landed, home, "the home copy is the one that stays");
+    assert_eq!(
+        SealedMlDsa65Signer::open_existing(&alias, &home)
+            .expect("this home's half must be untouched")
+            .public_key()
+            .await
+            .expect("public key"),
+        ours,
+        "a retry must not change the key this home signs with"
+    );
+    assert!(
+        SealedMlDsa65Signer::open_existing(&alias, &legacy).is_err(),
+        "the staging was scaffolding — leaving it in the global store re-creates the sharing \
+         this whole change removes"
     );
 }
 
@@ -124,13 +270,9 @@ async fn a_half_already_in_this_home_is_left_alone() {
 /// a genuine failure (the home key store cannot be created: a FILE sits where
 /// the directory must go) and asserts the global original is untouched and
 /// still opens to the key it always had.
-///
-/// Note what this case is NOT: pre-placing a different half in the home store
-/// would trip the "already home" short-circuit, and the relocation would return
-/// before copying anything. That version of this test passed without ever
-/// exercising a failure — a fixture whose hazards cancel proves nothing.
 #[tokio::test]
 async fn a_relocation_that_cannot_complete_leaves_the_original_working() {
+    use ciris_server::identity::SealedHalfPlan;
     let root = tmp("blocked");
     let seed_dir = root.join("identity").join("user");
     std::fs::create_dir_all(&seed_dir).expect("seed dir");
@@ -145,8 +287,13 @@ async fn a_relocation_that_cannot_complete_leaves_the_original_working() {
     let home = home_keys(&seed_dir);
     std::fs::write(&home, b"not a directory").expect("place the blocker");
 
-    let landed =
-        ciris_server::identity::relocate_sealed_pqc_into_home(&seed_dir, &alias, &legacy).await;
+    let landed = ciris_server::identity::relocate_sealed_pqc_into_home(
+        &seed_dir,
+        &alias,
+        &legacy,
+        SealedHalfPlan::CreatorWillMint,
+    )
+    .await;
 
     assert_eq!(
         landed, legacy,
