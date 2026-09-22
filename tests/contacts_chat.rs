@@ -277,6 +277,25 @@ impl OwnerIdentity {
     /// assertion in `open_chat` is where that is stated out loud.
     async fn mint() -> Self {
         static NTH: AtomicU32 = AtomicU32::new(0);
+        // A UNIQUE ALIAS IS NOT ENOUGH, and macOS is where that shows. The
+        // alias and the seed dir are already per-test (above), but
+        // `create_federation_identity` seals the ML-DSA half into the
+        // PROCESS-GLOBAL keyring directory, and that directory has material of
+        // its OWN — a master key the software seal creates on first use. Six
+        // tests in this binary mint in parallel; when several create that
+        // material at once, one wins and the others' blobs no longer open
+        // against the key that landed. The symptom is `Key not found:
+        // mldsa65.seed` from a mint that just succeeded, on a DIFFERENT test
+        // each run (two CI runs on two branches failed at this same line under
+        // two different test names) and never locally, where the box is faster
+        // than the race.
+        //
+        // So the mint is serialized. Only the mint: once the directory's
+        // material exists, distinct aliases read back independently, and
+        // holding this any longer would serialize the whole file for nothing.
+        // A `tokio::sync::Mutex` because the guard spans an `.await`.
+        static MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _minting = MINT.lock().await;
         let alias = format!(
             "alice-owner-{}-{}",
             std::process::id(),
@@ -508,7 +527,7 @@ async fn serve(engine: Arc<Engine>, seed_dir: PathBuf) -> (String, tokio::task::
     // `SelfEncKeys`; that was #590's mistake, and the read door never unwrapped
     // with those keys. Nothing keystore-side is needed.
 
-    let app = contacts_chat::router(engine, signer, seed_dir, None);
+    let app = contacts_chat::router(engine, signer, seed_dir, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -863,6 +882,35 @@ async fn add_contact_writes_the_consent_grant_and_resolves_occurrences() {
         row["pubkey_ed25519_base64"].is_string(),
         "a contact card must carry the peer projection's fields: {row}"
     );
+    // CIRISServer#616 — the receipt: the grant's envelope rides the row, SENT,
+    // so the client renders "who sent it / the rule it follows" from the row
+    // and never from a rule it assumed.
+    let grant = &row["grant"];
+    assert!(
+        grant.is_object(),
+        "every contact row carries its live grant: {row}"
+    );
+    assert_eq!(grant["dimension"], "consent:replication:v1");
+    assert_eq!(grant["cohort_scope"], "federation");
+    assert!(
+        grant["attesting_key_id"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty()),
+        "who signed the grant is sent, not inferred: {grant}"
+    );
+    assert!(
+        grant["subject_key_ids"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == CONTACT_KEY_ID)),
+        "the grant names the contact: {grant}"
+    );
+    assert!(
+        grant["consent_prefixes"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|p| p == "chat:")),
+        "the rule it follows covers chat: {grant}"
+    );
+    assert!(grant["asserted_at"].is_string(), "when: {grant}");
 }
 
 #[tokio::test]

@@ -28,9 +28,15 @@
 //! ## The YubiKey (PKCS#11) backend — gated + flagged
 //!
 //! The `pkcs11` cargo feature on `ciris-server` turns on `ciris-keyring`'s own
-//! `pkcs11` feature (Linux operator hardware). It is OFF by default: a plain
-//! `cargo build` never links `cryptoki`, and the `Pkcs11` backend honestly
-//! returns [`KeyringError::NotSupported`] without it. The empty-slot
+//! `pkcs11` feature (Linux operator hardware). It is **ON by default**
+//! (`Cargo.toml` `default = ["pkcs11"]`), deliberately: the published wheel and
+//! the `ciris-server` binary carry the hardware fed-ID and accord-custody paths
+//! out of the box, with no special build. Build with `--no-default-features`
+//! and `cryptoki` is never linked and the `Pkcs11` backend honestly returns
+//! [`KeyringError::NotSupported`]. (This paragraph said "OFF by default" long
+//! after the feature moved into the default set — the same stale-prose shape as
+//! the `accord_custody` comments corrected in 97ca867e. Read `Cargo.toml`, not
+//! this sentence, and fix this sentence when it disagrees.) The empty-slot
 //! provisioning flow (`provision_piv_via_ykman`, default PIV slot `9c`,
 //! touch/pin policy) mirrors the `ciris-verify identity create` CLI but is
 //! driven here as a ciris-server operation.

@@ -586,7 +586,11 @@ async fn serve(
     // No node keystore seed here since edge v24.2.0: the owner's content-only
     // occurrence is provisioned on persist's content-KEM identity by
     // `provision_engine_occurrence` from the engine itself (CIRISServer#596).
-    let app = contacts_chat::router(engine, signer, seed_dir, None);
+    // No scope lifecycle either: scoped room addresses are a mesh-facing
+    // concern (`ensure_room_addresses`), and this bench measures the local
+    // send/read path only. `None` leaves the install a no-op rather than
+    // standing up a lifecycle no peer can reach.
+    let app = contacts_chat::router(engine, signer, seed_dir, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
