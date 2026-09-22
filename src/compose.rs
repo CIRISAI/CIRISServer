@@ -3901,9 +3901,9 @@ pub(crate) async fn publish_own_set_admit_owner(engine: &Engine, node_key_id: &s
     refresh_publish_own_set(engine, node_key_id, keys).await
 }
 
-pub(crate) fn kick_replication(reason: &'static str) {
+pub(crate) fn kick_replication(reason: &'static str) -> bool {
     let Some(runtime) = held_replication_runtime() else {
-        return;
+        return false;
     };
     // Callers are async handlers, but the fold's author door reaches here from
     // a `block_on` — spawn on whatever runtime is current rather than assume
@@ -3913,7 +3913,7 @@ pub(crate) fn kick_replication(reason: &'static str) {
             reason,
             "replication kick skipped — no runtime context; the cadence carries it"
         );
-        return;
+        return false;
     };
     handle.spawn(async move {
         match runtime.round_now_all().await {
@@ -3932,6 +3932,7 @@ pub(crate) fn kick_replication(reason: &'static str) {
             ),
         }
     });
+    true
 }
 
 /// Core replication-runtime bring-up, shared by the compose boot path
@@ -4085,6 +4086,9 @@ pub(crate) async fn start_replication_runtime(
             // Vec; on shutdown the runtime drop aborts it mid-sleep. Re-checks
             // every 30s so a claim (or a re-rooted ownership) is picked up
             // without a restart, and an owner it has already added is a no-op.
+            //
+            // `owed` outlives one iteration on purpose — see the kick below.
+            let mut owed = false;
             loop {
                 // THE SET CHANGED ⇒ CARRY THE ROWS. Adding the owner without a
                 // kick left the rows it unlocks (owner-binding, occurrences)
@@ -4093,8 +4097,20 @@ pub(crate) async fn start_replication_runtime(
                 // that knows to round now. Measured on the v26.1.0 ladder: the
                 // binding crossed at +41s, one full cadence after the announce
                 // kick fired against a set that did not yet contain the owner.
+                // A KICK THAT COULD NOT BE DISPATCHED IS STILL OWED. This task
+                // is spawned from inside `RUNTIME.get_or_try_init`, so on a node
+                // that already has an owner at startup it can add them while the
+                // closure is still constructing the runtime — `kick_replication`
+                // then finds `RUNTIME` unset and returns false. The owner is in
+                // the set by that point, so every later poll reports no gain,
+                // and the kick is never retried: the owner-authored binding and
+                // occurrences wait for the ordinary cadence on exactly the nodes
+                // that were ready for them soonest. Hold the debt instead.
                 if refresh_publish_own_set(&engine, &node, &keys).await {
-                    kick_replication("publish-own set gained the owner");
+                    owed = true;
+                }
+                if owed && kick_replication("publish-own set gained the owner") {
+                    owed = false;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }

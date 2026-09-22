@@ -1458,14 +1458,34 @@ pub fn grant_receipt(grant: &ciris_persist::federation::types::Attestation) -> s
         ),
         "consent_prefixes": grant_prefixes(grant).unwrap_or_default(),
         "asserted_at": grant.asserted_at.to_rfc3339(),
-        "valid_until": grant.expires_at.map(|t| t.to_rfc3339()),
+        // THE POLICY'S EXPIRY, not the row's. `emit_grant_row` writes an owner's
+        // time-boxed window into the payload as `valid_until` and the doc on
+        // `ConsentGrantOpts::valid_until` says in as many words that it is
+        // distinct from the row's `expires_at` column — which this read used.
+        // So a grant the human deliberately bounded came back with
+        // `valid_until: null` and the client rendered expiring consent as
+        // unbounded, on the receipt sheet whose whole job is telling a person
+        // what they agreed to. The row column is reported beside it rather than
+        // folded in: two different lifetimes must not share one name, which is
+        // how this started.
+        "valid_until": grant_policy(grant)
+            .and_then(|policy| policy.valid_until)
+            .map(|t| t.to_rfc3339()),
+        "row_expires_at": grant.expires_at.map(|t| t.to_rfc3339()),
     })
 }
 
-fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
+/// The grant's payload, parsed through persist's closed grammar — the one
+/// reader for every payload-declared member of the receipt.
+fn grant_policy(
+    grant: &ciris_persist::federation::types::Attestation,
+) -> Option<ciris_persist::federation::consent_grammar::ConsentTransferPolicy> {
     ciris_persist::federation::consent_grammar::parse_grant_payload(&grant.attestation_envelope)
         .ok()
-        .map(|policy| normalize_prefixes(&policy.attestation_prefixes))
+}
+
+fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
+    grant_policy(grant).map(|policy| normalize_prefixes(&policy.attestation_prefixes))
 }
 
 /// The live `consent:replication` rows that stand FOR machine `k` — the

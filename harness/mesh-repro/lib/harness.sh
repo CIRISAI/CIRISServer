@@ -405,6 +405,13 @@ harness_verdict() {
 # matching line; ANSI stripped, the tracing span prefix dropped, the tail cut
 # to one terminal line. Scenarios pass the regex that names THEIR events (the
 # chat ladder passes the handshake, kick, install, serve and pull lines).
+# A SERVICE WITH NO MATCHING EVENTS IS THE NORMAL CASE HERE, not an error.
+# `grep` exits 1 on no match, and the harness runs under `set -euo pipefail`, so
+# an unguarded grep aborted this function — and with it the evidence and verdict
+# path that calls it. That fired exactly when a node never reached any of the
+# named events, which is to say on an early failure: the diagnostic machinery
+# died at the moment its output was the whole point. Guarded per service, so an
+# empty match set contributes no lines instead of killing the run.
 harness_timeline() {
   local pat="$1"; shift
   local svcs=("$@")
@@ -413,7 +420,7 @@ harness_timeline() {
   for svc in "${svcs[@]}"; do
     compose logs -t --no-log-prefix "$svc" 2>/dev/null \
       | sed -E 's/\x1b\[[0-9;]*m//g' \
-      | grep -E "$pat" \
+      | { grep -E "$pat" || true; } \
       | sed -E "s/^([0-9-]+T)([0-9:.]{12})[0-9]*Z\s+\S+Z?\s*(INFO|WARN|ERROR|DEBUG)?\s*/\2  $svc  /" \
       | sed -E 's/[a-z_]+\{[^}]*\}(:[a-z_]+\{[^}]*\})*: //' \
       | cut -c1-230
