@@ -1012,21 +1012,78 @@ pub async fn mint_local_device_occurrence_with(
         // cannot sign, after the raw seed has already been deleted (Codex review
         // on PR #620). Both are home-scoped; each goes where its own re-open
         // looks.
-        let sealed =
-            SealedEd25519Signer::open_or_create(alias, seed_dir, Some(&*ed32)).map_err(|e| {
-                anyhow::anyhow!("seal this device's own Ed25519 half under {alias}: {e}")
-            })?;
+        let sealed = match SealedEd25519Signer::open_or_create(alias, seed_dir, Some(&*ed32)) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                // A FAILED ENROLMENT MUST NOT LEAVE PLAINTEXT AT REST. We got
+                // here through `mint_portable_software_occurrence`, which has
+                // already written both raw seeds and a `software` marker; the
+                // caller is about to see an error, the alias is never returned,
+                // and nothing is registered. Leaving the seeds behind would mean
+                // a request that failed still put an unreferenced private key on
+                // disk — under a random alias nobody will ever come back to
+                // clean up. Best-effort by necessity (we are already on the
+                // error path and the original failure is what the caller needs),
+                // but each miss is named.
+                for orphan in [&raw_ed, &raw_pqc] {
+                    if let Err(rm) = std::fs::remove_file(orphan) {
+                        if rm.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                path = %orphan.display(),
+                                error = %rm,
+                                "sealed-device mint failed AND its raw seed could not be \
+                                 removed — a private key is at rest for an enrolment that \
+                                 did not happen; delete it by hand"
+                            );
+                        }
+                    }
+                }
+                let marker = user_backend_marker_path(seed_dir, alias);
+                if let Err(rm) = std::fs::remove_file(&marker) {
+                    if rm.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(marker = %marker.display(), error = %rm, "…and its backend marker remains");
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "seal this device's own Ed25519 half under {alias}: {e}"
+                ));
+            }
+        };
         // What the seal ACTUALLY is: `open_or_create` falls back to encrypted
         // software where there is no TPM/SE, and a response that reported `tpm`
         // regardless would let an audit log call a software-custodied occurrence
         // hardware-backed.
         sealed_hardware_type = Some(ciris_keyring::HardwareSigner::hardware_type(&sealed));
+        // THE MARKER BEFORE THE DELETION, and as a failure. The order is the
+        // whole safety property: between removing the raw seed and recording the
+        // custody there is a window in which the key exists ONLY in the sealed
+        // store and nothing on disk says so. A best-effort write that lost that
+        // race left a registered occurrence whose next re-open asks for
+        // `Software`, finds no seed, and mints a fresh key — active, bound, and
+        // unable to sign. Write first: a marker naming a seal that does not
+        // exist yet is recoverable (the raw seed is still there), a deletion
+        // with no marker is not.
+        write_user_backend_marker_strict(
+            seed_dir,
+            alias,
+            UserIdentityBackend::PlatformSealed.label(),
+        )?;
         std::fs::remove_file(&raw_ed).with_context(|| {
             format!(
                 "remove the raw Ed25519 seed {} after sealing",
                 raw_ed.display()
             )
         })?;
+        // The response describes the FINAL artifacts. The raw seed is gone, so
+        // listing it would have an operator looking for a plaintext device key
+        // that does not exist — and treating it as the installed one. Same
+        // shape as the PQC half's swap below.
+        keyset
+            .files_written
+            .retain(|f| f != &portable_ed_seed_name(alias));
+        keyset
+            .files_written
+            .push(format!("{alias} (Ed25519 sealed)"));
         // THE MARKER IS THE BRIDGE. `resolve_user_signer` re-opens a user
         // identity under the custody this file names; without it every re-open
         // would ask for `Software`, find no seed (we just removed it), and MINT
@@ -1034,8 +1091,8 @@ pub async fn mint_local_device_occurrence_with(
         // that no longer resolves to itself. Caught by
         // `tests/portable_occurrence.rs` the first time the seal was made the
         // default: the test re-opened device 2 as Software and got a new id.
-        // One custody, written where the resolver already looks.
-        write_user_backend_marker(seed_dir, alias, UserIdentityBackend::PlatformSealed.label());
+        // One custody, written where the resolver already looks — above, before
+        // the raw seed was removed.
         tracing::info!(
             alias,
             keys_dir = %keys_dir.display(),
@@ -1755,10 +1812,28 @@ fn user_backend_marker_path(seed_dir: &std::path::Path, alias: &str) -> PathBuf 
 /// Record which custody backend minted the user identity (best-effort; a failure
 /// to write only degrades claim-remote signer resolution, never the mint itself).
 fn write_user_backend_marker(seed_dir: &std::path::Path, alias: &str, backend_label: &str) {
-    let path = user_backend_marker_path(seed_dir, alias);
-    if let Err(e) = std::fs::write(&path, backend_label) {
-        tracing::warn!(marker = %path.display(), error = %e, "could not write user backend marker");
+    if let Err(e) = write_user_backend_marker_strict(seed_dir, alias, backend_label) {
+        tracing::warn!(error = %format!("{e:#}"), "could not write user backend marker");
     }
+}
+
+/// The same write, as a FAILURE.
+///
+/// Best-effort is right where the marker only records what the default already
+/// is — a lost write leaves the re-open asking for `Software` and finding the
+/// software seed exactly where it left it. It is wrong on the sealing path,
+/// where the raw seed is about to be deleted: there, a marker that did not land
+/// means the next re-open asks for `Software`, finds nothing, and MINTS A FRESH
+/// KEY under the same alias. The occurrence is registered, bound and active,
+/// and it can never sign again. A failure the caller must see, not a warn.
+fn write_user_backend_marker_strict(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    backend_label: &str,
+) -> Result<()> {
+    let path = user_backend_marker_path(seed_dir, alias);
+    std::fs::write(&path, backend_label)
+        .with_context(|| format!("write user backend marker {}", path.display()))
 }
 
 /// Read the recorded custody backend for the user identity, if any. Returns the

@@ -95,15 +95,31 @@ fn the_authorizer_is_read_into_memory_and_zeroized() {
 #[test]
 fn associate_enrols_an_occurrence() {
     let code = code_only(&src("src/auth/portable_occurrence.rs"));
-    // THE WINDOW IS THE MODULE, not one function. This scraped
-    // `associate_handler`'s body alone and went red the day CIRISServer#618
-    // factored the two custody arms out of it into `open_directory_authorizer`
-    // / `open_hardware_authorizer` — the property held throughout, the window
-    // did not. The property is "this module enrols by minting here and opening
-    // the supplied material transiently", and it is a property of the module.
-    let body = code
-        .split_once("async fn associate_handler")
-        .map_or(code.as_str(), |_| code.as_str());
+    // THE WINDOW IS THE ASSOCIATE FLOW: its handler plus the two helpers
+    // CIRISServer#618 factored the custody arms into. Not one function — that
+    // went red the day the helpers were extracted, while the property held
+    // throughout. And not the whole MODULE, which is what it was widened to
+    // next: `portable_handler` independently calls `bind_occurrence_core` and
+    // `mint_local_device_occurrence`, so a module-wide scan stays green even if
+    // the binding is deleted from `associate_handler` outright — the test keeps
+    // its name and stops protecting the thing the name promises. A window has
+    // to be the flow, not the file the flow happens to live in.
+    let window = [
+        "async fn associate_handler",
+        "fn open_directory_authorizer",
+        "fn open_hardware_authorizer",
+    ]
+    .iter()
+    .map(|needle| {
+        let i = code
+            .find(needle)
+            .unwrap_or_else(|| panic!("the associate flow must contain `{needle}`"));
+        let rest = &code[i..];
+        &rest[..rest.find("\n}\n").map_or(rest.len(), |j| j + 2)]
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let body = window.as_str();
     assert!(
         body.contains("bind_occurrence_core"),
         "associate must BIND the device as an occurrence — that is what gives it the identity's \
