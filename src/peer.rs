@@ -173,6 +173,18 @@ pub async fn emit_analyze_consent(
             "analyze consent row {id} authored but resolve_scoped_consent failed: {e}"
         ),
     }
+    // CARRY THE PERMISSION WITH THE DATA. `POST /v1/federation/consent` with
+    // `analyze=true` authors two rows — the replication grant, then this one —
+    // and only the first used to kick. The kick is fire-and-forget, so a round
+    // could leave with traces the recipient is now consented to receive and
+    // without the row that lets them analyse those traces; the analyze row then
+    // waited for the periodic cadence, because by the time anything else kicked
+    // the peer set had already converged and nothing looked changed.
+    //
+    // Kicking here rather than after the compound handler keeps it true for the
+    // other caller too (the embedded delivery path authors this row on its own).
+    // Kicks coalesce per coordinator, so the pair still costs one round.
+    crate::compose::kick_replication("analyze consent grant emitted");
     Ok(Some(id))
 }
 
@@ -1433,7 +1445,17 @@ pub fn grant_receipt(grant: &ciris_persist::federation::types::Attestation) -> s
         (paths::DIMENSION): ciris_persist::federation::admission::envelope_dimension(&grant.attestation_envelope),
         "subject_key_ids": grant.subject_key_ids,
         "cohort_scope": grant.cohort_scope,
-        "for_key_id": grant.attestation_envelope.get("for_key_id").and_then(|v| v.as_str()),
+        // THROUGH THE PARSER, not a hand lookup. `for_key_id` is written under
+        // `payload` by `emit_grant_row` and at the top level by the author
+        // envelope, so a `get("for_key_id")` on the envelope reads null for
+        // every grant the owner-authored path produces — which is the normal
+        // path, and the field exists to name the machine a human's grant is
+        // FOR. persist's `for_key_id_of` knows both locations; this file
+        // already uses it in `live_consent_grants_for_machine`, and spelling
+        // the lookup by hand here is how the two disagreed.
+        "for_key_id": ciris_persist::federation::consent_by_humans::for_key_id_of(
+            &grant.attestation_envelope,
+        ),
         "consent_prefixes": grant_prefixes(grant).unwrap_or_default(),
         "asserted_at": grant.asserted_at.to_rfc3339(),
         "valid_until": grant.expires_at.map(|t| t.to_rfc3339()),

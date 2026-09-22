@@ -193,6 +193,26 @@ harness_log_count() {
 # Optional:
 #   DIAG_<id>()                            # extra evidence printed on failure
 #   harness_scenario_evidence()            # always-printed evidence tail
+# Is any REQUIRED stage still zero? (0 = yes, something is pending — shell
+# truth, so it reads as `! harness_required_pending` at the break.)
+#
+# Also prints what it is waiting for, once per tick: a run that uses its whole
+# window should say which stage kept it there, otherwise the only visible
+# difference between "waiting for the body" and "hung" is the wall clock.
+harness_required_pending() {
+  local s req pending=""
+  for s in "${STAGES[@]}"; do
+    req="REQUIRED_$s"
+    [ -n "${!req:-}" ] || continue
+    if [ "${COUNT[$s]:-0}" -le 0 ]; then pending="$pending $s"; fi
+  done
+  if [ -n "$pending" ]; then
+    echo "     … ${SUCCESS_STAGE} is positive; still waiting on REQUIRED:${pending}"
+    return 0
+  fi
+  return 1
+}
+
 harness_run_ladder() {
   local window="${1:-780}" resample="${2:-30}"
   declare -gA COUNT
@@ -205,7 +225,16 @@ harness_run_ladder() {
     # `if`, NOT `[ … ] && break`: under `set -e` a FALSE `&&` list returns
     # non-zero and terminates the script, which silently killed the ladder after
     # one tick. Guarding a loop with a bare test-and-break is a trap here.
-    if [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ]; then break; fi
+    #
+    # LEAVING EARLY IS A MEASUREMENT DECISION. Breaking on SUCCESS_STAGE alone
+    # was right while that stage was the whole claim, and wrong the moment a
+    # scenario declared a REQUIRED stage that can lag it: chat's `hamburger`
+    # (the row's identity) goes positive while `arrived` (its body, fetched over
+    # the mesh) is still in flight, so the break truncated a 780s window to
+    # whatever happened to be on the clock, and a fetch that was merely SLOWER
+    # than the final re-sample was reported as a failure. A required stage is
+    # part of the claim; wait for it, or say at the end that we stopped waiting.
+    if [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ] && ! harness_required_pending; then break; fi
   done
   # Rule 3 — ALWAYS re-sample. Late rows are normal, not failure.
   echo "── final re-sample (+${resample}s: the scorer runs on a cadence) ──"

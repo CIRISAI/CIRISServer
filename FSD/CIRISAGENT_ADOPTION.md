@@ -459,9 +459,16 @@ what to expect on a fleet that crosses it:
   stalled the identity round for every node that owner stewards. The server
   rebuilds the bound envelope from the row's own pubkeys and re-signs it with
   the owner's pen at boot, at claim and after your author door.
-  `delivery_status().owner_key_record` reads `bound | rebound | unbound |
-  absent`; `unbound` means the heal could not run (hardware custody, or the
-  pen does not hold those pubkeys) and is worth surfacing to the operator.
+  `delivery_status().owner_key_record` reads `bound | unbound | absent |
+  unknown` — those four and no others. `unbound` means the heal could not run
+  (hardware custody, or the pen does not hold those pubkeys) and is worth
+  surfacing to the operator; `unknown` means this node could not read the
+  record at all (no owner resolved yet, or the directory read failed) and is
+  NOT the same as `absent`. There is no `rebound`: a heal that ran leaves a
+  record that reads `bound`, exactly like one that never needed healing —
+  whether a rebind happened is in the logs, not in this field. An earlier draft
+  of this line listed `rebound` and omitted `unknown`, so an adopter coding to
+  it would wait for a state that is never emitted and reject one that is.
 - **The body opens.** Three host-side doors the server had never set kept
   every chat body sealed on the far node while the row itself crossed: edge's
   key-grant engine (`ReplicationRuntimeConfig::engine`, CIRISPersist#848 —
