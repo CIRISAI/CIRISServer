@@ -1745,16 +1745,29 @@ pub async fn run_federation_delivery(
             phase_secs = schedule.phase().as_secs_f64(),
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
-        let mut last_logged: Option<usize> = None;
+        // The SET, not its size: this loop must make the same gain/loss
+        // decision the composed controller makes, because on an embedded agent
+        // it is the only one of the two that runs.
+        let mut last_logged: Option<crate::replication_reconcile::Reconciled> = None;
         let mut rooting_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Decay a failing reconcile instead of re-running it at full cadence
         // forever. Resets to the floor on the first success, so a peer that
         // recovers is not still being punished for an earlier blip.
         let mut backoff =
             crate::backoff::Backoff::new(cadence, Duration::from_secs(MAX_RECONCILE_BACKOFF_SECS));
+        // The same nudge the composed controller waits on. Without this arm an
+        // embedded agent that authors a grant through the fold's author door
+        // converges the new peer only on the next cadence tick, so the kick that
+        // follows the grant has nobody new to round toward.
+        let reconcile_nudge = crate::replication_reconcile::nudge_handle();
         loop {
             tokio::select! {
                 _ = schedule.tick() => {}
+                _ = reconcile_nudge.notified() => {
+                    tracing::debug!(
+                        "federation-delivery reconcile woken by a nudge (a grant was just authored)"
+                    );
+                }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         tracing::info!("federation-delivery reconcile loop shutting down");
@@ -1772,12 +1785,16 @@ pub async fn run_federation_delivery(
             {
                 Ok(reconciled) => {
                     backoff.succeed();
-                    // This loop keys its logging on the SIZE of the admitted set
-                    // (the "0 peers" warn below is the line that matters here).
-                    // The kick-on-change decision is the reconcile controller's
-                    // job and is keyed on the set itself — see
-                    // `replication_reconcile::Reconciled`; one kicker, so a gain
-                    // observed by both loops is still one coalesced round.
+                    // THIS LOOP KICKS TOO. An earlier revision left the kick to
+                    // `replication_reconcile::spawn` and said so in a comment —
+                    // but a bare embedded agent reaches delivery only through
+                    // `run_federation_delivery` and never runs compose's
+                    // controller at all, so on exactly the path that authors a
+                    // grant and then reconciles, nobody carried it and the new
+                    // peer waited a full cadence. `note_convergence` owns the
+                    // decision for both callers; kicks coalesce per coordinator
+                    // in edge's scheduler, so a node running both loops still
+                    // rounds once.
                     let count = reconciled.count();
                     // ROOTING, per consent peer, on BOTH nodes — the ladder's
                     // `arrive` diagnosis needs the canonical's view of the agent
@@ -1845,7 +1862,9 @@ pub async fn run_federation_delivery(
                         // halves its reconcile rate.
                         schedule.reset();
                     }
-                    if last_logged != Some(count) {
+                    if let Some((gained, lost)) =
+                        crate::replication_reconcile::note_convergence(&mut last_logged, reconciled)
+                    {
                         if count == 0 {
                             // ZERO IS NOT CONVERGENCE. This read "converged to 0
                             // consent peers" at info, which is what a healthy
@@ -1871,10 +1890,11 @@ pub async fn run_federation_delivery(
                         } else {
                             tracing::info!(
                                 consent_peers = count,
+                                gained = ?gained,
+                                lost = ?lost,
                                 "federation delivery converged to {count} consent peers",
                             );
                         }
-                        last_logged = Some(count);
                     }
                 }
                 Err(e) => {

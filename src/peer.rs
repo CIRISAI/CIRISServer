@@ -1390,9 +1390,18 @@ async fn emit_grant_row<S: AsRef<str>>(
         attestation_id = %attestation_id,
         "emitted directed replication-consent grant (this node consents to replicate to peer)"
     );
-    // The grant row itself should cross now (CIRISEdge#636). The NEW peer it
-    // names is not an initiator yet — the peering API nudges the reconciler,
-    // and the reconcile loop kicks again once the peer set has converged.
+    // ORDER MATTERS, for the same reason it does at the announce door. The NEW
+    // peer this grant names is not an initiator in the ReplicationRuntime yet,
+    // so a kick on its own rounds toward everyone EXCEPT the peer the grant was
+    // authored for. Converging the peer set is what makes them one.
+    //
+    // This used to be left to "the peering API nudges the reconciler" — true
+    // only of the federation-admin routes. `POST /v1/contacts` and the fold's
+    // author door reach here as well and nudged nothing, so exactly the grants a
+    // person authors by talking to someone waited for the periodic cadence.
+    // Nudge here instead, where the grant is written, and the loop that hears it
+    // kicks on the gain (`note_convergence`).
+    crate::replication_reconcile::nudge("consent grant emitted");
     crate::compose::kick_replication("consent grant emitted");
     Ok(ConsentGrant {
         attestation_id,
@@ -1444,16 +1453,33 @@ fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Opti
 /// for a sibling machine contributes nothing. Every READ of "what does this
 /// node consent to, and covering which prefixes" goes through here; the WRITE
 /// path's standing-grant lookup stays author-keyed (`standing_live_grant_for`).
+///
+/// **Ordered: steward-authored rows first, the machine's own after.** Both can
+/// be live for the same peer after the owner re-signed, and a caller that takes
+/// the first row for a peer must get the human's. See the body.
 pub async fn live_consent_grants_for_machine(
     engine: &Engine,
     k: &str,
 ) -> Result<Vec<ciris_persist::federation::types::Attestation>> {
     use ciris_persist::federation::consent_by_humans::for_key_id_of;
     let dir = engine.federation_directory();
-    let mut rows = dir
-        .list_live_consent_grants_by(k)
-        .await
-        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?;
+    // THE HUMAN'S ROWS COME FIRST, and the order is part of the contract.
+    //
+    // After `migrate_consent_to_owner` a machine-authored grant from before
+    // 0.5.211 deliberately stays live beside the owner-authored one that
+    // replaced it — both cover the same peer, so neither is wrong and dropping
+    // either would revoke coverage nobody asked to revoke. But they are not
+    // interchangeable to a READER: a receipt exists to name who signed, and
+    // consent is authored by the human (CC — grants are signed by the owner's
+    // fed-ID, never a node key). A caller taking the first row for a peer was
+    // therefore reporting the node's signature for a grant the owner has since
+    // signed themselves.
+    //
+    // Fixed here rather than in each reader: "prefer the owner's row" is one
+    // rule, and the alternative is every consumer of this list re-deriving it
+    // and one of them getting it wrong. Order is documented, so first-match is
+    // correct by construction.
+    let mut rows = Vec::new();
     let stewards = engine
         .steward_bindings_of(k)
         .await
@@ -1469,6 +1495,13 @@ pub async fn live_consent_grants_for_machine(
                 .filter(|g| for_key_id_of(&g.attestation_envelope) == Some(k)),
         );
     }
+    // Then this machine's own — the legacy pen, and the only rows there are on
+    // a node whose owner has not re-signed (or has no steward binding yet).
+    rows.extend(
+        dir.list_live_consent_grants_by(k)
+            .await
+            .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?,
+    );
     Ok(rows)
 }
 

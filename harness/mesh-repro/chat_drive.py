@@ -498,15 +498,29 @@ def probe_arrived(base, token, cid, att_id):
 
 
 def probe_arrived_reason(base, token, cid, att_id):
-    """The recipient's own word for why the body is shut: `unopened_reason` for
-    the row, or `open` when the body is there, or `absent` when the row is not.
-    Read by DIAG_arrived so the diagnosis quotes the node instead of guessing."""
+    """The recipient's own word for why `arrived` is 0.
+
+    `arrived` wants two things (see probe_arrived): a body, and a `live` row.
+    So this has to distinguish two failures that look alike from outside:
+
+      * `unopened:<reason>` — the body is SHUT. The blob/key-grant layers.
+      * `open-not-live:<status>` — the body is OPEN and the row is not live
+        (superseded, withdrawn). Nothing is sealed; a status transition made
+        the stage red, and sending anyone to the puller is sending them to a
+        layer that did its job.
+      * `open` — body and row both fine (so `arrived` failed on the id, not
+        on this message).
+      * `absent` — no such row here at all.
+
+    Read by DIAG_arrived so the diagnosis quotes the node instead of guessing.
+    """
     _, _, msgs = _messages(base, token, cid)
     for m in msgs:
         if m.get("attestation_id") != att_id:
             continue
         if m.get("body"):
-            return "open"
+            status = m.get("status") or "<no status>"
+            return "open" if status == "live" else f"open-not-live:{status}"
         return m.get("unopened_reason") or "unopened:<no reason given>"
     return "absent"
 

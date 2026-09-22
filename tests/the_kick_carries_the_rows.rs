@@ -103,3 +103,51 @@ fn the_dek_binding_is_read_from_both_backends() {
         );
     }
 }
+
+/// BOTH loops that drive `reconcile_once` carry a gain.
+///
+/// There are two, and which one runs depends on how the process was started: a
+/// composed node runs `replication_reconcile::spawn`, and a bare embedded agent
+/// reaches delivery only through `run_federation_delivery` and never runs
+/// compose's controller at all. A kick written into one of them is not "the
+/// kicker for this node" — it is the kicker for half the ways a node can exist,
+/// and the first revision of this fix did exactly that, with a comment
+/// asserting the other loop would handle it.
+///
+/// So the property is not "someone kicks" but "neither caller decides for
+/// itself": both must route through `note_convergence`, which owns the diff and
+/// the kick. A second implementation that happens to be correct today is the
+/// shape that forked last time.
+#[test]
+fn both_reconcile_loops_route_through_one_decision() {
+    for (file, what) in [
+        (
+            "src/replication_reconcile.rs",
+            "the composed node's controller",
+        ),
+        (
+            "src/federation_delivery.rs",
+            "the agent-embedded delivery controller",
+        ),
+    ] {
+        let src = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert!(
+            src.contains("note_convergence"),
+            "{what} ({file}) drives reconcile_once, so it must record the converged set \
+             through `note_convergence` — the one place that diffs the set and kicks on a \
+             gain. Deciding locally is how this broke: the embedded path reconciled, gained \
+             a peer, and carried nothing."
+        );
+    }
+    let recon = std::fs::read_to_string("src/replication_reconcile.rs").expect("read");
+    let body_start = recon
+        .find("pub fn note_convergence(")
+        .expect("note_convergence must exist");
+    let body = &recon[body_start..];
+    let end = body.find("\n}").unwrap_or(body.len());
+    assert!(
+        body[..end].contains("kick_replication"),
+        "note_convergence must be where the kick happens; if the kick moves back out to the \
+         callers, the two of them are free to disagree again"
+    );
+}

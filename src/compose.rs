@@ -996,7 +996,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // signal per consumer keeps `notify_one`'s stored-permit semantics AND
     // deterministic routing: the peering API nudges the replication reconciler,
     // the config API nudges the config reconciler.
-    let replication_notify = Arc::new(tokio::sync::Notify::new());
+    // The SHARED handle, not a private one: every path that authors a consent
+    // grant nudges `replication_reconcile::nudge`, and it must reach the loop
+    // this node actually runs (see `nudge_cell`).
+    let replication_notify = crate::replication_reconcile::nudge_handle();
     let config_notify = Arc::new(tokio::sync::Notify::new());
 
     // ── Mesh control-plane relay, remote half (#128 Phase D — C3) ─────────────

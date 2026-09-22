@@ -196,6 +196,42 @@ impl Reconciled {
     }
 }
 
+/// Record a converged set, and carry what it unlocked.
+///
+/// Returns `(gained, lost)` when the set actually MOVED — `None` when this tick
+/// converged to the same peers as the last one, which is the common case and
+/// the reason neither loop logs at INFO every cadence.
+///
+/// THE KICK LIVES HERE, not in either caller. Two loops drive `reconcile_once`
+/// — the composed node's controller ([`spawn`]) and the agent-embedded
+/// delivery controller ([`crate::federation_delivery::run_federation_delivery`])
+/// — and which of them is running depends on how the process was started: an
+/// embedded agent never reaches `serve_with_adapter`, so `spawn` is not running
+/// for it at all. A kick written into one loop is therefore not "the kicker for
+/// this node"; it is the kicker for half the ways a node can exist, and on the
+/// other half a freshly granted peer waits a full cadence for rows the grant
+/// was authored to carry. Both callers call this; only this function decides.
+///
+/// Kicks on a GAIN, not on a loss: a tick that only lost a peer has nothing new
+/// to carry, and rounding toward the remaining peers would re-offer rows they
+/// already hold.
+pub fn note_convergence(
+    last: &mut Option<Reconciled>,
+    now: Reconciled,
+) -> Option<(Vec<String>, Vec<String>)> {
+    if last.as_ref() == Some(&now) {
+        return None;
+    }
+    let previous = last.take().unwrap_or_default();
+    let gained: Vec<String> = now.peers.difference(&previous.peers).cloned().collect();
+    let lost: Vec<String> = previous.peers.difference(&now.peers).cloned().collect();
+    if !gained.is_empty() {
+        crate::compose::kick_replication("consent peer set gained a peer");
+    }
+    *last = Some(now);
+    Some((gained, lost))
+}
+
 pub async fn reconcile_once(
     engine: &Arc<Engine>,
     node_key_id: &str,
@@ -482,6 +518,45 @@ pub async fn reconcile_once(
 /// previously `CIRIS_SERVER_REPLICATION_RECONCILE_SECS` env. The interval is
 /// rebuilt when the cadence changes, so a `POST /v1/config` retunes it on the next
 /// tick with no restart.
+/// The process-wide reconcile NUDGE.
+///
+/// Converging the peer set is what makes a newly granted peer an initiator in
+/// the `ReplicationRuntime`; until that happens a kick has nobody new to round
+/// toward, so "author the grant, then kick" carries the grant to everyone
+/// EXCEPT the peer it was authored for. The federation-admin routes have always
+/// fired this notify after writing the grant; `POST /v1/contacts` and the
+/// fold's author door emit grants too and did not, so those peers waited for
+/// the periodic cadence — the thing the kick exists to avoid.
+///
+/// One handle for the whole process, because the loop that must hear it depends
+/// on how the node was started: a composed node runs [`spawn`], a bare embedded
+/// agent runs only `federation_delivery::run_federation_delivery`, and an
+/// emitter cannot know which. Both wait on this.
+fn nudge_cell() -> &'static Arc<Notify> {
+    static NUDGE: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
+    NUDGE.get_or_init(|| Arc::new(Notify::new()))
+}
+
+/// The handle a reconcile loop waits on. Get-or-init, so whichever loop starts
+/// first defines it and the other one waits on the same object.
+pub fn nudge_handle() -> Arc<Notify> {
+    Arc::clone(nudge_cell())
+}
+
+/// Converge the peer set NOW, for a caller that just authored a grant naming a
+/// peer that is not an initiator yet.
+///
+/// `notify_one` and not `notify_waiters`: a nudge fired while the loop is
+/// between selects must not be lost, and a stored permit makes the next
+/// `notified()` return immediately. Extra nudges collapse into one pass.
+pub fn nudge(reason: &'static str) {
+    tracing::debug!(
+        reason,
+        "replication reconcile nudged — converging the peer set now"
+    );
+    nudge_cell().notify_one();
+}
+
 pub fn spawn(
     engine: Arc<Engine>,
     node_key_id: String,
@@ -575,49 +650,24 @@ pub fn spawn(
 
             match reconcile_once(&engine, &node_key_id, &runtime).await {
                 Ok(reconciled) => {
-                    // COMPARE THE SET, NOT ITS SIZE. Keyed on the count, a swap
-                    // inside one tick (A withdrew, B was admitted) is invisible:
-                    // same number, so no INFO and no kick, and B — the peer with
-                    // everything still to learn — waits a full cadence for its
-                    // first round. INFO only on a genuine transition; otherwise
-                    // the per-tick detail already went to debug! inside
-                    // reconcile_once.
+                    // COMPARE THE SET, NOT ITS SIZE — and let `note_convergence`
+                    // do it, because the other loop that drives `reconcile_once`
+                    // has to make the same decision and only one of the two runs
+                    // in any given process. INFO only on a genuine transition;
+                    // otherwise the per-tick detail already went to debug!
+                    // inside reconcile_once.
                     let count = reconciled.count();
-                    if last_logged.as_ref() != Some(&reconciled) {
+                    if let Some((gained, lost)) = note_convergence(&mut last_logged, reconciled) {
                         // Name who moved, in both directions. A bare count
                         // ("converged to 2") cannot answer the question an
                         // operator actually has at this line, which is *which*
                         // peer appeared or left.
-                        let previous = last_logged.unwrap_or_default();
-                        let gained: Vec<&str> = reconciled
-                            .peers
-                            .difference(&previous.peers)
-                            .map(String::as_str)
-                            .collect();
-                        let lost: Vec<&str> = previous
-                            .peers
-                            .difference(&reconciled.peers)
-                            .map(String::as_str)
-                            .collect();
                         tracing::info!(
                             consent_peers = count,
                             gained = ?gained,
                             lost = ?lost,
                             "replication converged to {count} consent peers",
                         );
-                        // The peer set just changed: the newly admitted
-                        // initiators would otherwise sit until their first
-                        // cadence tick. One coalesced round toward everyone,
-                        // now (CIRISEdge#636, edge v26.1.0). Gated on a GAIN,
-                        // not on a non-empty set: a tick that only lost a peer
-                        // has nothing new to carry, and re-kicking on every
-                        // departure would round toward the remaining peers for
-                        // rows they already hold.
-                        if !gained.is_empty() {
-                            crate::compose::kick_replication("consent peer set gained a peer");
-                        }
-                        // After the diff, which borrows it.
-                        last_logged = Some(reconciled);
                     }
                 }
                 Err(e) => {

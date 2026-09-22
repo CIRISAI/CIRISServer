@@ -1006,6 +1006,19 @@ async fn room_key(
 ///
 /// Never fatal: the room is keyed either way, and a body that cannot be
 /// fetched says so as `unopened_reason` with the router's refusal by name.
+///
+/// # What this does NOT cover yet (CIRISServer#623)
+///
+/// The only caller is `room_key`, so an address is installed when an HTTP chat
+/// op for that conversation reaches this node — and nothing installs one at
+/// boot. After a restart both the `rooms` map and edge's lifecycle are empty,
+/// so a holder is not listening on any room's derived address until someone
+/// LOCALLY revisits that conversation. A headless holder (a relay, a node whose
+/// person is not in the app) never does, and stays unroutable for those rooms
+/// while looking healthy from here: it holds the bytes, its peers are
+/// reachable, and the symptom lands on the other node as a fetch that finds no
+/// holder. The fix is a boot-time rehydration pass, which wants a ladder run
+/// that actually restarts a node.
 async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::mls::CohortGroup) {
     use ciris_edge::cohort_addressing::{scope_for, snapshot_for_nodes};
     let Some(life) = st.scope_lifecycle.as_ref() else {
@@ -1034,8 +1047,9 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
             room = %room,
             unresolved = ?roster.unresolved,
             "chat: a room member does not resolve to a node here yet — their nodes \
-             get no scoped address until their announce lands (the next room read \
-             advances the group); the rest of the roster is installed"
+             get no scoped address until their announce lands; the rest of the \
+             roster is installed. NOT self-healing at the same epoch: see the \
+             membership check below (CIRISEdge#648)"
         );
     }
     let installed = &roster.snapshot;
@@ -1043,7 +1057,54 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
     let verb = match life.table().live_epochs(&scope, &installed.group_id) {
         None => "install",
         Some(le) if le.current == installed.epoch || le.next == Some(installed.epoch) => {
-            tracing::debug!(room = %room, epoch = installed.epoch, "chat: room addresses current");
+            // THE EPOCH IS NOT THE MEMBERSHIP. Returning here on epoch equality
+            // alone is right for the ordinary case — an MLS membership change
+            // rotates the epoch, so a moved roster arrives as `advance`. It is
+            // wrong for the one case that does not rotate: a member who did not
+            // resolve to a node on an earlier read (their announce had not
+            // landed) and resolves now. Nothing in MLS happened, so the epoch is
+            // unchanged, and without this check the newly resolved node is never
+            // addressed — its blobs stay unroutable for the life of the epoch
+            // while the room looks completely healthy from here.
+            //
+            // Detected, not repaired: edge's `install_group` refuses a group it
+            // already holds (`GroupAlreadyInstalled`) and `advance` installs a
+            // NEW epoch, so there is no make-before-break verb for "same epoch,
+            // more members". Removing and re-installing would drop every
+            // member's address — including our own listen registration — in a
+            // window where a frame is simply lost, to repair a table that is
+            // merely incomplete. Asked for upstream as CIRISEdge#648; until
+            // then this says exactly which member is dark and why, instead of
+            // logging "room addresses current" over a table that is not.
+            let missing: Vec<&str> = installed
+                .members
+                .iter()
+                .map(String::as_str)
+                .filter(|m| {
+                    life.table()
+                        .address_at(&scope, &installed.group_id, installed.epoch, m)
+                        .is_none()
+                })
+                .collect();
+            if missing.is_empty() {
+                tracing::debug!(
+                    room = %room,
+                    epoch = installed.epoch,
+                    "chat: room addresses current"
+                );
+            } else {
+                tracing::warn!(
+                    room = %room,
+                    epoch = installed.epoch,
+                    missing = ?missing,
+                    "chat: these room members resolve to a node NOW but hold no scoped \
+                     address at the installed epoch — they resolved after the install and \
+                     MLS did not rotate, so nothing re-addressed them. Bodies they hold \
+                     cannot be fetched and bodies we send do not reach them until the \
+                     next real epoch change (a join, a leave, a rekey). CIRISEdge#648 \
+                     asks for a same-epoch membership refresh"
+                );
+            }
             return;
         }
         Some(_) => "advance",

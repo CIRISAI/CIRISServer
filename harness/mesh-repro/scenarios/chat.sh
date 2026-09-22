@@ -853,7 +853,25 @@ DIAG_arrived() {
   no_source="$(compose logs "$CHAT_SENDER" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'no BlobChunkSource wired' || true)"
   fetch_timeout="$(compose logs "$recip" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -c 'fetch_blob_chunk_scoped timeout' || true)"
   echo "  ── which of the seven? ──"
-  if [ "${at_b:-0}" -gt 0 ] && [ -n "$unopened_reason" ]; then
+  # A BODY THAT OPENED IS NOT A SEALED BODY. `arrived` wants a body AND a live
+  # row, so it also goes red when the body opened and the row was superseded or
+  # withdrawn. Reading every non-empty reason as "sealed shut" printed the blob
+  # and key-grant layers at someone whose bytes had arrived and decrypted — the
+  # diagnosis pointing away from the status transition that actually failed.
+  case "$unopened_reason" in
+    open-not-live:*)
+      echo "  OPEN BUT NOT LIVE: ${recip} holds the row, the body DECRYPTED, and the row's"
+      echo "    status is ${unopened_reason#open-not-live:} — so the blob, the key grant and the"
+      echo "    scope address all did their job. Look at what superseded or withdrew the row"
+      echo "    (a widening that replaced it, a withdraws the sender authored), not at the puller."
+      ;;
+    open)
+      echo "  OPEN AND LIVE on ${recip}: this message is fine, so \`arrived\` went red on the"
+      echo "    attestation id it was told to look for — check CHAT_ATT_ID against what was sent."
+      ;;
+  esac
+  if [ "${at_b:-0}" -gt 0 ] && [ -n "$unopened_reason" ] && \
+     [ "${unopened_reason%%:*}" != "open-not-live" ] && [ "$unopened_reason" != "open" ]; then
     echo "  HELD, SEALED SHUT: the row is on ${recip} and its body reads unopened_reason=${unopened_reason}"
     if [ "${no_holders:-0}" -gt 0 ]; then
       echo "    NO HOLDERS (${no_holders}×): ${recip}'s puller found no holds_bytes claim for the blob — the"
