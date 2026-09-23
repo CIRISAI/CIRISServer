@@ -174,7 +174,49 @@ where
 {
     use ciris_edge::content_occurrence::{provision_engine_occurrence, Provisioned};
     use ciris_persist::federation::types::device_class::SERVER;
-    let (me, outcome) = provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?;
+    // WHICH KEY IS THE OCCURRENCE? On an actor/node split compose mints a node
+    // key, MOVES the owner-binding onto it and makes it the wire identity,
+    // while edge's `provision_engine_occurrence` derives the occurrence from
+    // `engine.local_derived_key_id()` — the ACTOR. Admission needs an owner
+    // binding naming the occurrence, and after the split no binding names the
+    // actor, so provisioning fails on a freshly split install and the next
+    // file or note publication refuses `ReadableByNobody` (Codex,
+    // CIRISServer#628).
+    //
+    // The content-KEM keys are the MACHINE's either way — they are what this
+    // box can decrypt with, and they do not change with the name it is
+    // registered under. So when the wire identity differs we provision the
+    // same keys under the key the binding actually names, through edge's
+    // explicitly-targeted door.
+    let engine_key = engine.local_derived_key_id().await.ok();
+    let wire = crate::node_key::wire_identity().map(str::to_owned);
+    let (me, outcome) = match (&wire, &engine_key) {
+        (Some(w), Some(e)) if w != e => {
+            let kem = backend
+                .load_or_init_content_kem_identity()
+                .await
+                .map_err(|e| format!("load the content-KEM identity: {e}"))?;
+            let enc = ciris_persist::federation::EncryptionPubkeys {
+                x25519_base64: kem.x25519_pubkey_b64,
+                ml_kem_768_base64: kem.ml_kem_768_pubkey_b64,
+            };
+            let outcome = ciris_edge::content_occurrence::ensure_content_occurrence(
+                backend,
+                owner_key_id,
+                w,
+                SERVER,
+                enc,
+            )
+            .await?;
+            tracing::info!(
+                occurrence = %w, engine_key = %e, owner = %owner_key_id,
+                "content occurrence provisioned under the WIRE node key — this install is \
+                 actor/node split and the owner-binding names the node, not the engine"
+            );
+            (w.clone(), outcome)
+        }
+        _ => provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?,
+    };
     match outcome {
         Provisioned::Created => Ok((me, "created")),
         Provisioned::AlreadyCurrent => Ok((me, "already_current")),

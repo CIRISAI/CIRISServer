@@ -529,7 +529,17 @@ async fn read_drive(
     // Each row carries the room it came from — see `DriveEntry.room_id`.
     let mut rows: Vec<(String, String, files::FileRow)> = Vec::new();
     for (_, room) in &rooms {
-        match files::in_room(&*dir, room, q.limit).await {
+        // THE LIMIT IS A BUDGET ACROSS THE WHOLE DRIVE, not per room (Codex,
+        // CIRISServer#628). Passing `q.limit` to each room made `?limit=100`
+        // return up to 100 entries PER membership and attempt an `open` for
+        // every one of them, so both the response and the work scaled with
+        // `rooms × limit` — a person in a dozen communities asks for 100 rows
+        // and pays for 1200 decrypt attempts.
+        let remaining = q.limit.saturating_sub(rows.len());
+        if remaining == 0 {
+            break;
+        }
+        match files::in_room(&*dir, room, remaining).await {
             Ok(r) => rows.extend(r.into_iter().map(|row| {
                 (
                     room.row_scope_token().to_owned(),

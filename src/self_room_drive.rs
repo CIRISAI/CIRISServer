@@ -105,6 +105,23 @@ pub struct SelfRoomState {
 impl SelfRoomState {
     /// The MLS state store for this identity's room. In-process for now (see
     /// the module note) — one provider per room id, as chat does.
+    /// The MLS state store for this room — **in memory, and that is a known
+    /// limitation with a sharp edge** (Codex, CIRISServer#628 → #630).
+    ///
+    /// A restart loses this node's group AND the KeyPackage material its
+    /// Welcome was sealed to. It can publish a fresh KeyPackage, but a
+    /// surviving creator still sees it in `member_key_ids()`, so `decide`
+    /// finds no missing member, never emits a Welcome, and the restarted
+    /// device cannot rejoin or reinstall its derived addresses.
+    ///
+    /// **Why the obvious fix is not taken here.** `XChaChaKvStore::open(path,
+    /// passphrase)` exists, and swapping it in would be a one-line change —
+    /// but the passphrase this call passes is `room_id`, which for a self room
+    /// is the owner's **public** identity key id. That is harmless for a store
+    /// that never touches disk and is no encryption at all for one that does:
+    /// it would write long-lived MLS group secrets to disk under a value
+    /// anybody can read. Durable MLS state needs a real key, which is a key
+    /// management decision and not a swap. Tracked on CIRISServer#630.
     fn store(room_id: &str) -> Result<ciris_edge::mls::ScopeStateProvider, String> {
         Ok(ciris_edge::mls::ScopeStateProvider::new(Arc::new(
             ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(room_id.as_bytes())
@@ -117,9 +134,19 @@ impl SelfRoomState {
 /// again, because `decide` re-reads the world each time.
 pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     let dir = st.engine.federation_directory();
-    let node_key = match st.engine.local_derived_key_id().await {
-        Ok(k) => k,
-        Err(e) => return SelfRoomTick::Failed(format!("resolve this node's key: {e}")),
+    // THE WIRE NODE, NOT THE ENGINE'S ACTOR KEY (Codex, CIRISServer#628). On an
+    // actor/node split compose mints a node key and MOVES the owner-binding
+    // onto it, so `owner_of(actor_key)` is None and every tick below would exit
+    // `NoOwner` — the room never converges, never installs addresses, and
+    // cross-device self bytes are permanently unavailable on exactly the
+    // topology the agent runs. Third instance of this axis in one review; see
+    // `drive_auth::owner` and the publish-own set (CIRISServer#629).
+    let node_key = match crate::node_key::wire_identity() {
+        Some(w) => w.to_owned(),
+        None => match st.engine.local_derived_key_id().await {
+            Ok(k) => k,
+            Err(e) => return SelfRoomTick::Failed(format!("resolve this node's key: {e}")),
+        },
     };
     let owner = match st.engine.owner_of(&node_key).await {
         Ok(Some(o)) => o,
