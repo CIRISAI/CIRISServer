@@ -1,0 +1,1070 @@
+//! **Files at every cohort, and the drive that lists them** — one door for
+//! self, family and community (CIRISServer#622 / #615, edge v29.5.0
+//! `FSD/CONTENT_TRANSFER.md` §6.7–§6.9).
+//!
+//! # One door, three cohorts
+//!
+//! A file is bytes sealed at a room's tier plus a row citing them. Which room
+//! decides everything else — the seal's group, the row's cohort target, who the
+//! row crosses to — and edge's [`ScopeRoom`] answers all of those from one
+//! value, so nothing here spells a group id or picks an audience by hand. That
+//! is deliberate: the alternative is three near-copies of one rule, which is
+//! how the cohorts drift apart.
+//!
+//! # What the drive shows that a file listing does not
+//!
+//! `row held, bytes absent` is a FIRST-CLASS state, not an error. A self file
+//! written on the laptop is a row on the phone long before its bytes are
+//! pulled, and the honest answer for the phone's drive is "on another device" —
+//! distinct from "this key does not open it", which is a grant problem with a
+//! different remedy. `UnopenedReason::NotFetched` and `NotGranted` are separate
+//! variants for exactly that reason, and this surface keeps them separate.
+
+use std::sync::Arc;
+
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use ciris_edge::files::{self, FileWrite};
+
+/// What a note IS on the wire: a text file in the self room. One constant, so
+/// the writer and the reader cannot disagree about which files are notes.
+const NOTE_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+use ciris_edge::scope_room::ScopeRoom;
+use ciris_persist::prelude::Engine;
+
+/// The cohort a write names. Spelled as a closed set at the door so an
+/// unknown token is a 400 with a list, not a silently-wrong audience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cohort {
+    /// This identity's own devices.
+    #[serde(rename = "self")]
+    SelfCollective,
+    /// A family the owner belongs to (`family_id` required).
+    Family,
+    /// A community room (`room_id` required).
+    Community,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileWriteRequest {
+    pub cohort: Cohort,
+    /// The family or community id. Omitted for `self` — the room IS the owner.
+    #[serde(default)]
+    pub room_id: Option<String>,
+    /// Base64 bytes. Inline only for now (edge caps at 1 MiB and says so).
+    pub bytes_base64: String,
+    pub media_type: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileWriteResponse {
+    pub attestation_id: String,
+    /// Whether the room has a derived destination. `crossed: true` with
+    /// `addressed: false` means the ROW reached the audience and the BYTES
+    /// cannot be fetched — two different facts, reported separately.
+    pub addressed: bool,
+    pub cohort: String,
+    pub room: String,
+    pub tier: String,
+    /// **False means the file reached nobody.** It is local-tier, and persist's
+    /// E5 invariant keeps local-tier rows out of every federation stream — so
+    /// it is invisible to other devices AND to this drive. Reported, never
+    /// implied by a 200.
+    pub crossed: bool,
+    /// Occurrences that could not be granted. Non-empty is partial
+    /// readability: those keys will read `not_granted`.
+    pub excluded: Vec<String>,
+    pub granted: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DriveEntry {
+    /// The cohort this row was listed from (`self` | `family` | `community`).
+    pub cohort: String,
+    /// The room id to pass back to `GET /v1/files/{id}`.
+    pub room_id: String,
+    pub attestation_id: String,
+    pub author_key_id: String,
+    pub asserted_at: String,
+    pub filename: Option<String>,
+    pub media_type: Option<String>,
+    /// `here` when the bytes open on this node, else the reason they do not.
+    pub bytes: String,
+    /// The plain-words version of `bytes`, for a client that renders state.
+    pub detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DriveQuery {
+    #[serde(default)]
+    pub cohort: Option<String>,
+    #[serde(default)]
+    pub room_id: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+fn default_limit() -> usize {
+    100
+}
+
+#[derive(Clone)]
+pub struct DriveState {
+    pub engine: Arc<Engine>,
+    pub node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    pub user_seed_dir: std::path::PathBuf,
+    /// The scope-address plane, so a write can SAY when the room it is sealing
+    /// into has no derived destination. See `addressed_or_warn`.
+    pub scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
+}
+
+fn refuse(code: StatusCode, error: &str, detail: String) -> Response {
+    (
+        code,
+        Json(serde_json::json!({ "error": error, "detail": detail })),
+    )
+        .into_response()
+}
+
+/// Resolve the room a request names, refusing a missing id by name rather than
+/// defaulting to something the caller did not ask for.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response; boxing it would
+                                   // only move the allocation and make every call site unwrap a Box to return it.
+fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeRoom, Response> {
+    match cohort {
+        Cohort::SelfCollective => Ok(ciris_edge::self_room::room(owner)),
+        Cohort::Family => room_id.map(ScopeRoom::family).ok_or_else(|| {
+            refuse(
+                StatusCode::BAD_REQUEST,
+                "drive.family_id_required",
+                "a family write must name `room_id` (the family's key id) — there is no \
+                 default family, and guessing one would place bytes in a cohort nobody chose"
+                    .into(),
+            )
+        }),
+        Cohort::Community => room_id.map(ScopeRoom::community).ok_or_else(|| {
+            refuse(
+                StatusCode::BAD_REQUEST,
+                "drive.community_id_required",
+                "a community write must name `room_id` (the community's key id)".into(),
+            )
+        }),
+    }
+}
+
+/// **The id a caller can actually read the file back by.**
+///
+/// A crossing that WIDENS is two rows: the authored one (`self`, local tier —
+/// the producer's own copy) and the `supersedes` row placed at the wider
+/// audience, which has a NEW id. Edge says so in as many words on
+/// `Shared::Placed`: "After a widening this is the NEW `supersedes` row's id,
+/// not the one passed in."
+///
+/// Returning `published.row.attestation_id` therefore handed the caller an id
+/// that names a row nobody else has. Measured on the chat ladder: `POST
+/// /v1/files {cohort:"community"}` answered `file-f9d37acb…` while the row that
+/// crossed was `e0d4dcdc-…`; reading back by the answered id was
+/// `404 drive.not_in_room` on the recipient's node AND on the author's own,
+/// because `file-f9d37acb…` is only the `self`-scoped copy. A client that
+/// stores what the write returns could never open its own file.
+///
+/// `self` writes were unaffected — nothing widens — which is exactly why the
+/// self-file ladder was green over this same code. One cohort exercised the
+/// widening and the other did not.
+fn readable_id(published: &files::PublishedFile) -> &str {
+    use ciris_edge::replication::attestation_bind::Shared;
+    match &published.shared {
+        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+            attestation_id
+        }
+        // Parked: nothing was placed, so the authored row is the only row
+        // there is. `crossed: false` already tells the caller it reached
+        // nobody; naming the local row here keeps the two answers consistent.
+        Shared::AwaitingActor { .. } => &published.row.attestation_id,
+    }
+}
+
+/// **Does this owner belong to the cohort they named?** (Codex, CIRISServer#628)
+///
+/// `self` needs no check — the room IS the owner, and `room_for` derived it
+/// from their own key rather than from anything they sent.
+///
+/// `family` / `community` do, and this was missing. A `room_id` is a
+/// caller-supplied string, `files::in_room` takes no caller identity and so
+/// cannot enforce membership itself, and a node that relays for a mesh holds
+/// rows for cohorts its owner is not in. Without this, an authenticated owner
+/// could name ANY locally-known room and read back filenames, authors,
+/// timestamps and byte-availability from it — the metadata, even where the
+/// bytes stay sealed. Owning the machine is not membership in the cohort;
+/// that is the whole contextual-integrity line, and persist's §4.3 predicate
+/// is where it is drawn for chat already (`contacts_chat::require_member`).
+///
+/// Applied to every family/community door: the write, the listing, and the
+/// direct read.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn require_cohort_member(
+    st: &DriveState,
+    owner: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+) -> Result<(), Response> {
+    let scope_token = match cohort {
+        Cohort::SelfCollective => return Ok(()),
+        Cohort::Family => ciris_persist::federation::types::cohort_scope::FAMILY,
+        Cohort::Community => ciris_persist::federation::types::cohort_scope::COMMUNITY,
+    };
+    let group = room.content_group_id();
+    let admission =
+        match ciris_persist::scope::build_caller_admission(&st.engine, &owner.to_owned()).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.store_unavailable",
+                    format!("build_caller_admission: {e}"),
+                ))
+            }
+        };
+    let scope = ciris_persist::prelude::CallerScope::Authenticated { admission };
+    if scope.admits(scope_token, group, None) {
+        return Ok(());
+    }
+    Err(refuse(
+        StatusCode::FORBIDDEN,
+        "drive.not_a_member",
+        format!(
+            "this identity is not a member of {scope_token} {group:?} — owning the node that              relays a cohort's rows is not membership in it, and the listing would disclose              its filenames, authors and timestamps"
+        ),
+    ))
+}
+
+/// **Is this room actually addressable?** (Codex, CIRISServer#628)
+///
+/// A file can cross — the ROW is placed, `crossed: true` — while its BYTES
+/// have nowhere to be fetched from, because no derived destination for the
+/// room is installed in the scope-address table. The chat flow installs one
+/// when it keys a room, which is exactly what masked this: the harness chats
+/// first. A community reached without that flow, or reached after a restart,
+/// seals a file whose bytes no recipient can pull.
+///
+/// This reports rather than repairs, and the distinction is deliberate.
+/// INSTALLING a room needs its live MLS group, which lives in the chat
+/// module's registry; reaching across for it here would put two owners on the
+/// scope plane. What this does do is refuse to let the response say "crossed"
+/// and mean "reachable" — `addressed` is its own field, and a `false` is
+/// WARNed with the room named. The repair belongs with whoever owns the
+/// group registry; tracked on CIRISServer#622.
+fn addressed_or_warn(st: &DriveState, room: &ScopeRoom, cohort: Cohort) -> bool {
+    if matches!(cohort, Cohort::SelfCollective) {
+        // The self room's driver installs its own addresses each tick.
+        return true;
+    }
+    let Some(life) = st.scope_lifecycle.as_ref() else {
+        return false;
+    };
+    let installed = life
+        .table()
+        .live_epochs(&room.scope(), &room.table_group_id())
+        .is_some();
+    if !installed {
+        tracing::warn!(
+            room = %room,
+            "drive: this room has NO derived destination in the scope-address table, so the \
+             file's bytes cannot be fetched by anyone even though the row crosses. The room \
+             is addressed when it is keyed (the chat flow does it); a community reached \
+             without that, or after a restart, seals bytes nobody can pull"
+        );
+    }
+    installed
+}
+
+/// Every room this identity can reach: their own devices, plus each family and
+/// community persist's admission places them in.
+///
+/// Read off `CallerAdmission` rather than enumerated here, so the drive can
+/// never list a cohort the caller is not admitted to — the same predicate
+/// `require_cohort_member` applies to a NAMED room, applied to the unnamed
+/// case by construction instead of by a second check that could drift.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn everything_reachable(
+    st: &DriveState,
+    owner: &str,
+) -> Result<Vec<(Cohort, ScopeRoom)>, Response> {
+    let mut out = vec![(Cohort::SelfCollective, ciris_edge::self_room::room(owner))];
+    let admission =
+        match ciris_persist::scope::build_caller_admission(&st.engine, &owner.to_owned()).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.store_unavailable",
+                    format!("build_caller_admission: {e}"),
+                ))
+            }
+        };
+    for fam in &admission.family_key_ids {
+        out.push((Cohort::Family, ScopeRoom::family(fam.as_str())));
+    }
+    for com in &admission.community_key_ids {
+        out.push((Cohort::Community, ScopeRoom::community(com.as_str())));
+    }
+    Ok(out)
+}
+
+fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
+    ciris_edge::group_content::PersistGroupContentStore::new(
+        (**engine).clone(),
+        engine.federation_directory(),
+    )
+}
+
+/// Make sure the OWNER is a content-KEM target on this node before a write.
+///
+/// A self/family write resolves its recipients from the owner's active
+/// occurrences that carry content-KEM keys. A freshly claimed node has none —
+/// only its own singleton — so `files::publish` refuses the write as
+/// `ReadableByNobody`: correct, and useless to the person who just asked to
+/// save a file. The self-room drive provisions this on its cadence, but a
+/// FIRST write must not have to wait for a background tick; the chat route has
+/// ensured the same thing inline since 0.5.207 for exactly this reason.
+///
+/// Idempotent. A failure is logged and not fatal: the publish below will refuse
+/// by name, which is a better error than this one could invent.
+async fn ensure_owner_is_a_kem_target(st: &DriveState, owner_key_id: &str) {
+    match crate::backend::provision_engine_occurrence(&st.engine, owner_key_id).await {
+        Ok((occurrence, how)) if how != "already_current" => tracing::info!(
+            owner = %owner_key_id, %occurrence, how,
+            "drive: provisioned this node as a content-KEM occurrence of its owner so the \
+             write below has somebody to be wrapped to"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            owner = %owner_key_id, error = %e,
+            "drive: could not provision this node as a content-KEM occurrence of its owner — \
+             a self or family write will refuse as readable-by-nobody"
+        ),
+    }
+}
+
+/// `POST /v1/files` — write a file at a chosen cohort.
+async fn write_file(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Json(req): Json<FileWriteRequest>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "drive.owner_session_required",
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
+        );
+    };
+    // DECLARED-CONFORMANCE GATE, ahead of the membership read (Codex,
+    // CIRISServer#628). A file published into a cohort room is a
+    // federation-wire production exactly as a chat message is, so a node
+    // declared consumer-only must not author one — `contacts_chat` gates its
+    // author door on the same verb, and a producer that skipped it would make
+    // the declaration a statement the node does not keep.
+    //
+    // ORDER IS LOAD-BEARING, for the same reason it is in chat: this is a pure
+    // function of the node's OWN declaration, so answering it first cannot
+    // leak whether a cohort exists here, where the membership check below
+    // necessarily touches the directory.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
+        return resp;
+    }
+    let room = match room_for(req.cohort, req.room_id.as_deref(), &owner.key_id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_cohort_member(&st, &owner.key_id, req.cohort, &room).await {
+        return e;
+    }
+    ensure_owner_is_a_kem_target(&st, &owner.key_id).await;
+    let addressed = addressed_or_warn(&st, &room, req.cohort);
+    let bytes = match base64_decode(&req.bytes_base64) {
+        Ok(b) => b,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, "drive.bad_base64", e),
+    };
+    let capsule = match crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer(&headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "drive.author_signer_unavailable",
+                format!(
+                "a file is authored by the person, and this node cannot wield that identity: {e:?}"
+            ),
+            )
+        }
+    };
+    let dir = st.engine.federation_directory();
+    let content = store(&st.engine);
+    let published = match files::publish(
+        &*dir,
+        &content,
+        ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(capsule.edge_signer()),
+        },
+        &FileWrite {
+            room: &room,
+            bytes: &bytes,
+            media_type: &req.media_type,
+            filename: req.filename.as_deref(),
+            asserted_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => return file_error(&e, &room),
+    };
+    // The row is written; make it cross now rather than on the next cadence.
+    crate::compose::kick_replication("file published in a cohort room");
+    if !published.crossed {
+        tracing::warn!(
+            room = %room,
+            attestation_id = %published.row.attestation_id,
+            "drive: the file was written but did NOT cross — it is local-tier, which persist's \
+             E5 invariant keeps out of every federation stream, so no other device and not \
+             even this node's own drive will list it. It parks only when the crossing awaits \
+             an actor signature"
+        );
+    }
+    if !published.excluded.is_empty() {
+        tracing::warn!(
+            room = %room,
+            excluded = ?published.excluded,
+            "drive: the file is only PARTIALLY readable — these occurrences hold no grant and \
+             will read not_granted"
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(FileWriteResponse {
+            attestation_id: readable_id(&published).to_owned(),
+            addressed,
+            cohort: room.row_scope_token().to_owned(),
+            room: room.to_string(),
+            tier: format!("{:?}", published.tier),
+            crossed: published.crossed,
+            excluded: published.excluded.clone(),
+            granted: published.granted.len(),
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /v1/drive` — everything this identity can reach, with the bytes' state
+/// named per row.
+async fn read_drive(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Query(q): Query<DriveQuery>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "drive.owner_session_required",
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
+        );
+    };
+    // NO FILTER MEANS THE WHOLE DRIVE. This route is "everything this identity
+    // can reach", and converting an absent `cohort` to `self` made it "your
+    // own devices" while still calling itself a drive — every family and
+    // community file silently missing, with a 200 (Codex, CIRISServer#628).
+    // The cohorts are not guessed: they are the ones persist's own admission
+    // says this caller is in, so the listing cannot reach past membership.
+    let rooms: Vec<(Cohort, ScopeRoom)> = match q.cohort.as_deref() {
+        Some("self") => vec![(
+            Cohort::SelfCollective,
+            ciris_edge::self_room::room(&owner.key_id),
+        )],
+        Some("family") | Some("community") => {
+            let cohort = if q.cohort.as_deref() == Some("family") {
+                Cohort::Family
+            } else {
+                Cohort::Community
+            };
+            let room = match room_for(cohort, q.room_id.as_deref(), &owner.key_id) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
+                return e;
+            }
+            vec![(cohort, room)]
+        }
+        Some(other) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "drive.unknown_cohort",
+                format!("unknown cohort {other:?} — use self | family | community"),
+            )
+        }
+        None => match everything_reachable(&st, &owner.key_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+    };
+    let dir = st.engine.federation_directory();
+    // Each row carries the room it came from — see `DriveEntry.room_id`.
+    let mut rows: Vec<(String, String, files::FileRow)> = Vec::new();
+    for (_, room) in &rooms {
+        // THE LIMIT IS A BUDGET ACROSS THE WHOLE DRIVE, not per room (Codex,
+        // CIRISServer#628). Passing `q.limit` to each room made `?limit=100`
+        // return up to 100 entries PER membership and attempt an `open` for
+        // every one of them, so both the response and the work scaled with
+        // `rooms × limit` — a person in a dozen communities asks for 100 rows
+        // and pays for 1200 decrypt attempts.
+        let remaining = q.limit.saturating_sub(rows.len());
+        if remaining == 0 {
+            break;
+        }
+        match files::in_room(&*dir, room, remaining).await {
+            Ok(r) => rows.extend(r.into_iter().map(|row| {
+                (
+                    room.row_scope_token().to_owned(),
+                    room.content_group_id().to_owned(),
+                    row,
+                )
+            })),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.listing_failed",
+                    format!("list {room}: {e}"),
+                )
+            }
+        }
+    }
+    let content = store(&st.engine);
+    let viewer = match st.engine.local_derived_key_id().await {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.no_node_key",
+                format!("resolve this node's key: {e}"),
+            )
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (cohort, room_id, row) in rows {
+        let (bytes, detail) = match row.open(&content, &viewer).await {
+            Ok(_) => ("here".to_owned(), "the bytes are on this device".to_owned()),
+            Err(reason) => {
+                let u = unopened(&reason);
+                (u.state.to_owned(), u.detail)
+            }
+        };
+        out.push(DriveEntry {
+            // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
+            // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
+            // and `room_id` or it defaults to `self` and misses. Without this a
+            // client that DISCOVERED a family or community file through the
+            // aggregate listing could not construct the read for it without
+            // probing every room (Codex, CIRISServer#628).
+            cohort: cohort.clone(),
+            room_id: room_id.clone(),
+            attestation_id: row.attestation_id.clone(),
+            author_key_id: row.attesting_key_id.clone(),
+            asserted_at: row.asserted_at.to_rfc3339(),
+            filename: row.filename.clone(),
+            media_type: row.media_type.clone(),
+            bytes,
+            detail,
+        });
+    }
+    // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
+    // reporting one would name whichever happened to be first.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "rooms": rooms
+                .iter()
+                .map(|(_, r)| serde_json::json!({
+                    "cohort": r.row_scope_token(),
+                    "room": r.to_string(),
+                }))
+                .collect::<Vec<_>>(),
+            "entries": out,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/files/{attestation_id}` — the bytes, or the reason they are not
+/// here yet.
+async fn read_file(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Path(attestation_id): Path<String>,
+    Query(q): Query<DriveQuery>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "drive.owner_session_required",
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
+        );
+    };
+    // Named, not defaulted. A `_ => Community` arm here sent a typo'd cohort
+    // looking in a community room and reported `not_in_room` — a refusal about
+    // the ROW for a mistake in the QUESTION, which is the hardest kind to read
+    // from the client side. The write and list doors both name it; so does this.
+    let cohort = match q.cohort.as_deref() {
+        None | Some("self") => Cohort::SelfCollective,
+        Some("family") => Cohort::Family,
+        Some("community") => Cohort::Community,
+        Some(other) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "drive.unknown_cohort",
+                format!("unknown cohort {other:?} — use self | family | community"),
+            )
+        }
+    };
+    let room = match room_for(cohort, q.room_id.as_deref(), &owner.key_id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
+        return e;
+    }
+    let dir = st.engine.federation_directory();
+    // NO CALLER-SIDE CAP ON A LOOKUP BY ID. A fixed 500 meant that in a room
+    // with more rows than that, a perfectly valid id outside the first page
+    // answered `drive.not_in_room` — a refusal that says "this does not exist
+    // here" about a file that does (Codex, CIRISServer#628). `usize::MAX`
+    // does not mean unbounded: `files::in_room` walks at most
+    // MAX_LISTING_PAGES × LISTING_PAGE itself, so the ceiling is edge's and
+    // stays edge's, where a number chosen here would silently diverge from it.
+    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
+        Ok(r) => r,
+        // NOT an empty room (Codex, CIRISServer#628). `unwrap_or_default()`
+        // turned a directory or store outage into "no rows", and the handler
+        // then answered `404 drive.not_in_room` — telling a client its file is
+        // GONE when the truth is "ask again shortly". The listing doors return
+        // 503 for this same class; so does this one now.
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.listing_failed",
+                format!("list {room}: {e}"),
+            )
+        }
+    };
+    let Some(row) = rows
+        .into_iter()
+        .find(|r| r.attestation_id == attestation_id)
+    else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "drive.not_in_room",
+            format!("{attestation_id} is not a file row in {room}"),
+        );
+    };
+    let content = store(&st.engine);
+    let viewer = match st.engine.local_derived_key_id().await {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.no_node_key",
+                format!("resolve this node's key: {e}"),
+            )
+        }
+    };
+    match row.open(&content, &viewer).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "attestation_id": row.attestation_id,
+                "media_type": row.media_type,
+                "filename": row.filename,
+                "bytes_base64": base64_encode(&bytes),
+            })),
+        )
+            .into_response(),
+        Err(reason) => {
+            let u = unopened(&reason);
+            // Status and id chosen TOGETHER, both literal. NOT an error status
+            // for `not_fetched`: the row is legitimately here and the bytes
+            // legitimately are not. 409 says "ask again", which is the truth,
+            // where 404 would say "this does not exist".
+            match u.state {
+                "not_fetched" => refuse(StatusCode::CONFLICT, "drive.not_fetched", u.detail),
+                "not_granted" => refuse(StatusCode::FORBIDDEN, "drive.not_granted", u.detail),
+                _ => refuse(StatusCode::FORBIDDEN, "drive.unopened", u.detail),
+            }
+        }
+    }
+}
+
+/// The two states a client must tell apart, in its words.
+/// Why bytes are not here, in three forms a caller needs kept apart.
+struct Unopened {
+    /// The short STATE token the drive and notes surfaces report per row.
+    /// Deliberately not the id: this is a field value a client switches on,
+    /// and prefixing it would change the wire for every existing reader.
+    state: &'static str,
+    /// The English sentence, pending a bundle (CIRISClient#65).
+    detail: String,
+}
+
+fn unopened(reason: &ciris_edge::chat::UnopenedReason) -> Unopened {
+    // Returns the STATE only; the message id is spelled at the `refuse` call
+    // in `read_file`. That is not ceremony: the localization guard reads ids
+    // from literals in an emitter's ARGUMENT POSITION, so an id assembled here
+    // — or built as the old `format!("drive.{state}")` — is invisible to it,
+    // and `drive.not_fetched` / `drive.not_granted` would render the server's
+    // English in all 29 languages with NOTHING tracking the debt. These two
+    // are met in NORMAL use (a file whose bytes are simply on the person's
+    // other device), not only on error, so they are the worst pair to lose.
+    let s = format!("{reason:?}");
+    if s.contains("NotFetched") {
+        Unopened {
+            state: "not_fetched",
+            detail: "on another device — the row is here, its bytes have not been pulled yet"
+                .to_owned(),
+        }
+    } else if s.contains("NotGranted") {
+        Unopened {
+            state: "not_granted",
+            detail: "this device's key does not open it — it holds no grant for these bytes"
+                .to_owned(),
+        }
+    } else {
+        Unopened {
+            state: "unopened",
+            detail: s,
+        }
+    }
+}
+
+fn file_error(e: &files::FileError, room: &ScopeRoom) -> Response {
+    use files::FileError as F;
+    let (code, tag, detail) = match e {
+        F::TooLargeForInline { size, cap } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "drive.too_large",
+            format!(
+                "{size} bytes exceeds the {cap}-byte inline cap — the chunk-DAG door is not \
+                 open yet (CIRISEdge#633)"
+            ),
+        ),
+        F::ReadableByNobody { .. } => (
+            StatusCode::CONFLICT,
+            "drive.readable_by_nobody",
+            format!(
+                "nothing in {room} could be granted these bytes, so the write was refused \
+                 rather than sealing something no one can open"
+            ),
+        ),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "drive.publish_failed",
+            format!("{other:?}"),
+        ),
+    };
+    refuse(code, tag, detail)
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .map_err(|e| format!("bytes_base64 is not base64: {e}"))
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTES — self-chat as a note-taking mechanism
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A note is a chat message in the SELF room: same row shape, same sealed body,
+// same crossing — the only difference is the room, and therefore the audience.
+// That is the whole design. Writing a note is talking to yourself across your
+// own devices, so it needs no new object: the self room already means "this
+// identity's devices", the body is already sealed to the room's tier, and the
+// row already crosses `With::MyDevices`.
+//
+// It also gets the properties for free that a bespoke notes table would have
+// had to re-earn: a note is a CEG row with an author and a time, it is
+// invisible to the substrate (CC 5.2 — no holder claim is emitted for self),
+// and it reaches a new device through the same retroactive re-grant as
+// everything else the owner holds.
+
+#[derive(Debug, Deserialize)]
+pub struct NoteWrite {
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Note {
+    pub attestation_id: String,
+    pub asserted_at: String,
+    pub author_key_id: String,
+    /// The note, when this device can open it; `None` with `state` saying why.
+    pub body: Option<String>,
+    pub state: String,
+    pub detail: String,
+}
+
+/// `POST /v1/notes` — write a note to yourself.
+async fn write_note(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Json(req): Json<NoteWrite>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "notes.owner_session_required",
+            "notes are one person's, and writing or reading them is that person's own act".into(),
+        );
+    };
+    if req.body.trim().is_empty() {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "notes.empty",
+            "a note with no body is not a note".into(),
+        );
+    }
+    // DECLARED-CONFORMANCE GATE, ahead of the membership read (Codex,
+    // CIRISServer#628). A file published into a cohort room is a
+    // federation-wire production exactly as a chat message is, so a node
+    // declared consumer-only must not author one — `contacts_chat` gates its
+    // author door on the same verb, and a producer that skipped it would make
+    // the declaration a statement the node does not keep.
+    //
+    // ORDER IS LOAD-BEARING, for the same reason it is in chat: this is a pure
+    // function of the node's OWN declaration, so answering it first cannot
+    // leak whether a cohort exists here, where the membership check below
+    // necessarily touches the directory.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
+        return resp;
+    }
+    let room = ciris_edge::self_room::room(&owner.key_id);
+    ensure_owner_is_a_kem_target(&st, &owner.key_id).await;
+    let capsule = match crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer(&headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "notes.author_signer_unavailable",
+                format!("a note is authored by the person: {e:?}"),
+            )
+        }
+    };
+    let dir = st.engine.federation_directory();
+    let content = store(&st.engine);
+    // A NOTE IS A SELF-SCOPED TEXT FILE, through the same door as every other
+    // file. The first cut authored it with `chat_message_attestation_in`, and
+    // persist refused the seal by name: that builder stamps `cohort_scope:
+    // community` and hands persist the room id as a `community_key_id`, so a
+    // self room came back as `unknown community_key_id`. The refusal was right
+    // — the community-DEK path is not the self tier. `files::publish` seals at
+    // the ROOM's tier (a per-write DEK for self) and fills persist's group slot
+    // with the OWNER, which is what a self note is.
+    let published = match files::publish(
+        &*dir,
+        &content,
+        ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(capsule.edge_signer()),
+        },
+        &FileWrite {
+            room: &room,
+            bytes: req.body.as_bytes(),
+            media_type: NOTE_MEDIA_TYPE,
+            filename: None,
+            asserted_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return file_error(&e, &room),
+    };
+    crate::compose::kick_replication("note written in the self room");
+    if !published.crossed {
+        tracing::warn!(
+            attestation_id = %published.row.attestation_id,
+            "notes: the note was written but did NOT cross — it is local-tier, so this \
+             person's other devices will never see it"
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": readable_id(&published),
+            "room": room.to_string(),
+            "cohort": room.row_scope_token(),
+            "crossed": published.crossed,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/notes` — your notes, newest last, with unopened ones named.
+async fn read_notes(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Query(q): Query<DriveQuery>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "notes.owner_session_required",
+            "notes are one person's, and writing or reading them is that person's own act".into(),
+        );
+    };
+    let room = ciris_edge::self_room::room(&owner.key_id);
+    let dir = st.engine.federation_directory();
+    // THE LIMIT COUNTS NOTES, NOT ROWS (Codex, CIRISServer#628). `q.limit`
+    // applied here bounds every FILE in the self room — photos, named uploads,
+    // anything — and the note filter runs after. Enough non-note rows at the
+    // head of the window and a person's notes simply vanish from
+    // `GET /v1/notes`, while the response still returns fewer than `limit`
+    // items and so looks complete. Read the room's rows without a caller-side
+    // cap (edge bounds its own walk) and stop once `limit` NOTES are collected.
+    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "notes.listing_failed",
+                format!("read your self room: {e}"),
+            )
+        }
+    };
+    let content = store(&st.engine);
+    let viewer = match st.engine.local_derived_key_id().await {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "notes.no_node_key",
+                format!("resolve this node's key: {e}"),
+            )
+        }
+    };
+    let mut out: Vec<Note> = Vec::new();
+    for row in rows {
+        if out.len() >= q.limit {
+            break;
+        }
+        // A note is an UNNAMED text row in this room. Both conditions, because
+        // both are what `write_note` stamps: `text/plain` and `filename: None`.
+        // The media type alone is not enough — `POST /v1/files` can put a named
+        // `.txt` in the same room, and a notes list that swallowed it would
+        // report somebody's uploaded file as something they had written. A
+        // photo in this room is excluded by the type; a named text file is
+        // excluded by the name, and nothing here guesses.
+        let is_text = row
+            .media_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("text/plain"));
+        if !is_text || row.filename.is_some() {
+            continue;
+        }
+        let (body, state, detail) = match row.open(&content, &viewer).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => (
+                    Some(text),
+                    "open".to_owned(),
+                    "readable on this device".to_owned(),
+                ),
+                Err(_) => (
+                    None,
+                    "unreadable".to_owned(),
+                    "the bytes opened but are not UTF-8 text".to_owned(),
+                ),
+            },
+            Err(reason) => {
+                let u = unopened(&reason);
+                (None, u.state.to_owned(), u.detail)
+            }
+        };
+        out.push(Note {
+            attestation_id: row.attestation_id.clone(),
+            asserted_at: row.asserted_at.to_rfc3339(),
+            author_key_id: row.attesting_key_id.clone(),
+            body,
+            state,
+            detail,
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "room": room.to_string(), "notes": out })),
+    )
+        .into_response()
+}
+
+pub fn router(
+    engine: Arc<Engine>,
+    node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    user_seed_dir: std::path::PathBuf,
+    // CIRISEdge#499 — the same plane the chat router is given. The drive does
+    // not INSTALL rooms (that needs the group registry) but it must be able to
+    // say whether one is addressed, or a write reports `crossed` for bytes
+    // nobody can fetch.
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
+) -> Router {
+    let state = DriveState {
+        engine,
+        node_signer,
+        user_seed_dir,
+        scope_lifecycle,
+    };
+    Router::new()
+        .route("/v1/files", axum::routing::post(write_file))
+        .route("/v1/drive", axum::routing::get(read_drive))
+        .route("/v1/files/{attestation_id}", axum::routing::get(read_file))
+        .route("/v1/notes", axum::routing::get(read_notes).post(write_note))
+        .with_state(state)
+}

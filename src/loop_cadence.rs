@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 9] = [
+pub const LOOPS: [&str; 10] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -96,6 +96,10 @@ pub const LOOPS: [&str; 9] = [
     // group epoch once its convergence window has passed. The third verb of
     // the plane compose arms; install/advance ride the chat handshake.
     "scope_seal",
+    // The self room's driver — edge decides, this host does the IO
+    // (CIRISEdge#646). Its own phase so it does not tick with scope_seal,
+    // which it calls into.
+    "self_room",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.

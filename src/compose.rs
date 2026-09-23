@@ -1558,6 +1558,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // on every epoch, sealed on the cadence loop below.
                         edge.scope_lifecycle().cloned(),
                     ))
+                    // FILES, THE DRIVE AND NOTES (CIRISServer#622/#615): one
+                    // door for a file at any cohort, the drive that lists what
+                    // this identity can reach with `row held, bytes absent` as
+                    // a first-class state, and notes — self-chat, which is the
+                    // same row in the same room, so note-taking needs no new
+                    // object.
+                    .merge(crate::drive::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&chat_node_signer),
+                        crate::user_seed_dir(&cfg),
+                        // The scope-address plane, so a cohort write can report
+                        // whether the room it seals into is addressable at all.
+                        edge.scope_lifecycle().cloned(),
+                    ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -1862,6 +1876,102 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // made it the only route timing out on the canonical (0.5.193 regression).
     crate::conformance::prime_capabilities(&engine).await;
 
+    let (self_room_sd_tx, mut self_room_sd_rx) = watch::channel(false);
+
+    // THE SELF ROOM'S DRIVER (CIRISEdge#646 / CIRISServer#622). Nobody creates
+    // a self room by asking: it must appear the moment an identity owns a
+    // second device. Edge owns the rule (`self_room::decide`); this owns the
+    // IO, the same split as the lifecycle's verbs above. Without this loop a
+    // self file's ROW crosses (persist `send_set_for` since v46.3.0) and its
+    // BYTES have nowhere to be fetched from — the last rung under "my stuff on
+    // my other devices", and the one the FSD says is ours.
+    let self_room_join = {
+        let drive_state = crate::self_room_drive::SelfRoomState {
+            engine: Arc::clone(&engine),
+            node_signer: Arc::clone(&chat_node_signer),
+            user_seed_dir: crate::user_seed_dir(&cfg),
+            lifecycle: edge.scope_lifecycle().cloned(),
+            held: Arc::new(tokio::sync::Mutex::new(None)),
+            pending: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        // SUPERVISED, like the reconcile and retention loops. An unsupervised
+        // spawn survives `shutdown_node()` — the embedded restart flow keeps
+        // the Tokio runtime alive — so the old driver would keep polling a
+        // torn-down engine while the next serve starts a second one, and two
+        // drivers would contend over the same person's room (Codex,
+        // CIRISServer#628).
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(30);
+            let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
+            let mut last = None;
+            loop {
+                if *self_room_sd_rx.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    () = schedule.tick() => {}
+                    _ = self_room_sd_rx.changed() => {
+                        if *self_room_sd_rx.borrow() { break; }
+                        continue;
+                    }
+                }
+                // A WATCHDOG, because a tick that never returns is a loop that
+                // is gone. `drive_once` awaits an MLS commit, a directory read
+                // and a placement; if any of them wedges, the loop stops
+                // forever with NOTHING in the log — it looks exactly like a
+                // healthy quiet node. That cost a full ladder run to tell
+                // apart from a working steady state, so it is now impossible:
+                // a tick either finishes or says it did not.
+                let tick = match tokio::time::timeout(
+                    period * 4,
+                    crate::self_room_drive::drive_once(&drive_state),
+                )
+                .await
+                {
+                    Ok(t) => t,
+                    Err(_) => {
+                        tracing::warn!(
+                            after_secs = (period * 4).as_secs(),
+                            "self room: a drive tick did not finish and was abandoned — the \
+                             next tick starts fresh. Self-scoped BYTES stay unfetchable while \
+                             this repeats (rows still cross)"
+                        );
+                        continue;
+                    }
+                };
+                // Transition-only logging for the QUIET states, which are the
+                // steady state and not news. Everything else is logged EVERY
+                // time: `Created`/`Added`/`Removed`/`Failed` are one-time
+                // events by their nature, so a repeat is a loop that is not
+                // converging, and suppressing it as "unchanged" is how a node
+                // re-creating its room every 30s reads as silence.
+                let quiet = matches!(
+                    tick,
+                    crate::self_room_drive::SelfRoomTick::Idle
+                        | crate::self_room_drive::SelfRoomTick::SoleDevice
+                        | crate::self_room_drive::SelfRoomTick::NotInRoster
+                        | crate::self_room_drive::SelfRoomTick::NoOwner
+                        | crate::self_room_drive::SelfRoomTick::PublishedKeyPackage
+                );
+                if !quiet || last.as_ref() != Some(&tick) {
+                    match &tick {
+                        crate::self_room_drive::SelfRoomTick::Failed(why) => tracing::warn!(
+                            detail = %why,
+                            "self room: the drive could not complete this tick — self-scoped \
+                             BYTES stay unfetchable until it does (rows still cross)"
+                        ),
+                        other => tracing::info!(
+                            tick = ?other,
+                            "self room drive"
+                        ),
+                    }
+                    last = Some(tick);
+                }
+            }
+            tracing::info!("self room drive stopped");
+        })
+    };
+
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
     let retention_join = {
@@ -1969,6 +2079,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if let Some(join) = reconcile_join {
         stop_step("replication reconciler", join).await;
     }
+    // Tear down the self-room driver BEFORE the edge: it drives the
+    // scope-address lifecycle and holds an MLS group, so a tick landing after
+    // the edge is gone would install destinations nothing can answer for.
+    let _ = self_room_sd_tx.send(true);
+    stop_step("self room drive", self_room_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.
@@ -2971,8 +3086,21 @@ fn identity_router(identity_json: String) -> axum::Router {
 /// fed-ID is "bound to the login" — no live owner session (or first-run bootstrap), no
 /// fed-ID. A future caller can't reach the signer without declaring its authority.
 pub(crate) enum FedIdUse {
-    /// A VERIFIED owner session — the caller already passed `require_owner`
-    /// (SystemAdmin + FullAccess via `resolve_bearer`). The post-claim path.
+    /// **Owner authority, already established.** The post-claim path, reached
+    /// two ways — and both are authorizations, not conveniences:
+    ///
+    /// 1. a VERIFIED owner session (the caller passed `require_owner`:
+    ///    SystemAdmin + FullAccess via `resolve_bearer`, delegates refused);
+    /// 2. the node's OWNER BINDING, for a background loop that has no caller
+    ///    to verify (`owner_signer_capsule::for_owned_node`,
+    ///    `peer::owner_consent_pen`). The binding is the standing statement
+    ///    that this human owns this machine, and the arm that uses it checks
+    ///    the resolved signer actually derives the key `owner_of` named.
+    ///
+    /// Naming (2) here because this variant used to say "the caller already
+    /// passed require_owner", which stopped being the whole truth the moment a
+    /// daemon needed the owner's pen — and a loop that trusted that sentence
+    /// passed `bearer: None` into the session door and refused on every tick.
     OwnerSession,
     /// First-run BOOTSTRAP: no owner exists yet, so the fed-ID is minted + used to
     /// CREATE the owner. `resolve_user_signer` RE-VERIFIES `is_first_run` for this
@@ -3854,7 +3982,15 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
 struct PublishOwn {
     keys: Arc<std::sync::RwLock<Vec<String>>>,
     engine: Arc<Engine>,
-    node_key_id: String,
+    /// EVERY key that is "us" — `own_key_ids(edge)`: the edge signer, the actor
+    /// identity, and the minted node signer. Not one key.
+    ///
+    /// On the actor/node split (CC 3.4.7.3 Clause A) these are DIFFERENT keys
+    /// and the owner-binding is moved onto the NODE key
+    /// (`move_owner_binding_to_node_key`), so `owner_of(edge_signer)` resolves
+    /// to nothing and the owner never enters the publish-own set at all
+    /// (CIRISServer#629).
+    own_key_ids: Vec<String>,
     /// Once the owner is in the set, no kick needs to resolve them again — this
     /// is what keeps "every kick admits the owner" down to one atomic load on
     /// the hot path (a kick fires for every chat row).
@@ -3880,7 +4016,18 @@ async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
     if held.owner_admitted.load(Ordering::Relaxed) {
         return false;
     }
-    let Ok(Some(owner)) = held.engine.owner_of(&held.node_key_id).await else {
+    // ASK FOR EVERY IDENTITY WE ARE. A split install binds the owner to the
+    // NODE key while the edge signs as the actor, so asking only about the
+    // signer answers None and the owner-attested rows — the binding itself,
+    // the owner's occurrences — are held locally and advertised to nobody.
+    let mut found = None;
+    for k in &held.own_key_ids {
+        if let Ok(Some(owner)) = held.engine.owner_of(k).await {
+            found = Some(owner);
+            break;
+        }
+    }
+    let Some(owner) = found else {
         return false;
     };
     let keys = &held.keys;
@@ -4085,8 +4232,25 @@ pub(crate) async fn start_replication_runtime(
     // still never crossed; this was the last door). The owner is resolved at
     // runtime (claiming happens after boot) by the updater task below, through
     // persist's withdraws-aware owner_of.
+    // SEEDED WITH EVERY IDENTITY THIS NODE IS, not just the edge signer.
+    //
+    // `own_key_ids(edge)` is the existing answer to "which keys are us" — the
+    // edge signer, the actor identity, and the minted node signer — and two
+    // other call sites are gated on consulting it (#607). This one was not, and
+    // on an actor/node split install that omission is total: the node mints a
+    // node key, MOVES the owner-binding onto it and makes it the wire identity,
+    // then attests its identity occurrences and its `consent:replication:v1`
+    // grant with it — while the publish-own set contains only the actor key, so
+    // the node's OWN key record is never offered in a Key round. The far side
+    // admits the actor key, never the node key, and then refuses every row the
+    // node attests with "attesting_key_id … is not a registered federation
+    // key". Measured on the production canonical (CIRISServer#629): five agent
+    // keys admitted in one afternoon, zero node keys, zero rows of any
+    // dimension, and no trace since the last install whose keys happened to
+    // coincide.
+    let own = own_key_ids(edge);
     let self_publish_keys: Arc<std::sync::RwLock<Vec<String>>> =
-        Arc::new(std::sync::RwLock::new(vec![node_key_id.to_string()]));
+        Arc::new(std::sync::RwLock::new(own.clone()));
     // Published so the CLAIM/ANNOUNCE path can refresh this set the moment it
     // authors the owner-binding, instead of the owner arriving up to 30s later
     // on the poll below. Set once per process; a second replication bring-up
@@ -4095,7 +4259,7 @@ pub(crate) async fn start_replication_runtime(
     let _ = SELF_PUBLISH.set(PublishOwn {
         keys: Arc::clone(&self_publish_keys),
         engine: Arc::clone(engine),
-        node_key_id: node_key_id.to_string(),
+        own_key_ids: own.clone(),
         owner_admitted: std::sync::atomic::AtomicBool::new(false),
     });
     let self_provider: ciris_edge::replication::CohortProvider = {
@@ -5008,12 +5172,42 @@ mod own_key_ids_tests {
         for f in [
             "async fn prime_trusted_peers(",
             "async fn prime_canonical_bootstrap_peers(",
+            // THE PUBLISH-OWN SEED (CIRISServer#629). This one was missed, and
+            // the omission was total on an actor/node split: the node's own key
+            // record was never offered in a Key round, so the far side refused
+            // every row the node attested as "not a registered federation key".
+            // Seeding from a single key here is the same defect as rooting a
+            // hint without consulting `own_key_ids`, so it is gated in the same
+            // loop rather than in a test of its own.
+            "pub(crate) async fn start_replication_runtime(",
         ] {
             let start = compose.find(f).unwrap_or_else(|| panic!("{f} exists"));
-            let body = &compose[start..start + 4_000];
+            // THE WHOLE FUNCTION, not a fixed window. A 4 KiB slice silently
+            // stopped short of `start_replication_runtime`'s publish-own seed,
+            // which is exactly the statement this gate exists to see — a scan
+            // whose reach is shorter than the body it checks reports "absent"
+            // for code that is present, and would have reported "present" for a
+            // function whose next neighbour happened to contain the needle.
+            let body = &compose[start..];
+            let end = body.find("\n}\n").map_or(body.len(), |n| n + 2);
+            // CODE ONLY. These functions explain in prose WHY they consult
+            // `own_key_ids(edge)`, so a scan that cannot tell an explanation
+            // from a call passes on the comment alone — verified by deleting
+            // the call and watching this gate stay green until it stripped
+            // them.
+            let body: String = body[..end]
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
                 body.contains("own_key_ids(edge)"),
-                "{f} must consult own_key_ids before rooting a hint as a peer (#607)"
+                "{f} must consult own_key_ids — every key this node IS has to be in the \
+                 set, or a split install never offers its own node key and the far side \
+                 refuses every row it attests (#607, #629)"
             );
         }
         let delivery = include_str!("federation_delivery.rs");

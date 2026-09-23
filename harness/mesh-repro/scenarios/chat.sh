@@ -166,8 +166,8 @@
 
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
-SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
+SUCCESS_STAGE="comm_file_on_b"
+SUCCESS_MESSAGE="cross-node chat AND community files PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), the canonical that carries the mesh cannot read the room, and a FILE published into that community at tier=CommunityDek crossed and OPENED on the other person's node."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
@@ -178,7 +178,18 @@ SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived r
 # row crosses only if the joiner's node can place the creator's node in the
 # room's audience — which is the owner-binding walk `bound` measures. That
 # ordering rule is the whole reason this ladder is not simply the narrative order.
-STAGES=(rooted peered pulling contact room dark one_sided bound sent arrived hamburger)
+STAGES=(rooted peered pulling contact room dark one_sided bound sent arrived hamburger comm_file comm_file_on_b)
+# `comm_file*` — the community FILE plane (CIRISServer#622). MEASURED on their
+# first run, then promoted here, which is the rule this file follows: a rung is
+# evidence, not an aspiration.
+#
+# THEY MUST BE REQUIRED, and that is not a formality. They sit AFTER
+# `hamburger`, and the run loop breaks as soon as SUCCESS_STAGE is positive and
+# nothing REQUIRED is pending — so on their first run the ladder stopped the
+# moment chat went green and reported `comm_file_on_b=0` against a file that
+# crossed and OPENED on the recipient's node seconds later. A rung after the
+# success stage is invisible unless it is required; the same truncation once
+# made chat's own `arrived` read 0 for six releases.
 # (The definitions below are grouped by topic, not by ladder position — each
 #  header carries its own number, and THIS array is the running order.)
 
@@ -783,6 +794,11 @@ DIAG_sent() {
 # on the server side, CIRISEdge#601 / CIRISPersist#848) while the ladder read
 # "cross-node chat PROVEN". A red `arrived` is a BREAK wherever it sits.
 REQUIRED_arrived=1
+# The community file plane: published AND crossed, then LISTED and OPENED by
+# the other PERSON. Proven 2026-09-23 — node-b read "community file proof"
+# back out of `chat:pair:v1:…` with `tier=CommunityDek`, `granted=2`.
+REQUIRED_comm_file=1
+REQUIRED_comm_file_on_b=1
 stage_arrived() {
   _chat_load
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
@@ -1134,3 +1150,102 @@ for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
   echo "· recipient holds the message row: $(harness_db_count "${CHAT_RECIPIENT_SVC:-node-b}" federation_attestations "attestation_id = '${CHAT_ATT_ID:-none}'")"
   echo "· drive errors: ${CHAT_DRIVE_ERRORS:-<unread>}"
 }
+
+# ── 12. COMMUNITY FILES ──────────────────────────────────────────────────────
+# The same two people and the same community the chat rungs above proved, now
+# carrying BYTES instead of a message. This is the community arm of the drive
+# (CIRISServer#622): `POST /v1/files {cohort:"community", room_id:<cid>}` seals
+# to the community's content group and crosses to the roster.
+#
+# WHY IT IS TESTED HERE AND NOT IN `selffiles`: a community needs two PEOPLE,
+# and this is the only ladder that has them. `selffiles` is one person on two
+# devices — the right shape for `self`, and the wrong one for a roster.
+#
+# The write is on the SENDER as its owner; the read is on the RECIPIENT as
+# theirs, which is the only pair that proves the bytes crossed a person
+# boundary rather than a device one.
+stage_comm_file() {
+  _chat_load
+  if [ -z "${CHAT_CID_A:-}" ] || [ -z "${CHAT_A_TOKEN:-}" ]; then echo 0; return; fi
+  # PUBLISH ONCE. A ladder stage is SAMPLED — `harness_sample` re-runs it every
+  # tick until the window closes — so a stage that acts instead of observing
+  # would write a new file every few seconds and the rung above would then be
+  # racing whichever id it last recorded. The marker is the whole guard: once
+  # this has crossed, re-read the answer rather than re-asking the question.
+  if [ -s "$CHAT_STATE/comm-file-id" ]; then echo 1; return; fi
+  compose exec -T "${CHAT_SENDER_SVC:-node-a}" python - \
+    "$CHAT_A_BASE" "$CHAT_A_TOKEN" "$CHAT_CID_A" "${CHAT_COMM_FILE_TEXT:-community file proof}" \
+    >"$CHAT_STATE/comm-file.json" 2>/dev/null <<'PY' || true
+import base64, json, sys, urllib.request, urllib.error
+base, token, cid, text = sys.argv[1:5]
+body = json.dumps({"cohort": "community", "room_id": cid,
+                   "bytes_base64": base64.b64encode(text.encode()).decode(),
+                   "media_type": "text/plain", "filename": "community-proof.txt"}).encode()
+req = urllib.request.Request(base + "/v1/files", data=body, method="POST",
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+try:
+    r = urllib.request.urlopen(req, timeout=60)
+    print(json.dumps({"status": r.status, "body": json.load(r)}))
+except urllib.error.HTTPError as e:
+    try: b = json.loads(e.read().decode() or "{}")
+    except Exception: b = {}
+    print(json.dumps({"status": e.code, "body": b}))
+except Exception as e:  # noqa: BLE001
+    print(json.dumps({"status": 0, "body": {"detail": repr(e)[:200]}}))
+PY
+  # 200 AND crossed. `crossed=false` is a file that reached nobody: persist's E5
+  # invariant keeps a local-tier row out of every federation stream, so the
+  # other person would never see it and neither would this node's own drive.
+  python3 -c '
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print(0); raise SystemExit
+b=d.get("body",{})
+if d.get("status")==200 and b.get("crossed") is True:
+    open(sys.argv[2],"w").write(b.get("attestation_id") or "")
+    print(1)
+else: print(0)' "$CHAT_STATE/comm-file.json" "$CHAT_STATE/comm-file-id" 2>/dev/null || echo 0
+}
+HINT_comm_file="the community file was refused, or published WITHOUT crossing. \`readable_by_nobody\` means no member of the community holds a usable content-KEM key — the roster's occurrences, not the room's membership, are what a seal wraps to"
+EXIT_comm_file=37
+DIAG_comm_file() { cat "$CHAT_STATE/comm-file.json" 2>/dev/null | head -c 900; echo; }
+
+stage_comm_file_on_b() {
+  _chat_load
+  local att; att="$(cat "$CHAT_STATE/comm-file-id" 2>/dev/null)"
+  if [ -z "${CHAT_CID_B:-}" ] || [ -z "${CHAT_B_TOKEN:-}" ] || [ -z "$att" ]; then echo 0; return; fi
+  compose exec -T "${CHAT_RECIPIENT_SVC:-node-b}" python - \
+    "$CHAT_B_BASE" "$CHAT_B_TOKEN" "$CHAT_CID_B" "$att" \
+    >"$CHAT_STATE/comm-file-b.json" 2>/dev/null <<'PY' || true
+import json, sys, urllib.parse, urllib.request, urllib.error
+base, token, cid, att = sys.argv[1:5]
+def get(path):
+    req = urllib.request.Request(base + path, headers={"Authorization": "Bearer " + token})
+    try:
+        r = urllib.request.urlopen(req, timeout=45)
+        return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try: return e.code, json.loads(e.read().decode() or "{}")
+        except Exception: return e.code, {}
+    except Exception as e:  # noqa: BLE001
+        return 0, {"detail": repr(e)[:200]}
+q = urllib.parse.urlencode({"cohort": "community", "room_id": cid})
+ls, lb = get(f"/v1/drive?{q}")
+listed = any(e.get("attestation_id") == att for e in (lb.get("entries") or []))
+rs, rb = get(f"/v1/files/{att}?{q}")
+print(json.dumps({"list_status": ls, "listed": listed, "read_status": rs, "read": rb}))
+PY
+  # LISTED is not OPENED. A row can cross while its bytes stay on the other
+  # node (`not_fetched`, 409) or while this device holds no grant
+  # (`not_granted`, 403) — three different truths, and only the third is done.
+  python3 -c '
+import base64,json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print(0); raise SystemExit
+if not d.get("listed") or d.get("read_status")!=200: print(0); raise SystemExit
+try: print(1 if base64.b64decode(d["read"]["bytes_base64"]) else 0)
+except Exception: print(0)' "$CHAT_STATE/comm-file-b.json" 2>/dev/null || echo 0
+}
+HINT_comm_file_on_b="the other person's node did not OPEN the community file. \`listed=false\` = the row never crossed (a consent grant covering \`file:\` is NOT what carries it — a community row rides the room's audience); \`not_fetched\` = the row crossed but the bytes were never pulled (blob holder/chunk-source); \`not_granted\` = this reader's occurrence was not a KEM target when the bytes were sealed"
+EXIT_comm_file_on_b=38
+DIAG_comm_file_on_b() { cat "$CHAT_STATE/comm-file-b.json" 2>/dev/null | head -c 900; echo; }

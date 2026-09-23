@@ -46,10 +46,17 @@ wait_healthy() {
 wait_agent_seeded() {
   local phase="$1" deadline="$2" waited=0
   while [ "$waited" -lt "$deadline" ]; do
-    if compose logs --since 90s agent 2>/dev/null | grep -qE "federation delivery started: [1-9]|KEX-GATE.*PRESENT"; then
+    # `grep -c … || true`, NOT `grep -q`: these scripts run under `set -euo
+    # pipefail`, and `grep -q` exits the instant it matches — which SIGPIPEs the
+    # `compose logs` feeding it, so the PIPELINE exits 141 and the `if` is FALSE
+    # **on a successful match**. It fails only once the log is big enough that
+    # `compose logs` is still writing when grep leaves, so it reads as a flaky
+    # readiness check rather than a bug. Measured in scenarios/selffiles.sh, where
+    # it made three ladder rungs report 0 against logs that plainly matched.
+    if [ "$(compose logs --since 90s agent 2>/dev/null | grep -cE "federation delivery started: [1-9]|KEX-GATE.*PRESENT" || true)" -gt 0 ]; then
       echo "── [$phase] agent seeded delivery"; return 0
     fi
-    if compose logs --since 90s agent 2>/dev/null | grep -q "FATAL"; then
+    if [ "$(compose logs --since 90s agent 2>/dev/null | grep -c "FATAL" || true)" -gt 0 ]; then
       echo "── [$phase] agent FATAL"; compose logs --tail 5 agent; return 1
     fi
     sleep 5; waited=$((waited + 5))
