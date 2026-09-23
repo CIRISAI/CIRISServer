@@ -198,6 +198,8 @@ pub mod deployment;
 /// loopback-only: the mallinfo2 memory report and the CPU clocks behind
 /// `compose_status::mark` (CIRISServer#549 / #550).
 pub mod diag;
+pub mod drive;
+pub mod drive_auth;
 /// **Same-key equivocation detection** (CIRISServer#350, CC 6.1.1 N4) — the
 /// periodic pass that compares the rows this node holds and emits a
 /// `hard_case:attestation_equivocation` when ONE key has signed two different
@@ -302,6 +304,7 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+pub mod self_room_drive;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);

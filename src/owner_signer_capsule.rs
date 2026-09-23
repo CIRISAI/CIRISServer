@@ -61,6 +61,10 @@ pub enum CapsuleRefusal {
     Delegated,
     /// The owner exists but has no minted fed-ID yet.
     NoFedIdentity,
+    /// This node has no owner binding, so there is no human to sign as. Only
+    /// [`OwnerSignerCapsule::for_owned_node`] can return this: a bearer session
+    /// names its own owner, an unclaimed node names nobody.
+    Unowned,
     /// The store could not be read.
     Unavailable(String),
 }
@@ -86,6 +90,11 @@ impl std::fmt::Display for CapsuleRefusal {
             Self::NoFedIdentity => write!(
                 f,
                 "no responsible-user identity minted yet — create the federation ID first"
+            ),
+            Self::Unowned => write!(
+                f,
+                "this node is not claimed, so it has no owner to sign as — a background \
+                 loop's authority IS the owner binding, and there is not one yet"
             ),
             Self::Unavailable(e) => write!(f, "identity store unavailable: {e}"),
         }
@@ -237,6 +246,89 @@ pub async fn acquire(
             signer,
             edge_signer,
         }),
+        Ok(None) => Err(CapsuleRefusal::NoFedIdentity),
+        Err(e) => Err(CapsuleRefusal::Unavailable(e.to_string())),
+    }
+}
+
+/// **The owner's pen for a background loop, authorized by the node's own owner
+/// binding** (CIRISServer#622).
+///
+/// # Why [`acquire`] cannot serve a loop
+///
+/// `acquire` authorizes a *caller*: it reads a bearer, refuses a delegate, and
+/// checks the session's role. A daemon has no caller, so it can only ever pass
+/// `bearer: None` — and that is `NotSignedIn` on the first line. The self-room
+/// drive did exactly this and every arm that authors a row AS THE OWNER (the
+/// KeyPackage, the Add, the Remove) refused on every tick, forever, while the
+/// one arm that signs as the NODE (Create) succeeded. A node would create its
+/// self room and then never admit its own second device.
+///
+/// # What authorizes this instead
+///
+/// The node's **owner binding** — the live `delegates_to(user → node, infra:*)`
+/// that a claim writes. That row is the standing statement "this human owns this
+/// machine", and it is the same authority `peer::owner_consent_pen` signs
+/// consent under at boot with no session either (CIRISServer#599). A loop on a
+/// claimed node is acting on its owner's standing instruction; a loop on an
+/// unclaimed node is acting on nobody's, and gets [`CapsuleRefusal::Unowned`].
+///
+/// # The check that must not be dropped
+///
+/// The seed under `active_user_alias` is not *assumed* to be the owner's — it is
+/// verified to derive the key `owner_of` named, exactly as `owner_consent_pen`
+/// does, and a mismatch is [`CapsuleRefusal::NotTheOwner`] rather than a
+/// fallback to the node's own key. Signing a self-collective row as the machine
+/// would put infrastructure's name on a human's content
+/// (`consent-is-authored-by-the-human`, CC 3.3.6), and a room keyed to the
+/// wrong principal is unreadable by the person it is for.
+///
+/// This still goes through `compose::resolve_user_signers`, so there remains ONE
+/// place the fed-ID is released. What differs from [`acquire`] is only WHO
+/// authorized the release, and both answers are written down.
+///
+/// # Errors
+/// [`CapsuleRefusal`] — as [`acquire`], plus `Unowned`.
+pub async fn for_owned_node(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+) -> Result<OwnerSignerCapsule, CapsuleRefusal> {
+    let owner = match ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        node_key_id,
+    )
+    .await
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Err(CapsuleRefusal::Unowned),
+        Err(e) => return Err(CapsuleRefusal::Unavailable(e.to_string())),
+    };
+    let Some((seed_dir, default_alias)) = crate::node_key::held_user_seed_dir() else {
+        // A bare harness engine registers no seed dir. That is not "no
+        // identity" — it is "not here", and naming it that way is what stopped
+        // the last two of these from reading as a product bug.
+        return Err(CapsuleRefusal::Unavailable(
+            "this process registered no user seed dir — compose registers one at boot; a \
+             bare engine does not, so the owner's pen cannot be opened here"
+                .into(),
+        ));
+    };
+    let alias = crate::active_user_alias(&seed_dir, &default_alias);
+    match crate::compose::resolve_user_signers(
+        engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &alias,
+        seed_dir,
+    )
+    .await
+    {
+        Ok(Some((signer, edge_signer))) if crate::peer::signer_holds(&signer, &owner) => {
+            Ok(OwnerSignerCapsule {
+                signer,
+                edge_signer,
+            })
+        }
+        Ok(Some(_)) => Err(CapsuleRefusal::NotTheOwner),
         Ok(None) => Err(CapsuleRefusal::NoFedIdentity),
         Err(e) => Err(CapsuleRefusal::Unavailable(e.to_string())),
     }

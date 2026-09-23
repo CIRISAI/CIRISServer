@@ -220,13 +220,38 @@ enum RoomState {
 /// `share_in_room` (`src/bin/edge_node.rs`) rather than re-derived, because the
 /// ordering — store, then `share` — is what makes the crossing act on bytes that
 /// already exist.
-async fn share_in_room(
+pub(crate) async fn share_in_room(
     dir: &dyn ciris_persist::federation::FederationDirectory,
     row: Attestation,
     room: &str,
     signers: ciris_edge::replication::attestation_bind::Signers<'_>,
 ) -> Result<String, String> {
-    use ciris_edge::replication::attestation_bind::{share, CrossingBasis, Shared, With};
+    share_in(
+        dir,
+        row,
+        &ciris_edge::scope_room::ScopeRoom::community(room),
+        signers,
+    )
+    .await
+}
+
+/// **Place a row in ANY cohort's room** — the one crossing door.
+///
+/// `share_in_room` above is this with a community room, kept because every
+/// chat call site reads better naming the room as a string. The audience comes
+/// from the room itself (`ScopeRoom::widen_to`), so a self row crosses
+/// `With::MyDevices` and a family row `With::MyFamily` without a second copy of
+/// this function deciding that — the mistake this repo has paid for elsewhere
+/// (one rule, two spellings, and they fork).
+pub(crate) async fn share_in(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    row: Attestation,
+    room: &ciris_edge::scope_room::ScopeRoom,
+    signers: ciris_edge::replication::attestation_bind::Signers<'_>,
+) -> Result<String, String> {
+    use ciris_edge::replication::attestation_bind::{share, CrossingBasis, Shared};
+    let room_label = room.to_string();
+    let room: &ciris_edge::scope_room::ScopeRoom = room;
     // The AUTHORED door (persist v41): the actor signed this row on this node,
     // so it is the node's own writing and never a peer's — the ordinary door
     // metered it as a stranger's and refused the owner's own sends at
@@ -254,9 +279,7 @@ async fn share_in_room(
     let crossing = share(
         dir,
         &row,
-        With::Community {
-            community_key_id: room.to_owned(),
-        },
+        room.widen_to(),
         CrossingBasis::ProducerAuthority,
         signers,
     )
@@ -265,7 +288,7 @@ async fn share_in_room(
         tracing::error!(
             attestation_id = %row.attestation_id,
             attester = %row.attesting_key_id,
-            room = %room,
+            room = %room_label,
             error = %e,
             "chat: the row was stored but NOT placed in the room. `share` runs \
              `enter_mesh` (tier crossing over the same bytes) then \
@@ -285,7 +308,7 @@ async fn share_in_room(
             // The row is in the room; make it cross NOW (KeyPackage, Welcome,
             // message, roster — every chat row goes through here), not on the
             // next cadence tick (CIRISEdge#636, edge v26.1.0).
-            crate::compose::kick_replication("chat row placed in room");
+            crate::compose::kick_replication("row placed in a cohort room");
             Ok(attestation_id)
         }
         Shared::AlreadyThere { attestation_id } => Ok(attestation_id),
@@ -296,7 +319,7 @@ async fn share_in_room(
             tracing::warn!(
                 attestation_id = %attestation_id,
                 attester = %row.attesting_key_id,
-                room = %room,
+                room = %room_label,
                 age_ms,
                 "chat: the row is WAITING for its author's signature and has not \
                  been placed — an `Ok` that did nothing. `custody_for` will sign \

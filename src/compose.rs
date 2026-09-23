@@ -1558,6 +1558,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // on every epoch, sealed on the cadence loop below.
                         edge.scope_lifecycle().cloned(),
                     ))
+                    // FILES, THE DRIVE AND NOTES (CIRISServer#622/#615): one
+                    // door for a file at any cohort, the drive that lists what
+                    // this identity can reach with `row held, bytes absent` as
+                    // a first-class state, and notes — self-chat, which is the
+                    // same row in the same room, so note-taking needs no new
+                    // object.
+                    .merge(crate::drive::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&chat_node_signer),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -1861,6 +1872,84 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // peer-facing declaration into three DB round-trips on a shared connection and
     // made it the only route timing out on the canonical (0.5.193 regression).
     crate::conformance::prime_capabilities(&engine).await;
+
+    // THE SELF ROOM'S DRIVER (CIRISEdge#646 / CIRISServer#622). Nobody creates
+    // a self room by asking: it must appear the moment an identity owns a
+    // second device. Edge owns the rule (`self_room::decide`); this owns the
+    // IO, the same split as the lifecycle's verbs above. Without this loop a
+    // self file's ROW crosses (persist `send_set_for` since v46.3.0) and its
+    // BYTES have nowhere to be fetched from — the last rung under "my stuff on
+    // my other devices", and the one the FSD says is ours.
+    {
+        let drive_state = crate::self_room_drive::SelfRoomState {
+            engine: Arc::clone(&engine),
+            node_signer: Arc::clone(&chat_node_signer),
+            user_seed_dir: crate::user_seed_dir(&cfg),
+            lifecycle: edge.scope_lifecycle().cloned(),
+            held: Arc::new(tokio::sync::Mutex::new(None)),
+            pending: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(30);
+            let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
+            let mut last = None;
+            loop {
+                schedule.tick().await;
+                // A WATCHDOG, because a tick that never returns is a loop that
+                // is gone. `drive_once` awaits an MLS commit, a directory read
+                // and a placement; if any of them wedges, the loop stops
+                // forever with NOTHING in the log — it looks exactly like a
+                // healthy quiet node. That cost a full ladder run to tell
+                // apart from a working steady state, so it is now impossible:
+                // a tick either finishes or says it did not.
+                let tick = match tokio::time::timeout(
+                    period * 4,
+                    crate::self_room_drive::drive_once(&drive_state),
+                )
+                .await
+                {
+                    Ok(t) => t,
+                    Err(_) => {
+                        tracing::warn!(
+                            after_secs = (period * 4).as_secs(),
+                            "self room: a drive tick did not finish and was abandoned — the \
+                             next tick starts fresh. Self-scoped BYTES stay unfetchable while \
+                             this repeats (rows still cross)"
+                        );
+                        continue;
+                    }
+                };
+                // Transition-only logging for the QUIET states, which are the
+                // steady state and not news. Everything else is logged EVERY
+                // time: `Created`/`Added`/`Removed`/`Failed` are one-time
+                // events by their nature, so a repeat is a loop that is not
+                // converging, and suppressing it as "unchanged" is how a node
+                // re-creating its room every 30s reads as silence.
+                let quiet = matches!(
+                    tick,
+                    crate::self_room_drive::SelfRoomTick::Idle
+                        | crate::self_room_drive::SelfRoomTick::SoleDevice
+                        | crate::self_room_drive::SelfRoomTick::NotInRoster
+                        | crate::self_room_drive::SelfRoomTick::NoOwner
+                        | crate::self_room_drive::SelfRoomTick::PublishedKeyPackage
+                );
+                if !quiet || last.as_ref() != Some(&tick) {
+                    match &tick {
+                        crate::self_room_drive::SelfRoomTick::Failed(why) => tracing::warn!(
+                            detail = %why,
+                            "self room: the drive could not complete this tick — self-scoped \
+                             BYTES stay unfetchable until it does (rows still cross)"
+                        ),
+                        other => tracing::info!(
+                            tick = ?other,
+                            "self room drive"
+                        ),
+                    }
+                    last = Some(tick);
+                }
+            }
+        });
+    }
 
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
@@ -2971,8 +3060,21 @@ fn identity_router(identity_json: String) -> axum::Router {
 /// fed-ID is "bound to the login" — no live owner session (or first-run bootstrap), no
 /// fed-ID. A future caller can't reach the signer without declaring its authority.
 pub(crate) enum FedIdUse {
-    /// A VERIFIED owner session — the caller already passed `require_owner`
-    /// (SystemAdmin + FullAccess via `resolve_bearer`). The post-claim path.
+    /// **Owner authority, already established.** The post-claim path, reached
+    /// two ways — and both are authorizations, not conveniences:
+    ///
+    /// 1. a VERIFIED owner session (the caller passed `require_owner`:
+    ///    SystemAdmin + FullAccess via `resolve_bearer`, delegates refused);
+    /// 2. the node's OWNER BINDING, for a background loop that has no caller
+    ///    to verify (`owner_signer_capsule::for_owned_node`,
+    ///    `peer::owner_consent_pen`). The binding is the standing statement
+    ///    that this human owns this machine, and the arm that uses it checks
+    ///    the resolved signer actually derives the key `owner_of` named.
+    ///
+    /// Naming (2) here because this variant used to say "the caller already
+    /// passed require_owner", which stopped being the whole truth the moment a
+    /// daemon needed the owner's pen — and a loop that trusted that sentence
+    /// passed `bearer: None` into the session door and refused on every tick.
     OwnerSession,
     /// First-run BOOTSTRAP: no owner exists yet, so the fed-ID is minted + used to
     /// CREATE the owner. `resolve_user_signer` RE-VERIFIES `is_first_run` for this
