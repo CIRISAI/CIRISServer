@@ -95,12 +95,31 @@ fn the_authorizer_is_read_into_memory_and_zeroized() {
 #[test]
 fn associate_enrols_an_occurrence() {
     let code = code_only(&src("src/auth/portable_occurrence.rs"));
-    let i = code
-        .find("async fn associate_handler")
-        .expect("the associate handler");
-    let body = &code[i..];
-    let end = body.find("\npub fn router").unwrap_or(body.len());
-    let body = &body[..end];
+    // THE WINDOW IS THE ASSOCIATE FLOW: its handler plus the two helpers
+    // CIRISServer#618 factored the custody arms into. Not one function — that
+    // went red the day the helpers were extracted, while the property held
+    // throughout. And not the whole MODULE, which is what it was widened to
+    // next: `portable_handler` independently calls `bind_occurrence_core` and
+    // `mint_local_device_occurrence`, so a module-wide scan stays green even if
+    // the binding is deleted from `associate_handler` outright — the test keeps
+    // its name and stops protecting the thing the name promises. A window has
+    // to be the flow, not the file the flow happens to live in.
+    let window = [
+        "async fn associate_handler",
+        "fn open_directory_authorizer",
+        "fn open_hardware_authorizer",
+    ]
+    .iter()
+    .map(|needle| {
+        let i = code
+            .find(needle)
+            .unwrap_or_else(|| panic!("the associate flow must contain `{needle}`"));
+        let rest = &code[i..];
+        &rest[..rest.find("\n}\n").map_or(rest.len(), |j| j + 2)]
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let body = window.as_str();
     assert!(
         body.contains("bind_occurrence_core"),
         "associate must BIND the device as an occurrence — that is what gives it the identity's \
@@ -118,4 +137,18 @@ fn associate_enrols_an_occurrence() {
         "associate must open the supplied keyset TRANSIENTLY to authorize with — possession of \
          the identity key IS the authorization, and it must not be persisted."
     );
+    // CIRISServer#618 — the HARDWARE arm authorizes with material that was
+    // never on this host at all: the classical half signs on the token, the
+    // post-quantum half is unwrapped from a USB or read from THIS home's
+    // sealed store. It composes them and hands the composition to the same
+    // steps; nothing about the enrolled identity is written here.
+    assert!(
+        body.contains("HardwareRootedIdentity::new"),
+        "the hardware arm must COMPOSE the two custodied halves into an authorizer rather than \
+         import them — a token that exported its key would not be a token."
+    );
+    // (No "the module never mints a portable keyset" assertion: `POST
+    // /v1/self/occurrence/portable` lives in this same module and minting one
+    // is exactly its job. Asserting otherwise was a false property — caught by
+    // running it, which is the only reason to write a gate that can fail.)
 }

@@ -58,7 +58,7 @@ use anyhow::{Context, Result};
 use ciris_keyring::user_identity::{get_user_identity_signer, SigningBackend, UserIdentityConfig};
 use ciris_keyring::{HardwareSigner, PqcSigner};
 use ciris_verify_core::fedcode;
-use ciris_verify_core::federation_identity::create_federation_identity;
+use ciris_verify_core::federation_identity::{create_federation_identity_in, preflight_keys_dir};
 
 /// The default PIV slot an empty YubiKey is provisioned into — `9c` (Digital
 /// Signature). ykcs11 maps `9c` to the label "Private key for Digital
@@ -214,9 +214,141 @@ pub struct MintedUserIdentity {
     pub hardware_type: String,
 }
 
+/// **The sealed-key store for an identity whose seeds live in `seed_dir`** —
+/// `<home>/identity/keys`, resolved from the seed dir's own parent
+/// (CIRISServer#621).
+///
+/// # Why this exists
+///
+/// The ML-DSA-65 half and its TPM-sealed master were written to
+/// `ciris_verify_core::ceg_outbox::keys_dir()`, which is `$CIRIS_HOME/keys` or
+/// `~/ciris/keys` — the process's ENVIRONMENT, never the node's `--home`, and
+/// the server never sets that variable. So every home on a machine shared one
+/// directory keyed by ALIAS alone:
+///
+/// ```text
+/// ~/ciris/keys/{alias}.master.key          ← TPM-sealed master, shared
+/// ~/ciris/keys/{alias}.mldsa65.seed.blob   ← the sealed PQC half, shared
+/// ```
+///
+/// `--home ~/ciris-manager-client` therefore isolated the Ed25519 seed, the
+/// database and the logs, and NOT the half that matters most; two homes
+/// minting the same alias collided, and the second failed to unseal against the
+/// first's master (correctly — the plugin storage refuses a wrong-TPM seal
+/// rather than re-minting, CIRISVerify#134). A dedicated home is supposed to be
+/// a dedicated identity; now it is.
+///
+/// # What this does NOT reach: a NEWLY MINTED user identity
+///
+/// `create_federation_identity` seals the ML-DSA half itself, into the global
+/// `keys_dir()`, with no parameter for where (CIRISVerify#285). That happens
+/// before any code here runs, so a fresh mint writes globally and the resolver
+/// below then finds that marker and keeps using it — correctly, because the
+/// alternative is minting a second PQC half for a live identity. So today:
+///
+/// - a DEVICE occurrence (`mint_local_device_occurrence_with`) is fully
+///   home-scoped — it does not go through `create_federation_identity`, and
+///   both halves land in this home;
+/// - a newly minted USER identity seals its ML-DSA half into THIS home too,
+///   through verify v16.1.0's `create_federation_identity_in(keys_dir, …)`
+///   (CIRISVerify#285), after `preflight_keys_dir` has proved the directory
+///   usable. So `--home` now isolates the database, config, logs, the Ed25519
+///   seed AND the post-quantum half, and two homes minting the same alias no
+///   longer share one file. (A relocation that copied a globally-sealed half
+///   into the home used to stand in for this parameter; it is gone, because it
+///   had to guess whose half it was moving.)
+///
+/// # The fallback is deliberate, and it never re-mints
+///
+/// An identity sealed before this change lives in the legacy directory. When
+/// the home store holds nothing for `alias` and the legacy one does, this
+/// returns the LEGACY path and says so once — because the alternative is a
+/// node that finds no sealed half and mints a fresh one, silently replacing a
+/// live identity's post-quantum key (the #134 footgun that corrupted the prior
+/// fedID). New material always lands in the home.
+/// `<home>/identity/user` → `<home>/identity/keys`, unconditionally.
+///
+/// The RAW path, with no fallback logic — [`sealed_keys_dir_for`] answers "where
+/// is this alias's sealed half actually kept", which may still be the legacy
+/// global store. This answers "where does this home keep keys", which is what a
+/// relocation needs to know.
+fn home_keys_dir(seed_dir: &std::path::Path) -> std::path::PathBuf {
+    seed_dir
+        .parent()
+        .map_or_else(|| seed_dir.join("keys"), |p| p.join("keys"))
+}
+
+/// Is a sealed ML-DSA-65 half for `alias` present in `dir`? One question, one
+/// spelling — the software seal, its master key, and the TPM plugin's marker.
+fn sealed_half_present(dir: &std::path::Path, alias: &str) -> bool {
+    dir.join(format!("{alias}.mldsa65.seed.blob")).exists()
+        || dir.join(format!("{alias}.master.key")).exists()
+        || dir.join(format!("{alias}.tpmplugin_seal")).exists()
+}
+
+/// **Move a freshly minted identity's sealed PQC half into THIS home.**
+///
+/// `create_federation_identity` seals the ML-DSA half itself, into the global
+/// `keys_dir()`, with no parameter for where (CIRISVerify#285). So a fresh mint
+/// always writes globally, and `sealed_keys_dir_for` then finds that marker and
+/// keeps using it — correctly, since the alternative is minting a SECOND PQC
+/// half for a live identity. The consequence was that `--home` isolated the
+/// database, config, logs and Ed25519 seed while the post-quantum half stayed
+/// shared with every other home on the machine, keyed by alias: two homes using
+/// the same alias would collide on one file, and "a dedicated home for this
+/// identity" was not true of the half that makes it a hybrid identity.
+///
+/// Relocating is what the server can do without that parameter. RELOCATE, never
+/// re-mint: the seed is the identity, so this copies, PROVES the copy opens to
+/// the same public key, and only then removes the original.
+///
+/// Returns the directory the half now lives in. Never fatal — on any doubt the
+/// legacy copy is left exactly as it was and the identity keeps working from
+/// there; the caller resolves through `sealed_keys_dir_for` either way.
+pub(crate) fn sealed_keys_dir_for(seed_dir: &std::path::Path, alias: &str) -> std::path::PathBuf {
+    // `<home>/identity/user` → `<home>/identity/keys`. Deriving from the seed
+    // dir rather than threading a `ServerConfig` keeps this callable from the
+    // mint paths, which take a seed dir and nothing else.
+    sealed_keys_dir_in(seed_dir, alias, &ciris_verify_core::ceg_outbox::keys_dir())
+}
+
+/// The same resolution against a GIVEN legacy store.
+///
+/// [`sealed_keys_dir_for`] is this with the global one. The split exists because
+/// the relocation takes its legacy store as an argument, and answering "where
+/// does this alias live" against a different directory than the one being
+/// relocated from is how a failed relocation reported a path with nothing in it
+/// — one question, two spellings, and the parameterised caller reading the
+/// global anyway. One implementation; the global is a caller's choice.
+pub fn sealed_keys_dir_in(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    legacy: &std::path::Path,
+) -> std::path::PathBuf {
+    let home_keys = home_keys_dir(seed_dir);
+    let marker = |dir: &std::path::Path| sealed_half_present(dir, alias);
+    if marker(&home_keys) {
+        return home_keys;
+    }
+    if marker(legacy) {
+        tracing::info!(
+            alias,
+            legacy = %legacy.display(),
+            home = %home_keys.display(),
+            "sealed ML-DSA-65 half found in the LEGACY global key store, not this home's — \
+             using it rather than minting a fresh one (CIRISServer#621). Move \
+             `{alias}.*` into the home store to isolate this identity; nothing is \
+             copied or re-sealed automatically, because re-minting a live PQC half \
+             silently replaces the identity (CIRISVerify#134)"
+        );
+        return legacy.to_path_buf();
+    }
+    home_keys
+}
+
 /// Build the [`UserIdentityConfig`] for `backend` under the user-identity alias
 /// `key_id` and its (distinct-from-the-node) `seed_dir`.
-fn user_identity_config(
+pub(crate) fn user_identity_config(
     backend: &UserIdentityBackend,
     key_id: &str,
     seed_dir: PathBuf,
@@ -265,7 +397,7 @@ fn user_identity_config(
 /// re-open) rather than `get_user_identity_signer(Software)`. The
 /// `PlatformSealed` / `Pkcs11` backends go through `get_user_identity_signer`
 /// (both yield Ed25519).
-fn open_user_signer(
+pub(crate) fn open_user_signer(
     backend: &UserIdentityBackend,
     cfg: &UserIdentityConfig,
     create: bool,
@@ -382,7 +514,7 @@ pub(crate) fn open_software_hybrid_identity(
     let pqc: Arc<dyn PqcSigner> = Arc::from(
         ciris_keyring::get_platform_sealed_mldsa65_signer(
             alias,
-            ciris_verify_core::ceg_outbox::keys_dir(),
+            sealed_keys_dir_for(seed_dir, alias),
         )
         .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for '{alias}': {e}"))?,
     );
@@ -424,6 +556,34 @@ pub async fn mint_user_identity(
 ) -> Result<MintedUserIdentity> {
     let cfg = user_identity_config(&backend, key_id_alias, seed_dir);
 
+    // 0. WHERE THE ML-DSA HALF LIVES — decided and proved usable BEFORE any key
+    //    material exists (CIRISVerify#285, verify v16.1.0).
+    //
+    //    `sealed_keys_dir_for`, not this home's raw key path. The distinction is
+    //    load-bearing for an identity minted BEFORE home scoping: its Ed25519
+    //    half is in `seed_dir` while its ML-DSA half exists only in the global
+    //    store, so minting against an empty home directory would have
+    //    `open_or_create` MINT A SECOND post-quantum half under the same alias
+    //    and derived id — the replacement wins the later home-first resolve, and
+    //    the identity stops producing signatures its directory record and peers
+    //    accept. That is exactly CIRISVerify#134's hazard, and the three-case
+    //    plan this collapse replaced had an arm for it. The resolver already
+    //    encodes the right answer: the home store when it holds this alias, the
+    //    legacy store when IT does (opened, never duplicated), and otherwise
+    //    this home — so a NEW identity is home-scoped and an OLD one is reused.
+    //
+    //    And it runs FIRST. `open_user_signer` writes an Ed25519 seed, creates a
+    //    platform seal, and with provisioning can program a PIV slot — none of
+    //    it undoable. Preflighting after that left those artifacts behind (and a
+    //    slot consumed) for a home whose key store was never usable.
+    let keys_dir = sealed_keys_dir_for(&cfg.seed_dir, key_id_alias);
+    preflight_keys_dir(&keys_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "the key store for {key_id_alias} ({}) is unusable, so nothing was minted: {e}",
+            keys_dir.display()
+        )
+    })?;
+
     // 1. Open the user's Ed25519 signing half (YubiKey / sealed / software).
     let hw_signer = open_user_signer(&backend, &cfg, true)?;
     let hardware_type = format!("{:?}", hw_signer.hardware_type());
@@ -461,8 +621,13 @@ pub async fn mint_user_identity(
     // 2. Mint the hybrid hardware-rooted identity. verify v6.0.0 attaches the
     //    sealed ML-DSA-65 half internally + emits the genesis CEG object + the
     //    fedcode. A touch-required YubiKey blocks on the signature until tapped.
+    // The seal lands in the directory chosen at step 0 — this home for a new
+    // identity, the legacy global store for one that predates home scoping
+    // (opened, never replaced). Migration of live material stays a deliberate
+    // operator act, as verify's own doc says.
     let now = chrono::Utc::now().to_rfc3339();
-    let created = create_federation_identity(
+    let created = create_federation_identity_in(
+        &keys_dir,
         Arc::clone(&hw_signer),
         // identity_type "user" → FedKind::User (the accountable human).
         "user",
@@ -499,11 +664,11 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user Ed25519 public key: {e}"))?;
-    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
-        key_id_alias,
-        ciris_verify_core::ceg_outbox::keys_dir(),
-    )
-    .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
+    // Re-open from the SAME directory the mint sealed into — resolving again
+    // would be a second answer to a question already settled at step 0.
+    let pqc_dir = keys_dir.clone();
+    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(key_id_alias, pqc_dir)
+        .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
     let ml_pub = pqc
         .public_key()
         .await
@@ -570,6 +735,12 @@ pub async fn mint_user_identity(
 /// BOTH halves to the target directory so the keyset is genuinely portable to
 /// another device — the explicitly-accepted INSECURE software trade-off.
 pub struct PortableSoftwareKeyset {
+    /// CIRISServer#621 — what the DEVICE key's classical half actually is, when
+    /// this keyset was minted with [`DeviceCustody::PlatformSealed`]. `None` for
+    /// a software keyset (nothing was sealed) — and never the REQUESTED custody:
+    /// `SealedEd25519Signer::open_or_create` falls back to encrypted software
+    /// where there is no TPM/SE, so this carries the seal's own answer.
+    pub device_hardware_type: Option<ciris_keyring::HardwareType>,
     /// The derived federation `key_id` (`derive_key_id(alias, ed_pub)`).
     pub key_id: String,
     /// The keystore **alias** the seeds are named/keyed under (`derive_key_id`'s
@@ -793,6 +964,7 @@ pub async fn mint_portable_software_occurrence(
         .with_context(|| format!("write {}", marker_path.display()))?;
 
     Ok(PortableSoftwareKeyset {
+        device_hardware_type: None,
         key_id,
         alias: alias.to_string(),
         fedcode,
@@ -832,9 +1004,53 @@ pub async fn mint_local_device_occurrence(
     seed_dir: &std::path::Path,
     alias: &str,
 ) -> Result<PortableSoftwareKeyset> {
+    mint_local_device_occurrence_with(seed_dir, alias, DeviceCustody::default()).await
+}
+
+/// The custody of a DEVICE key this node is about to mint (CIRISServer#621).
+///
+/// Distinct from the custody of whoever AUTHORIZES the enrolment (the
+/// `/v1/self/associate` matrix): this is the key the device will hold and sign
+/// as for the rest of its life. This minted a plain software Ed25519 seed, so a
+/// manager-client enrolled from a hardware-held identity still acted with a
+/// FILE — the private half of the key that configures agents on the owner's
+/// behalf, sitting at rest in the clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceCustody {
+    /// TPM/SE-sealed Ed25519: the material exists once, sealed to THIS host,
+    /// and cannot be lifted to another machine. **Opt-in, not the default —
+    /// yet.** It should be the default (a device key is a per-device key,
+    /// which is the whole reason enrolment mints one instead of copying the
+    /// identity's), and making it so is a MIGRATION, not a flag flip: every
+    /// re-open that names a custody explicitly — rather than reading the
+    /// `.backend` marker through `resolve_user_signer` — would find no seed and
+    /// mint a fresh key under the same alias, silently changing the
+    /// occurrence's `key_id`. `tests/portable_occurrence.rs` caught exactly
+    /// that within a minute of trying it. Tracked on CIRISServer#621: audit the
+    /// explicit-custody re-opens, then flip, with existing device keys left on
+    /// their current custody.
+    PlatformSealed,
+    /// A raw Ed25519 seed file — today's behaviour, and the default so this
+    /// change adds a capability without moving anyone's key.
+    #[default]
+    Software,
+}
+
+/// [`mint_local_device_occurrence`] with an explicit custody for the classical
+/// half.
+///
+/// The PQC half is sealed either way: no hardware SIGNS ML-DSA-65 yet, so
+/// "sealed at rest" is the whole of that choice. Both halves land in THIS
+/// home's key store — see [`sealed_keys_dir_for`].
+pub async fn mint_local_device_occurrence_with(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    custody: DeviceCustody,
+) -> Result<PortableSoftwareKeyset> {
     use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
 
     let mut keyset = mint_portable_software_occurrence(seed_dir, alias).await?;
+    let mut sealed_hardware_type: Option<ciris_keyring::HardwareType> = None;
 
     let raw_pqc = seed_dir.join(portable_mldsa_seed_name(alias));
     let seed_bytes = zeroize::Zeroizing::new(
@@ -846,14 +1062,130 @@ pub async fn mint_local_device_occurrence(
             anyhow::anyhow!("freshly-minted ML-DSA-65 seed is not 32 bytes — refusing to seal")
         })?);
 
-    let keys_dir = ciris_verify_core::ceg_outbox::keys_dir();
+    let keys_dir = sealed_keys_dir_for(seed_dir, alias);
     std::fs::create_dir_all(&keys_dir)
         .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
     SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&*seed32))
         .map_err(|e| anyhow::anyhow!("seal this device's own ML-DSA-65 half under {alias}: {e}"))?;
 
+    // THE CLASSICAL HALF, under the custody the caller asked for. Same shape as
+    // the PQC half above: adopt the freshly-minted seed into the sealed store,
+    // then remove the raw file once the seal round-trips. The key_id does not
+    // move — it was derived from this pubkey at mint and the seal adopts the
+    // same seed — so the occurrence's identity is unchanged by its custody.
+    if custody == DeviceCustody::PlatformSealed {
+        use ciris_keyring::sealed_ed25519::SealedEd25519Signer;
+        let raw_ed = seed_dir.join(portable_ed_seed_name(alias));
+        let ed_bytes =
+            zeroize::Zeroizing::new(std::fs::read(&raw_ed).with_context(|| {
+                format!("read freshly-minted ed25519 seed {}", raw_ed.display())
+            })?);
+        let ed32 =
+            zeroize::Zeroizing::new(<[u8; 32]>::try_from(ed_bytes.as_slice()).map_err(|_| {
+                anyhow::anyhow!("freshly-minted Ed25519 seed is not 32 bytes — refusing to seal")
+            })?);
+        // INTO `seed_dir`, NOT `keys_dir`. The two halves have two resolvers and
+        // they look in different places: `open_user_signer(PlatformSealed)` opens
+        // the Ed25519 seal from `UserIdentityConfig.seed_dir`
+        // (`<home>/identity/user`), while the PQC half is re-opened from
+        // `sealed_keys_dir_for` (`<home>/identity/keys`). Sealing the classical
+        // half into the PQC store would leave the resolver with nothing to open —
+        // an enrolment that reports success and hands back an occurrence that
+        // cannot sign, after the raw seed has already been deleted (Codex review
+        // on PR #620). Both are home-scoped; each goes where its own re-open
+        // looks.
+        let sealed = match SealedEd25519Signer::open_or_create(alias, seed_dir, Some(&*ed32)) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                // A FAILED ENROLMENT MUST NOT LEAVE PLAINTEXT AT REST. We got
+                // here through `mint_portable_software_occurrence`, which has
+                // already written both raw seeds and a `software` marker; the
+                // caller is about to see an error, the alias is never returned,
+                // and nothing is registered. Leaving the seeds behind would mean
+                // a request that failed still put an unreferenced private key on
+                // disk — under a random alias nobody will ever come back to
+                // clean up. Best-effort by necessity (we are already on the
+                // error path and the original failure is what the caller needs),
+                // but each miss is named.
+                for orphan in [&raw_ed, &raw_pqc] {
+                    if let Err(rm) = std::fs::remove_file(orphan) {
+                        if rm.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                path = %orphan.display(),
+                                error = %rm,
+                                "sealed-device mint failed AND its raw seed could not be \
+                                 removed — a private key is at rest for an enrolment that \
+                                 did not happen; delete it by hand"
+                            );
+                        }
+                    }
+                }
+                let marker = user_backend_marker_path(seed_dir, alias);
+                if let Err(rm) = std::fs::remove_file(&marker) {
+                    if rm.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(marker = %marker.display(), error = %rm, "…and its backend marker remains");
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "seal this device's own Ed25519 half under {alias}: {e}"
+                ));
+            }
+        };
+        // What the seal ACTUALLY is: `open_or_create` falls back to encrypted
+        // software where there is no TPM/SE, and a response that reported `tpm`
+        // regardless would let an audit log call a software-custodied occurrence
+        // hardware-backed.
+        sealed_hardware_type = Some(ciris_keyring::HardwareSigner::hardware_type(&sealed));
+        // THE MARKER BEFORE THE DELETION, and as a failure. The order is the
+        // whole safety property: between removing the raw seed and recording the
+        // custody there is a window in which the key exists ONLY in the sealed
+        // store and nothing on disk says so. A best-effort write that lost that
+        // race left a registered occurrence whose next re-open asks for
+        // `Software`, finds no seed, and mints a fresh key — active, bound, and
+        // unable to sign. Write first: a marker naming a seal that does not
+        // exist yet is recoverable (the raw seed is still there), a deletion
+        // with no marker is not.
+        write_user_backend_marker_strict(
+            seed_dir,
+            alias,
+            UserIdentityBackend::PlatformSealed.label(),
+        )?;
+        std::fs::remove_file(&raw_ed).with_context(|| {
+            format!(
+                "remove the raw Ed25519 seed {} after sealing",
+                raw_ed.display()
+            )
+        })?;
+        // The response describes the FINAL artifacts. The raw seed is gone, so
+        // listing it would have an operator looking for a plaintext device key
+        // that does not exist — and treating it as the installed one. Same
+        // shape as the PQC half's swap below.
+        keyset
+            .files_written
+            .retain(|f| f != &portable_ed_seed_name(alias));
+        keyset
+            .files_written
+            .push(format!("{alias} (Ed25519 sealed)"));
+        // THE MARKER IS THE BRIDGE. `resolve_user_signer` re-opens a user
+        // identity under the custody this file names; without it every re-open
+        // would ask for `Software`, find no seed (we just removed it), and MINT
+        // A FRESH KEY under the same alias — a different key_id, an occurrence
+        // that no longer resolves to itself. Caught by
+        // `tests/portable_occurrence.rs` the first time the seal was made the
+        // default: the test re-opened device 2 as Software and got a new id.
+        // One custody, written where the resolver already looks — above, before
+        // the raw seed was removed.
+        tracing::info!(
+            alias,
+            keys_dir = %keys_dir.display(),
+            "device key SEALED — this occurrence's classical half exists once, sealed to this \
+             host, no raw seed remains at rest, and the `.backend` marker records the custody \
+             so every re-open resolves the SAME key (CIRISServer#621)"
+        );
+    }
     // Remove the raw half ONLY after the seal round-trips — a failed seal must not
     // leave the device with neither copy.
+    keyset.device_hardware_type = sealed_hardware_type;
     std::fs::remove_file(&raw_pqc)
         .with_context(|| format!("remove the raw pqc seed {}", raw_pqc.display()))?;
     keyset
@@ -1164,7 +1496,7 @@ async fn user_signer_parts(
     // (`seal_alias` at mint time); re-open under the alias.
     let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
         user_key_id,
-        ciris_verify_core::ceg_outbox::keys_dir(),
+        sealed_keys_dir_for(&cfg.seed_dir, user_key_id),
     )
     .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for the user signer: {e}"))?;
     let pqc: Arc<dyn PqcSigner> = Arc::from(pqc);
@@ -1562,10 +1894,28 @@ fn user_backend_marker_path(seed_dir: &std::path::Path, alias: &str) -> PathBuf 
 /// Record which custody backend minted the user identity (best-effort; a failure
 /// to write only degrades claim-remote signer resolution, never the mint itself).
 fn write_user_backend_marker(seed_dir: &std::path::Path, alias: &str, backend_label: &str) {
-    let path = user_backend_marker_path(seed_dir, alias);
-    if let Err(e) = std::fs::write(&path, backend_label) {
-        tracing::warn!(marker = %path.display(), error = %e, "could not write user backend marker");
+    if let Err(e) = write_user_backend_marker_strict(seed_dir, alias, backend_label) {
+        tracing::warn!(error = %format!("{e:#}"), "could not write user backend marker");
     }
+}
+
+/// The same write, as a FAILURE.
+///
+/// Best-effort is right where the marker only records what the default already
+/// is — a lost write leaves the re-open asking for `Software` and finding the
+/// software seed exactly where it left it. It is wrong on the sealing path,
+/// where the raw seed is about to be deleted: there, a marker that did not land
+/// means the next re-open asks for `Software`, finds nothing, and MINTS A FRESH
+/// KEY under the same alias. The occurrence is registered, bound and active,
+/// and it can never sign again. A failure the caller must see, not a warn.
+fn write_user_backend_marker_strict(
+    seed_dir: &std::path::Path,
+    alias: &str,
+    backend_label: &str,
+) -> Result<()> {
+    let path = user_backend_marker_path(seed_dir, alias);
+    std::fs::write(&path, backend_label)
+        .with_context(|| format!("write user backend marker {}", path.display()))
 }
 
 /// Read the recorded custody backend for the user identity, if any. Returns the

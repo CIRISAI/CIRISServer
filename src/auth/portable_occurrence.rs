@@ -363,18 +363,442 @@ async fn portable_handler(
 
 // ─── POST /v1/self/associate (INSTALL as this device's fed-ID) ────────────────
 
-/// `POST /v1/self/associate` request. Two shapes:
-///   - directory: `{ source_dir }` — adopt a portable software keyset.
-///   - yubikey: `{ yubikey: true, … }` — GATED (not yet implemented in this pass).
+/// `POST /v1/self/associate` request. Two shapes, one flow:
+///   - directory: `{ source_dir }` — a portable SOFTWARE keyset (both seeds on
+///     a USB folder).
+///   - yubikey: `{ yubikey: true, key_id, mldsa_usb_dir, pkcs11? }` — a
+///     HARDWARE-custodied fed-ID: the Ed25519 half on the token, the ML-DSA-65
+///     half AEAD-wrapped on a USB key under the token's own signature
+///     (CIRISServer#618).
+///
+/// Both resolve to a `&dyn SelfSigner` and the rest of the handler is
+/// identical — the authorization is possession, and possession is proven the
+/// same way whether the key is a seed on a stick or a token that signs.
 #[derive(Debug, Default, Deserialize)]
 struct AssociateRequest {
     /// The directory a portable software keyset was written to (the USB folder).
     #[serde(default)]
     source_dir: Option<String>,
-    /// Alternative: associate a YubiKey-backed fed-ID instead of a directory.
-    /// GATED in this pass — see the handler.
+    /// Enrol from a YubiKey-held fed-ID instead of a directory.
     #[serde(default)]
     yubikey: bool,
+    /// YubiKey shape: the identity's federation `key_id` — WHICH identity on
+    /// the token this device is being enrolled under. Required, and checked
+    /// against the inserted token before a PIN attempt is spent.
+    #[serde(default)]
+    key_id: Option<String>,
+    /// YubiKey shape: the USB folder holding the AEAD-wrapped ML-DSA-65 seed.
+    ///
+    /// The token carries the CLASSICAL half only — no PKCS#11 token performs
+    /// ML-DSA-65 — so the post-quantum half travels on a USB key, wrapped under
+    /// a key derived from the token's deterministic signature over a
+    /// domain-separated challenge. Unwrapping needs BOTH (touch + PIN), and the
+    /// token gains no decrypt capability (`ciris_keyring::usb_wrapped_mldsa65`).
+    /// This is the same portable hardware custody the accord-holder flow uses.
+    #[serde(default)]
+    mldsa_usb_dir: Option<String>,
+    /// Hardware shape: PIN / PIV slot / module path, exactly as
+    /// `POST /v1/accord/provision-holder` takes them (slot defaults to `9c`).
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+    /// Hardware shape: custody of the CLASSICAL (Ed25519) half —
+    /// `yubikey` | `tpm` | `software`. Defaults to `yubikey` (the only reason
+    /// to take this arm at all); `yubikey: true` is the legacy spelling.
+    #[serde(default)]
+    classical: Option<String>,
+    /// Hardware shape: custody of the POST-QUANTUM (ML-DSA-65) half —
+    /// `usb` | `tpm` | `software`. Defaults to `usb` when `mldsa_usb_dir` is
+    /// given, else `tpm`. INDEPENDENT of the classical half: a token for the
+    /// classical half with the PQC half sealed on this host is the ordinary
+    /// laptop case, and `usb` is the portable high-secure one.
+    #[serde(default)]
+    pqc: Option<String>,
+    /// The custody of the DEVICE key this enrolment MINTS — `tpm` seals its
+    /// classical half to this host (nothing at rest in the clear), `software`
+    /// writes a seed file. Default `software`, which is today's behaviour; see
+    /// `identity::DeviceCustody` for why `tpm` is not yet the default.
+    ///
+    /// Independent of every field above: those say who AUTHORIZES, this says
+    /// what the device will hold afterwards. A manager-client enrolled from a
+    /// portable keypair on a USB stick wants `device: "tpm"` — the authorizing
+    /// keypair stays on the stick, the key this host acts with is sealed here.
+    #[serde(default)]
+    device: Option<String>,
+    /// Hardware shape: where a `tpm` / `software` half lives. Defaults to THIS
+    /// home's user-seed directory (`<home>/identity/user`), which is what makes
+    /// a dedicated `--home` a dedicated identity: the TPM-sealed master is
+    /// `{alias}.tpmplugin_seal` INSIDE that directory, so two homes never share
+    /// sealed material or collide on an alias.
+    #[serde(default)]
+    seed_dir: Option<String>,
+}
+
+/// The DIRECTORY arm's authorizer: a portable SOFTWARE keyset on a USB folder.
+///
+/// Reads both seeds transiently, builds the hybrid identity, zeroizes. Nothing
+/// is written to this device; possession is the authorization and this is how
+/// it is proven without persisting it.
+fn open_directory_authorizer(
+    req: &AssociateRequest,
+) -> Result<ciris_verify_core::self_at_login::HybridSigningIdentity, Box<Response>> {
+    let Some(source) = req
+        .source_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Box::new(http_err(
+            StatusCode::BAD_REQUEST,
+            "source_dir must not be empty — choose the folder holding the portable keyset \
+             (or pass yubikey:true with key_id + mldsa_usb_dir to enrol from a token)",
+        )));
+    };
+    let source_dir = PathBuf::from(source);
+    if !source_dir.is_dir() {
+        return Err(Box::new(http_err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "source_dir is not a directory: {} — insert the USB key and choose its folder",
+                source_dir.display()
+            ),
+        )));
+    }
+    let alias = crate::identity::find_portable_alias(&source_dir)
+        .map_err(|e| Box::new(http_err(StatusCode::BAD_REQUEST, format!("{e}"))))?;
+    crate::identity::open_portable_identity_transiently(&source_dir, &alias)
+        .map_err(|e| Box::new(http_err(StatusCode::BAD_REQUEST, format!("{e}"))))
+}
+
+/// The HARDWARE arm's authorizer — **the custody MATRIX** (CIRISServer#618).
+///
+/// A federation identity is two keys, and their custodies are INDEPENDENT.
+/// Nothing binds them together: `HardwareRootedIdentity` takes
+/// `Arc<dyn HardwareSigner>` and `Arc<dyn PqcSigner>`, the wire bytes are
+/// identical whichever each one is, and verify's own doc says so. So this
+/// resolves them separately and composes:
+///
+/// | | classical (Ed25519) | post-quantum (ML-DSA-65) |
+/// |---|---|---|
+/// | `yubikey` / `pkcs11` | PIV slot, `C_Sign` on the token, never exported | — no token does ML-DSA |
+/// | `tpm` / `platform-sealed` | TPM/SE-sealed seed on this host | TPM/SE-sealed seed on this host |
+/// | `software` | seed file in a directory | seed file in a directory |
+/// | `usb` | — | AEAD-wrapped on a USB key, unwrappable only WITH the token |
+///
+/// So `yubikey + usb` is the high-secure portable pair the accord-holder flow
+/// uses, and it is one cell, not the shape. `yubikey + tpm` (token for the
+/// classical half, this host's sealed store for the PQC half) is the ordinary
+/// laptop case; `tpm + tpm` is a machine with no token; `yubikey + software`
+/// is a dev box. Each combination is honest about what it is, and the response
+/// names the pair so nobody has to infer the custody from the request.
+///
+/// The PQC half cannot be derived from the token — no PKCS#11 token performs
+/// ML-DSA-65 — so SOMETHING must supply it, and refusing to guess is why the
+/// arms are named rather than defaulted. What is NOT acceptable is silently
+/// proceeding classical-only: step (3) registers the identity with a
+/// self-signed HYBRID record and verify refuses a classical-only registration
+/// at the #425 gate (the unbound-owner-record arc, CIRISServer#606).
+///
+/// Nothing is copied onto this host either way: the halves authorize, and step
+/// (4) mints a FRESH device key whose private half only this device holds.
+async fn open_hardware_authorizer(
+    req: &AssociateRequest,
+    cfg: &ServerConfig,
+) -> Result<
+    (
+        ciris_verify_core::self_at_login::HardwareRootedIdentity,
+        String,
+    ),
+    Box<Response>,
+> {
+    use std::sync::Arc;
+
+    use ciris_keyring::PqcSigner;
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+
+    let bad = |msg: String| -> Box<Response> { Box::new(http_err(StatusCode::BAD_REQUEST, msg)) };
+
+    let Some(key_id) = req
+        .key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(bad(
+            "key_id is required — name WHICH identity this device is being enrolled under \
+             (the fed-ID's key_id, from `ciris-server identity create` or GET \
+             /v1/federation/identity on the device that minted it)"
+                .into(),
+        ));
+    };
+
+    // ── ARGUMENTS FIRST, HARDWARE SECOND ────────────────────────────────────
+    //
+    // Every custody name and every required path is checked BEFORE the token is
+    // opened, because opening it spends a PIN attempt (and a touch): a request
+    // that was malformed anyway must not cost the operator one of five tries.
+    // The accord flow learned this as `piv_preflight_matches_holder` ("No PIN
+    // attempt has been spent"); this is the same rule for the argument shape.
+    // Found by the test below, which asked for `pqc:"usb"` with no folder on a
+    // box with no reader and got the TOKEN's error back.
+    let classical_name = req.classical.as_deref().map_or("yubikey", str::trim);
+    if !matches!(
+        classical_name,
+        "yubikey" | "pkcs11" | "tpm" | "platform-sealed" | "platform_sealed" | "software"
+    ) {
+        return Err(bad(format!(
+            "unknown classical custody {classical_name:?} — use yubikey | tpm | software"
+        )));
+    }
+    let pqc_name = req.pqc.as_deref().map(str::trim).unwrap_or({
+        if req.mldsa_usb_dir.is_some() {
+            "usb"
+        } else {
+            "tpm"
+        }
+    });
+    if !matches!(
+        pqc_name,
+        "usb" | "tpm" | "platform-sealed" | "platform_sealed" | "software"
+    ) {
+        return Err(bad(format!(
+            "unknown pqc custody {pqc_name:?} — use usb | tpm | software"
+        )));
+    }
+    let usb_dir: Option<&str> = req
+        .mldsa_usb_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if pqc_name == "usb" {
+        let Some(dir) = usb_dir else {
+            return Err(bad(
+                "pqc:\"usb\" needs mldsa_usb_dir — the folder holding the ML-DSA-65 seed \
+                 wrapped under this token's own signature. Nothing was asked of the token"
+                    .into(),
+            ));
+        };
+        // The PATH too, not just the string: an unmounted stick or a typo would
+        // otherwise be discovered after the token had been opened and a PIN
+        // attempt spent (Codex review on PR #620). The directory arm and the
+        // accord path both check this before they touch anything.
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(bad(format!(
+                "mldsa_usb_dir is not a directory: {dir} — insert the USB key and name its \
+                 folder. Nothing was asked of the token"
+            )));
+        }
+    }
+
+    // ── the POST-QUANTUM half, WHEN IT DOES NOT NEED THE TOKEN ──────────────
+    //
+    // `tpm` and `software` read local material and depend on nothing the token
+    // provides, so they are resolved BEFORE it is opened: a missing or corrupt
+    // local half would otherwise cost a PIN interaction to discover, for a
+    // request that was going to fail either way (Codex review on PR #620). Only
+    // `usb` is ordered after the classical open, because its wrap key IS the
+    // token's signature.
+    let local_mldsa: Option<Arc<dyn PqcSigner>> = if pqc_name == "usb" {
+        None
+    } else {
+        Some(match pqc_name {
+            "tpm" | "platform-sealed" | "platform_sealed" => {
+                let seed_dir = pqc_or_seed_dir(req, cfg);
+                match ciris_keyring::get_platform_sealed_mldsa65_signer(key_id, seed_dir.clone()) {
+                    Ok(s) => Arc::from(s),
+                    Err(e) => {
+                        return Err(bad(format!(
+                            "no TPM/SE-sealed ML-DSA-65 for {key_id} in {}: {e} — a token carries \
+                         the classical half only, so the post-quantum half must be sealed on \
+                         this host (pqc:\"tpm\"), wrapped on a USB (pqc:\"usb\" + \
+                         mldsa_usb_dir), or a seed file (pqc:\"software\"). It is never \
+                         derived from the token, and enrolling without it would register a \
+                         classical-only identity that verify refuses",
+                            seed_dir.display()
+                        )))
+                    }
+                }
+            }
+            "software" => {
+                let seed_dir = pqc_or_seed_dir(req, cfg);
+                let path = seed_dir.join(format!("{key_id}.mldsa65.seed"));
+                match ciris_keyring::MlDsa65SoftwareSigner::from_seed_file(path.clone(), key_id) {
+                    Ok(s) => Arc::new(s) as Arc<dyn PqcSigner>,
+                    Err(e) => {
+                        return Err(bad(format!(
+                            "no ML-DSA-65 seed file at {}: {e}",
+                            path.display()
+                        )))
+                    }
+                }
+            }
+            // Unreachable: checked above, before anything was touched.
+            other => {
+                return Err(bad(format!(
+                    "unknown pqc custody {other:?} — use usb | tpm | software"
+                )))
+            }
+        })
+    };
+
+    // ── the CLASSICAL half ──────────────────────────────────────────────────
+    let ed: Arc<dyn ciris_keyring::HardwareSigner> = match classical_name {
+        "yubikey" | "pkcs11" => {
+            let piv_slot = req
+                .pkcs11
+                .piv_slot
+                .clone()
+                .unwrap_or_else(|| crate::identity::DEFAULT_PIV_SLOT.to_string());
+            let opts = crate::identity::Pkcs11Options {
+                piv_slot,
+                module_path: req
+                    .pkcs11
+                    .module_path
+                    .clone()
+                    .map_or_else(crate::identity::default_ykcs11_module, Into::into),
+                user_pin: req.pkcs11.user_pin.clone(),
+                ..crate::identity::Pkcs11Options::default()
+            };
+            match crate::identity::open_yubikey_ed25519_signer(opts) {
+                Ok(s) => Arc::from(s),
+                // A build without the `pkcs11` feature cannot open ANY token, which
+                // is a property of the server, not of the request: 501, exactly as
+                // the accord endpoints answer and as this route answered before
+                // #618. Anything else is the operator's to fix: 400.
+                Err(e) if e.to_string().contains("not supported") => {
+                    return Err(Box::new(http_err(
+                        StatusCode::NOT_IMPLEMENTED,
+                        format!(
+                            "this server was built without the `pkcs11` feature, so it cannot \
+                             open a hardware token: {e}"
+                        ),
+                    )))
+                }
+                Err(e) => {
+                    return Err(bad(format!(
+                        "could not open the token's PIV key for {key_id}: {e} — check the \
+                         YubiKey is inserted, the slot provisioned, and the PIN correct"
+                    )))
+                }
+            }
+        }
+        "tpm" | "platform-sealed" | "platform_sealed" => {
+            let backend = crate::identity::UserIdentityBackend::PlatformSealed;
+            let seed_dir = pqc_or_seed_dir(req, cfg);
+            let ucfg = crate::identity::user_identity_config(&backend, key_id, seed_dir.clone());
+            match crate::identity::open_user_signer(&backend, &ucfg, false) {
+                Ok(s) => Arc::from(s),
+                Err(e) => {
+                    return Err(bad(format!(
+                        "no TPM/SE-sealed Ed25519 for {key_id} in {}: {e} — this host must \
+                         already hold that identity's sealed classical half (it is not \
+                         re-sealed here; that is what makes it non-portable)",
+                        seed_dir.display()
+                    )))
+                }
+            }
+        }
+        "software" => {
+            let backend = crate::identity::UserIdentityBackend::Software;
+            let seed_dir = pqc_or_seed_dir(req, cfg);
+            // EXISTENCE FIRST. `open_user_signer` delegates software custody to
+            // `open_software_ed25519_signer`, which MINTS a random seed when the
+            // file is absent — `create: false` does not reach it. A path meant to
+            // PROVE possession must never manufacture the thing it is proving
+            // (Codex review on PR #620); without this, a typo'd key_id would
+            // silently enrol a brand-new identity and leave an orphan seed.
+            let seed_path = seed_dir.join(format!("{key_id}.ed25519.seed"));
+            if !seed_path.is_file() {
+                return Err(bad(format!(
+                    "no software Ed25519 seed for {key_id} at {} — this arm opens an existing \
+                     key, it never mints one",
+                    seed_path.display()
+                )));
+            }
+            let ucfg = crate::identity::user_identity_config(&backend, key_id, seed_dir.clone());
+            match crate::identity::open_user_signer(&backend, &ucfg, false) {
+                Ok(s) => Arc::from(s),
+                Err(e) => {
+                    return Err(bad(format!(
+                        "no software Ed25519 seed for {key_id} in {}: {e}",
+                        seed_dir.display()
+                    )))
+                }
+            }
+        }
+        // Unreachable: the name was checked above, before the token was touched.
+        other => {
+            return Err(bad(format!(
+                "unknown classical custody {other:?} — use yubikey | tpm | software"
+            )))
+        }
+    };
+
+    // ── the POST-QUANTUM half ───────────────────────────────────────────────
+    //
+    // ── the POST-QUANTUM half, WHEN IT DOES need the token ──────────────────
+    let mldsa: Arc<dyn PqcSigner> = match local_mldsa {
+        Some(m) => m,
+        None => {
+            let usb = usb_dir.unwrap_or_default();
+            match ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer::open(
+                ed.as_ref(),
+                key_id,
+                std::path::PathBuf::from(usb),
+            )
+            .await
+            {
+                Ok(s) => Arc::new(s) as Arc<dyn PqcSigner>,
+                Err(e) => {
+                    return Err(bad(format!(
+                        "could not unwrap the ML-DSA-65 half from {usb}: {e} — the wrap is \
+                         bound to THIS token (touch + PIN), so check the USB is the one \
+                         provisioned with {key_id} and the same token is inserted"
+                    )))
+                }
+            }
+        }
+    };
+
+    // THE LABEL COMES FROM BOTH SIGNERS, not from the request's words. A sealed
+    // half falls back to encrypted software where there is no TPM/SE and says
+    // so through `hardware_type()`; echoing the request would report
+    // software-custodied material as `tpm` in the log and on the wire (Codex
+    // review on PR #620, twice — once per half).
+    let label = format!(
+        "{}+{}",
+        custody_word(ed.hardware_type(), classical_name),
+        custody_word(mldsa.hardware_type(), pqc_name)
+    );
+
+    let id = HardwareRootedIdentity::new(key_id, ed, mldsa).map_err(|e| {
+        bad(format!(
+            "compose the hardware-rooted identity for {key_id}: {e}"
+        ))
+    })?;
+    Ok((id, label))
+}
+
+/// The honest custody word for one half: what the SIGNER reports, falling back
+/// to the requested name only when the signer says "hardware" and cannot say
+/// which kind. `SoftwareOnly` always wins — a seal that degraded to encrypted
+/// software is software, whatever was asked for.
+fn custody_word(actual: ciris_keyring::HardwareType, asked: &str) -> &str {
+    match actual {
+        ciris_keyring::HardwareType::SoftwareOnly => "software",
+        _ => asked,
+    }
+}
+
+/// Where a `tpm` / `software` half is read from: the caller's `seed_dir` when
+/// given, else this node's conventional user-seed directory — the same path
+/// `resolve_user_signer` uses, so "the identity this host already holds" means
+/// one directory and not two.
+fn pqc_or_seed_dir(req: &AssociateRequest, cfg: &ServerConfig) -> PathBuf {
+    req.seed_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| crate::user_seed_dir(cfg), PathBuf::from)
 }
 
 /// `POST /v1/self/associate` — **enrol THIS device as an occurrence of the
@@ -396,6 +820,22 @@ struct AssociateRequest {
 /// as a full stand-in — so this device gets the identical privileges of the
 /// identity, and gets them under a key only it holds. One device, one key,
 /// separately revocable.
+///
+/// # Two custodies (CIRISServer#618)
+///
+/// - `{ source_dir }` — a portable SOFTWARE keyset: both seeds on a USB folder,
+///   read transiently and zeroized.
+/// - `{ yubikey: true, key_id, mldsa_usb_dir, pkcs11? }` — HARDWARE custody:
+///   the Ed25519 half signs on the token (`C_Sign`, never exported), the
+///   ML-DSA-65 half is AEAD-wrapped on a USB key under the token's own
+///   deterministic signature, so unwrapping needs both plus touch + PIN. This
+///   arm returned 501 from v0.5.43 until #618, which forced a hardware-held
+///   fed-ID through a software keyset to reach this endpoint — the one artifact
+///   the token exists to avoid.
+///
+/// Both arms end at a `&dyn SelfSigner`; everything after the open is identical,
+/// which is the point — the authorization is possession, and a token proves it
+/// by signing exactly as a seed does.
 ///
 /// # The authorization
 ///
@@ -436,52 +876,59 @@ async fn associate_handler(
         }
     };
 
-    if req.yubikey {
-        return http_err(
-            StatusCode::NOT_IMPLEMENTED,
-            "enrolling this device from a YubiKey-held fed-ID is not yet implemented — use the \
-             directory (source_dir) path for a portable software keyset for now",
-        );
-    }
+    // THE DEVICE CUSTODY IS PARSED FIRST. A typo like `device:"tpn"` used to be
+    // discovered after the authorizer had been opened — a YubiKey PIN and touch
+    // spent, and for an unknown identity a self-signed record already registered
+    // into the federation directory — before answering 400 (Codex review on
+    // PR #620). Nothing is opened, signed or written until every argument has
+    // been read.
 
-    let Some(source) = req
-        .source_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return http_err(
-            StatusCode::BAD_REQUEST,
-            "source_dir must not be empty — choose the folder holding the portable keyset",
-        );
-    };
-    let source_dir = PathBuf::from(source);
-    if !source_dir.is_dir() {
-        return http_err(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "source_dir is not a directory: {} — insert the USB key and choose its folder",
-                source_dir.display()
-            ),
-        );
-    }
-
-    // (1) Which identity is on the USB?
-    let alias = match crate::identity::find_portable_alias(&source_dir) {
-        Ok(a) => a,
-        Err(e) => return http_err(StatusCode::BAD_REQUEST, format!("{e}")),
+    let device_custody = match req.device.as_deref().map(str::trim) {
+        None | Some("software") => crate::identity::DeviceCustody::Software,
+        Some("tpm" | "platform-sealed" | "platform_sealed") => {
+            crate::identity::DeviceCustody::PlatformSealed
+        }
+        Some(other) => {
+            return http_err(
+                StatusCode::BAD_REQUEST,
+                format!("unknown device custody {other:?} — use tpm | software"),
+            )
+        }
     };
 
-    // (2) PROVE possession — open the keyset transiently. The seeds are read into
-    //     memory, used to build the authorizing identity, and zeroized. Nothing is
-    //     written to this device. This is the whole authorization.
-    let authorizer = match crate::identity::open_portable_identity_transiently(&source_dir, &alias)
+    // ── (1+2) WHICH identity, and PROVE possession of it ────────────────────
+    //
+    // Two custodies, one authorization. Both arms end at a `&dyn SelfSigner`
+    // that can produce a HYBRID signature, which is the whole requirement:
+    // step (3) below registers the identity's public key with a self-signed
+    // record, and a classical-only signer cannot make one (verify refuses it
+    // at the #425 gate — the unbound-owner-record arc, CIRISServer#606).
+    let (authorizer, custody): (
+        Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
+        String,
+    ) = if req.yubikey
+        || req.classical.is_some()
+        || req.pqc.is_some()
+        || req.mldsa_usb_dir.is_some()
+        || (req.key_id.is_some() && req.source_dir.is_none())
     {
-        Ok(id) => id,
-        Err(e) => return http_err(StatusCode::BAD_REQUEST, format!("{e}")),
+        match open_hardware_authorizer(&req, &st.cfg).await {
+            Ok((id, label)) => (
+                Box::new(id) as Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
+                label,
+            ),
+            Err(resp) => return *resp,
+        }
+    } else {
+        match open_directory_authorizer(&req) {
+            Ok(id) => (
+                Box::new(id) as Box<dyn ciris_verify_core::self_at_login::SelfSigner>,
+                "portable_software".to_string(),
+            ),
+            Err(resp) => return *resp,
+        }
     };
-    let supplied_key_id =
-        ciris_verify_core::self_at_login::SelfSigner::key_id(&authorizer).to_string();
+    let supplied_key_id = authorizer.key_id().to_string();
 
     // WHICH identity is this device being enrolled under? (CIRISServer#401)
     //
@@ -524,7 +971,7 @@ async fn associate_handler(
     if !known {
         let now = chrono::Utc::now().to_rfc3339();
         let v_rec = match ciris_verify_core::federation_self_record::produce_self_key_record(
-            &authorizer,
+            &*authorizer,
             ciris_persist::federation::types::identity_type::USER,
             &now,
             None,
@@ -562,8 +1009,18 @@ async fn associate_handler(
     //     the key the device will sign as, and the only device that will ever hold
     //     it — which is what makes revoking this one device possible.
     let dest_dir = crate::user_seed_dir(&st.cfg);
-    let device_alias = format!("{alias}-device-{}", short_unique());
-    let keyset = match crate::identity::mint_local_device_occurrence(&dest_dir, &device_alias).await
+    // Named after the IDENTITY, not the source artifact: the directory arm used
+    // the USB folder's alias, which the token arm has no equivalent of (a token
+    // names slots, not aliases). `slug` of the identity's key_id is stable across
+    // both custodies and is what a second device under the same identity reads
+    // as, which is the point of the name.
+    let device_alias = format!("{}-device-{}", slug(&supplied_key_id), short_unique());
+    let keyset = match crate::identity::mint_local_device_occurrence_with(
+        &dest_dir,
+        &device_alias,
+        device_custody,
+    )
+    .await
     {
         Ok(k) => k,
         Err(e) => {
@@ -582,7 +1039,14 @@ async fn associate_handler(
         &st.engine,
         &identity_key_id,
         &keyset.key_id,
-        "portable_software",
+        // `laptop`, from persist's CLOSED set (§5.6.8.8:
+        // phone|laptop|server|embedded|agent|service). This passed
+        // `"portable_software"` — not in the set — so `check_device_class`
+        // refused and the route answered 500 AFTER minting and registering the
+        // occurrence key, leaving an orphan. Latent on main and untested end to
+        // end; the response object next to it had already been corrected to
+        // `laptop` and the bind was left behind (Codex review on PR #620).
+        crate::auth::occurrence::DEVICE_CLASS_LAPTOP,
         None,
         keyset.encryption_pubkeys.clone(),
         Some(keyset.key_record.clone()),
@@ -607,6 +1071,7 @@ async fn associate_handler(
         identity_key_id = %identity_key_id,
         occurrence_key_id = %keyset.key_id,
         device_alias = %device_alias,
+        authorized_by = %custody,
         "enrolled this device as an OCCURRENCE of {identity_key_id} — a fresh key was minted \
          here and the supplied keyset only authorized the binding. No private key material was \
          copied (CIRISServer#391). NOTE: if that keyset is itself an occurrence of a parent \
@@ -626,6 +1091,25 @@ async fn associate_handler(
             // What was actually BOUND. The old value named a class persist does
             // not accept — nothing noticed, because that path bound nothing.
             "device_class": "laptop",
+            // WHICH custody authorized this enrolment: `yubikey+usb` (the
+            // identity's classical half never left the token) or
+            // `portable_software` (a software keyset existed on a USB and is
+            // as secure as that USB was). The operator asked for one of them;
+            // the response says which one answered (CIRISServer#618).
+            "authorized_by": custody,
+            // And what this device now HOLDS — the other axis. `tpm` means the
+            // classical half is sealed to this host with no seed at rest;
+            // `software` means a seed file. Reported because "enrolled" says
+            // nothing about what the enrolled key is (CIRISServer#621).
+            "device_custody": match keyset.device_hardware_type {
+                // What the SEAL is, not what was asked for:
+                // `SealedEd25519Signer::open_or_create` falls back to encrypted
+                // software where there is no TPM/SE, and reporting `tpm` anyway
+                // would let an audit log call a software-custodied occurrence
+                // hardware-backed (Codex review on PR #620).
+                Some(ciris_keyring::HardwareType::SoftwareOnly) | None => "software",
+                Some(_) => "tpm",
+            },
             // The wire contract keeps this key; it now names what was MINTED here
             // rather than what was copied, and copying is no longer a thing that
             // happens.
@@ -670,4 +1154,125 @@ pub fn router(engine: Arc<Engine>, cfg: Arc<ServerConfig>) -> Router {
         )
         .route("/v1/self/associate", axum::routing::post(associate_handler))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod custody_matrix_tests {
+    use super::*;
+
+    /// A `ServerConfig` rooted at a throwaway home — which is also the point of
+    /// CIRISServer#618's `seed_dir` default: identity material lives under the
+    /// HOME, so a dedicated `--home` is a dedicated, isolated identity (the
+    /// TPM-sealed master is `{alias}.tpmplugin_seal` inside that directory).
+    fn cfg_at(tag: &str) -> ServerConfig {
+        let home = std::env::temp_dir().join(format!(
+            "ciris-custody-{tag}-{}-{}",
+            std::process::id(),
+            short_unique()
+        ));
+        std::fs::create_dir_all(&home).expect("temp home");
+        ServerConfig::from_home(home, "test-node".into()).expect("config from home")
+    }
+
+    /// The refusal's TEXT is the contract here — an operator reads it and knows
+    /// which half is missing — so the assertions are on the words, not the code.
+    /// (`HardwareRootedIdentity` has no `Debug`, so the openers' results are
+    /// matched rather than `expect_err`'d.)
+    async fn refusal_of(req: &AssociateRequest, cfg: &ServerConfig) -> String {
+        match open_hardware_authorizer(req, cfg).await {
+            Ok(_) => panic!("expected a refusal, got an identity"),
+            Err(resp) => {
+                let bytes = axum::body::to_bytes((*resp).into_body(), 64 * 1024)
+                    .await
+                    .expect("read body");
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        }
+    }
+
+    /// No `key_id` → say which identity is missing, never guess one from the
+    /// node's own alias (enrolling under the wrong self is unrecoverable).
+    #[tokio::test]
+    async fn the_hardware_arm_refuses_without_an_identity_to_enrol_under() {
+        let req = AssociateRequest {
+            yubikey: true,
+            ..AssociateRequest::default()
+        };
+        let body = refusal_of(&req, &cfg_at("no-key-id")).await;
+        assert!(
+            body.contains("key_id is required"),
+            "the refusal names the missing field: {body}"
+        );
+    }
+
+    /// `pqc: "usb"` with no folder → name the folder. The token carries the
+    /// classical half ONLY; enrolling without the PQC half would register a
+    /// classical-only identity that verify refuses at the #425 gate.
+    #[tokio::test]
+    async fn the_usb_pqc_arm_refuses_without_a_folder() {
+        let req = AssociateRequest {
+            yubikey: true,
+            key_id: Some("somebody-v1-abcdef".into()),
+            pqc: Some("usb".into()),
+            ..AssociateRequest::default()
+        };
+        let body = refusal_of(&req, &cfg_at("usb-no-dir")).await;
+        assert!(
+            body.contains("mldsa_usb_dir"),
+            "the refusal names the folder it needs: {body}"
+        );
+    }
+
+    /// An unknown custody is refused WITH the closed set — never defaulted to a
+    /// weaker one, which is the whole failure mode this arm exists to avoid.
+    #[tokio::test]
+    async fn an_unknown_classical_custody_is_refused_with_the_closed_set() {
+        let req = AssociateRequest {
+            classical: Some("smartcard-of-the-future".into()),
+            key_id: Some("somebody-v1-abcdef".into()),
+            ..AssociateRequest::default()
+        };
+        let body = refusal_of(&req, &cfg_at("bad-classical")).await;
+        assert!(
+            body.contains("unknown classical custody") && body.contains("yubikey | tpm | software"),
+            "the refusal states the closed set: {body}"
+        );
+    }
+
+    /// A `tpm` PQC half this home does not hold is refused by NAME, and the
+    /// message enumerates where the half can come from — the failure an
+    /// operator meets first on a machine that never held the identity.
+    #[tokio::test]
+    async fn a_missing_sealed_pqc_half_is_refused_and_lists_the_alternatives() {
+        let req = AssociateRequest {
+            classical: Some("software".into()),
+            key_id: Some("nobody-here-v1-abcdef".into()),
+            pqc: Some("tpm".into()),
+            ..AssociateRequest::default()
+        };
+        let body = refusal_of(&req, &cfg_at("no-sealed")).await;
+        assert!(
+            body.contains("nobody-here-v1-abcdef"),
+            "the refusal names the identity: {body}"
+        );
+    }
+
+    /// The custody word is what the SIGNER reports, not what was asked for. A
+    /// seal that degraded to encrypted software is software, on either half
+    /// (Codex review on PR #620 — raised once per half, fixed once here).
+    #[test]
+    fn a_degraded_seal_labels_as_software_however_it_was_asked_for() {
+        use ciris_keyring::HardwareType;
+        assert_eq!(custody_word(HardwareType::SoftwareOnly, "tpm"), "software");
+        assert_eq!(
+            custody_word(HardwareType::SoftwareOnly, "yubikey"),
+            "software"
+        );
+        assert_eq!(custody_word(HardwareType::SoftwareOnly, "usb"), "software");
+        // Real hardware keeps the requested word, which is the only thing that
+        // distinguishes a USB-wrapped half from a locally-sealed one — both are
+        // "sealed" to `hardware_type()`.
+        assert_eq!(custody_word(HardwareType::TpmDiscrete, "tpm"), "tpm");
+        assert_eq!(custody_word(HardwareType::TpmDiscrete, "usb"), "usb");
+    }
 }

@@ -82,13 +82,13 @@ pub(crate) struct ProvisionPkcs11 {
     /// The PIV user PIN. When omitted the token may prompt out of band (or the
     /// open fails with a plain-language "PIN required" error the UI surfaces).
     #[serde(default)]
-    user_pin: Option<String>,
+    pub(crate) user_pin: Option<String>,
     /// The PIV slot the Ed25519 key lives in (default `9c`).
     #[serde(default)]
-    piv_slot: Option<String>,
+    pub(crate) piv_slot: Option<String>,
     /// Path to the token's PKCS#11 module (default `libykcs11.so`).
     #[serde(default)]
-    module_path: Option<String>,
+    pub(crate) module_path: Option<String>,
 }
 
 /// `POST /v1/accord/provision-holder` request.

@@ -144,6 +144,14 @@ pub struct OccurrenceBindOutcome {
 ///
 /// After this returns Ok, `verify::signer_acts_for(engine, occurrence_key_id,
 /// identity_key_id) == true`.
+/// persist's §5.6.8.8 closed set is `phone | laptop | server | embedded |
+/// agent | service`; this is the one an enrolled desktop/laptop device binds
+/// as. Spelled here so a caller cannot invent a class the door refuses — which
+/// is what `"portable_software"` was doing on `/v1/self/associate`, failing the
+/// bind with a 500 after the occurrence key had already been minted and
+/// registered.
+pub const DEVICE_CLASS_LAPTOP: &str = "laptop";
+
 pub async fn bind_occurrence_core(
     engine: &Engine,
     identity_key_id: &str,
