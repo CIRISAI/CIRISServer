@@ -86,6 +86,10 @@ pub struct FileWriteResponse {
 
 #[derive(Debug, Serialize)]
 pub struct DriveEntry {
+    /// The cohort this row was listed from (`self` | `family` | `community`).
+    pub cohort: String,
+    /// The room id to pass back to `GET /v1/files/{id}`.
+    pub room_id: String,
     pub attestation_id: String,
     pub author_key_id: String,
     pub asserted_at: String,
@@ -522,10 +526,17 @@ async fn read_drive(
         },
     };
     let dir = st.engine.federation_directory();
-    let mut rows = Vec::new();
+    // Each row carries the room it came from — see `DriveEntry.room_id`.
+    let mut rows: Vec<(String, String, files::FileRow)> = Vec::new();
     for (_, room) in &rooms {
         match files::in_room(&*dir, room, q.limit).await {
-            Ok(r) => rows.extend(r),
+            Ok(r) => rows.extend(r.into_iter().map(|row| {
+                (
+                    room.row_scope_token().to_owned(),
+                    room.content_group_id().to_owned(),
+                    row,
+                )
+            })),
             Err(e) => {
                 return refuse(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -547,7 +558,7 @@ async fn read_drive(
         }
     };
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (cohort, room_id, row) in rows {
         let (bytes, detail) = match row.open(&content, &viewer).await {
             Ok(_) => ("here".to_owned(), "the bytes are on this device".to_owned()),
             Err(reason) => {
@@ -556,6 +567,14 @@ async fn read_drive(
             }
         };
         out.push(DriveEntry {
+            // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
+            // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
+            // and `room_id` or it defaults to `self` and misses. Without this a
+            // client that DISCOVERED a family or community file through the
+            // aggregate listing could not construct the read for it without
+            // probing every room (Codex, CIRISServer#628).
+            cohort: cohort.clone(),
+            room_id: room_id.clone(),
             attestation_id: row.attestation_id.clone(),
             author_key_id: row.attesting_key_id.clone(),
             asserted_at: row.asserted_at.to_rfc3339(),
@@ -629,9 +648,21 @@ async fn read_file(
     // does not mean unbounded: `files::in_room` walks at most
     // MAX_LISTING_PAGES × LISTING_PAGE itself, so the ceiling is edge's and
     // stays edge's, where a number chosen here would silently diverge from it.
-    let rows = files::in_room(&*dir, &room, usize::MAX)
-        .await
-        .unwrap_or_default();
+    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
+        Ok(r) => r,
+        // NOT an empty room (Codex, CIRISServer#628). `unwrap_or_default()`
+        // turned a directory or store outage into "no rows", and the handler
+        // then answered `404 drive.not_in_room` — telling a client its file is
+        // GONE when the truth is "ask again shortly". The listing doors return
+        // 503 for this same class; so does this one now.
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.listing_failed",
+                format!("list {room}: {e}"),
+            )
+        }
+    };
     let Some(row) = rows
         .into_iter()
         .find(|r| r.attestation_id == attestation_id)
@@ -922,7 +953,14 @@ async fn read_notes(
     };
     let room = ciris_edge::self_room::room(&owner.key_id);
     let dir = st.engine.federation_directory();
-    let rows = match files::in_room(&*dir, &room, q.limit).await {
+    // THE LIMIT COUNTS NOTES, NOT ROWS (Codex, CIRISServer#628). `q.limit`
+    // applied here bounds every FILE in the self room — photos, named uploads,
+    // anything — and the note filter runs after. Enough non-note rows at the
+    // head of the window and a person's notes simply vanish from
+    // `GET /v1/notes`, while the response still returns fewer than `limit`
+    // items and so looks complete. Read the room's rows without a caller-side
+    // cap (edge bounds its own walk) and stop once `limit` NOTES are collected.
+    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
         Ok(r) => r,
         Err(e) => {
             return refuse(
@@ -945,6 +983,9 @@ async fn read_notes(
     };
     let mut out: Vec<Note> = Vec::new();
     for row in rows {
+        if out.len() >= q.limit {
+            break;
+        }
         // A note is an UNNAMED text row in this room. Both conditions, because
         // both are what `write_note` stamps: `text/plain` and `filename: None`.
         // The media type alone is not enough — `POST /v1/files` can put a named

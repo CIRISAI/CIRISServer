@@ -163,6 +163,13 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
 
     // WHAT WE HOLD: the live tree, if this process has one.
     let held_group = st.held.lock().await.clone();
+    // FOLLOW THE ROOM before deciding anything about it: `decide` reads our
+    // membership, and membership that has not applied the room's commits is a
+    // stale answer. Applying first means an add we have not yet seen cannot be
+    // mistaken for a device that needs adding again.
+    if let Some(h) = &held_group {
+        apply_remote_commits(&*dir, &h.group, &roster, &node_key, &room_id).await;
+    }
     let held = match &held_group {
         Some(h) => Some(HeldRoom {
             // The STORED claim — see `HeldGroup`. Not `Utc::now()`.
@@ -268,6 +275,80 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
 }
 
 /// The oldest rival claim among the identity's other nodes, if any.
+/// The best commit claim published by ONE node in this room.
+///
+/// `first_rival` folds every node's claims into a single winner; this asks
+/// about one node, which is what a joiner needs: it is adopting a particular
+/// creator's room, so it must store that creator's claim.
+async fn claim_of(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    node: &str,
+    room_id: &str,
+) -> Option<CommitClaim> {
+    let mut best: Option<CommitClaim> = None;
+    for (_, claim) in ciris_edge::chat::commits_from(dir, node, room_id)
+        .await
+        .ok()?
+    {
+        if best.as_ref().is_none_or(|b| claim.wins_over(b)) {
+            best = Some(claim);
+        }
+    }
+    best
+}
+
+/// **Apply every remote Commit we have not applied yet.**
+///
+/// A membership change publishes an MLS Commit that EVERY existing member must
+/// apply before it can derive the new epoch's secrets and addresses. This loop
+/// read those rows only to extract a `CommitClaim` and threw the payload away,
+/// and nothing else applied them — so once a room had two devices, the first
+/// add or remove after that left every other device on the old epoch with
+/// stale membership, and three-device rooms and removals could not converge
+/// (Codex, CIRISServer#628).
+///
+/// `apply_remote_commit_claimed` is idempotent per commit and defers one that
+/// is framed ahead of our epoch (it holds it until the chain reaches it), so
+/// replaying the room's whole commit history every tick is safe and is how a
+/// device that missed several catches up.
+async fn apply_remote_commits(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    group: &Arc<CohortGroup>,
+    roster: &[String],
+    own: &str,
+    room_id: &str,
+) -> usize {
+    let mut applied = 0usize;
+    for node in roster.iter().filter(|n| n.as_str() != own) {
+        let Ok(commits) = ciris_edge::chat::commits_from(dir, node, room_id).await else {
+            continue;
+        };
+        for (bytes, claim) in commits {
+            match group.apply_remote_commit_claimed(&bytes, Some(claim)).await {
+                Ok(outcome) => {
+                    let o = format!("{outcome:?}");
+                    // `AlreadyApplied` is the steady state and is not news;
+                    // anything that moved the tree is.
+                    if !o.contains("AlreadyApplied") {
+                        tracing::info!(
+                            room = %room_id, from = %node, outcome = %o,
+                            "self room: applied a remote Commit — this device follows the \
+                             room's epoch"
+                        );
+                        applied += 1;
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    room = %room_id, from = %node, error = %e,
+                    "self room: a remote Commit would not apply — this device may be stuck \
+                     on an older epoch than the rest of the room"
+                ),
+            }
+        }
+    }
+    applied
+}
+
 async fn first_rival(
     dir: &dyn ciris_persist::federation::FederationDirectory,
     roster: &[String],
@@ -361,8 +442,22 @@ async fn join_if_welcomed(
             Ok(group) => {
                 let group = Arc::new(group);
                 let members = group.member_key_ids().await.len();
-                let claim = rival
-                    .cloned()
+                // THE CLAIM OF THE NODE WHOSE WELCOME WE CONSUMED — not the
+                // globally-oldest rival (Codex, CIRISServer#628). With three or
+                // more devices racing, `rival` is the oldest claim anywhere
+                // while the Welcome we found is whichever came first in roster
+                // order, and they need not be the same creator. Storing an
+                // unrelated claim makes a losing group look like it owns the
+                // winning one, so `decide` keeps two room secrets and two
+                // derived address sets instead of converging on one.
+                //
+                // Falling back to `rival` only if that creator published no
+                // commit we can read, and to a fresh claim only if there is
+                // nothing at all — both are strictly better than adopting
+                // somebody else's.
+                let claim = claim_of(&*dir, node, room_id)
+                    .await
+                    .or_else(|| rival.cloned())
                     .unwrap_or_else(|| CommitClaim::new(chrono::Utc::now(), node.clone()));
                 *st.held.lock().await = Some(HeldGroup {
                     group: Arc::clone(&group),
@@ -613,7 +708,40 @@ async fn remove_members(
             &commit,
         )
         .await?;
-        cross(st, room, row, &capsule).await?;
+        // A REMOVAL CANNOT BE ROLLED BACK, so a failed publication drops the
+        // whole room instead (Codex, CIRISServer#628).
+        //
+        // `remove_member` has already advanced the local tree. Undoing it would
+        // mean re-ADDING the device, which needs a KeyPackage we may not have —
+        // so unlike an add there is no symmetric repair. Leaving it is worse
+        // than it looks: on the next tick our membership already matches the
+        // reduced roster, `decide` returns `Idle`, and the Commit is never
+        // retried — every retained device stays on the old epoch while this one
+        // has advanced, which is a split room that looks converged from here.
+        //
+        // Dropping `held` and retiring the addresses makes the next tick
+        // re-derive from nothing: this node rejoins from a peer's Welcome or
+        // creates afresh, and either way the room reconverges. Forward secrecy
+        // is preserved — the removal happened locally and is not undone.
+        if let Err(e) = cross(st, room, row, &capsule).await {
+            tracing::warn!(
+                %node, room = %room, error = %e,
+                "self room: the removal Commit could not be placed — dropping this room so \
+                 the next tick re-derives, rather than holding a tree the other devices \
+                 never advanced to"
+            );
+            if let Some(life) = &st.lifecycle {
+                let out = life.leave(&room.scope(), &room.table_group_id());
+                if out.unretired > 0 {
+                    tracing::warn!(
+                        room = %room, unretired = out.unretired,
+                        "self room: could not retire every address of the dropped room"
+                    );
+                }
+            }
+            *st.held.lock().await = None;
+            return Err(e);
+        }
         removed += 1;
     }
     if removed > 0 {
