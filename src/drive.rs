@@ -148,6 +148,38 @@ fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeR
     }
 }
 
+/// **The id a caller can actually read the file back by.**
+///
+/// A crossing that WIDENS is two rows: the authored one (`self`, local tier —
+/// the producer's own copy) and the `supersedes` row placed at the wider
+/// audience, which has a NEW id. Edge says so in as many words on
+/// `Shared::Placed`: "After a widening this is the NEW `supersedes` row's id,
+/// not the one passed in."
+///
+/// Returning `published.row.attestation_id` therefore handed the caller an id
+/// that names a row nobody else has. Measured on the chat ladder: `POST
+/// /v1/files {cohort:"community"}` answered `file-f9d37acb…` while the row that
+/// crossed was `e0d4dcdc-…`; reading back by the answered id was
+/// `404 drive.not_in_room` on the recipient's node AND on the author's own,
+/// because `file-f9d37acb…` is only the `self`-scoped copy. A client that
+/// stores what the write returns could never open its own file.
+///
+/// `self` writes were unaffected — nothing widens — which is exactly why the
+/// self-file ladder was green over this same code. One cohort exercised the
+/// widening and the other did not.
+fn readable_id(published: &files::PublishedFile) -> &str {
+    use ciris_edge::replication::attestation_bind::Shared;
+    match &published.shared {
+        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+            attestation_id
+        }
+        // Parked: nothing was placed, so the authored row is the only row
+        // there is. `crossed: false` already tells the caller it reached
+        // nobody; naming the local row here keeps the two answers consistent.
+        Shared::AwaitingActor { .. } => &published.row.attestation_id,
+    }
+}
+
 fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
     ciris_edge::group_content::PersistGroupContentStore::new(
         (**engine).clone(),
@@ -269,7 +301,7 @@ async fn write_file(
     (
         StatusCode::OK,
         Json(FileWriteResponse {
-            attestation_id: published.row.attestation_id.clone(),
+            attestation_id: readable_id(&published).to_owned(),
             cohort: room.row_scope_token().to_owned(),
             room: room.to_string(),
             tier: format!("{:?}", published.tier),
@@ -623,7 +655,7 @@ async fn write_note(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "attestation_id": published.row.attestation_id,
+            "attestation_id": readable_id(&published),
             "room": room.to_string(),
             "cohort": room.row_scope_token(),
             "crossed": published.crossed,

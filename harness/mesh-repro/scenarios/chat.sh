@@ -166,8 +166,8 @@
 
 SCENARIO_NAME="chat"
 COMPOSE_FILES="-f docker-compose.chat.yml"
-SUCCESS_STAGE="hamburger"
-SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), and the canonical that carries the mesh cannot read the room."
+SUCCESS_STAGE="comm_file_on_b"
+SUCCESS_MESSAGE="cross-node chat AND community files PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), the canonical that carries the mesh cannot read the room, and a FILE published into that community at tier=CommunityDek crossed and OPENED on the other person's node."
 
 # ORDERED BY DEPENDENCY, because the monotonic verdict treats a positive later
 # stage as PROOF of every earlier one. `dark` and `one_sided` are independent of
@@ -179,11 +179,17 @@ SUCCESS_MESSAGE="cross-node chat PROVEN — two nodes converged on one derived r
 # room's audience — which is the owner-binding walk `bound` measures. That
 # ordering rule is the whole reason this ladder is not simply the narrative order.
 STAGES=(rooted peered pulling contact room dark one_sided bound sent arrived hamburger comm_file comm_file_on_b)
-# `comm_file*` sit AFTER `hamburger` and are deliberately NOT required yet: the
-# community FILE plane is new (CIRISServer#622) and this ladder is load-bearing
-# for a cut, so the rungs are MEASURED first and promoted to REQUIRED once
-# they have been green on a real run. Measuring before gating is the same rule
-# the rest of this file follows — a rung is evidence, not an aspiration.
+# `comm_file*` — the community FILE plane (CIRISServer#622). MEASURED on their
+# first run, then promoted here, which is the rule this file follows: a rung is
+# evidence, not an aspiration.
+#
+# THEY MUST BE REQUIRED, and that is not a formality. They sit AFTER
+# `hamburger`, and the run loop breaks as soon as SUCCESS_STAGE is positive and
+# nothing REQUIRED is pending — so on their first run the ladder stopped the
+# moment chat went green and reported `comm_file_on_b=0` against a file that
+# crossed and OPENED on the recipient's node seconds later. A rung after the
+# success stage is invisible unless it is required; the same truncation once
+# made chat's own `arrived` read 0 for six releases.
 # (The definitions below are grouped by topic, not by ladder position — each
 #  header carries its own number, and THIS array is the running order.)
 
@@ -788,6 +794,11 @@ DIAG_sent() {
 # on the server side, CIRISEdge#601 / CIRISPersist#848) while the ladder read
 # "cross-node chat PROVEN". A red `arrived` is a BREAK wherever it sits.
 REQUIRED_arrived=1
+# The community file plane: published AND crossed, then LISTED and OPENED by
+# the other PERSON. Proven 2026-09-23 — node-b read "community file proof"
+# back out of `chat:pair:v1:…` with `tier=CommunityDek`, `granted=2`.
+REQUIRED_comm_file=1
+REQUIRED_comm_file_on_b=1
 stage_arrived() {
   _chat_load
   if [ -z "${CHAT_ATT_ID:-}" ] || [ -z "${CHAT_CID_B:-}" ]; then echo 0; return; fi
