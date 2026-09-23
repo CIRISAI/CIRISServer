@@ -281,6 +281,39 @@ fn addressed_or_warn(st: &DriveState, room: &ScopeRoom, cohort: Cohort) -> bool 
     installed
 }
 
+/// Every room this identity can reach: their own devices, plus each family and
+/// community persist's admission places them in.
+///
+/// Read off `CallerAdmission` rather than enumerated here, so the drive can
+/// never list a cohort the caller is not admitted to — the same predicate
+/// `require_cohort_member` applies to a NAMED room, applied to the unnamed
+/// case by construction instead of by a second check that could drift.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn everything_reachable(
+    st: &DriveState,
+    owner: &str,
+) -> Result<Vec<(Cohort, ScopeRoom)>, Response> {
+    let mut out = vec![(Cohort::SelfCollective, ciris_edge::self_room::room(owner))];
+    let admission =
+        match ciris_persist::scope::build_caller_admission(&st.engine, &owner.to_owned()).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.store_unavailable",
+                    format!("build_caller_admission: {e}"),
+                ))
+            }
+        };
+    for fam in &admission.family_key_ids {
+        out.push((Cohort::Family, ScopeRoom::family(fam.as_str())));
+    }
+    for com in &admission.community_key_ids {
+        out.push((Cohort::Community, ScopeRoom::community(com.as_str())));
+    }
+    Ok(out)
+}
+
 fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
     ciris_edge::group_content::PersistGroupContentStore::new(
         (**engine).clone(),
@@ -329,6 +362,23 @@ async fn write_file(
             "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
         );
     };
+    // DECLARED-CONFORMANCE GATE, ahead of the membership read (Codex,
+    // CIRISServer#628). A file published into a cohort room is a
+    // federation-wire production exactly as a chat message is, so a node
+    // declared consumer-only must not author one — `contacts_chat` gates its
+    // author door on the same verb, and a producer that skipped it would make
+    // the declaration a statement the node does not keep.
+    //
+    // ORDER IS LOAD-BEARING, for the same reason it is in chat: this is a pure
+    // function of the node's OWN declaration, so answering it first cannot
+    // leak whether a cohort exists here, where the membership check below
+    // necessarily touches the directory.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
+        return resp;
+    }
     let room = match room_for(req.cohort, req.room_id.as_deref(), &owner.key_id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -433,10 +483,32 @@ async fn read_drive(
             "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
         );
     };
-    let cohort = match q.cohort.as_deref() {
-        None | Some("self") => Cohort::SelfCollective,
-        Some("family") => Cohort::Family,
-        Some("community") => Cohort::Community,
+    // NO FILTER MEANS THE WHOLE DRIVE. This route is "everything this identity
+    // can reach", and converting an absent `cohort` to `self` made it "your
+    // own devices" while still calling itself a drive — every family and
+    // community file silently missing, with a 200 (Codex, CIRISServer#628).
+    // The cohorts are not guessed: they are the ones persist's own admission
+    // says this caller is in, so the listing cannot reach past membership.
+    let rooms: Vec<(Cohort, ScopeRoom)> = match q.cohort.as_deref() {
+        Some("self") => vec![(
+            Cohort::SelfCollective,
+            ciris_edge::self_room::room(&owner.key_id),
+        )],
+        Some("family") | Some("community") => {
+            let cohort = if q.cohort.as_deref() == Some("family") {
+                Cohort::Family
+            } else {
+                Cohort::Community
+            };
+            let room = match room_for(cohort, q.room_id.as_deref(), &owner.key_id) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
+                return e;
+            }
+            vec![(cohort, room)]
+        }
         Some(other) => {
             return refuse(
                 StatusCode::BAD_REQUEST,
@@ -444,25 +516,25 @@ async fn read_drive(
                 format!("unknown cohort {other:?} — use self | family | community"),
             )
         }
+        None => match everything_reachable(&st, &owner.key_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
     };
-    let room = match room_for(cohort, q.room_id.as_deref(), &owner.key_id) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
-        return e;
-    }
     let dir = st.engine.federation_directory();
-    let rows = match files::in_room(&*dir, &room, q.limit).await {
-        Ok(r) => r,
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "drive.listing_failed",
-                format!("list {room}: {e}"),
-            )
+    let mut rows = Vec::new();
+    for (_, room) in &rooms {
+        match files::in_room(&*dir, room, q.limit).await {
+            Ok(r) => rows.extend(r),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.listing_failed",
+                    format!("list {room}: {e}"),
+                )
+            }
         }
-    };
+    }
     let content = store(&st.engine);
     let viewer = match st.engine.local_derived_key_id().await {
         Ok(v) => v,
@@ -493,11 +565,18 @@ async fn read_drive(
             detail,
         });
     }
+    // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
+    // reporting one would name whichever happened to be first.
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "cohort": room.row_scope_token(),
-            "room": room.to_string(),
+            "rooms": rooms
+                .iter()
+                .map(|(_, r)| serde_json::json!({
+                    "cohort": r.row_scope_token(),
+                    "room": r.to_string(),
+                }))
+                .collect::<Vec<_>>(),
             "entries": out,
         })),
     )
@@ -543,7 +622,16 @@ async fn read_file(
         return e;
     }
     let dir = st.engine.federation_directory();
-    let rows = files::in_room(&*dir, &room, 500).await.unwrap_or_default();
+    // NO CALLER-SIDE CAP ON A LOOKUP BY ID. A fixed 500 meant that in a room
+    // with more rows than that, a perfectly valid id outside the first page
+    // answered `drive.not_in_room` — a refusal that says "this does not exist
+    // here" about a file that does (Codex, CIRISServer#628). `usize::MAX`
+    // does not mean unbounded: `files::in_room` walks at most
+    // MAX_LISTING_PAGES × LISTING_PAGE itself, so the ceiling is edge's and
+    // stays edge's, where a number chosen here would silently diverge from it.
+    let rows = files::in_room(&*dir, &room, usize::MAX)
+        .await
+        .unwrap_or_default();
     let Some(row) = rows
         .into_iter()
         .find(|r| r.attestation_id == attestation_id)
@@ -732,6 +820,23 @@ async fn write_note(
             "notes.empty",
             "a note with no body is not a note".into(),
         );
+    }
+    // DECLARED-CONFORMANCE GATE, ahead of the membership read (Codex,
+    // CIRISServer#628). A file published into a cohort room is a
+    // federation-wire production exactly as a chat message is, so a node
+    // declared consumer-only must not author one — `contacts_chat` gates its
+    // author door on the same verb, and a producer that skipped it would make
+    // the declaration a statement the node does not keep.
+    //
+    // ORDER IS LOAD-BEARING, for the same reason it is in chat: this is a pure
+    // function of the node's OWN declaration, so answering it first cannot
+    // leak whether a cohort exists here, where the membership check below
+    // necessarily touches the directory.
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
+        return resp;
     }
     let room = ciris_edge::self_room::room(&owner.key_id);
     ensure_owner_is_a_kem_target(&st, &owner.key_id).await;
