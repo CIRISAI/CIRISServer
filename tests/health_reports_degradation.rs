@@ -279,8 +279,19 @@ async fn the_instrument_survives_saturated_counters_and_a_hostile_host() {
     // The probes, on whatever this host is. On CI that is Linux with cgroup v2
     // and PSI; on the macOS runners it is neither, and the requirement is the
     // same: report, do not panic.
+    //
+    // QUIETED WHILE THEY RUN. On a loaded runner these read REAL pressure and
+    // raise truthfully — ubuntu CI failed this case with "EVERY task in this
+    // container was blocked on io 24.6% of the last 10s", which is not a defect
+    // in anything this case is testing, and no amount of injecting healthy
+    // windows takes an honest host alarm back down. The switch exists for
+    // exactly this (CIRISServer#605 did it for `folded_health`); the probes
+    // still RUN, which is what this case is about — that they report rather
+    // than panic on an unknown host.
+    degradation::set_host_probes_raise_for_test(false);
     let _ = degradation::probe_memory();
     let _ = degradation::probe_contention();
+    degradation::set_host_probes_raise_for_test(true);
 
     // Still serving, and still well-formed. A surface that survives by
     // returning nothing has not survived.
@@ -302,6 +313,12 @@ async fn the_instrument_survives_saturated_counters_and_a_hostile_host() {
         total: 1,
         ..Default::default()
     });
+    // A host alarm raised BEFORE this case ran (another case's probe, on a
+    // runner that is genuinely stalling) is not this case's to leave standing
+    // either: the assertion below is about handing the registry back clean.
+    for code in [degradation::CODE_IO_STALL, degradation::CODE_CPU_STALL] {
+        degradation::clear(code);
+    }
     assert!(
         !degradation::degraded_mode(),
         "this case must hand the registry back clean, or it poisons whichever case libtest          happens to run next: {:?}",

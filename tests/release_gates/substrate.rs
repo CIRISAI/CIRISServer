@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v15.2.0";
-pub const TARGET_PERSIST: &str = "v44.7.0";
-pub const TARGET_EDGE: &str = "v25.2.0";
+pub const TARGET_VERIFY: &str = "v16.1.0";
+pub const TARGET_PERSIST: &str = "v46.3.1";
+pub const TARGET_EDGE: &str = "v29.3.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -217,7 +217,17 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //     everywhere else. Inferring the shape from `differs_in` instead, which
     //     is what this did through the v39 adoption, is a second spelling of a
     //     definition the substrate now states outright.
-    const ADOPTED: &str = "e7135559a3d843ecff3ad34ee3b1a10acf92b33f199a327758139969e19f5699";
+    //
+    // v45.0.0 (0.5.213, CIRISPersist#871 / CC 3.3.13): `media` joins the
+    //   vocabulary — the multimedia Source struct, refused by member name at
+    //   every door — and `size` is REQUIRED on every `holds_bytes` claim.
+    //   Reviewed against this repo: no `media` emitter yet (CIRISServer#614
+    //   will be the first); every key we spell goes through `paths::*` and
+    //   none moved; the holder claims we depend on are minted by persist's own
+    //   blob doors, which now carry the stored length; the v45 ingest door
+    //   refuses a size-less claim, so the fleet pins together (there are no
+    //   production blobs older than this). `e7135559…` → `4d7054a6…`.
+    const ADOPTED: &str = "4d7054a6e05306e7b37d30ab2d25c43625a4f382021f39191f55a2c1f833589b";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

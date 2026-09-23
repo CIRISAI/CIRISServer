@@ -173,6 +173,18 @@ pub async fn emit_analyze_consent(
             "analyze consent row {id} authored but resolve_scoped_consent failed: {e}"
         ),
     }
+    // CARRY THE PERMISSION WITH THE DATA. `POST /v1/federation/consent` with
+    // `analyze=true` authors two rows — the replication grant, then this one —
+    // and only the first used to kick. The kick is fire-and-forget, so a round
+    // could leave with traces the recipient is now consented to receive and
+    // without the row that lets them analyse those traces; the analyze row then
+    // waited for the periodic cadence, because by the time anything else kicked
+    // the peer set had already converged and nothing looked changed.
+    //
+    // Kicking here rather than after the compound handler keeps it true for the
+    // other caller too (the embedded delivery path authors this row on its own).
+    // Kicks coalesce per coordinator, so the pair still costs one round.
+    crate::compose::kick_replication("analyze consent grant emitted");
     Ok(Some(id))
 }
 
@@ -1390,6 +1402,19 @@ async fn emit_grant_row<S: AsRef<str>>(
         attestation_id = %attestation_id,
         "emitted directed replication-consent grant (this node consents to replicate to peer)"
     );
+    // ORDER MATTERS, for the same reason it does at the announce door. The NEW
+    // peer this grant names is not an initiator in the ReplicationRuntime yet,
+    // so a kick on its own rounds toward everyone EXCEPT the peer the grant was
+    // authored for. Converging the peer set is what makes them one.
+    //
+    // This used to be left to "the peering API nudges the reconciler" — true
+    // only of the federation-admin routes. `POST /v1/contacts` and the fold's
+    // author door reach here as well and nudged nothing, so exactly the grants a
+    // person authors by talking to someone waited for the periodic cadence.
+    // Nudge here instead, where the grant is written, and the loop that hears it
+    // kicks on the gain (`note_convergence`).
+    crate::replication_reconcile::nudge("consent grant emitted");
+    crate::compose::kick_replication("consent grant emitted");
     Ok(ConsentGrant {
         attestation_id,
         content_hash,
@@ -1404,10 +1429,63 @@ async fn emit_grant_row<S: AsRef<str>>(
 /// about, while an empty set would claim it was read and found bare. Callers
 /// treat `None` as "covers nothing" — the same verdict `promote_consented_backlog`
 /// reaches when it warns and skips.
-fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
+/// CIRISServer#616 — the grant as a RECEIPT: the CC 2.1 envelope members the
+/// client's receipt sheet renders in plain words ("who it is about / who sent
+/// it / who can see it / what it is / the rule it follows"), read off the row
+/// and never inferred. `attesting_key_id` is whoever actually signed — since
+/// 0.5.211 that is the OWNER's fed-ID, not this node (consent is by humans),
+/// which is exactly why the client must be sent it rather than assume CC 3.3.7's
+/// `G` is the node. `for_key_id` names the one agent the consent is FOR
+/// (persist v44.6.0); `consent_prefixes` is the same normalised set the POST
+/// returns.
+pub fn grant_receipt(grant: &ciris_persist::federation::types::Attestation) -> serde_json::Value {
+    serde_json::json!({
+        "attestation_id": grant.attestation_id,
+        "attesting_key_id": grant.attesting_key_id,
+        (paths::DIMENSION): ciris_persist::federation::admission::envelope_dimension(&grant.attestation_envelope),
+        "subject_key_ids": grant.subject_key_ids,
+        "cohort_scope": grant.cohort_scope,
+        // THROUGH THE PARSER, not a hand lookup. `for_key_id` is written under
+        // `payload` by `emit_grant_row` and at the top level by the author
+        // envelope, so a `get("for_key_id")` on the envelope reads null for
+        // every grant the owner-authored path produces — which is the normal
+        // path, and the field exists to name the machine a human's grant is
+        // FOR. persist's `for_key_id_of` knows both locations; this file
+        // already uses it in `live_consent_grants_for_machine`, and spelling
+        // the lookup by hand here is how the two disagreed.
+        "for_key_id": ciris_persist::federation::consent_by_humans::for_key_id_of(
+            &grant.attestation_envelope,
+        ),
+        "consent_prefixes": grant_prefixes(grant).unwrap_or_default(),
+        "asserted_at": grant.asserted_at.to_rfc3339(),
+        // THE POLICY'S EXPIRY, not the row's. `emit_grant_row` writes an owner's
+        // time-boxed window into the payload as `valid_until` and the doc on
+        // `ConsentGrantOpts::valid_until` says in as many words that it is
+        // distinct from the row's `expires_at` column — which this read used.
+        // So a grant the human deliberately bounded came back with
+        // `valid_until: null` and the client rendered expiring consent as
+        // unbounded, on the receipt sheet whose whole job is telling a person
+        // what they agreed to. The row column is reported beside it rather than
+        // folded in: two different lifetimes must not share one name, which is
+        // how this started.
+        "valid_until": grant_policy(grant)
+            .and_then(|policy| policy.valid_until)
+            .map(|t| t.to_rfc3339()),
+        "row_expires_at": grant.expires_at.map(|t| t.to_rfc3339()),
+    })
+}
+
+/// The grant's payload, parsed through persist's closed grammar — the one
+/// reader for every payload-declared member of the receipt.
+fn grant_policy(
+    grant: &ciris_persist::federation::types::Attestation,
+) -> Option<ciris_persist::federation::consent_grammar::ConsentTransferPolicy> {
     ciris_persist::federation::consent_grammar::parse_grant_payload(&grant.attestation_envelope)
         .ok()
-        .map(|policy| normalize_prefixes(&policy.attestation_prefixes))
+}
+
+fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Option<Vec<String>> {
+    grant_policy(grant).map(|policy| normalize_prefixes(&policy.attestation_prefixes))
 }
 
 /// The live `consent:replication` rows that stand FOR machine `k` — the
@@ -1417,16 +1495,33 @@ fn grant_prefixes(grant: &ciris_persist::federation::types::Attestation) -> Opti
 /// for a sibling machine contributes nothing. Every READ of "what does this
 /// node consent to, and covering which prefixes" goes through here; the WRITE
 /// path's standing-grant lookup stays author-keyed (`standing_live_grant_for`).
+///
+/// **Ordered: steward-authored rows first, the machine's own after.** Both can
+/// be live for the same peer after the owner re-signed, and a caller that takes
+/// the first row for a peer must get the human's. See the body.
 pub async fn live_consent_grants_for_machine(
     engine: &Engine,
     k: &str,
 ) -> Result<Vec<ciris_persist::federation::types::Attestation>> {
     use ciris_persist::federation::consent_by_humans::for_key_id_of;
     let dir = engine.federation_directory();
-    let mut rows = dir
-        .list_live_consent_grants_by(k)
-        .await
-        .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?;
+    // THE HUMAN'S ROWS COME FIRST, and the order is part of the contract.
+    //
+    // After `migrate_consent_to_owner` a machine-authored grant from before
+    // 0.5.211 deliberately stays live beside the owner-authored one that
+    // replaced it — both cover the same peer, so neither is wrong and dropping
+    // either would revoke coverage nobody asked to revoke. But they are not
+    // interchangeable to a READER: a receipt exists to name who signed, and
+    // consent is authored by the human (CC — grants are signed by the owner's
+    // fed-ID, never a node key). A caller taking the first row for a peer was
+    // therefore reporting the node's signature for a grant the owner has since
+    // signed themselves.
+    //
+    // Fixed here rather than in each reader: "prefer the owner's row" is one
+    // rule, and the alternative is every consumer of this list re-deriving it
+    // and one of them getting it wrong. Order is documented, so first-match is
+    // correct by construction.
+    let mut rows = Vec::new();
     let stewards = engine
         .steward_bindings_of(k)
         .await
@@ -1442,6 +1537,13 @@ pub async fn live_consent_grants_for_machine(
                 .filter(|g| for_key_id_of(&g.attestation_envelope) == Some(k)),
         );
     }
+    // Then this machine's own — the legacy pen, and the only rows there are on
+    // a node whose owner has not re-signed (or has no steward binding yet).
+    rows.extend(
+        dir.list_live_consent_grants_by(k)
+            .await
+            .map_err(|e| anyhow::anyhow!("list_live_consent_grants_by({k}): {e}"))?,
+    );
     Ok(rows)
 }
 

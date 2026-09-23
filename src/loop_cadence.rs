@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 8] = [
+pub const LOOPS: [&str; 9] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -92,6 +92,10 @@ pub const LOOPS: [&str; 8] = [
     // short by two.
     "trace_plane_watch",
     "equivocation",
+    // CIRISEdge#499 — the scope-address seal pass (60 s): retires a rotated
+    // group epoch once its convergence window has passed. The third verb of
+    // the plane compose arms; install/advance ride the chat handshake.
+    "scope_seal",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.

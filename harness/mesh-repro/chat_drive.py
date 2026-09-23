@@ -497,6 +497,34 @@ def probe_arrived(base, token, cid, att_id):
     return 0
 
 
+def probe_arrived_reason(base, token, cid, att_id):
+    """The recipient's own word for why `arrived` is 0.
+
+    `arrived` wants two things (see probe_arrived): a body, and a `live` row.
+    So this has to distinguish two failures that look alike from outside:
+
+      * `unopened:<reason>` — the body is SHUT. The blob/key-grant layers.
+      * `open-not-live:<status>` — the body is OPEN and the row is not live
+        (superseded, withdrawn). Nothing is sealed; a status transition made
+        the stage red, and sending anyone to the puller is sending them to a
+        layer that did its job.
+      * `open` — body and row both fine (so `arrived` failed on the id, not
+        on this message).
+      * `absent` — no such row here at all.
+
+    Read by DIAG_arrived so the diagnosis quotes the node instead of guessing.
+    """
+    _, _, msgs = _messages(base, token, cid)
+    for m in msgs:
+        if m.get("attestation_id") != att_id:
+            continue
+        if m.get("body"):
+            status = m.get("status") or "<no status>"
+            return "open" if status == "live" else f"open-not-live:{status}"
+        return m.get("unopened_reason") or "unopened:<no reason given>"
+    return "absent"
+
+
 def probe_hamburger(base, token, cid, att_id, owner, node_key, author_field, world):
     """THE TWO-FACT ASSERTION: who SIGNED and who AUTHORED are separate fields,
     and both must be right.
@@ -579,6 +607,7 @@ def main():
         return 0
     table = {
         "arrived": (4, probe_arrived),
+        "arrived_reason": (4, probe_arrived_reason),
         "hamburger": (8, probe_hamburger),
         "dark": (4, probe_dark),
     }

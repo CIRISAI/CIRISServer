@@ -996,7 +996,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // signal per consumer keeps `notify_one`'s stored-permit semantics AND
     // deterministic routing: the peering API nudges the replication reconciler,
     // the config API nudges the config reconciler.
-    let replication_notify = Arc::new(tokio::sync::Notify::new());
+    // The SHARED handle, not a private one: every path that authors a consent
+    // grant nudges `replication_reconcile::nudge`, and it must reach the loop
+    // this node actually runs (see `nudge_cell`).
+    let replication_notify = crate::replication_reconcile::nudge_handle();
     let config_notify = Arc::new(tokio::sync::Notify::new());
 
     // ── Mesh control-plane relay, remote half (#128 Phase D — C3) ─────────────
@@ -1550,6 +1553,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // edge's own `RouteLens` instead of this module deciding
                         // what reachable means.
                         edge.reticulum_transport(),
+                        // CIRISEdge#499 — the host drives the scope-address
+                        // plane it armed: a keyed room is installed, advanced
+                        // on every epoch, sealed on the cadence loop below.
+                        edge.scope_lifecycle().cloned(),
                     ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
@@ -3822,6 +3829,132 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
     RUNTIME.get().map(Arc::clone)
 }
 
+/// CIRISEdge#636 (edge v26.1.0) — the publish-side KICK. A caller that just
+/// authored rows the federation should see (the claim/announce bundle, a
+/// consent grant, an owner-binding, a chat KeyPackage / Welcome / message)
+/// calls this so they cross on the next round-trip instead of the next 30 s
+/// cadence tick: the first v26.0.0 ladder measured node-b's rows landing at
+/// +30.8 s / +61 s, and every one of those seconds was a tick, not a byte.
+///
+/// Fire-and-forget by design: the caller is an HTTP handler or a boot step
+/// and must not wait on a round. `round_now_all` is coalesced per coordinator
+/// in edge's scheduler, so a burst of kicks is at most one round per
+/// (peer, kind). No runtime (no Reticulum transport) is not an error — the
+/// row is held locally and there is nothing to kick; a stopped scheduler is
+/// logged at debug because the shutdown path already said so.
+/// The process-wide publish-own set and what it takes to refresh it (see
+/// `start_replication_runtime`). `None` until replication has been composed.
+///
+/// The ENGINE is held beside the set so [`kick_replication`] can admit the
+/// owner ITSELF. Requiring each caller to admit first was correct and
+/// unkeepable: the announce handler did it, the fold's post-claim author door
+/// did not, and there is no way to tell from a call site whether the rows it
+/// just authored are owner-attested. One kick, one ordering, no call site to
+/// forget it.
+struct PublishOwn {
+    keys: Arc<std::sync::RwLock<Vec<String>>>,
+    engine: Arc<Engine>,
+    node_key_id: String,
+    /// Once the owner is in the set, no kick needs to resolve them again — this
+    /// is what keeps "every kick admits the owner" down to one atomic load on
+    /// the hot path (a kick fires for every chat row).
+    owner_admitted: std::sync::atomic::AtomicBool,
+}
+
+static SELF_PUBLISH: std::sync::OnceLock<PublishOwn> = std::sync::OnceLock::new();
+
+/// Resolve this node's owner and add them to the publish-own set.
+///
+/// Returns whether the set actually GAINED the owner, so a caller can kick on a
+/// real transition and stay silent on the no-op — the poll runs every 30s and
+/// the announce path calls it too, so "already there" is the common case.
+///
+/// Why this set matters: edge selects a self-plane row for publication only
+/// when its attester is in this provider's set. The owner-binding
+/// `delegates_to(user → node)` and the owner's occurrence rows are attested by
+/// the OWNER, not by the node — with a node-only set they are held locally and
+/// advertised to nobody, and every person→node resolution walk on every other
+/// node starves (CIRISServer#472 arc).
+async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
+    use std::sync::atomic::Ordering;
+    if held.owner_admitted.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Ok(Some(owner)) = held.engine.owner_of(&held.node_key_id).await else {
+        return false;
+    };
+    let keys = &held.keys;
+    // Taken after the last await, so this blocking lock never spans one.
+    let mut w = keys.write().expect("self_publish_keys poisoned");
+    if w.contains(&owner) {
+        held.owner_admitted.store(true, Ordering::Relaxed);
+        return false;
+    }
+    tracing::info!(
+        owner = %owner,
+        "publish-own set gains this node's OWNER — their self-plane rows \
+         (owner-binding, occurrences) now advertise to consent peers \
+         (CIRISServer#472 arc)"
+    );
+    w.push(owner);
+    held.owner_admitted.store(true, Ordering::Relaxed);
+    true
+}
+
+pub(crate) fn kick_replication(reason: &'static str) -> bool {
+    let Some(runtime) = held_replication_runtime() else {
+        return false;
+    };
+    // Callers are async handlers, but the fold's author door reaches here from
+    // a `block_on` — spawn on whatever runtime is current rather than assume
+    // one (a bare `tokio::spawn` outside a context panics the caller).
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!(
+            reason,
+            "replication kick skipped — no runtime context; the cadence carries it"
+        );
+        return false;
+    };
+    handle.spawn(async move {
+        // ADMIT THE OWNER FIRST, HERE, so no caller has to remember. A round
+        // publishes a self-plane row only if its attester is in the publish-own
+        // set, and the rows that matter most — the owner-binding, the owner's
+        // occurrences — are attested by the OWNER, who is resolvable only after
+        // the claim. Kicking before they are admitted rounds toward every peer
+        // carrying none of them.
+        //
+        // This was each caller's job for exactly one revision. The announce
+        // handler did it; the fold's post-claim author door did not, and a call
+        // site cannot tell whether the rows it just wrote are owner-attested.
+        // After the first admission this is one atomic load.
+        if let Some(held) = SELF_PUBLISH.get() {
+            if refresh_publish_own_set(held).await {
+                tracing::info!(
+                    reason,
+                    "publish-own set admitted the owner as part of this kick — their \
+                     self-plane rows ride THIS round rather than the next poll"
+                );
+            }
+        }
+        match runtime.round_now_all().await {
+            // INFO, not debug: a handful of lines per session (claim, announce,
+            // each grant, each chat row) and each one is a timestamp the ladder's
+            // timeline reads — "the row crossed 0.16 s after the kick" is only
+            // legible if the kick is on the record.
+            Ok(()) => tracing::info!(
+                reason,
+                "replication kicked — a round toward every peer now (CIRISEdge#636)"
+            ),
+            Err(e) => tracing::debug!(
+                reason,
+                error = %e,
+                "replication kick skipped — scheduler not running"
+            ),
+        }
+    });
+    true
+}
+
 /// Core replication-runtime bring-up, shared by the compose boot path
 /// ([`setup_peer_replication`]) AND the agent-embedded federation-delivery
 /// controller ([`crate::federation_delivery`]) — and since CIRISServer#312 the two
@@ -3954,33 +4087,66 @@ pub(crate) async fn start_replication_runtime(
     // persist's withdraws-aware owner_of.
     let self_publish_keys: Arc<std::sync::RwLock<Vec<String>>> =
         Arc::new(std::sync::RwLock::new(vec![node_key_id.to_string()]));
+    // Published so the CLAIM/ANNOUNCE path can refresh this set the moment it
+    // authors the owner-binding, instead of the owner arriving up to 30s later
+    // on the poll below. Set once per process; a second replication bring-up
+    // (the agent-embedded controller) receives the same runtime and the same
+    // set, so `set` losing the race is correct, not an error.
+    let _ = SELF_PUBLISH.set(PublishOwn {
+        keys: Arc::clone(&self_publish_keys),
+        engine: Arc::clone(engine),
+        node_key_id: node_key_id.to_string(),
+        owner_admitted: std::sync::atomic::AtomicBool::new(false),
+    });
     let self_provider: ciris_edge::replication::CohortProvider = {
         let keys = Arc::clone(&self_publish_keys);
         Arc::new(move || keys.read().expect("self_publish_keys poisoned").clone())
     };
     tokio::spawn({
-        let engine = Arc::clone(engine);
-        let keys = Arc::clone(&self_publish_keys);
-        let node = node_key_id.to_string();
+        // Nothing to capture: the engine, the node key and the set all live in
+        // `SELF_PUBLISH` now, because `kick_replication` needs them too.
         async move {
             // Detached by design: it only reads the directory and updates a
             // Vec; on shutdown the runtime drop aborts it mid-sleep. Re-checks
             // every 30s so a claim (or a re-rooted ownership) is picked up
             // without a restart, and an owner it has already added is a no-op.
+            //
+            // `owed` outlives one iteration on purpose — see the kick below.
+            let mut owed = false;
             loop {
-                if let Ok(Some(owner)) = engine.owner_of(&node).await {
-                    let mut w = keys.write().expect("self_publish_keys poisoned");
-                    if !w.contains(&owner) {
-                        tracing::info!(
-                            owner = %owner,
-                            "publish-own set gains this node's OWNER — their \
-                             self-plane rows (owner-binding, occurrences) now \
-                             advertise to consent peers (CIRISServer#472 arc)"
-                        );
-                        w.push(owner);
+                // THE SET CHANGED ⇒ CARRY THE ROWS. Adding the owner without a
+                // kick left the rows it unlocks (owner-binding, occurrences)
+                // waiting for the next cadence tick — and this task is the
+                // thing that just made them publishable, so it is the thing
+                // that knows to round now. Measured on the v26.1.0 ladder: the
+                // binding crossed at +41s, one full cadence after the announce
+                // kick fired against a set that did not yet contain the owner.
+                // A KICK THAT COULD NOT BE DISPATCHED IS STILL OWED. This task
+                // is spawned from inside `RUNTIME.get_or_try_init`, so on a node
+                // that already has an owner at startup it can add them while the
+                // closure is still constructing the runtime — `kick_replication`
+                // then finds `RUNTIME` unset and returns false. The owner is in
+                // the set by that point, so every later poll reports no gain,
+                // and the kick is never retried: the owner-authored binding and
+                // occurrences wait for the ordinary cadence on exactly the nodes
+                // that were ready for them soonest. Hold the debt instead.
+                if let Some(held) = SELF_PUBLISH.get() {
+                    if refresh_publish_own_set(held).await {
+                        owed = true;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                if owed && kick_replication("publish-own set gained the owner") {
+                    owed = false;
+                }
+                // AND RETRY IT PROMPTLY. Retaining the debt across a full 30s
+                // sleep leaves the delay this exists to remove: the owner is
+                // resolvable at startup, the kick finds no runtime, and the
+                // retry then waits a cadence anyway. While a kick is owed this
+                // polls every second instead — a bounded, startup-only window
+                // that ends on the first dispatch, since `owed` can only be set
+                // by a set that GAINED the owner and that happens once.
+                let wait = if owed { 1 } else { 30 };
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
         }
     });
@@ -4011,8 +4177,29 @@ pub(crate) async fn start_replication_runtime(
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(node_key_id.to_string()),
-        pull_sink,
-        revocations,
+        // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
+        // that only make sense together, spelled as one type so the half-wired
+        // node cannot be built — `pull_sink ⇒ engine`, `revocations ⇒ engine`.
+        //
+        // - `engine`: THE KEY-GRANT DOOR (edge v24.1.0, CIRISPersist#848 /
+        //   CIRISEdge#601). A `key_grant:epoch:v1` row — the community DEK
+        //   wrap a room's sealer publishes for each member — is routed through
+        //   `Engine::apply_replicated_key_grant`, which admits the carrier AND
+        //   projects the wraps addressed to this node's occurrences. Without it
+        //   every member read `NotGranted` with the row present: the message
+        //   ARRIVED and would not OPEN, on every chat-ladder run from 0.5.207 to
+        //   0.5.213 (`arrived=0 hamburger=1`, mis-read as green until the rung
+        //   was made REQUIRED). The compose engine is the same substrate the
+        //   bridge's directory reads and carries the node's hybrid pen.
+        // - `pull_sink`: the BlobPuller's intake — an admitted row that
+        //   references a blob is offered here and the bytes are fetched.
+        // - `revocations`: the withdrawals observer, the SAME register the blob
+        //   chunk source refuses against (`backend::revocation_register`).
+        sealed_content: Some(ciris_edge::replication::SealedContentWiring {
+            engine: ciris_edge::replication::bridge::BridgeEngine(Engine::clone(engine)),
+            pull_sink,
+            revocations,
+        }),
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(
@@ -4031,9 +4218,12 @@ pub(crate) async fn start_replication_runtime(
 
     tracing::info!(
         initiator_peers = desired.len(),
+        key_grant_door = true,
         "CEG-driven replication runtime started + routed into the shared Edge ({} consent-derived \
          Initiator peers; reconciler converges the rest at runtime via set_peers — no restart, \
-         CIRISEdge#173 resolved)",
+         CIRISEdge#173 resolved). key_grant_door=true: key_grant rows project their wraps \
+         through Engine::apply_replicated_key_grant (CIRISPersist#848) — a member reads \
+         NotGranted with the row present only when the wrap was not addressed to it",
         desired.len(),
     );
     anyhow::Ok(Arc::new(runtime))
@@ -4397,7 +4587,27 @@ async fn build_edge(
         // it both wires the transport for run/dispatch AND records it so
         // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
         // populate the RET-transport role of GET /v1/identity.
-        .reticulum_transport(transport);
+        .reticulum_transport(transport)
+        // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
+        // row pointing at bytes this node has asks for them with a
+        // `BlobChunkFetch`; without a source wired here edge drops it —
+        // `BlobChunkFetch received but no BlobChunkSource wired; dropping` —
+        // and the peer's puller times out on a holder that answered nothing.
+        // That is what the first scope-native chat fetch did on 0.5.213
+        // (CIRISServer#612): every blob-backed body this node authored was
+        // held, announced, routed to, and never served. Persist's source
+        // answers through the gated peer-serve door (store gate + AV-13 caps)
+        // and, with the register the apply path writes withdrawals to, refuses
+        // a blob whose every reference has been withdrawn (CIRISEdge#606).
+        .blob_chunk_source(Arc::new(crate::backend::ServerBlobChunkSource::new(engine)));
+    tracing::info!(
+        "blob chunk source wired — this node SERVES the bytes it holds to a peer's \
+         BlobChunkFetch through persist's gated peer-serve door, answers the blob's SCOPE \
+         from its referencing row (edge's own BlobMeaning, so pull and serve agree) and \
+         refuses a blob whose references were all withdrawn (CIRISEdge#55 / #499 / #606). \
+         Without this line in a boot log every blob-backed body this node authors is \
+         held, announced, routed to, and never served"
+    );
 
     // CIRISServer 0.5.58 — attach a serial LoRa/RNode radio transport when
     // `net.radio.enabled` is set (Transport card). SERIAL-CAPABLE TARGETS ONLY
@@ -4489,6 +4699,31 @@ async fn build_edge(
         "scope-native addressing ARMED — scoped flows are one-hop and their \
          destinations are never announced (CC 5.4.6)"
     );
+    // CIRISEdge#499 — the third verb of the plane the line above armed. A
+    // group's superseded epoch stays reachable for the convergence window and
+    // is then SEALED; edge's contract is that the host calls `seal_due` on a
+    // timer ("…and on a timer: life.seal_due(Instant::now())"). Install and
+    // advance happen where rooms are keyed (`contacts_chat::ensure_room_addresses`);
+    // nothing else calls this, so without it a rotated-away address would stay
+    // live forever. Named phase + jitter per `loop_cadence` (CIRISServer#575).
+    if let Some(life) = edge.scope_lifecycle().cloned() {
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(60);
+            let mut schedule = crate::loop_cadence::Cadence::new("scope_seal", period);
+            loop {
+                schedule.tick().await;
+                let out = life.seal_due(std::time::Instant::now());
+                if out.sealed > 0 || out.unretired > 0 {
+                    tracing::info!(
+                        sealed = out.sealed,
+                        unretired = out.unretired,
+                        "scope-address seal pass: superseded epochs past the convergence \
+                         window retired (CIRISEdge#499)"
+                    );
+                }
+            }
+        });
+    }
     tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
     Ok(edge)
 }

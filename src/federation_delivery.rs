@@ -1148,6 +1148,16 @@ pub fn round_diagnostics_json(
             "round_outcomes": round_outcomes,
             // CIRISEdge#373 (v13.6.0): the trace-loss tripwire — should be 0.
             "inbound_backpressure_drops": backpressure_drops,
+            // CIRISServer#612 / CIRISEdge#634 (edge v26.0.0): where each inbound
+            // CRPL frame went now that the registry is keyed by role. Both
+            // `routed_to_*` climb on both nodes of a healthy pair; a
+            // `reply_dropped` names the drop that used to masquerade as "a
+            // responder reply stalled" and misdirected the #607/#609 RCA twice.
+            "round_routing": {
+                "routed_to_responder": snap.replication_routed_to_responder_total,
+                "routed_to_initiator": snap.replication_routed_to_initiator_total,
+                "reply_dropped": snap.replication_reply_dropped_total,
+            },
         },
         // ── the application/durable plane (edge.rs `send_*`) ─────────────────
         // These counters do NOT observe replication carriage. Keying trace-plane
@@ -1385,6 +1395,9 @@ pub fn author_consent_embedded(
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "consent re-sign as owner failed (non-fatal)"),
     }
+    // Everything the door just wrote (the heal, the anchor occurrence, the
+    // re-signed grants) should cross now (CIRISEdge#636, edge v26.1.0).
+    rt.block_on(async { crate::compose::kick_replication("fold author door") });
     tracing::info!(
         peer_key_id,
         attestation_id = %grant.attestation_id,
@@ -1732,16 +1745,29 @@ pub async fn run_federation_delivery(
             phase_secs = schedule.phase().as_secs_f64(),
             "federation-delivery reconcile loop started (consent:replication topology → set_peers)"
         );
-        let mut last_logged: Option<usize> = None;
+        // The SET, not its size: this loop must make the same gain/loss
+        // decision the composed controller makes, because on an embedded agent
+        // it is the only one of the two that runs.
+        let mut last_logged: Option<crate::replication_reconcile::Reconciled> = None;
         let mut rooting_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Decay a failing reconcile instead of re-running it at full cadence
         // forever. Resets to the floor on the first success, so a peer that
         // recovers is not still being punished for an earlier blip.
         let mut backoff =
             crate::backoff::Backoff::new(cadence, Duration::from_secs(MAX_RECONCILE_BACKOFF_SECS));
+        // The same nudge the composed controller waits on. Without this arm an
+        // embedded agent that authors a grant through the fold's author door
+        // converges the new peer only on the next cadence tick, so the kick that
+        // follows the grant has nobody new to round toward.
+        let reconcile_nudge = crate::replication_reconcile::nudge_handle();
         loop {
             tokio::select! {
                 _ = schedule.tick() => {}
+                _ = reconcile_nudge.notified() => {
+                    tracing::debug!(
+                        "federation-delivery reconcile woken by a nudge (a grant was just authored)"
+                    );
+                }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         tracing::info!("federation-delivery reconcile loop shutting down");
@@ -1757,8 +1783,62 @@ pub async fn run_federation_delivery(
             )
             .await
             {
-                Ok(count) => {
+                Ok(reconciled) => {
                     backoff.succeed();
+                    // THIS LOOP KICKS TOO. An earlier revision left the kick to
+                    // `replication_reconcile::spawn` and said so in a comment —
+                    // but a bare embedded agent reaches delivery only through
+                    // `run_federation_delivery` and never runs compose's
+                    // controller at all, so on exactly the path that authors a
+                    // grant and then reconciles, nobody carried it and the new
+                    // peer waited a full cadence. `note_convergence` owns the
+                    // decision for both callers; kicks coalesce per coordinator
+                    // in edge's scheduler, so a node running both loops still
+                    // rounds once.
+                    let count = reconciled.count();
+                    // BEFORE THE HOUSEKEEPING PAUSE, because this is the only
+                    // place that kicks. The stall branch below sleeps a whole
+                    // cadence to leave the node scheduling headroom — correct in
+                    // itself, and it sat between `reconcile_once` adding a newly
+                    // granted peer and the kick that carries the grant to them.
+                    // So the immediate-delivery path degraded to the cadence
+                    // exactly on loaded hosts, where the cadence may be far
+                    // longer than 30s. Record the convergence and kick first;
+                    // the pause then costs only what it is meant to cost.
+                    if let Some((gained, lost)) =
+                        crate::replication_reconcile::note_convergence(&mut last_logged, reconciled)
+                    {
+                        if count == 0 {
+                            // ZERO IS NOT CONVERGENCE. This read "converged to 0
+                            // consent peers" at info, which is what a healthy
+                            // node says — while meaning that nothing this node
+                            // ever authors can sail, to anyone, for any reason.
+                            // It is the trace plane's empty transcript.
+                            tracing::warn!(
+                                consent_peers = 0,
+                                "federation delivery has NO consent peers — nothing \
+                                 will replicate off this node, and no error will be \
+                                 raised because there is nobody to fail to reach. \
+                                 Rooting is not enough: a canonical becomes a \
+                                 REPLICATION peer only once an owner authors a \
+                                 `consent:replication` grant to it (POST \
+                                 /v1/federation/peering, after the claim). If a \
+                                 grant does exist, it is not being read back as \
+                                 live — check it is not withdrawn, that its \
+                                 audience covers the peer, and that the peer key \
+                                 in the grant is the peer's NODE key: a grant \
+                                 naming a PERSON is not routable, because a \
+                                 person's fed-ID carries no transport binding"
+                            );
+                        } else {
+                            tracing::info!(
+                                consent_peers = count,
+                                gained = ?gained,
+                                lost = ?lost,
+                                "federation delivery converged to {count} consent peers",
+                            );
+                        }
+                    }
                     // ROOTING, per consent peer, on BOTH nodes — the ladder's
                     // `arrive` diagnosis needs the canonical's view of the agent
                     // as much as the agent's view of the canonical, and only
@@ -1824,37 +1904,6 @@ pub async fn run_federation_delivery(
                         // a full cadence from now, so a stalled node genuinely
                         // halves its reconcile rate.
                         schedule.reset();
-                    }
-                    if last_logged != Some(count) {
-                        if count == 0 {
-                            // ZERO IS NOT CONVERGENCE. This read "converged to 0
-                            // consent peers" at info, which is what a healthy
-                            // node says — while meaning that nothing this node
-                            // ever authors can sail, to anyone, for any reason.
-                            // It is the trace plane's empty transcript.
-                            tracing::warn!(
-                                consent_peers = 0,
-                                "federation delivery has NO consent peers — nothing \
-                                 will replicate off this node, and no error will be \
-                                 raised because there is nobody to fail to reach. \
-                                 Rooting is not enough: a canonical becomes a \
-                                 REPLICATION peer only once an owner authors a \
-                                 `consent:replication` grant to it (POST \
-                                 /v1/federation/peering, after the claim). If a \
-                                 grant does exist, it is not being read back as \
-                                 live — check it is not withdrawn, that its \
-                                 audience covers the peer, and that the peer key \
-                                 in the grant is the peer's NODE key: a grant \
-                                 naming a PERSON is not routable, because a \
-                                 person's fed-ID carries no transport binding"
-                            );
-                        } else {
-                            tracing::info!(
-                                consent_peers = count,
-                                "federation delivery converged to {count} consent peers",
-                            );
-                        }
-                        last_logged = Some(count);
                     }
                 }
                 Err(e) => {

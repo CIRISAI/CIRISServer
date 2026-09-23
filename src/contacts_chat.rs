@@ -177,6 +177,17 @@ struct ChatState {
     /// `None` in-process (a single-node test has no mesh), where discovery is
     /// skipped rather than guessed at.
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
+    /// CIRISEdge#499 — the scope-address plane, when the operator armed it.
+    /// `compose` arms scope-native addressing for this node, which routes every
+    /// community-blob fetch through edge's per-scope derived addresses and NEVER
+    /// the federation address; edge's contract is that the HOST drives the
+    /// lifecycle (install a group when it is ours, advance it on every epoch,
+    /// seal on a cadence). Through 0.5.213 nothing here did, so the table held
+    /// no room, every holder read `blob_holder_not_in_group`, and no chat body
+    /// ever opened on a far node (the ladder's `arrived=0`, CIRISServer#612).
+    /// `None` when not armed (HTTP-only, no Reticulum): the router falls back
+    /// to the pre-#499 federation address and there is nothing to drive.
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 }
 
 /// Where a room's MLS handshake has got to on THIS node.
@@ -270,9 +281,14 @@ async fn share_in_room(
     })?;
     match crossing.shared {
         // The PLACED row's id — the widening, which is what the room reads.
-        Shared::Placed { attestation_id } | Shared::AlreadyThere { attestation_id } => {
+        Shared::Placed { attestation_id } => {
+            // The row is in the room; make it cross NOW (KeyPackage, Welcome,
+            // message, roster — every chat row goes through here), not on the
+            // next cadence tick (CIRISEdge#636, edge v26.1.0).
+            crate::compose::kick_replication("chat row placed in room");
             Ok(attestation_id)
         }
+        Shared::AlreadyThere { attestation_id } => Ok(attestation_id),
         Shared::AwaitingActor {
             attestation_id,
             age_ms,
@@ -818,7 +834,10 @@ async fn room_key(
     let dir = st.engine.federation_directory();
     let mut rooms = st.rooms.lock().await;
 
-    if let Some(RoomState::Keyed(_group)) = rooms.get(&room) {
+    if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
+        // Idempotent: a keyed room whose epoch has not moved costs one table
+        // read; one that has (a commit processed since) is advanced here.
+        ensure_room_addresses(st, &room, group).await;
         return Ok(RoomHandshake::Ready);
     }
     // ADVANCING the handshake needs the person's signer; READING a room whose
@@ -900,7 +919,9 @@ async fn room_key(
                 },
             )
             .await?;
-            rooms.insert(room, RoomState::Keyed(Arc::new(group)));
+            let group = Arc::new(group);
+            ensure_room_addresses(st, &room, &group).await;
+            rooms.insert(room, RoomState::Keyed(group));
             Ok(RoomHandshake::Ready)
         }
         PairRole::Joiner => {
@@ -956,9 +977,176 @@ async fn room_key(
             let group = CohortGroup::join(store, &room, material, &welcome, 16)
                 .await
                 .map_err(|e| format!("CohortGroup::join: {e}"))?;
-            rooms.insert(room, RoomState::Keyed(Arc::new(group)));
+            let group = Arc::new(group);
+            ensure_room_addresses(st, &room, &group).await;
+            rooms.insert(room, RoomState::Keyed(group));
             Ok(RoomHandshake::Ready)
         }
+    }
+}
+
+/// CIRISEdge#499 — install (or advance) this room in the scope-address table.
+///
+/// The host's half of the scope-native plane: compose ARMS scope-native
+/// addressing, and arming is not driving. Edge owns the table; the host owns
+/// three verbs — install a group when it becomes ours, advance it on every
+/// epoch, seal on a cadence (`scope_seal` in compose). Through 0.5.213 none
+/// of them ran, so every community blob was unroutable
+/// (`blob_holder_not_in_group`) and no chat body ever opened on a far node.
+///
+/// The roster names PERSONS (the owners' fed-IDs — a chat is between people);
+/// the table's members are NODES (the lifecycle requires this node's own key,
+/// the blob router looks a holder up by the node that signed its
+/// `holds_bytes` claim, a derived destination is something a node listens
+/// on). Edge v26.2.0's `snapshot_for_nodes` walks person → nodes through the
+/// contact ladder's one resolution and reports what it could not resolve
+/// yet, so a member whose announce has not landed is named here and picked
+/// up by the next call (every `room_key` on a keyed room re-enters this and
+/// advances when the epoch or the member set moved).
+///
+/// Never fatal: the room is keyed either way, and a body that cannot be
+/// fetched says so as `unopened_reason` with the router's refusal by name.
+///
+/// # What this does NOT cover yet (CIRISServer#623)
+///
+/// The only caller is `room_key`, so an address is installed when an HTTP chat
+/// op for that conversation reaches this node — and nothing installs one at
+/// boot. After a restart both the `rooms` map and edge's lifecycle are empty,
+/// so a holder is not listening on any room's derived address until someone
+/// LOCALLY revisits that conversation. A headless holder (a relay, a node whose
+/// person is not in the app) never does, and stays unroutable for those rooms
+/// while looking healthy from here: it holds the bytes, its peers are
+/// reachable, and the symptom lands on the other node as a fetch that finds no
+/// holder. The fix is a boot-time rehydration pass, which wants a ladder run
+/// that actually restarts a node.
+async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::mls::CohortGroup) {
+    use ciris_edge::cohort_addressing::{scope_for, snapshot_for_nodes};
+    let Some(life) = st.scope_lifecycle.as_ref() else {
+        tracing::debug!(
+            room = %room,
+            "chat: scope-native addressing not armed — community blobs ride the \
+             federation address (pre-CIRISEdge#499), nothing to install"
+        );
+        return;
+    };
+    let directory = st.engine.federation_directory();
+    let lens = ciris_edge::contact::PersistLens::new(&*directory);
+    let roster = match snapshot_for_nodes(group, &lens).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                room = %room,
+                error = %e,
+                "chat: room snapshot for the scope-address table failed"
+            );
+            return;
+        }
+    };
+    if !roster.unresolved.is_empty() {
+        tracing::info!(
+            room = %room,
+            unresolved = ?roster.unresolved,
+            "chat: a room member does not resolve to a node here yet — their nodes \
+             get no scoped address until their announce lands; the rest of the \
+             roster is installed. NOT self-healing at the same epoch: see the \
+             membership check below (CIRISEdge#648)"
+        );
+    }
+    let installed = &roster.snapshot;
+    let scope = scope_for(room);
+    let verb = match life.table().live_epochs(&scope, &installed.group_id) {
+        None => "install",
+        Some(le) if le.current == installed.epoch || le.next == Some(installed.epoch) => {
+            // THE EPOCH IS NOT THE MEMBERSHIP. Returning here on epoch equality
+            // alone is right for the ordinary case — an MLS membership change
+            // rotates the epoch, so a moved roster arrives as `advance`. It is
+            // wrong for the one case that does not rotate: a member who did not
+            // resolve to a node on an earlier read (their announce had not
+            // landed) and resolves now. Nothing in MLS happened, so the epoch is
+            // unchanged, and without this check the newly resolved node is never
+            // addressed — its blobs stay unroutable for the life of the epoch
+            // while the room looks completely healthy from here.
+            //
+            // REPAIRED, since edge v29.2.0 (CIRISEdge#648, asked from here):
+            // `ScopeLifecycle::refresh_members` is the make-before-break verb
+            // for "same epoch, more members" — it derives and admits only the
+            // members the current slot lacks, re-derives every held member
+            // against the exporter secret (a mismatch refuses the whole call
+            // before anything moves), and never rotates. Before it existed the
+            // only door was remove + reinstall, which drops every member's
+            // address — including our own listen registration — in a window
+            // where a frame is simply lost, so this arm used to only NAME the
+            // dark member. Now it addresses them.
+            let missing: Vec<&str> = installed
+                .members
+                .iter()
+                .map(String::as_str)
+                .filter(|m| {
+                    life.table()
+                        .address_at(&scope, &installed.group_id, installed.epoch, m)
+                        .is_none()
+                })
+                .collect();
+            if missing.is_empty() {
+                tracing::debug!(
+                    room = %room,
+                    epoch = installed.epoch,
+                    "chat: room addresses current"
+                );
+            } else {
+                match life.refresh_members(&scope, installed) {
+                    Ok(o) => tracing::info!(
+                        room = %room,
+                        epoch = o.epoch,
+                        admitted = o.derived,
+                        members = ?missing,
+                        "chat: room membership REFRESHED at the same epoch — these members \
+                         resolved to a node after the install and MLS did not rotate; they \
+                         are addressed now, nothing else moved (CIRISEdge#648, edge v29.2.0)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        room = %room,
+                        epoch = installed.epoch,
+                        missing = ?missing,
+                        error = %e,
+                        "chat: these room members resolve to a node NOW but hold no scoped \
+                         address at the installed epoch, and the same-epoch refresh was \
+                         REFUSED — bodies they hold cannot be fetched and bodies we send do \
+                         not reach them until the next real epoch change. `SelfNotInRoster` \
+                         means the roster no longer names this node (that is a leave, not a \
+                         refresh); `ExporterSecretMismatch` means the snapshot's secret is not \
+                         the one the table was installed with"
+                    ),
+                }
+            }
+            return;
+        }
+        Some(_) => "advance",
+    };
+    let out = if verb == "install" {
+        life.install(&scope, installed)
+    } else {
+        life.advance(&scope, installed, std::time::Instant::now())
+    };
+    match out {
+        Ok(o) => tracing::info!(
+            room = %room,
+            verb,
+            epoch = o.epoch,
+            derived = o.derived,
+            members = ?installed.members,
+            "chat: room addresses in the scope-address table — this node listens on \
+             its own derived address and dials the members' (CIRISEdge#499)"
+        ),
+        Err(e) => tracing::warn!(
+            room = %room,
+            verb,
+            epoch = installed.epoch,
+            members = ?installed.members,
+            error = %e,
+            "chat: the scope-address table refused the room — community blobs from \
+             this room read blob_holder_not_in_group until it is installed"
+        ),
     }
 }
 
@@ -1109,16 +1297,21 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     // A withdrawn grant is already gone here, so un-contacting needs no second
     // code path — and the `chat:` filter below is why this reads prefixes rather
     // than bare peer ids.
-    let grants = match crate::peer::live_consent_grants(&st.engine, &owner.node_key_id).await {
-        Ok(g) => g,
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "contacts.store_unavailable",
-                format!("consent peer set: {e}"),
-            )
-        }
-    };
+    // The live grant ROWS, not just (peer, prefixes): CIRISServer#616 — every
+    // contact row carries the envelope of the grant that makes it a contact,
+    // so the client's receipt is sent, never inferred. Rows come back
+    // `asserted_at DESC`, so the first grant naming a peer is its live one.
+    let grant_rows =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("consent peer set: {e}"),
+                )
+            }
+        };
     // A CONTACT is a peer this node can actually MESSAGE, not merely one it
     // replicates to. An ordinarily-federated peer carries the default
     // `capacity:`/`trace:` grant and no `chat:`; listing them would offer the
@@ -1140,30 +1333,36 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     let directory = st.engine.federation_directory();
     let lens = ciris_edge::contact::PersistLens::new(&*directory);
     let mut peer_ids: Vec<String> = Vec::new();
-    for (subject, prefixes) in grants {
-        if !prefixes.iter().any(|p| p == CHAT_ATTESTATION_PREFIX) {
+    let mut receipts: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    for grant in &grant_rows {
+        let receipt = crate::peer::grant_receipt(grant);
+        let covers_chat = receipt["consent_prefixes"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|p| p.as_str() == Some(CHAT_ATTESTATION_PREFIX))
+        });
+        if !covers_chat {
             continue;
         }
-        let person = match ciris_edge::contact::resolve(&lens, &subject).await {
-            Ok(resolved) => resolved.fed_id,
-            // A STALL IS NOT AN ERROR, and a live grant must not vanish from the
-            // list because the directory has not converged on its subject yet.
-            // `NotYetDiscovered` fixes itself — edge queues the key fetch — so
-            // the grant is reported under the id it names until it does.
-            Err(stall) => {
-                tracing::info!(
-                    subject = %subject,
-                    stall = ?stall,
-                    "contacts: a chat-covering grant's subject does not resolve to a \
-                     person yet, so it is listed under the key the grant names. This \
-                     is the directory not having converged, not a broken grant — it \
-                     resolves itself once the subject's key body arrives"
-                );
-                subject
+        for subject in &grant.subject_key_ids {
+            let person = match ciris_edge::contact::resolve(&lens, subject).await {
+                Ok(resolved) => resolved.fed_id,
+                Err(stall) => {
+                    tracing::info!(
+                        subject = %subject,
+                        stall = ?stall,
+                        "contacts: a chat-covering grant's subject does not resolve to a \
+                         person yet, so it is listed under the key the grant names. This \
+                         is the directory not having converged, not a broken grant — it \
+                         resolves itself once the subject's key body arrives"
+                    );
+                    subject.clone()
+                }
+            };
+            if !peer_ids.contains(&person) {
+                peer_ids.push(person.clone());
+                receipts.insert(person, receipt.clone());
             }
-        };
-        if !peer_ids.contains(&person) {
-            peer_ids.push(person);
         }
     }
     let mut contacts = Vec::with_capacity(peer_ids.len());
@@ -1204,6 +1403,14 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             .collect();
         if let Some(obj) = card.as_object_mut() {
             obj.insert("contact".into(), serde_json::json!(true));
+            // CIRISServer#616 — the grant's envelope, per row: the receipt.
+            obj.insert(
+                "grant".into(),
+                receipts
+                    .get(&key_id)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
             obj.insert("chat_community_id".into(), serde_json::json!(community_id));
             obj.insert("chat_started".into(), serde_json::json!(chat_started));
             obj.insert(
@@ -2028,6 +2235,14 @@ async fn start_chat(
             format!("put_community: {e}"),
         );
     }
+    // The ROSTER is a row too. `share_in_room` kicks for every chat row that
+    // goes through it (KeyPackage, Welcome, message), but the `Community`
+    // record is written straight to the directory here and returns — so
+    // without this the invitation itself was the one row in the conversation
+    // that waited for a cadence tick, while the KeyPackage sent milliseconds
+    // later did not. Fresh create only: the idempotent second arrival above
+    // returns early, so a client retry does not re-round.
+    crate::compose::kick_replication("chat room roster created");
     (
         StatusCode::OK,
         Json(StartChatResponse {
@@ -2271,7 +2486,7 @@ async fn require_member(st: &ChatState, owner: &Owner, community_id: &str) -> Re
             format!("build_caller_admission: {e}"),
         )
     })?;
-    if !scope.admits(cohort_scope::COMMUNITY, community_id) {
+    if !scope.admits(cohort_scope::COMMUNITY, community_id, None) {
         // The contextual-integrity line. Owning the node is not membership in
         // the cohort, and the tier means nothing if this arm is skipped.
         return Err(refuse(
@@ -2546,6 +2761,20 @@ async fn send_message(
     // way, and who cannot read it is a fact about the send, not the read-back.
     let fully_readable = sealed.fully_readable();
     let excluded_key_ids = sealed.excluded;
+    // The timeline's send mark: one line per message with what a peer must now
+    // do to read it — pull the body blob from this node (holds_bytes claim +
+    // key_grant wrap replicate with the row; the kick fired in share_in_room).
+    tracing::info!(
+        room = %community_id,
+        attestation_id = %attestation_id,
+        author = %owner.key_id,
+        fully_readable,
+        excluded = excluded_key_ids.len(),
+        "chat: message sent — row placed in the room and kicked; the body is a \
+         community-DEK blob this node holds and serves, so the recipient's puller \
+         must fetch it (holds_bytes → scoped route → BlobChunkFetch) before its \
+         transcript shows a body"
+    );
     let message = match load_message(&st, &community_id, &attestation_id, &owner).await {
         Ok(Some(m)) => m,
         Ok(None) | Err(_) => {
@@ -2746,7 +2975,22 @@ async fn collect_messages(
         .await;
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
         let (body, unopened_reason) = match opened.body {
-            ciris_edge::chat::Body::Text(text) => (Some(text), None),
+            ciris_edge::chat::Body::Text(text) => {
+                // The timeline's arrival mark: the FIRST time this node reads
+                // this row with its body open. Once per row per process — a
+                // transcript is re-read constantly and the fact is one-shot.
+                if first_open(&row.attestation_id) {
+                    tracing::info!(
+                        room = %community_id,
+                        attestation_id = %row.attestation_id,
+                        author = %opened.author_key_id,
+                        "chat: body opened — the row's pointer resolved to bytes this node \
+                         holds and the seal opened under this reader's grant; the message \
+                         is readable here from now on"
+                    );
+                }
+                (Some(text), None)
+            }
             ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason.to_string())),
             // Still a pointer AFTER `resolve_content` — so the fetch did not
             // happen or did not succeed. The commonest cause is no active
@@ -2820,12 +3064,47 @@ async fn collect_messages(
             .then_with(|| a.attestation_id.cmp(&b.attestation_id))
     });
 
-    // ONE LINE THAT EXPLAINS AN EMPTY TRANSCRIPT. Every count here has been the
-    // answer to "why is the room blank" at least once, and each points somewhere
-    // different — which is the whole reason they are counted separately rather
-    // than summed.
+    // ONE LINE THAT EXPLAINS AN EMPTY OR SEALED TRANSCRIPT — and it names the
+    // reading that matches THESE counts, not a legend of every reading. Every
+    // count here has been the answer to "why is the room blank" at least once,
+    // and each points somewhere different, which is why they are counted
+    // separately rather than summed. The unopened reasons come from edge's
+    // `Body::Unopened { reason }` and are printed by kind with a count, so a
+    // recipient that holds the row and not the bytes reads `not_fetched` here
+    // and the operator goes to the puller, not the roster.
     let unopened = out.iter().filter(|m| m.body.is_none()).count();
     if out.is_empty() || unopened > 0 {
+        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        for m in out.iter().filter(|m| m.body.is_none()) {
+            let r = m
+                .unopened_reason
+                .as_deref()
+                .map(|r| r.split(':').next().unwrap_or(r).trim().to_owned())
+                .unwrap_or_else(|| "unknown".to_owned());
+            *reasons.entry(r).or_insert(0) += 1;
+        }
+        let reading = if members.is_empty() {
+            "members=0: the community row never replicated here, so nothing is anchored \
+             — check the roster plane, not the message"
+        } else if rows.is_empty() {
+            "rows_by_members=0: the members are known but none of their rows are on this \
+             node — a DELIVERY problem; read the sender's withholds and the round outcomes"
+        } else if out.is_empty() && not_community > 0 {
+            "skipped_not_community_scope>0 with projected=0: the rows exist but sit at \
+             `self`, so `widen_audience` never placed them and only their author can see them"
+        } else if out.is_empty() && not_this_room > 0 {
+            "skipped_other_room>0: the rows carry a different `community_key_id` than the \
+             one asked for — the two sides derived different room ids"
+        } else if unopened > 0 {
+            "unopened>0: the rows arrived and belong here but the body did not open — \
+             `not_fetched` = the bytes are not here yet (the puller: NoHolders means no \
+             holds_bytes claim replicated, blob_holder_not_in_group means the room is not \
+             in this node's scope-address table, a fetch timeout means the holder did not \
+             serve); `not_granted` = no key_grant wrap for this occurrence; `swept` = the \
+             epoch was destroyed; `seal_mismatch` = row and bytes disagree"
+        } else {
+            "no rows projected for a reason these counts do not name — read them left to right"
+        };
         tracing::warn!(
             room = %community_id,
             members = members.len(),
@@ -2834,20 +3113,8 @@ async fn collect_messages(
             skipped_other_room = not_this_room,
             projected = out.len(),
             unopened,
-            "chat: the transcript is empty or partly unreadable — read the counts \
-             left to right, the first surprising one is the answer. members=0: \
-             the community row never replicated here, so nothing is anchored \
-             (check the roster plane, not the message). rows_by_members=0: the \
-             members are known but none of their rows are on this node — a \
-             DELIVERY problem, look at the sender's withholds. \
-             skipped_not_community_scope>0 with projected=0: the rows exist but \
-             sit at `self`, so `widen_audience` never placed them and only this \
-             node can see them. skipped_other_room>0: rows carry a different \
-             `community_key_id` than the one asked for — the two sides derived \
-             different room ids. unopened>0: the rows arrived and belong here but \
-             the seal will not open, which is an MLS epoch this member does not \
-             hold (a row sealed before we joined, or sealed under edge v19's key \
-             derivation, which v20 deliberately cannot read)"
+            unopened_reasons = ?reasons,
+            "chat: the transcript is empty or partly unreadable — {reading}"
         );
     } else {
         tracing::debug!(
@@ -2858,6 +3125,23 @@ async fn collect_messages(
         );
     }
     Ok(out)
+}
+
+/// Once-per-process gate for the "body opened" timeline mark: `true` the first
+/// time `attestation_id` is seen open here. Bounded — a chat corpus is small,
+/// and the set is cleared rather than grown without limit, at the cost of one
+/// repeated line per row after a clear.
+fn first_open(attestation_id: &str) -> bool {
+    static OPENED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let set = OPENED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let Ok(mut guard) = set.lock() else {
+        return false;
+    };
+    if guard.len() > 8192 {
+        guard.clear();
+    }
+    guard.insert(attestation_id.to_owned())
 }
 
 /// The other person in a pair room. Split out of [`room_context`] because a
@@ -3080,6 +3364,7 @@ pub fn router(
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     user_seed_dir: std::path::PathBuf,
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 ) -> Router {
     let state = ChatState {
         engine,
@@ -3087,6 +3372,7 @@ pub fn router(
         rooms: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         node_signer,
         routes,
+        scope_lifecycle,
     };
     Router::new()
         .route(
