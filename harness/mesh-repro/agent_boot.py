@@ -418,6 +418,14 @@ def main() -> int:
         for addr in [a.strip() for a in block.split(",") if a.strip()]:
             r = subprocess.run(["iptables", "-I", "OUTPUT", "-d", addr, "-j", "REJECT"], capture_output=True, text=True)
             log(f"BLOCK-PRODUCTION: iptables OUTPUT -d {addr} REJECT rc={r.returncode} {(r.stderr or '').strip()[:120]}")
+            if r.returncode != 0:
+                # LOAD-BEARING, not advisory. A runner that refuses NET_ADMIN (or an
+                # image without iptables) must not start an edge that will dial
+                # production from CI. The prepare hook's guard would only notice
+                # AFTER the connection; this refuses to make it.
+                log(f"BLOCK-PRODUCTION FATAL: could not REJECT egress to {addr} — refusing to start "
+                    f"an edge that would dial the production canonical (CIRISServer#632 / CIRISEdge#661)")
+                sys.exit(3)
     engine = Engine(
         f"sqlite:///{db}",
         key_id,
