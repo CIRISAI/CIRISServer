@@ -495,6 +495,36 @@ what to expect on a fleet that crosses it:
   / `share` / `view` tokens are unchanged and cover every narrower ask. If you
   mint your own tokens, keep to the grammar; an unknown *kind* is still yours.
 
+### 6c″. A claimed node reads its own config again — 0.5.214 (added 2026-09-22)
+
+**Adopt the triple together: edge v29.3.1 · persist v46.3.1 · verify v16.1.0.** 0.5.213
+failed your five-platform gate at first-run setup (CIRISServer#624): the *second*
+`POST /v1/federation/announce` returned 500. The 500 was a symptom. On a **claimed** node
+`GET /v1/config` read `{}` over rows that existed and were stamped exactly as CC 3.1.9 / 3.4.5
+prescribe, because persist's read-side `self` gate compared the caller's *resolved* identity to
+the row's *raw* target — since persist#873 a claimed node resolves to its owner, so its own rows
+vanished, for the node too. With no leaf head to renew, the next write opened the leaf a second
+time and persist's (correct) duplicate-live-row guard refused it. Fixed upstream in persist
+v46.3.1 (CIRISPersist#888/#889): the gate admits the caller's **self-collective** on both twins.
+
+What this means for you:
+
+- **Nothing changes in the agent.** No route, wire, migration or vocabulary moved. Your two-pass
+  gate (run-without-AI, then with-AI, over one node) now passes the second announce; the first
+  always did.
+- **What to re-run:** the five-platform gate on 0.5.214 (CIRISAgent#1184). The server's own
+  witness for this is `tests/a_claimed_node_reads_its_own_config.rs`: claimed node → write
+  config → read returns it → the second write is a `supersedes`, not a refused `scores`.
+- **Sensitive config leaves stay node-local.** persist's widening admits the owner's other keys to
+  a node's `self` rows *except* `config:admission` and `config:transport` (CC 3.4.5.1), which only
+  the node itself reads. `net.announce_ownership` / `net.bootstrap_peers` are not in that set.
+- **Also in the triple, no action needed:** edge v29.2.0 `refresh_members` — a room member whose
+  announce lands after the room was addressed is now addressed at the same epoch instead of staying
+  unroutable until the next rekey (CIRISEdge#648); edge v29.3.0 / persist v46.3.0 `send_set_for` —
+  a `self` row now reaches the owner's second device with no grant between them (R2, the rung under
+  "my stuff on my other devices"; the self-room drive and `GET /v1/drive` are the cuts after this);
+  verify v16.1.0 `create_federation_identity_in` (a dedicated `--home` seals its own PQC half).
+
 ### 6d. Not in this cut (tracked)
 
 - Rooms are **pairs only**: no create/invite/revoke, roster check is exactly
