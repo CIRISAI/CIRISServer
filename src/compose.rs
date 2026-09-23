@@ -3982,7 +3982,15 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
 struct PublishOwn {
     keys: Arc<std::sync::RwLock<Vec<String>>>,
     engine: Arc<Engine>,
-    node_key_id: String,
+    /// EVERY key that is "us" — `own_key_ids(edge)`: the edge signer, the actor
+    /// identity, and the minted node signer. Not one key.
+    ///
+    /// On the actor/node split (CC 3.4.7.3 Clause A) these are DIFFERENT keys
+    /// and the owner-binding is moved onto the NODE key
+    /// (`move_owner_binding_to_node_key`), so `owner_of(edge_signer)` resolves
+    /// to nothing and the owner never enters the publish-own set at all
+    /// (CIRISServer#629).
+    own_key_ids: Vec<String>,
     /// Once the owner is in the set, no kick needs to resolve them again — this
     /// is what keeps "every kick admits the owner" down to one atomic load on
     /// the hot path (a kick fires for every chat row).
@@ -4008,7 +4016,18 @@ async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
     if held.owner_admitted.load(Ordering::Relaxed) {
         return false;
     }
-    let Ok(Some(owner)) = held.engine.owner_of(&held.node_key_id).await else {
+    // ASK FOR EVERY IDENTITY WE ARE. A split install binds the owner to the
+    // NODE key while the edge signs as the actor, so asking only about the
+    // signer answers None and the owner-attested rows — the binding itself,
+    // the owner's occurrences — are held locally and advertised to nobody.
+    let mut found = None;
+    for k in &held.own_key_ids {
+        if let Ok(Some(owner)) = held.engine.owner_of(k).await {
+            found = Some(owner);
+            break;
+        }
+    }
+    let Some(owner) = found else {
         return false;
     };
     let keys = &held.keys;
@@ -4213,8 +4232,25 @@ pub(crate) async fn start_replication_runtime(
     // still never crossed; this was the last door). The owner is resolved at
     // runtime (claiming happens after boot) by the updater task below, through
     // persist's withdraws-aware owner_of.
+    // SEEDED WITH EVERY IDENTITY THIS NODE IS, not just the edge signer.
+    //
+    // `own_key_ids(edge)` is the existing answer to "which keys are us" — the
+    // edge signer, the actor identity, and the minted node signer — and two
+    // other call sites are gated on consulting it (#607). This one was not, and
+    // on an actor/node split install that omission is total: the node mints a
+    // node key, MOVES the owner-binding onto it and makes it the wire identity,
+    // then attests its identity occurrences and its `consent:replication:v1`
+    // grant with it — while the publish-own set contains only the actor key, so
+    // the node's OWN key record is never offered in a Key round. The far side
+    // admits the actor key, never the node key, and then refuses every row the
+    // node attests with "attesting_key_id … is not a registered federation
+    // key". Measured on the production canonical (CIRISServer#629): five agent
+    // keys admitted in one afternoon, zero node keys, zero rows of any
+    // dimension, and no trace since the last install whose keys happened to
+    // coincide.
+    let own = own_key_ids(edge);
     let self_publish_keys: Arc<std::sync::RwLock<Vec<String>>> =
-        Arc::new(std::sync::RwLock::new(vec![node_key_id.to_string()]));
+        Arc::new(std::sync::RwLock::new(own.clone()));
     // Published so the CLAIM/ANNOUNCE path can refresh this set the moment it
     // authors the owner-binding, instead of the owner arriving up to 30s later
     // on the poll below. Set once per process; a second replication bring-up
@@ -4223,7 +4259,7 @@ pub(crate) async fn start_replication_runtime(
     let _ = SELF_PUBLISH.set(PublishOwn {
         keys: Arc::clone(&self_publish_keys),
         engine: Arc::clone(engine),
-        node_key_id: node_key_id.to_string(),
+        own_key_ids: own.clone(),
         owner_admitted: std::sync::atomic::AtomicBool::new(false),
     });
     let self_provider: ciris_edge::replication::CohortProvider = {
@@ -5136,12 +5172,42 @@ mod own_key_ids_tests {
         for f in [
             "async fn prime_trusted_peers(",
             "async fn prime_canonical_bootstrap_peers(",
+            // THE PUBLISH-OWN SEED (CIRISServer#629). This one was missed, and
+            // the omission was total on an actor/node split: the node's own key
+            // record was never offered in a Key round, so the far side refused
+            // every row the node attested as "not a registered federation key".
+            // Seeding from a single key here is the same defect as rooting a
+            // hint without consulting `own_key_ids`, so it is gated in the same
+            // loop rather than in a test of its own.
+            "pub(crate) async fn start_replication_runtime(",
         ] {
             let start = compose.find(f).unwrap_or_else(|| panic!("{f} exists"));
-            let body = &compose[start..start + 4_000];
+            // THE WHOLE FUNCTION, not a fixed window. A 4 KiB slice silently
+            // stopped short of `start_replication_runtime`'s publish-own seed,
+            // which is exactly the statement this gate exists to see — a scan
+            // whose reach is shorter than the body it checks reports "absent"
+            // for code that is present, and would have reported "present" for a
+            // function whose next neighbour happened to contain the needle.
+            let body = &compose[start..];
+            let end = body.find("\n}\n").map_or(body.len(), |n| n + 2);
+            // CODE ONLY. These functions explain in prose WHY they consult
+            // `own_key_ids(edge)`, so a scan that cannot tell an explanation
+            // from a call passes on the comment alone — verified by deleting
+            // the call and watching this gate stay green until it stripped
+            // them.
+            let body: String = body[..end]
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
                 body.contains("own_key_ids(edge)"),
-                "{f} must consult own_key_ids before rooting a hint as a peer (#607)"
+                "{f} must consult own_key_ids — every key this node IS has to be in the \
+                 set, or a split install never offers its own node key and the far side \
+                 refuses every row it attests (#607, #629)"
             );
         }
         let delivery = include_str!("federation_delivery.rs");

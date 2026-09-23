@@ -66,7 +66,19 @@ pub async fn owner(st: &crate::drive::DriveState, headers: &HeaderMap) -> Option
     {
         return None;
     }
-    let node = st.engine.local_derived_key_id().await.ok()?;
+    // THE WIRE NODE, NOT THE ENGINE'S ACTOR KEY (Codex, CIRISServer#628). On the
+    // supported actor/node split (CC 3.4.7.3 Clause A, `FSD/ACTOR_NODE_KEY_SPLIT.md`)
+    // compose moves the owner binding onto `node_resolution.node_key_id` and
+    // registers it as the process's wire identity, while
+    // `engine.local_derived_key_id()` keeps returning the ACTOR key. Looking the
+    // binding up by the actor key finds nothing there, so every file, drive and
+    // notes route would answer `drive.owner_session_required` to the real owner
+    // — a total outage of this plane on exactly the embedded topology the agent
+    // runs, and one no single-identity test can see.
+    let node = match crate::node_key::wire_identity() {
+        Some(w) => w.to_owned(),
+        None => st.engine.local_derived_key_id().await.ok()?,
+    };
     let bound = crate::auth::gate::require_owner_bound(&st.engine, &node)
         .await
         .ok()?;
