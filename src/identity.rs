@@ -58,7 +58,7 @@ use anyhow::{Context, Result};
 use ciris_keyring::user_identity::{get_user_identity_signer, SigningBackend, UserIdentityConfig};
 use ciris_keyring::{HardwareSigner, PqcSigner};
 use ciris_verify_core::fedcode;
-use ciris_verify_core::federation_identity::create_federation_identity;
+use ciris_verify_core::federation_identity::{create_federation_identity_in, preflight_keys_dir};
 
 /// The default PIV slot an empty YubiKey is provisioned into — `9c` (Digital
 /// Signature). ykcs11 maps `9c` to the label "Private key for Digital
@@ -249,22 +249,14 @@ pub struct MintedUserIdentity {
 /// - a DEVICE occurrence (`mint_local_device_occurrence_with`) is fully
 ///   home-scoped — it does not go through `create_federation_identity`, and
 ///   both halves land in this home;
-/// - a newly minted USER identity is sealed globally by
-///   `create_federation_identity` and then settled by
-///   [`relocate_sealed_pqc_into_home`] according to a [`SealedHalfPlan`] taken
-///   BEFORE the mint — because afterwards a half the creator minted is
-///   indistinguishable from one that was already there. A half this mint
-///   created is relocated (copy, prove the copy opens to the same public key,
-///   then remove the original); a half this home already had is staged for the
-///   creator so a retry reuses it; a half that predates home scoping is LEFT
-///   ALONE, because another home may be resolving through it and moving it
-///   would strand that identity. Re-minting is what it must never do, since
-///   the seed IS the identity (CIRISVerify#134).
-///
-/// So `--home` now isolates the database, config, logs, the Ed25519 seed AND
-/// the post-quantum half. If the relocation cannot complete — the home store
-/// cannot be written, or the copy does not verify — the identity keeps working
-/// from the global store, untouched, and says so at WARN.
+/// - a newly minted USER identity seals its ML-DSA half into THIS home too,
+///   through verify v16.1.0's `create_federation_identity_in(keys_dir, …)`
+///   (CIRISVerify#285), after `preflight_keys_dir` has proved the directory
+///   usable. So `--home` now isolates the database, config, logs, the Ed25519
+///   seed AND the post-quantum half, and two homes minting the same alias no
+///   longer share one file. (A relocation that copied a globally-sealed half
+///   into the home used to stand in for this parameter; it is gone, because it
+///   had to guess whose half it was moving.)
 ///
 /// # The fallback is deliberate, and it never re-mints
 ///
@@ -313,295 +305,6 @@ fn sealed_half_present(dir: &std::path::Path, alias: &str) -> bool {
 /// Returns the directory the half now lives in. Never fatal — on any doubt the
 /// legacy copy is left exactly as it was and the identity keeps working from
 /// there; the caller resolves through `sealed_keys_dir_for` either way.
-/// What a mint must do about the sealed PQC half — decided BEFORE the
-/// global-only creator runs, because afterwards the three cases are
-/// indistinguishable.
-///
-/// `create_federation_identity` calls `open_or_create` against the global store.
-/// Whether that OPENS an existing key or MINTS a new one depends on what was
-/// there beforehand, and nothing in its result says which happened. Reading the
-/// directory afterwards and relocating whatever is found conflates a half this
-/// mint created with one that belonged to somebody already — which is how a
-/// second `--home` could move a pre-home-scoping identity out from under the
-/// home that was resolving through it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SealedHalfPlan {
-    /// Nothing sealed anywhere for this alias. The creator will mint it, and
-    /// what it mints belongs to this mint — safe to relocate into the home.
-    CreatorWillMint,
-    /// This home already holds the half (a retried provision/ensure). A copy is
-    /// staged into the global store first so the creator OPENS our key instead
-    /// of minting a second one, then the staged copy is removed.
-    ReuseHome,
-    /// The global store holds it and this home does not. It predates home
-    /// scoping and another home may be resolving through it, so it is not ours
-    /// to move. Left exactly where it is.
-    LeaveLegacy,
-    /// Home and global are the same directory — nothing to decide.
-    NotApplicable,
-}
-
-/// Decide before minting. Pure: reads the two directories and nothing else.
-pub fn plan_sealed_half(
-    seed_dir: &std::path::Path,
-    alias: &str,
-    legacy: &std::path::Path,
-) -> SealedHalfPlan {
-    let home = home_keys_dir(seed_dir);
-    if home == legacy {
-        return SealedHalfPlan::NotApplicable;
-    }
-    match (
-        sealed_half_present(&home, alias),
-        sealed_half_present(legacy, alias),
-    ) {
-        (true, _) => SealedHalfPlan::ReuseHome,
-        (false, true) => SealedHalfPlan::LeaveLegacy,
-        (false, false) => SealedHalfPlan::CreatorWillMint,
-    }
-}
-
-/// Copy every file this alias owns from `from` into `to`, returning what landed
-/// so a caller can undo it. One spelling for both directions.
-fn copy_alias_files(
-    from: &std::path::Path,
-    to: &std::path::Path,
-    alias: &str,
-) -> Result<Vec<std::path::PathBuf>> {
-    std::fs::create_dir_all(to).with_context(|| format!("create key store {}", to.display()))?;
-    let prefix = format!("{alias}.");
-    let mut landed = Vec::new();
-    for entry in
-        std::fs::read_dir(from).with_context(|| format!("read key store {}", from.display()))?
-    {
-        let entry = entry.context("read an entry of the key store")?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        // EVERY file the alias owns, not just the blob: the software seal keeps
-        // its master key beside it and the TPM plugin its own marker, and a
-        // half-copied keyset opens to nothing.
-        if !name.starts_with(&prefix) || !entry.path().is_file() {
-            continue;
-        }
-        let dest = to.join(name);
-        std::fs::copy(entry.path(), &dest)
-            .with_context(|| format!("copy {} into {}", name, to.display()))?;
-        landed.push(dest);
-    }
-    Ok(landed)
-}
-
-/// Remove every file this alias owns from `dir`, naming what it could not.
-fn remove_alias_files(dir: &std::path::Path, alias: &str, why: &str) {
-    let prefix = format!("{alias}.");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with(&prefix))
-            && entry.path().is_file()
-        {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                tracing::warn!(
-                    path = %entry.path().display(),
-                    error = %e,
-                    reason = why,
-                    "a sealed-key file could not be removed — delete it by hand"
-                );
-            }
-        }
-    }
-}
-
-/// Stage this home's half into the global store so the global-only creator
-/// opens OUR key rather than minting a second one for an alias we already hold.
-///
-/// Without this, a retried `POST /v1/self/identity` produced an identity that
-/// disagreed with itself: the creator minted a fresh global half and built the
-/// CEG object and fedcode from it, while the response and every later signer
-/// resolution used the home half — so the operation that is documented as
-/// repeatable emitted an unusable identity the second time.
-pub fn stage_home_half_into(
-    seed_dir: &std::path::Path,
-    alias: &str,
-    legacy: &std::path::Path,
-) -> Vec<std::path::PathBuf> {
-    match copy_alias_files(&home_keys_dir(seed_dir), legacy, alias) {
-        Ok(landed) => landed,
-        Err(e) => {
-            // Not fatal, but say what it costs: the creator will mint a second
-            // half and the identity it records will not be the one this home
-            // signs with.
-            tracing::warn!(
-                alias,
-                error = %format!("{e:#}"),
-                "could not stage this home's sealed half for the minter — a retried provision \
-                 may record a DIFFERENT post-quantum half than this home resolves with"
-            );
-            Vec::new()
-        }
-    }
-}
-
-/// `legacy` is passed in rather than looked up so this is testable without
-/// setting `CIRIS_HOME` — a process-global that races every other test in the
-/// binary. The global lookup stays at the call site, where it belongs.
-///
-/// `plan` is what [`plan_sealed_half`] decided before the creator ran.
-pub async fn relocate_sealed_pqc_into_home(
-    seed_dir: &std::path::Path,
-    alias: &str,
-    legacy: &std::path::Path,
-    plan: SealedHalfPlan,
-) -> std::path::PathBuf {
-    use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
-
-    let home = home_keys_dir(seed_dir);
-    let legacy = legacy.to_path_buf();
-    match plan {
-        SealedHalfPlan::NotApplicable => return sealed_keys_dir_in(seed_dir, alias, &legacy),
-        SealedHalfPlan::LeaveLegacy => {
-            // NOT OURS TO MOVE. This alias was sealed globally before home
-            // scoping existed, so another home's resolver may be reaching it
-            // there; relocating would leave that home with neither a local nor
-            // a global half and an established identity that can no longer
-            // sign. Isolation for this alias needs an operator: move
-            // `{alias}.*` deliberately, once, knowing which homes use it.
-            tracing::info!(
-                alias,
-                legacy = %legacy.display(),
-                home = %home.display(),
-                "this alias's sealed ML-DSA-65 half predates home scoping and stays in the \
-                 GLOBAL key store — another home may resolve through it, and moving it would \
-                 strand that home's identity. Nothing was copied (CIRISVerify#285)"
-            );
-            return sealed_keys_dir_in(seed_dir, alias, &legacy);
-        }
-        SealedHalfPlan::ReuseHome => {
-            // The creator opened the copy staged for it. Prove the two still
-            // agree, then take the staging back down: the home copy is the one
-            // that stays.
-            let same = async {
-                let a = SealedMlDsa65Signer::open_existing(alias, &home)
-                    .map_err(|e| anyhow::anyhow!("re-open this home's half: {e}"))?;
-                let b = SealedMlDsa65Signer::open_existing(alias, &legacy)
-                    .map_err(|e| anyhow::anyhow!("re-open the staged half: {e}"))?;
-                Ok::<bool, anyhow::Error>(a.public_key().await? == b.public_key().await?)
-            }
-            .await;
-            match same {
-                Ok(true) => {
-                    remove_alias_files(&legacy, alias, "staged for the minter, no longer needed");
-                    tracing::info!(
-                        alias,
-                        home = %home.display(),
-                        "the minter reused THIS home's sealed ML-DSA-65 half — the identity it \
-                         recorded and the one this home signs with are the same key"
-                    );
-                }
-                Ok(false) => tracing::warn!(
-                    alias,
-                    "the minter recorded a DIFFERENT post-quantum half than this home holds — \
-                     the staged copy is left in the global store rather than deleted, because \
-                     deleting it would destroy the key the new record names. Reconcile by hand \
-                     before using this identity"
-                ),
-                Err(e) => tracing::warn!(
-                    alias,
-                    error = %format!("{e:#}"),
-                    "could not compare this home's sealed half with the staged copy — leaving \
-                     both in place; nothing was deleted"
-                ),
-            }
-            return home;
-        }
-        SealedHalfPlan::CreatorWillMint => {}
-    }
-    if !sealed_half_present(&legacy, alias) {
-        // The creator did not seal after all (a hardware-custodied mint, or a
-        // failure that did not surface here). Nothing to move.
-        return sealed_keys_dir_in(seed_dir, alias, &legacy);
-    }
-
-    let copied = match copy_alias_files(&legacy, &home, alias) {
-        Ok(copied) => copied,
-        Err(e) => {
-            tracing::warn!(
-                alias,
-                error = %format!("{e:#}"),
-                legacy = %legacy.display(),
-                "could not move this identity's sealed ML-DSA-65 half into the home key \
-                 store — it stays in the global one and the identity is unaffected \
-                 (CIRISVerify#285)"
-            );
-            return sealed_keys_dir_in(seed_dir, alias, &legacy);
-        }
-    };
-
-    // PROVE IT BEFORE DELETING ANYTHING. `open_existing` is load-only and errors
-    // rather than fabricating a seed, which matters more here than anywhere:
-    // `open_or_create` against a bad copy would MINT a fresh PQC half, and the
-    // identity would be silently replaced by one no peer can verify
-    // (CIRISVerify#134). Both halves are opened and their public keys compared,
-    // so "the file copied" is not mistaken for "the key survived".
-    let verdict = async {
-        let from_home = SealedMlDsa65Signer::open_existing(alias, &home)
-            .map_err(|e| anyhow::anyhow!("re-open the copied half from {}: {e}", home.display()))?;
-        let from_legacy = SealedMlDsa65Signer::open_existing(alias, &legacy).map_err(|e| {
-            anyhow::anyhow!("re-open the original half from {}: {e}", legacy.display())
-        })?;
-        let a = from_home
-            .public_key()
-            .await
-            .map_err(|e| anyhow::anyhow!("public key of the copied half: {e}"))?;
-        let b = from_legacy
-            .public_key()
-            .await
-            .map_err(|e| anyhow::anyhow!("public key of the original half: {e}"))?;
-        if a != b {
-            anyhow::bail!("the copied half opens to a DIFFERENT public key than the original");
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-
-    if let Err(e) = verdict {
-        for c in &copied {
-            let _ = std::fs::remove_file(c);
-        }
-        tracing::warn!(
-            alias,
-            error = %format!("{e:#}"),
-            "the copied sealed half did not verify — the copy has been removed and the \
-             identity keeps using the global key store, untouched. Nothing was re-minted"
-        );
-        return sealed_keys_dir_in(seed_dir, alias, &legacy);
-    }
-
-    // Verified, and this half was minted BY THIS MINT (`CreatorWillMint`), so
-    // removing the global original strands nobody — the `LeaveLegacy` arm above is
-    // what keeps a pre-home-scoping half where another home can still reach it.
-    // Best-effort: a leftover file there is untidy, and the resolution prefers the
-    // home copy anyway.
-    remove_alias_files(
-        &legacy,
-        alias,
-        "relocated into this home; two homes sharing the alias would otherwise find it",
-    );
-    tracing::info!(
-        alias,
-        home = %home.display(),
-        legacy = %legacy.display(),
-        "this identity's sealed ML-DSA-65 half now lives in THIS home's key store — verified \
-         by public key before the global original was removed, never re-minted \
-         (CIRISServer#621, CIRISVerify#285)"
-    );
-    home
-}
-
 pub(crate) fn sealed_keys_dir_for(seed_dir: &std::path::Path, alias: &str) -> std::path::PathBuf {
     // `<home>/identity/user` → `<home>/identity/keys`. Deriving from the seed
     // dir rather than threading a `ServerConfig` keeps this callable from the
@@ -890,30 +593,29 @@ pub async fn mint_user_identity(
     // 2. Mint the hybrid hardware-rooted identity. verify v6.0.0 attaches the
     //    sealed ML-DSA-65 half internally + emits the genesis CEG object + the
     //    fedcode. A touch-required YubiKey blocks on the signature until tapped.
-    // DECIDED BEFORE THE MINT. `create_federation_identity` calls
-    // `open_or_create` against the GLOBAL key store and its result does not say
-    // whether that opened an existing half or minted a new one — so the three
-    // cases are only distinguishable from here. See `SealedHalfPlan`:
+    // THE HOME'S OWN KEY STORE, chosen BEFORE the mint (CIRISVerify#285, verify
+    // v16.1.0). `create_federation_identity` seals the ML-DSA half into the
+    // process-global `keys_dir()`; the `_in` form takes the directory, so a
+    // dedicated `--home` scopes its post-quantum half the way it already scoped
+    // its database, config, logs and Ed25519 seed. `preflight_keys_dir` runs
+    // first: it creates the directory, refuses a file where the directory must
+    // be, and probes a real write — before anything irreversible (a PIV slot
+    // consumed by `--provision`, a record registered) can happen.
     //
-    // - nothing sealed anywhere ⇒ what the creator mints is ours to relocate;
-    // - this home already holds it (a retried provision/ensure) ⇒ stage a copy
-    //   so the creator OPENS our key rather than minting a second one, which is
-    //   what made the second call emit an identity that disagreed with itself;
-    // - the global store holds it and this home does not ⇒ it predates home
-    //   scoping and another home may resolve through it, so it is not ours to
-    //   move.
-    let legacy_keys = ciris_verify_core::ceg_outbox::keys_dir();
-    let sealed_plan = plan_sealed_half(&cfg.seed_dir, key_id_alias, &legacy_keys);
-    if sealed_plan == SealedHalfPlan::ReuseHome {
-        stage_home_half_into(&cfg.seed_dir, key_id_alias, &legacy_keys);
-    }
-    tracing::debug!(
-        alias = key_id_alias,
-        plan = ?sealed_plan,
-        "sealed ML-DSA-65 half: plan decided before the mint"
-    );
+    // This replaces a relocation that copied the globally-sealed half into the
+    // home, proved the copy by public key, and deleted the original — a
+    // stand-in for exactly this parameter, and one that could strand another
+    // home's identity if it guessed wrong about whose half it was moving. An
+    // identity sealed globally BEFORE this change is still found: the re-open
+    // below resolves home-first with the global store as fallback and never
+    // re-mints (CIRISVerify#134). Migration of existing material stays a
+    // deliberate operator act, as verify's own doc says.
+    let home_keys = home_keys_dir(&cfg.seed_dir);
+    preflight_keys_dir(&home_keys)
+        .map_err(|e| anyhow::anyhow!("this home's key store is unusable: {e}"))?;
     let now = chrono::Utc::now().to_rfc3339();
-    let created = create_federation_identity(
+    let created = create_federation_identity_in(
+        &home_keys,
         Arc::clone(&hw_signer),
         // identity_type "user" → FedKind::User (the accountable human).
         "user",
@@ -950,13 +652,10 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user Ed25519 public key: {e}"))?;
-    // BEFORE the first re-open: move the half verify just sealed globally into
-    // this home, so everything downstream — this open, the resolver, a later
-    // device enrolment — finds it where this home keeps keys. Returns whichever
-    // directory the half actually lives in, so a relocation that did not happen
-    // (or did not verify) still resolves.
-    let pqc_dir =
-        relocate_sealed_pqc_into_home(&cfg.seed_dir, key_id_alias, &legacy_keys, sealed_plan).await;
+    // Re-open from wherever this alias's half actually lives: the home store
+    // for anything minted from here on, the global store for an identity sealed
+    // before home scoping. Never re-mints.
+    let pqc_dir = sealed_keys_dir_for(&cfg.seed_dir, key_id_alias);
     let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(key_id_alias, pqc_dir)
         .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
     let ml_pub = pqc
