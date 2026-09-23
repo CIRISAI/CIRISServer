@@ -84,7 +84,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat"]') }}
+        # traceflow_prod is the PRODUCTION-SHAPED ladder (CIRISServer#632): a split, owned,
+        # Advisory-admitted, genesis-imported agent — the topology every production agent
+        # runs and the blessed ladders never had. Its SUCCESS_STAGE is `served` until
+        # CIRISEdge#659 lands; `arrive` is measured and expected red until then.
+        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat","traceflow_prod"]') }}
     runs-on: ubuntu-latest
     # 0.5.166 raised this from 45: this ladder builds a test-anchor wheel, and
     # `lto = "thin"` + `codegen-units = 1` (CIRISServer#378) roughly doubles the
