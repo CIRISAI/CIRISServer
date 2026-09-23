@@ -733,6 +733,45 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # THE DRIVE PLANE (CIRISServer#622 / 0.5.215) — a new surface's refusals,
+    # emitted before the bundle that carries them exists. Same shape as the
+    # chat plane's entries below: a whole plane landed with the substrate that
+    # made it possible, and the `ciris-client` release carrying its keys comes
+    # after. Requested in CIRISClient#65 WITH the English text, so this is a
+    # queue, not a shrug.
+    #
+    # This is the borderline case the note above warns about, so the reasoning
+    # is written down rather than assumed: these are NOT "prose that got an id"
+    # and they ARE translatable, which normally means fix it instead of listing
+    # it. What makes listing right here is that the fix is in another repo's
+    # release, and the alternative — holding the drive plane until a client
+    # ships — trades a real capability for English strings on error paths. The
+    # entries come out and the floor in pyproject.toml goes up the moment a
+    # bundle carries them, exactly as 0.5.203 did for the contact ladder.
+    #
+    # `drive.not_fetched` / `drive.not_granted` matter most: they are emitted
+    # in NORMAL use (a file whose bytes are on another device), not only on
+    # error, so they are the two a reader meets first.
+    "drive.author_signer_unavailable",
+    "drive.bad_base64",
+    "drive.community_id_required",
+    "drive.family_id_required",
+    "drive.listing_failed",
+    "drive.no_node_key",
+    "drive.not_fetched",
+    "drive.not_granted",
+    "drive.not_in_room",
+    "drive.owner_session_required",
+    "drive.publish_failed",
+    "drive.readable_by_nobody",
+    "drive.too_large",
+    "drive.unknown_cohort",
+    "drive.unopened",
+    "notes.author_signer_unavailable",
+    "notes.empty",
+    "notes.listing_failed",
+    "notes.no_node_key",
+    "notes.owner_session_required",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

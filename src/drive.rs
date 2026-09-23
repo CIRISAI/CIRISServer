@@ -132,7 +132,7 @@ fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeR
         Cohort::Family => room_id.map(ScopeRoom::family).ok_or_else(|| {
             refuse(
                 StatusCode::BAD_REQUEST,
-                "drive.room_required",
+                "drive.family_id_required",
                 "a family write must name `room_id` (the family's key id) — there is no \
                  default family, and guessing one would place bytes in a cohort nobody chose"
                     .into(),
@@ -141,7 +141,7 @@ fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeR
         Cohort::Community => room_id.map(ScopeRoom::community).ok_or_else(|| {
             refuse(
                 StatusCode::BAD_REQUEST,
-                "drive.room_required",
+                "drive.community_id_required",
                 "a community write must name `room_id` (the community's key id)".into(),
             )
         }),
@@ -225,7 +225,7 @@ async fn write_file(
         return refuse(
             StatusCode::FORBIDDEN,
             "drive.owner_session_required",
-            "writing a file is an act of the person who owns this node".into(),
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
         );
     };
     let room = match room_for(req.cohort, req.room_id.as_deref(), &owner.key_id) {
@@ -324,7 +324,7 @@ async fn read_drive(
         return refuse(
             StatusCode::FORBIDDEN,
             "drive.owner_session_required",
-            "a drive is one person's view of their own reach".into(),
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
         );
     };
     let cohort = match q.cohort.as_deref() {
@@ -369,7 +369,10 @@ async fn read_drive(
     for row in rows {
         let (bytes, detail) = match row.open(&content, &viewer).await {
             Ok(_) => ("here".to_owned(), "the bytes are on this device".to_owned()),
-            Err(reason) => unopened(&reason),
+            Err(reason) => {
+                let u = unopened(&reason);
+                (u.state.to_owned(), u.detail)
+            }
         };
         out.push(DriveEntry {
             attestation_id: row.attestation_id.clone(),
@@ -404,7 +407,7 @@ async fn read_file(
         return refuse(
             StatusCode::FORBIDDEN,
             "drive.owner_session_required",
-            "reading a file is an act of the person who owns this node".into(),
+            "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
         );
     };
     // Named, not defaulted. A `_ => Community` arm here sent a typo'd cohort
@@ -462,35 +465,58 @@ async fn read_file(
         )
             .into_response(),
         Err(reason) => {
-            let (state, detail) = unopened(&reason);
-            // NOT an error status for `not_fetched`: the row is legitimately
-            // here and the bytes legitimately are not. 409 says "ask again",
-            // which is the truth, where 404 would say "this does not exist".
-            let code = if state == "not_fetched" {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::FORBIDDEN
-            };
-            refuse(code, &format!("drive.{state}"), detail)
+            let u = unopened(&reason);
+            // Status and id chosen TOGETHER, both literal. NOT an error status
+            // for `not_fetched`: the row is legitimately here and the bytes
+            // legitimately are not. 409 says "ask again", which is the truth,
+            // where 404 would say "this does not exist".
+            match u.state {
+                "not_fetched" => refuse(StatusCode::CONFLICT, "drive.not_fetched", u.detail),
+                "not_granted" => refuse(StatusCode::FORBIDDEN, "drive.not_granted", u.detail),
+                _ => refuse(StatusCode::FORBIDDEN, "drive.unopened", u.detail),
+            }
         }
     }
 }
 
 /// The two states a client must tell apart, in its words.
-fn unopened(reason: &ciris_edge::chat::UnopenedReason) -> (String, String) {
+/// Why bytes are not here, in three forms a caller needs kept apart.
+struct Unopened {
+    /// The short STATE token the drive and notes surfaces report per row.
+    /// Deliberately not the id: this is a field value a client switches on,
+    /// and prefixing it would change the wire for every existing reader.
+    state: &'static str,
+    /// The English sentence, pending a bundle (CIRISClient#65).
+    detail: String,
+}
+
+fn unopened(reason: &ciris_edge::chat::UnopenedReason) -> Unopened {
+    // Returns the STATE only; the message id is spelled at the `refuse` call
+    // in `read_file`. That is not ceremony: the localization guard reads ids
+    // from literals in an emitter's ARGUMENT POSITION, so an id assembled here
+    // — or built as the old `format!("drive.{state}")` — is invisible to it,
+    // and `drive.not_fetched` / `drive.not_granted` would render the server's
+    // English in all 29 languages with NOTHING tracking the debt. These two
+    // are met in NORMAL use (a file whose bytes are simply on the person's
+    // other device), not only on error, so they are the worst pair to lose.
     let s = format!("{reason:?}");
     if s.contains("NotFetched") {
-        (
-            "not_fetched".to_owned(),
-            "on another device — the row is here, its bytes have not been pulled yet".to_owned(),
-        )
+        Unopened {
+            state: "not_fetched",
+            detail: "on another device — the row is here, its bytes have not been pulled yet"
+                .to_owned(),
+        }
     } else if s.contains("NotGranted") {
-        (
-            "not_granted".to_owned(),
-            "this device's key does not open it — it holds no grant for these bytes".to_owned(),
-        )
+        Unopened {
+            state: "not_granted",
+            detail: "this device's key does not open it — it holds no grant for these bytes"
+                .to_owned(),
+        }
     } else {
-        ("unopened".to_owned(), s)
+        Unopened {
+            state: "unopened",
+            detail: s,
+        }
     }
 }
 
@@ -585,7 +611,7 @@ async fn write_note(
         return refuse(
             StatusCode::FORBIDDEN,
             "notes.owner_session_required",
-            "a note is written by the person whose devices these are".into(),
+            "notes are one person's, and writing or reading them is that person's own act".into(),
         );
     };
     if req.body.trim().is_empty() {
@@ -674,7 +700,7 @@ async fn read_notes(
         return refuse(
             StatusCode::FORBIDDEN,
             "notes.owner_session_required",
-            "notes are one person's".into(),
+            "notes are one person's, and writing or reading them is that person's own act".into(),
         );
     };
     let room = ciris_edge::self_room::room(&owner.key_id);
@@ -730,8 +756,8 @@ async fn read_notes(
                 ),
             },
             Err(reason) => {
-                let (s, d) = unopened(&reason);
-                (None, s, d)
+                let u = unopened(&reason);
+                (None, u.state.to_owned(), u.detail)
             }
         };
         out.push(Note {
