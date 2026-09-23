@@ -60,6 +60,8 @@ pub enum SelfRoomTick {
     Created { members: usize },
     /// Our KeyPackage is published; the creator adds us when it reads it.
     PublishedKeyPackage,
+    /// The creator's Welcome arrived and we are IN the room.
+    Joined { members: usize },
     /// Devices admitted to the tree this tick.
     Added(usize),
     /// Devices removed from the tree this tick (forward secrecy: first).
@@ -72,14 +74,30 @@ pub enum SelfRoomTick {
     Failed(String),
 }
 
+/// The room this node holds, with the claim it was created under.
+///
+/// THE CLAIM IS STORED, NOT REBUILT. `decide` settles a two-room contest by
+/// comparing our claim to a rival's, and `first_rival` reads rivals off their
+/// SIGNED commit rows — stable, dated values. Rebuilding ours with
+/// `Utc::now()` on every tick made it perpetually the youngest, so a rival
+/// always won and this node always abandoned; with both nodes doing that, both
+/// drop their group and neither room survives. The winner has to be decided by
+/// a value that does not move (Codex, CIRISServer#628).
+#[derive(Clone)]
+pub struct HeldGroup {
+    pub group: Arc<CohortGroup>,
+    pub claim: CommitClaim,
+}
+
 /// Everything the driver needs, resolved once at compose.
 pub struct SelfRoomState {
     pub engine: Arc<Engine>,
     pub node_signer: Arc<LocalSigner>,
     pub user_seed_dir: std::path::PathBuf,
     pub lifecycle: Option<Arc<ScopeLifecycle>>,
-    /// The live group, held across ticks — see the module note on durability.
-    pub held: Arc<tokio::sync::Mutex<Option<Arc<CohortGroup>>>>,
+    /// The live group **and the claim it was created under**, held across
+    /// ticks — see the module note on durability.
+    pub held: Arc<tokio::sync::Mutex<Option<HeldGroup>>>,
     /// Our KeyPackage material while we wait to be added.
     pub pending: Arc<tokio::sync::Mutex<Option<CohortKeyMaterial>>>,
 }
@@ -146,9 +164,10 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     // WHAT WE HOLD: the live tree, if this process has one.
     let held_group = st.held.lock().await.clone();
     let held = match &held_group {
-        Some(g) => Some(HeldRoom {
-            claim: CommitClaim::new(chrono::Utc::now(), node_key.clone()),
-            members: g.member_key_ids().await,
+        Some(h) => Some(HeldRoom {
+            // The STORED claim — see `HeldGroup`. Not `Utc::now()`.
+            claim: h.claim.clone(),
+            members: h.group.member_key_ids().await,
         }),
         None => None,
     };
@@ -173,8 +192,8 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
         SelfRoomAction::NotInRoster => SelfRoomTick::NotInRoster,
         SelfRoomAction::SoleDevice => SelfRoomTick::SoleDevice,
         SelfRoomAction::Idle => {
-            if let Some(g) = held_group {
-                install_or_advance(st, &room, &owner, &g).await;
+            if let Some(h) = held_group {
+                install_or_advance(st, &room, &owner, &h.group).await;
             }
             if let Some(l) = &st.lifecycle {
                 l.seal_due(std::time::Instant::now());
@@ -182,8 +201,18 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             SelfRoomTick::Idle
         }
         SelfRoomAction::PublishKeyPackage => {
-            match publish_key_package(st, &room, &node_key).await {
-                Ok(()) => SelfRoomTick::PublishedKeyPackage,
+            // THE WELCOME IS THE POINT OF THE KEYPACKAGE. The first cut
+            // returned early forever once `pending` was set, so nothing ever
+            // consumed the creator's Welcome and a second device published a
+            // KeyPackage it could never act on — it stayed outside the room
+            // while reporting success every tick (Codex, CIRISServer#628).
+            // Look first, publish only if there is nothing to join.
+            match join_if_welcomed(st, &room, &roster, &node_key, rival.as_ref()).await {
+                Ok(Some(members)) => SelfRoomTick::Joined { members },
+                Ok(None) => match publish_key_package(st, &room, &node_key).await {
+                    Ok(()) => SelfRoomTick::PublishedKeyPackage,
+                    Err(e) => SelfRoomTick::Failed(e),
+                },
                 Err(e) => SelfRoomTick::Failed(e),
             }
         }
@@ -203,6 +232,29 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             // Drop ours and wait for their Welcome. Dropping FIRST is the
             // point: a room about to be abandoned must not be addressed, or we
             // register destinations at a group that is going away.
+            //
+            // AND RETIRE ITS ADDRESSES. Clearing `held` drops this driver's
+            // reference and nothing else — the snapshot installed in the
+            // scope-address table survives it, so the node keeps LISTENING on
+            // the derived address of a group it has just conceded, and keeps
+            // advertising it to peers. `leave` retires every live epoch of the
+            // group, which is exactly what abandoning means and is the one
+            // moment no address of it should survive (Codex, CIRISServer#628).
+            if let Some(life) = &st.lifecycle {
+                let out = life.leave(&room.scope(), &room.table_group_id());
+                if out.unretired > 0 {
+                    tracing::warn!(
+                        room = %room, retired = out.sealed, unretired = out.unretired,
+                        "self room: abandoned the room but could not retire every address — \
+                         this node still answers for a group it has left"
+                    );
+                } else {
+                    tracing::info!(
+                        room = %room, retired = out.sealed,
+                        "self room: retired the abandoned room's addresses"
+                    );
+                }
+            }
             *st.held.lock().await = None;
             tracing::info!(
                 owner = %owner,
@@ -256,6 +308,84 @@ async fn owner_pen(
                  cannot wield that identity: {e:?}"
             )
         })
+}
+
+/// **Join from a creator's Welcome, if one has arrived.**
+///
+/// `Ok(Some(members))` — we are in the room. `Ok(None)` — nothing to join yet,
+/// so the caller publishes (or re-publishes) a KeyPackage.
+///
+/// The material is TAKEN before the join and is NOT restored on failure — it
+/// cannot be: `CohortGroup::join` consumes it and `CohortKeyMaterial` is not
+/// `Clone`. That is the right shape anyway. A Welcome is sealed to one
+/// KeyPackage, so material that failed to consume one is spent; clearing
+/// `pending` makes the next tick MINT AND REPUBLISH a fresh KeyPackage, which
+/// is a recovery, where hoarding the dead material would retry the same
+/// failure forever.
+///
+/// The claim stored is the CREATOR's, not a fresh one — we are adopting their
+/// room, so their claim is the one that must win any later contest. Dating it
+/// `now()` here would make this node's copy of the room look younger than the
+/// room itself and invite it to abandon what it just joined.
+async fn join_if_welcomed(
+    st: &SelfRoomState,
+    room: &ScopeRoom,
+    roster: &[String],
+    own: &str,
+    rival: Option<&CommitClaim>,
+) -> Result<Option<usize>, String> {
+    if st.held.lock().await.is_some() {
+        return Ok(None);
+    }
+    if st.pending.lock().await.is_none() {
+        return Ok(None);
+    }
+    let dir = st.engine.federation_directory();
+    let room_id = room.content_group_id();
+    for node in roster.iter().filter(|n| n.as_str() != own) {
+        let Some((welcome, _epoch)) = ciris_edge::chat::welcome_from(&*dir, node, room_id)
+            .await
+            .map_err(|e| format!("read {node}'s Welcome: {e}"))?
+        else {
+            continue;
+        };
+        let Some(material) = st.pending.lock().await.take() else {
+            return Ok(None);
+        };
+        let store = SelfRoomState::store(room_id)?;
+        match ciris_edge::mls::cohort_group::CohortGroup::join(
+            store, room_id, material, &welcome, 16,
+        )
+        .await
+        {
+            Ok(group) => {
+                let group = Arc::new(group);
+                let members = group.member_key_ids().await.len();
+                let claim = rival
+                    .cloned()
+                    .unwrap_or_else(|| CommitClaim::new(chrono::Utc::now(), node.clone()));
+                *st.held.lock().await = Some(HeldGroup {
+                    group: Arc::clone(&group),
+                    claim,
+                });
+                install_or_advance(st, room, room.content_group_id(), &group).await;
+                tracing::info!(
+                    room = %room, from = %node, members,
+                    "self room JOINED — this device is in its person's room"
+                );
+                return Ok(Some(members));
+            }
+            Err(e) => {
+                // `pending` is already None (taken above), so the next tick
+                // mints a fresh KeyPackage and republishes. See the note on
+                // this function for why that beats keeping the spent material.
+                return Err(format!(
+                    "join {node}'s self room: {e} — republishing a fresh KeyPackage next tick"
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 async fn publish_key_package(
@@ -329,7 +459,11 @@ async fn create_room(
     .map_err(|e| format!("create the self room: {e}"))?;
     let group = Arc::new(group);
     let members = group.member_key_ids().await.len();
-    *st.held.lock().await = Some(Arc::clone(&group));
+    *st.held.lock().await = Some(HeldGroup {
+        group: Arc::clone(&group),
+        // Dated ONCE, here, when the room actually came into being.
+        claim: CommitClaim::new(chrono::Utc::now(), node_key.to_owned()),
+    });
     install_or_advance(st, room, owner, &group).await;
     tracing::info!(
         owner = %owner,
@@ -340,13 +474,40 @@ async fn create_room(
     Ok(members)
 }
 
+/// Undo an add whose rows could not be placed, so the next tick retries.
+///
+/// The tree is mutated by `add_member` BEFORE the Welcome exists to place, so
+/// a failure after it leaves a member `decide` counts as present and therefore
+/// never re-adds. Removing restores `in the tree ⇒ was welcomed`.
+///
+/// A failed rollback is WARNed, not returned: the caller is already returning
+/// the placement error, and replacing it with the rollback's would name the
+/// second problem and hide the first. This is the one state the drive cannot
+/// repair by itself — the tree holds a member that was never welcomed — so it
+/// says so in those words.
+async fn rollback_add(group: &Arc<CohortGroup>, node: &str, cause: &str) {
+    match group.remove_member(node).await {
+        Ok(_) => tracing::warn!(
+            %node, %cause,
+            "self room: placing the add's rows failed — removed the device from the tree \
+             again so the next tick can retry it cleanly"
+        ),
+        Err(e) => tracing::warn!(
+            %node, %cause, error = %e,
+            "self room: the add's rows could not be placed AND the member could not be \
+             rolled back — the tree now holds a device that was never welcomed, and \
+             `decide` will report Idle rather than retrying it"
+        ),
+    }
+}
+
 async fn add_members(
     st: &SelfRoomState,
     room: &ScopeRoom,
     owner: &str,
     nodes: &[String],
 ) -> Result<usize, String> {
-    let Some(group) = st.held.lock().await.clone() else {
+    let Some(group) = st.held.lock().await.clone().map(|h| h.group) else {
         return Err("add without a held room — decide() and the tree disagree".into());
     };
     let dir = st.engine.federation_directory();
@@ -390,7 +551,21 @@ async fn add_members(
         )
         .await?;
         tracing::info!(%node, epoch, "self room: committed the add; placing the Welcome");
-        cross(st, room, welcome_row, &capsule).await?;
+        // FROM HERE THE TREE IS ALREADY MUTATED, and that is the hazard: if a
+        // placement fails (or the watchdog cancels this tick), the next
+        // `decide` sees the device present in `mine.members`, returns `Idle`,
+        // and the Welcome it never received is never retried — the device sits
+        // outside a room that believes it is inside (Codex, CIRISServer#628).
+        //
+        // So a placement failure ROLLS THE MEMBER BACK OUT, restoring the
+        // invariant `in the tree ⇒ was welcomed` and letting the next tick
+        // re-add cleanly. A rollback that itself fails is the one state we
+        // cannot repair here, so it is WARNed by name rather than folded into
+        // the returned error, which would name only the first failure.
+        if let Err(e) = cross(st, room, welcome_row, &capsule).await {
+            rollback_add(&group, node, &e).await;
+            return Err(e);
+        }
         // Same axis: `commits_from(dir, <node>, room_id)` in `first_rival`
         // below already reads commits BY NODE — these two must agree or a
         // node cannot even see its own rival.
@@ -400,7 +575,10 @@ async fn add_members(
             &commit,
         )
         .await?;
-        cross(st, room, commit_row, &capsule).await?;
+        if let Err(e) = cross(st, room, commit_row, &capsule).await {
+            rollback_add(&group, node, &e).await;
+            return Err(e);
+        }
         tracing::info!(%node, epoch, "self room: device ADDED — Welcome and Commit placed");
         added += 1;
     }
@@ -416,7 +594,7 @@ async fn remove_members(
     owner: &str,
     nodes: &[String],
 ) -> Result<usize, String> {
-    let Some(group) = st.held.lock().await.clone() else {
+    let Some(group) = st.held.lock().await.clone().map(|h| h.group) else {
         return Err("remove without a held room — decide() and the tree disagree".into());
     };
     let capsule = owner_pen(st, owner).await?;

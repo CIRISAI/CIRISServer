@@ -66,6 +66,10 @@ pub struct FileWriteRequest {
 #[derive(Debug, Serialize)]
 pub struct FileWriteResponse {
     pub attestation_id: String,
+    /// Whether the room has a derived destination. `crossed: true` with
+    /// `addressed: false` means the ROW reached the audience and the BYTES
+    /// cannot be fetched — two different facts, reported separately.
+    pub addressed: bool,
     pub cohort: String,
     pub room: String,
     pub tier: String,
@@ -112,6 +116,9 @@ pub struct DriveState {
     pub engine: Arc<Engine>,
     pub node_signer: Arc<ciris_edge::identity::LocalSigner>,
     pub user_seed_dir: std::path::PathBuf,
+    /// The scope-address plane, so a write can SAY when the room it is sealing
+    /// into has no derived destination. See `addressed_or_warn`.
+    pub scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 }
 
 fn refuse(code: StatusCode, error: &str, detail: String) -> Response {
@@ -180,6 +187,100 @@ fn readable_id(published: &files::PublishedFile) -> &str {
     }
 }
 
+/// **Does this owner belong to the cohort they named?** (Codex, CIRISServer#628)
+///
+/// `self` needs no check — the room IS the owner, and `room_for` derived it
+/// from their own key rather than from anything they sent.
+///
+/// `family` / `community` do, and this was missing. A `room_id` is a
+/// caller-supplied string, `files::in_room` takes no caller identity and so
+/// cannot enforce membership itself, and a node that relays for a mesh holds
+/// rows for cohorts its owner is not in. Without this, an authenticated owner
+/// could name ANY locally-known room and read back filenames, authors,
+/// timestamps and byte-availability from it — the metadata, even where the
+/// bytes stay sealed. Owning the machine is not membership in the cohort;
+/// that is the whole contextual-integrity line, and persist's §4.3 predicate
+/// is where it is drawn for chat already (`contacts_chat::require_member`).
+///
+/// Applied to every family/community door: the write, the listing, and the
+/// direct read.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn require_cohort_member(
+    st: &DriveState,
+    owner: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+) -> Result<(), Response> {
+    let scope_token = match cohort {
+        Cohort::SelfCollective => return Ok(()),
+        Cohort::Family => ciris_persist::federation::types::cohort_scope::FAMILY,
+        Cohort::Community => ciris_persist::federation::types::cohort_scope::COMMUNITY,
+    };
+    let group = room.content_group_id();
+    let admission =
+        match ciris_persist::scope::build_caller_admission(&st.engine, &owner.to_owned()).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "drive.store_unavailable",
+                    format!("build_caller_admission: {e}"),
+                ))
+            }
+        };
+    let scope = ciris_persist::prelude::CallerScope::Authenticated { admission };
+    if scope.admits(scope_token, group, None) {
+        return Ok(());
+    }
+    Err(refuse(
+        StatusCode::FORBIDDEN,
+        "drive.not_a_member",
+        format!(
+            "this identity is not a member of {scope_token} {group:?} — owning the node that              relays a cohort's rows is not membership in it, and the listing would disclose              its filenames, authors and timestamps"
+        ),
+    ))
+}
+
+/// **Is this room actually addressable?** (Codex, CIRISServer#628)
+///
+/// A file can cross — the ROW is placed, `crossed: true` — while its BYTES
+/// have nowhere to be fetched from, because no derived destination for the
+/// room is installed in the scope-address table. The chat flow installs one
+/// when it keys a room, which is exactly what masked this: the harness chats
+/// first. A community reached without that flow, or reached after a restart,
+/// seals a file whose bytes no recipient can pull.
+///
+/// This reports rather than repairs, and the distinction is deliberate.
+/// INSTALLING a room needs its live MLS group, which lives in the chat
+/// module's registry; reaching across for it here would put two owners on the
+/// scope plane. What this does do is refuse to let the response say "crossed"
+/// and mean "reachable" — `addressed` is its own field, and a `false` is
+/// WARNed with the room named. The repair belongs with whoever owns the
+/// group registry; tracked on CIRISServer#622.
+fn addressed_or_warn(st: &DriveState, room: &ScopeRoom, cohort: Cohort) -> bool {
+    if matches!(cohort, Cohort::SelfCollective) {
+        // The self room's driver installs its own addresses each tick.
+        return true;
+    }
+    let Some(life) = st.scope_lifecycle.as_ref() else {
+        return false;
+    };
+    let installed = life
+        .table()
+        .live_epochs(&room.scope(), &room.table_group_id())
+        .is_some();
+    if !installed {
+        tracing::warn!(
+            room = %room,
+            "drive: this room has NO derived destination in the scope-address table, so the \
+             file's bytes cannot be fetched by anyone even though the row crosses. The room \
+             is addressed when it is keyed (the chat flow does it); a community reached \
+             without that, or after a restart, seals bytes nobody can pull"
+        );
+    }
+    installed
+}
+
 fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
     ciris_edge::group_content::PersistGroupContentStore::new(
         (**engine).clone(),
@@ -232,7 +333,11 @@ async fn write_file(
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Err(e) = require_cohort_member(&st, &owner.key_id, req.cohort, &room).await {
+        return e;
+    }
     ensure_owner_is_a_kem_target(&st, &owner.key_id).await;
+    let addressed = addressed_or_warn(&st, &room, req.cohort);
     let bytes = match base64_decode(&req.bytes_base64) {
         Ok(b) => b,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, "drive.bad_base64", e),
@@ -302,6 +407,7 @@ async fn write_file(
         StatusCode::OK,
         Json(FileWriteResponse {
             attestation_id: readable_id(&published).to_owned(),
+            addressed,
             cohort: room.row_scope_token().to_owned(),
             room: room.to_string(),
             tier: format!("{:?}", published.tier),
@@ -343,6 +449,9 @@ async fn read_drive(
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
+        return e;
+    }
     let dir = st.engine.federation_directory();
     let rows = match files::in_room(&*dir, &room, q.limit).await {
         Ok(r) => r,
@@ -430,6 +539,9 @@ async fn read_file(
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
+        return e;
+    }
     let dir = st.engine.federation_directory();
     let rows = files::in_room(&*dir, &room, 500).await.unwrap_or_default();
     let Some(row) = rows
@@ -781,11 +893,17 @@ pub fn router(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     user_seed_dir: std::path::PathBuf,
+    // CIRISEdge#499 — the same plane the chat router is given. The drive does
+    // not INSTALL rooms (that needs the group registry) but it must be able to
+    // say whether one is addressed, or a write reports `crossed` for bytes
+    // nobody can fetch.
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 ) -> Router {
     let state = DriveState {
         engine,
         node_signer,
         user_seed_dir,
+        scope_lifecycle,
     };
     Router::new()
         .route("/v1/files", axum::routing::post(write_file))

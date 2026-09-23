@@ -1568,6 +1568,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&chat_node_signer),
                         crate::user_seed_dir(&cfg),
+                        // The scope-address plane, so a cohort write can report
+                        // whether the room it seals into is addressable at all.
+                        edge.scope_lifecycle().cloned(),
                     ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
@@ -1873,6 +1876,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // made it the only route timing out on the canonical (0.5.193 regression).
     crate::conformance::prime_capabilities(&engine).await;
 
+    let (self_room_sd_tx, mut self_room_sd_rx) = watch::channel(false);
+
     // THE SELF ROOM'S DRIVER (CIRISEdge#646 / CIRISServer#622). Nobody creates
     // a self room by asking: it must appear the moment an identity owns a
     // second device. Edge owns the rule (`self_room::decide`); this owns the
@@ -1880,7 +1885,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // self file's ROW crosses (persist `send_set_for` since v46.3.0) and its
     // BYTES have nowhere to be fetched from — the last rung under "my stuff on
     // my other devices", and the one the FSD says is ours.
-    {
+    let self_room_join = {
         let drive_state = crate::self_room_drive::SelfRoomState {
             engine: Arc::clone(&engine),
             node_signer: Arc::clone(&chat_node_signer),
@@ -1889,12 +1894,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             held: Arc::new(tokio::sync::Mutex::new(None)),
             pending: Arc::new(tokio::sync::Mutex::new(None)),
         };
+        // SUPERVISED, like the reconcile and retention loops. An unsupervised
+        // spawn survives `shutdown_node()` — the embedded restart flow keeps
+        // the Tokio runtime alive — so the old driver would keep polling a
+        // torn-down engine while the next serve starts a second one, and two
+        // drivers would contend over the same person's room (Codex,
+        // CIRISServer#628).
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
             loop {
-                schedule.tick().await;
+                if *self_room_sd_rx.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    () = schedule.tick() => {}
+                    _ = self_room_sd_rx.changed() => {
+                        if *self_room_sd_rx.borrow() { break; }
+                        continue;
+                    }
+                }
                 // A WATCHDOG, because a tick that never returns is a loop that
                 // is gone. `drive_once` awaits an MLS commit, a directory read
                 // and a placement; if any of them wedges, the loop stops
@@ -1948,8 +1968,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     last = Some(tick);
                 }
             }
-        });
-    }
+            tracing::info!("self room drive stopped");
+        })
+    };
 
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
@@ -2058,6 +2079,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if let Some(join) = reconcile_join {
         stop_step("replication reconciler", join).await;
     }
+    // Tear down the self-room driver BEFORE the edge: it drives the
+    // scope-address lifecycle and holds an MLS group, so a tick landing after
+    // the edge is gone would install destinations nothing can answer for.
+    let _ = self_room_sd_tx.send(true);
+    stop_step("self room drive", self_room_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.
