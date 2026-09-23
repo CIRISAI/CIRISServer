@@ -151,4 +151,57 @@ async fn an_unusable_home_key_store_is_refused_up_front() {
         !sealed_half_in(&global, &alias),
         "a refused home mint must not fall back to sealing globally"
     );
+    // AND NOTHING IRREVERSIBLE RAN. `open_user_signer` writes an Ed25519 seed,
+    // creates a platform seal, and with provisioning can program a PIV slot —
+    // so the preflight must precede it, not merely precede the PQC seal. An
+    // earlier revision of this collapse preflighted afterwards and left exactly
+    // these artifacts behind for a home that never had a usable key store.
+    let leftovers: Vec<String> = std::fs::read_dir(&seed_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&alias))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "a refused mint must leave no key material for {alias} in the seed dir, found: \
+         {leftovers:?}"
+    );
+}
+
+/// **An identity that predates home scoping is REUSED, never replaced.**
+///
+/// Its Ed25519 half sits in `seed_dir` while its ML-DSA half exists only in the
+/// global store. Minting against an empty home directory would have
+/// `open_or_create` mint a SECOND post-quantum half under the same alias and
+/// derived id; the replacement then wins the home-first resolve and the identity
+/// stops producing signatures its directory record and peers accept — the
+/// CIRISVerify#134 hazard. The resolver is what prevents it, so this asserts the
+/// resolver's decision directly, with both stores injected (no `CIRIS_HOME`,
+/// which is process-global and races every other test in the binary).
+#[test]
+fn a_legacy_half_is_chosen_over_an_empty_home_store() {
+    let root = home("legacy");
+    let seed_dir = root.join("identity").join("user");
+    let legacy = root.join("global-keys");
+    std::fs::create_dir_all(&legacy).expect("legacy dir");
+    let alias = "predates-home-scoping";
+
+    // Nothing anywhere: a NEW identity is home-scoped.
+    assert_eq!(
+        ciris_server::identity::sealed_keys_dir_in(&seed_dir, alias, &legacy),
+        root.join("identity").join("keys"),
+        "a fresh alias must mint into THIS home — that is the isolation this cut buys"
+    );
+
+    // The half exists only in the global store: mint there, opening it.
+    std::fs::write(legacy.join(format!("{alias}.mldsa65.seed.blob")), b"x").expect("legacy half");
+    assert_eq!(
+        ciris_server::identity::sealed_keys_dir_in(&seed_dir, alias, &legacy),
+        legacy,
+        "an alias whose ML-DSA half lives in the global store must be OPENED there, not \
+         re-minted into an empty home store under the same id (CIRISVerify#134)"
+    );
 }

@@ -320,7 +320,7 @@ pub(crate) fn sealed_keys_dir_for(seed_dir: &std::path::Path, alias: &str) -> st
 /// relocated from is how a failed relocation reported a path with nothing in it
 /// — one question, two spellings, and the parameterised caller reading the
 /// global anyway. One implementation; the global is a caller's choice.
-fn sealed_keys_dir_in(
+pub fn sealed_keys_dir_in(
     seed_dir: &std::path::Path,
     alias: &str,
     legacy: &std::path::Path,
@@ -556,6 +556,34 @@ pub async fn mint_user_identity(
 ) -> Result<MintedUserIdentity> {
     let cfg = user_identity_config(&backend, key_id_alias, seed_dir);
 
+    // 0. WHERE THE ML-DSA HALF LIVES — decided and proved usable BEFORE any key
+    //    material exists (CIRISVerify#285, verify v16.1.0).
+    //
+    //    `sealed_keys_dir_for`, not this home's raw key path. The distinction is
+    //    load-bearing for an identity minted BEFORE home scoping: its Ed25519
+    //    half is in `seed_dir` while its ML-DSA half exists only in the global
+    //    store, so minting against an empty home directory would have
+    //    `open_or_create` MINT A SECOND post-quantum half under the same alias
+    //    and derived id — the replacement wins the later home-first resolve, and
+    //    the identity stops producing signatures its directory record and peers
+    //    accept. That is exactly CIRISVerify#134's hazard, and the three-case
+    //    plan this collapse replaced had an arm for it. The resolver already
+    //    encodes the right answer: the home store when it holds this alias, the
+    //    legacy store when IT does (opened, never duplicated), and otherwise
+    //    this home — so a NEW identity is home-scoped and an OLD one is reused.
+    //
+    //    And it runs FIRST. `open_user_signer` writes an Ed25519 seed, creates a
+    //    platform seal, and with provisioning can program a PIV slot — none of
+    //    it undoable. Preflighting after that left those artifacts behind (and a
+    //    slot consumed) for a home whose key store was never usable.
+    let keys_dir = sealed_keys_dir_for(&cfg.seed_dir, key_id_alias);
+    preflight_keys_dir(&keys_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "the key store for {key_id_alias} ({}) is unusable, so nothing was minted: {e}",
+            keys_dir.display()
+        )
+    })?;
+
     // 1. Open the user's Ed25519 signing half (YubiKey / sealed / software).
     let hw_signer = open_user_signer(&backend, &cfg, true)?;
     let hardware_type = format!("{:?}", hw_signer.hardware_type());
@@ -593,29 +621,13 @@ pub async fn mint_user_identity(
     // 2. Mint the hybrid hardware-rooted identity. verify v6.0.0 attaches the
     //    sealed ML-DSA-65 half internally + emits the genesis CEG object + the
     //    fedcode. A touch-required YubiKey blocks on the signature until tapped.
-    // THE HOME'S OWN KEY STORE, chosen BEFORE the mint (CIRISVerify#285, verify
-    // v16.1.0). `create_federation_identity` seals the ML-DSA half into the
-    // process-global `keys_dir()`; the `_in` form takes the directory, so a
-    // dedicated `--home` scopes its post-quantum half the way it already scoped
-    // its database, config, logs and Ed25519 seed. `preflight_keys_dir` runs
-    // first: it creates the directory, refuses a file where the directory must
-    // be, and probes a real write — before anything irreversible (a PIV slot
-    // consumed by `--provision`, a record registered) can happen.
-    //
-    // This replaces a relocation that copied the globally-sealed half into the
-    // home, proved the copy by public key, and deleted the original — a
-    // stand-in for exactly this parameter, and one that could strand another
-    // home's identity if it guessed wrong about whose half it was moving. An
-    // identity sealed globally BEFORE this change is still found: the re-open
-    // below resolves home-first with the global store as fallback and never
-    // re-mints (CIRISVerify#134). Migration of existing material stays a
-    // deliberate operator act, as verify's own doc says.
-    let home_keys = home_keys_dir(&cfg.seed_dir);
-    preflight_keys_dir(&home_keys)
-        .map_err(|e| anyhow::anyhow!("this home's key store is unusable: {e}"))?;
+    // The seal lands in the directory chosen at step 0 — this home for a new
+    // identity, the legacy global store for one that predates home scoping
+    // (opened, never replaced). Migration of live material stays a deliberate
+    // operator act, as verify's own doc says.
     let now = chrono::Utc::now().to_rfc3339();
     let created = create_federation_identity_in(
-        &home_keys,
+        &keys_dir,
         Arc::clone(&hw_signer),
         // identity_type "user" → FedKind::User (the accountable human).
         "user",
@@ -652,10 +664,9 @@ pub async fn mint_user_identity(
         .public_key()
         .await
         .map_err(|e| anyhow::anyhow!("read user Ed25519 public key: {e}"))?;
-    // Re-open from wherever this alias's half actually lives: the home store
-    // for anything minted from here on, the global store for an identity sealed
-    // before home scoping. Never re-mints.
-    let pqc_dir = sealed_keys_dir_for(&cfg.seed_dir, key_id_alias);
+    // Re-open from the SAME directory the mint sealed into — resolving again
+    // would be a second answer to a question already settled at step 0.
+    let pqc_dir = keys_dir.clone();
     let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(key_id_alias, pqc_dir)
         .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
     let ml_pub = pqc
