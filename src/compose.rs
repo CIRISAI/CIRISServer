@@ -4445,9 +4445,14 @@ pub(crate) fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
                             ev.message
                         );
                     }
+                    // NOT "rooted": edge emits this at Info for an ADVISORY
+                    // cold-start admit too (the peer_admitted line beside it says
+                    // `provenance=Advisory`). The old headline "announce rooted"
+                    // read as a trust verdict and misled a #632 RCA. The message
+                    // carries edge's own words; the headline claims nothing.
                     EventSeverity::Info => tracing::info!(
                         peer = ?ev.peer_key_id,
-                        "RNS announce rooted (peer now reachable by key_id): {}",
+                        "RNS announce event (edge's words — NOT a rooting verdict): {}",
                         ev.message
                     ),
                 },

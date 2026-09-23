@@ -956,6 +956,182 @@ async fn test_blessed_self_record(State(st): State<PeersState>) -> Response {
 /// admission gates (`register_federation_key`: Strict hybrid self-scrub
 /// verify, hardware-class chokepoint, role gates) — only the CALLER auth is
 /// waived, and only in a test-anchor build.
+/// **Harness only** — the genesis bundle a production ceremony would hand a fresh
+/// node, assembled from THIS canonical's records and signed by the test root
+/// (CIRISServer#632).
+///
+/// Production agents never run a local trust-root ceremony: they receive the
+/// baked seed — a charter, the canonical's `infra:serve` grant, a lifecycle
+/// witness, the holder records — and sign only their own acceptance. The blessed
+/// harness minted all of that LOCALLY on every node (test_bless), which is exactly
+/// the set of things a real deployment cannot do, and it also scrub-signed the
+/// agent so the canonical rooted it. This door lets the harness agent get its
+/// trust root the production way instead: fetch this bundle, `POST
+/// /v1/trust-root/import` it, and hold nothing it did not receive.
+///
+/// The assembly is the production ceremony's (`accord_provision`), byte for byte
+/// in what is signed: `charter_envelope` under [`CHARTER_ATTESTATION_ID`],
+/// `grant_envelope(serve)` under the grant prefix, `lifecycle_envelope`, then
+/// `produce_genesis` and an authorization over `authorization_digest`. The only
+/// difference is the pen — the SW test root, a 1-of-1 roster — and the charter
+/// roots at the test KEY rather than a family, matching the trust edge every
+/// harness node already holds. The result passes `verify_bundle` before it is
+/// served; a bundle this door cannot verify is not served.
+#[cfg(feature = "test-anchor")]
+async fn test_genesis_bundle(State(st): State<PeersState>) -> Response {
+    use ciris_verify_core::self_at_login::SelfSigner;
+    let root = match crate::test_bless::mint_test_root() {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("test root: {e}")),
+    };
+    let root_key_id = root.key_id().to_string();
+    let self_key_id = match self_key_id(&st).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let serve_signed = match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&self_key_id)
+        .await
+    {
+        Ok(Some(rec)) => rec,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "self record not in directory"),
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}")),
+    };
+    async fn sign_att(
+        signer: &(impl SelfSigner + ?Sized),
+        id: &str,
+        attested_key_id: &str,
+        envelope: serde_json::Value,
+        att_type: &str,
+    ) -> Result<ciris_persist::federation::types::SignedAttestation, String> {
+        let mut spec = crate::attest::Spec::new(
+            att_type,
+            ciris_persist::federation::types::cohort_scope::FEDERATION,
+            envelope,
+        )
+        .weighing(Some(1.0));
+        spec.attested_key_id = Some(attested_key_id.to_string());
+        let stamped = crate::attest::Emit::stamp(signer.key_id(), spec)
+            .and_then(|e| e.with_row_id(id))
+            .map_err(|e| format!("stamp {id}: {e}"))?;
+        let (ed, pqc) = signer
+            .sign_bound(stamped.canonical())
+            .await
+            .map_err(|e| format!("sign {id}: {e}"))?;
+        let row = stamped
+            .assemble_from_b64(&ed, &pqc)
+            .map_err(|e| format!("assemble {id}: {e}"))?;
+        Ok(ciris_persist::federation::types::SignedAttestation { attestation: row })
+    }
+    use ciris_persist::federation::types::attestation_type;
+    // A 1-of-1 roster has no other holder to name as successor; the commitment
+    // is to the root itself, which is well-formed and is what test_bless commits.
+    let successors = vec![root_key_id.clone()];
+    let charter_env = match crate::mesh_genesis::charter_envelope(&successors) {
+        Ok(e) => e,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let charter = match sign_att(
+        &root,
+        crate::mesh_genesis::CHARTER_ATTESTATION_ID,
+        &root_key_id,
+        charter_env,
+        attestation_type::DELEGATES_TO,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let grant_id = format!(
+        "{}:{self_key_id}",
+        crate::mesh_genesis::GRANT_ATTESTATION_ID_PREFIX
+    );
+    let grant = match sign_att(
+        &root,
+        &grant_id,
+        &self_key_id,
+        crate::mesh_genesis::grant_envelope(&self_key_id),
+        attestation_type::DELEGATES_TO,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let lifecycle = match sign_att(
+        &root,
+        &format!("genesis-lifecycle:{root_key_id}"),
+        &root_key_id,
+        crate::mesh_genesis::lifecycle_envelope(),
+        attestation_type::SCORES,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut bundle = match crate::mesh_genesis::produce_genesis(
+        &root_key_id,
+        "quorum:1/1",
+        vec![ciris_persist::federation::SignedKeyRecord {
+            record: serve_signed,
+        }],
+        vec![charter, grant, lifecycle],
+        Vec::new(),
+        &now,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("produce_genesis: {e}"),
+            )
+        }
+    };
+    let digest = match crate::mesh_genesis::authorization_digest(&bundle) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("digest: {e}")),
+    };
+    let (ed, pqc) = match root.sign_bound(&digest).await {
+        Ok(p) => p,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("authorize: {e}"),
+            )
+        }
+    };
+    bundle
+        .authorizations
+        .push(crate::mesh_genesis::GenesisAuthorization {
+            holder_key_id: root_key_id.clone(),
+            signature_classical: ed,
+            signature_pqc: pqc,
+        });
+    if let Err(e) = crate::mesh_genesis::verify_bundle(&bundle) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("assembled bundle does not verify — not served: {e}"),
+        );
+    }
+    tracing::warn!(
+        root = %root_key_id,
+        serve = %self_key_id,
+        "TEST-ANCHOR: served a genesis bundle assembled the production way (charter + serve grant + \
+         lifecycle, 1-of-1 authorized by the SW test root) — the harness agent's trust root arrives \
+         by IMPORT, not by a local ceremony (CIRISServer#632)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "bundle": bundle })),
+    )
+        .into_response()
+}
+
 #[cfg(feature = "test-anchor")]
 async fn test_admit_peer(
     State(st): State<PeersState>,
@@ -977,7 +1153,23 @@ async fn test_admit_peer(
     // the inbound round envelopes stay unattributed → the round times out.
     // Scrubbing with the SW test root (terminus `test-accord-holder-0`, in the
     // swapped anchor) makes the peer root exactly as an A1-admitted node does.
-    let blessed = {
+    // CIRIS_TEST_ADMIT_NO_BLESS=true (CIRISServer#632): admit the record AS
+    // RECEIVED — self-signed, NOT scrub-signed under the test root — and still
+    // issue the reciprocal consent below. That is production's admission: no
+    // production agent's chain roots at a steward, so the canonical never sees
+    // it as `Rooted`. The blessed path lets every ladder pass item 1 of the
+    // attribution gate (Rooted∧owns_key), which no production agent can pass;
+    // this switch is how a ladder sees what production sees.
+    let no_bless = std::env::var("CIRIS_TEST_ADMIT_NO_BLESS").ok().as_deref() == Some("true");
+    let blessed = if no_bless {
+        tracing::warn!(
+            peer = %key_id,
+            "TEST-ANCHOR: CIRIS_TEST_ADMIT_NO_BLESS=true — admitting the peer's record AS \
+             RECEIVED (self-signed, not scrubbed): the peer will NOT root here and its \
+             frames must pass attribution the way a production agent's do (CIRISServer#632)"
+        );
+        rec.clone()
+    } else {
         let Some(ml) = rec.record.pubkey_ml_dsa_65_base64.clone() else {
             return err(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1248,6 +1440,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/v1/federation/test-blessed-self-record",
             axum::routing::get(test_blessed_self_record),
+        )
+        .route(
+            "/v1/federation/test-genesis-bundle",
+            axum::routing::get(test_genesis_bundle),
         )
         .route(
             "/v1/federation/test-admit-peer",

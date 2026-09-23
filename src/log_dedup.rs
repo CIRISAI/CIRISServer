@@ -155,6 +155,15 @@ impl std::fmt::Debug for DedupState {
 impl DedupState {
     /// Record one occurrence; `true` means "let this event print".
     fn admit(&self, target: &str, level: Level, msg: &str) -> bool {
+        // DIAGNOSTIC LINES ARE NEVER COLLAPSED (CIRISServer#632). A line that
+        // names its own `diag=` field, or is headed `DIAG#`, exists to state a
+        // drop's operands per occurrence — the 22 attribution misses this layer
+        // folded into "event repeated 25 times" on 2026-09-23 were the whole RCA,
+        // and the throttle upstream had already hidden them once. Dedup exists
+        // to keep a quiet log readable; a diagnostic is not noise.
+        if msg.contains("diag=") || msg.contains("DIAG#") {
+            return true;
+        }
         let mut key = DefaultHasher::new();
         target.hash(&mut key);
         level.as_str().hash(&mut key);

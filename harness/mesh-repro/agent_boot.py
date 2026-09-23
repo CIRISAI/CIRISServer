@@ -360,7 +360,13 @@ def main() -> int:
 
     (home / "data").mkdir(parents=True, exist_ok=True)
     (home / "logs").mkdir(parents=True, exist_ok=True)
-    db = home / "data" / "ciris.db"
+    # PRODUCTION-SHAPED NODE (CIRISServer#632): the composed server opens
+    # `<home>/data/ciris_engine.db` (ServerConfig::from_home). In server-fold
+    # mode the agent's engine MUST open the same file, or the node never sees
+    # the agent-typed key (no split) and never reads the sealed traces — a
+    # harness that looked like production and measured a different store.
+    server_fold_store = os.environ.get("CIRIS_HARNESS_SERVER_FOLD", "").strip().lower() == "true"
+    db = home / "data" / ("ciris_engine.db" if server_fold_store else "ciris.db")
     identity_path = str(home / "edge_identity.rid")
 
     # One wheel, one PyO3 type registry: import Engine and init_edge_runtime from
@@ -381,8 +387,19 @@ def main() -> int:
     # The embedded-edge init needs a SOFTWARE Ed25519 (+ ML-DSA) signer, not the
     # default hardware/HSM keyring (which yields a 65-byte EC pubkey edge rejects).
     # Mirror CIRISAgent's bootstrap: two 32-byte seed files, minted on first boot.
-    seed = home / "data" / "local_signing.seed"
-    pqc_seed = home / "data" / "local_pqc_signing.seed"
+    # PRODUCTION-SHAPED NODE (CIRISServer#632): compose loads the configured
+    # key's seeds from `<home>/identity/ed25519.seed` + `ml_dsa_65.seed`
+    # (ServerConfig::seed_path). In server-fold mode the agent's engine MUST use
+    # the same two files, so the key it registers as `agent` and the key the
+    # composed node signs with are ONE keypair — the QA runner's shape, and the
+    # precondition for the actor/node split to be about a real actor.
+    if server_fold_store:
+        (home / "identity").mkdir(parents=True, exist_ok=True)
+        seed = home / "identity" / "ed25519.seed"
+        pqc_seed = home / "identity" / "ml_dsa_65.seed"
+    else:
+        seed = home / "data" / "local_signing.seed"
+        pqc_seed = home / "data" / "local_pqc_signing.seed"
     for s in (seed, pqc_seed):
         if not s.exists():
             s.write_bytes(os.urandom(32))
@@ -390,6 +407,17 @@ def main() -> int:
                 s.chmod(0o600)
             except OSError:
                 pass
+    # NEVER DIAL PRODUCTION (CIRISServer#632). edge's `init_edge_runtime` seeds a
+    # TCP dial to the baked production canonical even under CIRIS_TESTING_MODE
+    # (`source="baked_canonical_genesis"`); a harness agent that reaches it
+    # registers its keys on the real directory. Refuse the egress at the kernel
+    # before the edge exists — a belt that holds until edge gates the seed.
+    block = os.environ.get("CIRIS_HARNESS_BLOCK_PRODUCTION", "").strip()
+    if block:
+        import subprocess
+        for addr in [a.strip() for a in block.split(",") if a.strip()]:
+            r = subprocess.run(["iptables", "-I", "OUTPUT", "-d", addr, "-j", "REJECT"], capture_output=True, text=True)
+            log(f"BLOCK-PRODUCTION: iptables OUTPUT -d {addr} REJECT rc={r.returncode} {(r.stderr or '').strip()[:120]}")
     engine = Engine(
         f"sqlite:///{db}",
         key_id,
@@ -424,6 +452,87 @@ def main() -> int:
     except Exception:  # noqa: BLE001 — best-effort label for the log only
         signer = "?"
     log(f"embedded edge up: signer_key_id={signer} listen={listen}")
+    # ── PRODUCTION-SHAPED NODE (CIRISServer#632): compose the server on THIS home ──
+    # The QA runner's agent opens persist with an AGENT-typed signing key and then
+    # runs the server (compose) on the same store: compose's `register_self_key`
+    # finds the key already registered as `agent`, `resolve_node_identity`
+    # classifies it as an ACTOR, mints a separate NODE key, and moves the
+    # owner-binding onto it (CC 3.4.7.3 Clause A). That split — one engine, one
+    # transport, actor key ≠ wire key — is the topology every production agent
+    # runs and no ladder had. It runs AFTER init_edge_runtime because the fold
+    # composes ONTO the live embedded edge (`current_edge()`, CIRISServer#221) —
+    # one engine, one transport, production's order. Traces still seal through
+    # the same LensClient path, so the `seal` markers hold. Nothing below this
+    # block runs in this mode: no test-admit, no harness consent, no canonical
+    # record fetch — the genesis import and the owner's HTTP acts supply those.
+    server_fold = os.environ.get("CIRIS_HARNESS_SERVER_FOLD", "").strip().lower() == "true"
+    if server_fold:
+        import threading
+        import urllib.request as _rq
+
+        class _StubAdapter:
+            adapter_type = "harness-production-node"
+            enabled = True
+
+            def proxy_routes(self):
+                return []
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+        import json as _json  # `json` is a later LOCAL import in main(); a bare name here is unbound
+        raw_peers = os.environ.get("CIRIS_EDGE_BOOTSTRAP_PEERS", "").strip()
+        if raw_peers:
+            # compose reads `net.bootstrap_peers` from the node's config store —
+            # the same key node_boot.sh sets for the chat nodes.
+            peers_json = _json.dumps([p.strip() for p in raw_peers.split(",") if p.strip()])
+            import subprocess
+            console = os.environ.get("CIRIS_HARNESS_CONSOLE", "/opt/harness/ciris-server-bin")
+            r = subprocess.run([console, "config", "set", "net.bootstrap_peers", peers_json,
+                                "--home", str(home), "--key-id", key_id,
+                                "--reason", "mesh-harness production-shaped agent"],
+                               capture_output=True, text=True)
+            log(f"SERVER-FOLD: config set net.bootstrap_peers {peers_json} rc={r.returncode} "
+                f"{(r.stderr or r.stdout).strip()[:160]}")
+
+        def _fold() -> None:
+            try:
+                log(f"SERVER-FOLD: serve_with_python_adapter(home={home}, key_id={key_id}) — compose on the agent's own store")
+                ciris_server.serve_with_python_adapter(_StubAdapter(), str(home), key_id)
+            except BaseException as e:  # noqa: BLE001 — surface PanicException too
+                log(f"SERVER-FOLD FAILED: {type(e).__name__}: {e}")
+
+        threading.Thread(target=_fold, name="harness-server-fold", daemon=True).start()
+        bound = False
+        for waited in range(0, 180, 5):
+            time.sleep(5)
+            try:
+                _rq.urlopen("http://127.0.0.1:4243/health", timeout=3)
+                bound = True
+                log(f"SERVER-FOLD: read-API BOUND on 4243 after ~{waited + 5}s — the node is up on this store")
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if not bound:
+            log("SERVER-FOLD VERDICT: 4243 did NOT bind in 180s — the production-shaped node failed to compose")
+        # Seal traces exactly as the embedded mode does, then hold the process.
+        n_traces = int(os.environ.get("CIRIS_HARNESS_EMIT_TRACES", "0") or 0)
+        if n_traces > 0:
+            # The scenario claims + announces + consents over HTTP first; give it
+            # a window so the seals ride an owned, announced node.
+            time.sleep(int(os.environ.get("CIRIS_HARNESS_SEAL_DELAY_SECS", "60") or 60))
+            emit_synthetic_traces(engine, key_id, n_traces)
+        while True:
+            time.sleep(30)
+            try:
+                m = _json.loads(_rq.urlopen("http://127.0.0.1:4243/v1/federation/metrics", timeout=5).read().decode())
+                log(f"[DELIVERY-STATUS] {_json.dumps(m)[:600]}")
+            except Exception as e:  # noqa: BLE001
+                log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
+
 
     # TEST-ANCHOR harness: the test override skips the baked canonical genesis
     # (CIRISPersist#449), so the agent admits the HARNESS canonical explicitly —
@@ -462,9 +571,22 @@ def main() -> int:
         # source_key_id resolves to None → frame dropped pre-dispatch (#317) →
         # every round times out awaiting the reply). Stands in for the
         # owner-gated claim/peering flows of a production mesh.
+        #
+        # CIRIS_HARNESS_NO_TEST_ADMIT=true skips it (CIRISServer#632). The
+        # test-admit path SCRUB-SIGNS our record under the test root, so the
+        # canonical roots us and attribution passes on item 1 — which no
+        # production agent can do (its chain ends at a self-signed row). Skipping
+        # it leaves our key to cross the way production's does: our own
+        # self-signed record in a Key round, admitted Advisory.
+        no_test_admit = os.environ.get("CIRIS_HARNESS_NO_TEST_ADMIT", "").lower() == "true"
+        if no_test_admit:
+            log("CIRIS_HARNESS_NO_TEST_ADMIT=true — NOT registering self at the canonical; "
+                "our key crosses self-signed in a Key round (production admission)")
         try:
-            my_row = engine.lookup_public_key(self_key) if self_key else None
-            if my_row:
+            my_row = (engine.lookup_public_key(self_key) if self_key else None) if not no_test_admit else None
+            if no_test_admit:
+                pass
+            elif my_row:
                 body = json.dumps({"record": json.loads(my_row)}).encode()
                 req = urllib.request.Request(
                     f"http://{canon_host}:4243/v1/federation/test-admit-peer",

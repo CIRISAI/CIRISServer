@@ -1,0 +1,19 @@
+# Production-faithful admission overlay (CIRISServer#632).
+#
+# The agent keeps the test SEED (its own leg-B ceremony builds the trust graph
+# it needs to root the canonical's `infra:serve` — production's baked genesis
+# gives it that) and still registers through `test-admit-peer`, because that
+# call is also how the harness canonical issues the reciprocal consent that
+# stands in for the genesis-delivered grant. What changes is ONE thing: the
+# canonical admits the agent's record AS RECEIVED instead of scrub-signing it
+# under the test root (CIRIS_TEST_ADMIT_NO_BLESS). The agent therefore never
+# roots at the canonical and is admitted Advisory — the admission every
+# production agent gets and no other ladder exercises.
+services:
+  canonical:
+    environment:
+      CIRIS_TEST_ADMIT_NO_BLESS: "true"
+      RUST_LOG: "info,ciris_edge=debug"
+  agent:
+    environment:
+      RUST_LOG: "info,ciris_edge=debug"
