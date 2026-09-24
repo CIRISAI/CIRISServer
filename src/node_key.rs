@@ -886,7 +886,7 @@ pub async fn migrate_consent_to_owner(
 /// registered; the human already anchors the agent (idempotent). `Err` when the
 /// node IS owned and split and the ceremony fails.
 pub async fn anchor_agent_to_owner(
-    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    engine: &ciris_persist::prelude::Engine,
 ) -> Result<Option<String>> {
     use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
     use ciris_persist::federation::types::device_class;

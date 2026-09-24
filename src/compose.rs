@@ -2472,16 +2472,27 @@ pub(crate) async fn publish_self_transport_destination(
     // engine signer's by construction (CIRISServer#315: cfg.key_id == local_derived_key_id());
     // NOT `federation_signer`, whose re-opened seed can diverge in the fold (the phantom-key
     // class #315 closed). signer_acts_for is satisfied: attesting == occurrence (self).
-    let signer = match EngineSelfSigner::new(engine).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(key_id, error = %e,
-                "could not build the engine self-signer for the signed transport-destination — skipping");
-            return;
-        }
+    // WHO SIGNS is WHO THE BINDING IS FOR (CIRISServer#632). On an actor/node split
+    // the wire identity — `key_id` here — is the NODE key, while the engine signs as
+    // the ACTOR; persist refused every boot's binding ("signer <actor> is neither
+    // identity <node> …"), so no peer could attribute this node's link until the
+    // transport-destination plane carried a binding on the round cadence — the 70 s
+    // before the owner's consent reached the canonical on the production-shaped
+    // ladder. The node binding is signed by the held node pen under its registered
+    // id; every other case keeps the engine signer.
+    let signer: Box<dyn SelfSigner> = match node_pen_signer_for(key_id, engine).await {
+        Some(node) => Box::new(node),
+        None => match EngineSelfSigner::new(engine).await {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                tracing::warn!(key_id, error = %e,
+                    "could not build the engine self-signer for the signed transport-destination — skipping");
+                return;
+            }
+        },
     };
     let (signed_envelope, signature) =
-        match produce_signed_identity_occurrence(&signer, envelope).await {
+        match produce_signed_identity_occurrence(signer.as_ref(), envelope).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(key_id, error = %e,
@@ -3777,6 +3788,70 @@ impl ciris_verify_core::self_at_login::SelfSigner for EngineSelfSigner {
         let sig = self.engine.sign_hybrid(bytes).await.map_err(|e| {
             ciris_verify_core::VerifyError::IntegrityError {
                 message: format!("EngineSelfSigner sign_hybrid: {e}"),
+            }
+        })?;
+        Ok((
+            B64.encode(&sig.classical.signature),
+            B64.encode(&sig.pqc.signature),
+        ))
+    }
+}
+
+/// A [`SelfSigner`](ciris_verify_core::self_at_login::SelfSigner) over the held
+/// NODE pen, named by the node key's REGISTERED id (the pen's `derived_key_id()`;
+/// its `key_id()` is a bare alias registered nowhere). `Some` only when `key_id`
+/// IS that node key and it differs from the engine's — i.e. on a split install,
+/// for the node's own records.
+struct NodePenSelfSigner {
+    pen: Arc<ciris_persist::prelude::LocalSigner>,
+    key_id: String,
+    ed_pub: Vec<u8>,
+    pqc_pub: Vec<u8>,
+}
+
+async fn node_pen_signer_for(key_id: &str, engine: &Arc<Engine>) -> Option<NodePenSelfSigner> {
+    let pen = crate::node_key::held_node_signer()?;
+    let node = pen.derived_key_id();
+    if node != key_id {
+        return None;
+    }
+    if engine.local_derived_key_id().await.ok().as_deref() == Some(key_id) {
+        return None;
+    }
+    let probe = match pen.sign_hybrid(b"ciris:self-signer:pubkey-probe:v1").await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(key_id, error = %e, "node pen probe-sign failed — falling back to the engine signer");
+            return None;
+        }
+    };
+    Some(NodePenSelfSigner {
+        pen,
+        key_id: node,
+        ed_pub: probe.classical.public_key,
+        pqc_pub: probe.pqc.public_key,
+    })
+}
+
+#[async_trait::async_trait]
+impl ciris_verify_core::self_at_login::SelfSigner for NodePenSelfSigner {
+    fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    async fn ed25519_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
+        Ok(self.ed_pub.clone())
+    }
+    async fn mldsa65_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
+        Ok(self.pqc_pub.clone())
+    }
+    async fn sign_bound(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(String, String), ciris_verify_core::VerifyError> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let sig = self.pen.sign_hybrid(bytes).await.map_err(|e| {
+            ciris_verify_core::VerifyError::IntegrityError {
+                message: format!("NodePenSelfSigner sign_hybrid: {e}"),
             }
         })?;
         Ok((

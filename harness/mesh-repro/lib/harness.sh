@@ -275,6 +275,9 @@ harness_print_ladder() {
     i=$((i+1))
   done
   echo "$out"
+  # Optional tee for the run timeline (lib/timeline.py): the rung transitions on
+  # the same clock as the nodes' logs. `if`, not `&&` — see rule 3 above.
+  if [ -n "${HARNESS_LADDER_LOG:-}" ]; then echo "$out" >> "$HARNESS_LADDER_LOG"; fi
 }
 
 # Print the verdict and EXIT with the stable code. SUCCESS iff SUCCESS_STAGE > 0;

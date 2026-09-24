@@ -85,6 +85,11 @@ pub enum KeySigner<'a> {
     Engine(&'a Engine),
     /// A keypair held directly (a user's fed-ID, a test party).
     Local(&'a LocalSigner),
+    /// A keypair held directly whose REGISTERED id is not its `key_id()`: the
+    /// held node signer is built under its bare alias, and the node key it
+    /// signs for is registered under the DERIVED id (`wire_identity()`). The
+    /// attester is the named id; the signature is the pen's. CIRISServer#632.
+    LocalAs(&'a LocalSigner, &'a str),
 }
 
 impl KeySigner<'_> {
@@ -102,6 +107,7 @@ impl KeySigner<'_> {
                 .await
                 .map_err(|e| Error::Sign(e.to_string())),
             Self::Local(s) => Ok(s.key_id().to_owned()),
+            Self::LocalAs(_, key_id) => Ok((*key_id).to_owned()),
         }
     }
 
@@ -111,7 +117,7 @@ impl KeySigner<'_> {
                 .sign_hybrid(bytes)
                 .await
                 .map_err(|e| Error::Sign(e.to_string())),
-            Self::Local(s) => s
+            Self::Local(s) | Self::LocalAs(s, _) => s
                 .sign_hybrid(bytes)
                 .await
                 .map_err(|e| Error::Sign(e.to_string())),

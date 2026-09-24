@@ -156,7 +156,9 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # cargo lane: it builds nothing, so it costs a subprocess. The ceiling must
      # match ci.yml — a preflight that passes what CI fails is worse than no
      # preflight, because it teaches people to trust it.
-     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 48"
+     # 48 -> 49 (CIRISServer#632): the NODE key's own trust-root acceptance on a split install
+     # (mesh_genesis::accept_trust_root_as_node_key) — edge's serve gate (leg B) reads the wire key.
+     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 49"
      "localization"        "python3 tools/check_server_localization.py --strict"
      # Pure python over synthetic Mach-O headers — it needs no iOS toolchain and
      # no device, so it belongs here rather than in the gate's PLATFORM_ONLY

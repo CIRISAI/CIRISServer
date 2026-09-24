@@ -811,6 +811,7 @@ pub async fn accept_trust_root(
     }
     if node_trusts_root(engine, &node_key_id, &root).await? {
         tracing::debug!(root, "trust root already accepted — no-op");
+        accept_trust_root_as_node_key(engine, &node_key_id, &root).await?;
         return Ok(Some(root));
     }
 
@@ -839,7 +840,68 @@ pub async fn accept_trust_root(
         "trust root ACCEPTED — this node now accepts the root's authority. Delete this \
          attestation to un-trust (the capability cascade then fails closed on its own)."
     );
+    accept_trust_root_as_node_key(engine, &node_key_id, &root).await?;
     Ok(Some(root))
+}
+
+/// **The NODE key's own acceptance on a split install** (CIRISServer#632).
+///
+/// [`accept_trust_root`] signs as the ENGINE key, which on an actor/node split
+/// (CC 3.4.7.3 Clause A) is the ACTOR. Edge's serve gate (leg B, CIRISEdge#386)
+/// asks for `delegates_to(local_key_id → root)` with `local_key_id` = the WIRE
+/// identity, the node key — so a split agent withheld every trace row toward a
+/// Rooted, consenting canonical: "recipient's `infra:serve` roots to no root this
+/// node (local_key_id=<node>) trusts … (2) this node's own
+/// `delegates_to(<node> → root)` trust edge" (production-shaped ladder,
+/// 2026-09-24, persist v48.0.0 — the first run where the traces were offerable).
+/// Same row shape as the engine's, signed by the held node signer; idempotent;
+/// a no-op on an unsplit node (no held node signer, or it IS the engine key).
+async fn accept_trust_root_as_node_key(
+    engine: &ciris_persist::prelude::Engine,
+    engine_key_id: &str,
+    root: &str,
+) -> Result<(), GenesisError> {
+    use ciris_persist::federation::types::cohort_scope;
+
+    let Some(node_signer) = crate::node_key::held_node_signer() else {
+        return Ok(());
+    };
+    // The node key is registered under the signer's DERIVED id (the held pen is
+    // built under its bare alias, so `key_id()` names nothing registered —
+    // "ciris-node-bootstrap does not exist in federation_keys", caught by the
+    // split gate). The row is attested AS that registered id, signed by the pen.
+    let node_key_id = node_signer.derived_key_id();
+    if node_key_id == engine_key_id || node_key_id == root {
+        return Ok(());
+    }
+    if node_trusts_root(engine, &node_key_id, root).await? {
+        return Ok(());
+    }
+    let id = format!("trust-edge:{node_key_id}:{root}");
+    let envelope = serde_json::json!({
+        (paths::REFERENCES_ATTESTATION_ID): id,
+        "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
+    });
+    let attestation_id = crate::attest::emit(
+        engine,
+        crate::attest::KeySigner::LocalAs(node_signer.as_ref(), &node_key_id),
+        crate::attest::Spec::new(
+            attestation_type::DELEGATES_TO,
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .attested_to(root),
+    )
+    .await
+    .map_err(|e| GenesisError::Directory(format!("write the node key's trust:accepts: {e}")))?;
+    tracing::info!(
+        node_key_id = %node_key_id,
+        trust_root = %root,
+        attestation_id = %attestation_id,
+        "trust root ACCEPTED BY THE NODE KEY — the wire identity's own delegates_to(node → \
+         root, infra:*); edge's serve gate (leg B) reads this key on a split install"
+    );
+    Ok(())
 }
 
 /// **UN-TRUST** — withdraw this node's `trust:accepts` edge for `root`

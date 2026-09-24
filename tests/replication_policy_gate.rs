@@ -43,7 +43,7 @@
 /// persist v21 (`ciris_persist::federation::replication_policy`) — the 15-kind
 /// APPLY (admission + projection) policy hash.
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
-    "c1082c12db13b6d0f2240b910da2c0008a85b363df4f9b9b73a013ab28cb389d";
+    "9d62d3a86f7a0ab955969256a10c8160da73a390953ba3c87167a2da96828a19";
 
 /// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
@@ -170,7 +170,7 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// E3 unchanged and re-checked: `Attestation` keeps `subject-only`, `trace:*`
 /// still serves only to `capability:infra:serve` recipients.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "8249e30b5a0b48a8c309252c99eafdef86f3de04faf238d297143c443599c4ab";
+    "d6e4f0dfccbf02d274b7c76a70f8b3af8548d177fffaeed699efe3bd423b1df0";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

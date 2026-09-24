@@ -710,6 +710,7 @@ pub async fn emit_replication_consent<S: AsRef<str>>(
     peer_key_id: &str,
     attestation_prefixes: &[S],
 ) -> Result<ConsentGrant> {
+    cover_other_own_keys(engine, node_key_id, peer_key_id, attestation_prefixes).await;
     emit_replication_consent_with_policy(
         engine,
         node_key_id,
@@ -1813,6 +1814,95 @@ pub struct ConsentCoverage {
     pub prefixes: Vec<String>,
 }
 
+/// PER-KEY CONSENT ON A SPLIT INSTALL — every door, not only the covering one
+/// (CIRISServer#601 / #632). Covers `peer_key_id` for every OTHER own key of this
+/// node that the human is bound to, before the caller writes the requested key.
+///
+/// Called by [`ensure_replication_consent_covers`] AND by
+/// [`emit_replication_consent`], because the doors that matter in production
+/// do not all go through the covering door: `POST /v1/federation/peering`, the
+/// delivery controller's canonical grant and the admin door call the emitter
+/// directly. With the per-key step only in the covering door, those doors wrote
+/// one grant FOR the node key and none FOR the actor, and persist's promotion
+/// sweep (which reads the ENGINE key) lifted nothing — the production-shaped
+/// ladder read `offerable=0` on persist v48.0.0 until this moved here.
+///
+/// Best-effort: every failure is logged by name and the caller's own grant
+/// still goes out. Never recurses: coverage writes through
+/// [`emit_replication_consent_with_policy`], not [`emit_replication_consent`].
+async fn cover_other_own_keys<S: AsRef<str>>(
+    engine: &Engine,
+    node_key_id: &str,
+    peer_key_id: &str,
+    required_prefixes: &[S],
+) {
+    // ORDER MATTERED under persist v47 (V152 in v48 keeps every per-key row live): `consent_peer_set` held ONE live row per
+    // (author, peer) (INSERT OR REPLACE), so the attester-keyed readers
+    // (`list_live_consent_grants_by` → `live_consent_grants_for_machine`,
+    // contacts / chat / delivery status) see only the LAST grant this human
+    // wrote toward this peer. The per-key projection (`consent_peer_set_for`,
+    // by-principals reads: edge's send-set, the reconciler) keeps every one.
+    // So the other own keys go first and the requested key — the NODE, for
+    // every operator door — is written last and stays the live one.
+    // PER-KEY CONSENT ON A SPLIT INSTALL (CIRISServer#601 / #632). The human's
+    // grant names the own key it is FOR, and every plane reads its own key:
+    // edge's send-set and the Rooted walk read the WIRE (node) key; persist's
+    // promotion sweep (`load_active_egress_grants`) reads the ENGINE (actor)
+    // key, because the actor authors the rows. One grant cannot serve both, and
+    // "a grant FOR the agent is not the node's consent" (the split gate) — so
+    // the owner consents once per own key they are bound to. The actor is bound
+    // through the occurrence anchor (`anchor_agent_to_owner`); an unanchored
+    // actor is skipped, never named. Found by the production-shaped ladder:
+    // the pair Rooted and the traces stayed at `(self, local)` — `offerable=0`.
+    // Anchor first (idempotent): consent FOR the actor is only writable once the
+    // actor is its human's occurrence, and not every claim path anchored it
+    // (the 1-phase first-run claim did not until 0.5.216). The pen that signs
+    // this consent is the pen the anchor needs, so this is where the gap closes
+    // for every door. Failure is logged and the loop below skips an unbound key.
+    match crate::node_key::anchor_agent_to_owner(engine).await {
+        Ok(Some(pair)) => {
+            tracing::info!(pair_id = %pair, "consent: agent anchored to its owner before covering")
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "consent: anchoring the agent FAILED (non-fatal) — its grant is skipped")
+        }
+    }
+    let others: Vec<String> = match engine.local_derived_key_id().await {
+        // Fan out only when the caller named the NODE. A grant a caller writes
+        // explicitly FOR the actor (the engine key) stays exactly that — "a grant
+        // FOR the agent is not the node's consent" — and on an unsplit node the
+        // requested key IS the engine key, so there is nothing else to cover.
+        Ok(engine_author) if engine_author == node_key_id => return,
+        Ok(engine_author) => own_keys_of_this_node(&engine_author),
+        // No engine key: nothing to fold over; the requested key alone.
+        Err(_) => return,
+    };
+    for k in others {
+        if k == node_key_id {
+            continue;
+        }
+        let bound = match engine.steward_bindings_of(&k).await {
+            Ok(stewards) => !stewards.is_empty(),
+            Err(_) => false,
+        };
+        if !bound {
+            continue;
+        }
+        if let Err(e) =
+            ensure_replication_consent_covers_for(engine, &k, peer_key_id, required_prefixes).await
+        {
+            tracing::warn!(
+                own_key = %k,
+                peer = %peer_key_id,
+                error = %e,
+                "consent coverage for this own key FAILED (non-fatal) — rows it authors toward \
+                 this peer stay unpromoted until it is covered"
+            );
+        }
+    }
+}
+
 /// **Ensure this node's live grant to `peer_key_id` COVERS `required_prefixes`,
 /// widening a too-narrow standing grant by superseding it.**
 ///
@@ -1873,52 +1963,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
     peer_key_id: &str,
     required_prefixes: &[S],
 ) -> Result<ConsentCoverage> {
-    // ORDER MATTERS under persist v47: `consent_peer_set` holds ONE live row per
-    // (author, peer) (INSERT OR REPLACE), so the attester-keyed readers
-    // (`list_live_consent_grants_by` → `live_consent_grants_for_machine`,
-    // contacts / chat / delivery status) see only the LAST grant this human
-    // wrote toward this peer. The per-key projection (`consent_peer_set_for`,
-    // by-principals reads: edge's send-set, the reconciler) keeps every one.
-    // So the other own keys go first and the requested key — the NODE, for
-    // every operator door — is written last and stays the live one.
-    // PER-KEY CONSENT ON A SPLIT INSTALL (CIRISServer#601 / #632). The human's
-    // grant names the own key it is FOR, and every plane reads its own key:
-    // edge's send-set and the Rooted walk read the WIRE (node) key; persist's
-    // promotion sweep (`load_active_egress_grants`) reads the ENGINE (actor)
-    // key, because the actor authors the rows. One grant cannot serve both, and
-    // "a grant FOR the agent is not the node's consent" (the split gate) — so
-    // the owner consents once per own key they are bound to. The actor is bound
-    // through the occurrence anchor (`anchor_agent_to_owner`); an unanchored
-    // actor is skipped, never named. Found by the production-shaped ladder:
-    // the pair Rooted and the traces stayed at `(self, local)` — `offerable=0`.
-    let others: Vec<String> = match engine.local_derived_key_id().await {
-        Ok(engine_author) => own_keys_of_this_node(&engine_author),
-        // No engine key: nothing to fold over; the requested key alone.
-        Err(_) => Vec::new(),
-    };
-    for k in others {
-        if k == node_key_id {
-            continue;
-        }
-        let bound = match engine.steward_bindings_of(&k).await {
-            Ok(stewards) => !stewards.is_empty(),
-            Err(_) => false,
-        };
-        if !bound {
-            continue;
-        }
-        if let Err(e) =
-            ensure_replication_consent_covers_for(engine, &k, peer_key_id, required_prefixes).await
-        {
-            tracing::warn!(
-                own_key = %k,
-                peer = %peer_key_id,
-                error = %e,
-                "consent coverage for this own key FAILED (non-fatal) — rows it authors toward \
-                 this peer stay unpromoted until it is covered"
-            );
-        }
-    }
+    cover_other_own_keys(engine, node_key_id, peer_key_id, required_prefixes).await;
     let primary =
         ensure_replication_consent_covers_for(engine, node_key_id, peer_key_id, required_prefixes)
             .await?;

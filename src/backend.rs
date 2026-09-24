@@ -556,7 +556,7 @@ where
 /// `encryption_pubkeys` so a far node's DEK cascade can wrap to it. `None` when
 /// the Engine has no read-capable backend.
 pub async fn content_kem_pubkeys(
-    engine: &Arc<Engine>,
+    engine: &Engine,
 ) -> Result<Option<ciris_persist::federation::EncryptionPubkeys>, String> {
     use ciris_persist::federation::blobs::BlobStorage;
     let kem = {
