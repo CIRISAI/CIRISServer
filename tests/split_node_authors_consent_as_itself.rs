@@ -569,6 +569,14 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         for_keys.contains(&node) && for_keys.contains(&actor) && for_keys.len() == 2,
         "two grants by the human, one FOR each machine key: {for_keys:?}"
     );
+    // And the attester-keyed live reader shows the LAST one written — the node's.
+    // That order is load-bearing: contacts / chat / delivery status read this
+    // projection for the machine, so the node's grant must be the survivor.
+    assert_eq!(
+        rows_for_5,
+        vec![(owner.clone(), Some(node.clone()))],
+        "the one live row per (author, peer) is the node's grant (written last)"
+    );
     let _ = std::fs::remove_dir_all(&seed_dir);
     let _ = std::fs::remove_dir_all(&identity_dir);
 }
