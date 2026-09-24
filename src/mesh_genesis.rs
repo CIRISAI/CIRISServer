@@ -865,6 +865,99 @@ pub async fn accept_trust_root(
 ///
 /// Returns `false` when there was nothing to withdraw (no live acceptance) —
 /// distinct from an error, because "already un-trusted" is a success.
+/// **The OWNER's acceptance** — `delegates_to(owner → R, infra:attest, infra:serve)`
+/// at federation, signed with the owner's pen, for every root this node
+/// accepted (CIRISServer#632 step 2; Eric's ruling 2026-09-23: trust lives on
+/// the owner, the node inherits through the owner-binding — CC 4.4.3.8).
+///
+/// Edge's `Rooted(P)` at node N (CIRISEdge#659, `FSD/CIRIS_EDGE_TRANSPORT.md`
+/// §5.3) is `∃R ∈ roots_of(owner_of(N)) ∩ roots_of(owner_of(P)) ∧ valid ∧
+/// pinned`, with `roots_of(k)` = persist's `trusted_roots_of(k)`: the live
+/// `delegates_to(k → R, infra:*)` at federation tier. [`accept_trust_root`]
+/// writes that edge for the NODE key — bootstrap default trust, the row an
+/// operator deletes to un-trust. This writes the owner's, which is the one the
+/// walk reads. Same envelope shape as the node's (the id `trust-edge:{who}:{R}`
+/// under `references_attestation_id`, the two `infra:*` scopes), so persist's
+/// `trust_root_valid` leg 1 reads both through one predicate.
+///
+/// Roots = every root any key this node IS has accepted
+/// (`peer::own_keys_of_this_node`, so a split install's actor AND node key both
+/// count) ∪ the baked charter root. Never the owner's own key. Idempotent: a
+/// root the owner already accepts is skipped, and the row is
+/// [`crate::attest::emit`]-minted (one author for row and envelope, #402).
+///
+/// Returns the roots newly accepted this call.
+pub async fn accept_trust_roots_as_owner(
+    engine: &ciris_persist::prelude::Engine,
+    owner_signer: &ciris_persist::prelude::LocalSigner,
+    owner_key_id: &str,
+) -> Result<Vec<String>, GenesisError> {
+    use ciris_persist::federation::types::cohort_scope;
+
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+    let dir = engine.federation_directory();
+    let now = chrono::Utc::now();
+    let mut roots: Vec<String> = Vec::new();
+    for k in crate::peer::own_keys_of_this_node(&engine_key) {
+        let accepted =
+            ciris_persist::federation::trust_root::trusted_roots_of(dir.as_ref(), &k, now)
+                .await
+                .map_err(|e| GenesisError::Directory(format!("trusted_roots_of({k}): {e}")))?;
+        for r in accepted {
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+    }
+    if let Some(baked) =
+        charter_root_key_id(ciris_persist::federation::genesis::canonical_genesis_bundle())
+    {
+        if !roots.contains(&baked) && node_trusts_root(engine, &engine_key, &baked).await? {
+            roots.push(baked);
+        }
+    }
+    let mut newly = Vec::new();
+    for root in roots {
+        if root == owner_key_id {
+            continue;
+        }
+        if node_trusts_root(engine, owner_key_id, &root).await? {
+            tracing::debug!(owner = %owner_key_id, root = %root, "owner already accepts this root");
+            continue;
+        }
+        let id = format!("trust-edge:{owner_key_id}:{root}");
+        let envelope = serde_json::json!({
+            (paths::REFERENCES_ATTESTATION_ID): id,
+            "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
+        });
+        let attestation_id = crate::attest::emit(
+            engine,
+            crate::attest::KeySigner::Local(owner_signer),
+            crate::attest::Spec::new(
+                attestation_type::DELEGATES_TO,
+                cohort_scope::FEDERATION,
+                envelope,
+            )
+            .attested_to(&root),
+        )
+        .await
+        .map_err(|e| GenesisError::Directory(format!("write the owner's trust:accepts: {e}")))?;
+        tracing::info!(
+            owner = %owner_key_id,
+            trust_root = %root,
+            attestation_id = %attestation_id,
+            "trust root ACCEPTED BY THE OWNER — delegates_to(owner → root, infra:*) at \
+             federation; this is the edge peers walk for Rooted (CIRISEdge#659). Withdraw \
+             it to un-trust."
+        );
+        newly.push(root);
+    }
+    Ok(newly)
+}
+
 pub async fn withdraw_trust_acceptance(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
     root: &str,

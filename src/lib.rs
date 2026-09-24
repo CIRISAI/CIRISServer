@@ -495,6 +495,26 @@ pub mod vocabulary_surface;
 ///
 /// Inert without the feature (verify's `test_anchor_active` is a `false`
 /// constant there), so it costs nothing on the default surface.
+/// Is a TEST trust anchor live in this process — the `test-anchor` feature
+/// compiled in AND `CIRIS_TEST_TRUST_ROOT` set? Under exactly that condition
+/// persist admits the honest software-custody marker
+/// `{"tier":"SoftwareOnly_TEST","test_anchor":true}` (CIRISPersist#545) and
+/// refuses it, typed and loud, anywhere else. persist v47.3.0 (CIRISPersist#901)
+/// made a root only as valid as its holders' attested custody, so a harness
+/// node that is a root's charter holder must carry the marker or every peer
+/// reads its root INVALID and nobody Roots. A production build has no feature
+/// and never attaches it; never a fabricated hardware claim (the AV-77 class).
+pub(crate) fn test_anchor_marker_active() -> bool {
+    cfg!(feature = "test-anchor")
+        && std::env::var("CIRIS_TEST_TRUST_ROOT").is_ok_and(|v| !v.trim().is_empty())
+}
+
+/// The marker itself — exactly persist's shape (`SoftwareOnlyTestMarker`,
+/// `deny_unknown_fields`).
+pub(crate) fn software_only_test_marker() -> serde_json::Value {
+    serde_json::json!({ "tier": "SoftwareOnly_TEST", "test_anchor": true })
+}
+
 #[cfg(test)]
 pub(crate) fn assert_test_anchor_disarmed(context: &str) {
     assert!(

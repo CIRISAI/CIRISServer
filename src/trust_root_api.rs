@@ -284,6 +284,25 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
         }
     };
 
+    // The OWNER's acceptance rides the same import when the pen is here
+    // (CIRISServer#632 step 2): the node→root edge above is default trust; the
+    // owner→root edge is what a peer's Rooted walk reads (CIRISEdge#659).
+    match crate::node_key::accept_roots_as_owner(&st.engine).await {
+        Ok(Some(newly)) if !newly.is_empty() => {
+            tracing::info!(roots = ?newly, "trust root import: the OWNER accepted the root(s)")
+        }
+        Ok(Some(_)) => {
+            tracing::info!("trust root import: the owner's acceptance already on record")
+        }
+        Ok(None) => tracing::info!(
+            "trust root import: no owner pen on this node yet — the owner's acceptance is \
+             written at the claim"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "trust root import: the owner's acceptance FAILED (non-fatal)"
+        ),
+    }
     let posture = st.engine.genesis_posture().await;
     tracing::warn!(
         installed,
