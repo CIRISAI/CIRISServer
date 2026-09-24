@@ -287,7 +287,15 @@ jobs:
         # definition (every node that pins the root must read them); the route
         # is `#[cfg(feature = "test-anchor")]` and never compiles into a
         # shipping binary. Same scope as `produce_genesis`'s ceremony rows.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 46
+        # 46 -> 47 (0.5.216): `mesh_genesis::accept_trust_roots_as_owner` — the
+        # OWNER's `delegates_to(owner → root, infra:attest, infra:serve)`
+        # (CIRISServer#632 step 2). The twin of `accept_trust_root`'s node edge
+        # directly above it, signed with the owner's pen instead of the node's:
+        # it is the row edge v30.2.0's Rooted walk reads on the PEER
+        # (`trusted_roots_of(owner_of(P))`, CIRISEdge#659), so federation scope
+        # is the claim — an acceptance nobody else can read roots nobody. Same
+        # audience as the node edge; no new one.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 47
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
