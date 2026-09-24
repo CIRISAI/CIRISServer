@@ -11094,6 +11094,1133 @@
           }
         ]
       }
+    },
+    "/v1/files": {
+      "post": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Write File",
+        "description": "Write a file at a cohort (owner + membership). JSON or multipart/form-data; body limit raised to the 64 MiB chunk-DAG whole-read cap for this route only.",
+        "operationId": "write_file_v1_files_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "drive.bad_body | drive.bad_base64 | drive.unknown_cohort | drive.family_id_required | drive.community_id_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.delegate_may_not_author | drive.not_a_member | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "drive.readable_by_nobody",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "drive.too_large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileWriteRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/FileUploadForm"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/drive": {
+      "get": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Read Drive",
+        "description": "Everything this identity can reach, a page at a time: byte state and size without a whole read, the row envelope per entry, withdrawn rows hidden unless include_withdrawn=true.",
+        "operationId": "read_drive_v1_drive_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrivePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "drive.unknown_cohort | drive.bad_cursor | drive.family_id_required | drive.community_id_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.not_a_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "drive.listing_failed | drive.store_unavailable | drive.no_node_key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Rows per page; clamped to 1..=500 (default 100)."
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The `resume` of the previous page."
+          },
+          {
+            "name": "include_withdrawn",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "true to list withdrawn rows too (marked withdrawn)."
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{attestation_id}": {
+      "get": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Read File",
+        "description": "The bytes (JSON base64), or with raw=1 the bytes themselves with Content-Type, Content-Disposition and HTTP Range (206 / 416).",
+        "operationId": "read_file_v1_files_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "A byte range (raw=1 with Range)."
+          },
+          "400": {
+            "description": "drive.unknown_cohort",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.not_a_member | drive.not_granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "drive.not_fetched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "drive.withdrawn | drive.evicted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "drive.too_large_for_whole_read (use raw=1 with Range)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "drive.range_not_satisfiable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "drive.seal_mismatch | drive.unopened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "1 to answer the bytes themselves."
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Replace File",
+        "description": "Author only. Publishes the new bytes as a new row, then withdraws the old one; returns the new id. JSON or multipart; unnamed members keep the old file's.",
+        "operationId": "replace_file_v1_files_put",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "drive.bad_body | drive.bad_base64 | drive.unknown_cohort",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.delegate_may_not_author | drive.not_a_member | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "drive.withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "drive.too_large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileWriteRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/FileUploadForm"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Withdraw File",
+        "description": "Author only. A `withdraws` of the row (and the rows its widening superseded); persist then refuses every read of the bytes and the local copy is evicted.",
+        "operationId": "withdraw_file_v1_files_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.delegate_may_not_author | drive.not_a_member | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "drive.withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "drive.withdraw_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{attestation_id}/meta": {
+      "get": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "File Metadata",
+        "description": "Envelope, size, media type, filename, byte state and holder claims \u2014 without opening the bytes.",
+        "operationId": "file_meta_v1_files_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.not_a_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{attestation_id}/rename": {
+      "post": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Rename File",
+        "description": "Author only. A new row over the SAME bytes (no re-upload) carrying the new filename and `replaces_attestation_id`; the old row is withdrawn.",
+        "operationId": "rename_file_v1_files_rename_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "drive.filename_empty | drive.bad_body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.delegate_may_not_author | drive.not_a_member | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "drive.withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "filename": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "filename"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{attestation_id}/move": {
+      "post": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Move File",
+        "description": "Author only; target membership. Reseals at the target room's tier and publishes there; unless keep_source, withdraws the source.",
+        "operationId": "move_file_v1_files_move_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "drive.bad_move_target | drive.bad_body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "drive.owner_session_required | drive.delegate_may_not_author | drive.not_a_member | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "drive.not_in_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "drive.same_room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "drive.withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "drive.too_large_for_whole_read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cohort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "self (default) | family | community"
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family or community id (required for family / community)."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cohort": {
+                    "type": "string",
+                    "enum": [
+                      "self",
+                      "family",
+                      "community"
+                    ]
+                  },
+                  "room_id": {
+                    "type": "string"
+                  },
+                  "keep_source": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cohort"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notes": {
+      "get": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Read Notes",
+        "description": "Your notes, withdrawn ones gone.",
+        "operationId": "read_notes_v1_notes_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "notes.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Notes to return; clamped to 1..=500."
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Write Note",
+        "description": "Write a note to yourself (a text file in the self room).",
+        "operationId": "write_note_v1_notes_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "notes.empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "notes.owner_session_required | notes.delegate_may_not_author | notes.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "body": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "body"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/notes/{attestation_id}": {
+      "put": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Edit Note",
+        "description": "The new text is a new note; the old one is withdrawn.",
+        "operationId": "update_note_v1_notes_put",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "notes.empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "notes.owner_session_required | notes.delegate_may_not_author | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "notes.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "body": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "body"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "drive"
+        ],
+        "summary": "Withdraw Note",
+        "description": "Withdraw a note.",
+        "operationId": "withdraw_note_v1_notes_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "notes.owner_session_required | notes.delegate_may_not_author | drive.not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "notes.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "attestation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -28848,6 +29975,268 @@
         ],
         "title": "AdapterConfig",
         "description": "Configuration for an adapter.\n\nThis schema supports two configuration approaches:\n1. Simple adapters (CLI, API, Discord): Use `settings` dict with flat primitives\n2. Complex adapters (MCP): Use `adapter_config` dict for nested structures\n\nThe adapter's own typed config class (e.g., MCPAdapterConfig, DiscordAdapterConfig)\nperforms full validation when the adapter is loaded."
+      },
+      "DriveRefusal": {
+        "type": "object",
+        "title": "DriveRefusal",
+        "description": "A refusal: `reason_id` is the stable localization id (drive.* / notes.*), `error` carries the same value for older clients, `detail` is English.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "reason_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "reason_id",
+          "detail"
+        ]
+      },
+      "FileWriteRequest": {
+        "type": "object",
+        "title": "FileWriteRequest",
+        "properties": {
+          "cohort": {
+            "type": "string",
+            "enum": [
+              "self",
+              "family",
+              "community"
+            ]
+          },
+          "room_id": {
+            "type": "string",
+            "description": "The family or community id; omitted for self."
+          },
+          "bytes_base64": {
+            "type": "string",
+            "description": "Up to 64 MiB decoded (the chunk-DAG whole-read cap)."
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bytes_base64"
+        ]
+      },
+      "FileUploadForm": {
+        "type": "object",
+        "title": "FileUploadForm",
+        "description": "multipart/form-data: the bytes in a part named `file` (its filename and Content-Type are used when the fields are absent).",
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary"
+          },
+          "cohort": {
+            "type": "string",
+            "enum": [
+              "self",
+              "family",
+              "community"
+            ]
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ]
+      },
+      "FileWriteResponse": {
+        "type": "object",
+        "title": "FileWriteResponse",
+        "properties": {
+          "attestation_id": {
+            "type": "string",
+            "description": "The id to read the file back by (the placed row)."
+          },
+          "addressed": {
+            "type": "boolean"
+          },
+          "cohort": {
+            "type": "string"
+          },
+          "room": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          },
+          "crossed": {
+            "type": "boolean"
+          },
+          "excluded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "granted": {
+            "type": "integer"
+          },
+          "replaces": {
+            "type": "string",
+            "description": "PUT / move: the row this write retired."
+          },
+          "withdrawn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RowEnvelope": {
+        "type": "object",
+        "title": "RowEnvelope",
+        "description": "The row's CEG envelope (CSD-006 / CIRISServer#616).",
+        "properties": {
+          "attestation_id": {
+            "type": "string"
+          },
+          "attestation_type": {
+            "type": "string"
+          },
+          "attesting_key_id": {
+            "type": "string"
+          },
+          "attested_key_id": {
+            "type": "string"
+          },
+          "subject_key_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cohort_scope": {
+            "type": "string"
+          },
+          "cohort_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dimension": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tier": {
+            "type": "string"
+          },
+          "consent_scope": {
+            "description": "Whatever the row declares; null for file rows."
+          },
+          "asserted_at": {
+            "type": "string"
+          }
+        }
+      },
+      "DriveEntry": {
+        "type": "object",
+        "title": "DriveEntry",
+        "properties": {
+          "cohort": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "attestation_id": {
+            "type": "string"
+          },
+          "author_key_id": {
+            "type": "string"
+          },
+          "asserted_at": {
+            "type": "string"
+          },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes": {
+            "type": "string",
+            "description": "here | not_fetched | not_granted | evicted | withdrawn | seal_mismatch | a substrate kind"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "withdrawn": {
+            "type": "boolean"
+          },
+          "replaces": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/RowEnvelope"
+          }
+        }
+      },
+      "DrivePage": {
+        "type": "object",
+        "title": "DrivePage",
+        "properties": {
+          "rooms": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DriveEntry"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "resume": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass back as `after`; null when the drive is exhausted."
+          }
+        }
       }
     },
     "securitySchemes": {

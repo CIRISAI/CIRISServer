@@ -797,6 +797,26 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "community.quorum_pending",
     "community.store_unavailable",
     "community.write_failed",
+    # THE DRIVE CRUD SURFACE (0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md` §5) — the
+    # same plane, the same queue: the ids the FSD names for replace / rename /
+    # withdraw / move / range / notes edit, requested of the client beside the
+    # entries above (CIRISClient#65). `drive.withdrawn` and `drive.not_author`
+    # are the two a person meets in normal use.
+    "drive.bad_body",
+    "drive.bad_cursor",
+    "drive.bad_move_target",
+    "drive.delegate_may_not_author",
+    "drive.evicted",
+    "drive.filename_empty",
+    "drive.not_author",
+    "drive.range_not_satisfiable",
+    "drive.same_room",
+    "drive.seal_mismatch",
+    "drive.too_large_for_whole_read",
+    "drive.withdraw_failed",
+    "drive.withdrawn",
+    "notes.delegate_may_not_author",
+    "notes.not_found",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

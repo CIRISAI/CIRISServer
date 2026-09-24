@@ -76,18 +76,41 @@ fn every_drive_route_goes_through_the_guard() {
         "async fn write_file(",
         "async fn read_drive(",
         "async fn read_file(",
+        "async fn file_meta(",
+        "async fn replace_file(",
+        "async fn rename_file(",
+        "async fn withdraw_file(",
+        "async fn move_file(",
         "async fn write_note(",
+        "async fn update_note(",
+        "async fn withdraw_note(",
         "async fn read_notes(",
     ] {
         let start = src
             .find(handler)
             .unwrap_or_else(|| panic!("{handler} not found — did it move?"));
         let body = &src[start..src.len().min(start + 900)];
+        // Reads call `drive_auth::owner`; writes call it through
+        // `drive_author` / `notes_author`, which ask `owner_checked` so a
+        // delegate is refused by name. Both are the ONE guard.
         assert!(
-            body.contains("drive_auth::owner("),
+            body.contains("drive_auth::owner(")
+                || body.contains("drive_author(&st, &headers)")
+                || body.contains("notes_author(&st, &headers)"),
             "{handler} must call `drive_auth::owner` before doing anything with the \
              person's content — a route that answers on its own is how the READ side \
              drifted away from the WRITE side in the first place"
+        );
+    }
+    // …and the two write-side wrappers are the guard, not a second one.
+    for wrapper in ["async fn drive_author(", "async fn notes_author("] {
+        let start = src
+            .find(wrapper)
+            .unwrap_or_else(|| panic!("{wrapper} not found — did it move?"));
+        let body = &src[start..src.len().min(start + 400)];
+        assert!(
+            body.contains("drive_auth::owner_checked(st, headers)"),
+            "{wrapper} must be `drive_auth::owner_checked` and nothing else"
         );
     }
 }

@@ -192,6 +192,69 @@ Byte-state and error mapping: `drive.withdrawn` (410) from persist `BlobError::W
 The split-install viewer key is resolved once: files are opened as the key the KEM occurrence was
 provisioned for (`wire_identity()`), and a gate proves a split node opens its own file.
 
+### 5.1 As built (0.5.216, branch `feat/drive-crud`)
+
+Every route in the table above exists (`src/drive.rs`), with the ids above plus six the build needed:
+`drive.delegate_may_not_author` / `notes.delegate_may_not_author` (403 — §1 rule 1, named rather than
+folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipart body),
+`drive.bad_cursor` (400, an `after` this drive did not issue), `drive.range_not_satisfiable` (416, with
+`Content-Range: bytes */total`) and `drive.withdraw_failed` (500). Refusals answer
+`{error, reason_id, detail}`. Witnesses: `tests/drive_crud.rs` (12 in-process tests) and
+`tests/drive_split_viewer_key.rs` (its own binary: the wire identity is a process-global).
+
+- **Upload.** `DefaultBodyLimit` on `POST /v1/files` and `PUT /v1/files/{id}` only: the 64 MiB cap
+  as base64 plus 1 MiB. The FILE cap is the whole-read cap itself, so the node never accepts bytes it
+  cannot hand back whole; `drive.too_large` (413) is now reachable (it was dead: axum's 2 MB default
+  refused first, in plain text). `multipart/form-data` is parsed in-house (RFC 7578, no new crate).
+- **Byte state without a whole read.** Persist has no public "may this viewer read" door —
+  `authorize_viewer_by_tier` is `pub(crate)` (`federation/at_rest_cascade.rs:2024`). The drive
+  therefore asks `read_blob_range_as` for a range starting past any end: persist authorizes by tier,
+  refuses a withdrawn sha, then answers `RangeNotSatisfiable { size }` — no decryption for an inline
+  blob, one manifest open for a chunk DAG. One call yields presence, grant, withdrawal and plaintext size.
+- **Error mapping** is typed end to end: persist `BlobError` variants on the range/probe path, edge
+  `UnopenedReason::kind()` on the whole-read path. The `Debug`-string match is gone.
+- **Viewer key.** `backend::content_occurrence_key_id` is the ONE answer, used by the provisioner and
+  by every open: the wire node key on a split install, else `engine.local_derived_key_id()`. Before
+  this the provisioner wrapped grants to the wire key while the drive opened as the actor key, so a
+  split node read `not_granted` on every file it wrote. The witness uses production's
+  `node_key::move_owner_binding_to_node_key` and asserts the control (the actor key does NOT open).
+
+**Gaps at these pins (edge v31.0.0 / persist v48.0.0), each deliberate and named:**
+
+1. **Replace / rename / move are "publish new, withdraw old", not a CEG `supersedes`.** Edge's file
+   door (`files::publish`) takes no supersedes input and no existing pointer, and persist's only
+   supersedes builder (`crossing::build_widening`) changes `cohort_scope` and nothing else. The old
+   row is WITHDRAWN (what retires it); a rename row carries the signed member
+   `replaces_attestation_id` for lineage, and every change route answers `replaces`. Upstream ask:
+   an edge `files::republish(pointer, ..)` and a body-changing `supersedes` builder.
+2. **A rename row is built in the server** (`drive::rename_row`) — edge's row shape over the OLD
+   pointer, author and instant (the seal's AAD is `(author, asserted_at, field)` read off the row, so
+   a new row with those values opens the same bytes). `rename_keeps_the_blob_and_the_bytes_open`
+   fails if the shape drifts from edge's.
+3. **§1 rule 2 is not met for files.** `files::publish` authors every file row with
+   `Signers::node` (edge `src/files.rs:222`, `:271`); the owner's pen is passed as `actor` and never
+   used. So "author only" means "this node wrote it" (a rule-1 `withdraws` is signed with the same
+   node key), and a file the owner wrote on ANOTHER device answers `drive.not_author` here.
+4. **Withdrawn rows are listed by persist's gated reader.** `list_attestations` ignores
+   `AttestationFilter::lifecycle` (sqlite `store/sqlite.rs:22334` builds no lifecycle predicate;
+   only `list_scores`, `:11095`, applies it), so edge's `files::in_room` returns withdrawn and
+   superseded rows. The drive re-derives each row's withdrawal with persist's own
+   `check_withdraws_admission` (the per-row fold, `blob_tombstone::retiring_composer`, is private)
+   and hides it unless `include_withdrawn=true`.
+5. **Edge drops `BlobError::Withdrawn` into `Substrate`** (`group_content/persist_store.rs` `map_err`
+   catch-all; `UnopenedReason` has no withdrawn arm). Every read checks the ROW's withdrawal first,
+   so `drive.withdrawn` (410) does not depend on it.
+6. **Crossing of the withdrawal.** Edge's `withdraws_attestation` is born at the widest cohort with no
+   dimension; whether it reaches the owner's other devices depends on the consent plane covering it.
+   Not provable in-process — the chat ladder's `withdrawn` rung is the witness.
+7. **`devices_holding`** is the live `holds_bytes` claim count and is reported for community rooms
+   only; at `self` / `family` CC 5.2 emits no holder claim, so the field is `null` with
+   `holder_claims_recorded: false` rather than a misleading 0.
+8. **Split-install authorship.** Files are authored by the router's node signer (the ACTOR key on a
+   split). The owner's `self` gate admits them only because `move_owner_binding_to_node_key` adds the
+   node-key binding without withdrawing the actor's; a change that retires the actor binding would
+   hide a split node's files from its own drive.
+
 ## 6. Witnesses
 
 - In-process tests per route family (behavioural, not source-scrapes): `tests/family_crud.rs`,
