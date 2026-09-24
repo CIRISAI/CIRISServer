@@ -14,7 +14,7 @@ use crate::ladder::{
 /// three deliberately, in one commit.
 pub const TARGET_VERIFY: &str = "v16.1.0";
 pub const TARGET_PERSIST: &str = "v47.3.0";
-pub const TARGET_EDGE: &str = "v30.3.0";
+pub const TARGET_EDGE: &str = "v30.3.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.

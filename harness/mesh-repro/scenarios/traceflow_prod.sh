@@ -18,7 +18,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/traceflow.sh"
 SCENARIO_NAME="traceflow_prod — production-shaped agent (split, owned, Advisory-admitted, genesis-imported)"
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.prod.yml"
 SUCCESS_STAGE="served"
-SUCCESS_MESSAGE="production-shaped agent reached the canonical: owned, split, Advisory-admitted, bootstrap rounds served. (arrive stays RED until CIRISEdge#659 — read its count above.)"
+SUCCESS_MESSAGE="production-shaped agent reached the canonical: owned, split, Advisory-admitted, bootstrap rounds served, Rooted as a pair. (offerable/ship/arrive stay RED until CIRISPersist#905 — the promotion sweep reads self-authored grants only, and a claimed agent's consent is authored by its human. Read the counts above.)"
 # seal/trace_att lag the bootstrap rounds by CIRIS_HARNESS_SEAL_DELAY_SECS; requiring them
 # keeps the window open so the Attestation rounds RUN inside the measurement and `arrive`
 # is read (red, today) rather than skipped by an early SUCCESS at `served`.
