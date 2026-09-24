@@ -1004,6 +1004,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // announce-heal of the peer's routing dest + the LINK_REQUEST_TX-with-no-path
     // guard that turns any future recurrence into a loud immediate error.
     prime_canonical_bootstrap_peers(&engine, &edge).await;
+    // The first-contact carry for a server-shaped node (CIRISServer#632 / CIRISEdge#671).
+    crate::mesh_genesis::carry_allegiance_from_canonicals(&engine, &[]).await;
 
     crate::compose_status::phase("holonomic");
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────

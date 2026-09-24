@@ -958,6 +958,276 @@ pub async fn accept_trust_roots_as_owner(
     Ok(newly)
 }
 
+/// **A node's allegiance facts** — the signed rows a peer's Rooted walk reads
+/// about THIS node (CIRISEdge#659 §5.3), carried by the node itself
+/// (CIRISServer#632, CIRISEdge#671):
+///
+/// * `key_records` — this node's own key records and its owner's (the peer must
+///   hold the signers before it can admit anything they signed);
+/// * `rows` — every live FEDERATION-tier `delegates_to` authored by one of those
+///   identities whose `attested_key_id` is one of them or a root they accept:
+///   the owner-binding(s) `owner → node`, the node's `node → R` and the
+///   owner's `owner → R` acceptances. Nothing this node holds ABOUT OTHERS.
+///
+/// "Recognition can be shipped; acceptance can only be signed" — these are all
+/// signed, all self-published, and a receiver verifies each at persist's
+/// admission doors. Handing them over the read API is the first-contact design
+/// (the node CARRIES its owner's rows), and it exists because edge v30.3.0's
+/// consent send-set gate withholds them from any peer the node has not
+/// consented to (CIRISEdge#671) — production's canonical consents to nobody.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AllegianceFacts {
+    #[serde(default)]
+    pub key_records: Vec<ciris_persist::federation::SignedKeyRecord>,
+    #[serde(default)]
+    pub rows: Vec<ciris_persist::federation::SignedAttestation>,
+}
+
+/// Caps on what a node will SERVE and what it will ADOPT — a node has a handful
+/// of identities and a handful of roots; anything larger is not allegiance.
+pub const ALLEGIANCE_MAX_KEY_RECORDS: usize = 8;
+pub const ALLEGIANCE_MAX_ROWS: usize = 32;
+
+/// Assemble this node's [`AllegianceFacts`] from its own directory.
+pub async fn allegiance_facts(
+    engine: &ciris_persist::prelude::Engine,
+) -> Result<AllegianceFacts, GenesisError> {
+    use ciris_persist::federation::types::attestation_tier;
+
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+    let dir = engine.federation_directory();
+    let now = chrono::Utc::now();
+    // The identities: every key this node IS, plus its owner (if claimed).
+    let mut identities: Vec<String> = crate::peer::own_keys_of_this_node(&engine_key);
+    for k in identities.clone() {
+        if let Ok(Some(owner)) =
+            ciris_persist::federation::admission::owner_of(dir.as_ref(), &k).await
+        {
+            if !identities.contains(&owner) {
+                identities.push(owner);
+            }
+        }
+    }
+    // The roots any of them accepts.
+    let mut roots: Vec<String> = Vec::new();
+    for k in &identities {
+        if let Ok(rs) =
+            ciris_persist::federation::trust_root::trusted_roots_of(dir.as_ref(), k, now).await
+        {
+            for r in rs {
+                if !roots.contains(&r) {
+                    roots.push(r);
+                }
+            }
+        }
+    }
+    let mut facts = AllegianceFacts::default();
+    for k in &identities {
+        if facts.key_records.len() >= ALLEGIANCE_MAX_KEY_RECORDS {
+            break;
+        }
+        if let Ok(Some(rec)) = dir.lookup_public_key(k).await {
+            facts
+                .key_records
+                .push(ciris_persist::federation::SignedKeyRecord { record: rec });
+        }
+    }
+    for k in &identities {
+        let rows = dir
+            .list_attestations_by(k)
+            .await
+            .map_err(|e| GenesisError::Directory(format!("list_attestations_by({k}): {e}")))?;
+        for a in rows {
+            if facts.rows.len() >= ALLEGIANCE_MAX_ROWS {
+                break;
+            }
+            let names_us_or_a_root =
+                identities.contains(&a.attested_key_id) || roots.contains(&a.attested_key_id);
+            // Federation TIER is the walk's own filter (`counts_in_capability_walk`);
+            // a federation-tier row is by construction a replicating one.
+            if a.attestation_type == attestation_type::DELEGATES_TO
+                && a.tier == attestation_tier::FEDERATION
+                && names_us_or_a_root
+            {
+                facts
+                    .rows
+                    .push(ciris_persist::federation::SignedAttestation { attestation: a });
+            }
+        }
+    }
+    Ok(facts)
+}
+
+/// What [`adopt_allegiance_facts`] did, by name.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AllegianceAdopted {
+    pub keys_registered: usize,
+    pub keys_already_held: usize,
+    pub rows_inserted: usize,
+    pub rows_already_held: usize,
+    /// `(id, reason)` — persist refused it. A refusal is a verdict about the
+    /// row, never a failure of the carry; named so the operator can read it.
+    pub refused: Vec<(String, String)>,
+}
+
+/// Admit a peer's [`AllegianceFacts`] into THIS directory, through the same
+/// persist doors the genesis install uses (`put_public_key`, `put_attestation`
+/// — each verifies the row it admits; a tampered or unsigned row is refused
+/// there, not trusted here). Keys first (the signers), then rows.
+///
+/// Nothing here confers anything on this node or on the peer: an allegiance
+/// row is STANDING (CIRISEdge#659 ruling 4), read only by the Rooted walk, and
+/// only meaningful against a root this node already pins and finds valid.
+pub async fn adopt_allegiance_facts(
+    engine: &ciris_persist::prelude::Engine,
+    facts: &AllegianceFacts,
+) -> Result<AllegianceAdopted, GenesisError> {
+    use ciris_persist::federation::AttestationOutcome;
+    let dir = engine.federation_directory();
+    let mut out = AllegianceAdopted::default();
+    for rec in facts.key_records.iter().take(ALLEGIANCE_MAX_KEY_RECORDS) {
+        let id = rec.record.key_id.clone();
+        // A key already held is never replaced (persist refuses a different
+        // record; an identical one is an idempotent no-op) — say "held", so a
+        // re-carry reads as nothing-new rather than as a registration.
+        match dir.lookup_public_key(&id).await {
+            Ok(Some(_)) => {
+                out.keys_already_held += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                out.refused.push((id, format!("lookup: {e}")));
+                continue;
+            }
+        }
+        match dir.put_public_key(rec.clone()).await {
+            Ok(()) => out.keys_registered += 1,
+            Err(e) if is_already_exists(&e) => out.keys_already_held += 1,
+            Err(e) => out.refused.push((id, e.to_string())),
+        }
+    }
+    for row in facts.rows.iter().take(ALLEGIANCE_MAX_ROWS) {
+        let id = row.attestation.attestation_id.clone();
+        match dir.put_attestation(row.clone()).await {
+            Ok(AttestationOutcome::Inserted) => out.rows_inserted += 1,
+            Ok(AttestationOutcome::AlreadyHeld) => out.rows_already_held += 1,
+            Ok(other) => out.refused.push((id, format!("{other:?}"))),
+            Err(e) if is_already_exists(&e) => out.rows_already_held += 1,
+            Err(e) => out.refused.push((id, e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch a peer's allegiance facts from its read API and adopt them.
+/// `base_url` is the peer's read-API base (`http://host:4243`). Bounded body,
+/// bounded counts; every outcome logged by the caller.
+pub async fn carry_allegiance_from(
+    engine: &ciris_persist::prelude::Engine,
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<AllegianceAdopted, String> {
+    const MAX_BYTES: usize = 1024 * 1024;
+    let url = format!(
+        "{}/v1/federation/allegiance",
+        base_url.trim_end_matches('/')
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{url}: HTTP {}", resp.status()));
+    }
+    if resp
+        .content_length()
+        .is_some_and(|l| l as usize > MAX_BYTES)
+    {
+        return Err(format!(
+            "{url}: body larger than {MAX_BYTES} bytes — not allegiance"
+        ));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("{url}: read body: {e}"))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(format!(
+            "{url}: body larger than {MAX_BYTES} bytes — not allegiance"
+        ));
+    }
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        allegiance: AllegianceFacts,
+    }
+    let wire: Wire = serde_json::from_slice(&bytes).map_err(|e| format!("{url}: parse: {e}"))?;
+    adopt_allegiance_facts(engine, &wire.allegiance)
+        .await
+        .map_err(|e| format!("{url}: adopt: {e}"))
+}
+
+/// Carry allegiance facts from every canonical this node can name a read URL
+/// for (`federation.canonical_read_urls`, else the baked hints' `:4243`), for
+/// the canonicals in `targets` (empty = all). Non-fatal by construction: each
+/// canonical logs its own outcome.
+pub async fn carry_allegiance_from_canonicals(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    targets: &[String],
+) {
+    let roster = match crate::trace_receipt::canonical_reads(engine).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::info!(error = %e, "allegiance carry: no canonical read roster — skipped");
+            return;
+        }
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        tracing::warn!("allegiance carry: could not build an HTTP client — skipped");
+        return;
+    };
+    for read in roster
+        .reads
+        .iter()
+        .filter(|r| targets.is_empty() || targets.contains(&r.key_id))
+    {
+        match carry_allegiance_from(engine, &client, &read.url).await {
+            Ok(adopted) if adopted.rows_inserted > 0 || adopted.keys_registered > 0 => {
+                tracing::info!(
+                    canonical = %read.key_id,
+                    url = %read.url,
+                    keys_registered = adopted.keys_registered,
+                    rows_inserted = adopted.rows_inserted,
+                    rows_already_held = adopted.rows_already_held,
+                    refused = ?adopted.refused,
+                    "allegiance carried from the canonical — its owner-binding and root \
+                     acceptance(s) are now held here; the Rooted walk can read them (CIRISEdge#671)"
+                )
+            }
+            Ok(adopted) => tracing::info!(
+                canonical = %read.key_id,
+                url = %read.url,
+                rows_already_held = adopted.rows_already_held,
+                refused = ?adopted.refused,
+                "allegiance carry: nothing new from the canonical"
+            ),
+            Err(e) => tracing::warn!(
+                canonical = %read.key_id,
+                url = %read.url,
+                error = %e,
+                "allegiance carry FAILED for this canonical (non-fatal; retried on the next prime)"
+            ),
+        }
+    }
+}
+
 pub async fn withdraw_trust_acceptance(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
     root: &str,

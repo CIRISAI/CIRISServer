@@ -204,6 +204,12 @@ fn baked_bundle() -> Result<Option<&'static crate::mesh_genesis::GenesisBundle>,
 struct ImportRequest {
     /// A portable genesis bundle — the artifact a ceremony produced.
     bundle: serde_json::Value,
+    /// Optional: the read-API base URL of the node this bundle came from. Its
+    /// allegiance facts (owner-binding, root acceptances) are carried in the
+    /// same act, so the Rooted walk toward it works from first contact
+    /// (CIRISServer#632 / CIRISEdge#671). Loopback-gated like the import.
+    #[serde(default)]
+    allegiance_from: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +308,36 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
             error = %e,
             "trust root import: the owner's acceptance FAILED (non-fatal)"
         ),
+    }
+    if let Some(base) = req
+        .allegiance_from
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => {
+                match crate::mesh_genesis::carry_allegiance_from(&st.engine, &client, base).await {
+                    Ok(adopted) => tracing::info!(
+                        from = %base,
+                        keys_registered = adopted.keys_registered,
+                        rows_inserted = adopted.rows_inserted,
+                        rows_already_held = adopted.rows_already_held,
+                        refused = ?adopted.refused,
+                        "trust root import: the source node's allegiance facts carried (CIRISEdge#671)"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(from = %base, error = %e, "trust root import: allegiance carry FAILED (non-fatal)")
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "trust root import: no HTTP client for the allegiance carry")
+            }
+        }
     }
     let posture = st.engine.genesis_posture().await;
     tracing::warn!(

@@ -295,7 +295,15 @@ jobs:
         # (`trusted_roots_of(owner_of(P))`, CIRISEdge#659), so federation scope
         # is the claim — an acceptance nobody else can read roots nobody. Same
         # audience as the node edge; no new one.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 47
+        # 47 -> 48 (0.5.216): `test_bless.rs` — the test-anchor ceremony's trust
+        # edge `delegates_to(self → root)` moves from `self` to FEDERATION, the
+        # scope `mesh_genesis::accept_trust_root` has always written on a
+        # production boot. Edge v30.2.0's Rooted walk reads FEDERATION-tier
+        # acceptances only, from the peer's directory (CIRISEdge#659), so a
+        # self-scoped edge left the harness canonical with no roots — both trace
+        # ladders red at `arrive` on the v30.3.0 adoption (CIRISServer#632).
+        # Test-anchor builds only; no new production audience.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 48
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one
