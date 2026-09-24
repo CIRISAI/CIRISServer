@@ -996,9 +996,13 @@ pub async fn heal_owner_key_record(
         return Ok(None);
     };
     let Some(signer) = pen.signer.as_ref() else {
+        tracing::warn!(
+            owner_key_id = %pen.key_id,
+            "owner resolved but no pen came with it — owner record heal skipped (#606)"
+        );
         return Ok(None);
     };
-    let state = crate::auth::ownership::rebind_owner_key_record(engine, signer)
+    let state = crate::auth::ownership::rebind_owner_key_record(engine, signer, &pen.key_id)
         .await
         .map_err(|e| anyhow::anyhow!("rebind the owner's key record: {e}"))?;
     Ok(Some(state))

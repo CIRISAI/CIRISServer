@@ -809,25 +809,69 @@ pub enum OwnerKeyRecordState {
 /// row; a bound row is `Bound` and nothing is written. A hardware-custodied
 /// owner with no software seed never reaches here (the pen resolution refuses
 /// first) — nobody re-signs a key they do not hold.
+///
+/// # The row is named by the CALLER, never derived from the pen
+///
+/// `owner_key_id` is the registered id the caller already resolved — the
+/// steward `owner_of(node)` named (boot, delivery), or the binding's
+/// `responsible_user_key_id` (claim). The pen is checked to be that key
+/// (`key_id()` or `derived_key_id()` equals it, as `peer::signer_holds` reads
+/// it) and then its pubkeys are checked against the stored row before anything
+/// is signed.
+///
+/// It used to be `owner_signer.derived_key_id()`. Production's owner signer is
+/// built by `hardware_user_local_signer`, which hands `from_hardware_parts` the
+/// DERIVED id — so on that signer `key_id()` IS the registered id and
+/// `derived_key_id()` is `<alias>-<fp>-<fp>`, a key that exists nowhere
+/// (`identity.rs`, CIRISServer#597 §4: "every existing caller reads
+/// `key_id()`"). This door was the one caller that did not. Measured on the
+/// production canonical 2026-09-24 with the owner's pen placed on disk for one
+/// boot: the pen resolved (three `responsible-user signer resolved` lines), the
+/// heal looked up the doubly-derived id, found nothing, returned `Absent`, and
+/// every call site's `Ok(_) => {}` arm swallowed it — no log line, row
+/// unchanged. The gate in `tests/owner_key_record_rebind.rs` was green
+/// throughout because its fixture pen is named by ALIAS, the one shape
+/// production never builds. Both are fixed together: the id comes from the
+/// caller, and `Absent` / `Bound` are logged by name.
 pub async fn rebind_owner_key_record(
     engine: &Engine,
     owner_signer: &LocalSigner,
+    owner_key_id: &str,
 ) -> Result<OwnerKeyRecordState, OwnershipError> {
     use ciris_persist::federation::admission::{
         bind_subject_into_envelope, verify_envelope_binds_subject,
     };
     use ciris_persist::federation::register::RebindOutcome;
 
-    let owner_key_id = owner_signer.derived_key_id();
+    // Both names are compared — never used as the lookup key. `signer_holds`
+    // reads a pen the same way (src/peer.rs).
+    if !crate::peer::signer_holds(owner_signer, owner_key_id) {
+        return Err(OwnershipError::Verify(format!(
+            "the pen is named {:?}, not the owner {owner_key_id:?} — refusing to re-sign a \
+             record as anyone but its holder",
+            owner_signer.key_id(),
+        )));
+    }
+    let owner_key_id = owner_key_id.to_string();
     let stored = engine
         .federation_directory()
         .lookup_public_key(&owner_key_id)
         .await
         .map_err(|e| OwnershipError::Persist(format!("lookup_public_key({owner_key_id}): {e}")))?;
     let Some(stored) = stored else {
+        tracing::warn!(
+            owner_key_id = %owner_key_id,
+            "owner registration record is ABSENT on this node — nothing to rebind; if the \
+             owner is known to this node, the id the caller resolved and the id the row \
+             was registered under disagree (CIRISServer#606)"
+        );
         return Ok(OwnerKeyRecordState::Absent);
     };
     if verify_envelope_binds_subject(&stored).is_ok() {
+        tracing::info!(
+            owner_key_id = %owner_key_id,
+            "owner registration record already binds its subject — nothing to rebind (#606)"
+        );
         return Ok(OwnerKeyRecordState::Bound);
     }
     // The same binder the registration path uses (#659): the bound envelope is

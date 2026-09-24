@@ -142,7 +142,7 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
     );
 
     // ── 2. the heal, with the owner's own pen ─────────────────────────────
-    let state = rebind_owner_key_record(&node, &owner)
+    let state = rebind_owner_key_record(&node, &owner, &owner_id)
         .await
         .expect("rebind runs");
     assert_eq!(state, OwnerKeyRecordState::Rebound);
@@ -188,7 +188,7 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
 
     // ── 4. idempotent; a bound-from-birth record is Bound on the first call ─
     assert_eq!(
-        rebind_owner_key_record(&node, &owner)
+        rebind_owner_key_record(&node, &owner, &owner_id)
             .await
             .expect("second call"),
         OwnerKeyRecordState::Bound
@@ -198,7 +198,7 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
         .await
         .expect("a bound record registers through the gate");
     assert_eq!(
-        rebind_owner_key_record(&node, &modern)
+        rebind_owner_key_record(&node, &modern, &modern.derived_key_id())
             .await
             .expect("bound owner"),
         OwnerKeyRecordState::Bound,
@@ -212,7 +212,7 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
         .put_public_key(record_for(&other_unbound_owner, identity_type::USER, false).await)
         .await
         .expect("a second unbound row");
-    let absent = rebind_owner_key_record(&node, &stranger)
+    let absent = rebind_owner_key_record(&node, &stranger, &stranger.derived_key_id())
         .await
         .expect("no row for a stranger");
     assert_eq!(
@@ -229,5 +229,131 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
     assert!(
         verify_envelope_binds_subject(&still_unbound).is_err(),
         "no other owner's record was touched"
+    );
+}
+
+/// A pen named by its DERIVED id — the shape production builds.
+///
+/// `hardware_user_local_signer` hands `from_hardware_parts` the derived id
+/// (`identity.rs`, CIRISServer#597 §4), so on the owner's real pen `key_id()`
+/// IS the registered id and `derived_key_id()` is `<alias>-<fp>-<fp>`. The
+/// first test above names its pen by ALIAS — the shape production never
+/// builds — and stayed green while the canonical's heal looked up a key that
+/// does not exist and returned `Absent` in silence (2026-09-24). This is the
+/// production shape: same seeds, same pubkeys, id already derived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pen_named_by_its_derived_id_rebinds_the_row_too() {
+    let node = engine_as("node-for-the-derived-pen-test").await;
+    let alias = "owner-whose-pen-is-named-by-its-derived-id";
+    let by_alias = signer_for(alias);
+    let owner_id = by_alias.derived_key_id();
+
+    let unbound = record_for(&by_alias, identity_type::USER, false).await;
+    node.federation_directory()
+        .put_public_key(unbound)
+        .await
+        .expect("the bypass door stores an unbound row, as 2026-07 did");
+
+    // The production pen: the SAME key material, named by the derived id.
+    let production_pen = LocalSigner::from_parts(
+        SigningKey::from_bytes(&seed(alias, 1)),
+        owner_id.clone(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&seed(alias, 2), format!("{alias}-pqc"))
+                .expect("ML-DSA-65 seed"),
+        )),
+        Some(format!("{alias}-pqc")),
+    );
+    assert_eq!(
+        production_pen.key_id(),
+        owner_id,
+        "fixture: named by the registered id"
+    );
+    assert_ne!(
+        production_pen.derived_key_id(),
+        owner_id,
+        "fixture: re-deriving an already-derived id yields a key that exists nowhere — \
+         the shape that made the heal return Absent"
+    );
+
+    let state = rebind_owner_key_record(&node, &production_pen, &owner_id)
+        .await
+        .expect("rebind runs");
+    assert_eq!(
+        state,
+        OwnerKeyRecordState::Rebound,
+        "a pen named by its derived id must rebind the row it holds, not report Absent"
+    );
+    let healed = node
+        .federation_directory()
+        .lookup_public_key(&owner_id)
+        .await
+        .expect("lookup")
+        .expect("still stored");
+    assert!(
+        verify_envelope_binds_subject(&healed).is_ok(),
+        "the row now binds its subject"
+    );
+
+    // And a pen that is neither the owner's key_id nor derives it is refused
+    // BY NAME before any lookup — the caller's id and the pen must agree.
+    let stranger = signer_for("a-stranger");
+    let err = rebind_owner_key_record(&node, &stranger, &owner_id)
+        .await
+        .expect_err("a pen for another key is refused");
+    assert!(
+        err.to_string()
+            .contains("refusing to re-sign a record as anyone but its holder"),
+        "refused by name: {err}"
+    );
+}
+
+/// The convention the heal broke, as a source gate: an owner/user pen's
+/// registered id is `key_id()`, never `derived_key_id()` (CIRISServer#597 §4).
+/// `login_signer` is the one alias-named variant and is exempt by name.
+#[test]
+fn no_owner_pen_is_looked_up_by_its_re_derived_id() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    // No regex crate in the test graph: a pen identifier immediately followed by
+    // the re-derivation is the whole pattern.
+    const PENS: [&str; 4] = ["owner_signer", "user_signer", "owner_pen", "pen.signer"];
+    let is_hit = |line: &str| {
+        PENS.iter().any(|pen| {
+            line.match_indices(&format!("{pen}.derived_key_id()"))
+                .any(|(at, _)| {
+                    // word boundary on the left: not `xowner_signer`
+                    at == 0
+                        || !line[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+        })
+    };
+    let mut hits = Vec::new();
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("read file");
+                for (i, line) in text.lines().enumerate() {
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    if is_hit(line) {
+                        hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "\nan owner/user pen is named by key_id(); derived_key_id() on it is \
+         `<alias>-<fp>-<fp>`, a key that exists nowhere (CIRISServer#597 §4, #606):\n{}",
+        hits.join("\n")
     );
 }
