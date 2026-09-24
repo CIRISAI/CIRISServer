@@ -961,9 +961,19 @@ pub fn owner_authored_consent_enabled() -> bool {
 /// CIRISPersist#857). Directory-driven on purpose: a claim made BEFORE the split
 /// binds the actor and one made AFTER it binds the node key, and persist admits
 /// a `for_key_id` only where the author is actually a steward (CIRISServer#632).
-async fn bound_own_key_for(engine: &Engine, author: &str, engine_author: &str) -> Option<String> {
-    let dir = engine.federation_directory();
+async fn bound_own_key_for(
+    engine: &Engine,
+    author: &str,
+    engine_author: &str,
+    requested: &str,
+) -> Option<String> {
+    // The key the CALLER asked the grant to be for comes first: a human bound to
+    // both the agent (occurrence anchor) and the node key (claim) who consents
+    // "for this agent" names the agent (`split_node_authors_consent_as_itself`).
+    // Only when that key is not one the author is bound to do we fall to the
+    // wire identity, the held node key, then the engine key.
     for k in [
+        Some(requested.to_owned()),
         crate::node_key::wire_identity().map(str::to_owned),
         crate::node_key::held_node_signer().map(|h| h.derived_key_id()),
         Some(engine_author.to_owned()),
@@ -971,10 +981,13 @@ async fn bound_own_key_for(engine: &Engine, author: &str, engine_author: &str) -
     .into_iter()
     .flatten()
     {
-        if let Ok(Some(owner)) =
-            ciris_persist::federation::admission::owner_of(dir.as_ref(), &k).await
-        {
-            if owner == author {
+        // "Bound to" is persist's OWN predicate for the fold (`steward_bindings_of`,
+        // every live delegates_to granter — an owner-binding OR an occurrence
+        // anchor), not the purpose-filtered `owner_of`: the author and the reader
+        // must agree on which grants count, or a grant is authored for a key the
+        // fold will never match it to.
+        if let Ok(stewards) = engine.steward_bindings_of(&k).await {
+            if stewards.iter().any(|st| st == author) {
                 return Some(k);
             }
         }
@@ -1045,7 +1058,7 @@ pub async fn consent_author(
             // by-principals fold (`for_key_id == k`) drops the grant and the
             // reconciler never converges (CIRISServer#632). A machine pen — the
             // node's own — names nobody: persist refuses anything else.
-            let for_key_id = bound_own_key_for(engine, requested, &engine_author).await;
+            let for_key_id = bound_own_key_for(engine, requested, &engine_author, requested).await;
             return Ok(ConsentAuthor {
                 key_id: requested.to_owned(),
                 signer: Some(signer),
@@ -1097,7 +1110,7 @@ pub async fn consent_author(
         // key otherwise. Naming the actor here left every post-split claim's
         // consent unmatched by the fold (CIRISServer#632).
         owner.for_key_id = Some(
-            bound_own_key_for(engine, &owner.key_id, &engine_author)
+            bound_own_key_for(engine, &owner.key_id, &engine_author, requested)
                 .await
                 .unwrap_or_else(|| engine_author.clone()),
         );
