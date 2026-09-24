@@ -981,6 +981,19 @@ async fn bound_own_key_for(
     .into_iter()
     .flatten()
     {
+        // NEVER the author's own key. persist's `steward_bindings_of` clause 1
+        // says a `user`-role key steward-binds ITSELF, so a human author passes
+        // the test below on their own key — and `ensure_replication_consent_covers`
+        // re-resolves the author with `requested = author.key_id` on its widen
+        // path, so `requested` IS the human there. That put the OWNER into
+        // `for_key_id`, `live_consent_grants_for_machine(node)` filters on
+        // `for_key_id == node`, and every person-contact grant became invisible
+        // to the node that authored it: `POST /v1/chat` 403 `chat.not_a_contact`
+        // on the chat ladder (2026-09-24). "Bound to" is a relation between a
+        // person and a MACHINE; a person's identity with themselves is not it.
+        if k == author {
+            continue;
+        }
         // "Bound to" is persist's OWN predicate for the fold (`steward_bindings_of`,
         // every live delegates_to granter — an owner-binding OR an occurrence
         // anchor), not the purpose-filtered `owner_of`: the author and the reader
