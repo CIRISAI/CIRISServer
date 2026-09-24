@@ -774,7 +774,7 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
     opts: &ConsentGrantOptions,
 ) -> Result<ConsentGrant> {
     // Idempotency guard: does A hold a LIVE replication-consent grant to this
-    // peer? See [`standing_live_grant`] for why "live" and not "present".
+    // peer? See [`standing_live_grant_for`] for why "live" and not "present".
     // WHO authors this — resolved before the standing-grant lookup, so a caller
     // that named the actor on a split node looks up (and writes) the NODE's grant.
     let author = consent_author(engine, node_key_id, opts.author_signer.clone()).await?;
@@ -835,17 +835,11 @@ pub async fn emit_replication_consent_with_policy<S: AsRef<str>>(
 /// is why the old scan's `attestation_type` / `dimension` predicates are gone
 /// rather than merely relocated. Ordered `asserted_at DESC` by both SQL
 /// backends, so the first match is the most recent.
-async fn standing_live_grant(
-    engine: &Engine,
-    node_key_id: &str,
-    peer_key_id: &str,
-) -> Result<Option<ciris_persist::federation::types::Attestation>> {
-    standing_live_grant_for(engine, node_key_id, peer_key_id, None).await
-}
-
-/// [`standing_live_grant`] narrowed to the row FOR `for_key_id` when given: an
-/// owner holds one grant per (peer, agent), and a grant for a sibling agent is
-/// not this agent's standing grant (CIRISServer#601 item 4).
+///
+/// Narrowed to the row FOR `for_key_id` when given: an owner holds one grant per
+/// (peer, agent), and a grant for a sibling agent is not this agent's standing
+/// grant (CIRISServer#601 item 4). Every caller now names the key it is asking
+/// about — the un-narrowed form was retired with the per-key covering door.
 async fn standing_live_grant_for(
     engine: &Engine,
     node_key_id: &str,
@@ -1637,7 +1631,7 @@ pub async fn live_consent_grants_for_machine(
 
 /// **What this node's LIVE grant to `peer_key_id` actually covers.**
 ///
-/// The sibling of [`standing_live_grant`] on the same revocation-folded read —
+/// The sibling of [`standing_live_grant_for`] on the same revocation-folded read —
 /// deliberately not a second predicate, because "is there a live grant" and
 /// "what does it cover" are two questions about ONE row, and answering them
 /// through two lookups is how they drift apart.
@@ -1879,6 +1873,64 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
     peer_key_id: &str,
     required_prefixes: &[S],
 ) -> Result<ConsentCoverage> {
+    // ORDER MATTERS under persist v47: `consent_peer_set` holds ONE live row per
+    // (author, peer) (INSERT OR REPLACE), so the attester-keyed readers
+    // (`list_live_consent_grants_by` → `live_consent_grants_for_machine`,
+    // contacts / chat / delivery status) see only the LAST grant this human
+    // wrote toward this peer. The per-key projection (`consent_peer_set_for`,
+    // by-principals reads: edge's send-set, the reconciler) keeps every one.
+    // So the other own keys go first and the requested key — the NODE, for
+    // every operator door — is written last and stays the live one.
+    // PER-KEY CONSENT ON A SPLIT INSTALL (CIRISServer#601 / #632). The human's
+    // grant names the own key it is FOR, and every plane reads its own key:
+    // edge's send-set and the Rooted walk read the WIRE (node) key; persist's
+    // promotion sweep (`load_active_egress_grants`) reads the ENGINE (actor)
+    // key, because the actor authors the rows. One grant cannot serve both, and
+    // "a grant FOR the agent is not the node's consent" (the split gate) — so
+    // the owner consents once per own key they are bound to. The actor is bound
+    // through the occurrence anchor (`anchor_agent_to_owner`); an unanchored
+    // actor is skipped, never named. Found by the production-shaped ladder:
+    // the pair Rooted and the traces stayed at `(self, local)` — `offerable=0`.
+    let others: Vec<String> = match engine.local_derived_key_id().await {
+        Ok(engine_author) => own_keys_of_this_node(&engine_author),
+        // No engine key: nothing to fold over; the requested key alone.
+        Err(_) => Vec::new(),
+    };
+    for k in others {
+        if k == node_key_id {
+            continue;
+        }
+        let bound = match engine.steward_bindings_of(&k).await {
+            Ok(stewards) => !stewards.is_empty(),
+            Err(_) => false,
+        };
+        if !bound {
+            continue;
+        }
+        if let Err(e) =
+            ensure_replication_consent_covers_for(engine, &k, peer_key_id, required_prefixes).await
+        {
+            tracing::warn!(
+                own_key = %k,
+                peer = %peer_key_id,
+                error = %e,
+                "consent coverage for this own key FAILED (non-fatal) — rows it authors toward \
+                 this peer stay unpromoted until it is covered"
+            );
+        }
+    }
+    let primary =
+        ensure_replication_consent_covers_for(engine, node_key_id, peer_key_id, required_prefixes)
+            .await?;
+    Ok(primary)
+}
+
+async fn ensure_replication_consent_covers_for<S: AsRef<str>>(
+    engine: &Engine,
+    node_key_id: &str,
+    peer_key_id: &str,
+    required_prefixes: &[S],
+) -> Result<ConsentCoverage> {
     use ciris_persist::federation::consent_grammar::parse_grant_payload;
 
     let required = normalize_prefixes(required_prefixes);
@@ -1894,15 +1946,32 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
     let author = consent_author(engine, node_key_id, None).await?;
     let node_key_id = author.key_id.as_str();
     // The revocation-FOLDED standing grant — one predicate, shared with the
-    // idempotency guard (see [`standing_live_grant`]).
-    let Some(standing) = standing_live_grant(engine, node_key_id, peer_key_id).await? else {
+    // idempotency guard (see [`standing_live_grant_for`]).
+    // The standing grant is the one FOR THIS OWN KEY (the idempotency guard in
+    // `emit_replication_consent_with_policy` asks the same way). Keyed on
+    // (author, peer) alone, the owner's grant for the NODE read as "standing" for
+    // the ACTOR too, and the actor's grant was never written (CIRISServer#632).
+    let Some(standing) = standing_live_grant_for(
+        engine,
+        node_key_id,
+        peer_key_id,
+        author.for_key_id.as_deref(),
+    )
+    .await?
+    else {
         // No live grant: the ordinary first-grant path, guard and all.
+        // The own key this coverage is FOR rides in `opts` — the emitter would
+        // otherwise re-resolve it from `requested` (now the AUTHOR, after the
+        // shadowing above) and land on the node key for every pass.
         let grant = emit_replication_consent_with_policy(
             engine,
             node_key_id,
             peer_key_id,
             &required,
-            &ConsentGrantOptions::default(),
+            &ConsentGrantOptions {
+                for_key_id: author.for_key_id.clone(),
+                ..ConsentGrantOptions::default()
+            },
         )
         .await?;
         return Ok(ConsentCoverage {
@@ -1920,7 +1989,7 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
         // policy axes below need the whole parsed struct, so this arm keeps it.
         Ok(policy) => {
             let opts = ConsentGrantOptions {
-                for_key_id: None,
+                for_key_id: author.for_key_id.clone(),
                 author_signer: None,
                 audience: Some(policy.audience.clone()),
                 valid_until: policy.valid_until,
@@ -1941,7 +2010,13 @@ pub async fn ensure_replication_consent_covers<S: AsRef<str>>(
                  (promote_consented_backlog skips it) — superseding it with a well-formed \
                  grant under DEFAULT policy"
             );
-            (Vec::new(), ConsentGrantOptions::default())
+            (
+                Vec::new(),
+                ConsentGrantOptions {
+                    for_key_id: author.for_key_id.clone(),
+                    ..ConsentGrantOptions::default()
+                },
+            )
         }
     };
     if required.iter().all(|p| covered.contains(p)) {

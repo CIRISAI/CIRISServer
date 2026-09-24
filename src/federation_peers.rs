@@ -610,6 +610,22 @@ async fn list_peers(State(st): State<PeersState>) -> Response {
 
 /// `GET /v1/federation/peers/{key_id}` →
 /// `{ "peer": LocalPeerState, "reachability": null }` (404 if unknown).
+/// `GET /v1/federation/allegiance` — this node's own allegiance facts (its and
+/// its owner's key records; the owner-binding and root-acceptance rows), for a
+/// peer to CARRY at first contact (CIRISServer#632 / CIRISEdge#671). Public,
+/// like `/v1/federation/peers`: every row is signed and self-published, and the
+/// reader admits each through persist's own doors.
+async fn allegiance(State(st): State<PeersState>) -> Response {
+    match crate::mesh_genesis::allegiance_facts(&st.engine).await {
+        Ok(facts) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "allegiance": facts })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, &format!("allegiance: {e}")),
+    }
+}
+
 async fn get_peer(State(st): State<PeersState>, Path(key_id): Path<String>) -> Response {
     let rec = match st
         .engine
@@ -1417,6 +1433,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
     let state = PeersState { engine };
     let router = Router::new()
         .route("/v1/federation/peers", axum::routing::get(list_peers))
+        .route("/v1/federation/allegiance", axum::routing::get(allegiance))
         .route(
             "/v1/federation/peers/{key_id}",
             axum::routing::get(get_peer),

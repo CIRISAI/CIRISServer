@@ -528,8 +528,15 @@ pub async fn register_node_key_with_record(
     let v_rec = produce_self_key_record(identity, identity_type::NODE, &valid_from, None, &[])
         .await
         .map_err(|e| anyhow::anyhow!("produce node self key record: {e}"))?;
-    let signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
+    let mut signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist node SignedKeyRecord: {e}"))?;
+    // See `compose::build_self_key_record`: under a live TEST anchor the node key
+    // may be a root's charter holder, and persist v47.3.0 (CIRISPersist#901)
+    // reads an evidence-less holder as an invalid root. Row metadata, outside
+    // the signed envelope; served to peers in `record_json` as is.
+    if crate::test_anchor_marker_active() {
+        signed.record.attestation_evidence = Some(crate::software_only_test_marker());
+    }
     let key_id = signed.record.key_id.clone();
     let record_json = serde_json::to_string(&signed)
         .map_err(|e| anyhow::anyhow!("serialize node SignedKeyRecord: {e}"))?;
@@ -1006,6 +1013,45 @@ pub async fn heal_owner_key_record(
         .await
         .map_err(|e| anyhow::anyhow!("rebind the owner's key record: {e}"))?;
     Ok(Some(state))
+}
+
+/// The OWNER's acceptance of every trust root this node accepted, written with
+/// the owner's own pen (CIRISServer#632 step 2; CIRISEdge#659's Rooted walk).
+///
+/// * `Ok(None)` — the node is unowned, or no user seed dir is registered, or the
+///   owner resolved without a pen: nothing can be signed as the owner here.
+/// * `Ok(Some(roots))` — the roots newly accepted by the owner this call
+///   (empty = every acceptance was already on record).
+/// * `Err` — the node IS owned and the pen could not be reached, or persist
+///   refused the row. Callers log; none of them fails on it.
+///
+/// Same pen resolution as [`heal_owner_key_record`] (`peer::owner_consent_pen`
+/// on the held node key, else the engine key); the id handed to the emitter is
+/// the steward `owner_of` named, never derived from the pen.
+pub async fn accept_roots_as_owner(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> Result<Option<Vec<String>>> {
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    let node_key = held_node_signer()
+        .map(|h| h.derived_key_id())
+        .unwrap_or(engine_key);
+    let Some(pen) = crate::peer::owner_consent_pen(engine, &node_key).await? else {
+        return Ok(None);
+    };
+    let Some(signer) = pen.signer.as_ref() else {
+        tracing::warn!(
+            owner_key_id = %pen.key_id,
+            "owner resolved but no pen came with it — the owner's root acceptance is skipped"
+        );
+        return Ok(None);
+    };
+    let accepted = crate::mesh_genesis::accept_trust_roots_as_owner(engine, signer, &pen.key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("owner root acceptance: {e}"))?;
+    Ok(Some(accepted))
 }
 
 const REPRODUCIBLE_PAYLOAD_MEMBERS: &[&str] = &[

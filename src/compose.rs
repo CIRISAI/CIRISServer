@@ -569,6 +569,36 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if let Err(e) = crate::mesh_genesis::install_baked_trust_root(&engine).await {
         tracing::debug!(error = %e, "baked trust root did not install");
     }
+    // THE OWNER ACCEPTS THE ROOT (CIRISServer#632 step 2; CIRISEdge#659 walk).
+    // Trust lives on the owner: edge's `Rooted(P)` at node N is
+    // `∃R ∈ roots_of(owner_of(N)) ∩ roots_of(owner_of(P))`, and `roots_of(k)`
+    // is the live `delegates_to(k → R, infra:*)` at federation — keyed on the
+    // OWNER. The node→R edge above is bootstrap default trust; the owner's own
+    // signed acceptance is what makes this node placeable in the mesh. Written
+    // wherever the owner's pen exists: here at boot (the already-claimed
+    // fleet, and the production canonical on its one boot with the pen), at
+    // claim, and at import. Idempotent; every outcome named.
+    match crate::node_key::accept_roots_as_owner(&engine).await {
+        Ok(Some(newly)) if !newly.is_empty() => tracing::info!(
+            roots = ?newly,
+            "boot: the OWNER accepted this node's trust root(s) — delegates_to(owner → root, \
+             infra:*) at federation; peers sharing a valid root now read this node Rooted"
+        ),
+        Ok(Some(_)) => tracing::info!(
+            "boot: the owner's acceptance of every trust root this node accepted is already on \
+             record (nothing written)"
+        ),
+        Ok(None) => tracing::info!(
+            "boot: no owner pen on this node (unowned, or no user seed registered) — the \
+             owner's root acceptance waits for the claim; until then this node is not Rooted \
+             by any peer (CIRISEdge#659)"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "boot: the owner's root acceptance FAILED (non-fatal) — this node stays un-Rooted \
+             by every peer until it is written"
+        ),
+    }
     // WHAT STATE IS THIS NODE ACTUALLY IN? Ask persist, do not infer it from
     // whether the install returned Err (CIRISServer#400, persist v31.0.0).
     //
@@ -974,6 +1004,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // announce-heal of the peer's routing dest + the LINK_REQUEST_TX-with-no-path
     // guard that turns any future recurrence into a loud immediate error.
     prime_canonical_bootstrap_peers(&engine, &edge).await;
+    // The first-contact carry for a server-shaped node (CIRISServer#632 / CIRISEdge#671).
+    crate::mesh_genesis::carry_allegiance_from_canonicals(&engine, &[]).await;
 
     crate::compose_status::phase("holonomic");
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
@@ -3787,7 +3819,20 @@ pub(crate) async fn build_self_key_record(
     let signed: ciris_persist::federation::SignedKeyRecord =
         serde_json::from_value(serde_json::to_value(&v_rec)?)
             .map_err(|e| anyhow::anyhow!("bridge verify→persist self SignedKeyRecord: {e}"))?;
-    Ok(signed.record)
+    let mut record = signed.record;
+    // Row metadata, NOT part of the signed envelope (as accord.rs attaches real
+    // custody evidence): under a live TEST anchor this node may be a root's
+    // charter holder, and persist v47.3.0 reads a holder with no evidence as
+    // an invalid root (CIRISPersist#901). Honest about what it is.
+    if crate::test_anchor_marker_active() {
+        record.attestation_evidence = Some(crate::software_only_test_marker());
+        tracing::info!(
+            key_id = %record.key_id,
+            "self key record carries the SoftwareOnly_TEST custody marker — a TEST trust \
+             anchor is live (test-anchor build + CIRIS_TEST_TRUST_ROOT); never in production"
+        );
+    }
+    Ok(record)
 }
 
 /// Set up **CEG-driven** directed-consent replication. The corpus's
@@ -4192,7 +4237,16 @@ pub(crate) async fn start_replication_runtime(
     //    one hot path reads it back; anything else is a finger on the scale). Every
     //    candidate is admission-filtered against the federation directory (an
     //    unknown key has no record to route/verify).
-    let candidates = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
+    // THE RUNTIME'S IDENTITY IS THE WIRE IDENTITY (CIRISServer#632, D2). On a
+    // split install `node_key_id` here is the edge SIGNER — the ACTOR — while the
+    // owner-binding, the owner's `consent:replication` grant (`for_key_id`) and
+    // the link all name the NODE key. Keyed on the actor,
+    // `consent_peers_by_principals(actor)` matched nothing and the production-
+    // shaped agent withheld its whole Attestation plane toward the canonical
+    // (`send_set_size=0 consent=0 owner_routed=0`, 2026-09-24). The blob puller
+    // below keeps the signing key: its holder claims are self-attested by it.
+    let wire = crate::node_key::wire_identity().unwrap_or(node_key_id);
+    let candidates = crate::peer::replication_peers_from_consent(engine, wire).await?;
     let mut desired: Vec<String> = Vec::with_capacity(candidates.len());
     for peer in candidates {
         match directory.lookup_public_key(&peer).await {
@@ -4351,7 +4405,7 @@ pub(crate) async fn start_replication_runtime(
         crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
-        local_key_id: Some(node_key_id.to_string()),
+        local_key_id: Some(wire.to_string()),
         // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
         // that only make sense together, spelled as one type so the half-wired
         // node cannot be built — `pull_sink ⇒ engine`, `revocations ⇒ engine`.

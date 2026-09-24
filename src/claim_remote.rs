@@ -772,6 +772,9 @@ async fn record_claimed_target_locally(
             // The owner's pen is in hand: heal a pre-#659 registration record
             // now, before this node's first identity round carries it (#606).
             heal_owner_record_with(&st.engine, user_signer, &applied.responsible_user_key_id).await;
+            accept_roots_as_owner_with(&st.engine, user_signer, &applied.responsible_user_key_id)
+                .await;
+            anchor_agent_after_claim(&st.engine).await;
             crate::compose::kick_replication("claim applied");
             tracing::info!(
             target = %nc.key_id,
@@ -915,6 +918,9 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
         Ok(applied) => {
             heal_owner_record_with(&st.engine, &user_signer, &applied.responsible_user_key_id)
                 .await;
+            accept_roots_as_owner_with(&st.engine, &user_signer, &applied.responsible_user_key_id)
+                .await;
+            anchor_agent_after_claim(&st.engine).await;
             crate::compose::kick_replication("claim applied");
             tracing::info!(
                 responsible_user = %applied.responsible_user_key_id,
@@ -1246,6 +1252,62 @@ pub fn router(
             axum::routing::post(announce_self_handler),
         )
         .with_state(state)
+}
+
+/// On a SPLIT home, anchor the agent to the human the claim just bound
+/// (CIRISServer#601 items 7–8; CIRISServer#632). The login ceremony runs at
+/// boot and at delivery start, and on every real install BOTH happen before the
+/// claim — so the actor was never an occurrence of its owner, no grant could
+/// name it, and persist's promotion sweep (`load_active_egress_grants`, keyed on
+/// the ENGINE's key) lifted none of its traces: the production-shaped ladder
+/// read `offerable=0 ship=0` with the pair Rooted (2026-09-24). Logged, never
+/// fatal; a boot with the pen retries.
+async fn anchor_agent_after_claim(engine: &std::sync::Arc<ciris_persist::prelude::Engine>) {
+    match crate::node_key::anchor_agent_to_owner(engine).await {
+        Ok(Some(pair)) => tracing::info!(
+            bilateral_pair_id = %pair,
+            "claim: agent anchored to its owner — the human now stands behind the agent's rows"
+        ),
+        Ok(None) => {
+            tracing::info!("claim: no agent to anchor (not a split home, or already anchored)")
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "claim: agent login ceremony FAILED (non-fatal) — the actor's rows stay uncovered \
+             until a boot with the pen anchors it"
+        ),
+    }
+}
+
+/// The owner accepts every trust root this node accepted, with the pen the
+/// claim just used (CIRISServer#632 step 2) — the edge peers walk for Rooted
+/// (CIRISEdge#659). Logged, never fatal: the claim succeeded either way, and a
+/// missing acceptance shows up as "not Rooted by any peer", named at boot.
+async fn accept_roots_as_owner_with(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    user_signer: &ciris_persist::prelude::LocalSigner,
+    owner_key_id: &str,
+) {
+    match crate::mesh_genesis::accept_trust_roots_as_owner(engine, user_signer, owner_key_id).await
+    {
+        Ok(newly) if !newly.is_empty() => tracing::info!(
+            owner = %owner_key_id,
+            roots = ?newly,
+            "claim: the OWNER accepted this node's trust root(s) — peers sharing a valid root \
+             now read this node Rooted (CIRISEdge#659)"
+        ),
+        Ok(_) => tracing::info!(
+            owner = %owner_key_id,
+            "claim: the owner's root acceptance was already on record (or this node has \
+             accepted no root yet — it is written at boot once one is installed)"
+        ),
+        Err(e) => tracing::warn!(
+            owner = %owner_key_id,
+            error = %e,
+            "claim: the owner's root acceptance FAILED (non-fatal) — this node stays \
+             un-Rooted by every peer until it is written (a boot with the pen retries)"
+        ),
+    }
 }
 
 /// Heal the owner's registration record with the pen a claim just used

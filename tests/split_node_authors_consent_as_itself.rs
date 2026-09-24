@@ -490,6 +490,93 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .contains(&PEER_4.to_string()),
         "a grant FOR the agent is not the node's consent — no blanket across the human's machines"
     );
+    // CIRISServer#632 — the COVERING door (what `POST /v1/federation/peering`
+    // and `POST /v1/contacts` call) consents once per own key the human is
+    // bound to: the NODE key (edge's send-set, the Rooted walk) AND the AGENT
+    // (persist's promotion sweep reads the engine's key). One call, two grants,
+    // each read by the plane that needs it; neither a blanket.
+    const PEER_5: &str = "a-peer-covered-for-both-of-the-humans-machine-keys";
+    register(&engine, &signer_for(PEER_5), PEER_5, identity_type::NODE).await;
+    ciris_server::peer::ensure_replication_consent_covers(
+        &engine,
+        &node,
+        PEER_5,
+        &ciris_server::peer::default_attestation_prefixes(),
+    )
+    .await
+    .expect("the covering door consents for the node AND the anchored agent");
+    assert!(
+        engine
+            .consent_peers_by_principals(&node)
+            .await
+            .expect("by-principals for the node")
+            .contains(&PEER_5.to_string()),
+        "the NODE's plane (edge send-set / Rooted) sees the peer"
+    );
+    assert!(
+        engine
+            .consent_peers_by_principals(&actor)
+            .await
+            .expect("by-principals for the agent")
+            .contains(&PEER_5.to_string()),
+        "the AGENT's plane (persist's promotion sweep reads the engine key) sees the peer"
+    );
+    let rows_for_5: Vec<(String, Option<String>)> = engine
+        .federation_directory()
+        .list_live_consent_grants_by(&owner)
+        .await
+        .expect("grants by the owner")
+        .iter()
+        .filter(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_5))
+        .map(|g| {
+            (
+                g.attesting_key_id.clone(),
+                ciris_persist::federation::consent_by_humans::for_key_id_of(
+                    &g.attestation_envelope,
+                )
+                .map(str::to_owned),
+            )
+        })
+        .collect();
+    let all_for_5: Vec<(String, Option<String>)> = engine
+        .federation_directory()
+        .list_attestations_for(PEER_5)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|g| {
+                    (
+                        g.attesting_key_id.clone(),
+                        ciris_persist::federation::consent_by_humans::for_key_id_of(
+                            &g.attestation_envelope,
+                        )
+                        .map(str::to_owned),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Count from the RAW rows: persist v47's attester-keyed live reader holds one
+    // grant per (author, peer) (`consent_peer_set` INSERT OR REPLACE), so it
+    // shows only the last-written of the two; the per-key projection — what the
+    // two plane assertions above read — holds both.
+    let for_keys: Vec<String> = all_for_5
+        .iter()
+        .filter(|(author, _)| author == &owner)
+        .filter_map(|(_, f)| f.clone())
+        .collect();
+    assert!(
+        for_keys.contains(&node) && for_keys.contains(&actor) && for_keys.len() == 2,
+        "two grants by the human, one FOR each machine key: {for_keys:?}"
+    );
+    // And the attester-keyed live reader shows the LAST one written — the node's.
+    // That order is load-bearing: contacts / chat / delivery status read this
+    // projection for the machine, so the node's grant must be the survivor.
+    assert_eq!(
+        rows_for_5,
+        vec![(owner.clone(), Some(node.clone()))],
+        "the one live row per (author, peer) is the node's grant (written last)"
+    );
     let _ = std::fs::remove_dir_all(&seed_dir);
     let _ = std::fs::remove_dir_all(&identity_dir);
 }

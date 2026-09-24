@@ -197,8 +197,8 @@ fn readable_id(published: &files::PublishedFile) -> &str {
 /// from their own key rather than from anything they sent.
 ///
 /// `family` / `community` do, and this was missing. A `room_id` is a
-/// caller-supplied string, `files::in_room` takes no caller identity and so
-/// cannot enforce membership itself, and a node that relays for a mesh holds
+/// caller-supplied string, `files::in_room` (before edge v30) took no caller
+/// identity and could not enforce membership itself, and a node that relays for a mesh holds
 /// rows for cohorts its owner is not in. Without this, an authenticated owner
 /// could name ANY locally-known room and read back filenames, authors,
 /// timestamps and byte-availability from it — the metadata, even where the
@@ -233,7 +233,9 @@ async fn require_cohort_member(
             }
         };
     let scope = ciris_persist::prelude::CallerScope::Authenticated { admission };
-    if scope.admits(scope_token, group, None) {
+    // persist v47 (#893/#897): membership is the ROW's room against the caller's
+    // rooms — `cohort_target`; `target` is only read on the self arm.
+    if scope.admits(scope_token, owner, Some(group), None) {
         return Ok(());
     }
     Err(refuse(
@@ -525,7 +527,6 @@ async fn read_drive(
             Err(e) => return e,
         },
     };
-    let dir = st.engine.federation_directory();
     // Each row carries the room it came from — see `DriveEntry.room_id`.
     let mut rows: Vec<(String, String, files::FileRow)> = Vec::new();
     for (_, room) in &rooms {
@@ -539,8 +540,11 @@ async fn read_drive(
         if remaining == 0 {
             break;
         }
-        match files::in_room(&*dir, room, remaining).await {
-            Ok(r) => rows.extend(r.into_iter().map(|row| {
+        // edge v30 (CIRISEdge#656/#657): the drive read is persist's GATED
+        // reader door — the caller is named and the substrate composes the
+        // §4.3 predicate in the same query; a page, not an iterator.
+        match files::in_room(&st.engine, room, &owner.key_id, remaining, None).await {
+            Ok(r) => rows.extend(r.files.into_iter().map(|row| {
                 (
                     room.row_scope_token().to_owned(),
                     room.content_group_id().to_owned(),
@@ -650,7 +654,6 @@ async fn read_file(
     if let Err(e) = require_cohort_member(&st, &owner.key_id, cohort, &room).await {
         return e;
     }
-    let dir = st.engine.federation_directory();
     // NO CALLER-SIDE CAP ON A LOOKUP BY ID. A fixed 500 meant that in a room
     // with more rows than that, a perfectly valid id outside the first page
     // answered `drive.not_in_room` — a refusal that says "this does not exist
@@ -658,8 +661,8 @@ async fn read_file(
     // does not mean unbounded: `files::in_room` walks at most
     // MAX_LISTING_PAGES × LISTING_PAGE itself, so the ceiling is edge's and
     // stays edge's, where a number chosen here would silently diverge from it.
-    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
-        Ok(r) => r,
+    let rows = match files::in_room(&st.engine, &room, &owner.key_id, usize::MAX, None).await {
+        Ok(r) => r.files,
         // NOT an empty room (Codex, CIRISServer#628). `unwrap_or_default()`
         // turned a directory or store outage into "no rows", and the handler
         // then answered `404 drive.not_in_room` — telling a client its file is
@@ -962,7 +965,6 @@ async fn read_notes(
         );
     };
     let room = ciris_edge::self_room::room(&owner.key_id);
-    let dir = st.engine.federation_directory();
     // THE LIMIT COUNTS NOTES, NOT ROWS (Codex, CIRISServer#628). `q.limit`
     // applied here bounds every FILE in the self room — photos, named uploads,
     // anything — and the note filter runs after. Enough non-note rows at the
@@ -970,8 +972,8 @@ async fn read_notes(
     // `GET /v1/notes`, while the response still returns fewer than `limit`
     // items and so looks complete. Read the room's rows without a caller-side
     // cap (edge bounds its own walk) and stop once `limit` NOTES are collected.
-    let rows = match files::in_room(&*dir, &room, usize::MAX).await {
-        Ok(r) => r,
+    let rows = match files::in_room(&st.engine, &room, &owner.key_id, usize::MAX, None).await {
+        Ok(r) => r.files,
         Err(e) => {
             return refuse(
                 StatusCode::SERVICE_UNAVAILABLE,

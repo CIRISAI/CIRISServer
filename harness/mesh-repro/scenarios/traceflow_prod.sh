@@ -108,7 +108,7 @@ except Exception as e:
     print("✗ canonical served no genesis bundle:", e); sys.exit(0)
 req = urllib.request.Request("http://127.0.0.1:4243/v1/trust-root/import", method="POST",
     headers={"Authorization": "Bearer " + sys.argv[1], "Content-Type": "application/json"},
-    data=json.dumps({"bundle": b["bundle"]}).encode())
+    data=json.dumps({"bundle": b["bundle"], "allegiance_from": canon}).encode())
 try:
     r = urllib.request.urlopen(req, timeout=60); print("✓ genesis imported:", r.read().decode()[:220])
 except urllib.error.HTTPError as e:
