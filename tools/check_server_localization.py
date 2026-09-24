@@ -774,6 +774,29 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "notes.listing_failed",
     "notes.no_node_key",
     "notes.owner_session_required",
+    # THE COMMUNITY PLANE (CIRISServer#594 / 0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md`
+    # §4) — the same case as the drive plane above: a new surface whose refusals
+    # land before the `ciris-client` bundle that carries them. The ids and their
+    # English are listed in the FSD for the client release. (`community.
+    # delegate_may_not_author` and `community.delegation_denied` are emitted
+    # through `contacts_chat::require_verb`, which this guard does not scrape,
+    # exactly like their `chat.*` twins — so they are not listed here.)
+    "community.already_member",
+    "community.author_signer_unavailable",
+    "community.bad_consensus_protocol",
+    "community.bad_tier",
+    "community.change_stale",
+    "community.last_founder",
+    "community.malformed_body",
+    "community.name_empty",
+    "community.not_a_contact",
+    "community.not_a_member",
+    "community.not_authorized",
+    "community.not_found",
+    "community.pair_room_fixed",
+    "community.quorum_pending",
+    "community.store_unavailable",
+    "community.write_failed",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

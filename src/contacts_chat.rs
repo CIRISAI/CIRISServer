@@ -148,8 +148,8 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 // ─── State + refusal helpers ────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct ChatState {
-    engine: Arc<Engine>,
+pub(crate) struct ChatState {
+    pub(crate) engine: Arc<Engine>,
     /// This node's content occurrence for its owner is provisioned through
     /// edge's `provision_engine_occurrence`, from the ENGINE (the content-KEM
     /// identity persist mints and seals itself) — nothing about the keystore
@@ -158,7 +158,7 @@ struct ChatState {
     /// needs to re-open the responsible party's fed-ID under a live owner
     /// session. A chat row is signed by the PERSON, so the route has to be able
     /// to reach their signer; the capsule is the gate that decides whether it may.
-    user_seed_dir: std::path::PathBuf,
+    pub(crate) user_seed_dir: std::path::PathBuf,
     /// Live MLS state per room — see [`RoomState`].
     rooms: Arc<tokio::sync::Mutex<std::collections::HashMap<String, RoomState>>>,
     /// THIS NODE's edge signer — the room record's authority.
@@ -168,7 +168,7 @@ struct ChatState {
     /// the same sealed federation key the Engine holds, plus its ML-DSA-65 half,
     /// because from edge v20.0.0 there is no classical-only signing path
     /// anywhere in the chat plane.
-    node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    pub(crate) node_signer: Arc<ciris_edge::identity::LocalSigner>,
     /// The live Reticulum transport, when this node has one.
     ///
     /// Only ever used through edge's [`RouteLens`](ciris_edge::contact::RouteLens):
@@ -1008,6 +1008,252 @@ async fn room_key(
     }
 }
 
+/// The member who CREATES an N-member room's MLS group: the lexicographically
+/// smallest ACTIVE founder by the fold, or — for a room whose founders have all
+/// gone — the smallest active member. Decided from the directory alone, like
+/// `PairRole::of`, so no two nodes disagree about who creates and nobody has to
+/// be told.
+pub(crate) fn room_creator(
+    roster: &[ciris_persist::federation::types::CommunityMember],
+) -> Option<String> {
+    use ciris_persist::federation::admission::MEMBER_ROLE_FOUNDER;
+    let founders = roster
+        .iter()
+        .filter(|m| m.role.as_deref() == Some(MEMBER_ROLE_FOUNDER))
+        .map(|m| m.key_id.as_str())
+        .min();
+    founders
+        .or_else(|| roster.iter().map(|m| m.key_id.as_str()).min())
+        .map(str::to_owned)
+}
+
+/// **Advance an N-member room's MLS handshake** (CIRISServer#594) — the room
+/// form of [`room_key`], on edge's room-keyed builders (CIRISEdge#656:
+/// `key_package_attestation_in`, `welcome_attestation_in`, `welcome_for`,
+/// `commit_attestation_in`).
+///
+/// The creator ([`room_creator`]) builds the group and, on every touch, adds
+/// each ACTIVE member (by the fold) whose KeyPackage has arrived — one Welcome
+/// per joiner, into the same room, addressed by `welcome_for` — and removes
+/// every group member the fold no longer names, carrying each Commit as a row
+/// the others apply. Everyone else publishes a KeyPackage once, joins from the
+/// Welcome addressed to them, and applies the creator's later commits.
+///
+/// Unlike the pair room, this is NOT the send gate: the body is sealed under
+/// the room's community DEK to the fold, so a member is readable the moment the
+/// fold names them. What the group gives an N-member room is its CC 5.4
+/// addressing root ([`ensure_room_addresses`]), and a member who has not
+/// answered yet must not stop the rest of the room talking.
+pub(crate) async fn room_key_room(
+    st: &ChatState,
+    room: &str,
+    me: &str,
+    author: Option<&ciris_edge::identity::LocalSigner>,
+) -> Result<RoomHandshake, String> {
+    use ciris_edge::chat;
+    use ciris_edge::mls::cohort_group::{key_package_to_bytes, mint_cohort_key_material};
+    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
+    use ciris_persist::encrypted_kv::XChaChaKvStore;
+
+    let dir = st.engine.federation_directory();
+    let roster = dir
+        .active_community_members(room)
+        .await
+        .map_err(|e| format!("active_community_members({room}): {e:#}"))?;
+    let creator =
+        room_creator(&roster).ok_or_else(|| format!("room {room} has no active member"))?;
+    let scope_room = ciris_edge::scope_room::ScopeRoom::community(room);
+    let mut rooms = st.rooms.lock().await;
+
+    if let Some(RoomState::Keyed(group)) = rooms.get(room) {
+        let group = Arc::clone(group);
+        drop(rooms);
+        if me == creator {
+            if let Some(author) = author {
+                reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
+            }
+        } else {
+            apply_creator_commits(&dir, room, &creator, &group).await;
+        }
+        ensure_room_addresses(st, room, &group).await;
+        return Ok(RoomHandshake::Ready);
+    }
+    let Some(author) = author else {
+        return Ok(RoomHandshake::NoAuthorSigner);
+    };
+    let store = ScopeStateProvider::new(Arc::new(
+        XChaChaKvStore::open_in_memory(room.as_bytes())
+            .map_err(|e| format!("open the room's MLS store: {e}"))?,
+    ));
+    if me == creator {
+        let group = Arc::new(
+            CohortGroup::create(store, room, me, 16)
+                .await
+                .map_err(|e| format!("CohortGroup::create: {e}"))?,
+        );
+        reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
+        ensure_room_addresses(st, room, &group).await;
+        rooms.insert(room.to_owned(), RoomState::Keyed(group));
+        return Ok(RoomHandshake::Ready);
+    }
+    let material = match rooms.remove(room) {
+        Some(RoomState::AwaitingWelcome(m)) => m,
+        _ => {
+            let (material, kp) = mint_cohort_key_material(me)
+                .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
+            let kp_bytes = key_package_to_bytes(kp).map_err(|e| format!("KeyPackage: {e}"))?;
+            let row = chat::key_package_attestation_in(
+                author,
+                &scope_room,
+                &kp_bytes,
+                chrono::Utc::now(),
+            )
+            .await?;
+            share_in(
+                &*dir,
+                row,
+                &scope_room,
+                ciris_edge::replication::attestation_bind::Signers {
+                    node: &st.node_signer,
+                    actor: Some(author),
+                },
+            )
+            .await?;
+            material
+        }
+    };
+    let Some((welcome, _epoch)) = chat::welcome_for(&*dir, &creator, room, me).await? else {
+        tracing::info!(
+            room = %room,
+            joiner = %me,
+            creator = %creator,
+            "chat: N-member room not keyed — our KeyPackage is published and the \
+             creator's Welcome addressed to us has not arrived. The creator adds \
+             every active member whose KeyPackage it holds on its next touch of the \
+             room, so this converges on its own once our KeyPackage reaches it"
+        );
+        rooms.insert(room.to_owned(), RoomState::AwaitingWelcome(material));
+        return Ok(RoomHandshake::JoinRequested);
+    };
+    let group = Arc::new(
+        CohortGroup::join(store, room, material, &welcome, 16)
+            .await
+            .map_err(|e| format!("CohortGroup::join: {e}"))?,
+    );
+    apply_creator_commits(&dir, room, &creator, &group).await;
+    ensure_room_addresses(st, room, &group).await;
+    rooms.insert(room.to_owned(), RoomState::Keyed(group));
+    Ok(RoomHandshake::Ready)
+}
+
+/// The creator's half of an N-member room: make the MLS group's members equal
+/// the fold. Adds every active member whose KeyPackage has arrived (a Welcome
+/// addressed to them + the Commit for everyone already in), removes every
+/// group member the fold no longer names (a Commit). Members whose KeyPackage
+/// has not arrived are simply not added yet — the next touch picks them up.
+async fn reconcile_room_group(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    roster: &[ciris_persist::federation::types::CommunityMember],
+    group: &ciris_edge::mls::CohortGroup,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    use ciris_edge::chat;
+    use ciris_edge::mls::cohort_group::key_package_from_bytes;
+    let dir = st.engine.federation_directory();
+    let signers = || ciris_edge::replication::attestation_bind::Signers {
+        node: &st.node_signer,
+        actor: Some(author),
+    };
+    let in_group: std::collections::BTreeSet<String> =
+        group.member_key_ids().await.into_iter().collect();
+    for member in roster {
+        if member.key_id == author.key_id || in_group.contains(&member.key_id) {
+            continue;
+        }
+        let Some(kp_bytes) = chat::key_package_from(&*dir, &member.key_id, room).await? else {
+            continue;
+        };
+        let kp = key_package_from_bytes(&kp_bytes).map_err(|e| format!("KeyPackage: {e}"))?;
+        let commit = group
+            .add_member(&member.key_id, kp)
+            .await
+            .map_err(|e| format!("add_member({}): {e}", member.key_id))?;
+        let epoch = commit.epoch();
+        let welcome = commit
+            .welcome()
+            .ok_or("add_member produced no Welcome")?
+            .to_vec();
+        let row = chat::welcome_attestation_in(
+            author,
+            scope_room,
+            &member.key_id,
+            &welcome,
+            epoch,
+            chrono::Utc::now(),
+        )
+        .await?;
+        share_in(&*dir, row, scope_room, signers()).await?;
+        let row = chat::commit_attestation_in(author, room, &commit).await?;
+        share_in(&*dir, row, scope_room, signers()).await?;
+        tracing::info!(
+            room = %room,
+            member = %member.key_id,
+            epoch,
+            "chat: N-member room — member added to the MLS group; Welcome + Commit placed"
+        );
+    }
+    let active: std::collections::BTreeSet<&str> =
+        roster.iter().map(|m| m.key_id.as_str()).collect();
+    for gone in in_group
+        .iter()
+        .filter(|k| **k != author.key_id && !active.contains(k.as_str()))
+    {
+        let commit = group
+            .remove_member(gone)
+            .await
+            .map_err(|e| format!("remove_member({gone}): {e}"))?;
+        let row = chat::commit_attestation_in(author, room, &commit).await?;
+        share_in(&*dir, row, scope_room, signers()).await?;
+        tracing::info!(
+            room = %room,
+            member = %gone,
+            "chat: N-member room — a member the fold no longer names was removed from \
+             the MLS group; Commit placed"
+        );
+    }
+    Ok(())
+}
+
+/// A joiner's half after the Welcome: apply every Commit the creator placed in
+/// the room. Best-effort and idempotent (edge reads already-applied rows as
+/// `other`); a contest this node cannot resolve is logged, never fatal — the
+/// room's content does not depend on it.
+async fn apply_creator_commits(
+    dir: &Arc<dyn ciris_persist::federation::FederationDirectory>,
+    room: &str,
+    creator: &str,
+    group: &ciris_edge::mls::CohortGroup,
+) {
+    match ciris_edge::chat::apply_room_commits(group, &**dir, creator, room).await {
+        Ok(out) => tracing::debug!(
+            room = %room,
+            applied = out.applied,
+            discarded = out.discarded,
+            other = out.other,
+            "chat: N-member room — creator commits applied"
+        ),
+        Err(e) => tracing::warn!(
+            room = %room,
+            creator = %creator,
+            error = %e,
+            "chat: N-member room — a creator commit did not apply; the group's \
+             addressing lags until the next commit resolves it"
+        ),
+    }
+}
+
 /// CIRISEdge#499 — install (or advance) this room in the scope-address table.
 ///
 /// The host's half of the scope-native plane: compose ARMS scope-native
@@ -1176,18 +1422,18 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
 /// The owner-authority context every route here runs under: WHICH node, and
 /// WHICH human is responsible for it. The owner's key is the chat identity —
 /// messages are authored by the person, not by the box.
-struct Owner {
+pub(crate) struct Owner {
     /// This node's #247 DERIVED federation key_id.
-    node_key_id: String,
+    pub(crate) node_key_id: String,
     /// The responsible party's federation identity key (the fedID) —
     /// `auth::gate::require_owner_bound`'s return, not a caller-supplied value.
-    key_id: String,
+    pub(crate) key_id: String,
     /// The verified session. Carried because the OWNER-vs-DELEGATE distinction
     /// is invisible in the role (`resolve_bearer` hands a `dgrant:` token the
     /// owner's role AND `FullAccess` by design), so only `caller.actor` can tell
     /// them apart — and one route here may not be exercised by a delegate at
     /// all. See [`CapabilityVerb::ChatAuthor`].
-    caller: SessionCaller,
+    pub(crate) caller: SessionCaller,
 }
 
 /// Owner-authority gate for this surface: a `SYSTEM_ADMIN` session on an
@@ -1196,7 +1442,7 @@ struct Owner {
 /// `auth::gate::require_owner_bound` apply to the peer sideband writes; the
 /// difference is that every refusal here carries a typed `reason_id`
 /// (CIRISServer#389), because this surface is one a client localizes.
-async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Response> {
+pub(crate) async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Response> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1281,7 +1527,7 @@ async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Res
 /// surface's contract is `{error, reason_id}` and clients bind localization keys
 /// against it (see `auth::refusal`'s own note that the two are deliberately
 /// different contracts). Two renderings of one rule, never two rules.
-fn require_verb(
+pub(crate) fn require_verb(
     owner: &Owner,
     verb: crate::auth::gate::CapabilityVerb,
     reason_id: &'static str,
@@ -1289,6 +1535,35 @@ fn require_verb(
     crate::auth::gate::authorize_delegated(&owner.caller, verb)
         .err()
         .map(|deny| refuse(StatusCode::FORBIDDEN, reason_id, deny.detail))
+}
+
+/// **Who is in a room NOW** — persist's one roster fold (record ∪ widenings −
+/// revocations, latest event wins, a removal wins a tie; persist v48,
+/// CIRISPersist#860), never `community.members`.
+///
+/// The record is the FOUNDING roster and v48 never rewrites it to grow: an
+/// added member exists only on the widening plane, a removed one only on the
+/// revocation plane. Every membership decision in this module and in
+/// `communities` reads through here or through persist's
+/// `is_active_community_member`; `tests/no_raw_roster_reads.rs` fails the
+/// build on a raw `.members` read.
+pub(crate) async fn active_roster(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    community: &ciris_persist::federation::types::Community,
+) -> Result<Vec<ciris_persist::federation::types::CommunityMember>, String> {
+    ciris_persist::federation::effective_roster(directory, community)
+        .await
+        .map_err(|e| format!("effective_roster({}): {e:#}", community.community_key_id))
+}
+
+/// The bearer token on a request, if any — the one spelling, so the capsule
+/// and the owner gate never read two different headers.
+pub(crate) fn bearer_of(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
 }
 
 // ─── The pair room ──────────────────────────────────────────────────────────
@@ -1969,7 +2244,7 @@ struct StartChatResponse {
 /// A failure here is NOT fatal to starting a chat: it is reported, and the
 /// send door refuses later with a message naming the cause, which is a better
 /// place to fail than a half-built room.
-async fn ensure_owner_content_occurrence(st: &ChatState, owner_key_id: &str) {
+pub(crate) async fn ensure_owner_content_occurrence(st: &ChatState, owner_key_id: &str) {
     match crate::backend::provision_engine_occurrence(&st.engine, owner_key_id).await {
         Ok((me, how)) => tracing::debug!(
             identity = %owner_key_id,
@@ -2098,8 +2373,24 @@ async fn start_chat(
             // community-scoped message readable by the stowaway. Same sorted-
             // member equality the insert-race arm applies: a room at this id
             // that is not EXACTLY this pair is a conflict, not a chat.
+            //
+            // THE FOLD, NOT THE RECORD (persist v48, CIRISPersist#860). A
+            // stowaway no longer needs a record with three names on it: the
+            // record is never rewritten to grow, and a widening row naming a
+            // third member rides its own plane. Comparing `existing.members`
+            // would have passed a pair record with a widened third party and
+            // opened the room with them in it.
             let mut existing_members: Vec<String> =
-                existing.members.iter().map(|m| m.key_id.clone()).collect();
+                match active_roster(&*directory, &existing).await {
+                    Ok(r) => r.into_iter().map(|m| m.key_id).collect(),
+                    Err(e) => {
+                        return refuse(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "chat.store_unavailable",
+                            format!("active roster: {e}"),
+                        )
+                    }
+                };
             existing_members.sort();
             if existing_members != expected_members {
                 return refuse(
@@ -2235,8 +2526,11 @@ async fn start_chat(
         // A re-read that finds nothing (or a different shape) is a REAL
         // failure and keeps the 500 with the original error.
         if let Ok(Some(existing)) = directory.lookup_community(&community_id).await {
-            let mut existing_members: Vec<String> =
-                existing.members.iter().map(|m| m.key_id.clone()).collect();
+            // The fold, for the same reason as the lookup arm above.
+            let mut existing_members: Vec<String> = active_roster(&*directory, &existing)
+                .await
+                .map(|r| r.into_iter().map(|m| m.key_id).collect())
+                .unwrap_or_default();
             existing_members.sort();
             if existing_members == member_key_ids {
                 return (
@@ -2604,52 +2898,22 @@ async fn send_message(
         .map_or(DEFAULT_CONTENT_TYPE, str::trim)
         .to_owned();
 
-    // Envelope KEYS come from persist's exported constants where persist owns
-    // them (`paths::DIMENSION`); the three message members are server
-    // vocabulary persist types no constant for.
+    // WHO THE ROOM IS, and from where. A PAIR room is keyed by the two people in
+    // it — the MLS handshake gates the send, and it needs the OTHER member. An
+    // N-member room (CIRISServer#594) has no "other member": its body is sealed
+    // under the room's DEK to every member the FOLD names, and its handshake is
+    // advanced best-effort below without gating the send.
     //
-    // No `asserted_at` here (CIRISServer#402 / CIRISPersist#598): the local
-    // The OTHER member — the room is a pair, so the peer is the member that is
-    // not the owner. Read off the community record rather than re-derived: the
-    // roster is what the audience gate serves against, so the peer we address
-    // must be the peer the room says it has.
-    let contact_key_id = match st
-        .engine
-        .federation_directory()
-        .lookup_community(&community_id)
-        .await
-    {
-        Ok(Some(c)) => {
-            match c
-                .members
-                .iter()
-                .map(|m| m.key_id.clone())
-                .find(|k| *k != owner.key_id)
-            {
-                Some(peer) => peer,
-                None => {
-                    return refuse(
-                        StatusCode::CONFLICT,
-                        "chat.not_a_pair_room",
-                        NOT_A_PAIR_ROOM,
-                    )
-                }
-            }
+    // Both read the roster through persist's one fold (`active_roster`), never
+    // the record: v48 never grows the record, so a member added by a widening
+    // is not on it and a member removed by a revocation still is.
+    let contact_key_id = if community_id.starts_with(PAIR_COMMUNITY_PREFIX) {
+        match other_member(&st, &owner, &community_id).await {
+            Ok(peer) => Some(peer),
+            Err(r) => return r,
         }
-        Ok(None) => {
-            return refuse(
-                StatusCode::NOT_FOUND,
-                "chat.unknown_community",
-                format!("no community {community_id:?} on this node"),
-            )
-        }
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chat.store_unavailable",
-                format!("lookup_community: {e}"),
-            )
-        }
+    } else {
+        None
     };
     // Edge's row carries a body and no content type — the community tier is
     // sealed text. Refusing an unsupported type is honest; accepting it and
@@ -2664,11 +2928,7 @@ async fn send_message(
             ),
         );
     }
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(str::trim);
+    let bearer = bearer_of(&headers);
 
     // ── THE MESSAGE IS EDGE'S ROW, SEALED, SIGNED BY THE PERSON ─────────────
     //
@@ -2713,30 +2973,58 @@ async fn send_message(
     // of the MLS handshake has not replicated yet. Say so plainly — the mesh
     // converges on its own, and a client that retries in a loop is the wrong
     // answer (edge's `LadderStall` vocabulary, §3 of its integration guide).
-    match room_key(&st, &owner.key_id, &contact_key_id, Some(author)).await {
-        Ok(RoomHandshake::Ready) => {}
-        Ok(state) => {
-            // THE STATE, NOT A GENERIC STALL. Same table the transcript renders,
-            // so the note the sender sees here is the note already sitting in
-            // their chat history — one sentence, not two descriptions of one
-            // situation that a client would have to reconcile.
-            let (reason_id, note) = state.note();
-            tracing::info!(
-                room = %pair_community_key_id(&owner.key_id, &contact_key_id),
-                state = ?state,
-                converges_on_its_own = state.converges_on_its_own(),
-                "chat: send refused — the room's handshake is not complete"
-            );
-            return refuse(StatusCode::SERVICE_UNAVAILABLE, reason_id, note);
+    match contact_key_id.as_deref() {
+        Some(contact_key_id) => {
+            match room_key(&st, &owner.key_id, contact_key_id, Some(author)).await {
+                Ok(RoomHandshake::Ready) => {}
+                Ok(state) => {
+                    // THE STATE, NOT A GENERIC STALL. Same table the transcript
+                    // renders, so the note the sender sees here is the note
+                    // already sitting in their chat history — one sentence, not
+                    // two descriptions of one situation that a client would have
+                    // to reconcile.
+                    let (reason_id, note) = state.note();
+                    tracing::info!(
+                        room = %pair_community_key_id(&owner.key_id, contact_key_id),
+                        state = ?state,
+                        converges_on_its_own = state.converges_on_its_own(),
+                        "chat: send refused — the room's handshake is not complete"
+                    );
+                    return refuse(StatusCode::SERVICE_UNAVAILABLE, reason_id, note);
+                }
+                Err(e) => {
+                    return refuse(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "chat.room_key_failed",
+                        format!("derive the room key: {e}"),
+                    )
+                }
+            }
         }
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "chat.room_key_failed",
-                format!("derive the room key: {e}"),
-            )
+        None => {
+            // An N-member room. The body is sealed under the room's community
+            // DEK — the cascade wraps to every member the fold names at seal
+            // time — so the MLS group is not the membership gate here (persist's
+            // admission above is) and does not key the body. It is the room's
+            // CC 5.4 ADDRESSING root (`ensure_room_addresses`), and it is
+            // advanced on every touch, never waited on: a member whose
+            // KeyPackage has not arrived must not stop the others talking.
+            match room_key_room(&st, &community_id, &owner.key_id, Some(author)).await {
+                Ok(state) => tracing::debug!(
+                    room = %community_id,
+                    state = ?state,
+                    "chat: N-member room handshake advanced on send"
+                ),
+                Err(e) => tracing::warn!(
+                    room = %community_id,
+                    error = %e,
+                    "chat: the N-member room's MLS handshake did not advance — the \
+                     message is still sealed to the fold and sent; only the room's \
+                     scoped addresses lag until the next touch"
+                ),
+            }
         }
-    };
+    }
 
     // The grant set edge builds below is read from the directory NOW, so the
     // owner's occurrence must be there first (edge flag #1 on the tag).
@@ -2749,9 +3037,13 @@ async fn send_message(
         (*st.engine).clone(),
         st.engine.federation_directory(),
     );
-    let (row, sealed) = match ciris_edge::chat::chat_message_attestation(
+    // ROOM-KEYED, for every room (CIRISEdge#608): the row names the room it was
+    // asked for, and the seal wraps to the room's fold. For a pair room the id
+    // is the derived pair id, so this is byte-for-byte the row the pair-form
+    // builder produced.
+    let (row, sealed) = match ciris_edge::chat::chat_message_attestation_in(
         author,
-        &contact_key_id,
+        &community_id,
         &req.body,
         chrono::Utc::now(),
         &content_store,
@@ -2763,7 +3055,7 @@ async fn send_message(
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "chat.emit_failed",
-                format!("chat_message_attestation: {e}"),
+                format!("chat_message_attestation_in: {e}"),
             )
         }
     };
@@ -3182,16 +3474,22 @@ async fn other_member(
     owner: &Owner,
     community_id: &str,
 ) -> Result<String, Response> {
-    match st
-        .engine
-        .federation_directory()
-        .lookup_community(community_id)
-        .await
-    {
-        Ok(Some(c)) => match c
-            .members
-            .iter()
-            .map(|m| m.key_id.clone())
+    let directory = st.engine.federation_directory();
+    match directory.lookup_community(community_id).await {
+        // THE FOLD, NOT THE RECORD: the record is the founding roster and v48
+        // never rewrites it, so a member removed by a revocation would still be
+        // "the other person" here and the handshake would key a room to them.
+        Ok(Some(c)) => match active_roster(&*directory, &c)
+            .await
+            .map_err(|e| {
+                refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("active roster: {e}"),
+                )
+            })?
+            .into_iter()
+            .map(|m| m.key_id)
             .find(|k| *k != owner.key_id)
         {
             Some(peer) => Ok(peer),
@@ -3291,6 +3589,9 @@ async fn list_messages(
     // A reader with no occurrence here is excluded from every FUTURE seal the
     // far side builds; provisioning on read fixes the next message, not this one.
     ensure_owner_content_occurrence(&st, &owner.key_id).await;
+    if !community_id.starts_with(PAIR_COMMUNITY_PREFIX) {
+        return list_room_messages(&st, &headers, &owner, &community_id).await;
+    }
     let peer = match other_member(&st, &owner, &community_id).await {
         Ok(p) => p,
         Err(r) => return r,
@@ -3378,6 +3679,80 @@ async fn list_messages(
     }
 }
 
+/// `GET /v1/chat/{id}/messages` for an N-member room (CIRISServer#594).
+///
+/// No pair handshake gates the read: the body is sealed to the fold under the
+/// room's DEK, and persist's admission (`require_member`, already run) is the
+/// membership gate. The room's MLS group is advanced on the way through — with
+/// the owner's signer when this session can wield it, and without (a
+/// `chat_read` delegate) otherwise — and its state is reported beside the
+/// transcript as `handshake`, never as a refusal.
+async fn list_room_messages(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+) -> Response {
+    let capsule = if owner.caller.actor.is_none() {
+        crate::owner_signer_capsule::acquire(
+            &st.engine,
+            bearer_of(headers),
+            &owner.key_id,
+            st.user_seed_dir.clone(),
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let handshake = match room_key_room(
+        st,
+        community_id,
+        &owner.key_id,
+        capsule.as_ref().map(|c| &**c.edge_signer()),
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::warn!(
+                room = %community_id,
+                error = %e,
+                "chat: the N-member room's MLS handshake did not advance on read"
+            );
+            RoomHandshake::NoAuthorSigner
+        }
+    };
+    let (handshake_id, _) = handshake.note();
+    match collect_messages(st, community_id, owner, None).await {
+        Ok(messages) => {
+            let total = messages.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "community_id": community_id,
+                    "cohort_scope": cohort_scope::COMMUNITY,
+                    "kind": "room",
+                    "messages": messages,
+                    "total": total,
+                    // An N-member room's content does not wait on the group:
+                    // every message sealed to the fold opens for every member
+                    // the fold named at seal time.
+                    "ready": true,
+                    "converges_on_its_own": handshake.converges_on_its_own(),
+                    "handshake": handshake_id,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chat.store_unavailable",
+            format!("read transcript: {e}"),
+        ),
+    }
+}
+
 // ─── Router ─────────────────────────────────────────────────────────────────
 
 /// The contacts + chat router. Takes no key id: the node's own federation
@@ -3414,6 +3789,9 @@ pub fn router(
             "/v1/chat/{community_id}/messages",
             axum::routing::get(list_messages).post(send_message),
         )
+        // CIRISServer#594 — N-member rooms and affiliations: the same state,
+        // the same owner gate, the same signer.
+        .merge(crate::communities::routes())
         .with_state(state)
 }
 

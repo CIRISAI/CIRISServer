@@ -122,6 +122,54 @@ New ids: `community.not_found`, `community.not_authorized`, `community.not_a_con
 standing in the room (CIRISPersist#908). The server's routes enforce the protocol for rows it authors; rows
 a peer authors are admitted by persist alone until #908 lands. Stated in the release notes.
 
+### 4.1 As built (`src/communities.rs`, 0.5.216) — decisions and gaps at these pins
+
+- **Ids added beyond the list above:** `community.pair_room_fixed` (409 — a pair room's roster is its
+  derived identity; no add/remove/leave/dissolve), `community.change_stale` (409 — a submitted change
+  envelope no longer describes the room), `community.malformed_body` (400), `community.delegate_may_not_author`
+  and `community.delegation_denied` (403), `community.author_signer_unavailable` (403),
+  `community.store_unavailable` (503), `community.write_failed` (500). `community.not_a_member` is 409.
+- **Who may authorize** (`tally`): `founder_only` — one active founder, or, for a plain-member add/remove
+  only, an APPOINTED `moderate` duty holder (persist `appointed_moderators_of`: founder-rooted
+  `delegates_to` scoped `moderate`; there is no dedicated roster-duty scope in persist v48).
+  `unanimous` — every active member except a removal's own target. `majority` — strict majority of the fold.
+  `quorum:M/N` — M of the fold, and the change is applied through persist's
+  `supersede_{community,affiliations}_with_quorum`, i.e. `verify_membership_quorum` re-verifies it.
+- **Gap: `verify_membership_quorum` evaluates `quorum:M/N` only.** Its prior envelope reads the protocol
+  off the RECORD and requires `quorum:M/N` with N = the fold's size (verify
+  `accord_genesis.rs::quorum_threshold_from_envelope`), so `unanimous`/`majority` cannot be verified by
+  persist; the server counts those with verify's `verify_threshold_signatures` over the fold's registered
+  hybrid keys.
+- **Gap: a quorum room's record must be re-baselined.** Because the protocol lives on the record and a
+  widening never rewrites it, a `quorum:2/3` room grown to 4 by a widening alone could never be changed
+  again (N ≠ member count). So a quorum room's add/remove/role goes through the persist quorum supersede
+  (new roster + strict-majority protocol for the new N) AND writes the widening/revocation row, so peers,
+  who hold the old record, still fold the change. Other protocols never rewrite the record.
+- **Dissolve** is a revocation of every active member (others first, the signer last), not a terminal
+  record supersede: verify refuses an empty membership-change roster (`quorum:M/0`), and a rewritten record
+  is a roster fork at every peer. With nobody active, no server route can change the room again.
+- **Role change** is a fresh widening row carrying the new role, written through the REPLICATED door
+  (`put_community_membership_widening`); the local `add_community_member` no-ops for an already-active member.
+- **Roster instants** are strictly increasing per room (the fold breaks ties toward removal, so a re-add in
+  the removal's millisecond would silently lose); the revocation door refuses future-dated instants, so the
+  server waits for the clock rather than stepping past it.
+- **Listing a widened member's rooms:** persist indexes the record's members only, so `GET /v1/communities`
+  also walks the widening plane (`list_signed_community_membership_widenings_since`) and then judges every
+  candidate by the fold.
+- **Affiliations** rooms carry `policy_blob: {"cohort_scope": "affiliations"}` on the signed record and use
+  `Cohort::Affiliations` for the change envelope and the quorum supersede. **Gap:** edge v31's chat producer
+  has no affiliations placement (`ScopeRoom` has no affiliations variant; `chat_message_attestation_in`
+  seals at `community`), so an affiliations room's messages ride the `community` tier.
+- **N-member room MLS group:** the creator is the smallest active founder by the fold; it adds every
+  active member whose KeyPackage has arrived (a Welcome per joiner via `welcome_attestation_in` + a Commit
+  row) and removes members the fold dropped; joiners join via `welcome_for` and apply the creator's commits.
+  Unlike a pair room it never gates a send: the body is sealed under the room's DEK to the fold, and the
+  group is the CC 5.4 addressing root only. State is in-memory per process, as for pair rooms (#623).
+- **In-process witness:** `tests/community_crud.rs` runs three/four `Engine`s with distinct node keys and
+  owners over ONE sqlite file — a mesh whose replication has fully converged — so "every member reads every
+  message" is exercised through the real send/read routes on each member's own node. The crossing itself
+  remains the ladder's (`room3`, `widened_reads`).
+
 ## 5. Files and drive
 
 | Op | Route | Policy | Result |

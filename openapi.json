@@ -10548,6 +10548,552 @@
           }
         }
       }
+    },
+    "/v1/communities": {
+      "get": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "List my rooms",
+        "description": "Every room (N-member and pair, `kind: room|pair`) the caller is an ACTIVE member of by persist's roster fold. Paged: `limit` (<= 500), `after` (a community id); the response carries `resume`.\n\nRefusals (`reason_id`): `community.delegation_denied`, `community.store_unavailable`",
+        "operationId": "list_communities_v1_communities_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Found a room",
+        "description": "Found an N-member room (CIRISServer#594). The caller is the founder; each initial member must be a contact whose consent grant covers `chat:`. Owner-signed.\n\nRefusals (`reason_id`): `community.name_empty`, `community.bad_tier`, `community.bad_consensus_protocol`, `community.not_a_contact`, `community.malformed_body`, `community.delegate_may_not_author`, `community.author_signer_unavailable`",
+        "operationId": "create_community_v1_communities_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "members": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "community",
+                      "affiliations"
+                    ]
+                  },
+                  "consensus_protocol": {
+                    "type": "string",
+                    "description": "founder_only (default) | unanimous | majority | quorum:M/N"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/communities/{community_id}": {
+      "get": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Read a room",
+        "description": "Record + effective roster (the fold) + roles + appointed moderators. A non-member gets `community.not_found`.\n\nRefusals (`reason_id`): `community.not_found`, `community.delegation_denied`",
+        "operationId": "read_community_v1_communities__community_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Dissolve a room",
+        "description": "Revokes every active member under the room's consensus protocol.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.not_authorized`, `community.quorum_pending`, `community.pair_room_fixed`",
+        "operationId": "dissolve_community_v1_communities__community_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/members": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Add a member",
+        "description": "A signed CommunityMembershipWidening. The protocol must be satisfied (a founder, or an appointed `moderate` duty holder for a plain member). Blocked on CIRISPersist#907 for the added member's message reads.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.not_authorized`, `community.quorum_pending`, `community.pair_room_fixed`, `community.not_a_contact`, `community.already_member`, `community.malformed_body`",
+        "operationId": "add_member_v1_communities__community_id__members_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "key_id"
+                ],
+                "properties": {
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/members/{key_id}": {
+      "delete": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Remove a member",
+        "description": "A signed CommunityMembershipRevocation (rotates the room DEK). Naming yourself is leaving.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.not_authorized`, `community.quorum_pending`, `community.pair_room_fixed`, `community.not_a_member`, `community.last_founder`",
+        "operationId": "remove_member_v1_communities__community_id__members__key_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/members/{key_id}/role": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Change a member's role",
+        "description": "A widening carrying the new role.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.not_authorized`, `community.quorum_pending`, `community.pair_room_fixed`, `community.not_a_member`, `community.last_founder`, `community.malformed_body`",
+        "operationId": "change_role_v1_communities__community_id__members__key_id__role_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "role"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/leave": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Leave a room",
+        "description": "Your own revocation; never subject to quorum. The last founder of a room with other members must hand the role on first.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.last_founder`, `community.pair_room_fixed`",
+        "operationId": "leave_community_v1_communities__community_id__leave_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/changes/envelope": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Build a change for a quorum",
+        "description": "Returns the canonical membership-change envelope (persist's payload + the op), its signing bytes, and the caller's own signature.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.pair_room_fixed`, `community.malformed_body`",
+        "operationId": "change_envelope_v1_communities__community_id__changes_envelope_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "op"
+                ],
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "add",
+                      "remove",
+                      "role",
+                      "dissolve"
+                    ]
+                  },
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/changes/cosign": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Cosign a change",
+        "description": "This node's owner signs a change envelope after checking it still describes the room. Stateless.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.change_stale`, `community.malformed_body`",
+        "operationId": "change_cosign_v1_communities__community_id__changes_cosign_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "change_envelope"
+                ],
+                "properties": {
+                  "change_envelope": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/communities/{community_id}/changes/assemble": {
+      "post": {
+        "tags": [
+          "communities"
+        ],
+        "summary": "Apply a quorum-signed change",
+        "description": "Counts the signatures against the room's protocol (quorum:M/N re-verified by persist's verify_membership_quorum) and applies the change.\n\nRefusals (`reason_id`): `community.delegate_may_not_author`, `community.not_found`, `community.author_signer_unavailable`, `community.store_unavailable`, `community.write_failed`, `community.not_authorized`, `community.quorum_pending`, `community.pair_room_fixed`, `community.change_stale`, `community.malformed_body`",
+        "operationId": "change_assemble_v1_communities__community_id__changes_assemble_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "change_envelope",
+                  "signatures"
+                ],
+                "properties": {
+                  "change_envelope": {
+                    "type": "object"
+                  },
+                  "signatures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "community_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {

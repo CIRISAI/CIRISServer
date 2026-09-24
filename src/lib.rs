@@ -109,6 +109,11 @@ pub mod claim_remote;
 /// Public so the integration test (`tests/commons_surface.rs`) can drive the
 /// router directly.
 pub mod commons_surface;
+/// **Communities and affiliations** — N-member rooms (CIRISServer#594): found,
+/// list, read, widen, remove, leave, re-role, dissolve, and the two-phase
+/// quorum flow, all owner-signed and all read through persist v48's roster
+/// fold. Routes merge into [`contacts_chat::router`].
+mod communities;
 /// **CC 4.5.2.2 `compliance-vertical`** — the machine-readable vertical/statutory
 /// compliance map (CIRISServer#159). Bakes `evidence/cc_compliance_map.tsv` (a faithful
 /// transcription of CC 4.5.2.2 + CC 8.8.5 Annex C) into the binary and parses it into

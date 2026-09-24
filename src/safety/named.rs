@@ -110,7 +110,14 @@ pub async fn community_has_live_moderator(
         // Unknown community: fail-secure (cannot establish a moderator).
         return Ok(false);
     };
-    for member in &community.members {
+    // THE FOLD, NOT THE RECORD (persist v48, CIRISPersist#860): a member added
+    // by a widening is not on the record, and a removed one still is. Reading
+    // the record here kept a community "moderated" by a moderator who had been
+    // removed, and never saw one who had been added.
+    let roster = ciris_persist::federation::effective_roster(directory.as_ref(), &community)
+        .await
+        .map_err(|e| format!("effective_roster: {e:#}"))?;
+    for member in &roster {
         // COMPOSE persist's per-key predicate (owner-bound + scoped-chain walk).
         let named = admission::is_named_moderator(
             directory.as_ref(),
@@ -289,7 +296,12 @@ pub async fn auto_promotion_outcome(
     // Score each eligible (owner-bound) member. A read that could not happen
     // STOPS the ranking — it is never folded into a rankable number.
     let mut ranked: Vec<RankedMember> = Vec::new();
-    for member in &community.members {
+    // The fold, as in `community_has_live_moderator`: a removed member is not a
+    // promotion candidate, and a widened one is.
+    let roster = ciris_persist::federation::effective_roster(directory.as_ref(), &community)
+        .await
+        .map_err(|e| format!("effective_roster: {e:#}"))?;
+    for member in &roster {
         let eligible = admission::is_steward_bound(directory.as_ref(), &member.key_id)
             .await
             .map_err(|e| format!("is_steward_bound: {e}"))?;
