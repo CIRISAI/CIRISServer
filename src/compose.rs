@@ -509,6 +509,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // v15.2.0 peer admits it — and it rides the first identity round to every
     // node this owner stewards (CIRISServer#606). Healed here, from the
     // owner's own pen, before anything below replicates it.
+    // Every outcome is named. The `Ok(_) => {}` arm this replaces swallowed an
+    // `Absent` on the production canonical for a whole boot with the owner's pen
+    // on disk (CIRISServer#606, 2026-09-24): no line, row unchanged.
     match crate::node_key::heal_owner_key_record(&engine).await {
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Rebound)) => {
             tracing::info!("boot: the owner's registration record was rebound (#606)")
@@ -516,7 +519,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal })) => {
             tracing::warn!(%refusal, "boot: the owner's registration record is UNBOUND and could not be rebound (#606)")
         }
-        Ok(_) => {}
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Bound)) => {
+            tracing::info!("boot: the owner's registration record already binds its subject (#606)")
+        }
+        Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Absent)) => {
+            tracing::warn!("boot: the owner resolved but this node holds no registration record for them — nothing to heal (#606)")
+        }
+        Ok(None) => {
+            tracing::info!("boot: no owner pen on this node (unowned, or no user seed registered) — owner record heal skipped (#606)")
+        }
         Err(e) => tracing::warn!(error = %e, "boot: owner key record heal failed (non-fatal)"),
     }
     match crate::node_key::anchor_agent_to_owner(&engine).await {

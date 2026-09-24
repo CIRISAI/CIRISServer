@@ -771,7 +771,7 @@ async fn record_claimed_target_locally(
         Ok(applied) => {
             // The owner's pen is in hand: heal a pre-#659 registration record
             // now, before this node's first identity round carries it (#606).
-            heal_owner_record_with(&st.engine, user_signer).await;
+            heal_owner_record_with(&st.engine, user_signer, &applied.responsible_user_key_id).await;
             crate::compose::kick_replication("claim applied");
             tracing::info!(
             target = %nc.key_id,
@@ -913,7 +913,8 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
     .await
     {
         Ok(applied) => {
-            heal_owner_record_with(&st.engine, &user_signer).await;
+            heal_owner_record_with(&st.engine, &user_signer, &applied.responsible_user_key_id)
+                .await;
             crate::compose::kick_replication("claim applied");
             tracing::info!(
                 responsible_user = %applied.responsible_user_key_id,
@@ -1253,16 +1254,27 @@ pub fn router(
 async fn heal_owner_record_with(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
     user_signer: &ciris_persist::prelude::LocalSigner,
+    owner_key_id: &str,
 ) {
-    match crate::auth::ownership::rebind_owner_key_record(engine, user_signer).await {
-        Ok(crate::auth::ownership::OwnerKeyRecordState::Rebound) => {
-            tracing::info!("claim: the owner's registration record was rebound (#606)")
+    use crate::auth::ownership::OwnerKeyRecordState as S;
+    match crate::auth::ownership::rebind_owner_key_record(engine, user_signer, owner_key_id).await {
+        Ok(S::Rebound) => {
+            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record was rebound (#606)")
         }
-        Ok(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal }) => {
-            tracing::warn!(%refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (#606)")
+        Ok(S::Unbound { refusal }) => {
+            tracing::warn!(owner = %owner_key_id, %refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (#606)")
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "claim: owner key record heal failed (non-fatal)"),
+        // Every outcome is named: a silent arm here hid a heal that looked up
+        // the wrong key on the production canonical (CIRISServer#606).
+        Ok(S::Bound) => {
+            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record already binds its subject (#606)")
+        }
+        Ok(S::Absent) => {
+            tracing::warn!(owner = %owner_key_id, "claim: no registration record for the owner on this node — nothing to heal (#606)")
+        }
+        Err(e) => {
+            tracing::warn!(owner = %owner_key_id, error = %e, "claim: owner key record heal failed (non-fatal)")
+        }
     }
 }
 
