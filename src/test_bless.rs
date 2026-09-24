@@ -586,9 +586,17 @@ async fn perform_trust_root_ceremony(
             attestation_type::DELEGATES_TO,
             ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
                 .map_err(|e| anyhow!("ceremony: trust-edge EnvelopeCore: {e}"))?,
-            // self-scope: this node's OWN trust declaration, read locally by
-            // trust_root_valid(user=self). No peer needs it.
-            cohort_scope::SELF,
+            // FEDERATION, as `mesh_genesis::accept_trust_root` writes it on every
+            // production boot. This was `self` ("read locally, no peer needs it")
+            // — true under edge ≤ v29, where the canonical was Rooted by the
+            // accord co-scrub on its serve role. Edge v30.2.0's Rooted walk
+            // (CIRISEdge#659) reads persist's `trusted_roots_of(subject)`, which
+            // counts FEDERATION-tier edges only, from the PEER's directory too:
+            // a self-scoped edge left the harness canonical with no roots, so it
+            // Rooted nobody and served no `trace:*` — both ladders red at
+            // `arrive` on the v30.3.0 adoption (2026-09-24), with this row the
+            // only `delegates_to(canonical → root)` in its store.
+            cohort_scope::FEDERATION,
         );
         input.attested_key_id = Some(root_key_id.clone());
         input.subject_key_ids = vec![root_key_id.clone()];
@@ -783,14 +791,18 @@ async fn has_trust_edge(
     self_key_id: &str,
     root_key_id: &str,
 ) -> Result<bool> {
-    let rows = engine
-        .federation_directory()
-        .list_attestations_by(self_key_id)
-        .await
-        .map_err(|e| anyhow!("ceremony has_trust_edge: {e}"))?;
-    Ok(rows.iter().any(|a| {
-        a.attestation_type == attestation_type::DELEGATES_TO && a.attested_key_id == root_key_id
-    }))
+    // The reader's own predicate (persist `trusted_roots_of`: live,
+    // FEDERATION-tier, not claiming another trust job) — never a looser scan.
+    // A `self`-scoped row satisfied the old any-scope check and masked the
+    // federation edge the Rooted walk needs (CIRISServer#632, 2026-09-24).
+    let roots = ciris_persist::federation::trust_root::trusted_roots_of(
+        engine.federation_directory().as_ref(),
+        self_key_id,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|e| anyhow!("ceremony has_trust_edge: trusted_roots_of({self_key_id}): {e}"))?;
+    Ok(roots.iter().any(|r| r == root_key_id))
 }
 
 /// Idempotency: does a serve-capability grant `delegates_to(root → subject,

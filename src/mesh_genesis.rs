@@ -1025,19 +1025,32 @@ async fn live_acceptance_id(
 }
 
 /// Has this node already accepted `root`? Idempotency for [`accept_trust_root`].
+/// Does `node_key_id` already hold a LIVE, FEDERATION-tier acceptance of
+/// `root` — the row persist's `trusted_roots_of` (leg 1 of `trust_root_valid`,
+/// the reader edge's Rooted walk uses) actually counts?
+///
+/// This used to be "any `delegates_to` by the node naming the root, at any
+/// scope, in any dimension". The production-shaped ladder (CIRISServer#632,
+/// 2026-09-24) found the harness canonical with ONE such row — a `self`-scoped
+/// self-plane `delegates_to(canonical → root)` written at boot — and this
+/// predicate read it as "already accepted", so the federation-tier
+/// `trust:accepts` edge was never written, `trusted_roots_of(canonical)` was
+/// empty, and the canonical Rooted nobody while its boot log said "trust root
+/// entrenched". The idempotency predicate must be the reader's own predicate,
+/// or a row the walk ignores masks the row the walk needs.
 async fn node_trusts_root(
     engine: &ciris_persist::prelude::Engine,
     node_key_id: &str,
     root: &str,
 ) -> Result<bool, GenesisError> {
-    let rows = engine
-        .federation_directory()
-        .list_attestations_by(node_key_id)
-        .await
-        .map_err(|e| GenesisError::Directory(e.to_string()))?;
-    Ok(rows
-        .iter()
-        .any(|a| a.attestation_type == attestation_type::DELEGATES_TO && a.attested_key_id == root))
+    let roots = ciris_persist::federation::trust_root::trusted_roots_of(
+        engine.federation_directory().as_ref(),
+        node_key_id,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|e| GenesisError::Directory(format!("trusted_roots_of({node_key_id}): {e}")))?;
+    Ok(roots.iter().any(|r| r == root))
 }
 
 /// **The operator-facing "this node has no trust root" banner** (CIRISServer#400).
