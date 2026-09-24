@@ -278,7 +278,16 @@ jobs:
         # NODE's consent to be scored — so both are stamped and signed with the
         # held node key. Same rows, same MANDATORY federation scope as their
         # engine-signed twins directly above each; no new audience.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 45
+        # 45 -> 46 (0.5.216): `federation_peers.rs` gained `sign_att`, the helper
+        # behind the test-anchor route `GET /v1/federation/test-genesis-bundle`
+        # (CIRISServer#632). It mints a genesis-shaped bundle — charter, grant,
+        # lifecycle — under the harness canonical's own key so a harness agent
+        # imports a root the way production imports the baked seed, with NO
+        # bless and NO test-admit. Genesis rows are federation-scoped by
+        # definition (every node that pins the root must read them); the route
+        # is `#[cfg(feature = "test-anchor")]` and never compiles into a
+        # shipping binary. Same scope as `produce_genesis`'s ceremony rows.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 46
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one

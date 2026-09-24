@@ -1,0 +1,49 @@
+# PRODUCTION-SHAPED overlay (CIRISServer#632) — the agent as production runs it.
+#
+#   ./run_scenario.sh traceflow_prod
+#
+# What is different from the blessed traceflow, and why each item exists:
+#   * SERVER_FOLD — the agent opens persist with an AGENT-typed key and composes
+#     the server on the SAME store (no embedded edge): compose splits the key
+#     (actor ≠ wire/node key, owner-binding moved), one transport. Every
+#     production agent is this shape; no ladder was.
+#   * NO SEED on the agent — it never self-blesses under the test root, so the
+#     canonical admits it Advisory and `root_binding` answers
+#     NotRootedAtSteward, exactly as production. It keeps the anchor PUBKEYS
+#     so it can still verify the canonical's conferred record (recognition).
+#   * NO test-admit-peer — the agent's keys reach the canonical the way
+#     production's do: self-signed, in a Key round. The production canonical
+#     authors no consent to anyone; neither does this one.
+#   * The trust root arrives as a GENESIS BUNDLE the canonical assembles the way
+#     the production ceremony does (charter + serve grant + lifecycle, signed by
+#     the holder) and the agent IMPORTS (`POST /v1/trust-root/import`) — the
+#     production analogue of the baked seed. No local ceremony on the agent.
+#   * The owner claims, announces and consents over HTTP (the scenario does it,
+#     standing in for the operator at the console), so the owner-binding and the
+#     owner-authored `consent:replication` are real rows, not harness entries.
+#   * No node may dial production: the scenario fails if any log names the
+#     production canonical's address.
+services:
+  agent:
+    # Root + NET_ADMIN so the agent can REFUSE egress to the production canonical
+    # before edge's FFI seeds a dial to it from the baked genesis records
+    # (`source="baked_canonical_genesis"`, CIRISEdge#296) — persist skips the
+    # baked genesis in testing mode, edge's FFI does not, and harness agents
+    # have been dialing 108.61.242.236 and landing on the real directory.
+    user: "0:0"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      CIRIS_HARNESS_BLOCK_PRODUCTION: "108.61.242.236"
+      CIRIS_HARNESS_SERVER_FOLD: "true"
+      CIRIS_HARNESS_NO_TEST_ADMIT: "true"
+      CIRIS_HARNESS_SEAL_DELAY_SECS: "90"
+      CIRIS_HARNESS_CONSOLE: "/opt/harness/ciris-server-bin"
+      CIRIS_TEST_TRUST_ROOT_SEED: !reset null   # unset → no self-bless (verified by the scenario)
+      CIRIS_TEST_NO_CEREMONY: "true"           # belt: the code honours this even if the merge re-materialises the SEED
+      RUST_LOG: "info,ciris_edge=debug"
+    volumes:
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+  canonical:
+    environment:
+      RUST_LOG: "info,ciris_edge=debug"

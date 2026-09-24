@@ -954,6 +954,80 @@ pub fn owner_authored_consent_enabled() -> bool {
         .unwrap_or(OWNER_AUTHORED_CONSENT)
 }
 
+/// The own key a HUMAN author's consent is FOR: the first of this node's keys —
+/// wire identity, held node key, engine key — whose owner-binding names
+/// `author`, or `None` when `author` owns none of them (a machine pen, which
+/// persist forbids from naming anyone but itself: "consent is by humans",
+/// CIRISPersist#857). Directory-driven on purpose: a claim made BEFORE the split
+/// binds the actor and one made AFTER it binds the node key, and persist admits
+/// a `for_key_id` only where the author is actually a steward (CIRISServer#632).
+async fn bound_own_key_for(
+    engine: &Engine,
+    author: &str,
+    engine_author: &str,
+    requested: &str,
+) -> Option<String> {
+    // The key the CALLER asked the grant to be for comes first: a human bound to
+    // both the agent (occurrence anchor) and the node key (claim) who consents
+    // "for this agent" names the agent (`split_node_authors_consent_as_itself`).
+    // Only when that key is not one the author is bound to do we fall to the
+    // wire identity, the held node key, then the engine key.
+    for k in [
+        Some(requested.to_owned()),
+        crate::node_key::wire_identity().map(str::to_owned),
+        crate::node_key::held_node_signer().map(|h| h.derived_key_id()),
+        Some(engine_author.to_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        // NEVER the author's own key. persist's `steward_bindings_of` clause 1
+        // says a `user`-role key steward-binds ITSELF, so a human author passes
+        // the test below on their own key — and `ensure_replication_consent_covers`
+        // re-resolves the author with `requested = author.key_id` on its widen
+        // path, so `requested` IS the human there. That put the OWNER into
+        // `for_key_id`, `live_consent_grants_for_machine(node)` filters on
+        // `for_key_id == node`, and every person-contact grant became invisible
+        // to the node that authored it: `POST /v1/chat` 403 `chat.not_a_contact`
+        // on the chat ladder (2026-09-24). "Bound to" is a relation between a
+        // person and a MACHINE; a person's identity with themselves is not it.
+        if k == author {
+            continue;
+        }
+        // "Bound to" is persist's OWN predicate for the fold (`steward_bindings_of`,
+        // every live delegates_to granter — an owner-binding OR an occurrence
+        // anchor), not the purpose-filtered `owner_of`: the author and the reader
+        // must agree on which grants count, or a grant is authored for a key the
+        // fold will never match it to.
+        if let Ok(stewards) = engine.steward_bindings_of(&k).await {
+            if stewards.iter().any(|st| st == author) {
+                return Some(k);
+            }
+        }
+    }
+    None
+}
+
+/// Every key this node is: the engine's key, the actor identity, the held node
+/// key and the wire identity — deduplicated (CIRISServer#632; the same set
+/// `compose::own_key_ids` builds from an `Edge`).
+pub(crate) fn own_keys_of_this_node(engine_author: &str) -> Vec<String> {
+    let mut own = vec![engine_author.to_owned()];
+    for k in [
+        crate::node_key::actor_identity().map(str::to_owned),
+        crate::node_key::held_node_signer().map(|h| h.derived_key_id()),
+        crate::node_key::wire_identity().map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !own.contains(&k) {
+            own.push(k);
+        }
+    }
+    own
+}
+
 /// **Consent is by humans, not infrastructure (CIRISServer#599).** A
 /// `consent:replication` / `analyze` grant records the OWNER's act (the wizard's
 /// opt-in, a peering the owner requested, a contact the owner added), so on an
@@ -992,10 +1066,16 @@ pub async fn consent_author(
         // "I hold this key", never "sign as anyone". This is how the owner
         // migration and the harness author: the caller names the author.
         if signer_holds(&signer, requested) {
+            // An explicit pen that OWNS one of this node's keys is the human
+            // consenting FOR this node: name the key it is bound to, or persist's
+            // by-principals fold (`for_key_id == k`) drops the grant and the
+            // reconciler never converges (CIRISServer#632). A machine pen — the
+            // node's own — names nobody: persist refuses anything else.
+            let for_key_id = bound_own_key_for(engine, requested, &engine_author, requested).await;
             return Ok(ConsentAuthor {
                 key_id: requested.to_owned(),
                 signer: Some(signer),
-                for_key_id: None,
+                for_key_id,
             });
         }
         anyhow::bail!(
@@ -1038,7 +1118,15 @@ pub async fn consent_author(
         // The human consents FOR THIS AGENT — the engine's own key (the agent on
         // a split home; the node itself otherwise). Never a blanket
         // (CIRISServer#601 item 4, CIRISPersist#857).
-        owner.for_key_id = Some(engine_author.clone());
+        // The grant is FOR the node the owner is bound to: the WIRE identity on a
+        // split install (the key that links, announces and is bound), the engine
+        // key otherwise. Naming the actor here left every post-split claim's
+        // consent unmatched by the fold (CIRISServer#632).
+        owner.for_key_id = Some(
+            bound_own_key_for(engine, &owner.key_id, &engine_author, requested)
+                .await
+                .unwrap_or_else(|| engine_author.clone()),
+        );
         tracing::info!(
             requested = %requested,
             node_key_id = %node_key_id,
@@ -2044,6 +2132,11 @@ pub async fn replication_peers_from_consent(
     // (`for_key_id`). A steward's grant for a sibling agent contributes
     // nothing; there is no blanket form. Edge computes its send set the same
     // way (CIRISEdge#609), which is what made owner-authored consent shippable.
+    // persist returns the revocation-folded peer set for THIS key. The reader
+    // answers for one key on purpose: the engine signing as the actor must not
+    // see (or act on) the node's topology — `consent_survives_the_key_split`
+    // pins that isolation (#312). A consumer that IS several keys unions the
+    // reads itself (the reconciler, CIRISServer#632).
     let subjects = engine
         .consent_peers_by_principals(node_key_id)
         .await

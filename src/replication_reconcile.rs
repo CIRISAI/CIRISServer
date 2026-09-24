@@ -409,7 +409,27 @@ pub async fn reconcile_once(
     }
 
     // Desired topology from the corpus (the consent objects ARE the topology).
-    let consented = crate::peer::replication_peers_from_consent(engine, node_key_id).await?;
+    // EVERY KEY THIS NODE IS (CIRISServer#632, the eighth actor/node instance).
+    // persist's fold answers for ONE key k: k's own grants ∪ its stewards'
+    // grants that name k. On a split install the owner-binding may sit on the
+    // ACTOR key (a claim made before the split; the move leaves the actor's
+    // binding in place) or on the NODE key (a claim made after the split —
+    // every fresh install whose wizard runs after first boot). This loop is
+    // handed `edge.signer_key_id()`, the actor; reading for that key alone made
+    // an owner's grant invisible to a node bound on its node key: measured on
+    // the production-shaped harness as `converged to 0 consent peers` beside a
+    // live owner-authored grant. The READER stays per-key (the actor must not
+    // silently see the node's topology, #312); the reconciler — which IS all of
+    // these keys — unions the reads.
+    let mut consented: Vec<String> = Vec::new();
+    for k in crate::peer::own_keys_of_this_node(node_key_id) {
+        for p in crate::peer::replication_peers_from_consent(engine, &k).await? {
+            if !consented.contains(&p) {
+                consented.push(p);
+            }
+        }
+    }
+    consented.sort();
 
     // ── CC 4.1.4 (CIRISServer#159) — the withdraws-arbitrage countermeasure ──
     // Consent is granted once; behavior is continuous. A peer that was clean at
