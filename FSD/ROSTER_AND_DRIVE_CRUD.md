@@ -66,6 +66,37 @@ policy, its refusals, its witness.
 
 New ids: `self.not_your_node`, `self.release_self_requires_force`, `self.label_empty`.
 
+### 2.1 As built (0.5.216, `src/self_devices.rs`, `src/auth/occurrence.rs`, `src/self_room_drive.rs`)
+
+- **Release** is authorized by persist's single-owner projection: `owner_of(node) == caller`. Anything
+  else — another person's node, an unowned node, a key this node has never heard of — is one id,
+  `self.not_your_node` (403), so the route is not an oracle for who owns what. "The node you are
+  talking to" is this node's wire identity OR its engine (actor) key. Every live owner-binding the
+  owner holds on the node (`delegates_to`, `is_owner_binding_envelope`, not already withdrawn) gets a
+  `withdraws` at the BINDING's own `cohort_scope`, authored by the owner's pen through
+  `attest::Emit` (stamp → the capsule's `sign_hybrid` → `assemble_from_b64` → `attest::put`). The
+  route then re-reads `nodes_owned_by(owner)` and answers `self.release_incomplete` (500) if the node
+  is still listed. A released node answers its former owner's session as unowned
+  (`*.owner_session_required`, 403).
+- **Relabel.** The persist occurrence row has no label member and its admission is idempotent on
+  `(identity, occurrence)`, so a label cannot be written INTO it. It is an owner-signed row at
+  `cohort_scope: self`, dimension `self:device_label:v1`, attested to the occurrence key: the first
+  label is a `scores`, each relabel a `supersedes` naming the previous head; the newest wins. The
+  device must be one of the caller's occurrences (`self.not_your_device`, 404).
+- **`GET /v1/self/occurrences`** gains `revoked: bool` on every row and `include_revoked=true`
+  (revoked rows follow the active ones). `label` is returned only to the identity's own owner session
+  — the roster is public binding metadata, the name a person gave their phone is not.
+- **Self room:** `publish_key_package` uses `chat::key_package_attestation_in(node, &room, ..)`,
+  `add_members` uses `chat::welcome_attestation_in(node, &room, joiner, ..)`, and `join_if_welcomed`
+  reads `chat::welcome_for(dir, creator, room, own)`. The selffiles ladder's `opened_on_b` is
+  `SUCCESS_STAGE` and `REQUIRED_opened_on_b=1`; the source gate
+  `tests/the_self_room_handshake_is_node_attested.rs` pins both the room-keyed builders and the
+  absence of the pair forms. (Not run on the ladder by this change — the lead runs it.)
+- **Extra ids** (all in the localization guard's debt list until a `ciris-client` bundle carries
+  them): `self.owner_session_required`, `self.delegate_may_not_author`, `self.store_unavailable`,
+  `self.author_signer_unavailable`, `self.bad_request`, `self.not_your_device`,
+  `self.release_incomplete`.
+
 ## 3. Family (household)
 
 A household is a `Family` whose `family_key_id` is a keyless group identifier (V151), founded by the
@@ -89,6 +120,90 @@ satisfied; names the protocol), `family.unknown_member_key`, `family.already_mem
 `family.last_founder`, `family.name_empty`, `family.bad_consensus_protocol`, `family.quorum_pending`.
 
 Files at `cohort: family` then work through §5 unchanged; a family rung joins the chat ladder.
+
+### 3.5 As built (0.5.216, `src/family_api.rs`) — and what the pins admit
+
+Investigated before building, against persist v48.0.0 (`59283e3`) / verify v16.1.0 (`d99da1c`):
+
+- **`family_key_id` does NOT need a `federation_keys` row.** The FK was dropped in persist v13.3.0
+  (`migrations/sqlite/lens/V097__family_key_id_not_a_key.sql`, CIRISPersist#386); `put_family`'s
+  invariant is that every MEMBER is a registered key (`admission::validate_family_members`). V151 then
+  pointed the revocation table's FK at `federation_families`, not at a key. A household id is minted
+  as `family:v1:<uuid>` and never registered; nothing signs "as the family". The record is a
+  `SignedFamily` whose `authority_key_id` is the caller's fed-ID, admitted through the replicated
+  `put_family` (`verify_family_admission`: hybrid-Strict over `Family::signing_envelope()`); the
+  constitutional `humanity-accord` id is reserved there and 404s on every route here.
+- **Governance.** `founder_only` = the caller is an active member whose role is `founder`; one call.
+  Growth is `add_member(Cohort::Family, .., AdmitSpec)` with the founder's signature over the GROWN
+  record (persist #654); removal is a `SignedFamilyMembershipRevocation` authored by the founder; a
+  role change / dissolve is an authority-signed `supersede_family`. A `quorum:M/N` family refuses the
+  single-call routes with `family.quorum_pending` and changes through
+  `POST …/changes/envelope` → `…/cosign` (on each member's OWN node, with their OWN pen) →
+  `…/assemble`, verified by persist's `supersede_family_with_quorum` (→ `verify_membership_quorum`
+  → verify's `verify_membership_change`). The envelope is persist's
+  `build_membership_change_envelope` plus `action`, `target_key_id`, `roles` and
+  `prior_persist_row_hash`; cosign and assemble refuse an envelope whose prior hash is not the
+  current record's (`family.bad_change`), because verify's anti-replay binds the prior ROSTER only,
+  not roles.
+- **Only `quorum:M/N` is verifiable.** Verify reads both envelopes' protocol as `quorum:M/N` with
+  `N == member count` and `2M > N` (`accord_genesis.rs` `quorum_threshold_from_envelope`). So:
+  `majority` and `unanimous` are accepted at create as aliases and STORED as `quorum:⌊n/2⌋+1/n` and
+  `quorum:n/n`; a quorum family must be created with its full founding roster (`members: [..]` on
+  create, so N matches); on every roster change the protocol is re-derived keeping the ratio and never
+  below a strict majority (`quorum:2/3` + 1 → `quorum:3/4`, `quorum:3/3` + 1 → `quorum:4/4`), unless
+  the envelope request names one. A family carrying any other protocol string (e.g. replicated from
+  elsewhere) is refused `family.bad_consensus_protocol` on every governed write; leave still works.
+- **A quorum dissolve** cannot be an empty-roster membership change (verify: `WeakQuorum { m: 0 }`),
+  so the quorum cosigns a dissolve-marked envelope over the CURRENT roster (checked with
+  `verify_membership_quorum`) and the terminal write is an authority-signed `supersede_family` to an
+  empty roster carrying `{change_envelope, quorum_signatures}` as its recorded authorization. Every
+  dissolve (either protocol) first writes one signed removal per active member.
+- **Leave** writes the leaver's own signed removal; for a quorum family it first supersedes the
+  record (signed by the leaver) to drop them and re-derive N, because persist's family prior envelope
+  is built from the RAW record (`group_prior_envelope`, `federation/mod.rs` ~4683), so a departed seat
+  left on the record would still count toward — and could still sign — the quorum.
+- **Membership reads** are the fold: `active_members(Cohort::Family, id)` and
+  `list_families_for_member_active`. The record's raw roster is read only to BUILD the next record and
+  to recognise a removed member (below) — never to admit.
+- **DEK re-wrap on add** is `Engine::rekey_family_member_add` (`at_rest_cascade`), reported in the
+  response as `dek_rewrap {blobs_scanned, granted, excluded}`; a failure is reported, not raised (the
+  add has committed).
+
+**Gaps at these pins (upstream, filed as findings in the 0.5.216 report):**
+
+1. **A family record's growth and supersedes do not replicate to a peer that already holds it.**
+   Edge applies a `Family` row with `put_family` through `apply_signed_plane!`
+   (edge `src/replication/bridge.rs:7651-7653`), and persist's `put_family` → `put_family_local` is a
+   plain `INSERT` (`src/store/sqlite.rs:6853-6869`, no identical-re-put / supersede verdict, unlike
+   the community plane's #758 `community_reput_verdict`); a grown or superseded record under an id the
+   peer holds is refused there as a backend error. Additionally `supersede_group_row` re-stamps
+   `admitted_at` but does not re-index the wire (`src/store/sqlite.rs:6955-7178`, no
+   `index_stored_record` call, unlike `add_family_member` at :6946). So: create crosses, and every
+   REMOVAL crosses (its own plane), but add / role / quorum changes after first contact stay on the
+   node that made them — and a member whose node is stale gets `family.bad_change` on cosign rather
+   than signing an old state. The community plane solved this in v48 with a widening plane (#860);
+   the family plane needs the same.
+2. **A removed member cannot be re-added.** `federation_family_membership_revocations` is keyed
+   `(family_key_id, removed_identity_key_id)` (V151) and the family fold (`removed_key_ids_at`) has no
+   re-establishment rule (identity occurrences got one in #421). A re-add is refused by name,
+   `family.readd_unsupported` (409), instead of reporting a success the fold would ignore.
+3. **Persist does not check the signer's standing** on a family supersede or revocation
+   (`verify_family_admission` / the revocation gate verify a registered signature only). The server
+   enforces `founder_only` for the rows it authors; a peer-authored row is admitted by persist alone —
+   the family twin of CIRISPersist#908.
+
+**Extra ids beyond the list above** (in the localization guard's debt list with the others):
+`family.readd_unsupported` (409), `family.bad_role` (400), `family.bad_change` (409, a stale or
+foreign envelope), `family.bad_request` (400), `family.owner_session_required` (401/403),
+`family.delegate_may_not_author` (403 — a delegate may READ families), `family.store_unavailable`
+(503), `family.author_signer_unavailable` (403). Status codes: `not_found` 404, `not_a_member` 404,
+`not_authorized` 403, `quorum_pending` 409, `already_member` 409, `last_founder` 409,
+`unknown_member_key` 400, `name_empty` 400, `bad_consensus_protocol` 400.
+
+Witness: `tests/family_crud.rs` (founder / member / outsider / delegate / guest / no session; the
+founder_only lifecycle in single calls; a `quorum:2/3` family through envelope → cosign on each
+member's own node → assemble for add, remove, role and dissolve; leave crossing from the leaver's node;
+the last-founder rule; pagination) and `tests/self_node_release.rs`.
 
 ## 4. Community and affiliations
 

@@ -215,6 +215,12 @@ pub mod equivocation;
 /// (`federation_families` + membership revocations) — create / add / live-roster /
 /// swap, NOT accord-aware. The HUMANITY_ACCORD kill-switch is one specialization.
 pub mod family;
+/// The HOUSEHOLD routes (CIRISServer#627, `FSD/ROSTER_AND_DRIVE_CRUD.md` §3):
+/// create / list / read / add / remove / leave / role / dissolve, and the
+/// envelope → cosign → assemble flow for a `quorum:M/N` family. Every row is
+/// signed with the caller's fed-ID and admitted through persist's REPLICATED
+/// `put_family` door; membership is read through the revocation fold.
+pub mod family_api;
 /// Owner-directed federation operations (the keystone for on-demand
 /// `consent:replication` peering): `GET /v1/federation/self-key-record` +
 /// `POST /v1/federation/peering`. Each node authors its OWN consent grant
@@ -309,6 +315,10 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+/// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
+/// from its owner (a signed `withdraws` of the owner-binding) and relabel a
+/// device key.
+pub mod self_devices;
 pub mod self_room_drive;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer

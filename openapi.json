@@ -12221,6 +12221,1229 @@
           }
         ]
       }
+    },
+    "/v1/families": {
+      "get": {
+        "tags": [
+          "families"
+        ],
+        "summary": "List my families",
+        "description": "Families where the caller is an ACTIVE member (the revocation fold). Owner session (a delegate may read). Paged by `limit` (\u2264500) and `after`; `resume` is the next `after`.",
+        "operationId": "list_families_v1_families_get",
+        "responses": {
+          "200": {
+            "description": "`{families: [family], resume}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 family.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Create a household",
+        "description": "The caller becomes its founder. `consensus_protocol`: founder_only (default), majority / unanimous (stored as quorum:M/N), or quorum:M/N with N = 1 + len(members). Signed with the owner's fed-ID and admitted through persist's replicated put_family.",
+        "operationId": "create_family_v1_families_post",
+        "responses": {
+          "201": {
+            "description": "The family: `{family_id, name, members, consensus_protocol, founded_at, my_role, envelope}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.name_empty, family.bad_consensus_protocol, family.unknown_member_key, family.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.already_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 family.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "consensus_protocol": {
+                    "type": "string"
+                  },
+                  "members": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/families/{id}": {
+      "get": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Read a family",
+        "description": "The record, its effective roster (the fold) and roles. A non-member gets 404 exactly as for an unknown id.",
+        "operationId": "read_family_v1_families__id__get",
+        "responses": {
+          "200": {
+            "description": "The family",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Dissolve a family",
+        "description": "founder_only: a founder, in one call. A quorum family dissolves through changes/envelope {action: dissolve}. One signed removal per member (replicates), then a terminal supersede to an empty roster.",
+        "operationId": "dissolve_family_v1_families__id__delete",
+        "responses": {
+          "200": {
+            "description": "`{family_id, dissolved: true}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.not_authorized, family.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.quorum_pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ]
+      }
+    },
+    "/v1/families/{id}/members": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Add a member",
+        "description": "founder_only: a founder. The target must be a registered identity key. The signed GROWN record is admitted; the family DEKs are re-wrapped to the newcomer (`dek_rewrap`).",
+        "operationId": "add_family_member_v1_families__id__members_post",
+        "responses": {
+          "200": {
+            "description": "The family, plus `dek_rewrap`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.unknown_member_key, family.bad_role, family.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.not_authorized, family.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.already_member, family.readd_unsupported, family.quorum_pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/families/{id}/members/{key_id}": {
+      "delete": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Remove a member",
+        "description": "founder_only: a founder. Removing yourself is leaving. Written as a signed membership removal (replicates).",
+        "operationId": "remove_family_member_v1_families__id__members__key_id__delete",
+        "responses": {
+          "200": {
+            "description": "The family, plus `removed`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.not_authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found, family.not_a_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.last_founder, family.quorum_pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A member's identity key id"
+          }
+        ]
+      }
+    },
+    "/v1/families/{id}/members/{key_id}/role": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Change a member's role",
+        "description": "founder_only: a founder; the last founder cannot step down while others remain.",
+        "operationId": "change_family_role_v1_families__id__members__key_id__role_post",
+        "responses": {
+          "200": {
+            "description": "The family",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.bad_role, family.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.not_authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found, family.not_a_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.last_founder, family.quorum_pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A member's identity key id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "role"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/families/{id}/leave": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Leave a family",
+        "description": "Any member, always their own act, never subject to quorum. The last founder may not leave while other members remain.",
+        "operationId": "leave_family_v1_families__id__leave_post",
+        "responses": {
+          "200": {
+            "description": "`{family_id, left: true}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.last_founder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ]
+      }
+    },
+    "/v1/families/{id}/changes/envelope": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Build a quorum change envelope",
+        "description": "quorum:M/N families only. `action`: add | remove | role | dissolve. Returns the change envelope (verify's membership-change payload plus action, roles and the prior record hash) and its JCS signing bytes.",
+        "operationId": "family_change_envelope_v1_families__id__changes_envelope_post",
+        "responses": {
+          "200": {
+            "description": "`{change_envelope, signing_bytes_base64, required_signatures, signers}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.bad_consensus_protocol, family.bad_role, family.bad_request, family.unknown_member_key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found, family.not_a_member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.already_member, family.readd_unsupported, family.last_founder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "add",
+                      "remove",
+                      "role",
+                      "dissolve"
+                    ]
+                  },
+                  "key_id": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  },
+                  "consensus_protocol": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/families/{id}/changes/cosign": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Cosign a quorum change on your own node",
+        "description": "An active member signs the envelope with their own fed-ID; the signature is appended to `signatures` and `quorum_met` says whether persist's verify_membership_quorum is now satisfied.",
+        "operationId": "family_change_cosign_v1_families__id__changes_cosign_post",
+        "responses": {
+          "200": {
+            "description": "`{signature, signatures, required_signatures, quorum_met}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.bad_consensus_protocol, family.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.bad_change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "change_envelope": {
+                    "type": "object"
+                  },
+                  "signatures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "change_envelope"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/families/{id}/changes/assemble": {
+      "post": {
+        "tags": [
+          "families"
+        ],
+        "summary": "Apply a cosigned quorum change",
+        "description": "Any active member submits the envelope and the cosignatures; persist's supersede_family_with_quorum verifies the prior roster's quorum before writing (a dissolve verifies with verify_membership_quorum, then writes the terminal supersede).",
+        "operationId": "family_change_assemble_v1_families__id__changes_assemble_post",
+        "responses": {
+          "200": {
+            "description": "The family (or `{family_id, dissolved}`), plus `action` and `version`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 family.bad_consensus_protocol, family.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 family.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 family.owner_session_required, family.delegate_may_not_author, family.not_authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 family.not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 family.bad_change, family.quorum_pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The family id (`family:v1:<uuid>`)"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "change_envelope": {
+                    "type": "object"
+                  },
+                  "signatures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "change_envelope",
+                  "signatures"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/self/nodes/{node_key_id}/release": {
+      "post": {
+        "tags": [
+          "self"
+        ],
+        "summary": "Release a node you own",
+        "description": "The owner's signed `withdraws` of every live owner-binding they hold on the node; afterwards nodes_owned_by(owner) no longer lists it. The node serving the request needs `force_self: true`.",
+        "operationId": "release_node_v1_self_nodes__node_key_id__release_post",
+        "responses": {
+          "200": {
+            "description": "`{node_key_id, released, released_self, withdrawn, nodes_owned_by}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 self.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 self.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 self.owner_session_required, self.delegate_may_not_author, self.not_your_node, self.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 self.release_self_requires_force",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Refusal \u2014 self.release_incomplete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "node_key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The node's key id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "force_self": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/self/occurrence/label": {
+      "post": {
+        "tags": [
+          "self"
+        ],
+        "summary": "Label one of your devices",
+        "description": "An owner-signed `self:device_label:v1` row at cohort_scope self; a relabel supersedes the previous head. Returned in GET /v1/self/occurrences to the owner's own session.",
+        "operationId": "label_occurrence_v1_self_occurrence_label_post",
+        "responses": {
+          "200": {
+            "description": "`{occurrence_key_id, label, attestation_id, supersedes}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 self.label_empty, self.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 self.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 self.owner_session_required, self.delegate_may_not_author, self.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 self.not_your_device",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "occurrence_key_id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "occurrence_key_id",
+                  "label"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/self/occurrences": {
+      "get": {
+        "tags": [
+          "self"
+        ],
+        "summary": "List a self's device keys",
+        "description": "Public binding metadata. `include_revoked=true` adds revoked devices (`revoked: true`); the identity's own owner session also sees each device's `label`.",
+        "operationId": "list_occurrences_v1_self_occurrences_get",
+        "responses": {
+          "200": {
+            "description": "`{identity_key_id, occurrences: [{occurrence_key_id, device_class, has_encryption_pubkeys, asserted_at, revoked, label?}]}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "identity_key_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -30237,6 +31460,28 @@
             "description": "Pass back as `after`; null when the drive is exhausted."
           }
         }
+      },
+      "StableRefusal": {
+        "type": "object",
+        "title": "StableRefusal",
+        "description": "A refusal with a stable, localizable `reason_id` (FSD/ROSTER_AND_DRIVE_CRUD.md \u00a71 rule 6).",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "English text for reason_id"
+          },
+          "reason_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "reason_id",
+          "detail"
+        ]
       }
     },
     "securitySchemes": {

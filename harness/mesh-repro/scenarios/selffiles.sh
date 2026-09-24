@@ -27,9 +27,9 @@
 #   opened_on_b  node-c OPENS the bytes. The room's addresses resolved and the
 #              pull completed — the last rung, and the one that needs the room.
 #
-# `mine_on_b` and `opened_on_b` are expected RED until the self-room drive
-# converges on a two-node roster. A red here names its rung; that is the whole
-# reason the table exists.
+# `mine_on_b` and `opened_on_b` are both REQUIRED since 0.5.216 (the self-room
+# drive adopts edge's room-keyed handshake, CIRISEdge#656). A red here names its
+# rung; that is the whole reason the table exists.
 
 SCENARIO_NAME="selffiles"
 # The same three-node compose the chat ladder uses; node-c lives behind the
@@ -38,23 +38,26 @@ SCENARIO_NAME="selffiles"
 COMPOSE_FILES="-f docker-compose.chat.yml"
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-scale}"
 PROJECT="${PROJECT:-ciris-selffiles}"
-# `mine_on_b` — the ROW on the second device — is the claim this ladder can
-# make today. `opened_on_b` (the BYTES) is BLOCKED UPSTREAM on CIRISEdge#656
-# and stays in STAGES so every run measures it and a red names its cause
-# rather than going quiet: `self_room::decide` returns `PublishKeyPackage` and
-# `Add`, but edge exposes `key_package_attestation` / `welcome_attestation`
-# only in a form that derives a PAIR room, so those two rows land in
-# `chat:pair:v1:<hash>` and the creator's `key_package_from(<joiner>, <self
-# room>)` never matches — `Added(0)` forever, room stuck at one member, and
-# the second device reads `not_fetched`. Promote this back to SUCCESS_STAGE
-# the moment edge ships `*_attestation_in`; the rung is already written.
-SUCCESS_STAGE="mine_on_b"
+# `opened_on_b` — the BYTES on the second device — is the claim of this ladder
+# since 0.5.216. It was BLOCKED UPSTREAM on CIRISEdge#656 through 0.5.215:
+# `self_room::decide` returned `PublishKeyPackage` and `Add`, but edge exposed
+# `key_package_attestation` / `welcome_attestation` only in a form that derives
+# a PAIR room, so those two rows landed in `chat:pair:v1:<hash>` and the
+# creator's `key_package_from(<joiner>, <self room>)` never matched —
+# `Added(0)` forever, room stuck at one member, and the second device read
+# `not_fetched`. Edge v30.0.0 shipped the room-keyed `*_attestation_in` twins
+# and `welcome_for`; `src/self_room_drive.rs` adopts them in 0.5.216, so the
+# rung is PROMOTED to SUCCESS_STAGE and made REQUIRED.
+SUCCESS_STAGE="opened_on_b"
 STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b)
 
 # `mine_on_b` is the claim of this scenario: inferring it from a later stage is
 # exactly the mistake the chat ladder made with `arrived` for six releases.
 REQUIRED_mine_on_b=1
 REQUIRED_file=1
+# The BYTES, not inferred from the row: a green `mine_on_b` with a red
+# `opened_on_b` is exactly the 0.5.215 state this cut exists to end.
+REQUIRED_opened_on_b=1
 
 SELF_STATE="${TMPDIR:-/tmp}/ciris-selffiles-${PROJECT:-ciris-selffiles}"
 SELF_NODES="${SELF_NODES:-node-a node-c}"
@@ -388,7 +391,7 @@ print(1 if any(e.get("filename")=="proof.txt" and e.get("bytes")=="here"
                for e in d.get("body",{}).get("entries",[])) else 0)' \
     "$SELF_STATE/drive-b.json" 2>/dev/null || echo 0
 }
-HINT_opened_on_b="BLOCKED ON CIRISEdge#656 — not a regression. The row crossed (mine_on_b is green); the BYTES cannot, because the self room never admits the second device: edge can only author a KeyPackage/Welcome into a PAIR room, so the creator holds the joiner's KeyPackage and cannot see it (\`Added(0)\`). Check \`tick=Added(0)\` on the creator and \`community_key_id=chat:pair:v1:*\` on the KeyPackage row before looking anywhere else"
+HINT_opened_on_b="the second device LISTS the file (mine_on_b green) but cannot OPEN its bytes. The self room did not admit it: check \`tick=Added(0)\` on the creator (it cannot see the joiner's KeyPackage — is the row in the SELF room, not \`chat:pair:v1:*\`? src/self_room_drive.rs must use key_package_attestation_in / welcome_attestation_in, CIRISEdge#656), then \`self room JOINED\` on the joiner (welcome_for must find a Welcome naming THIS node), then the scope-address install on both"
 EXIT_opened_on_b=47
 
 harness_scenario_evidence() {

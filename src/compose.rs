@@ -1615,6 +1615,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         // whether the room it seals into is addressable at all.
                         edge.scope_lifecycle().cloned(),
                     ))
+                    // HOUSEHOLDS (CIRISServer#627, FSD/ROSTER_AND_DRIVE_CRUD.md §3):
+                    // create / list / read / add / remove / leave / role /
+                    // dissolve, and envelope → cosign → assemble for a quorum
+                    // family. Owner-gated; every row signed by the owner's fed-ID.
+                    .merge(crate::family_api::router(
+                        Arc::clone(&engine),
+                        crate::user_seed_dir(&cfg),
+                    ))
+                    // THE OWNER'S DEVICES (FSD §2): release a node, relabel a key.
+                    .merge(crate::self_devices::router(
+                        Arc::clone(&engine),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
