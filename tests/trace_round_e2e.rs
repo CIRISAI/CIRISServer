@@ -304,6 +304,91 @@ async fn register(on: &Node, who: &Node, id_type: &str, roles: Vec<String>) {
 /// `replication_consent_attestation`) and none for `trace:*` — a trace is the
 /// agent's claim, and persist's emit chokepoint is what stamps the instants into
 /// the signed bytes (CIRISPersist#598) and binds the row mirror (#643).
+/// Every node ACCEPTS the shared root — the root-side legs (persist's own
+/// fixture, which since v47.3.0 gives the root Layer-A custody evidence) plus
+/// each node's OWN `delegates_to(node → root, infra:*)` at federation, exactly
+/// what `mesh_genesis::accept_trust_root` writes at every production boot.
+///
+/// Under edge ≤ v29 the canonical was Rooted by CONFERRAL (the accord co-scrub
+/// on its serve role) and needed no acceptance; edge v30.2.0's `rooted_with`
+/// (CIRISEdge#659) is a pair property — `∃R ∈ roots_of(me) ∩ roots_of(peer)`,
+/// both valid — so a node that never accepted the root shares none with anyone,
+/// advertises nothing, and this file read "AGENT OFFERS 0 ref(s)" with the
+/// canonical's verdict at `edge_exists: false` (probe, 2026-09-24).
+async fn accept_shared_root(nodes: &[&Node], root: &str, serve_node_key_id: &str) {
+    for n in nodes {
+        ciris_persist::federation::operational::test_support::establish_trust_root_side(
+            n.engine.federation_directory().as_ref(),
+            root,
+            serve_node_key_id,
+            INFRA_SERVE,
+        )
+        .await
+        .expect("root-side trust legs");
+        let trust_edge = serde_json::json!({
+            "scope": [INFRA_ATTEST, INFRA_SERVE],
+        });
+        let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trust_edge)
+            .expect("trust edge envelope");
+        let mut te = ciris_persist::federation::EmitAttestationInput::with_envelope(
+            ciris_persist::federation::types::attestation_type::DELEGATES_TO,
+            core,
+            cohort_scope::FEDERATION,
+        );
+        te.attested_key_id = Some(root.to_string());
+        te.subject_key_ids = vec![root.to_string()];
+        n.engine
+            .emit_attestation_self(te)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{} emits its OWN delegates_to(self -> {root}): {e}",
+                    n.key_id
+                )
+            });
+    }
+    // AFTER FIRST CONTACT: each node holds the peer's acceptance. Edge walks
+    // BOTH sides from THIS node's directory (`rooted_with`: `peer_roots` is
+    // `trusted_roots_of(peer)` read locally), and on the wire a node's own
+    // allegiance facts cross to an Attributed peer below the serve floor
+    // (CIRISEdge#668). This hand-pumped round drives one plane one way and
+    // never carries them, so the fixture places the rows first contact would
+    // have — without them the walk read `my_roots=1 peer_roots=0`.
+    for n in nodes {
+        let mine: Vec<_> = n
+            .engine
+            .federation_directory()
+            .list_attestations_by(&n.key_id)
+            .await
+            .expect("own rows")
+            .into_iter()
+            .filter(|a| {
+                a.attested_key_id == root
+                    && a.attestation_type
+                        == ciris_persist::federation::types::attestation_type::DELEGATES_TO
+            })
+            .collect();
+        assert!(!mine.is_empty(), "{} accepted {root}", n.key_id);
+        for other in nodes.iter().filter(|o| o.key_id != n.key_id) {
+            for row in &mine {
+                other
+                    .engine
+                    .federation_directory()
+                    .put_attestation(ciris_persist::federation::SignedAttestation {
+                        attestation: row.clone(),
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{} holds {}'s acceptance of {root}: {e}",
+                            other.key_id, n.key_id
+                        )
+                    });
+            }
+        }
+    }
+}
+
 async fn seal_trace(n: &Node, trace_id: &str) -> String {
     let trace_envelope = serde_json::json!({
         "dimension": "trace:complete:v1",
@@ -522,39 +607,12 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     // with "attesting_key_id trace-round-e2e-root does not exist in
     // federation_keys" — it had never been told the root exists. A trust root is
     // shared state, not the sender's private opinion.
-    for n in [&agent, &canonical] {
-        ciris_persist::federation::operational::test_support::establish_trust_root_side(
-            n.engine.federation_directory().as_ref(),
-            "trace-round-e2e-root",
-            &canonical.key_id,
-            INFRA_SERVE,
-        )
-        .await
-        .expect("root-side trust legs");
-    }
-
-    // The agent's own honest trust edge, signed by its real engine key.
-    let trust_edge = serde_json::json!({
-        "scope": [INFRA_ATTEST, INFRA_SERVE],
-    });
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trust_edge)
-        .expect("trust edge envelope");
-    let mut te = ciris_persist::federation::EmitAttestationInput::with_envelope(
-        ciris_persist::federation::types::attestation_type::DELEGATES_TO,
-        core,
-        cohort_scope::FEDERATION,
-    );
-    te.attested_key_id = Some("trace-round-e2e-root".to_string());
-    te.subject_key_ids = vec!["trace-round-e2e-root".to_string()];
-    agent
-        .engine
-        .emit_attestation_self(te)
-        .await
-        .expect("the agent emits its OWN delegates_to(agent -> root) trust edge");
-
-    // The agent consents to replicate `trace:` to the canonical. NOTE the default
-    // prefix set is ["capacity:"] — a defaulted grant sweeps no traces at all,
-    // which is itself a silent failure this test refuses to reproduce.
+    accept_shared_root(
+        &[&agent, &canonical],
+        "trace-round-e2e-root",
+        &canonical.key_id,
+    )
+    .await;
     let grant = ciris_server::peer::emit_replication_consent(
         &agent.engine,
         &agent.key_id,
@@ -1086,6 +1144,7 @@ async fn drive_coordinator_round(mdu: Option<usize>, tag: &str) -> (bool, Vec<us
     register(&canonical, &agent, identity_type::NODE, Vec::new()).await;
     confer_roles(&agent, &canonical, &[INFRA_SERVE, INFRA_ATTEST]).await;
     confer_roles(&canonical, &canonical, &[INFRA_SERVE, INFRA_ATTEST]).await;
+    accept_shared_root(&[&agent, &canonical], "coord-round-root", &canonical.key_id).await;
 
     ciris_server::peer::emit_replication_consent(
         &agent.engine,

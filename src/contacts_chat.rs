@@ -2509,7 +2509,14 @@ async fn require_member(st: &ChatState, owner: &Owner, community_id: &str) -> Re
             format!("build_caller_admission: {e}"),
         )
     })?;
-    if !scope.admits(cohort_scope::COMMUNITY, community_id, None) {
+    // persist v47 (#893/#897): the targeted arms compare the ROW's room
+    // (`cohort_target`) against the caller's rooms; `target` is the self arm's.
+    if !scope.admits(
+        cohort_scope::COMMUNITY,
+        &owner.key_id,
+        Some(community_id),
+        None,
+    ) {
         // The contextual-integrity line. Owning the node is not membership in
         // the cohort, and the tier means nothing if this arm is skipped.
         return Err(refuse(

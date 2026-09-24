@@ -228,6 +228,11 @@ impl WithholdClass {
             WithholdReason::RecipientNotInSendSet
             | WithholdReason::ServeCapabilityMissing
             | WithholdReason::ServeCapabilityNotRooted
+            // edge v30.2.0 (CIRISEdge#659) — the recipient is ATTRIBUTED but not
+            // ROOTED: no valid trust root in common through the owner-bindings.
+            // A verdict about the peer, not a failure to reach one — same class
+            // as the capability-not-rooted leg above.
+            | WithholdReason::RecipientNotRooted
             | WithholdReason::RecipientCapabilityRestriction
             // edge v15.19.0 (CIRISEdge#440). Both are decisions somebody MADE,
             // not failures: a subscribed trust root paused the plane via

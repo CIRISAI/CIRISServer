@@ -55,7 +55,7 @@ authorization to fetch the blob and the only way it is known to exist. The
 node provisions its owner's content-KEM occurrence itself. Consent is by
 humans: a `consent:replication` grant is signed by the owner's fedID and names
 the one agent it is for (`for_key_id`); reads walk a machine key to the humans
-standing behind it (persist v46.3.1, edge v29.5.0; CIRISServer#599/#601). Routes and adopter
+standing behind it (persist v47.3.0, edge v30.3.0; CIRISServer#599/#601). Routes and adopter
 notes: `FSD/CIRISAGENT_ADOPTION.md` §6; the gaps (pair-only rooms, text-only)
 are CIRISServer#594 and CIRISEdge#601.
 
@@ -352,7 +352,7 @@ itself, while a quorum roots to `humanity-accord`. The charter is 2-of-2 over a
 — a replicated row proves its own m-of-n rather than deferring to the bundle it
 arrived in. Two humans to halt, two to legitimize.
 
-Substrate pins: **persist v46.3.1 / edge v29.5.0 / verify v16.1.0** — hybrid PQ
+Substrate pins: **persist v47.3.0 / edge v30.3.0 / verify v16.1.0** — hybrid PQ
 throughout, Registry-of-Record admission, drift-witnessed policy hashes. Edge
 v15.7.x adds the realtime A/V spine (MLS X-Wing epoch keys, signed Welcome,
 fragment ARQ); the server exercises publisher → relay → subscriber

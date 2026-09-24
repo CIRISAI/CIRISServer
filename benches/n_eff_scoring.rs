@@ -64,6 +64,8 @@ fn synthetic_trace(idx: usize) -> TraceSummary {
         completed_at: now,
         trace_level: TraceLevel::Generic,
         schema_version: "6".to_string(),
+        // persist v47: when this node admitted the trace (None for a synthetic row).
+        admitted_at: None,
         signature_verified: true,
         cognitive_state: None,
         thought_type: None,

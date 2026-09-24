@@ -104,7 +104,18 @@ fn uuid_like(tag: &str) -> String {
 /// Register `who`'s REAL hybrid halves, so persist's federation-tier ingest can
 /// verify what it signs. A PQC half is mandatory for anything that attests
 /// (`HybridPolicy::Strict`), which both the root and its witness do.
-async fn register_hybrid(engine: &Engine, who: &HybridSigningIdentity, id_type: &str) {
+/// `charter_holder`: attach Layer-A-valid custody evidence. persist v47.3.0
+/// (CIRISPersist#901) judges a root by its holders' attested custody, so the
+/// self-charter's SIGNER — a `node`-typed key here — needs it as much as the
+/// accord holder always did, or `trust_root_valid` is false and the conferral
+/// this fixture builds confers nothing (FSD `TRUST_ROOT_HOLDER_HARDWARE.md`
+/// §3.6 — the same remedy persist's own witnesses took).
+async fn register_hybrid(
+    engine: &Engine,
+    who: &HybridSigningIdentity,
+    id_type: &str,
+    charter_holder: bool,
+) {
     use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord, SignedKeyRecord};
     let now = Utc::now();
     // An `accord_holder` registration hits persist's #513 hardware-attestation
@@ -112,21 +123,22 @@ async fn register_hybrid(engine: &Engine, who: &HybridSigningIdentity, id_type: 
     // FRESHNESS (≤24h), not a real cert chain, so the established mock
     // Android-StrongBox value with a fresh nonce is the accepted test path —
     // the same one persist's own `register_typed_key` takes.
-    let attestation_evidence = (id_type == identity_type::ACCORD_HOLDER).then(|| {
-        serde_json::json!({
-            "platform_attestation": {
-                "Android": {
-                    "key_attestation_chain": [
-                        [0x30u8, 0x82, 0x01, 0x00],
-                        [0x30u8, 0x82, 0x02, 0x00],
-                    ],
-                    "play_integrity_token": "eyJhbGciOiJIUzI1NiJ9.fake.token",
-                    "strongbox_backed": true,
-                }
-            },
-            "nonce_captured_at": now.to_rfc3339(),
-        })
-    });
+    let attestation_evidence =
+        (charter_holder || id_type == identity_type::ACCORD_HOLDER).then(|| {
+            serde_json::json!({
+                "platform_attestation": {
+                    "Android": {
+                        "key_attestation_chain": [
+                            [0x30u8, 0x82, 0x01, 0x00],
+                            [0x30u8, 0x82, 0x02, 0x00],
+                        ],
+                        "play_integrity_token": "eyJhbGciOiJIUzI1NiJ9.fake.token",
+                        "strongbox_backed": true,
+                    }
+                },
+                "nonce_captured_at": now.to_rfc3339(),
+            })
+        });
     let member = who.directory_member().expect("directory member halves");
     let ed = member.ed25519_public_key_base64.clone();
     let record = KeyRecord {
@@ -271,8 +283,8 @@ pub async fn authorize_slash(engine: &Engine, revoking_key_id: &str) {
     let witness = format!("{root}-la");
     let root_id = seeded_identity(&root);
     let witness_id = seeded_identity(&witness);
-    register_hybrid(engine, &root_id, identity_type::NODE).await;
-    register_hybrid(engine, &witness_id, identity_type::ACCORD_HOLDER).await;
+    register_hybrid(engine, &root_id, identity_type::NODE, true).await;
+    register_hybrid(engine, &witness_id, identity_type::ACCORD_HOLDER, true).await;
 
     // Leg 2 — the root's self-declaration charter (R → R), carrying the
     // pre-rotation commitment that makes it a recoverable root rather than a
