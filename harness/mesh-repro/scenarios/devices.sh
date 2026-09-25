@@ -64,7 +64,7 @@ DEV_SECOND="${DEV_SECOND:-node-c}"
 DEV_SECOND_BASE="http://${DEV_SECOND}:4243"
 DEV_FAMILY_TEXT="${DEV_FAMILY_TEXT:-household file proof $(date -u +%Y%m%dT%H%M%SZ)}"
 
-STAGES=("${STAGES[@]}" second_device c_peered c_opens_old_self_file c_announced_by_b c_lists_room c_opens_history
+STAGES=("${STAGES[@]}" second_device c_peered b_lists_c_device c_opens_old_self_file c_announced_by_b c_lists_room c_opens_history
         family family_on_b family_file family_file_listed_on_b family_file_opened_on_b)
 # The claim of THIS scenario is the second device listing the conversation;
 # chat's own REQUIRED stages (arrived, comm_file, comm_file_on_b) stay required.
@@ -74,6 +74,10 @@ REQUIRED_second_device=1
 REQUIRED_c_lists_room=1
 # CIRISServer#678: the approving device re-wraps old self files for the new
 # device, and announces it (announce is per device; the pen stays on node-b).
+# The client's review asked whether the approved device appears in the device
+# list, or only as an owned node: it must be an OCCURRENCE of the person, listed
+# on the first device's My Identity roster (CIRISServer#678, CC 3.3.6).
+REQUIRED_b_lists_c_device=1
 REQUIRED_c_opens_old_self_file=1
 REQUIRED_c_announced_by_b=1
 REQUIRED_family=1
@@ -298,6 +302,29 @@ DIAG_c_peered() {
   for f in "$CHAT_STATE"/peering-*"$DEV_SECOND"*.json; do
     echo "  $(basename "$f"): $(head -c 300 "$f" 2>/dev/null)"
   done
+}
+
+stage_b_lists_c_device() {
+  _dev_load
+  if [ -z "${DEV_C_OWNER:-}" ] || [ -z "${DEV_C_KEY:-}" ]; then echo 0; return; fi
+  local waited=0
+  while :; do
+    _dev_api "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_B_TOKEN" GET \
+      "/v1/self/occurrences?identity_key_id=$DEV_C_OWNER" >"$CHAT_STATE/b-occurrences.json"
+    if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1])).get("body") or {}
+sys.exit(0 if any(o.get("occurrence_key_id")==sys.argv[2] for o in d.get("occurrences",[])) else 1)
+' "$CHAT_STATE/b-occurrences.json" "$DEV_C_KEY"; then echo 1; return; fi
+    [ "$waited" -ge 90 ] && { echo 0; return; }
+    sleep 10; waited=$((waited + 10))
+  done
+}
+HINT_b_lists_c_device="the first device's device roster (GET /v1/self/occurrences, owner audience) does not list the second device. node-c provisions its occurrence of the owner on its self-room tick and the SIGNED row replicates to node-b; if node-c lists it and node-b does not, the IdentityOccurrence plane did not cross (peering, or CIRISEdge#682 gating). If neither lists it, node-c never provisioned it (CIRISServer#678)"
+EXIT_b_lists_c_device=71
+DIAG_b_lists_c_device() {
+  echo "  node-b roster: $(head -c 500 "$CHAT_STATE/b-occurrences.json" 2>/dev/null)"
+  echo "  node-c key: ${DEV_C_KEY:-<none>}"
 }
 
 stage_c_opens_old_self_file() {
