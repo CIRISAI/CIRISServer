@@ -69,6 +69,14 @@ const EXEMPT: &[(&str, &str)] = &[
         "the door itself — the only place that assembles a row",
     ),
     (
+        "src/drive.rs",
+        "`rename_row` ONLY (0.5.216): a rename must re-author edge's file row over the SAME \
+         sealed pointer, author and instant or the bytes no longer open, and edge v31 has no \
+         rename/supersede door (`files::publish` mints a fresh row). It mirrors edge's \
+         `file_row` shape, pinned by drive's drift test; DELETE this exemption when \
+         CIRISEdge#675 ships a supersede-carrying publish.",
+    ),
+    (
         "src/admin_ops.rs",
         "read_admission_standing's PROBE: never signed, never stored, never leaves the \
          function. It exists to ask a persist predicate a question, and it deliberately carries \

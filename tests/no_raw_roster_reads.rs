@@ -51,7 +51,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     (
         "src/family_api.rs",
         "leave_inner",
-        "loaded.family",
+        "family",
         "RECORD CONSTRUCTION: a quorum family's record is rewritten minus the leaver so verify's prior-roster binding (persist builds it from the record, not the fold) stays satisfiable",
     ),
     (
@@ -75,13 +75,13 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     (
         "src/family_api.rs",
         "change_envelope",
-        "loaded.family",
+        "family",
         "VERIFY'S BINDING: `supersedes.prior_member_key_ids` must equal the RECORD's roster in order; a quorum family's record is kept equal to its fold",
     ),
     (
         "src/family_api.rs",
         "assemble",
-        "loaded.family",
+        "family",
         "VERIFY'S BINDING: joined_at of an envelope member is read from the record the quorum verifies against",
     ),
     (
