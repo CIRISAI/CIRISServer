@@ -698,8 +698,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `contacts.not_a_contact` (#657); and
     /// `self.associate.hardware_custody_unavailable` (#639).
     ///
-    /// Both 0.5.218 raises together: 102 + 2 + 15 = 119.
-    const MAX_UNCOVERED: usize = 119;
+    /// 119 -> 140 for 0.5.218, the claim named (CIRISServer#678, the client
+    /// team's review: "refusals come back as prose with no ids"): claim-remote's
+    /// ten `claim.*` and setup/root's eleven new `auth.claim.*` — same reason,
+    /// same list, same client issue (CIRISClient#78).
+    ///
+    /// All three 0.5.218 raises together: 102 + 2 + 15 + 21 = 140.
+    const MAX_UNCOVERED: usize = 140;
 
     let en = load_en();
     let ids = scraped_server_ids();

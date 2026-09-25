@@ -438,3 +438,165 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
         1
     );
 }
+
+// ─── A device claimed by ANOTHER device keeps its session (CIRISServer#678) ───
+
+/// A key record naming ANOTHER node — the claimer. Its signatures are not real:
+/// the target admits it through the peering gate or refuses it, and the claim
+/// stands either way, so the test reads only what the key id decides.
+fn claimer_record(key_id: &str) -> ciris_persist::federation::types::SignedKeyRecord {
+    use ciris_persist::federation::types::{algorithm, KeyRecord, SignedKeyRecord};
+    let now = chrono::Utc::now();
+    SignedKeyRecord {
+        record: KeyRecord {
+            key_id: key_id.to_string(),
+            pubkey_ed25519_base64: BASE64.encode([7u8; 32]),
+            pubkey_ml_dsa_65_base64: None,
+            algorithm: algorithm::HYBRID.into(),
+            identity_type: identity_type::NODE.into(),
+            identity_ref: key_id.to_string(),
+            valid_from: now,
+            valid_until: None,
+            registration_envelope: serde_json::json!({ "key_id": key_id }),
+            original_content_hash: String::new(),
+            scrub_signature_classical: String::new(),
+            scrub_signature_pqc: None,
+            scrub_key_id: key_id.to_string(),
+            scrub_timestamp: now,
+            pqc_completed_at: None,
+            persist_row_hash: String::new(),
+            capability_roles: Vec::new(),
+            attestation_evidence: None,
+            consent_role: None,
+            additional_scrubs: Vec::new(),
+        },
+    }
+}
+
+/// Serve T with connect-info, so its loopback-only routes answer a 127.0.0.1
+/// caller the way the real listener does.
+async fn serve_target_with_loopback(engine: Arc<Engine>) -> String {
+    let app = bootstrap::router(
+        engine,
+        HybridPolicy::Strict,
+        T_NODE_KEY_ID.to_string(),
+        t_node_pubkey_b64(),
+        Some(TEST_CLAIM_PIN.to_string()),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    format!("http://{addr}")
+}
+
+/// The client team's review of #678: "the claim response carries the new
+/// device's owner session through the approving device". It no longer does. The
+/// session stays on the claimed device for its own wizard, which collects it
+/// once, over loopback, with the PIN it showed — and a wrong PIN or a second
+/// collection is refused by name.
+#[tokio::test]
+async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
+    let t = target_node(T_NODE_KEY_ID).await;
+    register_target(&t, T_NODE_KEY_ID).await;
+    let base = serve_target_with_loopback(Arc::clone(&t)).await;
+    let user = local_user_signer(L_USER_KEY_ID);
+    let claimer = claimer_record("ciris-approving-device");
+
+    let http = reqwest::Client::new();
+    let result = claim_remote::claim_remote(
+        &http,
+        &user,
+        &target_node_code(&base),
+        TEST_CLAIM_PIN,
+        "self",
+        None,
+        None,
+        None,
+        None,
+        Some(&claimer),
+    )
+    .await
+    .expect("the approving device claims T");
+
+    assert_eq!(result["identity_key_id"], L_USER_KEY_ID);
+    assert!(
+        result.get("access_token").is_none(),
+        "the new device's owner session crossed to the approving device: {result}"
+    );
+    assert_eq!(result["session_pickup"], "local", "{result}");
+
+    let pickup = format!("{base}/v1/setup/claimed-session");
+    let wrong = http
+        .post(&pickup)
+        .json(&serde_json::json!({ "claim_pin": "NOT-THE-PIN" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status().as_u16(), 401);
+    let wrong: serde_json::Value = wrong.json().await.unwrap();
+    assert_eq!(wrong["reason_id"], "auth.claim.pin_invalid");
+
+    let got = http
+        .post(&pickup)
+        .json(&serde_json::json!({ "claim_pin": TEST_CLAIM_PIN }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.status().as_u16(), 200);
+    let got: serde_json::Value = got.json().await.unwrap();
+    assert!(
+        got["access_token"].as_str().is_some_and(|s| !s.is_empty()),
+        "{got}"
+    );
+    assert_eq!(got["role"], "SYSTEM_ADMIN");
+
+    let again = http
+        .post(&pickup)
+        .json(&serde_json::json!({ "claim_pin": TEST_CLAIM_PIN }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status().as_u16(), 404);
+    let again: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(again["reason_id"], "auth.claim.no_pending_session");
+
+    // A second claim of the same node is refused by name, on the target and as
+    // the approving device reports it.
+    let second = claim_remote::claim_remote(
+        &http,
+        &user,
+        &target_node_code(&base),
+        TEST_CLAIM_PIN,
+        "self",
+        None,
+        None,
+        None,
+        None,
+        Some(&claimer),
+    )
+    .await
+    .expect_err("a claimed node refuses a second claim");
+    match second {
+        claim_remote::ClaimRemoteError::TargetRejected { status, body } => {
+            assert!(status == 401 || status == 409, "{status} {body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(
+                matches!(
+                    v["reason_id"].as_str(),
+                    Some("auth.claim.not_armed" | "auth.claim.already_claimed")
+                ),
+                "{body}"
+            );
+        }
+        other => panic!("expected the target's refusal, got {other}"),
+    }
+}

@@ -175,10 +175,18 @@ print(json.dumps({"cohort":"self","bytes_base64":base64.b64encode(b"written befo
             "$code" "$pin" "$DEV_SECOND_BASE")"
   _dev_api "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_B_TOKEN" POST /v1/setup/claim-remote "$body" \
     >"$CHAT_STATE/claim-remote.json"
-  # setup/root mints the target's owner SESSION in its response and claim-remote
-  # returns that response, so the second device's bearer comes back here.
-  token="$(_dev_field "$CHAT_STATE/claim-remote.json" body.access_token)"
-  [ -n "$token" ] || token="$(_dev_field "$CHAT_STATE/claim-remote.json" body.session.access_token)"
+  # THE SESSION STAYS ON THE NEW DEVICE (CIRISServer#678, client review). The
+  # claim response no longer carries node-c's owner session back through node-b;
+  # node-c's own wizard collects it over ITS loopback with the PIN it showed.
+  # A token in the claim-remote response is itself a regression.
+  if [ -n "$(_dev_field "$CHAT_STATE/claim-remote.json" body.access_token)" ]; then
+    echo "  ✗ claim-remote returned the new device's owner session to the approving device"
+  fi
+  _dev_api "$DEV_SECOND" "" POST /v1/setup/claimed-session \
+    "$(python3 -c 'import json,sys;print(json.dumps({"claim_pin":sys.argv[1]}))' "$pin")" \
+    >"$CHAT_STATE/claimed-session.json"
+  token="$(_dev_field "$CHAT_STATE/claimed-session.json" body.access_token)"
+  echo "  $DEV_SECOND collects its own session: status=$(_dev_field "$CHAT_STATE/claimed-session.json" status) pickup=$(_dev_field "$CHAT_STATE/claim-remote.json" body.session_pickup)"
   owner="$(_dev_field "$CHAT_STATE/claim-remote.json" body.identity_key_id)"
   printf 'DEV_C_TOKEN=%q\nDEV_C_OWNER=%q\n' "$token" "$owner" >>"$CHAT_STATE/dev.sh"
   echo "  claim-remote: status=$(_dev_field "$CHAT_STATE/claim-remote.json" status) owner=${owner:-<none>} token=${token:+yes} local_directory_updated=$(_dev_field "$CHAT_STATE/claim-remote.json" body.local_directory_updated)"

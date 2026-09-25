@@ -756,8 +756,17 @@ struct SetupRootResponse {
     /// Flattened so the wire shape is exactly what `/v1/auth/login` and the
     /// native token exchanges return — one shape, one issuance point
     /// ([`super::session::SessionGrant`]), no fifth copy of the token policy.
-    #[serde(flatten)]
-    session: super::session::SessionGrant,
+    ///
+    /// `None` when ANOTHER device made the claim (CIRISServer#678): the session
+    /// is this device's, so it stays here for the local wizard to collect
+    /// (`POST /v1/setup/claimed-session`) instead of travelling back through the
+    /// device that approved it.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    session: Option<super::session::SessionGrant>,
+    /// `"local"` when the session was kept for this device's wizard rather than
+    /// returned (see [`Self::session`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_pickup: Option<&'static str>,
     /// Whether the claiming node's key record (when it sent one) was admitted
     /// here — `None` when it sent none (CIRISServer#678).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -775,8 +784,9 @@ use crate::claim_remote::COHORT_SCOPES;
 /// this is the cold/reject path.
 fn validate_cohort_scope(req: &SetupRootRequest) -> Result<String, Box<Response>> {
     let Some(raw) = req.cohort_scope.as_deref() else {
-        return Err(Box::new(err(
+        return Err(Box::new(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
+            "auth.claim.cohort_missing",
             "first-run ROOT claim must carry `cohort_scope` (one of self|family|community)",
         )));
     };
@@ -784,15 +794,12 @@ fn validate_cohort_scope(req: &SetupRootRequest) -> Result<String, Box<Response>
     if COHORT_SCOPES.contains(&v) {
         Ok(v.to_string())
     } else {
-        Err(Box::new(err(
+        Err(Box::new(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
+            "auth.claim.cohort_invalid",
             format!("invalid cohort_scope {v:?} — must be one of self|family|community"),
         )))
     }
-}
-
-fn err(code: StatusCode, msg: impl Into<String>) -> Response {
-    (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }
 
 /// Verify the NodeCode identity-pin in the signed claim body matches THIS node's
@@ -810,8 +817,9 @@ fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Respo
         match ciris_verify_core::fedcode::decode(code) {
             Ok(fc) => (fc.key_id, fc.pubkey_ed25519_base64),
             Err(e) => {
-                return Some(err(
+                return Some(super::refusal::refuse(
                     StatusCode::BAD_REQUEST,
+                    "auth.claim.node_code_invalid",
                     format!("supplied NodeCode is undecodable: {e}"),
                 ))
             }
@@ -820,16 +828,18 @@ fn verify_node_code_pin(st: &SetupState, req: &SetupRootRequest) -> Option<Respo
     {
         (k.to_string(), p.to_string())
     } else {
-        return Some(err(
+        return Some(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
+            "auth.claim.node_code_missing",
             "first-run ROOT claim must pin this node's identity: supply `node_code` \
              (CIRIS-V1-...) or `key_id` + `pubkey_ed25519_base64`",
         ));
     };
 
     if claim_key_id != st.node_key_id || claim_pubkey != st.node_pubkey_ed25519_base64 {
-        return Some(err(
+        return Some(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
+            "auth.claim.wrong_node",
             "supplied NodeCode does not match this node's identity — \
              you may have reached the wrong node",
         ));
@@ -1018,13 +1028,20 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
         // A ROOT exists AND it is not an adoptable door-minted placeholder ⇒ the
         // node has a real owner. Refuse exactly as before.
         Ok(v) if !v.is_empty() && placeholder.is_none() => {
-            return err(
+            return super::refusal::refuse(
                 StatusCode::CONFLICT,
+                "auth.claim.already_claimed",
                 "root already claimed; first-run setup is closed",
             )
         }
         Ok(_) => {}
-        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+        Err(e) => {
+            return super::refusal::refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.claim.store_unavailable",
+                format!("store: {e}"),
+            )
+        }
     }
     if let Some(p) = &placeholder {
         tracing::info!(
@@ -1041,8 +1058,9 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
         match serde_json::from_slice(&body) {
             Ok(r) => r,
             Err(e) => {
-                return err(
+                return super::refusal::refuse(
                     StatusCode::BAD_REQUEST,
+                    "auth.claim.body_invalid",
                     format!("setup/root body is not valid JSON: {e}"),
                 )
             }
@@ -1071,8 +1089,9 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     //     + canonicalized + hybrid-signed it in ITS substrate; we only verify +
     //     persist it here (no canonicalize/sign on the user's behalf).
     let Some(owner_binding) = req.owner_binding.as_ref() else {
-        return err(
+        return super::refusal::refuse(
             StatusCode::BAD_REQUEST,
+            "auth.claim.owner_binding_missing",
             "first-run ROOT claim must carry a complete `owner_binding` \
              (the user-signed delegates_to: envelope + signatures + key_id + pubkeys)",
         );
@@ -1103,15 +1122,20 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                 super::ownership::OwnershipError::Sign(_)
                 | super::ownership::OwnershipError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            return err(code, format!("owner-binding rejected: {e}"));
+            return super::refusal::refuse(
+                code,
+                "auth.claim.owner_binding_rejected",
+                format!("owner-binding rejected: {e}"),
+            );
         }
     };
 
     // (5) Bind this responsible user as ROOT (race-narrowed: re-check + claim).
     if let Ok(v) = store::list_by_role(&st.engine, WaRole::Root, 1).await {
         if !v.is_empty() && placeholder.is_none() {
-            return err(
+            return super::refusal::refuse(
                 StatusCode::CONFLICT,
+                "auth.claim.already_claimed",
                 "root already claimed; first-run setup is closed",
             );
         }
@@ -1310,16 +1334,34 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     "first-run claim: anchoring the agent to its owner FAILED (non-fatal) — the covering consent door retries"
                 ),
             }
-            let claimer_key_admitted =
-                admit_claimer_key(&st.engine, &st.node_key_id, req.claimer_key_record.clone())
-                    .await;
+            let claimed_by_other_device = match req.claimer_key_record.as_ref() {
+                Some(r) => !names_this_node(&st.engine, &st.node_key_id, &r.record.key_id).await,
+                None => false,
+            };
+            let claimer_key_admitted = if claimed_by_other_device {
+                admit_claimer_key(&st.engine, &st.node_key_id, req.claimer_key_record.clone()).await
+            } else {
+                None
+            };
+            let (session, session_pickup) = if claimed_by_other_device {
+                // The PIN was verified above; it is what this device's own wizard
+                // holds, so it is what collects the session.
+                hold_claimed_session(req.claim_pin.as_deref().unwrap_or_default(), &wa_id);
+                (None, Some("local"))
+            } else {
+                (
+                    Some(super::session::SessionGrant::issue(
+                        &wa_id,
+                        &super::roles::UserRole::SystemAdmin,
+                    )),
+                    None,
+                )
+            };
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
-                    session: super::session::SessionGrant::issue(
-                        &wa_id,
-                        &super::roles::UserRole::SystemAdmin,
-                    ),
+                    session,
+                    session_pickup,
                     wa_id,
                     identity_key_id,
                     cohort_scope,
@@ -1330,8 +1372,114 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             )
                 .into_response()
         }
-        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+        Err(e) => super::refusal::refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "auth.claim.store_unavailable",
+            format!("store: {e}"),
+        ),
     }
+}
+
+/// Is `key_id` one of THIS node's keys? A split install holds a node key and an
+/// actor key, and either can sign a self-claim's key record.
+async fn names_this_node(engine: &Engine, node_key_id: &str, key_id: &str) -> bool {
+    if key_id == node_key_id {
+        return true;
+    }
+    match engine.local_derived_key_id().await {
+        Ok(engine_key) => crate::peer::own_keys_of_this_node(&engine_key)
+            .iter()
+            .any(|k| k == key_id),
+        Err(_) => false,
+    }
+}
+
+/// How long a session kept for this device's wizard waits to be collected.
+const CLAIMED_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The owner session of a claim ANOTHER device made (CIRISServer#678): the
+/// claim PIN that proved it and the owner it names. IN-PROCESS ONLY, one at a
+/// time, collected once. The session itself is minted at collection, so its
+/// lifetime starts when the wizard has it.
+struct HeldSession {
+    pin: String,
+    wa_id: String,
+    held_at: std::time::Instant,
+}
+
+static CLAIMED_SESSION: Mutex<Option<HeldSession>> = Mutex::new(None);
+
+fn hold_claimed_session(pin: &str, wa_id: &str) {
+    if let Ok(mut slot) = CLAIMED_SESSION.lock() {
+        *slot = Some(HeldSession {
+            pin: pin.to_owned(),
+            wa_id: wa_id.to_owned(),
+            held_at: std::time::Instant::now(),
+        });
+    }
+}
+
+/// Constant-time PIN equality (the same discipline as [`verify_claim_pin`]).
+fn pin_matches(supplied: &str, expected: &str) -> bool {
+    let a = supplied.as_bytes();
+    let b = expected.as_bytes();
+    let mut padded = vec![0u8; b.len()];
+    for (i, slot) in padded.iter_mut().enumerate() {
+        *slot = if i < a.len() { a[i] } else { 0 };
+    }
+    let eq: bool = padded.ct_eq(b).into();
+    a.len() == b.len() && eq
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimedSessionRequest {
+    claim_pin: String,
+}
+
+/// `POST /v1/setup/claimed-session` — the wizard on a device that ANOTHER
+/// device just claimed collects its owner session (CIRISServer#678).
+///
+/// The approving device delivers the claim; the session it would have carried
+/// back belongs here. The wizard that showed the approval code already holds
+/// the claim PIN (it read the 0600 PIN file or the in-process accessor to show
+/// it), so the PIN is what collects it, over loopback only, once. No password
+/// crosses the network and no token leaves the device.
+async fn claimed_session(Json(req): Json<ClaimedSessionRequest>) -> Response {
+    let held = {
+        let mut slot = match CLAIMED_SESSION.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let fresh = slot
+            .as_ref()
+            .is_some_and(|h| h.held_at.elapsed() <= CLAIMED_SESSION_TTL);
+        if !fresh {
+            *slot = None;
+            None
+        } else if slot
+            .as_ref()
+            .is_some_and(|h| pin_matches(&req.claim_pin, &h.pin))
+        {
+            slot.take()
+        } else {
+            return super::refusal::refuse(
+                StatusCode::UNAUTHORIZED,
+                "auth.claim.pin_invalid",
+                "invalid one-time claim PIN",
+            );
+        }
+    };
+    let Some(held) = held else {
+        return super::refusal::refuse(
+            StatusCode::NOT_FOUND,
+            "auth.claim.no_pending_session",
+            "no session is waiting: this device was not claimed by another device in \
+             the last 15 minutes, or its session was already collected",
+        );
+    };
+    let grant =
+        super::session::SessionGrant::issue(&held.wa_id, &super::roles::UserRole::SystemAdmin);
+    (StatusCode::OK, Json(grant)).into_response()
 }
 
 /// Admit the key of the node that claimed this one (CIRISServer#678). Returns
@@ -1548,6 +1696,13 @@ pub fn router(
     let loopback_reads = Router::new()
         .route("/v1/setup/status", axum::routing::get(setup_status))
         .route("/v1/setup/owned-nodes", axum::routing::get(owned_nodes))
+        // A device another device claimed collects its owner session here
+        // (CIRISServer#678). Loopback-only with the reads: the PIN is the gate,
+        // the loopback bind keeps the attempt off the network.
+        .route(
+            "/v1/setup/claimed-session",
+            axum::routing::post(claimed_session),
+        )
         // The wizard's consent step renders the SUBSTRATE's own words rather
         // than a paragraph the client wrote — that is the whole point of the
         // export. The route was missing here, so a live desktop first-run got

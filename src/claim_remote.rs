@@ -432,7 +432,13 @@ async fn claim_remote_handler(
     }
     let req: ClaimRemoteRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "claim.bad_request",
+                format!("bad request: {e}"),
+            )
+        }
     };
 
     // Resolve the responsible-user signer NOW (not at boot): the fed-ID minted
@@ -459,33 +465,70 @@ async fn claim_remote_handler(
     {
         Ok(Some(s)) => s,
         Ok(None) => {
-            return err(
+            return crate::auth::refusal::refuse(
                 StatusCode::SERVICE_UNAVAILABLE,
+                "claim.no_identity",
                 "no responsible-user identity yet — create your federation ID \
                  (POST /v1/self/identity) before claiming ownership",
             )
         }
         Err(e) => {
-            return err(
+            return crate::auth::refusal::refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "claim.signer_unavailable",
                 format!("resolve user signer: {e}"),
             )
         }
     };
 
-    // `target_url` overrides the NodeCode's transport_hint — needed for server
-    // nodes that don't embed their external IP in the NodeCode.
-    let fallback = req
-        .target_url
-        .as_deref()
-        .unwrap_or(st.local_self_url.as_str());
+    // WHERE THE CLAIM GOES (CIRISServer#678, client review). `target_url`
+    // overrides the NodeCode's `transport_hint` — needed for server nodes that
+    // don't embed their external IP. With neither, the claim may fall back to
+    // THIS node's loopback ONLY when the code names this node (the wizard's own
+    // self-claim). A desktop or phone code carries no hint, and falling back for
+    // it would POST another device's claim to ourselves: the wrong node, refused
+    // as `auth.claim.wrong_node` at best. Refuse it here instead, by name.
+    let target_is_self = match crate::nodecode::decode(&req.node_code) {
+        Ok(nc) => node_code_names_this_node(&st, &nc.key_id).await,
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "claim.node_code_invalid",
+                format!("the node code could not be read: {e}"),
+            )
+        }
+    };
+    let fallback: Option<&str> = match req.target_url.as_deref() {
+        Some(url) => Some(url),
+        None if target_is_self => Some(st.local_self_url.as_str()),
+        None => None,
+    };
+    // A password is for signing in to THIS device (the wizard's loopback
+    // self-claim). For another device the user-signed owner-binding is the proof
+    // of ownership, and a password sent to it would cross the network for
+    // nothing — the owner signs in there with their federation ID.
+    if !target_is_self
+        && (req.owner_password.as_deref().is_some_and(|p| !p.is_empty())
+            || req
+                .owner_username
+                .as_deref()
+                .is_some_and(|u| !u.trim().is_empty()))
+    {
+        return crate::auth::refusal::refuse(
+            StatusCode::BAD_REQUEST,
+            "claim.password_not_forwarded",
+            "a password is set only on the device it is typed on; claiming another \
+             device needs none — the signed owner-binding is the proof, and the owner \
+             signs in there with their federation ID",
+        );
+    }
     match claim_remote(
         &st.http,
         &user_signer,
         &req.node_code,
         &req.claim_pin,
         &req.cohort_scope,
-        Some(fallback),
+        fallback,
         req.owner_password.as_deref(),
         req.owner_username.as_deref(),
         // Zip: only a COMPLETE pair is forwarded, so a client sending one half
@@ -528,24 +571,137 @@ async fn claim_remote_handler(
             // toward every peer EXCEPT the one just claimed, because it is not an
             // initiator until the pass has run.
             crate::replication_reconcile::nudge("claim-remote linked the owner's new device");
+            // The new device's owner session belongs to the new device. A target
+            // on this release keeps it for its own wizard and sends none; an
+            // older one still returns it, and it must not reach the approving
+            // device's client either way.
+            let target_result = if target_is_self {
+                target_result
+            } else {
+                without_session(target_result)
+            };
             let body = with_local_flag(target_result, local_directory_updated);
             (StatusCode::OK, Json(body)).into_response()
         }
-        Err(e) => {
-            let code = match e {
-                ClaimRemoteError::BadNodeCode(_) | ClaimRemoteError::BadCohortScope(_) => {
-                    StatusCode::BAD_REQUEST
+        Err(e) => claim_refusal(&e),
+    }
+}
+
+/// Is `key_id` one of THIS node's keys? A split install answers for both its
+/// node key and its actor key (`peer::own_keys_of_this_node`), and a node code
+/// may name either.
+async fn node_code_names_this_node(st: &ClaimRemoteState, key_id: &str) -> bool {
+    if key_id == st.node_key_id {
+        return true;
+    }
+    match st.engine.local_derived_key_id().await {
+        Ok(engine_key) => crate::peer::own_keys_of_this_node(&engine_key)
+            .iter()
+            .any(|k| k == key_id),
+        Err(_) => false,
+    }
+}
+
+/// Drop the owner-session members from a target's claim result (CIRISServer#678).
+fn without_session(mut v: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        for k in ["access_token", "token_type", "expires_in", "user_id"] {
+            obj.remove(k);
+        }
+    }
+    v
+}
+
+/// The target's `reason_id`, when its refusal body carried one.
+fn target_reason_id(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("reason_id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// One named refusal per way a claim can fail (CIRISServer#678, client review:
+/// "refusals come back as prose"). The ids are what the approve-a-device card
+/// renders; the English is the fallback. A refusal FROM the target is mapped
+/// onto the few answers a person can act on, and its own id rides along as
+/// `target_reason_id` so nothing the target said is lost.
+///
+/// There is no "PIN expired": a node mints a new PIN every boot until it is
+/// claimed, so an old PIN reads as `claim.pin_invalid`, and the fix is the same —
+/// read the code off the new device again.
+fn claim_refusal(e: &ClaimRemoteError) -> Response {
+    use crate::auth::refusal::{refuse, refuse_with};
+    match e {
+        ClaimRemoteError::BadNodeCode(_) => refuse(
+            StatusCode::BAD_REQUEST,
+            "claim.node_code_invalid",
+            format!("claim-remote failed: {e}"),
+        ),
+        ClaimRemoteError::BadCohortScope(_) => refuse(
+            StatusCode::BAD_REQUEST,
+            "claim.cohort_invalid",
+            format!("claim-remote failed: {e}"),
+        ),
+        ClaimRemoteError::Build(_) => refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "claim.binding_unsigned",
+            format!("claim-remote failed: {e}"),
+        ),
+        ClaimRemoteError::NoTransport => refuse(
+            StatusCode::BAD_REQUEST,
+            "claim.no_route",
+            "this node code carries no address this device can reach, and it is not \
+             this device — scan the code on the same network as the new device, or \
+             give its address",
+        ),
+        ClaimRemoteError::Transport(_) => refuse(
+            StatusCode::BAD_GATEWAY,
+            "claim.target_unreachable",
+            format!("claim-remote failed: {e}"),
+        ),
+        ClaimRemoteError::TargetRejected { status, body } => {
+            let code = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let from_target = target_reason_id(body);
+            let extra = serde_json::json!({
+                "target_status": status,
+                "target_reason_id": from_target,
+            });
+            // A target on this release names its refusal; an older one is read by
+            // its status, which it used the same way. The three a person can act
+            // on come back under the TARGET's own id and sentence — one id, one
+            // meaning, whichever device reports it.
+            match (from_target.as_deref(), *status) {
+                (Some("auth.claim.pin_invalid" | "auth.claim.pin_missing"), _) | (None, 401) => {
+                    refuse_with(
+                        code,
+                        "auth.claim.pin_invalid",
+                        "invalid one-time claim PIN",
+                        extra,
+                    )
                 }
-                ClaimRemoteError::Build(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                ClaimRemoteError::NoTransport => StatusCode::BAD_REQUEST,
-                ClaimRemoteError::Transport(_) => StatusCode::BAD_GATEWAY,
-                // Surface the target's status to the operator (it is the target's
-                // verdict on the claim, not a local error).
-                ClaimRemoteError::TargetRejected { status, .. } => {
-                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY)
+                (Some("auth.claim.not_armed" | "auth.claim.already_claimed"), _) | (None, 409) => {
+                    refuse_with(
+                        code,
+                        "auth.claim.already_claimed",
+                        "root already claimed; first-run setup is closed",
+                        extra,
+                    )
                 }
-            };
-            err(code, format!("claim-remote failed: {e}"))
+                (Some("auth.claim.wrong_node"), _) => refuse_with(
+                    code,
+                    "auth.claim.wrong_node",
+                    "supplied NodeCode does not match this node's identity — \
+                     you may have reached the wrong node",
+                    extra,
+                ),
+                _ => refuse_with(
+                    code,
+                    "claim.target_refused",
+                    format!("claim-remote failed: {e}"),
+                    extra,
+                ),
+            }
         }
     }
 }
@@ -1387,7 +1543,102 @@ async fn heal_owner_record_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{rns_seed_from_target, with_local_flag};
+    use super::{
+        claim_refusal, rns_seed_from_target, with_local_flag, without_session, ClaimRemoteError,
+    };
+
+    async fn body_of(r: axum::response::Response) -> (u16, serde_json::Value) {
+        let status = r.status().as_u16();
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// Every way a claim fails comes back NAMED (CIRISServer#678, client review).
+    /// A target's refusal is mapped onto the id a person can act on, by its own
+    /// id when it names one and by its status when it is older.
+    #[tokio::test]
+    async fn every_claim_failure_is_named() {
+        let named = |status: u16, body: &str| ClaimRemoteError::TargetRejected {
+            status,
+            body: body.to_string(),
+        };
+        let cases: Vec<(ClaimRemoteError, u16, &str)> = vec![
+            (ClaimRemoteError::NoTransport, 400, "claim.no_route"),
+            (
+                ClaimRemoteError::Transport("refused".into()),
+                502,
+                "claim.target_unreachable",
+            ),
+            (
+                ClaimRemoteError::BadNodeCode("x".into()),
+                400,
+                "claim.node_code_invalid",
+            ),
+            (
+                ClaimRemoteError::BadCohortScope("x".into()),
+                400,
+                "claim.cohort_invalid",
+            ),
+            (
+                named(401, r#"{"error":"x","reason_id":"auth.claim.pin_invalid"}"#),
+                401,
+                "auth.claim.pin_invalid",
+            ),
+            (
+                named(401, "invalid one-time claim PIN"),
+                401,
+                "auth.claim.pin_invalid",
+            ),
+            (
+                named(401, r#"{"error":"x","reason_id":"auth.claim.not_armed"}"#),
+                401,
+                "auth.claim.already_claimed",
+            ),
+            (
+                named(409, "root already claimed"),
+                409,
+                "auth.claim.already_claimed",
+            ),
+            (
+                named(400, r#"{"error":"x","reason_id":"auth.claim.wrong_node"}"#),
+                400,
+                "auth.claim.wrong_node",
+            ),
+            (
+                named(
+                    400,
+                    r#"{"error":"x","reason_id":"auth.claim.cohort_missing"}"#,
+                ),
+                400,
+                "claim.target_refused",
+            ),
+        ];
+        for (e, status, id) in cases {
+            let label = e.to_string();
+            let (got_status, body) = body_of(claim_refusal(&e)).await;
+            assert_eq!(got_status, status, "{label}: {body}");
+            assert_eq!(body["reason_id"], id, "{label}: {body}");
+        }
+        let (_, body) = body_of(claim_refusal(&named(
+            400,
+            r#"{"error":"x","reason_id":"auth.claim.cohort_missing"}"#,
+        )))
+        .await;
+        assert_eq!(body["target_reason_id"], "auth.claim.cohort_missing");
+    }
+
+    #[test]
+    fn a_relayed_claim_result_carries_no_session() {
+        let v = without_session(serde_json::json!({
+            "wa_id": "w", "access_token": "t", "token_type": "bearer",
+            "expires_in": 1, "user_id": "w", "role": "SYSTEM_ADMIN",
+        }));
+        assert!(v.get("access_token").is_none() && v.get("token_type").is_none());
+        assert_eq!(v["wa_id"], "w");
+        assert_eq!(v["role"], "SYSTEM_ADMIN");
+    }
 
     #[test]
     fn rns_seed_derives_host_at_node_port_from_read_api_url() {
