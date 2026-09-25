@@ -483,6 +483,7 @@ mod test_bless;
 pub mod trace_plane_watch;
 pub mod trace_receipt;
 pub mod trust_root_api;
+pub mod trust_root_broadcast;
 /// The wire vocabularies, served to the operator UI so no picker ever
 /// hardcodes a member (CIRISPersist#625).
 pub mod vocabulary_surface;
