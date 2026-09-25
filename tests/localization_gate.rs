@@ -682,7 +682,12 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 99 -> 102 for 0.5.217: the drive write gate's `drive.bad_media_type`,
     /// `drive.format_mismatch` and `drive.bad_filename` (CIRISServer#642) — same
     /// reason, same list, same client issue (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 102;
+    ///
+    /// 102 -> 104 for 0.5.218: `self.announce_not_your_node` and
+    /// `self.announce_refused` of `POST /v1/self/nodes/{node}/announce`
+    /// (CIRISServer#678) — same reason, same list, same client issue
+    /// (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 104;
 
     let en = load_en();
     let ids = scraped_server_ids();

@@ -846,6 +846,11 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "family.readd_unsupported",
     "family.store_unavailable",
     "family.unknown_member_key",
+    # ANNOUNCE ANOTHER DEVICE (0.5.218, CIRISServer#678): the per-node announce
+    # made from the device holding the pen. Queued for the client bundle beside
+    # the self-device ids (CIRISClient#78).
+    "self.announce_not_your_node",
+    "self.announce_refused",
     "self.author_signer_unavailable",
     "self.bad_request",
     "self.delegate_may_not_author",

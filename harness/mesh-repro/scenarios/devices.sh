@@ -64,7 +64,7 @@ DEV_SECOND="${DEV_SECOND:-node-c}"
 DEV_SECOND_BASE="http://${DEV_SECOND}:4243"
 DEV_FAMILY_TEXT="${DEV_FAMILY_TEXT:-household file proof $(date -u +%Y%m%dT%H%M%SZ)}"
 
-STAGES=("${STAGES[@]}" second_device c_peered c_lists_room c_opens_history
+STAGES=("${STAGES[@]}" second_device c_peered c_opens_old_self_file c_announced_by_b c_lists_room c_opens_history
         family family_on_b family_file family_file_listed_on_b family_file_opened_on_b)
 # The claim of THIS scenario is the second device listing the conversation;
 # chat's own REQUIRED stages (arrived, comm_file, comm_file_on_b) stay required.
@@ -72,6 +72,10 @@ SUCCESS_STAGE="c_lists_room"
 SUCCESS_MESSAGE="the chat ladder is green AND a second device claimed through claim-remote LISTS the conversation its owner was already in."
 REQUIRED_second_device=1
 REQUIRED_c_lists_room=1
+# CIRISServer#678: the approving device re-wraps old self files for the new
+# device, and announces it (announce is per device; the pen stays on node-b).
+REQUIRED_c_opens_old_self_file=1
+REQUIRED_c_announced_by_b=1
 REQUIRED_family=1
 REQUIRED_family_file=1
 
@@ -144,6 +148,15 @@ _dev_second_device() {
     return 0
   fi
   local pin="" waited=0 code body token owner
+  # A SELF FILE WRITTEN BEFORE THE SECOND DEVICE EXISTS (CIRISServer#678): it
+  # is sealed to node-b's occurrences only, so it opens on node-c only if the
+  # device holding the pen re-wraps it once node-c's occurrence arrives.
+  _dev_api "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_B_TOKEN" POST /v1/files "$(python3 -c '
+import base64, json
+print(json.dumps({"cohort":"self","bytes_base64":base64.b64encode(b"written before the second device").decode(),
+                  "media_type":"text/plain","filename":"before-the-claim.txt"}))')" >"$CHAT_STATE/old-self-file.json"
+  printf 'DEV_OLD_SELF_ID=%q\n' "$(_dev_field "$CHAT_STATE/old-self-file.json" body.attestation_id)" >>"$CHAT_STATE/dev.sh"
+  echo "  old self file on ${CHAT_RECIPIENT_SVC:-node-b}: status=$(_dev_field "$CHAT_STATE/old-self-file.json" status)"
   while [ "$waited" -lt 90 ]; do
     pin="$(compose exec -T "$DEV_SECOND" sh -c 'cat /var/lib/ciris/claim_pin 2>/dev/null' 2>/dev/null | tr -d '\r\n')"
     if [ -n "$pin" ]; then break; fi
@@ -182,6 +195,16 @@ _dev_second_device() {
   # reaches it must be relayed by the first device.
   _dev_api "$DEV_SECOND" "$token" POST /v1/federation/announce '{}' >"$CHAT_STATE/announce-c.json"
   echo "  $DEV_SECOND announce: status=$(_dev_field "$CHAT_STATE/announce-c.json" status) $(head -c 200 "$CHAT_STATE/announce-c.json")"
+  # The pen stays on the first device, so node-c cannot announce itself (the
+  # line above records that refusal as evidence). The approving device
+  # announces it: POST /v1/self/nodes/{node}/announce (CIRISServer#678).
+  local c_key
+  c_key="$(compose exec -T "$DEV_SECOND" python -c 'import json,urllib.request;print(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/identity",timeout=10))["key_id"])' 2>/dev/null | tr -d '\r\n[:space:]')"
+  printf 'DEV_C_KEY=%q\n' "$c_key" >>"$CHAT_STATE/dev.sh"
+  if [ -n "$c_key" ]; then
+    _dev_api "${CHAT_RECIPIENT_SVC:-node-b}" "$CHAT_B_TOKEN" POST "/v1/self/nodes/$c_key/announce" '{}' >"$CHAT_STATE/announce-c-by-b.json"
+    echo "  ${CHAT_RECIPIENT_SVC:-node-b} announces $DEV_SECOND: status=$(_dev_field "$CHAT_STATE/announce-c-by-b.json" status)"
+  fi
 
   # PEER THE TWO DEVICES. claim-remote records the target's key, its binding and
   # an RNS seed (`net.bootstrap_peers`, effective on the NEXT boot) — it opens no
@@ -268,6 +291,27 @@ DIAG_c_peered() {
     echo "  $(basename "$f"): $(head -c 300 "$f" 2>/dev/null)"
   done
 }
+
+stage_c_opens_old_self_file() {
+  _dev_load
+  if [ -z "${DEV_C_TOKEN:-}" ] || [ -z "${DEV_OLD_SELF_ID:-}" ]; then echo 0; return; fi
+  _dev_api "$DEV_SECOND" "$DEV_C_TOKEN" GET "/v1/files/$DEV_OLD_SELF_ID?cohort=self" >"$CHAT_STATE/c-old-self-file.json"
+  if [ "$(_dev_field "$CHAT_STATE/c-old-self-file.json" status)" = "200" ]; then echo 1; else echo 0; fi
+}
+HINT_c_opens_old_self_file="the second device cannot OPEN a self file written before it was claimed. 409 drive.not_fetched = the grant exists but the bytes never crossed (the self room / pull); 403 drive.not_granted = no wrap names node-c's occurrence: the pen holder (node-b) never ran the re-wrap. Check node-b's log for 'self files RE-WRAPPED for a new device' and that node-b holds node-c's occurrence WITH encryption pubkeys (CIRISServer#678)"
+EXIT_c_opens_old_self_file=69
+DIAG_c_opens_old_self_file() {
+  echo "  node-c: $(head -c 400 "$CHAT_STATE/c-old-self-file.json" 2>/dev/null)"
+  echo "  node-b re-wrap lines: $(compose logs "${CHAT_RECIPIENT_SVC:-node-b}" 2>/dev/null | grep -c 'RE-WRAPPED for a new device' || true)"
+}
+
+stage_c_announced_by_b() {
+  _dev_load
+  if [ "$(_dev_field "$CHAT_STATE/announce-c-by-b.json" status)" = "200" ]; then echo 1; else echo 0; fi
+}
+HINT_c_announced_by_b="the approving device could not announce the second device. 403 self.announce_not_your_node = node-b does not see node-c as its owner's (the claim's owner-binding did not land locally); 401 = the harness session; read announce-c-by-b.json (CIRISServer#678)"
+EXIT_c_announced_by_b=70
+DIAG_c_announced_by_b() { head -c 400 "$CHAT_STATE/announce-c-by-b.json" 2>/dev/null; echo; }
 
 stage_c_lists_room() {
   _dev_load

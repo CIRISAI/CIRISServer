@@ -20,6 +20,11 @@
 //!   `supersedes` naming the previous head, and the newest wins. Self-scoped, so
 //!   it reaches the owner's own devices and nobody else.
 //!
+//! - `POST /v1/self/nodes/{node_key_id}/announce` — announce ANOTHER of the
+//!   owner's devices from the device holding the pen (CIRISServer#678): the
+//!   owner re-signs the owner-binding user→that node at `federation`, the same
+//!   promote `POST /v1/federation/announce` runs for the node it is served by.
+//!
 //! Refusals are `{error, reason_id, detail}` with stable ids, like the family
 //! surface ([`crate::family_api`]), whose owner gate this shares.
 
@@ -326,6 +331,97 @@ async fn release_node(
     .into_response()
 }
 
+// ─── POST /v1/self/nodes/{node_key_id}/announce ─────────────────────────────
+
+/// **Announce ANOTHER of my devices, from the device holding my pen**
+/// (CIRISServer#678, item 3).
+///
+/// Announcing is per node (the #655 ruling): the owner chooses, device by
+/// device, which of their nodes people can reach them through, and the choice
+/// is the owner re-signing the owner-binding user→THAT node at `federation`.
+/// `POST /v1/federation/announce` makes that choice for the node it is served
+/// by, and needs the owner's pen there. A second device claimed through
+/// `claim-remote` never holds the pen — it stays on the device that approved
+/// the claim — so it could not be announced at all. This route is the same act
+/// made from the device that CAN sign it, for a node of the caller's choosing
+/// ([`crate::auth::ownership::promote_owner_binding_to_federation`], unchanged).
+///
+/// What it does not do: flip the target's `net.announce_ownership` (its
+/// Reticulum identity announce). That is a config row on the target, written
+/// by the target's own owner session; the owner-binding is what peers walk to
+/// place the node in an audience, and it crosses on the next round.
+async fn announce_node(
+    State(st): State<SelfState>,
+    headers: HeaderMap,
+    Path(node_key_id): Path<String>,
+) -> Response {
+    let caller = match gate(owner_caller(&st.engine, &headers, false).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    // THE CALLER MUST OWN IT, by the same single-owner walk `release` uses, and
+    // under ONE id for every way it is not theirs (another person's node, an
+    // unowned node, a key never heard of) so the route is not an oracle.
+    match owner_of(dir.as_ref(), &node_key_id).await {
+        Ok(Some(o)) if o == caller.owner_key_id => {}
+        Ok(_) | Err(ciris_persist::federation::Error::AmbiguousNodeOwner { .. }) => {
+            return refuse_with(
+                StatusCode::FORBIDDEN,
+                "self.announce_not_your_node",
+                "that node is not one you own, so it is not yours to announce",
+                node_key_id,
+            )
+        }
+        Err(e) => return store_unavailable(format!("owner_of: {e:#}")),
+    }
+    let capsule = match pen(&st, &caller).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let promoted = match crate::auth::ownership::promote_owner_binding_to_federation(
+        &st.engine,
+        capsule.local_signer(),
+        &node_key_id,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(crate::auth::ownership::OwnershipError::Validation(d)) => {
+            return refuse_with(
+                StatusCode::CONFLICT,
+                "self.announce_refused",
+                "the ownership of that node could not be announced from this device",
+                d,
+            )
+        }
+        Err(e) => return store_unavailable(format!("promote owner-binding: {e}")),
+    };
+    let this_actor = st.engine.local_derived_key_id().await.ok();
+    let is_this_node =
+        node_key_id == caller.node_key_id || this_actor.as_deref() == Some(node_key_id.as_str());
+    tracing::info!(
+        owner = %promoted.responsible_user_key_id,
+        node = %node_key_id,
+        promoted_attestation_id = ?promoted.attestation_id,
+        this_node = is_this_node,
+        "self: device ANNOUNCED — the owner re-signed the owner-binding for that node at \
+         federation scope from this device (per-node announce, #655; CIRISServer#678)"
+    );
+    // The widened binding is OWNER-attested; the kick admits the owner to the
+    // publish-own set before it rounds, so the row rides this round.
+    let _ = crate::compose::kick_replication("self: another device announced");
+    Json(serde_json::json!({
+        "node_key_id": node_key_id,
+        "owner": promoted.responsible_user_key_id,
+        // None ⇒ that node's binding was already federation-scoped.
+        "promoted_owner_binding_attestation_id": promoted.attestation_id,
+        "already_announced": promoted.attestation_id.is_none(),
+        "this_node": is_this_node,
+    }))
+    .into_response()
+}
+
 // ─── POST /v1/self/occurrence/label ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -468,6 +564,10 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
         .route(
             "/v1/self/nodes/{node_key_id}/release",
             axum::routing::post(release_node),
+        )
+        .route(
+            "/v1/self/nodes/{node_key_id}/announce",
+            axum::routing::post(announce_node),
         )
         .route(
             "/v1/self/occurrence/label",

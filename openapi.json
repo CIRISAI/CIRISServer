@@ -13321,6 +13321,79 @@
         }
       }
     },
+    "/v1/self/nodes/{node_key_id}/announce": {
+      "post": {
+        "tags": [
+          "self"
+        ],
+        "summary": "Announce another device you own",
+        "description": "Per-node announce (CIRISServer#655) made from the device holding the owner's pen (CIRISServer#678): the owner re-signs the owner-binding user\u2192that node at cohort_scope federation, so peers can place it in an audience. Idempotent. Does not change the target's own Reticulum identity announce config.",
+        "operationId": "announce_node_v1_self_nodes__node_key_id__announce_post",
+        "responses": {
+          "200": {
+            "description": "`{node_key_id, owner, promoted_owner_binding_attestation_id, already_announced, this_node}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 self.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 self.owner_session_required, self.delegate_may_not_author, self.announce_not_your_node, self.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 self.announce_refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 self.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "node_key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The node's key id"
+          }
+        ]
+      }
+    },
     "/v1/self/occurrence/label": {
       "post": {
         "tags": [

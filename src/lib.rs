@@ -320,6 +320,9 @@ pub mod media_gate;
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a
 /// device key.
 pub mod self_devices;
+/// Old self files open on a device claimed later: the re-wrap trigger
+/// (CIRISServer#678).
+pub mod self_rewrap;
 pub mod self_room_drive;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer

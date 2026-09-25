@@ -429,6 +429,21 @@ pub async fn reconcile_once(
             }
         }
     }
+    // ── The owner's OTHER devices (CIRISServer#678) ─────────────────────────
+    // A node the same person owns is a replication peer by virtue of the two
+    // owner-bindings, not by a consent grant. persist's `send_set_for` at
+    // `self` already names `nodes_of(principals)` with no grant; what it cannot
+    // do is DIAL — the runtime's initiators come from this set alone, so a
+    // second device claimed through claim-remote waited for a manual peering or
+    // a reboot before a single self row crossed. And the second device cannot
+    // author a grant back: the owner's pen stays on the device that approved
+    // it. The link is read from the owner-bindings, both sides, every tick; a
+    // release (the owner's `withdraws` of the binding) drops it on the next.
+    for p in own_device_peers(engine, node_key_id).await {
+        if !consented.contains(&p) {
+            consented.push(p);
+        }
+    }
     consented.sort();
 
     // ── CC 4.1.4 (CIRISServer#159) — the withdraws-arbitrage countermeasure ──
@@ -517,6 +532,13 @@ pub async fn reconcile_once(
         anyhow::bail!("replication set_peers failed to converge: {e}");
     }
 
+    // ── Old self files for a new device (CIRISServer#678) ───────────────────
+    // AFTER the peer set converged: the occurrence this re-wraps for arrived
+    // over the link just converged, and the key grants the re-wrap emits ride
+    // it back. Never fails the tick; a device without the owner's pen does
+    // nothing here (the device holding it does the re-wrap).
+    crate::self_rewrap::rewrap_for_new_devices(engine, node_key_id).await;
+
     // Steady-state per-tick detail (the controller loop logs the INFO line only
     // when this count actually changes, so an idle node doesn't spam INFO).
     tracing::debug!(
@@ -527,6 +549,66 @@ pub async fn reconcile_once(
     Ok(Reconciled {
         peers: admitted_peers,
     })
+}
+
+/// **The owner's other devices this node should replicate with** (CIRISServer#678):
+/// every node `nodes_owned_by(owner)` names, for the owner of any key this node
+/// is, minus this node's own keys — filtered to transport-capable NODE records,
+/// the same rule [`crate::peer::replication_peers_from_consent`] applies to a
+/// consent subject (a person or an agent key has no destination to dial).
+///
+/// No consent grant is read or written. The link is the owner-binding on each
+/// side: the person who signed both said "these machines are mine", and a self
+/// row's send set (`nodes_of(principals)`) already names them. Unowned node,
+/// unreadable directory: empty, logged at debug — this is additive to the
+/// consent topology and must never remove a consented peer or fail the tick.
+pub async fn own_device_peers(engine: &Engine, node_key_id: &str) -> Vec<String> {
+    use ciris_persist::federation::admission::{nodes_owned_by, owner_of};
+    use ciris_persist::federation::types::identity_type;
+
+    let own = crate::peer::own_keys_of_this_node(node_key_id);
+    let dir = engine.federation_directory();
+    let mut owners: Vec<String> = Vec::new();
+    for k in &own {
+        match owner_of(dir.as_ref(), k).await {
+            Ok(Some(o)) if !owners.contains(&o) => owners.push(o),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                key = %k,
+                error = %e,
+                "own-device link: owner_of failed for one of this node's keys this tick"
+            ),
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for owner in owners {
+        let nodes = match nodes_owned_by(dir.as_ref(), &owner).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(
+                    owner = %owner,
+                    error = %e,
+                    "own-device link: nodes_owned_by failed this tick"
+                );
+                continue;
+            }
+        };
+        for n in nodes {
+            if own.contains(&n) || out.contains(&n) {
+                continue;
+            }
+            let is_node = matches!(
+                dir.lookup_public_key(&n).await,
+                Ok(Some(rec)) if identity_type::parse_set(&rec.identity_type)
+                    .contains(&identity_type::NODE)
+            );
+            if is_node {
+                out.push(n);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Spawn the reconcile controller loop. Returns the task handle (held by the

@@ -244,6 +244,7 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
         None, // no owner password (this test doesn't exercise the login path)
         None, // no owner username
         None, // no OAuth identity (password/OAuth session paths are exercised below)
+        None, // no claimer key record (see the second-device test below)
     )
     .await
     .expect("L claims T over HTTP");
@@ -390,6 +391,7 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
         None, // the whole point: an OAuth owner has NO password
         None,
         Some((ident.provider.as_str(), ident.external_id.as_str())),
+        None,
     )
     .await
     .expect("L claims T over HTTP");

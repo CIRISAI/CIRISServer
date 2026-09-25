@@ -171,6 +171,15 @@ struct RemoteSetupRootRequest {
     /// The provider subject (`sub`) paired with [`Self::owner_oauth_provider`].
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_oauth_external_id: Option<String>,
+    /// OPTIONAL — the CLAIMING node's own self-signed key record
+    /// (CIRISServer#678). The target admits it through the same fail-secure
+    /// gate peering uses, so the two devices know each other's keys the moment
+    /// the claim lands: the claimer dials the target as the owner's other
+    /// device on its next reconcile, and the target answers that round instead
+    /// of dropping it from a stranger. The target cannot fetch it itself — a
+    /// claimer behind NAT publishes no address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claimer_key_record: Option<ciris_persist::federation::types::SignedKeyRecord>,
 }
 
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
@@ -231,6 +240,9 @@ pub async fn claim_remote(
     // caller that can supply half of it is a caller that can write a ROOT cert
     // nothing will ever find (CIRISServer#384).
     owner_oauth: Option<(&str, &str)>,
+    // THIS node's self-signed key record, handed to the target so it knows the
+    // device that claimed it (CIRISServer#678). `None` sends nothing.
+    claimer_key_record: Option<&ciris_persist::federation::types::SignedKeyRecord>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
     let (nc, owner_binding) =
@@ -261,6 +273,7 @@ pub async fn claim_remote(
         owner_username: owner_username.map(str::to_owned),
         owner_oauth_provider: owner_oauth.map(|(p, _)| p.to_owned()),
         owner_oauth_external_id: owner_oauth.map(|(_, e)| e.to_owned()),
+        claimer_key_record: claimer_key_record.cloned(),
     };
 
     let resp = http
@@ -307,6 +320,12 @@ struct ClaimRemoteState {
     /// Hybrid-verify policy for the local upgrade-owner apply (default Strict).
     policy: HybridPolicy,
     http: reqwest::Client,
+    /// THIS node's self-signed key record (the one `GET
+    /// /v1/federation/self-key-record` serves), sent with every claim so the
+    /// target admits the device that claimed it (CIRISServer#678). `None` when
+    /// compose had none to give — the claim still works; the target then learns
+    /// this node's key only from a later peering.
+    self_key_record: Option<ciris_persist::federation::types::SignedKeyRecord>,
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -481,6 +500,7 @@ async fn claim_remote_handler(
                     .map(str::trim)
                     .filter(|s| !s.is_empty()),
             ),
+        st.self_key_record.as_ref(),
     )
     .await
     {
@@ -498,6 +518,16 @@ async fn claim_remote_handler(
                 req.target_url.as_deref(),
             )
             .await;
+            // LINK IMMEDIATELY (CIRISServer#678). The target's key and its
+            // owner-binding are in THIS directory now, so the owner's other
+            // device is in the reconciler's desired set
+            // (`replication_reconcile::own_device_peers`) — no consent grant, no
+            // reboot. CONVERGE, then kick: the nudge runs a reconcile pass, and
+            // the pass kicks a round the moment the set gains the device
+            // (`note_convergence`). A kick issued here instead would round
+            // toward every peer EXCEPT the one just claimed, because it is not an
+            // initiator until the pass has run.
+            crate::replication_reconcile::nudge("claim-remote linked the owner's new device");
             let body = with_local_flag(target_result, local_directory_updated);
             (StatusCode::OK, Json(body)).into_response()
         }
@@ -1223,7 +1253,21 @@ pub fn router(
     user_seed_dir: std::path::PathBuf,
     local_self_url: String,
     policy: HybridPolicy,
+    // THIS node's self-signed key record as JSON (compose's
+    // `self_key_record_json`), sent to every claimed target (CIRISServer#678).
+    self_key_record_json: Option<String>,
 ) -> Router {
+    let self_key_record = self_key_record_json.and_then(|j| {
+        serde_json::from_str::<ciris_persist::federation::types::SignedKeyRecord>(&j)
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "claim-remote: this node's self key record does not parse — claims will not \
+                     introduce this node to the targets it claims (CIRISServer#678)"
+                )
+            })
+            .ok()
+    });
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -1236,6 +1280,7 @@ pub fn router(
         local_self_url,
         policy,
         http,
+        self_key_record,
     };
     Router::new()
         .route(

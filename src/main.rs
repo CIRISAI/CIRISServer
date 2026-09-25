@@ -570,6 +570,8 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
         // where the owner has just completed a Google/Apple sign-in and has no
         // password to fall back on.
         None,
+        // The CLI is not a node: it has no key record of its own to introduce.
+        None,
     )
     .await?;
     println!("✅ claim accepted by {target_url}");

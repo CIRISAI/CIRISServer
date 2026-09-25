@@ -700,6 +700,17 @@ struct SetupRootRequest {
     /// with [`Self::owner_oauth_provider`] — see that field for why this exists.
     #[serde(default)]
     owner_oauth_external_id: Option<String>,
+    /// OPTIONAL — the CLAIMING node's self-signed key record (CIRISServer#678).
+    /// A second device claimed through `claim-remote` otherwise never learns the
+    /// key of the device that approved it, so that device's first replication
+    /// round arrives from a stranger and is dropped. Admitted after the claim
+    /// through the peering route's fail-secure gate (`peer::register_peer_key`:
+    /// hybrid proof-of-possession verified, accord holders refused); a record
+    /// that fails is logged and the claim still stands. Admitting a key is a
+    /// directory entry, not a grant: nothing replicates to it until an
+    /// owner-binding or a consent names it.
+    #[serde(default)]
+    claimer_key_record: Option<ciris_persist::federation::types::SignedKeyRecord>,
 }
 
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
@@ -747,6 +758,10 @@ struct SetupRootResponse {
     /// ([`super::session::SessionGrant`]), no fifth copy of the token policy.
     #[serde(flatten)]
     session: super::session::SessionGrant,
+    /// Whether the claiming node's key record (when it sent one) was admitted
+    /// here — `None` when it sent none (CIRISServer#678).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claimer_key_admitted: Option<bool>,
 }
 
 // The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1) —
@@ -1295,6 +1310,9 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     "first-run claim: anchoring the agent to its owner FAILED (non-fatal) — the covering consent door retries"
                 ),
             }
+            let claimer_key_admitted =
+                admit_claimer_key(&st.engine, &st.node_key_id, req.claimer_key_record.clone())
+                    .await;
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {
@@ -1307,11 +1325,54 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     cohort_scope,
                     role: super::roles::UserRole::SystemAdmin.as_str().to_string(),
                     owner_binding_attestation_id: applied.attestation_id,
+                    claimer_key_admitted,
                 }),
             )
                 .into_response()
         }
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")),
+    }
+}
+
+/// Admit the key of the node that claimed this one (CIRISServer#678). Returns
+/// `None` when no record was sent (or it names this node itself — a loopback
+/// self-claim), else whether the fail-secure gate admitted it. Never fails the
+/// claim. On admission the replication reconciler is nudged: the claimer is
+/// this node's owner's other device, and `own_device_peers` links it as soon
+/// as its owner-binding arrives over the round the claimer opens.
+async fn admit_claimer_key(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    record: Option<ciris_persist::federation::types::SignedKeyRecord>,
+) -> Option<bool> {
+    let record = record?;
+    let key_id = record.record.key_id.clone();
+    if key_id == node_key_id {
+        return None;
+    }
+    let peer = crate::PeerB {
+        key_id: key_id.clone(),
+        key_record: record,
+    };
+    match crate::peer::register_peer_key(engine, &peer).await {
+        Ok(()) => {
+            tracing::info!(
+                claimer = %key_id,
+                "setup/root: admitted the key of the device that claimed this node — its first \
+                 replication round is answered, not dropped (CIRISServer#678)"
+            );
+            crate::replication_reconcile::nudge("claimed by the owner's other device");
+            Some(true)
+        }
+        Err(e) => {
+            tracing::warn!(
+                claimer = %key_id,
+                error = %format!("{e:#}"),
+                "setup/root: the claiming device's key record was REFUSED (the claim stands) — \
+                 this node will not answer that device's rounds until it is peered"
+            );
+            Some(false)
+        }
     }
 }
 

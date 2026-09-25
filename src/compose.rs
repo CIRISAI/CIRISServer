@@ -1308,6 +1308,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             format!("http://127.0.0.1:{}", cfg.read_api_addr().port()),
                             // Hybrid-verify policy for the local upgrade-owner apply.
                             strict,
+                            // The record every claimed target admits, so the
+                            // device that claimed it is known there (#678).
+                            Some(self_key_record_json.clone()),
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,
