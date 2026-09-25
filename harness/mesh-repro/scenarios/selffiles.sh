@@ -22,10 +22,15 @@
 #              means it reached nobody: local-tier rows are kept out of every
 #              federation stream by persist's E5 invariant, so the file would be
 #              invisible to the other device AND to this node's own drive.
+#              Since 0.5.218 (#626) also: tier InvisibleEncrypted, `excluded`
+#              empty, no `Stored { announced: true }` and no `holds_bytes:` row
+#              on either device — a self blob emits no holder claim (CC 5.2).
 #   mine_on_b  node-c's `GET /v1/drive` LISTS the file. The row crossed. This is
 #              REQUIRED and is the rung the whole cut exists for.
 #   opened_on_b  node-c OPENS the bytes. The room's addresses resolved and the
 #              pull completed — the last rung, and the one that needs the room.
+#              Red on any self pull regression by name (#626): `NoHolders`,
+#              `NoMeaning(GroupWithoutId)`, or a `self:claim_index` source.
 #
 # `mine_on_b` and `opened_on_b` are both REQUIRED since 0.5.216 (the self-room
 # drive adopts edge's room-keyed handshake, CIRISEdge#656). A red here names its
@@ -357,17 +362,126 @@ print(1 if d.get("status")==200 and d.get("body",{}).get("attestation_id") else 
 HINT_note="the note was refused. A note is a chat row in the self room — if this fails the owner's pen is unavailable or the row could not be placed"
 EXIT_note=44
 
-stage_file() {
-  # 200 AND crossed. `crossed == false` is a file that reached nobody.
+# ── #626: the write-side checks, and the three pull regressions ─────────────
+#
+# Edge's adoption note for the file door (CIRISServer#626 §5) names what a SELF
+# write must look like, and three outcomes that must NEVER appear for a self
+# pull. Each is a distinct regression, so each is checked by NAME and the
+# diagnosis says which one fired rather than lumping them into "red".
+#
+#   write side (stage_file):
+#     tier == InvisibleEncrypted    a self file is sealed to the owner's devices
+#     excluded == []                non-empty = partial readability: those
+#                                   occurrences will read not_granted
+#     no `announced: true`          a self blob NEVER emits a holder claim (CC 5.2 /
+#                                   persist I52); edge logs the pull as
+#                                   `Stored { announced: false }`, and `true` is a
+#                                   conformance break, not a nicety
+#     no holds_bytes: row           the same fact read off the ROWS: no holder
+#                                   claim exists on either device for a self write
+#   pull side (stage_opened_on_b):
+#     no `outcome=NoHolders`        the §6.2 source rule regressed — a self pull
+#                                   must never consult the claim index
+#     no `NoMeaning(GroupWithoutId` the §6.2 projector regressed (NOT the same as
+#                                   `AuthorUnresolved`, the legitimate wait)
+#     no `self:claim_index` key     the first regression seen from edge's
+#                                   `blob_pull_sources` counter (GET
+#                                   /v1/federation/metrics, since 0.5.218)
+#
+# Every scan is `grep -c … || true` (see `_self_log_has`), and every conditional
+# is an `if`: a false `[ … ] && x` as a function's last command returns non-zero
+# under `set -e`.
+
+# How many lines in THIS service's log match? Numeric, never empty.
+_self_log_count() {
+  local svc="$1" re="$2" n
+  n="$(compose logs "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -cE "$re" || true)"
+  echo "${n:-0}"
+}
+
+# The file write's own claims, from its 200 body. Prints one word per failed
+# check (empty = all hold), so the stage and its diagnosis read the same fact.
+_self_file_write_faults() {
   python3 -c '
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print(0); raise SystemExit
-b=d.get("body",{})
-print(1 if d.get("status")==200 and b.get("crossed") is True else 0)' "$SELF_STATE/file.json" 2>/dev/null || echo 0
+except Exception: print("no_response"); raise SystemExit
+b=d.get("body",{}) or {}
+out=[]
+if d.get("status")!=200: out.append("status=%s" % d.get("status"))
+if b.get("crossed") is not True: out.append("crossed=%s" % b.get("crossed"))
+if b.get("tier")!="InvisibleEncrypted": out.append("tier=%s" % b.get("tier"))
+if b.get("excluded")!=[]: out.append("excluded=%s" % json.dumps(b.get("excluded")))
+print(" ".join(out))' "$SELF_STATE/file.json" 2>/dev/null || echo "unreadable"
 }
-HINT_file="the file was not published, or was published WITHOUT crossing. crossed=false means local-tier: persist's E5 invariant keeps it out of every federation stream, so no other device and not even this node's drive will list it"
+
+# Cross-node faults a self write must never produce. One word per fault.
+_self_file_mesh_faults() {
+  local svc n out=""
+  for svc in $SELF_NODES; do
+    n="$(_self_log_count "$svc" 'Stored \{ announced: true')"
+    if [ "$n" -gt 0 ]; then out="$out announced_true@$svc=$n"; fi
+    n="$(harness_db_count "$svc" federation_attestations "attestation_type LIKE 'holds_bytes:%'")"
+    case "$n" in
+      0) ;;
+      -1|"") out="$out holds_bytes_unreadable@$svc" ;;
+      *) out="$out holds_bytes@$svc=$n" ;;
+    esac
+  done
+  echo "$out"
+}
+
+# The three pull regressions. One word per fault. Also refreshes
+# metrics-<svc>.json, which the diagnosis and the evidence tail print.
+_self_pull_faults() {
+  local svc n out=""
+  for svc in $SELF_NODES; do
+    n="$(_self_log_count "$svc" 'outcome=NoHolders')"
+    if [ "$n" -gt 0 ]; then out="$out NoHolders@$svc=$n"; fi
+    n="$(_self_log_count "$svc" 'NoMeaning\(GroupWithoutId')"
+    if [ "$n" -gt 0 ]; then out="$out GroupWithoutId@$svc=$n"; fi
+    _self_api "$svc" GET /v1/federation/metrics '' >"$SELF_STATE/metrics-$svc.json" 2>/dev/null || true
+    n="$(python3 -c '
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print(0); raise SystemExit
+src=((d.get("body") or {}).get("data") or {}).get("blob_pull_sources") or {}
+print(sum(v for k,v in src.items() if k in ("self:claim_index","family:claim_index")))' \
+      "$SELF_STATE/metrics-$svc.json" 2>/dev/null || echo 0)"
+    if [ "${n:-0}" -gt 0 ]; then out="$out claim_index_source@$svc=$n"; fi
+  done
+  echo "$out"
+}
+
+# The pull sources, as the metrics snapshot last reported them.
+_self_pull_sources() {
+  python3 -c '
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print("{}"); raise SystemExit
+print(json.dumps(((d.get("body") or {}).get("data") or {}).get("blob_pull_sources") or {}))' \
+    "$SELF_STATE/metrics-$1.json" 2>/dev/null || echo "{}"
+}
+
+stage_file() {
+  # 200 AND crossed AND the #626 write-side shape. `crossed == false` is a file
+  # that reached nobody; the rest are the conformance checks above.
+  local w m
+  w="$(_self_file_write_faults)"
+  m="$(_self_file_mesh_faults)"
+  if [ -z "${w// /}" ] && [ -z "${m// /}" ]; then echo 1; else echo 0; fi
+}
+HINT_file="the self file write is not what a self write must be (CIRISServer#626 §5); the diagnosis names the failed check. crossed=false is local-tier (persist's E5 invariant keeps it out of every federation stream, so no device lists it); tier≠InvisibleEncrypted is the wrong room tier; a non-empty excluded is partial readability (those occurrences read not_granted); announced_true or a holds_bytes: row is a self blob that emitted a holder claim, which CC 5.2 / persist I52 forbid"
 EXIT_file=45
+DIAG_file() {
+  echo "  write-side faults: $(_self_file_write_faults)"
+  echo "  mesh faults:       $(_self_file_mesh_faults)"
+  local svc
+  for svc in $SELF_NODES; do
+    echo "  $svc: Stored{announced:false}=$(_self_log_count "$svc" 'Stored \{ announced: false') Stored{announced:true}=$(_self_log_count "$svc" 'Stored \{ announced: true')"
+  done
+  echo "  write body: $(head -c 500 "$SELF_STATE/file.json" 2>/dev/null)"
+}
 
 stage_mine_on_b() {
   # THE CLAIM: the second device LISTS the file.
@@ -383,6 +497,10 @@ HINT_mine_on_b="the second device does not LIST the file. The row did not cross:
 EXIT_mine_on_b=46
 
 stage_opened_on_b() {
+  # A regression in the pull's source rule or projector fails this rung even if
+  # the bytes opened (a claim-index source can find a holder by accident on a
+  # two-node mesh) — #626 asks for each by name.
+  if [ -n "$(_self_pull_faults | tr -d ' ')" ]; then echo 0; return; fi
   python3 -c '
 import json,sys
 try: d=json.load(open(sys.argv[1]))
@@ -391,8 +509,15 @@ print(1 if any(e.get("filename")=="proof.txt" and e.get("bytes")=="here"
                for e in d.get("body",{}).get("entries",[])) else 0)' \
     "$SELF_STATE/drive-b.json" 2>/dev/null || echo 0
 }
-HINT_opened_on_b="the second device LISTS the file (mine_on_b green) but cannot OPEN its bytes. The self room did not admit it: check \`tick=Added(0)\` on the creator (it cannot see the joiner's KeyPackage — is the row in the SELF room, not \`chat:pair:v1:*\`? src/self_room_drive.rs must use key_package_attestation_in / welcome_attestation_in, CIRISEdge#656), then \`self room JOINED\` on the joiner (welcome_for must find a Welcome naming THIS node), then the scope-address install on both"
+HINT_opened_on_b="the second device cannot OPEN the file's bytes, or a self pull regressed. If the diagnosis lists NoHolders or claim_index_source, the §6.2 SOURCE RULE regressed (a self pull reads self:author_nodes, never the claim index); GroupWithoutId means the §6.2 PROJECTOR regressed (not AuthorUnresolved, the legitimate wait). Otherwise the self room did not admit it: check \`tick=Added(0)\` on the creator (it cannot see the joiner's KeyPackage — is the row in the SELF room, not \`chat:pair:v1:*\`? src/self_room_drive.rs must use key_package_attestation_in / welcome_attestation_in, CIRISEdge#656), then \`self room JOINED\` on the joiner (welcome_for must find a Welcome naming THIS node), then the scope-address install on both"
 EXIT_opened_on_b=47
+DIAG_opened_on_b() {
+  echo "  pull regressions: $(_self_pull_faults)"
+  local svc
+  for svc in $SELF_NODES; do
+    echo "  $svc blob_pull_sources: $(_self_pull_sources "$svc")"
+  done
+}
 
 harness_scenario_evidence() {
   echo "── the self-room drive, both nodes ──"
@@ -403,11 +528,12 @@ harness_scenario_evidence() {
   echo "── the write ──"
   head -c 500 "$SELF_STATE/file.json" 2>/dev/null; echo
   echo "── pull sources (MUST be self:author_nodes, never self:claim_index) ──"
+  # Read from the metrics snapshot (GET /v1/federation/metrics
+  # `blob_pull_sources`, 0.5.218). This was a log grep, and edge never LOGS the
+  # counter, so it could only ever print nothing.
+  echo "  regressions: $(_self_pull_faults)"
   local svc
   for svc in $SELF_NODES; do
-    printf '  %s: ' "$svc"
-    compose logs "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
-      | grep -oE 'blob_pull_sources\{[^}]*\}' | sort | uniq -c | tr '\n' ' '
-    echo
+    echo "  $svc: $(_self_pull_sources "$svc")"
   done
 }

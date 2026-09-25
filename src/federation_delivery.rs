@@ -2125,6 +2125,13 @@ mod tests {
             // And its removals: the roster is append-only, so admissions
             // without revocations replicate a membership that can only grow.
             EnvelopeKind::CommunityMembershipRevocation,
+            // CIRISServer#646 — the planes the server wrote and never routed.
+            EnvelopeKind::CommunityMembershipWidening,
+            EnvelopeKind::Family,
+            EnvelopeKind::FamilyMembershipRevocation,
+            EnvelopeKind::IdentityOccurrenceRevocation,
+            EnvelopeKind::Revocation,
+            EnvelopeKind::LocationProof,
         ];
         assert_eq!(peers.len(), desired.len() * expected.len());
         for (target_index, target) in desired.iter().enumerate() {
@@ -2158,6 +2165,77 @@ mod tests {
                 std::mem::discriminant(&b.kind),
                 std::mem::discriminant(&r.kind)
             );
+        }
+    }
+
+    /// CIRISServer#646 GATE — every wire kind is either ROUTED (a coordinator
+    /// per peer) or EXCLUDED BY NAME with a reason; never neither, never both.
+    ///
+    /// The expected routed set is derived from `EnvelopeKind::ALL` minus the
+    /// exclusion list, so a kind persist and edge append later (the way
+    /// `KeyGrant` and `CommunityMembershipWidening` were appended) is in
+    /// neither list and this goes red until someone decides — the silent
+    /// omission that left five server-written planes unrouted for a release.
+    /// The assembly itself is an explicit list, not this derivation, so the
+    /// gate compares two independent statements rather than one copied twice.
+    #[test]
+    fn every_envelope_kind_is_routed_or_excluded_by_name() {
+        use ciris_edge::replication::EnvelopeKind;
+        use std::collections::BTreeSet;
+
+        let excluded: BTreeSet<EnvelopeKind> = crate::compose::NOT_REPLICATED_KINDS
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(
+            excluded.len(),
+            crate::compose::NOT_REPLICATED_KINDS.len(),
+            "an excluded kind is listed twice"
+        );
+        for (kind, reason) in crate::compose::NOT_REPLICATED_KINDS {
+            assert!(
+                reason.len() > 40,
+                "{kind:?} is excluded without a real reason: {reason:?}"
+            );
+        }
+
+        let expected: BTreeSet<EnvelopeKind> = EnvelopeKind::ALL
+            .into_iter()
+            .filter(|k| !excluded.contains(k))
+            .collect();
+        let routed: Vec<EnvelopeKind> = crate::compose::build_replication_peers(&["p".to_string()])
+            .into_iter()
+            .map(|peer| peer.kind)
+            .collect();
+        let routed_set: BTreeSet<EnvelopeKind> = routed.iter().copied().collect();
+        assert_eq!(routed.len(), routed_set.len(), "a kind is routed twice");
+
+        let unrouted: Vec<_> = expected.difference(&routed_set).collect();
+        assert!(
+            unrouted.is_empty(),
+            "kinds in EnvelopeKind::ALL that are neither routed nor excluded by name: \
+             {unrouted:?} — add each to compose::REPLICATED_KINDS or, with a reason, to \
+             compose::NOT_REPLICATED_KINDS"
+        );
+        let both: Vec<_> = routed_set.intersection(&excluded).collect();
+        assert!(both.is_empty(), "routed AND excluded: {both:?}");
+        assert_eq!(
+            routed_set.len() + excluded.len(),
+            EnvelopeKind::ALL.len(),
+            "routed ∪ excluded must be exactly EnvelopeKind::ALL"
+        );
+
+        // The kinds this server WRITES on a roster / device / key change are
+        // named here on their own, so shrinking the routed list by moving one
+        // of them into the exclusions is a visible edit to this test too.
+        for must in [
+            EnvelopeKind::CommunityMembershipWidening,
+            EnvelopeKind::Family,
+            EnvelopeKind::FamilyMembershipRevocation,
+            EnvelopeKind::IdentityOccurrenceRevocation,
+            EnvelopeKind::Revocation,
+        ] {
+            assert!(routed_set.contains(&must), "{must:?} must replicate (#646)");
         }
     }
 

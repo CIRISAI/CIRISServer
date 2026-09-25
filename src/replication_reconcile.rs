@@ -450,7 +450,8 @@ pub async fn reconcile_once(
     // EnvelopeKind::Attestation carries BOTH directions (capacity:* out,
     // health:liveness in).
     let directory = engine.federation_directory();
-    let mut desired: Vec<ReplicationPeer> = Vec::with_capacity(consented.len() * 4);
+    let mut desired: Vec<ReplicationPeer> =
+        Vec::with_capacity(consented.len() * crate::compose::REPLICATED_KINDS.len());
     let mut admitted_peers: std::collections::BTreeSet<String> = Default::default();
     for peer in consented {
         // Fail closed: an over-threshold attester — or one whose behavioral ledger
