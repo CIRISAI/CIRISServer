@@ -315,6 +315,7 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+pub mod media_gate;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a
 /// device key.

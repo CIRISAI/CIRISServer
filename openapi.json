@@ -13444,6 +13444,25 @@
           }
         ]
       }
+    },
+    "/v1/media/policy": {
+      "get": {
+        "summary": "This node's media render policy (CIRISServer#643)",
+        "description": "Public. The Tier A essences and caps this node applies (CC 5.3.2.6), the Tier B/C sets, the write gate's rules, the inline and whole-read caps, and `renditions` (false until the ingest pipeline, #614).",
+        "operationId": "media_policy",
+        "responses": {
+          "200": {
+            "description": "The policy table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
