@@ -1170,7 +1170,7 @@ async fn rename_row(
     let author_key_id = author.key_id.as_str();
     let asserted_at = old.asserted_at;
     let mut envelope = serde_json::json!({
-        "dimension": files::FILE_DIMENSION,
+        (ciris_persist::federation::envelope::paths::DIMENSION): files::FILE_DIMENSION,
         (ciris_edge::chat::FIELD_CONTENT): old.pointer,
         (files::FIELD_FILENAME): filename,
         (FIELD_REPLACES): replaces,
@@ -1433,7 +1433,7 @@ fn envelope_of(row: &Attestation) -> serde_json::Value {
         "subject_key_ids": row.subject_key_ids,
         "cohort_scope": row.cohort_scope,
         "cohort_target": target,
-        "dimension": ciris_persist::federation::admission::envelope_dimension(env),
+        (ciris_persist::federation::envelope::paths::DIMENSION): ciris_persist::federation::admission::envelope_dimension(env),
         "tier": row.tier,
         "consent_scope": env.get("consent_scope"),
         "asserted_at": row.asserted_at.to_rfc3339(),

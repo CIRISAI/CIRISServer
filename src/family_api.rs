@@ -564,7 +564,7 @@ async fn view(engine: &Engine, loaded: &Loaded, caller: &str) -> serde_json::Val
             "subject": f.family_key_id,
             "attester": authority_of(engine, &f.family_key_id).await,
             "cohort_scope": ciris_persist::federation::types::cohort_scope::FAMILY,
-            "dimension": "family",
+            (ciris_persist::federation::envelope::paths::DIMENSION): "family",
             "persist_row_hash": f.persist_row_hash,
         },
     })
