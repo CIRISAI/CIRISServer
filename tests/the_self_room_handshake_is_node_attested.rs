@@ -43,12 +43,12 @@ fn read_src(path: &str) -> String {
 fn every_handshake_row_is_built_from_the_node_signer() {
     let src = read_src("src/self_room_drive.rs");
     // The row BUILDERS, by the edge fn each reader pairs with:
-    //   key_package_attestation  ↔ chat::key_package_from(dir, node, room)
-    //   welcome_attestation      ↔ chat::welcome_from(dir, creator_node, room)
-    //   commit_attestation_in    ↔ chat::commits_from(dir, node, room_id)
+    //   key_package_attestation_in  ↔ chat::key_package_from(dir, node, room)
+    //   welcome_attestation_in      ↔ chat::welcome_for(dir, creator_node, room, me)
+    //   commit_attestation_in       ↔ chat::commits_from(dir, node, room_id)
     for builder in [
-        "key_package_attestation(",
-        "welcome_attestation(",
+        "key_package_attestation_in(",
+        "welcome_attestation_in(",
         "commit_attestation_in(",
     ] {
         let mut found = 0;
@@ -89,4 +89,56 @@ fn the_owner_pen_remains_the_crossing_actor() {
          it (CC 3.3.6). Dropping the actor would author a person's placement as \
          infrastructure."
     );
+}
+
+/// Code with `//` comments removed, so a needle names a CALL and never the prose
+/// that explains why the call changed.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// **The handshake rows take the ROOM, not a derived pair** (CIRISEdge#656,
+/// adopted in 0.5.216).
+///
+/// The pair-form builders `key_package_attestation(author, recipient, ..)` /
+/// `welcome_attestation(author, recipient, ..)` compute
+/// `pair_community_key_id(author, recipient)` — for a self collective, a hash of
+/// two nodes that nobody installs. The row landed in `chat:pair:v1:<hash>` while
+/// the creator looked in the self room, so it held a KeyPackage it could not
+/// see: `Added(0)` forever and the selffiles ladder's `opened_on_b` red. And the
+/// joiner must read the Welcome ADDRESSED TO IT (`welcome_for`), not the
+/// creator's last one (`welcome_from`), or a third device consumes the
+/// second's.
+#[test]
+fn the_handshake_rows_are_room_keyed_and_the_joiner_reads_its_own_welcome() {
+    let src = code_only(&read_src("src/self_room_drive.rs"));
+    for pair_form in [
+        "chat::key_package_attestation(",
+        "chat::welcome_attestation(",
+        "chat::welcome_from(",
+    ] {
+        assert!(
+            !src.contains(pair_form),
+            "src/self_room_drive.rs still calls `{pair_form}` — the PAIR-deriving form. \
+             A self room is not a pair: that row lands in `chat:pair:v1:<hash>`, which \
+             no device reads, and the second device never opens a file's bytes \
+             (CIRISEdge#656)."
+        );
+    }
+    for room_form in [
+        "chat::key_package_attestation_in(",
+        "chat::welcome_attestation_in(",
+        "chat::welcome_for(",
+    ] {
+        assert!(
+            src.contains(room_form),
+            "src/self_room_drive.rs no longer calls `{room_form}` — did the handshake move?"
+        );
+    }
 }

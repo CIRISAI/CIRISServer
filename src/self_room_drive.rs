@@ -451,9 +451,15 @@ async fn join_if_welcomed(
     let dir = st.engine.federation_directory();
     let room_id = room.content_group_id();
     for node in roster.iter().filter(|n| n.as_str() != own) {
-        let Some((welcome, _epoch)) = ciris_edge::chat::welcome_from(&*dir, node, room_id)
+        // THE WELCOME ADDRESSED TO THIS DEVICE (CIRISEdge#656, edge v30.0.0).
+        // `welcome_from` returns the creator's LAST Welcome in the room, which
+        // for a self collective is whichever device joined most recently — a
+        // third device would try to consume the second's, fail, burn its
+        // KeyPackage and republish forever. `welcome_for` picks the one whose
+        // signed envelope names `own`.
+        let Some((welcome, _epoch)) = ciris_edge::chat::welcome_for(&*dir, node, room_id, own)
             .await
-            .map_err(|e| format!("read {node}'s Welcome: {e}"))?
+            .map_err(|e| format!("read {node}'s Welcome for {own}: {e}"))?
         else {
             continue;
         };
@@ -544,9 +550,18 @@ async fn publish_key_package(
     // edge's own `files::publish` builds its row from `signers.node`. The
     // owner's pen stays as the crossing ACTOR below, which is what carries the
     // person's authority for the placement.
-    let row = ciris_edge::chat::key_package_attestation(
+    //
+    // INTO THE SELF ROOM, NOT A DERIVED PAIR (CIRISEdge#656). The pair-form
+    // `key_package_attestation(author, recipient, ..)` computed
+    // `pair_community_key_id(node, <owner>)` — a room nobody installs — so the
+    // row landed in `chat:pair:v1:<hash>` while the creator's
+    // `key_package_from(<joiner>, <self room>)` looked in the self room and
+    // found nothing: `Added(0)` forever, every step logging success, and the
+    // second device read every file `not_fetched`. The `_in` builder takes
+    // the room itself.
+    let row = ciris_edge::chat::key_package_attestation_in(
         &st.node_signer,
-        room.content_group_id(),
+        room,
         &kp_bytes,
         chrono::Utc::now(),
     )
@@ -663,9 +678,14 @@ async fn add_members(
             .to_vec();
         let epoch = commit.epoch();
         // Same axis: the joiner reads this with
-        // `welcome_from(dir, <creator's NODE key>, room)`.
-        let welcome_row = ciris_edge::chat::welcome_attestation(
+        // `welcome_for(dir, <creator's NODE key>, room, <joiner's NODE key>)`.
+        // Room AND recipient, because they are two facts (CIRISEdge#656): the
+        // pair-form builder derived the room from `(creator, joiner)`, which
+        // placed the Welcome in a pair room neither device reads, and a room
+        // of three needs one Welcome per joiner in the SAME room.
+        let welcome_row = ciris_edge::chat::welcome_attestation_in(
             &st.node_signer,
+            room,
             node,
             &welcome,
             epoch,

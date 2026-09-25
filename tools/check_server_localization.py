@@ -774,6 +774,82 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "notes.listing_failed",
     "notes.no_node_key",
     "notes.owner_session_required",
+    # THE COMMUNITY PLANE (CIRISServer#594 / 0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md`
+    # §4) — the same case as the drive plane above: a new surface whose refusals
+    # land before the `ciris-client` bundle that carries them. The ids and their
+    # English are listed in the FSD for the client release. (`community.
+    # delegate_may_not_author` and `community.delegation_denied` are emitted
+    # through `contacts_chat::require_verb`, which this guard does not scrape,
+    # exactly like their `chat.*` twins — so they are not listed here.)
+    "community.already_member",
+    "community.author_signer_unavailable",
+    "community.bad_consensus_protocol",
+    "community.bad_tier",
+    "community.change_stale",
+    "community.last_founder",
+    "community.malformed_body",
+    "community.name_empty",
+    "community.not_a_contact",
+    "community.not_a_member",
+    "community.not_authorized",
+    "community.not_found",
+    "community.pair_room_fixed",
+    "community.quorum_pending",
+    "community.store_unavailable",
+    "community.write_failed",
+    # THE DRIVE CRUD SURFACE (0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md` §5) — the
+    # same plane, the same queue: the ids the FSD names for replace / rename /
+    # withdraw / move / range / notes edit, requested of the client beside the
+    # entries above (CIRISClient#65). `drive.withdrawn` and `drive.not_author`
+    # are the two a person meets in normal use.
+    "drive.bad_body",
+    "drive.bad_cursor",
+    "drive.bad_move_target",
+    "drive.delegate_may_not_author",
+    "drive.evicted",
+    "drive.filename_empty",
+    "drive.not_author",
+    "drive.range_not_satisfiable",
+    "drive.same_room",
+    "drive.seal_mismatch",
+    "drive.too_large_for_whole_read",
+    "drive.withdraw_failed",
+    "drive.withdrawn",
+    "notes.delegate_may_not_author",
+    "notes.not_found",
+    # THE HOUSEHOLD AND SELF-DEVICE PLANES (CIRISServer#627 / 0.5.216,
+    # `FSD/ROSTER_AND_DRIVE_CRUD.md` §2-§3) — same situation as the drive plane
+    # above: a whole surface whose refusals are emitted before the `ciris-client`
+    # release carrying their keys. The FSD lists the ids with their English so
+    # the client can request them in one batch; these come off this list, and
+    # the pyproject floor goes up, when a bundle carries them.
+    "family.already_member",
+    "family.author_signer_unavailable",
+    "family.bad_change",
+    "family.bad_consensus_protocol",
+    "family.bad_request",
+    "family.bad_role",
+    "family.delegate_may_not_author",
+    "family.last_founder",
+    "family.name_empty",
+    "family.not_a_member",
+    "family.not_authorized",
+    "family.not_found",
+    "family.owner_session_required",
+    "family.quorum_pending",
+    "family.readd_unsupported",
+    "family.store_unavailable",
+    "family.unknown_member_key",
+    "self.author_signer_unavailable",
+    "self.bad_request",
+    "self.delegate_may_not_author",
+    "self.label_empty",
+    "self.not_your_device",
+    "self.not_your_node",
+    "self.owner_session_required",
+    "self.release_incomplete",
+    "self.release_self_requires_force",
+    "self.store_unavailable",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

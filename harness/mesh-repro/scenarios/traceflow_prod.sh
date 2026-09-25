@@ -12,13 +12,15 @@
 # edge attributes an inbound frame only from a `Rooted ∧ owns_key` peer, no
 # production agent can be Rooted, and the self-attribution hole that hid this
 # closed on 2026-09-18 (CIRISServer#607). A red `arrive` here is the mesh's true
-# state; a green one is the fix landing. SUCCESS_STAGE is `served` for now and
-# moves to `score` with #659 — change it there, not here, and say why.
+# state; a green one is the fix landing. SUCCESS_STAGE moved `served` → `arrive`
+# on the persist v48.0.0 / edge v31.0.0 adoption: #659 landed in edge v30.2–v30.3.1
+# and the last gate, the promotion sweep reading self-authored grants only, is
+# CIRISPersist#905 in v48.0.0. `score` is measured, not yet required.
 source "$(dirname "${BASH_SOURCE[0]}")/traceflow.sh"
 SCENARIO_NAME="traceflow_prod — production-shaped agent (split, owned, Advisory-admitted, genesis-imported)"
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.prod.yml"
-SUCCESS_STAGE="served"
-SUCCESS_MESSAGE="production-shaped agent reached the canonical: owned, split, Advisory-admitted, bootstrap rounds served, Rooted as a pair. (offerable/ship/arrive stay RED until CIRISPersist#905 — the promotion sweep reads self-authored grants only, and a claimed agent's consent is authored by its human. Read the counts above.)"
+SUCCESS_STAGE="arrive"
+SUCCESS_MESSAGE="production-shaped agent's TRACES reached the canonical: owned, split, Advisory-admitted, Rooted as a pair, promoted by its HUMAN's consent (CIRISPersist#905, persist v48.0.0) and admitted by the canonical. Read the run timeline below for where the wall clock went."
 # seal/trace_att lag the bootstrap rounds by CIRIS_HARNESS_SEAL_DELAY_SECS; requiring them
 # keeps the window open so the Attestation rounds RUN inside the measurement and `arrive`
 # is read (red, today) rather than skipped by an early SUCCESS at `served`.
@@ -27,7 +29,13 @@ REQUIRED_trace_att=1
 REQUIRED_consent=1
 REQUIRED_converge=1
 REQUIRED_served=1
-HINT_arrive="EXPECTED RED until CIRISEdge#659: the canonical drops every non-bootstrap frame from an Advisory peer (resolved=(Advisory, owns_key=true), item2=false, door=not_applicable). If this is GREEN, #659 landed — move SUCCESS_STAGE to score."
+# Since persist v48.0.0 (CIRISPersist#905) a claimed agent's sealed traces are
+# promoted by its human's consent, so the rest of the carrier path is part of
+# the claim: wait for it instead of stopping at `served`.
+REQUIRED_offerable=1
+REQUIRED_ship=1
+REQUIRED_arrive=1
+HINT_arrive="the agent shipped but the canonical admitted no trace rows. Read the run timeline (the canonical's refused/rejected line and its rooted_with line) and the withhold ledger before touching consent: the promotion gate (CIRISPersist#905) is behind us once offerable > 0."
 
 # ── consent / converge / ship on a SERVER node log the server's own lines ────
 # The embedded agent printed harness markers; the composed node logs persist's
@@ -136,4 +144,65 @@ except Exception as e:
     print("✗ peering failed:", e)
 PY
   return 0
+}
+
+
+# ── run timeline (Eric, 2026-09-24: "a detailed timeline for the production
+# shaped run so we know what to expect and what to optimize") ────────────────
+# Runs inside the verdict, while the stack is still up: both nodes' timestamped
+# logs, their container start times, the trace-path row timestamps from each
+# node's own database, and the ladder's samples — merged onto one clock by
+# lib/timeline.py. Artifacts land in $HARNESS_OUT_DIR for anything the summary
+# does not name.
+HARNESS_OUT_DIR="${HARNESS_OUT_DIR:-${RUNNER_TEMP:-/tmp}/ciris-harness/$PROJECT-$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$HARNESS_OUT_DIR"
+export HARNESS_LADDER_LOG="$HARNESS_OUT_DIR/ladder.txt"
+
+prod_run_timeline() {
+  local svc cid
+  for svc in agent canonical; do
+    compose logs -t --no-color "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' > "$HARNESS_OUT_DIR/$svc.log" || true
+    cid="$(compose ps -q "$svc" 2>/dev/null | head -1)"
+    if [ -n "$cid" ]; then docker inspect -f '{{.State.StartedAt}}' "$cid" > "$HARNESS_OUT_DIR/$svc.started" 2>/dev/null || true; fi
+    compose exec -T "$svc" python -c '
+import glob, json, sqlite3
+TS = ("asserted_at", "admitted_at", "created_at", "inserted_at", "received_at", "sealed_at")
+Q = [
+  ("trace attestations by cohort_scope", "federation_attestations",
+   "CAST(attestation_envelope AS TEXT) LIKE ?", ("%\"dimension\":\"trace:%",), "cohort_scope"),
+  ("consent:replication grants", "federation_attestations",
+   "CAST(attestation_envelope AS TEXT) LIKE ?", ("%consent:replication%",), None),
+  ("trace_events", "trace_events", "1=1", (), None),
+]
+out = {}
+for d in sorted(glob.glob("/var/lib/ciris/**/*.db", recursive=True)):
+    try: c = sqlite3.connect("file:%s?mode=ro" % d, uri=True)
+    except Exception: continue
+    for label, table, where, args, group in Q:
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(%s)" % table)]
+        except Exception: continue
+        for col in [t for t in TS if t in cols]:
+            g = (group + ", ") if group and group in cols else ""
+            sql = "SELECT %scount(*), min(%s), max(%s) FROM %s WHERE %s%s" % (
+                g, col, col, table, where, (" GROUP BY " + group) if g else "")
+            try:
+                for row in c.execute(sql, args):
+                    key = "%s %s[%s]" % (label, ("scope=%s " % row[0]) if g else "", col)
+                    n, lo, hi = row[-3], row[-2], row[-1]
+                    if n: out[key] = {"n": n, "min": lo, "max": hi}
+            except Exception as e:
+                out["%s[%s] error" % (label, col)] = str(e)[:120]
+print(json.dumps(out))
+' > "$HARNESS_OUT_DIR/$svc.db.json" 2>/dev/null || true
+  done
+  echo "· RUN TIMELINE (artifacts: $HARNESS_OUT_DIR)"
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/timeline.py" "$HARNESS_OUT_DIR" || echo "  (timeline.py failed — raw logs are in $HARNESS_OUT_DIR)"
+}
+
+# Keep traceflow's evidence, then add the timeline after it.
+eval "$(declare -f harness_scenario_evidence | sed '1s/^harness_scenario_evidence/traceflow_scenario_evidence/')"
+harness_scenario_evidence() {
+  traceflow_scenario_evidence || true
+  prod_run_timeline || true
 }

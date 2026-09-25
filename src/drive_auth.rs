@@ -52,19 +52,47 @@ pub struct DriveOwner {
 /// 3. the session is the owner's (`SystemAdmin` + `FullAccess`);
 /// 4. the node HAS an owner binding, and that owner is who the files belong to.
 pub async fn owner(st: &crate::drive::DriveState, headers: &HeaderMap) -> Option<DriveOwner> {
+    owner_checked(st, headers).await.ok()
+}
+
+/// Why [`owner_checked`] refused — kept apart because the two have different
+/// remedies and a WRITE route names them differently (FSD
+/// `ROSTER_AND_DRIVE_CRUD.md` §1 rule 1: "Delegates never author roster
+/// changes or files").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerRefusal {
+    /// No bearer, an unknown bearer, not the owner's role, or an unbound node.
+    NoOwnerSession,
+    /// A valid session, but a DELEGATED one (`dgrant:`): someone acting for the
+    /// owner. A file or note is signed into the graph as the owner's own act,
+    /// and a delegation that ends cannot un-sign it.
+    Delegated,
+}
+
+/// [`owner`], saying WHICH refusal. Same checks, same order.
+pub async fn owner_checked(
+    st: &crate::drive::DriveState,
+    headers: &HeaderMap,
+) -> Result<DriveOwner, OwnerRefusal> {
+    use OwnerRefusal::NoOwnerSession as No;
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(str::trim)
-        .filter(|t| !t.is_empty())?;
-    let caller = resolve_bearer(&st.engine, token).await.ok()??;
+        .filter(|t| !t.is_empty())
+        .ok_or(No)?;
+    let caller = resolve_bearer(&st.engine, token)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(No)?;
     if caller.actor.is_some() {
-        return None;
+        return Err(OwnerRefusal::Delegated);
     }
     if caller.role != UserRole::SystemAdmin || !caller.permissions.contains(&Permission::FullAccess)
     {
-        return None;
+        return Err(No);
     }
     // THE WIRE NODE, NOT THE ENGINE'S ACTOR KEY (Codex, CIRISServer#628). On the
     // supported actor/node split (CC 3.4.7.3 Clause A, `FSD/ACTOR_NODE_KEY_SPLIT.md`)
@@ -77,10 +105,10 @@ pub async fn owner(st: &crate::drive::DriveState, headers: &HeaderMap) -> Option
     // runs, and one no single-identity test can see.
     let node = match crate::node_key::wire_identity() {
         Some(w) => w.to_owned(),
-        None => st.engine.local_derived_key_id().await.ok()?,
+        None => st.engine.local_derived_key_id().await.map_err(|_| No)?,
     };
     let bound = crate::auth::gate::require_owner_bound(&st.engine, &node)
         .await
-        .ok()?;
-    Some(DriveOwner { key_id: bound })
+        .map_err(|()| No)?;
+    Ok(DriveOwner { key_id: bound })
 }

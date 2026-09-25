@@ -1274,6 +1274,27 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     crate::receive_axis::pull_owner_testimony(&engine_for_pull, &node).await;
                 });
             }
+            // THE ACTOR BECOMES ITS HUMAN'S OCCURRENCE AT CLAIM (CIRISServer#632).
+            // The claim-remote arms anchor the agent; this 1-phase first-run claim
+            // did not, and it is the path a fresh install takes. Without the anchor
+            // `steward_bindings_of(actor)` is empty, the human's covering consent
+            // skips the actor, and persist's promotion sweep (which reads the
+            // ENGINE key) finds no grant — measured on the production-shaped
+            // ladder as `offerable=0` on persist v48.0.0. Idempotent; `Ok(None)`
+            // on an unsplit home or when the owner's pen is not on this host.
+            match crate::node_key::anchor_agent_to_owner(&st.engine).await {
+                Ok(Some(pair)) => tracing::info!(
+                    pair_id = %pair,
+                    "first-run claim: agent anchored to owner (the actor is an occurrence of its human)"
+                ),
+                Ok(None) => tracing::info!(
+                    "first-run claim: no agent to anchor (not a split home, already anchored, or no owner pen on this host)"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "first-run claim: anchoring the agent to its owner FAILED (non-fatal) — the covering consent door retries"
+                ),
+            }
             (
                 StatusCode::CREATED,
                 Json(SetupRootResponse {

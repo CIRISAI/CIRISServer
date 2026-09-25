@@ -33,6 +33,9 @@
 //!      §5.6.8.8 binding metadata — pubkeys + device_class — and a peer must be
 //!      able to read it to resolve who-acts-for-whom; there is nothing secret to
 //!      gate, same posture as `GET /v1/federation/self-key-record`).
+//!      `include_revoked=true` adds the revoked ones (`revoked: true`); the
+//!      identity's own owner session also sees each device's `label`
+//!      (`crate::self_devices`, 0.5.216).
 
 use std::sync::Arc;
 
@@ -536,6 +539,11 @@ async fn revoke_occurrence(
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     identity_key_id: String,
+    /// `true` also lists REVOKED occurrences (each with `revoked: true`), so a
+    /// device-history page can show what was removed and when it was bound
+    /// (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2). Default: the active roster only.
+    #[serde(default)]
+    include_revoked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -550,49 +558,100 @@ struct OccurrenceView {
     hardware_attestation: Option<String>,
     /// RFC-3339 binding-asserted time.
     asserted_at: String,
+    /// `true` for an occurrence a revocation has taken out of the self. Only
+    /// ever `true` under `include_revoked=true`.
+    revoked: bool,
+    /// The owner's display label for this device (`POST /v1/self/occurrence/label`).
+    /// Returned ONLY to the identity's own owner session: the roster itself is
+    /// public binding metadata, the name a person gave their phone is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ListOccurrencesResponse {
     identity_key_id: String,
-    /// The currently-ACTIVE occurrences (admitted, not revoked) — the device list.
+    /// The currently-ACTIVE occurrences (admitted, not revoked) — the device list
+    /// — followed, under `include_revoked=true`, by the revoked ones.
     occurrences: Vec<OccurrenceView>,
+}
+
+fn occurrence_view(
+    o: IdentityOccurrence,
+    revoked: bool,
+    labels: &std::collections::HashMap<String, String>,
+) -> OccurrenceView {
+    OccurrenceView {
+        label: labels.get(&o.occurrence_key_id).cloned(),
+        occurrence_key_id: o.occurrence_key_id,
+        device_class: o.device_class,
+        has_encryption_pubkeys: o.encryption_pubkeys.is_some(),
+        hardware_attestation: o.hardware_attestation,
+        asserted_at: o.asserted_at.to_rfc3339(),
+        revoked,
+    }
 }
 
 async fn list_occurrences(
     State(st): State<OccurrenceState>,
+    headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
     let directory = st.engine.federation_directory();
-    match directory
+    let active = match directory
         .list_identity_occurrences_active(&q.identity_key_id)
         .await
     {
-        Ok(occs) => {
-            let occurrences = occs
-                .into_iter()
-                .map(|o| OccurrenceView {
-                    occurrence_key_id: o.occurrence_key_id,
-                    device_class: o.device_class,
-                    has_encryption_pubkeys: o.encryption_pubkeys.is_some(),
-                    hardware_attestation: o.hardware_attestation,
-                    asserted_at: o.asserted_at.to_rfc3339(),
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(ListOccurrencesResponse {
-                    identity_key_id: q.identity_key_id,
-                    occurrences,
-                }),
+        Ok(occs) => occs,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_identity_occurrences_active: {e}"),
             )
-                .into_response()
         }
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list_identity_occurrences_active: {e}"),
-        ),
+    };
+    // Labels are the OWNER's, and only the owner reads them.
+    let labels = match crate::family_api::owner_caller(&st.engine, &headers, true).await {
+        Ok(c) if c.owner_key_id == q.identity_key_id => {
+            crate::self_devices::labels_for(&st.engine, &c.owner_key_id).await
+        }
+        _ => std::collections::HashMap::new(),
+    };
+    let active_ids: std::collections::HashSet<String> =
+        active.iter().map(|o| o.occurrence_key_id.clone()).collect();
+    let mut occurrences: Vec<OccurrenceView> = active
+        .into_iter()
+        .map(|o| occurrence_view(o, false, &labels))
+        .collect();
+    if q.include_revoked {
+        let all = match directory
+            .list_identity_occurrences_for(&q.identity_key_id)
+            .await
+        {
+            Ok(all) => all,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_identity_occurrences_for: {e}"),
+                )
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        occurrences.extend(
+            all.into_iter()
+                .filter(|o| !active_ids.contains(&o.occurrence_key_id))
+                .filter(|o| seen.insert(o.occurrence_key_id.clone()))
+                .map(|o| occurrence_view(o, true, &labels)),
+        );
     }
+    (
+        StatusCode::OK,
+        Json(ListOccurrencesResponse {
+            identity_key_id: q.identity_key_id,
+            occurrences,
+        }),
+    )
+        .into_response()
 }
 
 /// The self-occurrence-enrollment router — merge onto the read-API listener

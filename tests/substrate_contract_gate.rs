@@ -65,7 +65,7 @@ const RATIFIED_VENDORED_MANIFEST_VERSION: &str = "0.3.0";
 // the grammar hash covers. Principles, restriction ops and audiences are
 // unchanged. Previous value b66870da… (v31.1.0 – v44.2.1).
 const RATIFIED_CONSENT_GRAMMAR_HASH: &str =
-    "ed2b0f2c8b5d3fc54450c180abce14f3d619074c24d5b8669663ff048d8bc482";
+    "07a677bbcdff236e2018f0786e8d9b0d0ef6b5b7cc2b871d41459e26ff8864a9";
 
 // ─────────────────────────── persist: transform algebra ────────────────────
 

@@ -163,6 +163,60 @@ pub async fn provision_engine_occurrence(
     Err("this Engine has no read-capable backend (expected SQLite or PostgreSQL)".into())
 }
 
+/// **The key this node's content-KEM occurrence is provisioned under — and
+/// therefore the key every file on this node must be OPENED as.**
+///
+/// One answer for both sides. The grant a seal wraps is addressed to an
+/// OCCURRENCE key id, and persist's read door authorizes the viewer by that id
+/// (`get_at_rest_grant(sha, viewer)` / `community_dek_has_member_grant(.., viewer)`).
+/// So the reader must present exactly the id the writer provisioned:
+///
+/// - on a single-identity install that is `engine.local_derived_key_id()`;
+/// - on an actor/node SPLIT install it is the WIRE node key, because that is
+///   the key the owner-binding names and [`provision_engine_occurrence`]
+///   provisions the occurrence under it (see `provision_with`).
+///
+/// Until 0.5.216 the drive opened as `engine.local_derived_key_id()` — the
+/// ACTOR on a split — and asked for a grant nothing had ever been wrapped to:
+/// every file a split node wrote read `not_granted` on the node that wrote it.
+pub async fn content_occurrence_key_id(engine: &Engine) -> Result<String, String> {
+    if let Some(wire) = crate::node_key::wire_identity() {
+        return Ok(wire.to_owned());
+    }
+    engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| format!("resolve this node's derived key id: {e:#}"))
+}
+
+/// How many LIVE `holds_bytes` claims name `sha` — the substrate's
+/// federation-discovery answer (`BlobStorage::list_holders`, CEG §10.1.2 TTL).
+///
+/// Behind this door because `list_holders` is a `BlobStorage` trait method with
+/// no `Engine` facade. For `self` / `family` bytes it is structurally ZERO:
+/// CC 5.2 — no holder claim is ever emitted at those scopes, so "how many of my
+/// devices hold it" is not something the substrate records. Callers report that
+/// rather than a misleading 0.
+pub async fn blob_holder_count(engine: &Engine, sha256: &[u8; 32]) -> Result<usize, String> {
+    use ciris_persist::federation::blobs::BlobStorage as _;
+    #[cfg(target_os = "linux")]
+    if let Some(pg) = engine.postgres_backend() {
+        return pg
+            .list_holders(sha256)
+            .await
+            .map(|h| h.len())
+            .map_err(|e| format!("list_holders: {e}"));
+    }
+    if let Some(sq) = engine.sqlite_backend() {
+        return sq
+            .list_holders(sha256)
+            .await
+            .map(|h| h.len())
+            .map_err(|e| format!("list_holders: {e}"));
+    }
+    Err("this Engine has no read-capable backend (expected SQLite or PostgreSQL)".into())
+}
+
 async fn provision_with<B>(
     engine: &Engine,
     backend: &B,
@@ -188,10 +242,18 @@ where
     // registered under. So when the wire identity differs we provision the
     // same keys under the key the binding actually names, through edge's
     // explicitly-targeted door.
+    //
+    // The choice is [`content_occurrence_key_id`]'s, and ONLY its: the drive
+    // opens files as that same key, so the writer of the occurrence and the
+    // reader of the grant cannot pick differently (CIRISServer 0.5.216 — they
+    // did: this function provisioned the wire key while `drive.rs` opened as
+    // `engine.local_derived_key_id()`, so a split node could not open its own
+    // files).
     let engine_key = engine.local_derived_key_id().await.ok();
-    let wire = crate::node_key::wire_identity().map(str::to_owned);
+    let occurrence = content_occurrence_key_id(engine).await?;
+    let wire = (engine_key.as_deref() != Some(occurrence.as_str())).then_some(occurrence);
     let (me, outcome) = match (&wire, &engine_key) {
-        (Some(w), Some(e)) if w != e => {
+        (Some(w), Some(e)) => {
             let kem = backend
                 .load_or_init_content_kem_identity()
                 .await
@@ -556,7 +618,7 @@ where
 /// `encryption_pubkeys` so a far node's DEK cascade can wrap to it. `None` when
 /// the Engine has no read-capable backend.
 pub async fn content_kem_pubkeys(
-    engine: &Arc<Engine>,
+    engine: &Engine,
 ) -> Result<Option<ciris_persist::federation::EncryptionPubkeys>, String> {
     use ciris_persist::federation::blobs::BlobStorage;
     let kem = {
