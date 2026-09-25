@@ -163,6 +163,44 @@ pub struct FileWriteResponse {
     pub withdrawn: Vec<String>,
 }
 
+/// The PLAINTEXT digest of an opened file, as lowercase hex SHA-256
+/// (CIRISServer#641; CC 5.3.2.5 "verify the full SHA-256 before handing bytes
+/// to any renderer"). This node opened the seal, so it can state the digest of
+/// what it hands over; the edge pointer's `content_sha256` is the AT-REST hash
+/// (the sealed blob or the chunk manifest) and never matches decrypted bytes.
+/// A digest SIGNED into the row itself needs edge's file row to carry it
+/// (CIRISEdge#638).
+fn plaintext_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// RFC 9530 `Repr-Digest` for a whole representation.
+fn repr_digest(bytes: &[u8]) -> Option<HeaderValue> {
+    use sha2::{Digest as _, Sha256};
+    HeaderValue::from_str(&format!(
+        "sha-256=:{}:",
+        base64_encode(&Sha256::digest(bytes))
+    ))
+    .ok()
+}
+
+/// The byte-state tokens, one word per fact, shared by every drive surface
+/// (`GET /v1/drive` `bytes`, `GET /v1/notes` `state`, the `drive.*` refusal
+/// ids). CIRISServer#644: a second surface picked a second word (`open`) for
+/// `here`, and a client correctly read the unknown word as "not here". A new
+/// surface adds to THIS list, never its own.
+pub const BYTE_STATE_HERE: &str = "here";
+pub const BYTE_STATES: &[&str] = &[
+    BYTE_STATE_HERE,
+    "not_fetched",
+    "not_granted",
+    "withdrawn",
+    "evicted",
+    "seal_mismatch",
+    "unopened",
+];
+
 #[derive(Debug, Serialize)]
 pub struct DriveEntry {
     /// The cohort this row was listed from (`self` | `family` | `community`).
@@ -244,6 +282,23 @@ pub struct DriveState {
 /// `{error, reason_id, detail}` — the refusal shape every route here answers
 /// (`FSD/ROSTER_AND_DRIVE_CRUD.md` §1 rule 6). `reason_id` IS the localization
 /// id; `error` carries the same value for clients written before 0.5.216.
+/// [`refuse`] with extra top-level fields (e.g. `declared` / `sniffed` on a
+/// format mismatch) — named so the localization guard sees the id it emits.
+fn refuse_with(
+    code: StatusCode,
+    error: &str,
+    detail: String,
+    extra: serde_json::Value,
+) -> Response {
+    let mut body = serde_json::json!({ "error": error, "reason_id": error, "detail": detail });
+    if let (Some(b), Some(x)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in x {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    (code, Json(body)).into_response()
+}
+
 fn refuse(code: StatusCode, error: &str, detail: String) -> Response {
     (
         code,
@@ -825,6 +880,49 @@ async fn publish_into(
     filename: Option<&str>,
     plane: Plane,
 ) -> Result<(files::PublishedFile, bool), Response> {
+    // THE WRITE GATE (CIRISServer#642, CC 3.3.13 / CC 5.3.2.6): the node is the
+    // first consumer of these bytes, and every peer inherits what this row
+    // says they are. The declared type must be an RFC 6838 essence the leading
+    // bytes agree with, and the name is display-only (RFC 6266 §4.3) — no path,
+    // no control or bidi characters. Every write door comes through here.
+    let essence = match crate::media_gate::check_format(media_type, bytes) {
+        Ok(e) => e,
+        Err(crate::media_gate::TypeRefusal::BadEssence(d)) => {
+            return Err(refuse(
+                StatusCode::BAD_REQUEST,
+                "drive.bad_media_type",
+                format!("{d:?} is not an RFC 6838 media type (type/subtype)"),
+            ))
+        }
+        Err(crate::media_gate::TypeRefusal::Mismatch { declared, sniffed }) => {
+            return Err(refuse_with(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "drive.format_mismatch",
+                format!(
+                    "declared {declared}, but the bytes are {sniffed} — a file must be what it \
+                     says it is (CC 5.3.2.6)"
+                ),
+                serde_json::json!({ "declared": declared, "sniffed": sniffed }),
+            ))
+        }
+    };
+    let clean_name = match filename {
+        None => None,
+        Some(raw) => match crate::media_gate::sanitize_filename(raw) {
+            Some((n, _)) => Some(n),
+            None => {
+                return Err(refuse(
+                    StatusCode::BAD_REQUEST,
+                    "drive.bad_filename",
+                    "nothing displayable is left of that filename once path components and \
+                     control / bidi characters are removed (RFC 6266 §4.3)"
+                        .into(),
+                ))
+            }
+        },
+    };
+    let media_type = essence.as_str();
+    let filename = clean_name.as_deref();
     ensure_owner_is_a_kem_target(st, owner_key_id).await;
     let addressed = addressed_or_warn(st, room, cohort);
     let capsule = author_capsule(st, headers, owner_key_id, plane).await?;
@@ -1712,7 +1810,7 @@ async fn read_drive(
         } else {
             match probe(&st, &file, &viewer).await {
                 ByteState::Here { size } => (
-                    "here".to_owned(),
+                    BYTE_STATE_HERE.to_owned(),
                     "the bytes are on this device".to_owned(),
                     size,
                 ),
@@ -1807,12 +1905,22 @@ async fn file_meta(
     } else {
         match probe(&st, &found.file, &viewer).await {
             ByteState::Here { size } => (
-                "here".to_owned(),
+                BYTE_STATE_HERE.to_owned(),
                 "the bytes are on this device".to_owned(),
                 size,
             ),
             ByteState::Absent { state, detail } => (state.to_owned(), detail, None),
         }
+    };
+    // The plaintext digest costs a whole read, so it is computed only here and
+    // on open — never per listed row — and only when the bytes are here.
+    let content_digest = if bytes == BYTE_STATE_HERE {
+        match open_whole(&st, &found, &viewer).await {
+            Ok((plain, _)) => Some(plaintext_digest(&plain)),
+            Err(_) => None,
+        }
+    } else {
+        None
     };
     // HOLDER CLAIMS: CC 5.2 — `self` / `family` bytes are never advertised, so
     // the substrate records no holder there and the count is not a count of
@@ -1839,6 +1947,13 @@ async fn file_meta(
             "size": size,
             "bytes": bytes,
             "detail": detail,
+            // The PLAINTEXT digest, when the bytes open here (CIRISServer#641).
+            "content_digest": content_digest,
+            "content_digest_alg": "sha-256",
+            // The AT-REST hash of the sealed blob / chunk manifest — NOT a digest
+            // of the file's bytes; a client must not verify plaintext against it.
+            "at_rest_sha256": found.file.pointer.content_sha256,
+            // Deprecated name for `at_rest_sha256`, kept for 0.5.216 readers.
             "content_sha256": found.file.pointer.content_sha256,
             "chunked": found.file.pointer.stream_id.is_some(),
             "tier": format!("{:?}", found.file.pointer.tier),
@@ -1969,6 +2084,9 @@ async fn read_file(
                     "attestation_id": found.file.attestation_id,
                     "media_type": found.file.media_type,
                     "filename": found.file.filename,
+                    "size": bytes.len(),
+                    "content_digest": plaintext_digest(&bytes),
+                    "content_digest_alg": "sha-256",
                     "bytes_base64": base64_encode(&bytes),
                 })),
             )
@@ -2013,7 +2131,12 @@ async fn read_file(
     };
     match ask {
         RangeAsk::Whole => match open_whole(&st, &found, &viewer).await {
-            Ok((bytes, _)) => (StatusCode::OK, h, bytes).into_response(),
+            Ok((bytes, _)) => {
+                if let Some(v) = repr_digest(&bytes) {
+                    h.insert(header::HeaderName::from_static("repr-digest"), v);
+                }
+                (StatusCode::OK, h, bytes).into_response()
+            }
             Err(e) => e,
         },
         RangeAsk::Unsatisfiable => {
@@ -2177,6 +2300,17 @@ async fn rename_file(
                 .into(),
         );
     }
+    // Same display-only rule as the write gate (CIRISServer#642).
+    let Some((clean, _)) = crate::media_gate::sanitize_filename(filename) else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "drive.bad_filename",
+            "nothing displayable is left of that filename once path components and control / \
+             bidi characters are removed (RFC 6266 §4.3)"
+                .into(),
+        );
+    };
+    let filename = clean.as_str();
     let (_, room) = match room_from_query(&st, &owner.key_id, &q).await {
         Ok(r) => r,
         Err(e) => return e,
@@ -2523,6 +2657,10 @@ pub struct Note {
     pub author_key_id: String,
     /// The note, when this device can open it; `None` with `state` saying why.
     pub body: Option<String>,
+    /// One of [`BYTE_STATES`] — the SAME words `GET /v1/drive` uses for the same
+    /// fact (CIRISServer#644: notes said `open` where the drive said `here`) —
+    /// plus `unreadable`, the one note-only fact: the bytes opened and are not
+    /// UTF-8 text.
     pub state: String,
     pub detail: String,
 }
@@ -2799,7 +2937,7 @@ async fn read_notes(
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(text) => (
                         Some(text),
-                        "open".to_owned(),
+                        BYTE_STATE_HERE.to_owned(),
                         "readable on this device".to_owned(),
                     ),
                     Err(_) => (
@@ -2835,6 +2973,12 @@ async fn read_notes(
         .into_response()
 }
 
+/// `GET /v1/media/policy` — this node's media render policy (CIRISServer#643),
+/// published ahead of the ingest pipeline (#614). See [`crate::media_gate::policy`].
+async fn media_policy() -> Response {
+    (StatusCode::OK, Json(crate::media_gate::policy())).into_response()
+}
+
 pub fn router(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
@@ -2860,6 +3004,9 @@ pub fn router(
     Router::new()
         .route("/v1/files", post(write_file).layer(upload_limit))
         .route("/v1/drive", get(read_drive))
+        // Public: a node's render policy is what its clients need BEFORE they
+        // hold a session, and it discloses nothing about anyone (#643).
+        .route("/v1/media/policy", get(media_policy))
         .route(
             "/v1/files/{attestation_id}",
             get(read_file)

@@ -678,7 +678,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// every one is on `tools/check_server_localization.py`'s KNOWN_UNLOCALIZED
     /// debt list and in the FSD for the client release. Lower it back when the
     /// client bundle carries them.
-    const MAX_UNCOVERED: usize = 99;
+    ///
+    /// 99 -> 102 for 0.5.217: the drive write gate's `drive.bad_media_type`,
+    /// `drive.format_mismatch` and `drive.bad_filename` (CIRISServer#642) — same
+    /// reason, same list, same client issue (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 102;
 
     let en = load_en();
     let ids = scraped_server_ids();

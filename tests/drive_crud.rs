@@ -1166,3 +1166,178 @@ async fn notes_edit_and_delete() {
     let (s, v) = fx.delete("/v1/notes/file-nope").await;
     assert_eq!((s, reason(&v)), (404, "notes.not_found"), "{v}");
 }
+
+// ─── 0.5.217: the write gate, one byte-state vocabulary, digests, policy ────
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// CIRISServer#642 — a file must be what it says it is, and its name is
+/// display-only. Every refusal id, and the cleanup that is not a refusal.
+#[tokio::test]
+async fn the_write_gate_refuses_a_lie_and_cleans_a_name() {
+    let fx = fixture().await;
+    let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    let post = |media: &str, name: Option<&str>, bytes: &[u8]| {
+        let mut body = serde_json::json!({
+            "cohort": "self", "bytes_base64": b64(bytes), "media_type": media,
+        });
+        if let Some(n) = name {
+            body["filename"] = serde_json::json!(n);
+        }
+        body
+    };
+
+    // Not an RFC 6838 essence.
+    let (s, v) = fx.post("/v1/files", post("jpeg", None, &jpeg)).await;
+    assert_eq!((s, reason(&v)), (400, "drive.bad_media_type"), "{v}");
+
+    // JPEG bytes declared PNG: 415, naming both.
+    let (s, v) = fx.post("/v1/files", post("image/png", None, &jpeg)).await;
+    assert_eq!((s, reason(&v)), (415, "drive.format_mismatch"), "{v}");
+    assert_eq!(v["declared"], "image/png");
+    assert_eq!(v["sniffed"], "image/jpeg");
+
+    // An executable declared as a PDF.
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            post("application/pdf", None, b"MZ\x90\x00\x03"),
+        )
+        .await;
+    assert_eq!((s, reason(&v)), (415, "drive.format_mismatch"), "{v}");
+
+    // Binary declared as text.
+    let (s, v) = fx
+        .post("/v1/files", post("text/plain", None, b"a\0b"))
+        .await;
+    assert_eq!((s, reason(&v)), (415, "drive.format_mismatch"), "{v}");
+
+    // A name that is nothing but a bidi override.
+    let (s, v) = fx
+        .post("/v1/files", post("text/plain", Some("\u{202E}"), b"hi"))
+        .await;
+    assert_eq!((s, reason(&v)), (400, "drive.bad_filename"), "{v}");
+
+    // Honest: a JPEG declared JPEG (case and parameters normalised), with a
+    // bidi-spoofed, path-carrying name that is CLEANED, not refused.
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            post(
+                "Image/JPEG; q=1",
+                Some("../x/invoice\u{202E}gpj.exe"),
+                &jpeg,
+            ),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let (_, drive) = fx.get("/v1/drive?cohort=self").await;
+    let row = drive["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["attestation_id"] == id.as_str())
+        .expect("listed");
+    assert_eq!(row["filename"], "invoicegpj.exe", "path and bidi removed");
+    assert_eq!(
+        row["media_type"], "image/jpeg",
+        "the stored type is the essence"
+    );
+
+    // Rename runs the same cleanup.
+    let (s, v) = fx
+        .post(
+            &format!("/v1/files/{id}/rename?cohort=self"),
+            serde_json::json!({ "filename": "a/b/\u{200B}new\u{202E}.jpg" }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let renamed = v["attestation_id"].as_str().expect("new id").to_owned();
+    let (_, meta) = fx
+        .get(&format!("/v1/files/{renamed}/meta?cohort=self"))
+        .await;
+    assert_eq!(meta["filename"], "new.jpg", "{meta}");
+}
+
+/// CIRISServer#641 — the node states the PLAINTEXT digest of what it hands
+/// over (CC 5.3.2.5), on open and on meta, and names the at-rest hash for what
+/// it is. CIRISServer#644 — notes use the drive's word for the same fact.
+#[tokio::test]
+async fn digests_are_of_the_plaintext_and_notes_say_here() {
+    use sha2::{Digest as _, Sha256};
+    let fx = fixture().await;
+    let text = b"verify me before you render me".to_vec();
+    let want = hex::encode(Sha256::digest(&text));
+    let id = fx.upload_self(&text, Some("v.txt"), "text/plain").await;
+
+    let (s, v) = fx.get(&format!("/v1/files/{id}?cohort=self")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["content_digest"], want.as_str());
+    assert_eq!(v["content_digest_alg"], "sha-256");
+    assert_eq!(v["size"], text.len());
+
+    let (s, meta) = fx.get(&format!("/v1/files/{id}/meta?cohort=self")).await;
+    assert_eq!(s, 200, "{meta}");
+    assert_eq!(meta["content_digest"], want.as_str());
+    assert_ne!(
+        meta["at_rest_sha256"],
+        want.as_str(),
+        "the at-rest hash is of the SEALED blob, never the plaintext"
+    );
+
+    let raw = fx
+        .client
+        .get(format!("{}/v1/files/{id}?cohort=self&raw=1", fx.base))
+        .bearer_auth(&fx.owner)
+        .send()
+        .await
+        .expect("raw GET");
+    let rd = raw
+        .headers()
+        .get("repr-digest")
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned)
+        .expect("Repr-Digest on a whole raw read");
+    assert_eq!(rd, format!("sha-256=:{}:", b64(&Sha256::digest(&text))));
+
+    let (s, _) = fx
+        .post("/v1/notes", serde_json::json!({ "body": "a note" }))
+        .await;
+    assert_eq!(s, 200);
+    let (_, notes) = fx.get("/v1/notes").await;
+    let states: Vec<&str> = notes["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .filter_map(|n| n["state"].as_str())
+        .collect();
+    assert!(
+        !states.is_empty() && states.iter().all(|s| *s == "here"),
+        "a readable note says `here`, like the drive: {states:?}"
+    );
+}
+
+/// CIRISServer#643 — the policy is public and says no rendition will come.
+#[tokio::test]
+async fn the_media_policy_is_published() {
+    let fx = fixture().await;
+    let resp = fx
+        .client
+        .get(format!("{}/v1/media/policy", fx.base))
+        .send()
+        .await
+        .expect("policy GET without a session");
+    assert_eq!(resp.status().as_u16(), 200);
+    let v: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(v["renditions"], false);
+    assert_eq!(v["tier_a"]["image/jpeg"]["max_pixels"], 33_000_000);
+    assert!(v["tier_b_convert_at_sender"]
+        .as_array()
+        .expect("tier b")
+        .iter()
+        .any(|t| t == "image/heic"));
+}

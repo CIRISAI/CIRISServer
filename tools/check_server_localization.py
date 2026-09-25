@@ -805,6 +805,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "drive.bad_body",
     "drive.bad_cursor",
     "drive.bad_move_target",
+    # THE WRITE GATE (0.5.217, CIRISServer#642): a file must be what it says it
+    # is, and its name is display-only. Queued for the client bundle beside the
+    # drive CRUD ids (CIRISClient#78).
+    "drive.bad_filename",
+    "drive.bad_media_type",
+    "drive.format_mismatch",
     "drive.delegate_may_not_author",
     "drive.evicted",
     "drive.filename_empty",
