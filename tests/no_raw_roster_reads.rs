@@ -31,6 +31,66 @@ use std::path::{Path, PathBuf};
 /// `(file under src/, enclosing fn, receiver expression, why it is allowed)`.
 const ALLOWED: &[(&str, &str, &str, &str)] = &[
     (
+        "src/family_api.rs",
+        "create_family",
+        "req",
+        "REQUEST VALIDATION: the members the caller asked to found the family with, checked for registration before any record exists",
+    ),
+    (
+        "src/family_api.rs",
+        "add_member",
+        "grown",
+        "RECORD CONSTRUCTION: the grown record this handler signs and submits (families have no widening plane at persist v48; the record IS how a family grows)",
+    ),
+    (
+        "src/family_api.rs",
+        "check_addable",
+        "loaded.family",
+        "REFUSES A RE-ADD ONLY: a key already on the record is refused (`family.already_member` / `family.readd_unsupported`); membership itself is decided through the fold",
+    ),
+    (
+        "src/family_api.rs",
+        "leave_inner",
+        "loaded.family",
+        "RECORD CONSTRUCTION: a quorum family's record is rewritten minus the leaver so verify's prior-roster binding (persist builds it from the record, not the fold) stays satisfiable",
+    ),
+    (
+        "src/family_api.rs",
+        "leave_inner",
+        "next",
+        "RECORD CONSTRUCTION: the rewritten roster assigned to the record being signed",
+    ),
+    (
+        "src/family_api.rs",
+        "change_role",
+        "next",
+        "RECORD CONSTRUCTION: setting the role on the record being signed",
+    ),
+    (
+        "src/family_api.rs",
+        "terminal_dissolve",
+        "next",
+        "RECORD CONSTRUCTION: the empty roster of the terminal supersede",
+    ),
+    (
+        "src/family_api.rs",
+        "change_envelope",
+        "loaded.family",
+        "VERIFY'S BINDING: `supersedes.prior_member_key_ids` must equal the RECORD's roster in order; a quorum family's record is kept equal to its fold",
+    ),
+    (
+        "src/family_api.rs",
+        "assemble",
+        "loaded.family",
+        "VERIFY'S BINDING: joined_at of an envelope member is read from the record the quorum verifies against",
+    ),
+    (
+        "src/family_api.rs",
+        "assemble",
+        "next",
+        "RECORD CONSTRUCTION: the assembled roster assigned to the record being signed",
+    ),
+    (
         "src/accord.rs",
         "family_supersede",
         "new.family",
