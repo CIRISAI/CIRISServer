@@ -861,6 +861,25 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "self.release_incomplete",
     "self.release_self_requires_force",
     "self.store_unavailable",
+    # THE CONTACT FLOW (0.5.218) — same queue as the planes above, requested of
+    # the client with their English (CIRISClient#78): the person's contact code
+    # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
+    # custody this host cannot honour (#639).
+    "self.contact_code_key_not_derived",
+    "self.contact_code_no_pqc_half",
+    "self.contact_code_not_a_person",
+    "self.contact_code_owner_key_absent",
+    "self.contact_code_unencodable",
+    "self.node_not_announced",
+    "self.associate.hardware_custody_unavailable",
+    "consent.author_signer_unavailable",
+    "consent.delegate_may_not_withdraw",
+    "consent.grant_not_live",
+    "consent.grant_not_owner_authored",
+    "consent.malformed_body",
+    "consent.store_unavailable",
+    "consent.withdraw_failed",
+    "contacts.not_a_contact",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

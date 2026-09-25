@@ -2305,6 +2305,308 @@ async fn add_contact(
         .into_response()
 }
 
+// ─── Withdrawing consent (CIRISServer#657) ──────────────────────────────────
+//
+// CC 1.5: consent that cannot be withdrawn is not consent. A contact IS a live
+// `consent:replication` grant, and until 0.5.218 nothing in this repo could
+// withdraw one — the read side already folded `withdraws`, and no route wrote
+// it. Two doors, one mechanism:
+//
+//   * `DELETE /v1/contacts/{key_id}` — un-contact a PERSON: every live grant
+//     this node's owner authored for them (their person key, and each node they
+//     are bound to, which is where #472 aims a routable grant).
+//   * `POST /v1/federation/peering/revoke {attestation_id}` — withdraw ONE grant
+//     by id, whatever peer it names (the manage-consent card's Revoke).
+//
+// The `withdraws` is AUTHORED BY THE OWNER, with the owner's own pen through the
+// capsule — never the node's key. Consent is the human's act (CIRISServer#599),
+// so its withdrawal is too; and a grant is withdrawn only by its author, so a
+// grant the MACHINE authored (the provisional pre-claim row the owner migration
+// re-signs) is not one the owner can withdraw here, and is refused by name
+// rather than withdrawn by the node on the owner's behalf.
+
+/// Sign and store the owner's `withdraws` of each grant. Returns one
+/// `{grant, withdraws, cohort_scope}` per grant, in order.
+async fn withdraw_owner_grants(
+    st: &ChatState,
+    capsule: &crate::owner_signer_capsule::OwnerSignerCapsule,
+    grants: &[ciris_persist::federation::types::Attestation],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut out = Vec::with_capacity(grants.len());
+    for g in grants {
+        // At the GRANT's own audience, so every node that holds the grant can
+        // hold its withdrawal. Attested TO the peer the grant names but with no
+        // subject: the owner is the grant's producer, not a subject revoking
+        // someone else's claim (`attest::Spec::attested_to`).
+        let spec = crate::attest::Spec::new(
+            ciris_persist::federation::types::attestation_type::WITHDRAWS,
+            g.cohort_scope.clone(),
+            ciris_persist::federation::withdraws_attestation_envelope(
+                &g.attestation_id,
+                &g.attestation_type,
+            ),
+        )
+        .attested_to(&g.attested_key_id);
+        let id = crate::self_devices::emit_as_owner(&st.engine, capsule, spec)
+            .await
+            .map_err(|e| format!("withdraws({}): {e}", g.attestation_id))?;
+        out.push(serde_json::json!({
+            "grant": g.attestation_id,
+            "withdraws": id,
+            "cohort_scope": g.cohort_scope,
+        }));
+    }
+    Ok(out)
+}
+
+/// A grant the NODE authored is not the owner's to withdraw, and the node will
+/// not withdraw consent as itself. One sentence for both doors.
+fn machine_authored_refusal(grants: Vec<String>) -> Response {
+    crate::auth::refusal::refuse_with(
+        StatusCode::CONFLICT,
+        "consent.grant_not_owner_authored",
+        "that consent was authored by the node, not by you (a provisional grant from before \
+         this node was claimed). The owner migration re-signs it as yours; the node will not \
+         withdraw consent on your behalf",
+        serde_json::json!({ "grants": grants }),
+    )
+}
+
+/// The owner's pen for a withdrawal, or the refusal saying why not.
+async fn withdrawal_pen(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+) -> Result<crate::owner_signer_capsule::OwnerSignerCapsule, Response> {
+    crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer_of(headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    .map_err(|e| match e {
+        crate::owner_signer_capsule::CapsuleRefusal::Delegated => refuse(
+            StatusCode::FORBIDDEN,
+            "consent.delegate_may_not_withdraw",
+            "a delegated session may not withdraw the owner's consent — the withdrawal is \
+             signed with the owner's own key",
+        ),
+        other => refuse(
+            StatusCode::FORBIDDEN,
+            "consent.author_signer_unavailable",
+            format!(
+                "withdrawing consent is signed by the person who gave it, and this node \
+                 cannot wield that identity right now: {other}"
+            ),
+        ),
+    })
+}
+
+/// `DELETE /v1/contacts/{key_id}` — un-contact a person.
+async fn remove_contact(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    axum::extract::Path(key_id): axum::extract::Path<String>,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    // The same verb that ADDS a contact: a gate is only as narrow as its
+    // widest route, and withdrawing is the other half of the same object.
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::Peer,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
+    let key_id = key_id.trim().to_owned();
+    // Every subject a grant FOR this person may name: the person, and the nodes
+    // they are bound to (#472 aims a routable grant at the node).
+    let mut subjects = match crate::peer::bound_nodes_of(&st.engine, &key_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "contacts.store_unavailable",
+                format!("resolve {key_id}'s nodes: {e:#}"),
+            )
+        }
+    };
+    subjects.push(key_id.clone());
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let mut seen = std::collections::HashSet::new();
+    let naming: Vec<_> = grants
+        .into_iter()
+        .filter(|g| g.subject_key_ids.iter().any(|s| subjects.contains(s)))
+        .filter(|g| seen.insert(g.attestation_id.clone()))
+        .collect();
+    if naming.is_empty() {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "contacts.not_a_contact",
+            format!("{key_id} is not a contact here — no live consent grant names them"),
+        );
+    }
+    let (mine, machine): (Vec<_>, Vec<_>) = naming
+        .into_iter()
+        .partition(|g| g.attesting_key_id == owner.key_id);
+    if mine.is_empty() {
+        return machine_authored_refusal(
+            machine.iter().map(|g| g.attestation_id.clone()).collect(),
+        );
+    }
+    let capsule = match withdrawal_pen(&st, &headers, &owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let withdrawn = match withdraw_owner_grants(&st, &capsule, &mine).await {
+        Ok(w) => w,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "consent.withdraw_failed",
+                format!("the withdrawal could not be stored: {e}"),
+            )
+        }
+    };
+    // THE WITNESS, read back rather than assumed: persist's own fold.
+    let still: Vec<String> =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g
+                .into_iter()
+                .filter(|g| g.subject_key_ids.iter().any(|s| subjects.contains(s)))
+                .map(|g| g.attestation_id)
+                .collect(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("re-read the consent peer set: {e:#}"),
+                )
+            }
+        };
+    tracing::info!(
+        owner = %owner.key_id,
+        contact = %key_id,
+        withdrawn = withdrawn.len(),
+        remaining = still.len(),
+        "contacts: the owner withdrew their consent to a contact (CIRISServer#657)"
+    );
+    let _ = crate::compose::kick_replication("contacts:remove");
+    Json(serde_json::json!({
+        "key_id": key_id,
+        "withdrawn": withdrawn,
+        // Grants still live for this person after the withdrawal: machine-
+        // authored provisional rows the owner cannot withdraw here. Empty means
+        // the person is no longer a contact.
+        "remaining_grants": still,
+        "contact": !still.is_empty(),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeGrantRequest {
+    /// The `consent:replication` grant to withdraw (`consent_attestation_id` on
+    /// a contact, `attestation_id` on a peering).
+    attestation_id: String,
+}
+
+/// `POST /v1/federation/peering/revoke` — withdraw one replication grant.
+async fn revoke_grant(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::Peer,
+        "consent.delegation_denied",
+    ) {
+        return resp;
+    }
+    let req: RevokeGrantRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "consent.malformed_body",
+                format!("expected {{\"attestation_id\": \"…\"}}: {e}"),
+            )
+        }
+    };
+    let id = req.attestation_id.trim().to_owned();
+    // A LIVE grant for this node — the same fold the contacts list and the
+    // replication send-set read. A withdrawn grant, a grant for another machine,
+    // or an id that is not a grant at all are one answer: nothing here to revoke.
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "consent.store_unavailable",
+                    format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let Some(grant) = grants.into_iter().find(|g| g.attestation_id == id) else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "consent.grant_not_live",
+            format!("{id} is not a live replication grant for this node"),
+        );
+    };
+    if grant.attesting_key_id != owner.key_id {
+        return machine_authored_refusal(vec![grant.attestation_id]);
+    }
+    let capsule = match withdrawal_pen(&st, &headers, &owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let withdrawn = match withdraw_owner_grants(&st, &capsule, std::slice::from_ref(&grant)).await {
+        Ok(w) => w,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "consent.withdraw_failed",
+                format!("the withdrawal could not be stored: {e}"),
+            )
+        }
+    };
+    tracing::info!(
+        owner = %owner.key_id,
+        grant = %id,
+        peers = ?grant.subject_key_ids,
+        "consent: the owner withdrew a replication grant (CIRISServer#657)"
+    );
+    let _ = crate::compose::kick_replication("consent:revoke");
+    Json(serde_json::json!({
+        "attestation_id": id,
+        "peer_key_ids": grant.subject_key_ids,
+        "withdraws": withdrawn[0]["withdraws"],
+        "cohort_scope": grant.cohort_scope,
+    }))
+    .into_response()
+}
+
 // ─── POST /v1/chat ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -3940,6 +4242,18 @@ pub fn router(
         .route(
             "/v1/contacts",
             axum::routing::get(list_contacts).post(add_contact),
+        )
+        .route(
+            "/v1/contacts/{key_id}",
+            axum::routing::delete(remove_contact),
+        )
+        // CIRISServer#657 — withdraw one consent:replication grant by id. Here,
+        // not in `federation_admin`, because a withdrawal is signed with the
+        // OWNER's pen and this router holds the owner-seed location the capsule
+        // needs; `federation_admin` authors nothing as the owner.
+        .route(
+            "/v1/federation/peering/revoke",
+            axum::routing::post(revoke_grant),
         )
         .route("/v1/chat", axum::routing::post(start_chat))
         .route(

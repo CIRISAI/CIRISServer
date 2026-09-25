@@ -178,33 +178,61 @@ class Ui:
         return False
 
 
-def node_code(read_api_port: int) -> str:
-    """One side's node code — the identifier a person hands over out of band.
+def contact_code(read_api_port: int, username: str, password: str) -> str:
+    """One side's CONTACT code — the string a person hands over out of band.
 
-    Read over HTTP here, which is what a person does by reading it off their own
-    screen. The out-of-band part is not the transport; it is that the OTHER side
-    learns it from the person rather than from the federation. That distinction
-    is the design, and CIRISServer#524 §6.3 rules it:
+    A PERSON's v3 fedcode (CIRISServer#673), from `GET /v1/self/contact-code`
+    under the owner's own session: their fed-ID key, the commitment to its
+    ML-DSA-65 half, and — by default, as used here — every node they ANNOUNCED,
+    each with the transport key a destination derives from. Pasted into the
+    other side's contact field, it resolves with no directory at all (edge's
+    `ReadyFromCode`). The node code this stage used to read is the wrong input:
+    a node cannot consent, and its owner is unknown to the adder, so the contact
+    ladder refuses it (`contacts.unresolvable` / `NotContactable`) — which is
+    exactly where the runner stopped before this route existed.
 
-        "Stranger contact is meant to start from a nodecode, not a directory
-         lookup. You hand out an identifier out-of-band, the peer dials that
-         specific node (which serves its own record), and consent follows.
-         Building 'search the federation for a person' on top of `discover` will
-         work only for people you already have a consented relationship with —
-         that is the boundary, not a gap to route around."
+    Read over HTTP here, as READ-ONLY EVIDENCE, the same way the runner read the
+    node code: what a person does by reading it off their own screen. The
+    out-of-band part is not the transport; it is that the OTHER side learns it
+    from the person rather than from the federation (CIRISServer#524 §6.3:
+    "Stranger contact is meant to start from a nodecode, not a directory
+    lookup … You hand out an identifier out-of-band").
 
-    An earlier revision of this driver waited for discovery to deliver the peer's
-    fed-id and called that wait a blocked stage. It was not blocked: it asked the
-    substrate for an address-book lookup it refuses by design, because answering
-    a third-party probe "would make a body-holding server an address-book oracle
-    for records it never advertised" (§6.1).
+    TODO(client): once the client renders this code on its identity card, read
+    it off the UI instead (the card's text / QR payload) so the stage exercises
+    what a person actually copies. Until then the owner session is minted with
+    the same local credentials the wizard stage set.
     """
-    url = f"http://127.0.0.1:{read_api_port}/v1/federation/node-code"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        payload = json.loads(r.read().decode())
+    base = f"http://127.0.0.1:{read_api_port}"
+    login_req = urllib.request.Request(
+        f"{base}/v1/auth/login",
+        data=json.dumps({"username": username, "password": password}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(login_req, timeout=10) as r:
+        token = json.loads(r.read().decode()).get("access_token") or ""
+    if not token:
+        raise UiError(f"no owner session at :{read_api_port} for {username!r}")
+    req = urllib.request.Request(
+        f"{base}/v1/self/contact-code",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            payload = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise UiError(
+            f"contact code at :{read_api_port} refused {e.code}: {e.read().decode(errors='replace')}"
+        ) from e
     code = payload.get("code") or ""
     if not code:
-        raise UiError(f"no node code at :{read_api_port} — payload keys {sorted(payload)}")
+        raise UiError(f"no contact code at :{read_api_port} — payload keys {sorted(payload)}")
+    log(
+        "handoff",
+        f":{read_api_port} code carries {len(payload.get('included_nodes') or [])} node(s) "
+        f"of {len(payload.get('available_nodes') or [])} announced",
+    )
     return code
 
 
@@ -624,8 +652,9 @@ def main() -> int:
         # entirely — node-to-node delivery wearing a person-to-person label. The
         # fed-id being absent is the DEFECT, so it is waited for and then
         # reported, never substituted.
-        # THE OUT-OF-BAND HAND-OFF. Each side gets the other's node code the way a
-        # person would — handed over, not discovered. The harness carrying the
+        # THE OUT-OF-BAND HAND-OFF. Each side gets the other's CONTACT code (the
+        # person's v3 fedcode, CIRISServer#673) the way a person would — handed
+        # over, not discovered. The harness carrying the
         # string between the two UIs IS the out-of-band channel.
         #
         # The code goes straight into the CONTACT field: it takes a code or a
@@ -633,8 +662,9 @@ def main() -> int:
         # that looks like one (NetworkPeers' btn_add_peer) posts
         # /v1/setup/claim-remote with cohort=self — claiming a node as your own,
         # which is a different act entirely.
-        print("── exchange node codes (the stranger-contact entry) ──")
-        a_code, b_code = node_code(args.a_api), node_code(args.b_api)
+        print("── exchange contact codes (the stranger-contact entry) ──")
+        a_code = contact_code(args.a_api, "qaowner-a", "QaHarness!2026")
+        b_code = contact_code(args.b_api, "qaowner-b", "QaHarness!2026")
         log("handoff", f"A code {a_code[:24]}…   B code {b_code[:24]}…")
 
         print("── contact + consent, through the UI ──")

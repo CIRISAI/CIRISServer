@@ -687,7 +687,19 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `self.announce_refused` of `POST /v1/self/nodes/{node}/announce`
     /// (CIRISServer#678) — same reason, same list, same client issue
     /// (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 104;
+    ///
+    /// 102 -> 117 for 0.5.218, the contact flow — same reason, same list, same
+    /// client issue (CIRISClient#78): the contact code's
+    /// `self.contact_code_{owner_key_absent,not_a_person,key_not_derived,
+    /// no_pqc_half,unencodable}` and `self.node_not_announced` (CIRISServer#673);
+    /// withdrawing consent's `consent.{author_signer_unavailable,
+    /// delegate_may_not_withdraw,grant_not_live,grant_not_owner_authored,
+    /// malformed_body,store_unavailable,withdraw_failed}` and
+    /// `contacts.not_a_contact` (#657); and
+    /// `self.associate.hardware_custody_unavailable` (#639).
+    ///
+    /// Both 0.5.218 raises together: 102 + 2 + 15 = 119.
+    const MAX_UNCOVERED: usize = 119;
 
     let en = load_en();
     let ids = scraped_server_ids();

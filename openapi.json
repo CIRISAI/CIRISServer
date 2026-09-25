@@ -13484,11 +13484,11 @@
           "self"
         ],
         "summary": "List a self's device keys",
-        "description": "Public binding metadata. `include_revoked=true` adds revoked devices (`revoked: true`); the identity's own owner session also sees each device's `label`.",
+        "description": "Who sees what (CIRISServer#655): the identity's own owner session sees every device, with each device's `label`. Anyone else sees ONLY the occurrences that are nodes the owner ANNOUNCED (a federation-scope owner-binding; announce is per node), and an owner with none announced gets the same empty answer as an unknown identity. `include_revoked=true` adds revoked devices (`revoked: true`) within the same audience.",
         "operationId": "list_occurrences_v1_self_occurrences_get",
         "responses": {
           "200": {
-            "description": "`{identity_key_id, occurrences: [{occurrence_key_id, device_class, has_encryption_pubkeys, asserted_at, revoked, label?}]}`",
+            "description": "`{identity_key_id, audience: owner|public, occurrences: [{occurrence_key_id, device_class, has_encryption_pubkeys, asserted_at, revoked, label?}]}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -13530,6 +13530,291 @@
               "application/json": {
                 "schema": {
                   "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/self/contact-code": {
+      "get": {
+        "tags": [
+          "self"
+        ],
+        "summary": "Your contact code (text + QR)",
+        "description": "The owner's CURRENT v3 fedcode (CIRISServer#673): their fed-ID key, the commitment to its ML-DSA-65 half, and \u2014 by the person's choice \u2014 some of their ANNOUNCED nodes, each with the transport key a destination derives from. Pasted into `POST /v1/contacts` on another node it resolves with no directory (`source: direct`); with no nodes it resolves through the public directory (`source: federation`). `qr_payload` is the SAME code in verify's ungrouped QR form (`encode_qr`). Owner session (a delegated session may read it).",
+        "operationId": "contact_code_v1_self_contact_code_get",
+        "parameters": [
+          {
+            "name": "nodes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Absent: every announced node. `none`: no nodes. Otherwise a comma-separated list of announced node key ids \u2014 exactly those."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{key_id, code, qr_payload, format, ml_dsa_65_pubkey_sha256, available_nodes: [{node_key_id, announced, has_transport, this_node, label?}], included_nodes: [{key_id, transport_pubkey_ed25519_base64}], nodes_without_transport, reachable_without_directory}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 self.node_not_announced, self.bad_request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 self.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 self.owner_session_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 self.contact_code_owner_key_absent, self.contact_code_not_a_person, self.contact_code_key_not_derived, self.contact_code_no_pqc_half, self.contact_code_unencodable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 self.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contacts/{key_id}": {
+      "delete": {
+        "tags": [
+          "contacts"
+        ],
+        "summary": "Remove a contact (withdraw your consent)",
+        "description": "Un-contact a person (CIRISServer#657): the owner's signed `withdraws` of every live `consent:replication` grant they authored for that person (their fed-ID and each node bound to them), signed with the owner's own pen \u2014 never the node's key. A grant the node authored (provisional, pre-claim) is refused `consent.grant_not_owner_authored` rather than withdrawn on the owner's behalf. `remaining_grants` lists any grant still live afterwards; `contact: false` means the person is no longer a contact.",
+        "operationId": "remove_contact_v1_contacts__key_id__delete",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{key_id, withdrawn: [{grant, withdraws, cohort_scope}], remaining_grants, contact}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 auth.owner_gate.missing_bearer, auth.owner_gate.invalid_session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 auth.owner_gate.not_owner, auth.owner_gate.node_unowned, contacts.delegation_denied, consent.delegate_may_not_withdraw, consent.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 contacts.not_a_contact",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 consent.grant_not_owner_authored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Refusal \u2014 consent.withdraw_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 contacts.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/federation/peering/revoke": {
+      "post": {
+        "tags": [
+          "federation"
+        ],
+        "summary": "Withdraw one replication grant",
+        "description": "Withdraw a live `consent:replication` grant by `attestation_id` (CIRISServer#657): the owner's signed `withdraws`, authored with the owner's own pen, at the grant's own cohort_scope. CC 1.5: consent that cannot be withdrawn is not consent. A grant the node authored is refused by name.",
+        "operationId": "revoke_grant_v1_federation_peering_revoke_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "attestation_id"
+                ],
+                "properties": {
+                  "attestation_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`{attestation_id, peer_key_ids, withdraws, cohort_scope}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Refusal \u2014 consent.malformed_body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refusal \u2014 auth.owner_gate.missing_bearer, auth.owner_gate.invalid_session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refusal \u2014 auth.owner_gate.not_owner, auth.owner_gate.node_unowned, consent.delegation_denied, consent.delegate_may_not_withdraw, consent.author_signer_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Refusal \u2014 consent.grant_not_live",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refusal \u2014 consent.grant_not_owner_authored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Refusal \u2014 consent.withdraw_failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Refusal \u2014 consent.store_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StableRefusal"
                 }
               }
             }

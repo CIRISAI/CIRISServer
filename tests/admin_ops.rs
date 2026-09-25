@@ -1973,6 +1973,43 @@ async fn tier_s_takes_the_owners_own_authority_and_no_one_elses() {
     );
 }
 
+/// CIRISServer#676 — the standing read names the delegation ids a client can
+/// take a tier S act under: exactly the owner-issued `infra:serve` grants to
+/// this node. The fixture's third-party serve grant (right scope, wrong issuer)
+/// and its `slash` grants are NOT offered; the owner-binding is, and an act
+/// taken under the id the read returned succeeds.
+#[tokio::test]
+async fn tier_s_the_standing_read_names_the_owners_serve_delegations() {
+    let f = fixture().await;
+    let (status, json) = get(&f, "/v1/admin/self").await;
+    assert_eq!(status, 200, "{json}");
+    assert!(json["owner_delegations_error"].is_null(), "{json}");
+    let offered: Vec<&str> = json["owner_delegations"]
+        .as_array()
+        .expect("owner_delegations")
+        .iter()
+        .map(|d| d["delegation_id"].as_str().expect("delegation_id"))
+        .collect();
+    assert_eq!(offered, vec![f.owner_binding.as_str()], "{json}");
+    for not_offered in [&f.serve_not_owner, &f.slash_a, &f.review_only] {
+        assert!(!offered.contains(&not_offered.as_str()), "{json}");
+    }
+    let d = &json["owner_delegations"][0];
+    assert_eq!(d["subject_key_id"], f.node_key.as_str());
+    assert_eq!(d["scope"], "infra:serve");
+    assert_eq!(d["owner_binding"], true);
+
+    // The id the read returned is one the act accepts.
+    let (status, act) = post(
+        &f,
+        "/v1/admin/self/shed",
+        &self_commit(offered[0], "shedding, under the id the read offered"),
+    )
+    .await;
+    assert_eq!(status, 200, "{act}");
+    assert_eq!(act["delegation_id"], f.owner_binding);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Tier R — subject-side / per-reader
 // ═══════════════════════════════════════════════════════════════════════════

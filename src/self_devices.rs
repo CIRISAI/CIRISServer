@@ -1,6 +1,6 @@
 //! **The owner's own devices** (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2).
 //!
-//! Two routes the self-device surface lacked:
+//! Three routes the self-device surface lacked:
 //!
 //! - `POST /v1/self/nodes/{node_key_id}/release` — the owner lets a node go.
 //!   Ownership IS a row: the owner-binding `delegates_to(user → node, infra:*)`
@@ -19,6 +19,10 @@
 //!   [`LABEL_DIMENSION`]): the first label is a `scores`, every relabel a
 //!   `supersedes` naming the previous head, and the newest wins. Self-scoped, so
 //!   it reaches the owner's own devices and nobody else.
+//! - `GET /v1/self/contact-code` (CIRISServer#673) — the person's shareable
+//!   contact code: a v3 fedcode naming them and, by their choice (`?nodes=`),
+//!   any of their ANNOUNCED nodes with each node's transport key. The string
+//!   (and its QR form) another person pastes into `POST /v1/contacts`.
 //!
 //! - `POST /v1/self/nodes/{node_key_id}/announce` — announce ANOTHER of the
 //!   owner's devices from the device holding the pen (CIRISServer#678): the
@@ -149,7 +153,7 @@ async fn pen(st: &SelfState, caller: &OwnerCaller) -> Result<OwnerSignerCapsule,
 /// through the authored door. The ONE way this module writes a row
 /// (`crate::attest` is the recipe; the capsule never releases its signer, so
 /// the two stages are driven here with the capsule's `sign_hybrid`).
-async fn emit_as_owner(
+pub(crate) async fn emit_as_owner(
     engine: &Engine,
     capsule: &OwnerSignerCapsule,
     spec: crate::attest::Spec,
@@ -555,6 +559,294 @@ async fn label_occurrence(
     .into_response()
 }
 
+// ─── GET /v1/self/contact-code ──────────────────────────────────────────────
+
+/// One node the code names — echoed beside the code so a client can say WHICH
+/// of the person's machines a stranger will be able to reach.
+#[derive(Debug, serde::Serialize)]
+struct CodeNode {
+    key_id: String,
+    transport_pubkey_ed25519_base64: String,
+}
+
+/// `?nodes=` on `GET /v1/self/contact-code`.
+#[derive(Debug, Default, Deserialize)]
+struct ContactCodeQuery {
+    /// Absent: every node the owner ANNOUNCED. `none`: no nodes (the code then
+    /// resolves through the public directory). Otherwise a comma-separated list
+    /// of announced node key ids — exactly those.
+    #[serde(default)]
+    nodes: Option<String>,
+}
+
+/// **The owner's CURRENT contact code** (CIRISServer#673): a v3 fedcode naming
+/// the person (their fed-ID key and the commitment to its ML-DSA-65 half) and,
+/// by the person's CHOICE, some of their announced nodes, each with the
+/// TRANSPORT key a destination derives from.
+///
+/// With nodes, this is the input `POST /v1/contacts` resolves with no
+/// directory (edge's `ReadyFromCode`): the code carries what a stranger's
+/// directory cannot. With none (`?nodes=none`, or no node announced) it is
+/// still a valid code — the person's key and PQC commitment — and the adder
+/// resolves the person through the public directory, the lightnet path an
+/// announce makes possible. A node code is the wrong thing to share — a node
+/// cannot consent, and its owner is unknown to the adder — and the one place a
+/// person's code was served before was `POST /v1/self/identity`, at MINT,
+/// before any node was claimed.
+///
+/// **Only ANNOUNCED nodes may be named** (the maintainer's rulings on #655 /
+/// #673, 2026-09-25): announce is per node, each node's wizard asks, and the
+/// devices a person announced are the ones people contact them through. The
+/// choice is the person's — `available_nodes` lists what they may include,
+/// `included_nodes` what this code carries — and naming an unannounced or
+/// foreign node refuses `self.node_not_announced`. An announced node with no
+/// live reticulum transport binding here is reported under
+/// `nodes_without_transport` rather than guessed at, because the transport key
+/// is NOT derivable from the node's federation key (CIRISServer#335).
+///
+/// Built with verify's own encoder (`fedcode::FedCode` + `encode` /
+/// `encode_qr`), never by hand. Lightnet facts only (CC 5.4.6): a fed-ID key,
+/// announced node ids and their transport keys. Nothing group-scoped rides a
+/// code.
+async fn contact_code(
+    State(st): State<SelfState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ContactCodeQuery>,
+) -> Response {
+    use ciris_verify_core::fedcode;
+    // A read of public material: a delegated session may read it too.
+    let caller = match gate(owner_caller(&st.engine, &headers, true).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let owner = caller.owner_key_id;
+    let dir = st.engine.federation_directory();
+    let record = match dir.lookup_public_key(&owner).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return refuse_with(
+                StatusCode::CONFLICT,
+                "self.contact_code_owner_key_absent",
+                "this node does not hold your federation key record, so it cannot build your \
+                 contact code",
+                owner,
+            )
+        }
+        Err(e) => return store_unavailable(format!("lookup_public_key({owner}): {e:#}")),
+    };
+    // A person's code, and only a person's: a code of any other kind resolves
+    // to `NotContactable` at the adder (edge `resolve_contact`).
+    let types = ciris_persist::federation::types::identity_type::parse_set(&record.identity_type);
+    if !types.contains(&ciris_persist::federation::types::identity_type::USER) {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "self.contact_code_not_a_person",
+            "your federation key is not registered as a person (user), and only a person can \
+             be added as a contact",
+            record.identity_type,
+        );
+    }
+    let Ok(ed_pub) = B64.decode(record.pubkey_ed25519_base64.as_bytes()) else {
+        return store_unavailable(format!(
+            "the Ed25519 half registered for {owner} is not base64"
+        ));
+    };
+    // THE CODE MUST DERIVE ITS OWN ID. The adder re-derives `key_id` from the
+    // pubkey the code carries and refuses a mismatch as impersonation (edge
+    // `verify_code_binds_its_key`); an identity registered under a non-derived
+    // id (the pre-#247 `{key_id}`-only envelope) would hand out a code every
+    // adder refuses. Said here, by name, instead of there.
+    let label = owner.rsplit_once('-').map_or("", |(label, _fp)| label);
+    if fedcode::derive_key_id(label, &ed_pub) != owner {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "self.contact_code_key_not_derived",
+            "your federation key id is not derived from its public key, so a contact code for \
+             it would be refused by everyone you share it with as an impersonation",
+            owner,
+        );
+    }
+    // The PQC commitment (CIRISVerify#272): without it the adder cannot bind the
+    // ML-DSA-65 half it pulls to this code, and admission fails closed.
+    let Some(pqc) = record
+        .pubkey_ml_dsa_65_base64
+        .as_deref()
+        .and_then(|b| B64.decode(b.as_bytes()).ok())
+    else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "self.contact_code_no_pqc_half",
+            "your federation key record carries no ML-DSA-65 half, so a contact code could not \
+             commit to it and no one could admit you from it",
+            owner,
+        );
+    };
+    let commitment = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(&pqc))
+    };
+    // THE ANNOUNCED NODES are what the person may choose from. Announce is per
+    // node — each node's wizard asks — and a node they did not announce never
+    // rides a code, whatever their other nodes chose.
+    let announced = match crate::auth::ownership::announced_nodes_of(&st.engine, &owner).await {
+        Ok(v) => v,
+        Err(e) => return store_unavailable(e),
+    };
+    // WHICH of them this code carries — the person's choice.
+    let selected: Vec<String> = match q.nodes.as_deref().map(str::trim) {
+        None => announced.clone(),
+        Some(none) if none.eq_ignore_ascii_case("none") => Vec::new(),
+        Some(list) => {
+            let mut chosen: Vec<String> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned)
+                .collect();
+            chosen.sort();
+            chosen.dedup();
+            if chosen.is_empty() {
+                return bad_request(
+                    "nodes must be `none` or a comma-separated list of announced node key ids"
+                        .to_owned(),
+                );
+            }
+            let refused: Vec<&String> = chosen.iter().filter(|k| !announced.contains(k)).collect();
+            if !refused.is_empty() {
+                return refuse_with(
+                    StatusCode::BAD_REQUEST,
+                    "self.node_not_announced",
+                    "a contact code can carry only nodes you announced — announce a node on \
+                     that node (its wizard's announce step, or POST /v1/federation/announce) \
+                     before sharing it",
+                    refused
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+            chosen
+        }
+    };
+    // This node's own keys: a split install binds the NODE key but may hold its
+    // transport route under another of its keys, so a route for this node is
+    // looked up under all of them.
+    let engine_key = st.engine.local_derived_key_id().await.ok();
+    let own: Vec<String> = engine_key
+        .as_deref()
+        .map(crate::peer::own_keys_of_this_node)
+        .unwrap_or_default();
+    let labels = labels_for(&st.engine, &owner).await;
+    let mut available: Vec<serde_json::Value> = Vec::with_capacity(announced.len());
+    let mut named: Vec<CodeNode> = Vec::new();
+    let mut without_transport: Vec<String> = Vec::new();
+    for node in &announced {
+        let lookup: Vec<String> = if own.contains(node) {
+            let mut keys = vec![node.clone()];
+            keys.extend(own.iter().filter(|k| *k != node).cloned());
+            keys
+        } else {
+            vec![node.clone()]
+        };
+        let mut transport = None;
+        for key in &lookup {
+            match dir.list_transport_destinations_for(key).await {
+                Ok(routes) => {
+                    transport = routes
+                        .into_iter()
+                        .find(|d| {
+                            d.transport_kind == "reticulum"
+                                && d.retired_at.is_none()
+                                && d.transport_ed25519_pubkey_base64.is_some()
+                        })
+                        .and_then(|d| d.transport_ed25519_pubkey_base64);
+                }
+                Err(e) => {
+                    return store_unavailable(format!(
+                        "list_transport_destinations_for({key}): {e:#}"
+                    ))
+                }
+            }
+            if transport.is_some() {
+                break;
+            }
+        }
+        // The owner's own name for the device, when they gave it one — under
+        // any of this node's keys when this is the node.
+        let label = lookup.iter().find_map(|k| labels.get(k).cloned());
+        let mut entry = serde_json::json!({
+            "node_key_id": node,
+            "announced": true,
+            "has_transport": transport.is_some(),
+            "this_node": own.contains(node),
+        });
+        if let Some(label) = label {
+            entry["label"] = serde_json::Value::String(label);
+        }
+        available.push(entry);
+        if !selected.contains(node) {
+            continue;
+        }
+        match transport {
+            Some(transport) => named.push(CodeNode {
+                key_id: node.clone(),
+                transport_pubkey_ed25519_base64: transport,
+            }),
+            None => without_transport.push(node.clone()),
+        }
+    }
+    let mut fc = fedcode::FedCode::new(
+        fedcode::FedKind::User,
+        owner.clone(),
+        record.pubkey_ed25519_base64.clone(),
+    )
+    .with_ml_dsa_65_pubkey_sha256(commitment.clone())
+    .with_owned_nodes(
+        named
+            .iter()
+            .map(|n| {
+                fedcode::OwnedNode::new(n.key_id.clone(), n.transport_pubkey_ed25519_base64.clone())
+            })
+            .collect(),
+    );
+    if !label.is_empty() {
+        fc = fc.with_alias_hint(label.to_owned());
+    }
+    let (code, qr_payload) = match (fedcode::encode(&fc), fedcode::encode_qr(&fc)) {
+        (Ok(c), Ok(q)) => (c, q),
+        (Err(e), _) | (_, Err(e)) => {
+            return refuse_with(
+                StatusCode::CONFLICT,
+                "self.contact_code_unencodable",
+                "your contact code could not be encoded from the keys this node holds",
+                format!("{e}"),
+            )
+        }
+    };
+    Json(serde_json::json!({
+        "key_id": owner,
+        "code": code,
+        // The SAME code in verify's ungrouped QR form (`encode_qr`): one
+        // identity, one content — only the dashes differ, and `decode` reads
+        // either. Render this into the QR symbol; show `code` as text.
+        "qr_payload": qr_payload,
+        "format": "fedcode-v3",
+        "ml_dsa_65_pubkey_sha256": commitment,
+        // What the person may choose from: their ANNOUNCED nodes.
+        "available_nodes": available,
+        // What THIS code carries (each with the transport key it embeds).
+        "included_nodes": named,
+        // Chosen, announced, but with no transport binding here to embed.
+        "nodes_without_transport": without_transport,
+        // Whether a stranger can reach you from this code alone. `false` means
+        // it still identifies you and resolves through the public directory,
+        // where your announced nodes are known.
+        "reachable_without_directory": !named.is_empty(),
+    }))
+    .into_response()
+}
+
 // ─── Router ─────────────────────────────────────────────────────────────────
 
 /// The self-device routes. `user_seed_dir` is where the owner's fed-ID is
@@ -573,6 +865,8 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
             "/v1/self/occurrence/label",
             axum::routing::post(label_occurrence),
         )
+        // CIRISServer#673 — the person's shareable contact code (and QR form).
+        .route("/v1/self/contact-code", axum::routing::get(contact_code))
         .with_state(SelfState {
             engine,
             user_seed_dir,

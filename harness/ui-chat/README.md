@@ -62,6 +62,14 @@ the owner behind that node resolvable. The widening still matters — it is what
 makes the by-name fetch legal once a code names the peer — but it was never
 going to be sufficient on its own.
 
+**0.5.218: the hand-off is the person's CONTACT code, not the node code.** A
+node code names a machine, and a machine cannot consent: the contact ladder
+refuses it (`contacts.unresolvable`, CIRISServer#673). Each side now reads
+`GET /v1/self/contact-code` under its owner session — the person's v3 fedcode,
+carrying every node they announced with its transport key — and pastes that,
+which resolves with no directory. Read over HTTP as evidence for now; it moves
+to the client's identity card once the client renders the code.
+
 
 ## What it found on the way
 

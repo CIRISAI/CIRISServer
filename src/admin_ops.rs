@@ -3340,10 +3340,22 @@ async fn self_standing(State(st): State<AdminOpsState>, headers: HeaderMap) -> R
         standings.insert(act.axis().to_owned(), self_fold_json(&fold));
     }
     let unreadable = !errors.is_empty();
+    // CIRISServer#676 — the `delegation_id` every tier S act (and tiers 0–4)
+    // must carry. It was nowhere a client could read it, so no client could
+    // take an admin act without the person pasting an id they had no way to
+    // see. Read beside the standings because this is where a client reads
+    // standing anyway; the act still names the id it is taken under.
+    let (owner_delegations, owner_delegations_error) =
+        match owner_serve_delegations(&st, &node_key_id).await {
+            Ok(v) => (serde_json::Value::Array(v), serde_json::Value::Null),
+            Err(e) => (serde_json::Value::Null, serde_json::json!(e)),
+        };
     let mut out = serde_json::json!({
         "source_locale": SOURCE_LOCALE,
         "tier": "S",
         "node_key_id": node_key_id,
+        "owner_delegations": owner_delegations,
+        "owner_delegations_error": owner_delegations_error,
         "standings": standings,
         "partition": partition_note(),
         "distinct_zeroes": m(
@@ -3398,14 +3410,30 @@ async fn resolve_owner_authority(
     delegation_id: &str,
 ) -> Result<AuthorityProof, Response> {
     let node_key_id = self_key_id(st).await?;
+    // WHICH of this node's keys the delegation names (CIRISServer#676). On a
+    // split install the claim binds the NODE key while the engine signs as the
+    // ACTOR, so an owner's `infra:serve` grant is to a key `self_key_id` is not.
+    // Both are this node: the delegation is walked from the key it actually
+    // names, when that key is one of ours, and from the engine key otherwise
+    // (where `resolve_authority` refuses it by name as before).
+    let own = crate::peer::own_keys_of_this_node(&node_key_id);
+    let actor = match st
+        .engine
+        .federation_directory()
+        .get_attestation(delegation_id.trim())
+        .await
+    {
+        Ok(Some(row)) if own.contains(&row.attested_key_id) => row.attested_key_id,
+        _ => node_key_id.clone(),
+    };
     let proof = resolve_authority(
         &st.engine,
-        &node_key_id,
+        &actor,
         delegation_id,
         REQUIRED_SCOPE_SELF_DIRECTED,
     )
     .await?;
-    let Some(owner) = is_steward_bound(&st.engine, &node_key_id).await else {
+    let Some(owner) = is_steward_bound(&st.engine, &actor).await else {
         return Err(refusal(
             StatusCode::FORBIDDEN,
             "node_unowned",
@@ -3427,6 +3455,74 @@ async fn resolve_owner_authority(
         ));
     }
     Ok(proof)
+}
+
+/// **The delegations a client can name as `delegation_id`** (CIRISServer#676):
+/// every live `delegates_to` whose subject is one of THIS node's keys, that
+/// carries [`REQUIRED_SCOPE_SELF_DIRECTED`], and that was issued by the owner
+/// (or an occurrence of the owner) — i.e. exactly the set
+/// [`resolve_owner_authority`] would accept, found by running that walk.
+///
+/// Folded over ALL of this node's own keys (engine, actor, held node key, wire
+/// identity): on a split install the owner-binding sits on the node key, and a
+/// read keyed on the engine key alone would list nothing on precisely the
+/// installs that need it.
+async fn owner_serve_delegations(
+    st: &AdminOpsState,
+    self_key: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let dir = st.engine.federation_directory();
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for k in crate::peer::own_keys_of_this_node(self_key) {
+        let Some(owner) = is_steward_bound(&st.engine, &k).await else {
+            continue;
+        };
+        let inbound = dir
+            .list_attestations_for(&k)
+            .await
+            .map_err(|e| format!("list_attestations_for({k}): {e:#}"))?;
+        for row in inbound {
+            if row.attestation_type != attestation_type::DELEGATES_TO
+                || row.attested_key_id != k
+                || !delegation_scopes(&row.attestation_envelope)
+                    .contains(REQUIRED_SCOPE_SELF_DIRECTED)
+                || !seen.insert(row.attestation_id.clone())
+            {
+                continue;
+            }
+            if !crate::auth::verify::signer_acts_for(&st.engine, &row.attesting_key_id, &owner)
+                .await
+            {
+                continue;
+            }
+            // The same re-derivation the act runs: a withdrawn or unreachable
+            // grant is not offered as one a client can act under.
+            if resolve_authority(
+                &st.engine,
+                &k,
+                &row.attestation_id,
+                REQUIRED_SCOPE_SELF_DIRECTED,
+            )
+            .await
+            .is_err()
+            {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "delegation_id": row.attestation_id,
+                "issuer_key_id": row.attesting_key_id,
+                "subject_key_id": k,
+                "scope": REQUIRED_SCOPE_SELF_DIRECTED,
+                "owner_binding": ciris_persist::federation::admission::is_owner_binding_envelope(
+                    &row.attestation_envelope
+                ),
+                "cohort_scope": row.cohort_scope,
+                "asserted_at": row.asserted_at.to_rfc3339(),
+            }));
+        }
+    }
+    Ok(out)
 }
 
 /// Shared body for all six tier S routes.
