@@ -369,7 +369,11 @@ the ordinary CEG withdraw of that grant. There is no contacts table.
 - **A transcript row is either `body` or `unopened_reason`, never `""`.** A body
   sealed to the contact stays shut on your node by design; `status` is
   `live | superseded | withdrawn | recanted` from the same hamburger the memory
-  projection uses.
+  projection uses. From 0.5.218 `unopened_reason` is a TOKEN (edge's
+  `UnopenedReason::kind()`: `not_fetched | not_granted | evicted |
+  seal_mismatch | malformed_row | not_text | substrate`) and the sentence
+  moved to `unopened_detail`; branch on the token, show the detail
+  (CIRISServer#602).
 - **Delivery of traces** (unrelated to chat, same train): `ciris_server.delivery_receipt(agent_id_hash=…)`
   / `GET /v1/node/delivery-receipt` — the canonical's own signed answer to
   "did my newest trace arrive" (0.5.208, CIRISServer#369).

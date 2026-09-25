@@ -717,6 +717,7 @@ fn transcript_pending(
         status_attestation_id: None,
         body: Some(note.to_string()),
         unopened_reason: None,
+        unopened_detail: None,
         content_type: DEFAULT_CONTENT_TYPE,
         asserted_at: chrono::Utc::now().to_rfc3339(),
         author: String::new(),
@@ -1073,7 +1074,7 @@ pub(crate) async fn room_key_room(
                 reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
             }
         } else {
-            apply_creator_commits(&dir, room, &creator, &group).await;
+            apply_creator_commits(st, room, &scope_room, &creator, &group, author).await;
         }
         ensure_room_addresses(st, room, &group).await;
         return Ok(RoomHandshake::Ready);
@@ -1140,7 +1141,7 @@ pub(crate) async fn room_key_room(
             .await
             .map_err(|e| format!("CohortGroup::join: {e}"))?,
     );
-    apply_creator_commits(&dir, room, &creator, &group).await;
+    apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
     Ok(RoomHandshake::Ready)
@@ -1230,20 +1231,53 @@ async fn reconcile_room_group(
 /// the room. Best-effort and idempotent (edge reads already-applied rows as
 /// `other`); a contest this node cannot resolve is logged, never fatal — the
 /// room's content does not depend on it.
+///
+/// **Re-proposals are carried** (CIRISServer#602). When the creator's commit
+/// wins a contest against one of this node's own, edge rolls this node back,
+/// applies the winner and RE-ISSUES the lost commits against the winner's line
+/// (`AppliedCommits::reproposed`, `must_use`: "MUST be emitted as rows and
+/// shared"). Dropping them left the re-proposals existing nowhere but here —
+/// this node one epoch ahead of every peer, on a line nobody else can follow.
+/// Each is carried exactly as edge's own driver does it: a
+/// `commit_attestation_in` row authored by this node's author (the claim's
+/// committer), placed in the room with [`share_in`].
 async fn apply_creator_commits(
-    dir: &Arc<dyn ciris_persist::federation::FederationDirectory>,
+    st: &ChatState,
     room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
     creator: &str,
     group: &ciris_edge::mls::CohortGroup,
+    author: Option<&ciris_edge::identity::LocalSigner>,
 ) {
-    match ciris_edge::chat::apply_room_commits(group, &**dir, creator, room).await {
-        Ok(out) => tracing::debug!(
-            room = %room,
-            applied = out.applied,
-            discarded = out.discarded,
-            other = out.other,
-            "chat: N-member room — creator commits applied"
-        ),
+    let dir = st.engine.federation_directory();
+    match ciris_edge::chat::apply_room_commits(group, &*dir, creator, room).await {
+        Ok(out) => {
+            let reproposed = out.reproposed.len();
+            let d: &dyn ciris_persist::federation::FederationDirectory = &*dir;
+            let node: &ciris_edge::identity::LocalSigner = &st.node_signer;
+            let carried = carry_reproposals(room, author, out.reproposed, move |row| {
+                share_in(
+                    d,
+                    row,
+                    scope_room,
+                    ciris_edge::replication::attestation_bind::Signers {
+                        node,
+                        actor: author,
+                    },
+                )
+            })
+            .await;
+            tracing::debug!(
+                room = %room,
+                applied = out.applied,
+                discarded = out.discarded,
+                other = out.other,
+                reproposed,
+                carried = carried.placed.len(),
+                "chat: N-member room — creator commits applied"
+            );
+            carried.log(room);
+        }
         Err(e) => tracing::warn!(
             room = %room,
             creator = %creator,
@@ -1252,6 +1286,89 @@ async fn apply_creator_commits(
              addressing lags until the next commit resolves it"
         ),
     }
+}
+
+/// What [`carry_reproposals`] did — every re-proposal is accounted for in
+/// exactly one of these, never collapsed into a count that hides the loss.
+#[derive(Debug, Default)]
+pub(crate) struct CarriedReproposals {
+    /// Row ids placed in the room, in re-proposal order.
+    pub(crate) placed: Vec<String>,
+    /// `epoch: error` for each re-proposal whose row could not be built or
+    /// placed.
+    pub(crate) failed: Vec<String>,
+    /// Re-proposals dropped because this node had no author signer to carry
+    /// them as (the row's author MUST be the claim's committer).
+    pub(crate) no_author: usize,
+    /// Re-proposals that carried a Welcome. The commit row is placed; the
+    /// Welcome is NOT — `CohortCommit` does not name its joiner, and a joiner
+    /// reads its Welcome from the room's CREATOR only (`welcome_for`), which
+    /// this node is not. The creator's next reconcile re-adds anyone missing.
+    pub(crate) welcome_not_carried: usize,
+}
+
+impl CarriedReproposals {
+    fn log(&self, room: &str) {
+        if self.failed.is_empty() && self.no_author == 0 && self.welcome_not_carried == 0 {
+            if !self.placed.is_empty() {
+                tracing::info!(
+                    room = %room,
+                    placed = self.placed.len(),
+                    "chat: N-member room — this node lost a commit contest; its re-proposals \
+                     were carried as rows against the winner's line (CIRISEdge#604)"
+                );
+            }
+            return;
+        }
+        tracing::warn!(
+            room = %room,
+            placed = self.placed.len(),
+            failed = ?self.failed,
+            no_author = self.no_author,
+            welcome_not_carried = self.welcome_not_carried,
+            "chat: N-member room — a re-proposal after a lost commit contest was NOT fully \
+             carried; this node's epoch runs ahead of its peers on a line only it holds \
+             until a later commit resolves it (CIRISServer#602)"
+        );
+    }
+}
+
+/// **Carry a lost contest's re-proposals as rows** (CIRISServer#602) — each a
+/// [`ciris_edge::chat::commit_attestation_in`] row authored by `author`, handed
+/// to `place` (production: [`share_in`] into the room). Edge's contract for
+/// `AppliedCommits::reproposed`, done the way edge's own driver does it.
+async fn carry_reproposals<F, Fut>(
+    room: &str,
+    author: Option<&ciris_edge::identity::LocalSigner>,
+    reproposed: Vec<ciris_edge::mls::CohortCommit>,
+    mut place: F,
+) -> CarriedReproposals
+where
+    F: FnMut(Attestation) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut out = CarriedReproposals::default();
+    if reproposed.is_empty() {
+        return out;
+    }
+    let Some(author) = author else {
+        out.no_author = reproposed.len();
+        return out;
+    };
+    for commit in &reproposed {
+        if commit.welcome().is_some() {
+            out.welcome_not_carried += 1;
+        }
+        let placed = match ciris_edge::chat::commit_attestation_in(author, room, commit).await {
+            Ok(row) => place(row).await,
+            Err(e) => Err(e),
+        };
+        match placed {
+            Ok(id) => out.placed.push(id),
+            Err(e) => out.failed.push(format!("epoch {}: {e}", commit.epoch())),
+        }
+    }
+    out
 }
 
 /// CIRISEdge#499 — install (or advance) this room in the scope-address table.
@@ -2575,6 +2692,33 @@ async fn start_chat(
 
 // ─── The message row ────────────────────────────────────────────────────────
 
+/// Every word a transcript row's `unopened_reason` can carry (CIRISServer#602):
+/// edge's `UnopenedReason::kind()` labels, verbatim. The four the drive also
+/// reports (`not_fetched`, `not_granted`, `evicted`, `seal_mismatch`) are the
+/// SAME words there for the same facts (`drive::BYTE_STATES`); a test pins that
+/// every edge arm lands in this list, so an arm edge adds cannot reach a client
+/// as a word nobody documented.
+pub const UNOPENED_REASONS: &[&str] = &[
+    "not_fetched",
+    "not_granted",
+    "evicted",
+    "seal_mismatch",
+    "malformed_row",
+    "not_text",
+    "substrate",
+];
+
+/// A row still pointing at unfetched blob-store content after the read: edge's
+/// own word for "not held here yet".
+const UNOPENED_POINTER: &str = "not_fetched";
+
+/// Edge's typed reason → `(token, detail)`: the token from `kind()` (the arm's
+/// stable label), the detail the substrate's own sentence. Never the `Display`
+/// rendering, which is the two glued together for a log line.
+fn unopened_token(reason: &ciris_edge::chat::UnopenedReason) -> (&'static str, String) {
+    (reason.kind(), reason.detail().to_owned())
+}
+
 /// One chat message, projected for the client with its CEG identity intact.
 ///
 /// This is deliberately NOT a bespoke `{from, text, at}` shape. The client
@@ -2604,11 +2748,18 @@ struct ChatMessage {
     /// collapsing them onto `""` would render a locked row as an empty bubble.
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-    /// Why the body did not open, from edge (`Body::Unopened`): a row sealed at
-    /// an epoch this member no longer holds, a ciphertext lifted from another
-    /// room, or a row carrying no seal at all.
+    /// Why the body did not open, as a TOKEN: one of [`UNOPENED_REASONS`],
+    /// straight from edge's `UnopenedReason::kind()` (CIRISServer#602) — the
+    /// same words the drive uses for the same facts. It was edge's `Display`
+    /// text (`"not_fetched: <sentence>"`), so a client had to parse a sentence
+    /// to branch, and a reword upstream would silently move a row between
+    /// states. Branch on this; show [`Self::unopened_detail`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    unopened_reason: Option<String>,
+    unopened_reason: Option<&'static str>,
+    /// The substrate's own sentence for [`Self::unopened_reason`] — for a human
+    /// or a log, never for branching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unopened_detail: Option<String>,
     /// Always [`DEFAULT_CONTENT_TYPE`]. Edge's `ChatMessage` does not model a
     /// content type because the sealed community tier carries text and nothing
     /// else — `chat_message_attestation` takes a `&str` body — and `send_message`
@@ -3296,7 +3447,7 @@ async fn collect_messages(
         )
         .await;
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
-        let (body, unopened_reason) = match opened.body {
+        let (body, unopened_reason, unopened_detail) = match opened.body {
             ciris_edge::chat::Body::Text(text) => {
                 // The timeline's arrival mark: the FIRST time this node reads
                 // this row with its body open. Once per row per process — a
@@ -3311,9 +3462,12 @@ async fn collect_messages(
                          is readable here from now on"
                     );
                 }
-                (Some(text), None)
+                (Some(text), None, None)
             }
-            ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason.to_string())),
+            ciris_edge::chat::Body::Unopened { reason } => {
+                let (token, detail) = unopened_token(&reason);
+                (None, Some(token), Some(detail))
+            }
             // Still a pointer AFTER `resolve_content` — so the fetch did not
             // happen or did not succeed. The commonest cause is no active
             // occurrence for this viewer; saying so beats a blank message.
@@ -3328,8 +3482,12 @@ async fn collect_messages(
             // (CIRISServer#587). Guessing at that inside an urgent unbrick
             // release is how the next incident starts; the honest state is
             // cheap and the row is never silently dropped.
+            // The token is edge's own word for "not held here yet"
+            // (`UnopenedReason::NotFetched`), so a client branches one way on
+            // both shapes of the same fact.
             ciris_edge::chat::Body::Pointer(_) => (
                 None,
+                Some(UNOPENED_POINTER),
                 Some(
                     "content is in the room's blob store and was not fetched by this read"
                         .to_owned(),
@@ -3354,6 +3512,7 @@ async fn collect_messages(
             status_attestation_id,
             body,
             unopened_reason,
+            unopened_detail,
             content_type: DEFAULT_CONTENT_TYPE,
             asserted_at: opened.asserted_at.to_rfc3339(),
             // WHOSE WORDS — edge's, off the row's own attester. It is no longer
@@ -3396,14 +3555,12 @@ async fn collect_messages(
     // and the operator goes to the puller, not the roster.
     let unopened = out.iter().filter(|m| m.body.is_none()).count();
     if out.is_empty() || unopened > 0 {
-        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        // The token IS the kind now — no sentence to split (CIRISServer#602).
+        let mut reasons: std::collections::BTreeMap<&'static str, usize> = Default::default();
         for m in out.iter().filter(|m| m.body.is_none()) {
-            let r = m
-                .unopened_reason
-                .as_deref()
-                .map(|r| r.split(':').next().unwrap_or(r).trim().to_owned())
-                .unwrap_or_else(|| "unknown".to_owned());
-            *reasons.entry(r).or_insert(0) += 1;
+            *reasons
+                .entry(m.unopened_reason.unwrap_or("unknown"))
+                .or_insert(0) += 1;
         }
         let reading = if members.is_empty() {
             "members=0: the community row never replicated here, so nothing is anchored \
@@ -3830,4 +3987,228 @@ mod tests {
     // the same sorted pair, and it rides inside `Community::signing_envelope`,
     // so the property this used to assert is pinned where the string is built
     // rather than beside a copy of it.
+
+    // ─── CIRISServer#602 — re-proposals are carried, reasons are tokens ─────
+
+    fn edge_signer(key_id: &str, seed: u8) -> ciris_edge::identity::LocalSigner {
+        ciris_edge::identity::LocalSigner::new(
+            key_id,
+            Arc::new(
+                ciris_keyring::Ed25519SoftwareSigner::from_bytes(&[seed; 32], key_id)
+                    .expect("ed25519 seed"),
+            ),
+            Some(Arc::new(
+                ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+                    &[seed ^ 0x55; 32],
+                    format!("{key_id}-pqc"),
+                )
+                .expect("ml-dsa seed"),
+            )),
+        )
+    }
+
+    fn mls_store(tag: &str) -> ciris_edge::mls::ScopeStateProvider {
+        ciris_edge::mls::ScopeStateProvider::new(Arc::new(
+            ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(tag.as_bytes())
+                .expect("in-memory MLS store"),
+        ))
+    }
+
+    /// Two members, A (creator) and B, both commit against one epoch and A's
+    /// claim is earlier. B hears A: edge rolls B back, applies A's commit and
+    /// re-proposes B's rotate. Returns both groups, B's lost original, and
+    /// B's re-proposals — the `reproposed` edge marks `must_use`.
+    async fn lost_contest(
+        room: &str,
+    ) -> (
+        ciris_edge::mls::CohortGroup,
+        ciris_edge::mls::CohortGroup,
+        ciris_edge::mls::CohortCommit,
+        Vec<ciris_edge::mls::CohortCommit>,
+    ) {
+        use ciris_edge::mls::cohort_group::mint_cohort_key_material;
+        use ciris_edge::mls::{ClaimedApplyOutcome, CohortGroup};
+        let t0 = chrono::Utc::now();
+        let a = CohortGroup::create(mls_store("a"), room, "node-a", 16)
+            .await
+            .expect("create");
+        let (mb, kpb) = mint_cohort_key_material("node-b").expect("mint B");
+        let add_b = a.add_member("node-b", kpb).await.expect("add B");
+        let b = CohortGroup::join(
+            mls_store("b"),
+            room,
+            mb,
+            add_b.welcome().expect("an Add carries a Welcome"),
+            16,
+        )
+        .await
+        .expect("join");
+        let ca = a
+            .rotate_at(t0 + chrono::Duration::seconds(10))
+            .await
+            .expect("A rotates");
+        let cb = b
+            .rotate_at(t0 + chrono::Duration::seconds(20))
+            .await
+            .expect("B rotates");
+        let outcome = b
+            .apply_remote_commit_claimed(ca.commit(), Some(ca.claim().clone()))
+            .await
+            .expect("B applies A's earlier commit");
+        let ClaimedApplyOutcome::Superseded { reproposed, .. } = outcome else {
+            panic!("the earlier claim must win and B must roll back: {outcome:?}");
+        };
+        (a, b, cb, reproposed)
+    }
+
+    /// THE PROPERTY #602 needed: a lost contest's re-proposal leaves this node
+    /// as a row authored by the committer, bound to the claim the peer
+    /// contests — and a peer that applies it converges with this node.
+    #[tokio::test]
+    async fn a_reproposal_is_carried_as_a_commit_row_the_winner_can_apply() {
+        use ciris_edge::mls::{ClaimedApplyOutcome, CommitClaim};
+        let room = "room-602-carried";
+        let (a, b, cb_lost, reproposed) = lost_contest(room).await;
+        assert_eq!(reproposed.len(), 1, "B's rotate is re-proposed, not lost");
+        let expected_epoch = reproposed[0].epoch();
+        let commit_bytes = reproposed[0].commit().to_vec();
+
+        let author = edge_signer("node-b", 0xB0);
+        let mut sink: Vec<Attestation> = Vec::new();
+        let carried = carry_reproposals(room, Some(&author), reproposed, |row| {
+            let id = row.attestation_id.clone();
+            sink.push(row);
+            std::future::ready(Ok::<_, String>(id))
+        })
+        .await;
+        assert_eq!(carried.placed.len(), 1, "{carried:?}");
+        assert!(carried.failed.is_empty(), "{carried:?}");
+        assert_eq!(carried.no_author, 0);
+        assert_eq!(sink.len(), 1, "the row reached the placement door");
+        let row = &sink[0];
+        assert_eq!(carried.placed[0], row.attestation_id);
+        assert_eq!(
+            row.attesting_key_id, "node-b",
+            "the row's author IS the claim's committer (edge refuses otherwise)"
+        );
+
+        // A hears B's lost original (discarded), then B's re-proposal AS CARRIED
+        // BY THE ROW: the claim is rebuilt from the row exactly as edge's
+        // `commits_from` rebuilds it on a receiver.
+        let lost = a
+            .apply_remote_commit_claimed(cb_lost.commit(), Some(cb_lost.claim().clone()))
+            .await
+            .expect("A contests B's original");
+        assert!(
+            matches!(lost, ClaimedApplyOutcome::Discarded { .. }),
+            "B's original loses on A: {lost:?}"
+        );
+        let from_row = CommitClaim::new(row.asserted_at, row.attesting_key_id.clone());
+        let applied = a
+            .apply_remote_commit_claimed(&commit_bytes, Some(from_row))
+            .await
+            .expect("A applies the carried re-proposal");
+        assert!(
+            matches!(applied, ClaimedApplyOutcome::Applied(_)),
+            "the re-proposal applies on the winner: {applied:?}"
+        );
+        assert_eq!(a.epoch().await, expected_epoch);
+        assert_eq!(b.epoch().await, expected_epoch);
+        assert_eq!(
+            a.destination_secret().await.expect("A secret").as_bytes(),
+            b.destination_secret().await.expect("B secret").as_bytes(),
+            "both members converge on one line once the re-proposal is carried"
+        );
+    }
+
+    /// Without an author the re-proposal cannot be carried (the row's author
+    /// MUST be the committer) — and that is counted, not silently dropped.
+    #[tokio::test]
+    async fn a_reproposal_without_an_author_is_counted_not_dropped() {
+        let (_, _, _, reproposed) = lost_contest("room-602-no-author").await;
+        let n = reproposed.len();
+        assert!(n > 0);
+        let mut calls = 0usize;
+        let carried = carry_reproposals("room-602-no-author", None, reproposed, |_row| {
+            calls += 1;
+            std::future::ready(Ok::<_, String>(String::new()))
+        })
+        .await;
+        assert_eq!(carried.no_author, n);
+        assert!(carried.placed.is_empty());
+        assert_eq!(calls, 0, "nothing reaches the placement door unsigned");
+    }
+
+    /// A placement refusal names the epoch and the error — a caller that only
+    /// saw "carried" could not know B's line never left this node.
+    #[tokio::test]
+    async fn a_placement_failure_is_named() {
+        let room = "room-602-refused";
+        let (_, _, _, reproposed) = lost_contest(room).await;
+        let epoch = reproposed[0].epoch();
+        let author = edge_signer("node-b", 0xB0);
+        let carried = carry_reproposals(room, Some(&author), reproposed, |_row| {
+            std::future::ready(Err::<String, _>("put refused".to_owned()))
+        })
+        .await;
+        assert!(carried.placed.is_empty());
+        assert_eq!(carried.failed, vec![format!("epoch {epoch}: put refused")]);
+    }
+
+    /// Nothing to carry is not an event.
+    #[tokio::test]
+    async fn no_reproposals_places_nothing() {
+        let author = edge_signer("node-b", 0xB0);
+        let carried = carry_reproposals("r", Some(&author), Vec::new(), |_row| {
+            std::future::ready(Ok::<_, String>(String::new()))
+        })
+        .await;
+        assert!(carried.placed.is_empty() && carried.failed.is_empty());
+        assert_eq!((carried.no_author, carried.welcome_not_carried), (0, 0));
+    }
+
+    /// The transcript's `unopened_reason` is edge's `kind()` token for EVERY
+    /// arm — never the `Display` sentence — and every token is documented in
+    /// [`UNOPENED_REASONS`]. The drive-shared four are the drive's words.
+    #[test]
+    fn every_unopened_arm_is_a_documented_token_not_a_sentence() {
+        use ciris_edge::chat::UnopenedReason as R;
+        let d = || "the substrate's sentence: with a colon".to_owned();
+        let arms = [
+            R::NotFetched { detail: d() },
+            R::NotGranted { detail: d() },
+            R::Evicted { detail: d() },
+            R::SealMismatch { detail: d() },
+            R::MalformedRow { detail: d() },
+            R::NotText { detail: d() },
+            R::Substrate { detail: d() },
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for arm in &arms {
+            let (token, detail) = unopened_token(arm);
+            assert_eq!(token, arm.kind());
+            assert!(
+                UNOPENED_REASONS.contains(&token),
+                "`{token}` reaches clients but is not in UNOPENED_REASONS"
+            );
+            assert!(
+                !token.contains(':') && !token.contains(' '),
+                "a token, not a sentence: {token}"
+            );
+            assert_eq!(detail, d(), "the detail is the substrate's own sentence");
+            seen.insert(token);
+        }
+        assert_eq!(
+            seen.len(),
+            UNOPENED_REASONS.len(),
+            "every documented token is reachable, and no two arms share one"
+        );
+        assert!(UNOPENED_REASONS.contains(&UNOPENED_POINTER));
+        for shared in ["not_fetched", "not_granted", "evicted", "seal_mismatch"] {
+            assert!(
+                crate::drive::BYTE_STATES.contains(&shared),
+                "`{shared}` means the same fact on the drive and must be the same word"
+            );
+        }
+    }
 }
