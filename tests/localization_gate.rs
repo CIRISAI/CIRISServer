@@ -710,7 +710,9 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 139 -> 140 for 0.5.218: `peers.sas_no_owner` (CIRISServer#683, a
     /// person-to-person SAS on a node with no owner) — same list, CIRISClient#78.
-    const MAX_UNCOVERED: usize = 140;
+    ///
+    /// 140 -> 141: `accord.family_not_supersedable` (CIRISServer#682).
+    const MAX_UNCOVERED: usize = 141;
 
     let en = load_en();
     let ids = scraped_server_ids();

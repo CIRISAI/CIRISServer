@@ -855,6 +855,8 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # the device being claimed. Same queue (CIRISClient#78).
     # CIRISServer#683: a person-to-person verification code needs an owner.
     "peers.sas_no_owner",
+    # CIRISServer#682: superseding the accord family, refused with the remedy.
+    "accord.family_not_supersedable",
     "claim.bad_request",
     "claim.binding_unsigned",
     "claim.cohort_invalid",

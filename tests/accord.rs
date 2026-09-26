@@ -1525,9 +1525,23 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         body.contains("ceremony"),
         "the refusal must name the remedy (run the ceremony again), not just the rule: {body}"
     );
+    // The ROUTES that exist (CIRISServer#682): this used to require
+    // `/v1/accord/provision`, which is not a route, so the test pinned a remedy
+    // that pointed nowhere.
+    for route in ["/v1/accord/genesis/remint-source", "/v1/trust-root/import"] {
+        assert!(
+            body.contains(route),
+            "the refusal must name the endpoint that performs the remedy ({route}): {body}"
+        );
+    }
     assert!(
-        body.contains("/v1/accord/provision"),
-        "the refusal must name the ENDPOINT that performs the remedy: {body}"
+        !body.contains("/v1/accord/provision"),
+        "the refusal names no route that does not exist: {body}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        parsed["reason_id"], "accord.family_not_supersedable",
+        "the refusal is named so a client can render it: {body}"
     );
 
     // And the live roster is UNTOUCHED — a refused supersede must leave the
