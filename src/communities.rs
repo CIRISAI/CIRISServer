@@ -878,6 +878,7 @@ async fn put_widening(
         authority_key_id: spec.authority_key_id,
         scrub_signature_classical: spec.scrub_signature_classical,
         scrub_signature_pqc: spec.scrub_signature_pqc,
+        cosignatures: spec.cosignatures,
     })
     .await
     .map_err(|e| format!("put_community_membership_widening: {e:#}"))

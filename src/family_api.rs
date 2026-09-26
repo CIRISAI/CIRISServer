@@ -580,6 +580,9 @@ async fn sign_family(capsule: &OwnerSignerCapsule, family: Family) -> Result<Sig
         authority_key_id: sig.key_id,
         scrub_signature_classical: B64.encode(&sig.classical_signature),
         scrub_signature_pqc: Some(B64.encode(&sig.pqc_signature)),
+        // A founder-signed record carries no quorum proof; persist stamps one
+        // itself on `supersede_family_with_quorum` (v49.0.0, #910.5).
+        supersede_proof: None,
     })
 }
 
@@ -613,6 +616,9 @@ async fn write_revocation(
             authority_key_id: sig.key_id,
             scrub_signature_classical: B64.encode(&sig.classical_signature),
             scrub_signature_pqc: Some(B64.encode(&sig.pqc_signature)),
+            // Single-signed: the founder's pen alone (v49.0.0 #908 co-signatures
+            // are for a multi-signature protocol's rows).
+            cosignatures: Vec::new(),
         })
         .await
         .map_err(|e| format!("put_family_membership_revocation({removed}): {e:#}"))
@@ -901,6 +907,7 @@ async fn add_member(
             authority_key_id: s.authority_key_id,
             scrub_signature_classical: s.scrub_signature_classical,
             scrub_signature_pqc: s.scrub_signature_pqc,
+            cosignatures: Vec::new(),
         },
         Err(e) => return signer_unavailable(e),
     };

@@ -298,6 +298,7 @@ async fn try_put_community(
             authority_key_id: community_id.to_string(),
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
         })
         .await
         .map_err(|e| e.kind().to_string())

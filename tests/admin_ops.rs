@@ -420,6 +420,7 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
             authority_key_id: community_id.to_string(),
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
         })
         .await
         .expect("put_community");

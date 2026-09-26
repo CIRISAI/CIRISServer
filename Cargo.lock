@@ -937,8 +937,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "16.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v16.1.0#d99da1c24d69ecaab2d0bd7c858aa606a608c778"
+version = "17.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "31.0.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v31.0.0#d53056a9e6cb4d93e5356135d6c8a05f2ad788ed"
+version = "32.1.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v32.1.0#d34df2f6e47263a39defea2c3b2a18dacbe27b3f"
 dependencies = [
  "async-trait",
  "axum",
@@ -1019,8 +1019,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "16.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v16.1.0#d99da1c24d69ecaab2d0bd7c858aa606a608c778"
+version = "17.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1086,8 +1086,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "48.0.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v48.0.0#59283e3e4cb54bc90f92eb110d81246be8e9ee64"
+version = "49.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v49.0.0#a5965d42e79ff35c79509beaaebd417514b7914d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1181,8 +1181,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "16.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v16.1.0#d99da1c24d69ecaab2d0bd7c858aa606a608c778"
+version = "17.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1223,8 +1223,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "16.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v16.1.0#d99da1c24d69ecaab2d0bd7c858aa606a608c778"
+version = "17.1.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
 dependencies = [
  "aes-gcm",
  "android_logger",
@@ -3698,18 +3698,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leviculum-announce-policy"
+version = "0.1.0"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
+dependencies = [
+ "leviculum-telemetry-policy",
+]
+
+[[package]]
 name = "leviculum-ble-tx"
 version = "0.1.0"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.26.0%2Bciris.1#85fb1eaa82350490b06070e63f233303f27a9bcb"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
 dependencies = [
  "embassy-sync",
  "leviculum-core",
 ]
 
 [[package]]
+name = "leviculum-channel-access"
+version = "0.1.0"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
+
+[[package]]
 name = "leviculum-core"
-version = "0.26.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.26.0%2Bciris.1#85fb1eaa82350490b06070e63f233303f27a9bcb"
+version = "0.27.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
 dependencies = [
  "aes",
  "cbc",
@@ -3726,8 +3739,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.26.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.26.0%2Bciris.1#85fb1eaa82350490b06070e63f233303f27a9bcb"
+version = "0.27.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -3737,8 +3750,8 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.26.0+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?tag=v0.26.0%2Bciris.1#85fb1eaa82350490b06070e63f233303f27a9bcb"
+version = "0.27.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
 dependencies = [
  "bluer",
  "clap 4.6.6",
@@ -3747,7 +3760,9 @@ dependencies = [
  "futures",
  "hmac 0.12.1",
  "if-addrs",
+ "leviculum-announce-policy",
  "leviculum-ble-tx",
+ "leviculum-channel-access",
  "leviculum-core",
  "leviculum-lxmf",
  "libc",
@@ -3767,6 +3782,11 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "leviculum-telemetry-policy"
+version = "0.1.0"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.27.0%2Bciris.1#c2f8d3fda950096f954b0b18f8c90bb275487652"
 
 [[package]]
 name = "libbz2-rs-sys"

@@ -598,7 +598,12 @@ where
     // `compose::build_edge`) reads it. Two registers would let a withdrawn blob
     // keep being served — CIRISEdge#606's exact defect, one Arc away.
     let register = revocation_register();
-    let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = backend;
+    // THE ENGINE evicts, not the storage backend (edge v32, CIRISEdge#669):
+    // eviction retracts this node's `holds_bytes` claims first — hybrid-signed
+    // `withdraws` only the engine can sign — and only then deletes the bytes.
+    // Deleting through the backend left a live claim naming bytes this node no
+    // longer held.
+    let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = Arc::<Engine>::clone(engine);
     tracing::info!(
         local_key_id,
         "blob puller spawned — community/family/own content is held and announced, the \

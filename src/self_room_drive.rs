@@ -262,6 +262,19 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             Ok(n) => SelfRoomTick::Removed(n),
             Err(e) => SelfRoomTick::Failed(e),
         },
+        // CIRISEdge#676 (edge v32): a member whose leaf is stale — it restarted
+        // or was restored and published a fresh KeyPackage after it was added.
+        // Two commits, REMOVAL FIRST (the order `Remove` mandates), so its new
+        // Welcome reaches material it still holds. Dormant while this drive
+        // calls plain `decide` (which passes no republished set); it becomes
+        // live when the durable-MLS-state wiring (CIRISServer#630) passes one.
+        SelfRoomAction::Rejoin(nodes) => match remove_members(st, &room, &owner, &nodes).await {
+            Ok(_) => match add_members(st, &room, &owner, &nodes).await {
+                Ok(n) => SelfRoomTick::Added(n),
+                Err(e) => SelfRoomTick::Failed(e),
+            },
+            Err(e) => SelfRoomTick::Failed(e),
+        },
         SelfRoomAction::Abandon { in_favour_of } => {
             // Drop ours and wait for their Welcome. Dropping FIRST is the
             // point: a room about to be abandoned must not be addressed, or we

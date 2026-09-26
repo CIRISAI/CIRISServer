@@ -2260,6 +2260,8 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
         authority_key_id: String::new(),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
+        // persist stamps the quorum proof on `supersede_family_with_quorum` (v49.0.0).
+        supersede_proof: None,
     })
 }
 
