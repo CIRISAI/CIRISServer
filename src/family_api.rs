@@ -1222,7 +1222,7 @@ async fn leave_inner(
     // A quorum family's record must keep N == roster, or every later quorum
     // check reads a seat that has left. Rewritten FIRST (by the leaver, whose
     // own act this is); the revocation below is what replicates the departure.
-    if let Protocol::Quorum { m, n } = protocol {
+    if let Protocol::Quorum { m, .. } = protocol {
         let remaining: Vec<FamilyMember> = loaded
             .family
             .members

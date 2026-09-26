@@ -878,6 +878,23 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
+    // WHICH TWO KEYS (CIRISServer#683). A code both sides can compare must be
+    // over the SAME pair on both sides. For a NODE peer that is {this node,
+    // that node}. For a PERSON (a contact) it is {my person, their person} —
+    // the pair a chat uses. Computing over this NODE's key and the contact's
+    // PERSON key gave Alice sas(nodeA, Bob) and Bob sas(nodeB, Alice): never
+    // equal, so an honest comparison always read as a mismatch.
+    let peer_is_person =
+        ciris_persist::federation::types::identity_type::parse_set(&rec.identity_type)
+            .contains(&ciris_persist::federation::types::identity_type::USER);
+    if peer_is_person {
+        let local_pub = match owner_ed25519(&st).await {
+            Ok(pk) => pk,
+            Err(r) => return r,
+        };
+        return sas_response(&st, &key_id, &local_pub, &peer_pub).await;
+    }
+
     // Local pubkey — the node's composed federation signer (Ed25519 half).
     let local_pub: [u8; 32] = match st.engine.signer().public_key().await {
         Ok(b) => match <[u8; 32]>::try_from(b.as_slice()) {
@@ -897,6 +914,68 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
+    sas_response(&st, &key_id, &local_pub, &peer_pub).await
+}
+
+/// This node's OWNER's Ed25519 key — the person side of a person-to-person
+/// code. A node with no owner has no person to compare as.
+async fn owner_ed25519(st: &PeersState) -> Result<[u8; 32], Response> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    let node = self_key_id(st).await?;
+    let owner = match st.engine.owner_of(&node).await {
+        Ok(Some(o)) => o,
+        Ok(None) => {
+            return Err(crate::auth::refusal::refuse(
+                StatusCode::CONFLICT,
+                "peers.sas_no_owner",
+                "this node has no owner, so there is no person to compare a code as — a \
+                 person-to-person code is computed over the two people's keys",
+            ))
+        }
+        Err(e) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("owner_of: {e}"),
+            ))
+        }
+    };
+    let rec = match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&owner)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("the owner's key {owner:?} is not in this directory"),
+            ))
+        }
+        Err(e) => return Err(err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}"))),
+    };
+    BASE64
+        .decode(&rec.pubkey_ed25519_base64)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the owner's pubkey is not a 32-byte Ed25519 key",
+            )
+        })
+}
+
+/// The code over `(local_pub, peer_pub)` — `ciris_edge::sas` sorts the pair,
+/// so both sides of one pair derive the same words and digits.
+async fn sas_response(
+    st: &PeersState,
+    key_id: &str,
+    local_pub: &[u8; 32],
+    peer_pub: &[u8; 32],
+) -> Response {
+    let (local_pub, peer_pub) = (*local_pub, *peer_pub);
     let words = match ciris_edge::sas::peer_sas_words(
         &local_pub,
         &peer_pub,
@@ -919,7 +998,7 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
-    let sideband = load_sideband(&st, &key_id).await.ok().flatten();
+    let sideband = load_sideband(st, key_id).await.ok().flatten();
     (
         StatusCode::OK,
         Json(serde_json::json!({

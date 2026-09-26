@@ -853,6 +853,8 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # THE CLAIM, NAMED (0.5.218, CIRISServer#678 client review: "refusals come
     # back as prose"): claim-remote on the approving device, and setup/root on
     # the device being claimed. Same queue (CIRISClient#78).
+    # CIRISServer#683: a person-to-person verification code needs an owner.
+    "peers.sas_no_owner",
     "claim.bad_request",
     "claim.binding_unsigned",
     "claim.cohort_invalid",
