@@ -213,6 +213,17 @@ harness_required_pending() {
   return 1
 }
 
+# Is any REQUIRED stage red? Quiet — the verdict's question, not the loop's.
+harness_required_red() {
+  local s req
+  for s in "${STAGES[@]}"; do
+    req="REQUIRED_$s"
+    [ -n "${!req:-}" ] || continue
+    if [ "${COUNT[$s]:-0}" -le 0 ]; then return 0; fi
+  done
+  return 1
+}
+
 harness_run_ladder() {
   local window="${1:-780}" resample="${2:-30}"
   declare -gA COUNT
@@ -297,9 +308,14 @@ harness_verdict() {
   # The short-circuit is ALSO skipped when the scenario declares any XFAIL: a
   # green success stage must not swallow the report of the expected reds, which
   # are the scenario's other deliverable.
+  # And it is skipped while any REQUIRED stage is red (rule 7: a red REQUIRED
+  # stage is a BREAK wherever it sits). Without this a NEGATIVE rung — "the
+  # file's existence did not reach the federation" — could be red beside a
+  # green success stage and the run would still print SUCCESS.
   if [ "${VERDICT_MODE:-monotonic}" != "audit" ] \
      && [ "${COUNT[$SUCCESS_STAGE]:-0}" -gt 0 ] \
-     && ! harness_has_xfail; then
+     && ! harness_has_xfail \
+     && ! harness_required_red; then
     echo "  → SUCCESS: ${SUCCESS_MESSAGE:-full chain green}"
     exit 0
   fi

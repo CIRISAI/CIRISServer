@@ -32,6 +32,23 @@
 #              Red on any self pull regression by name (#626): `NoHolders`,
 #              `NoMeaning(GroupWithoutId)`, or a `self:claim_index` source.
 #
+#   self_stays_self  NEGATIVE. On the owner's own devices every self-plane row
+#              (a `file:v1` row, or a `chat:*` row in the owner's room — the notes
+#              and the self-room handshake) is at cohort_scope `self`. A row at a
+#              wider scope is the file's EXISTENCE — its metadata, its room, its
+#              handshake — distributed past the person. CIRISPersist#919 is
+#              exactly this: the #530 consent sweep superseded every self file row
+#              with a federation-scoped copy within a second of the write.
+#   outsiders_hold_nothing  NEGATIVE. A node that is NOT the person's (the
+#              canonical, the bystander node-b) holds no self-plane row at any
+#              scope and no row naming one of the scenario's files — after a soak
+#              window, and only when it holds SOMETHING from the person's keys
+#              (the positive control: a clean result from a node nothing reached
+#              is not evidence).
+#
+# Both negatives LATCH: a leak seen at any sample stays red for the run. A row
+# that widened and was later pruned still distributed the file's existence.
+#
 # `mine_on_b` and `opened_on_b` are both REQUIRED since 0.5.216 (the self-room
 # drive adopts edge's room-keyed handshake, CIRISEdge#656). A red here names its
 # rung; that is the whole reason the table exists.
@@ -54,7 +71,7 @@ PROJECT="${PROJECT:-ciris-selffiles}"
 # and `welcome_for`; `src/self_room_drive.rs` adopts them in 0.5.216, so the
 # rung is PROMOTED to SUCCESS_STAGE and made REQUIRED.
 SUCCESS_STAGE="corpus_opened_on_b"
-STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b corpus_written corpus_opened_on_b)
+STAGES=(rooted one_owner roster room note file self_stays_self mine_on_b opened_on_b corpus_written corpus_opened_on_b outsiders_hold_nothing)
 
 # `mine_on_b` is the claim of this scenario: inferring it from a later stage is
 # exactly the mistake the chat ladder made with `arrived` for six releases.
@@ -71,6 +88,16 @@ REQUIRED_opened_on_b=1
 # the second device returns — not by a listing's `bytes: "here"`.
 REQUIRED_corpus_written=1
 REQUIRED_corpus_opened_on_b=1
+# THE NEGATIVES (maintainer, 0.5.218: "file existence should not distribute to
+# the federation"). Required wherever they sit — a green corpus does not excuse
+# a leak, and the verdict's success short-circuit honours REQUIRED for exactly
+# this reason (lib/harness.sh).
+REQUIRED_self_stays_self=1
+REQUIRED_outsiders_hold_nothing=1
+# Nodes that are not the person's. Their holding NOTHING of the self plane is
+# the claim; how long we watch before believing it is the soak.
+SELF_OUTSIDERS="${SELF_OUTSIDERS:-canonical node-b}"
+SELF_SOAK_SECS="${SELF_SOAK_SECS:-120}"
 
 SELF_STATE="${TMPDIR:-/tmp}/ciris-selffiles-${PROJECT:-ciris-selffiles}"
 SELF_NODES="${SELF_NODES:-node-a node-c}"
@@ -316,6 +343,57 @@ print(json.dumps({"cohort":"self","bytes_base64":base64.b64encode(sys.argv[1].en
     >"$SELF_STATE/file.json" || true
   cat "$SELF_STATE/file.json" 2>/dev/null | head -c 400; echo
   _self_corpus_write
+  printf 'SELF_WROTE_AT=%s\n' "$(date +%s)" >>"$SELF_STATE/vars.sh"
+  _self_leak_probe_install
+}
+
+# ── THE NEGATIVE PROBE ───────────────────────────────────────────────────────
+# lib/self_leak_probe.py, copied into every holder and every outsider. Its
+# inputs are the owner's id, every file name the scenario wrote, and the keys
+# the person authors under (the owner and both nodes) for the positive control.
+_self_leak_probe_install() {
+  local svc
+  for svc in $SELF_OUTSIDERS; do
+    harness_wait_healthy "$svc" 12 >/dev/null 2>&1 || echo "  ! outsider $svc is not healthy — its negative cannot be read"
+  done
+  for svc in $SELF_NODES $SELF_OUTSIDERS; do
+    compose cp "$HARNESS_DIR/lib/self_leak_probe.py" "$svc:/tmp/self_leak_probe.py" >/dev/null 2>&1 \
+      || echo "  ! could not install the leak probe on $svc"
+  done
+  python3 - "$SELF_CORPUS/manifest.json" >"$SELF_STATE/leak-names.json" <<'PY2'
+import json, sys
+names = ["proof.txt"]
+try: names += [r["filename"] for r in json.load(open(sys.argv[1], encoding="utf-8"))]
+except Exception: pass
+print(json.dumps(names))
+PY2
+  python3 - "$SELF_STATE" $SELF_NODES >"$SELF_STATE/leak-authors.json" <<'PY2'
+import json, sys
+out = []
+for svc in sys.argv[2:]:
+    try: out.append(json.load(open(f"{sys.argv[1]}/record-{svc}.json"))["record"]["key_id"])
+    except Exception: pass
+print(json.dumps(out))
+PY2
+}
+
+# One probe run on one node. JSON on stdout, `{}` when it could not run.
+_self_leak_probe() {
+  local svc="$1" mode="$2" owner
+  _self_load
+  eval "owner=\${SELF_OWNER_${SELF_PRIMARY//-/_}:-}"
+  [ -n "$owner" ] || { echo '{}'; return 0; }
+  compose exec -T "$svc" python /tmp/self_leak_probe.py "$mode" "$owner" \
+    "$(cat "$SELF_STATE/leak-names.json" 2>/dev/null || echo '[]')" \
+    "$(cat "$SELF_STATE/leak-authors.json" 2>/dev/null || echo '[]')" 2>/dev/null | tail -1 || echo '{}'
+}
+
+# `python3 -c` over a probe's JSON: one field, with a default.
+_self_json_field() {
+  python3 -c '
+import json,sys
+try: print(json.loads(sys.argv[1]).get(sys.argv[2], sys.argv[3]))
+except Exception: print(sys.argv[3])' "$1" "$2" "$3"
 }
 
 # ── THE TRANSFER CORPUS ──────────────────────────────────────────────────────
@@ -518,6 +596,68 @@ DIAG_file() {
   echo "  write body: $(head -c 500 "$SELF_STATE/file.json" 2>/dev/null)"
 }
 
+stage_self_stays_self() {
+  # LATCHED: once a wide self-plane row was seen, the run is red.
+  if [ -s "$SELF_STATE/leak-holder.latched" ]; then echo 0; return; fi
+  local svc j wide total=0 self_rows=0
+  for svc in $SELF_NODES; do
+    j="$(_self_leak_probe "$svc" holder)"
+    printf '%s\n' "$j" >"$SELF_STATE/leak-holder-$svc.json"
+    wide="$(_self_json_field "$j" wide_count -1)"
+    if [ "$wide" = "-1" ]; then echo 0; return; fi
+    if [ "$wide" -gt 0 ]; then
+      printf '%s %s\n' "$svc" "$j" >>"$SELF_STATE/leak-holder.latched"
+      echo 0; return
+    fi
+    self_rows=$((self_rows + $(_self_json_field "$j" self_rows 0)))
+  done
+  # Non-vacuous: the self file IS on the author's device, at `self`.
+  if [ "$self_rows" -gt 0 ]; then echo 1; else echo 0; fi
+}
+HINT_self_stays_self="a self-plane row (a file:v1 row, or a chat:* row in the owner's room) is at a cohort_scope wider than self on the owner's own device — the file's existence was distributed past the person. The diagnosis lists each wide row. A federation-scoped file:v1 SUPERSEDE of the original is the persist #530 consent sweep (CIRISPersist#919: promote_consented_backlog widens every grant-covered self row and strips the room)"
+EXIT_self_stays_self=50
+DIAG_self_stays_self() {
+  if [ -s "$SELF_STATE/leak-holder.latched" ]; then
+    echo "  LATCHED (first seen):"; head -c 3000 "$SELF_STATE/leak-holder.latched"; echo
+  fi
+  local svc
+  for svc in $SELF_NODES; do
+    echo "  $svc: $(head -c 1500 "$SELF_STATE/leak-holder-$svc.json" 2>/dev/null)"
+  done
+}
+
+stage_outsiders_hold_nothing() {
+  if [ -s "$SELF_STATE/leak-outsider.latched" ]; then echo 0; return; fi
+  local svc j leaked control=0
+  for svc in $SELF_OUTSIDERS; do
+    j="$(_self_leak_probe "$svc" outsider)"
+    printf '%s\n' "$j" >"$SELF_STATE/leak-outsider-$svc.json"
+    leaked="$(_self_json_field "$j" leaked_count -1)"
+    if [ "$leaked" = "-1" ]; then echo 0; return; fi
+    if [ "$leaked" -gt 0 ]; then
+      printf '%s %s\n' "$svc" "$j" >>"$SELF_STATE/leak-outsider.latched"
+      echo 0; return
+    fi
+    control=$((control + $(_self_json_field "$j" control 0)))
+  done
+  # Not believed before the soak, and not believed from nodes nothing reached.
+  _self_load
+  if [ $(( $(date +%s) - ${SELF_WROTE_AT:-$(date +%s)} )) -lt "$SELF_SOAK_SECS" ]; then echo 0; return; fi
+  if [ "$control" -gt 0 ]; then echo 1; else echo 0; fi
+}
+HINT_outsiders_hold_nothing="a node that is NOT the person's holds part of their self plane (a file:v1 row, a chat:* row in the owner's room, or a row naming one of the files) — the file's existence reached the federation. OR the negative is not yet believable: the soak (SELF_SOAK_SECS) has not elapsed, or no outsider holds ANY row from the person's keys (control=0), so a clean read would prove nothing. The diagnosis says which"
+EXIT_outsiders_hold_nothing=51
+DIAG_outsiders_hold_nothing() {
+  if [ -s "$SELF_STATE/leak-outsider.latched" ]; then
+    echo "  LATCHED (first seen):"; head -c 3000 "$SELF_STATE/leak-outsider.latched"; echo
+  fi
+  local svc
+  for svc in $SELF_OUTSIDERS; do
+    echo "  $svc: $(head -c 1500 "$SELF_STATE/leak-outsider-$svc.json" 2>/dev/null)"
+  done
+  echo "  soak: $(( $(date +%s) - ${SELF_WROTE_AT:-0} ))s of ${SELF_SOAK_SECS}s"
+}
+
 stage_mine_on_b() {
   # THE CLAIM: the second device LISTS the file.
   _self_api "$SELF_SECOND" GET /v1/drive '' >"$SELF_STATE/drive-b.json" 2>/dev/null || true
@@ -612,6 +752,10 @@ harness_scenario_evidence() {
   head -c 900 "$SELF_STATE/drive-b.json" 2>/dev/null; echo
   echo "── the write ──"
   head -c 500 "$SELF_STATE/file.json" 2>/dev/null; echo
+  echo "── the negatives: the self plane stays with the person ──"
+  local n
+  for n in $SELF_NODES; do echo "  holder $n: $(head -c 600 "$SELF_STATE/leak-holder-$n.json" 2>/dev/null)"; done
+  for n in $SELF_OUTSIDERS; do echo "  outsider $n: $(head -c 600 "$SELF_STATE/leak-outsider-$n.json" 2>/dev/null)"; done
   echo "── pull sources (MUST be self:author_nodes, never self:claim_index) ──"
   # Read from the metrics snapshot (GET /v1/federation/metrics
   # `blob_pull_sources`, 0.5.218). This was a log grep, and edge never LOGS the
