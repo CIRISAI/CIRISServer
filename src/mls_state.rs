@@ -53,7 +53,9 @@ pub enum Posture {
     Ephemeral { reason: String },
 }
 
-type Registry = HashMap<String, (ScopeStateProvider, Posture)>;
+/// `(store, posture, explicit)` — `explicit` for a store a host registered on
+/// purpose (`register_for_node`), which the boot open must not replace.
+type Registry = HashMap<String, (ScopeStateProvider, Posture, bool)>;
 
 fn registry() -> &'static Mutex<Registry> {
     static R: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -65,6 +67,14 @@ fn registry() -> &'static Mutex<Registry> {
 /// degraded ones are logged by name.
 pub async fn open_for_node(node_key_id: &str, path: &Path) -> Posture {
     use ciris_edge::mls::scope_state::{open_mls_state, MlsStateUnavailable};
+    // A store the embedding host registered ON PURPOSE (an operator
+    // passphrase store, edge FSD §1) is kept: opening over it would replace a
+    // durable store with an ephemeral one on a host with no hardware seed, and
+    // record a posture that skips the boot re-address (Codex, #689).
+    if let Some(p) = explicit_posture(node_key_id) {
+        tracing::info!(posture = ?p, "MLS state: keeping the store the host registered for this node");
+        return p;
+    }
     let (store, posture) = match open_mls_state(path).await {
         Ok(store) => {
             let posture = Posture::Durable {
@@ -108,9 +118,55 @@ pub async fn open_for_node(node_key_id: &str, path: &Path) -> Posture {
         }
     };
     if let Ok(mut r) = registry().lock() {
-        r.insert(node_key_id.to_owned(), (store, posture.clone()));
+        r.insert(node_key_id.to_owned(), (store, posture.clone(), false));
     }
     posture
+}
+
+fn explicit_posture(node_key_id: &str) -> Option<Posture> {
+    registry()
+        .lock()
+        .ok()
+        .and_then(|r| r.get(node_key_id).filter(|e| e.2).map(|e| e.1.clone()))
+}
+
+/// Release `node_key_id`'s store: its opened KV and state-access key go with
+/// it. Called at serve teardown and on a failed boot, because the embedded
+/// restart flow can serve another identity in the same process and the
+/// registry would otherwise hold every stopped identity's store (Codex, #689).
+/// An explicit registration is released too: the host registers again before
+/// the next serve if it wants one.
+pub fn unregister(node_key_id: &str) {
+    if let Ok(mut r) = registry().lock() {
+        r.remove(node_key_id);
+    }
+}
+
+/// Unregisters its node's store when dropped — held by the serve function for
+/// its whole life, so a teardown AND every early return of a failed boot
+/// release the store without each path remembering to.
+pub struct Registration(String);
+
+impl Registration {
+    pub fn new(node_key_id: &str) -> Self {
+        Self(node_key_id.to_owned())
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        unregister(&self.0);
+    }
+}
+
+/// Delete `room`'s durable state (group, join map, pending material) — for a
+/// room this node INTENTIONALLY drops (abandoned in a creation contest, or a
+/// removal whose Commit could not be placed). Without it the reload on the
+/// next tick restores the very group the drive just discarded (Codex, #689).
+pub async fn forget(store: &ScopeStateProvider, room: &str) {
+    if let Err(e) = store.forget_room(room).await {
+        tracing::warn!(%room, error = %e, "the dropped room's durable MLS state could not be deleted — the next reload may restore it");
+    }
 }
 
 /// Register `store` for `node_key_id` directly: an operator-passphrase store
@@ -118,7 +174,7 @@ pub async fn open_for_node(node_key_id: &str, path: &Path) -> Posture {
 /// store already registered for the node.
 pub fn register_for_node(node_key_id: &str, store: ScopeStateProvider, posture: Posture) {
     if let Ok(mut r) = registry().lock() {
-        r.insert(node_key_id.to_owned(), (store, posture));
+        r.insert(node_key_id.to_owned(), (store, posture, true));
     }
 }
 
@@ -136,6 +192,7 @@ pub fn store_for(node_key_id: &str) -> ScopeStateProvider {
                 Posture::Ephemeral {
                     reason: "no store opened for this node (in-process)".to_owned(),
                 },
+                false,
             )
         })
         .0
@@ -147,7 +204,7 @@ pub fn posture_for(node_key_id: &str) -> Option<Posture> {
     registry()
         .lock()
         .ok()
-        .and_then(|r| r.get(node_key_id).map(|(_, p)| p.clone()))
+        .and_then(|r| r.get(node_key_id).map(|(_, p, _)| p.clone()))
 }
 
 /// Reload `room`'s group from the store, if this node persisted one — the
@@ -308,5 +365,51 @@ mod tests {
             "node b must not see node a's group under the shared room id"
         );
         assert!(matches!(posture_for(&b), Some(Posture::Ephemeral { .. })));
+    }
+
+    /// Codex #689: a store the host registered on purpose (the
+    /// operator-passphrase posture) survives the boot open, the teardown guard
+    /// releases it, and a forgotten room does not come back on reload.
+    #[tokio::test]
+    async fn an_explicit_store_survives_the_boot_open_and_teardown_releases_it() {
+        let node = format!("explicit-node-{}", std::process::id());
+        let path = tmp("explicit");
+        register_for_node(
+            &node,
+            disk_store(&path),
+            Posture::Durable {
+                path: path.display().to_string(),
+            },
+        );
+        let posture = open_for_node(&node, &tmp("never-opened")).await;
+        assert!(
+            matches!(posture, Posture::Durable { .. }),
+            "the boot open kept the host's durable store: {posture:?}"
+        );
+        let room = "chat:room:v1:explicit";
+        let _g = CohortGroup::create(store_for(&node), room, &node, RETAINED_EPOCHS)
+            .await
+            .expect("create");
+        assert!(load(&disk_store(&path), room)
+            .await
+            .expect("load")
+            .is_some());
+
+        // FORGET: an intentionally dropped room does not reload.
+        forget(&store_for(&node), room).await;
+        assert!(load(&disk_store(&path), room)
+            .await
+            .expect("load")
+            .is_none());
+
+        // TEARDOWN: the guard releases the registration.
+        {
+            let _reg = Registration::new(&node);
+        }
+        assert!(
+            posture_for(&node).is_none(),
+            "the stopped node's store is released"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

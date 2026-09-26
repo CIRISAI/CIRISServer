@@ -862,8 +862,25 @@ async fn room_key(
     let store = crate::mls_state::store_for(&st.node_signer.key_id);
     if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
         if let Some(group) = crate::mls_state::load(&store, &room).await? {
-            tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
-            rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
+            // A CREATOR'S HANDSHAKE THAT NEVER FINISHED (Codex, #689). `create`
+            // and `add_member` persist before the Welcome is placed; a crash in
+            // that window reloads a group the joiner was never welcomed into,
+            // and the keyed path would report Ready forever. With no Welcome of
+            // ours in the room nobody can have joined, so the persisted group is
+            // dropped and the ordinary create-and-welcome runs again below.
+            let unfinished = matches!(PairRole::of(me, peer), PairRole::Creator)
+                && chat::welcome_from(&*dir, me, &room).await?.is_none();
+            if unfinished {
+                tracing::warn!(
+                    room = %room,
+                    "chat: reloaded pair room has no Welcome of ours — the handshake was \
+                     interrupted; recreating it"
+                );
+                crate::mls_state::forget(&store, &room).await;
+            } else {
+                tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+                rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
+            }
         }
     }
 
@@ -969,7 +986,10 @@ async fn room_key(
                     let row =
                         chat::key_package_attestation(author, peer, &kp_bytes, chrono::Utc::now())
                             .await?;
-                    share_in_room(
+                    // Stash BEFORE the KeyPackage is out (Codex, #689); withdraw
+                    // the stash if publication fails.
+                    crate::mls_state::stash_pending(&store, &room, &material).await;
+                    if let Err(e) = share_in_room(
                         &*dir,
                         row,
                         &room,
@@ -978,8 +998,11 @@ async fn room_key(
                             actor: Some(author),
                         },
                     )
-                    .await?;
-                    crate::mls_state::stash_pending(&store, &room, &material).await;
+                    .await
+                    {
+                        crate::mls_state::clear_pending(&store, &room).await;
+                        return Err(e);
+                    }
                     material
                 }
             };
@@ -1008,16 +1031,19 @@ async fn room_key(
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
                 return Ok(RoomHandshake::JoinRequested);
             };
-            let group = CohortGroup::join(
+            let joined = CohortGroup::join(
                 store.clone(),
                 &room,
                 material,
                 &welcome,
                 crate::mls_state::RETAINED_EPOCHS,
             )
-            .await
-            .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            .await;
+            // Spent either way (Codex, #689): a failed join must not restore the
+            // same material against the same Welcome forever; the next call
+            // mints and publishes a fresh KeyPackage.
             crate::mls_state::clear_pending(&store, &room).await;
+            let group = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
             rooms.insert(room, RoomState::Keyed(group));
@@ -1132,7 +1158,9 @@ pub(crate) async fn room_key_room(
                 chrono::Utc::now(),
             )
             .await?;
-            share_in(
+            // Stash BEFORE the KeyPackage is out (Codex, #689).
+            crate::mls_state::stash_pending(&store, room, &material).await;
+            if let Err(e) = share_in(
                 &*dir,
                 row,
                 &scope_room,
@@ -1141,8 +1169,11 @@ pub(crate) async fn room_key_room(
                     actor: Some(author),
                 },
             )
-            .await?;
-            crate::mls_state::stash_pending(&store, room, &material).await;
+            .await
+            {
+                crate::mls_state::clear_pending(&store, room).await;
+                return Err(e);
+            }
             material
         }
     };
@@ -1159,18 +1190,17 @@ pub(crate) async fn room_key_room(
         rooms.insert(room.to_owned(), RoomState::AwaitingWelcome(material));
         return Ok(RoomHandshake::JoinRequested);
     };
-    let group = Arc::new(
-        CohortGroup::join(
-            store.clone(),
-            room,
-            material,
-            &welcome,
-            crate::mls_state::RETAINED_EPOCHS,
-        )
-        .await
-        .map_err(|e| format!("CohortGroup::join: {e}"))?,
-    );
+    let joined = CohortGroup::join(
+        store.clone(),
+        room,
+        material,
+        &welcome,
+        crate::mls_state::RETAINED_EPOCHS,
+    )
+    .await;
+    // Spent either way (Codex, #689).
     crate::mls_state::clear_pending(&store, room).await;
+    let group = Arc::new(joined.map_err(|e| format!("CohortGroup::join: {e}"))?);
     apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
@@ -1197,6 +1227,35 @@ async fn reconcile_room_group(
         node: &st.node_signer,
         actor: Some(author),
     };
+    // A MEMBER IN THE TREE THAT WAS NEVER WELCOMED (Codex, #689). The group
+    // persists at `add_member`, before its Welcome is placed; a crash in that
+    // window reloads a tree naming a member who holds nothing to join with, and
+    // the add loop below skips members already in the tree. The creator's own
+    // Welcome rows are local, so the gap is visible here: remove the member
+    // (the Commit reaches everyone who did join), and the loop re-adds them
+    // with a fresh Welcome in this same pass.
+    for m in group.member_key_ids().await {
+        if m == author.key_id {
+            continue;
+        }
+        if chat::welcome_for(&*dir, &author.key_id, room, &m)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        let commit = group
+            .remove_member(&m)
+            .await
+            .map_err(|e| format!("remove_member({m}) to re-welcome: {e}"))?;
+        let row = chat::commit_attestation_in(author, room, &commit).await?;
+        share_in(&*dir, row, scope_room, signers()).await?;
+        tracing::warn!(
+            room = %room, member = %m,
+            "chat: N-member room — a member in the tree had no Welcome (an add interrupted \
+             before its Welcome was placed); removed so it is re-added with a fresh one"
+        );
+    }
     let in_group: std::collections::BTreeSet<String> =
         group.member_key_ids().await.into_iter().collect();
     for member in roster {

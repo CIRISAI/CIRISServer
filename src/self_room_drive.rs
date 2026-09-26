@@ -178,7 +178,7 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     if st.held.lock().await.is_none() {
         match crate::mls_state::load(&st.store(), &room_id).await {
             Ok(Some(group)) => {
-                let claim = reloaded_claim(&*dir, &roster, &node_key, &room_id, &group).await;
+                let claim = reloaded_claim(&*dir, &node_key, &room_id, &group).await;
                 let members = group.member_key_ids().await.len();
                 tracing::info!(
                     room = %room, members,
@@ -230,6 +230,36 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             }),
         None => Vec::new(),
     };
+    // A MEMBER THAT WAS NEVER WELCOMED (Codex, #689). `add_members` persists
+    // the tree before it places the Welcome; a crash in that window reloads a
+    // device the tree names but that holds nothing to join with, and `decide`
+    // would call the room converged. Any member but the room's creator with no
+    // Welcome addressed to it, from any device, is rejoined like a restarted
+    // one: removed, then re-added with a fresh Welcome.
+    let mut republished = republished;
+    if let Some(h) = &held_group {
+        let creator = h.claim.committer_key_id().to_owned();
+        for m in h.group.member_key_ids().await {
+            if m == node_key || m == creator || republished.contains(&m) {
+                continue;
+            }
+            let mut welcomed = false;
+            for n in &roster {
+                if let Ok(Some(_)) = ciris_edge::chat::welcome_for(&*dir, n, &room_id, &m).await {
+                    welcomed = true;
+                    break;
+                }
+            }
+            if !welcomed {
+                tracing::warn!(
+                    member = %m, room = %room,
+                    "self room: a device in the tree has no Welcome (an add interrupted before \
+                     its Welcome was placed) — rejoining it"
+                );
+                republished.push(m);
+            }
+        }
+    }
     let action = self_room::decide_with_republished(
         &node_key,
         &roster,
@@ -328,6 +358,10 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
                     );
                 }
             }
+            // FORGET it durably too (Codex, #689): otherwise the next tick's
+            // reload restores the conceded room and this device never
+            // publishes a KeyPackage for the winner's.
+            crate::mls_state::forget(&st.store(), room.content_group_id()).await;
             *st.held.lock().await = None;
             tracing::info!(
                 owner = %owner,
@@ -346,37 +380,35 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
 /// `first_rival` folds every node's claims into a single winner; this asks
 /// about one node, which is what a joiner needs: it is adopting a particular
 /// creator's room, so it must store that creator's claim.
-/// The claim a RELOADED room is held under: the room's oldest commit claim on
-/// the rows — ours if we created it and committed, the creator's if we joined
-/// — which is the value the room was held under before the restart. With no
-/// commit rows yet (a creator alone in its room), the creator's recorded join
-/// instant, which edge persists with the group (CIRISEdge#676 §4.1). Edge v32
-/// writes that map only on a commit, so a room that never committed reloads
-/// without it and the claim falls back to `now()`: harmless, because such a
-/// room has no other member and no commit row, so losing a contest to a real
-/// rival abandons nothing anyone else holds.
+/// The claim a RELOADED room is held under: the claim of the node that
+/// CREATED THE LOADED GROUP — never the best claim anywhere (Codex, #689). A
+/// device that persisted a losing group and restarts after an older rival is
+/// visible must still see its tree as the LOSER's, so `decide` abandons it; a
+/// rival's claim pinned onto an unrelated tree would keep two room secrets.
+///
+/// The creator is the tree member with the earliest recorded join instant
+/// (edge persists the join map with the group, CIRISEdge#676 §4.1; the creator
+/// is recorded at creation). Its claim is its own signed commit claim in the
+/// room when it has committed, else its join instant. Edge v32 writes the join
+/// map only on a commit (CIRISEdge#695), so a group that never committed
+/// reloads without one: its only member is this node, and the claim is this
+/// node's, dated `now()` — harmless, as such a room holds nobody else.
 async fn reloaded_claim(
     dir: &dyn ciris_persist::federation::FederationDirectory,
-    roster: &[String],
     own: &str,
     room_id: &str,
     group: &CohortGroup,
 ) -> CommitClaim {
-    let mut best = claim_of(dir, own, room_id).await;
-    if let Some(r) = first_rival(dir, roster, own, room_id).await {
-        if best.as_ref().is_none_or(|b| r.wins_over(b)) {
-            best = Some(r);
-        }
-    }
-    match best {
-        Some(c) => c,
-        None => CommitClaim::new(
-            group
-                .member_added_at(own)
-                .await
-                .unwrap_or_else(chrono::Utc::now),
-            own.to_owned(),
-        ),
+    let joins = group.member_joins().await;
+    let creator = joins
+        .iter()
+        .min_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)))
+        .map(|(k, at)| (k.clone(), *at));
+    match creator {
+        Some((creator, at)) => claim_of(dir, &creator, room_id)
+            .await
+            .unwrap_or_else(|| CommitClaim::new(at, creator)),
+        None => CommitClaim::new(chrono::Utc::now(), own.to_owned()),
     }
 }
 
@@ -590,6 +622,9 @@ async fn join_if_welcomed(
                 // `pending` is already None (taken above), so the next tick
                 // mints a fresh KeyPackage and republishes. See the note on
                 // this function for why that beats keeping the spent material.
+                // The durable stash goes too (Codex, #689): restored, it would
+                // retry this same failed Welcome forever.
+                crate::mls_state::clear_pending(&store, room_id).await;
                 return Err(format!(
                     "join {node}'s self room: {e} — republishing a fresh KeyPackage next tick"
                 ));
@@ -649,7 +684,14 @@ async fn publish_key_package(
         chrono::Utc::now(),
     )
     .await?;
-    crate::contacts_chat::share_in(
+    // STASH BEFORE PUBLISHING (Codex, #689): once the KeyPackage row is out, a
+    // creator may add this device; a crash between publication and the stash
+    // would leave a restarted device holding no material for that Welcome, and
+    // a creator never re-adds a member already in its tree. If publication
+    // fails, the stash is withdrawn so it is not mistaken for a live KeyPackage.
+    let store = st.store();
+    crate::mls_state::stash_pending(&store, room.content_group_id(), &material).await;
+    if let Err(e) = crate::contacts_chat::share_in(
         &*st.engine.federation_directory(),
         row,
         room,
@@ -658,8 +700,11 @@ async fn publish_key_package(
             actor: Some(capsule.edge_signer()),
         },
     )
-    .await?;
-    crate::mls_state::stash_pending(&st.store(), room.content_group_id(), &material).await;
+    .await
+    {
+        crate::mls_state::clear_pending(&store, room.content_group_id()).await;
+        return Err(e);
+    }
     *pending = Some(material);
     Ok(())
 }
@@ -916,6 +961,9 @@ async fn remove_members(
                     );
                 }
             }
+            // Durably as well as in memory (Codex, #689): a reload would
+            // otherwise restore the unpublished epoch and report `Idle`.
+            crate::mls_state::forget(&st.store(), room.content_group_id()).await;
             *st.held.lock().await = None;
             return Err(e);
         }

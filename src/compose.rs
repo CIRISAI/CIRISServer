@@ -307,6 +307,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         &cfg.data_dir.join("mls-state.kv"),
     )
     .await;
+    // Released when this serve returns, cleanly or from a failed boot (Codex,
+    // #689): the embedded restart flow can serve another identity in-process.
+    let _mls_registration = crate::mls_state::Registration::new(&chat_node_signer.key_id);
 
     // ── ONE IDENTITY, HYBRID, OR WE DO NOT BOOT (CIRISServer#380) ─────────────
     // See `crate::identity_gate` for why this is a boot error rather than a
