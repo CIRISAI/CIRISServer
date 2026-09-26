@@ -843,7 +843,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "family.not_found",
     "family.owner_session_required",
     "family.quorum_pending",
-    "family.readd_unsupported",
     "family.store_unavailable",
     "family.unknown_member_key",
     # ANNOUNCE ANOTHER DEVICE (0.5.218, CIRISServer#678): the per-node announce

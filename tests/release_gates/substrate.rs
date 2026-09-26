@@ -227,7 +227,9 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   blob doors, which now carry the stored length; the v45 ingest door
     //   refuses a size-less claim, so the fleet pins together (there are no
     //   production blobs older than this). `e7135559…` → `4d7054a6…`.
-    const ADOPTED: &str = "4d7054a6e05306e7b37d30ab2d25c43625a4f382021f39191f55a2c1f833589b";
+    // 0.5.218 (persist v49.0.0): one key ADDED, `paths::LISTED` ("listed", the
+    //   #912 listing plane); none removed or renamed. `4d7054a6…` → `a6a84cc9…`.
+    const ADOPTED: &str = "a6a84cc9d5f4d6bd6295cfc78b42bce35145d2bb9ff14391bfe32ab027116a6a";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

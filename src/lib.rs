@@ -129,6 +129,7 @@ mod compose;
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
 pub mod owner_signer_capsule;
+mod roster_rows;
 
 /// **The self-occurrence envelope builder, exposed for tests** (CIRISServer#454).
 ///

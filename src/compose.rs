@@ -4035,7 +4035,7 @@ async fn setup_peer_replication(
 /// `list_revocations`, one permit per member read). Correctness wins until edge
 /// offers a per-kind cadence or kick-only rounds; the operator's relief stays
 /// the brake.
-pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 12] = {
+pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] = {
     use ciris_edge::replication::EnvelopeKind as K;
     [
         // capacity:* / trace out, health:liveness in — the one Consentable
@@ -4103,6 +4103,20 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 12] =
         // EVALUATING node's directory, so the proof must reach every node that
         // holds the room. Edge advertises it at `cohort` only.
         K::LocationProof,
+        // ── persist v49.0.0 / edge v32 (0.5.218) — kinds 18 and 19. ──
+        //
+        // #910: the HOUSEHOLD roster's append plane, the family twin of
+        // `CommunityMembershipWidening`. A member added after a family was
+        // created now travels as its own signed row; without this round the
+        // grown roster exists only on the node that added them, and a device
+        // of that member never sees the household (the devices ladder's
+        // `family_on_b` rung, and the reason it was XFAIL on #910).
+        K::FamilyMembershipWidening,
+        // #912: CC 2 `listed` — a member's OWN signed choice to appear in a
+        // room's enumerable roster. It is the member's row about themselves;
+        // without this round their choice stays on their node and every other
+        // member renders a roster that disagrees with it.
+        K::CommunityMembershipListing,
     ]
 };
 

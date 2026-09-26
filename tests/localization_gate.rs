@@ -704,7 +704,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// same list, same client issue (CIRISClient#78).
     ///
     /// All three 0.5.218 raises together: 102 + 2 + 15 + 21 = 140.
-    const MAX_UNCOVERED: usize = 140;
+    ///
+    /// 140 -> 139 for 0.5.218: `family.readd_unsupported` retired — persist
+    /// v49.0.0 re-admits a removed family member (#910.1).
+    const MAX_UNCOVERED: usize = 139;
 
     let en = load_en();
     let ids = scraped_server_ids();

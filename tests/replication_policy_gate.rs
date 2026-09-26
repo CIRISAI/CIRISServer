@@ -42,8 +42,14 @@
 
 /// persist v21 (`ciris_persist::federation::replication_policy`) — the 15-kind
 /// APPLY (admission + projection) policy hash.
+///
+/// Re-pinned for 0.5.218 (persist v49.0.0), reviewed: kinds 18
+/// `FamilyMembershipWidening` (#910) and 19 `CommunityMembershipListing` (#912)
+/// were APPENDED with their policy tuples; no existing kind's admission or
+/// projection moved. The value is persist's own published
+/// `REPLICATION_POLICY_HASH`. `9d62d3a8…` → `5501d6b9…`.
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
-    "9d62d3a86f7a0ab955969256a10c8160da73a390953ba3c87167a2da96828a19";
+    "5501d6b9621e0af400ed89c0c803515b33c084676be5cd5182c3629277d9714a";
 
 /// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
@@ -169,8 +175,15 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 ///
 /// E3 unchanged and re-checked: `Attestation` keeps `subject-only`, `trace:*`
 /// still serves only to `capability:infra:serve` recipients.
+///
+/// Re-pinned for 0.5.218 (edge v32.1.0), reviewed: the only change adds
+/// `FamilyMembershipWidening` and `CommunityMembershipListing` to the SAME
+/// serve/advertise class as `CommunityMembershipWidening` (a roster fact, never
+/// wider than the room's membership rows). E3 re-checked: `trace:*` still
+/// serves only to `capability:infra:serve`. Edge's own published
+/// `SERVE_ADVERTISE_POLICY_HASH`. `d6e4f0df…` → `6fbf0282…`.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "d6e4f0dfccbf02d274b7c76a70f8b3af8548d177fffaeed699efe3bd423b1df0";
+    "6fbf0282408148ceea541c9e5f0b6c0726d6e10b41880b7ce9d81339ecb3e7ab";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

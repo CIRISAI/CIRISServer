@@ -54,17 +54,14 @@
 //!   cosigning a dissolve-marked envelope over the CURRENT roster (verified by
 //!   `verify_membership_quorum`), and the terminal write is the authority-signed
 //!   supersede to an empty roster, carrying that proof as its authorization.
-//! - **A removed member cannot be re-added.** A family membership revocation is
-//!   keyed `(family, member)` and has no re-establishment rule (unlike an
-//!   identity occurrence's #421), so the fold excludes that key forever. A
-//!   re-add is refused by name (`family.readd_unsupported`) rather than
-//!   reported as a success the fold would ignore.
-//! - **Only the first record and the removals replicate.** A peer applies a
-//!   `Family` row with `put_family`, which is a plain INSERT: a grown or
-//!   superseded record under an id the peer already holds is refused there. The
-//!   revocation plane replicates independently, so removals, leaves and
-//!   dissolves cross; growth and role changes after first contact do not until
-//!   persist gives the family plane the community plane's widening (#860).
+//! - **The roster is rows (persist v49.0.0, #910).** An addition and a role
+//!   change are `FamilyMembershipWidening` rows, a removal a revocation; the
+//!   record is never grown in place. Both planes replicate, so growth, role
+//!   changes and removals all reach every member's node, and a removed member
+//!   can be re-added (a widening after a revocation folds back in).
+//! - **A multi-signature household's rows are co-signed** (#908): each quorum
+//!   signer also signs the exact rows the change writes (`crate::roster_rows`),
+//!   pinned to the envelope's `row_at`.
 
 use std::sync::Arc;
 
@@ -206,16 +203,6 @@ fn last_founder() -> Response {
         "family.last_founder",
         "you are the family's last founder and other members remain — make another member a \
          founder first, or dissolve the family",
-    )
-}
-
-fn readd_unsupported(key_id: &str) -> Response {
-    refuse_with(
-        StatusCode::CONFLICT,
-        "family.readd_unsupported",
-        "that identity was removed from this family, and a removal cannot be undone at this \
-         substrate version — found a new family to include them again",
-        key_id.to_owned(),
     )
 }
 
@@ -586,8 +573,100 @@ async fn sign_family(capsule: &OwnerSignerCapsule, family: Family) -> Result<Sig
     })
 }
 
-/// Write a signed removal of `removed` from `family_id`, authored by the
-/// capsule's owner. This is the plane that REPLICATES a removal.
+/// The [`AdmitSpec`] persist's `add_family_member` verifies (v49.0.0, #910):
+/// the authority's hybrid scrub over the family WIDENING row
+/// `{family_key_id, member_key_id, joined_at, effective_at = joined_at, role}`
+/// — the row the door builds from the same member. The family twin of edge's
+/// `community_roster::community_membership_widening`; persist's own builder
+/// for it sits in its test support, so the row is spelled here from the
+/// public type, field for field. `member.joined_at` is already at substrate
+/// resolution (`now()`), so the signed instant is the stored one.
+async fn sign_family_widening(
+    capsule: &OwnerSignerCapsule,
+    family_key_id: &str,
+    member: &FamilyMember,
+) -> Result<AdmitSpec, String> {
+    let row = ciris_persist::federation::types::FamilyMembershipWidening {
+        family_key_id: family_key_id.to_owned(),
+        member_key_id: member.key_id.clone(),
+        joined_at: member.joined_at,
+        effective_at: member.joined_at,
+        role: member.role.clone(),
+        persist_row_hash: String::new(),
+    };
+    let canonical =
+        ciris_persist::verify::canonical::ceg_produce_canonicalize(&row.signing_envelope())
+            .map_err(|e| format!("canonicalize the family widening: {e}"))?;
+    let sig = capsule.sign_hybrid(&canonical).await?;
+    Ok(AdmitSpec {
+        authority_key_id: sig.key_id,
+        scrub_signature_classical: B64.encode(&sig.classical_signature),
+        scrub_signature_pqc: Some(B64.encode(&sig.pqc_signature)),
+        cosignatures: Vec::new(),
+    })
+}
+
+/// A family removal row. `witness_set` is part of the signed envelope, so a
+/// row several members co-sign carries an EMPTY witness set (every signer
+/// signs the same bytes); a single-signed row names its signer as before.
+fn revocation_row(
+    family_id: &str,
+    removed: &str,
+    at: chrono::DateTime<chrono::Utc>,
+    reason: &str,
+    witness_set: Vec<String>,
+) -> FamilyMembershipRevocation {
+    FamilyMembershipRevocation {
+        family_key_id: family_id.to_owned(),
+        removed_identity_key_id: removed.to_owned(),
+        removed_at: at,
+        effective_at: at,
+        reason: Some(reason.to_owned()),
+        witness_set,
+        persist_row_hash: String::new(),
+    }
+}
+
+async fn sign_revocation_row(
+    capsule: &OwnerSignerCapsule,
+    row: &FamilyMembershipRevocation,
+) -> Result<(String, String, String), String> {
+    let canonical =
+        ciris_persist::verify::canonical::ceg_produce_canonicalize(&row.signing_envelope())
+            .map_err(|e| format!("canonicalize the removal: {e}"))?;
+    let sig = capsule.sign_hybrid(&canonical).await?;
+    Ok((
+        sig.key_id,
+        B64.encode(&sig.classical_signature),
+        B64.encode(&sig.pqc_signature),
+    ))
+}
+
+/// Write a signed removal row, with any co-signatures a multi-signature
+/// household's protocol needs (persist v49.0.0 judges the row by it).
+async fn put_revocation_row(
+    engine: &Engine,
+    capsule: &OwnerSignerCapsule,
+    row: FamilyMembershipRevocation,
+    cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
+) -> Result<(), String> {
+    let removed = row.removed_identity_key_id.clone();
+    let (authority_key_id, classical, pqc) = sign_revocation_row(capsule, &row).await?;
+    engine
+        .federation_directory()
+        .put_family_membership_revocation(SignedFamilyMembershipRevocation {
+            family_membership_revocation: row,
+            authority_key_id,
+            scrub_signature_classical: classical,
+            scrub_signature_pqc: Some(pqc),
+            cosignatures,
+        })
+        .await
+        .map_err(|e| format!("put_family_membership_revocation({removed}): {e:#}"))
+}
+
+/// Write a single-signed removal of `removed` from `family_id`, authored by
+/// the capsule's owner, now. This is the plane that REPLICATES a removal.
 async fn write_revocation(
     engine: &Engine,
     capsule: &OwnerSignerCapsule,
@@ -595,33 +674,127 @@ async fn write_revocation(
     removed: &str,
     reason: &str,
 ) -> Result<(), String> {
-    let at = now();
-    let row = FamilyMembershipRevocation {
-        family_key_id: family_id.to_owned(),
-        removed_identity_key_id: removed.to_owned(),
-        removed_at: at,
-        effective_at: at,
-        reason: Some(reason.to_owned()),
-        witness_set: vec![capsule.key_id().to_owned()],
-        persist_row_hash: String::new(),
-    };
-    let canonical =
-        ciris_persist::verify::canonical::ceg_produce_canonicalize(&row.signing_envelope())
-            .map_err(|e| format!("canonicalize the removal: {e}"))?;
-    let sig = capsule.sign_hybrid(&canonical).await?;
-    engine
-        .federation_directory()
-        .put_family_membership_revocation(SignedFamilyMembershipRevocation {
-            family_membership_revocation: row,
-            authority_key_id: sig.key_id,
-            scrub_signature_classical: B64.encode(&sig.classical_signature),
-            scrub_signature_pqc: Some(B64.encode(&sig.pqc_signature)),
-            // Single-signed: the founder's pen alone (v49.0.0 #908 co-signatures
-            // are for a multi-signature protocol's rows).
-            cosignatures: Vec::new(),
-        })
-        .await
-        .map_err(|e| format!("put_family_membership_revocation({removed}): {e:#}"))
+    let row = revocation_row(
+        family_id,
+        removed,
+        now(),
+        reason,
+        vec![capsule.key_id().to_owned()],
+    );
+    put_revocation_row(engine, capsule, row, Vec::new()).await
+}
+
+/// A row a quorum change writes, before anyone signs it.
+enum FamilyRow {
+    Widening {
+        member: String,
+        role: String,
+    },
+    Revocation {
+        member: String,
+        reason: &'static str,
+    },
+}
+
+/// The rows a quorum change writes, derived from the envelope alone so every
+/// signer derives the same list. A dissolve revokes plain members first and
+/// founders last: persist refuses the last founder's removal while anyone
+/// else remains (`roster_last_founder`).
+fn family_rows(loaded: &Loaded, action: &str, env: &serde_json::Value) -> Vec<FamilyRow> {
+    let target = env.get("target_key_id").and_then(|v| v.as_str());
+    match (action, target) {
+        ("remove", Some(k)) => vec![FamilyRow::Revocation {
+            member: k.to_owned(),
+            reason: "removed",
+        }],
+        ("role", Some(k)) => {
+            let role = env
+                .get("roles")
+                .and_then(|r| r.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or(ROLE_MEMBER)
+                .to_owned();
+            vec![FamilyRow::Widening {
+                member: k.to_owned(),
+                role,
+            }]
+        }
+        ("dissolve", _) => dissolve_order(loaded)
+            .into_iter()
+            .map(|member| FamilyRow::Revocation {
+                member,
+                reason: "dissolved",
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every active member, plain members first and founders last.
+fn dissolve_order(loaded: &Loaded) -> Vec<String> {
+    let mut plain: Vec<String> = Vec::new();
+    let mut founding: Vec<String> = Vec::new();
+    for m in &loaded.active {
+        if role_of(m) == ROLE_FOUNDER {
+            founding.push(m.key_id.clone());
+        } else {
+            plain.push(m.key_id.clone());
+        }
+    }
+    plain.extend(founding);
+    plain
+}
+
+/// The instant a quorum change's rows carry, pinned in the envelope.
+fn family_row_at(env: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    env.get("row_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+async fn sign_family_rows(
+    capsule: &OwnerSignerCapsule,
+    family_id: &str,
+    rows: &[FamilyRow],
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<crate::roster_rows::RowSignature>, String> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row {
+            FamilyRow::Widening { member, role } => {
+                let spec = sign_family_widening(
+                    capsule,
+                    family_id,
+                    &FamilyMember {
+                        key_id: member.clone(),
+                        joined_at: at,
+                        role: Some(role.clone()),
+                    },
+                )
+                .await?;
+                out.push(crate::roster_rows::RowSignature {
+                    kind: "widening".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id: spec.authority_key_id,
+                    scrub_signature_classical: spec.scrub_signature_classical,
+                    scrub_signature_pqc: spec.scrub_signature_pqc,
+                });
+            }
+            FamilyRow::Revocation { member, reason } => {
+                let r = revocation_row(family_id, member, at, reason, Vec::new());
+                let (authority_key_id, classical, pqc) = sign_revocation_row(capsule, &r).await?;
+                out.push(crate::roster_rows::RowSignature {
+                    kind: "revocation".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id,
+                    scrub_signature_classical: classical,
+                    scrub_signature_pqc: Some(pqc),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Re-wrap the family's existing at-rest DEKs to a newcomer
@@ -897,18 +1070,13 @@ async fn add_member(
         joined_at: now(),
         role: Some(role.clone()),
     };
-    // The authority signs the GROWN record (persist v31 #654): the roster as it
-    // will be after the addition, so a signature over one roster cannot be
-    // lifted onto another.
-    let mut grown = loaded.family.clone();
-    grown.members.push(member.clone());
-    let spec = match sign_family(&capsule, grown).await {
-        Ok(s) => AdmitSpec {
-            authority_key_id: s.authority_key_id,
-            scrub_signature_classical: s.scrub_signature_classical,
-            scrub_signature_pqc: s.scrub_signature_pqc,
-            cosignatures: Vec::new(),
-        },
+    // persist v49.0.0 (#910): the addition is its own signed row, a
+    // `FamilyMembershipWidening`, and the authority signs THAT row's envelope.
+    // The record is no longer grown in place (a rewritten record reached no
+    // peer: `put_family` is INSERT-only), so the pre-v49 signature over the
+    // grown record no longer verifies at the door.
+    let spec = match sign_family_widening(&capsule, &id, &member).await {
+        Ok(s) => s,
         Err(e) => return signer_unavailable(e),
     };
     match st
@@ -927,16 +1095,12 @@ async fn add_member(
     respond_with_family(&st, &id, &caller, serde_json::json!({ "dek_rewrap": dek })).await
 }
 
-/// A target may join iff it is a registered identity, not already an ACTIVE
-/// member, and was never removed (a removal is permanent at this pin).
+/// A target may join iff it is a registered identity and not already an
+/// ACTIVE member. A removed member may be re-added: persist v49.0.0 folds a
+/// widening after a revocation (#910.1, I177), so the re-add is a real one.
 async fn check_addable(engine: &Engine, loaded: &Loaded, key_id: &str) -> Result<(), Response> {
     if loaded.member(key_id).is_some() {
         return Err(already_member(key_id));
-    }
-    // On the RECORD but not in the FOLD ⇒ removed by a revocation. This is the
-    // one read of the record's roster, and it is to refuse, never to admit.
-    if loaded.family.members.iter().any(|m| m.key_id == key_id) {
-        return Err(readd_unsupported(key_id));
     }
     match engine
         .federation_directory()
@@ -1129,26 +1293,26 @@ async fn change_role(
         Ok(c) => c,
         Err(r) => return r,
     };
-    let mut next = loaded.family.clone();
-    for fm in &mut next.members {
-        if fm.key_id == key_id {
-            fm.role = Some(req.role.clone());
-        }
-    }
-    let signed = match sign_family(&capsule, next).await {
+    // persist v49.0.0 (#910): a role change is a WIDENING carrying the new
+    // role — the fold reads roles from the roster's rows (the latest event
+    // wins), so rewriting the record's role left the fold on the old one, and
+    // a record rewrite reached no peer anyway (`put_family` is INSERT-only).
+    let member = FamilyMember {
+        key_id: key_id.clone(),
+        joined_at: now(),
+        role: Some(req.role.clone()),
+    };
+    let spec = match sign_family_widening(&capsule, &id, &member).await {
         Ok(s) => s,
         Err(e) => return signer_unavailable(e),
     };
     if let Err(e) = st
         .engine
         .federation_directory()
-        .supersede_family(
-            signed,
-            Some(serde_json::json!({ "action": "role", "member": key_id, "role": req.role })),
-        )
+        .add_member(Cohort::Family, &id, RosterMember::from(member), &spec)
         .await
     {
-        return store_unavailable(format!("supersede_family(role): {e:#}"));
+        return store_unavailable(format!("add_member(role): {e:#}"));
     }
     tracing::info!(family = %id, member = %key_id, role = %req.role, "family: role changed");
     kick("family:role");
@@ -1182,6 +1346,7 @@ async fn dissolve(
         &capsule,
         &loaded,
         serde_json::json!({ "action": "dissolve", "protocol": FOUNDER_ONLY }),
+        None,
     )
     .await
 }
@@ -1196,11 +1361,33 @@ async fn terminal_dissolve(
     capsule: &OwnerSignerCapsule,
     loaded: &Loaded,
     authorization: serde_json::Value,
+    quorum: Option<(
+        chrono::DateTime<chrono::Utc>,
+        &[crate::roster_rows::ChangeSignature],
+    )>,
 ) -> Response {
     let id = loaded.family.family_key_id.clone();
-    for m in &loaded.active {
-        if let Err(e) = write_revocation(&st.engine, capsule, &id, &m.key_id, "dissolved").await {
-            return store_unavailable(e);
+    match quorum {
+        // A quorum dissolve: every revocation at the pinned instant, each
+        // carrying the other signers' co-signatures over that exact row.
+        Some((at, sigs)) => {
+            let primary = capsule.key_id().to_owned();
+            for k in dissolve_order(loaded) {
+                let row = revocation_row(&id, &k, at, "dissolved", Vec::new());
+                let cosigs = crate::roster_rows::cosignatures_for(sigs, &primary, "revocation", &k);
+                if let Err(e) = put_revocation_row(&st.engine, capsule, row, cosigs).await {
+                    return store_unavailable(e);
+                }
+            }
+        }
+        // Founders last: persist refuses the last founder's removal while
+        // anyone else remains (`roster_last_founder`, v49.0.0).
+        None => {
+            for k in dissolve_order(loaded) {
+                if let Err(e) = write_revocation(&st.engine, capsule, &id, &k, "dissolved").await {
+                    return store_unavailable(e);
+                }
+            }
         }
     }
     let mut next = loaded.family.clone();
@@ -1378,6 +1565,12 @@ async fn change_envelope(
             "prior_persist_row_hash".into(),
             serde_json::json!(loaded.family.persist_row_hash),
         );
+        // The instant the change's rows carry (persist v49.0.0): every signer
+        // signs the rows too, and a row's signed bytes include its instant.
+        obj.insert(
+            "row_at".into(),
+            serde_json::json!(now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
     }
     let bytes = match ciris_verify_core::jcs::canonicalize(&env) {
         Ok(b) => b,
@@ -1396,7 +1589,7 @@ async fn change_envelope(
 struct CosignRequest {
     change_envelope: serde_json::Value,
     #[serde(default)]
-    signatures: Vec<ThresholdSignature>,
+    signatures: Vec<crate::roster_rows::ChangeSignature>,
 }
 
 /// The envelope must describe THIS family AS IT STANDS: same id, same record
@@ -1456,18 +1649,41 @@ async fn cosign(
         Ok(s) => s,
         Err(e) => return signer_unavailable(e),
     };
-    let mine = ThresholdSignature {
-        member_id: sig.key_id.clone(),
-        ed25519_signature_base64: B64.encode(&sig.classical_signature),
-        mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
+    let action = check_envelope(&loaded, &req.change_envelope).unwrap_or_default();
+    let row_signatures = match family_row_at(&req.change_envelope) {
+        Some(at) => match sign_family_rows(
+            &capsule,
+            &id,
+            &family_rows(&loaded, &action, &req.change_envelope),
+            at,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => return signer_unavailable(e),
+        },
+        None => return bad_change("the envelope carries no row_at".to_owned()),
+    };
+    let mine = crate::roster_rows::ChangeSignature {
+        threshold: ThresholdSignature {
+            member_id: sig.key_id.clone(),
+            ed25519_signature_base64: B64.encode(&sig.classical_signature),
+            mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
+        },
+        row_signatures,
     };
     let mut signatures = req.signatures;
-    signatures.retain(|s| s.member_id != mine.member_id);
+    signatures.retain(|s| s.threshold.member_id != mine.threshold.member_id);
     signatures.push(mine.clone());
     let quorum_met = st
         .engine
         .federation_directory()
-        .verify_membership_quorum(Cohort::Family, &id, &req.change_envelope, &signatures)
+        .verify_membership_quorum(
+            Cohort::Family,
+            &id,
+            &req.change_envelope,
+            &crate::roster_rows::thresholds(&signatures),
+        )
         .await
         .is_ok();
     Json(serde_json::json!({
@@ -1482,14 +1698,22 @@ async fn cosign(
 #[derive(Debug, Deserialize)]
 struct AssembleRequest {
     change_envelope: serde_json::Value,
-    signatures: Vec<ThresholdSignature>,
+    signatures: Vec<crate::roster_rows::ChangeSignature>,
 }
 
 /// Map persist's quorum refusal onto the two ids: too few signatures is
 /// PENDING (collect more), anything else is NOT AUTHORIZED.
 fn quorum_refusal(e: &ciris_persist::federation::Error, protocol: &str) -> Response {
     let text = format!("{e:#}");
-    if text.contains("quorum not met") || text.contains("QuorumNotMet") {
+    // persist refuses in prose (no typed variant): before v49 "quorum not met";
+    // v49.0.0's consensus evaluator says "consensus_protocol not met
+    // (<direction>): quorum: k of m signatures" for too FEW signatures (pending:
+    // more can still be gathered), and "cannot be evaluated" for a change no
+    // number of signatures can pass (refused).
+    if text.contains("quorum not met")
+        || text.contains("QuorumNotMet")
+        || text.contains("consensus_protocol not met")
+    {
         quorum_pending(text)
     } else {
         not_authorized(format!("{protocol}: {text}"))
@@ -1524,6 +1748,11 @@ async fn assemble(
     let dir = st.engine.federation_directory();
     let env = &req.change_envelope;
     let proto_now = loaded.family.consensus_protocol.clone();
+    let thresholds = crate::roster_rows::thresholds(&req.signatures);
+    let Some(row_at) = family_row_at(env) else {
+        return bad_change("the envelope carries no row_at".to_owned());
+    };
+    let primary = capsule.key_id().to_owned();
 
     if action == "dissolve" {
         // An empty roster is not a verifiable membership change (verify's
@@ -1531,7 +1760,7 @@ async fn assemble(
         // envelope over the CURRENT roster, and that proof rides the terminal
         // supersede as its authorization.
         if let Err(e) = dir
-            .verify_membership_quorum(Cohort::Family, &id, env, &req.signatures)
+            .verify_membership_quorum(Cohort::Family, &id, env, &thresholds)
             .await
         {
             return quorum_refusal(&e, &proto_now);
@@ -1544,8 +1773,9 @@ async fn assemble(
             serde_json::json!({
                 "action": "dissolve",
                 "change_envelope": env,
-                "quorum_signatures": req.signatures,
+                "quorum_signatures": thresholds,
             }),
+            Some((row_at, req.signatures.as_slice())),
         )
         .await;
     }
@@ -1590,7 +1820,7 @@ async fn assemble(
         Err(e) => return signer_unavailable(e),
     };
     let version = match dir
-        .supersede_family_with_quorum(signed, env.clone(), req.signatures.clone())
+        .supersede_family_with_quorum(signed, env.clone(), thresholds.clone())
         .await
     {
         Ok(v) => v,
@@ -1607,11 +1837,43 @@ async fn assemble(
         }
         ("remove", Some(k)) => {
             // The supersede shrank the record; the revocation is what
-            // REPLICATES the removal (a peer never applies a supersede).
-            if let Err(e) = write_revocation(&st.engine, &capsule, &id, k, "removed").await {
+            // REPLICATES the removal. persist v49.0.0 judges it by the
+            // household's protocol over its own co-signatures, so it carries
+            // the other signers' scrubs over this exact row.
+            let row = revocation_row(&id, k, row_at, "removed", Vec::new());
+            let cosigs =
+                crate::roster_rows::cosignatures_for(&req.signatures, &primary, "revocation", k);
+            if let Err(e) = put_revocation_row(&st.engine, &capsule, row, cosigs).await {
                 return store_unavailable(e);
             }
             extra["removed"] = serde_json::json!(k);
+        }
+        ("role", Some(k)) => {
+            // Roles fold from the roster's rows (v49.0.0), so the role change
+            // is also a co-signed widening at the pinned instant.
+            let role = env
+                .get("roles")
+                .and_then(|r| r.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or(ROLE_MEMBER)
+                .to_owned();
+            let member = FamilyMember {
+                key_id: k.to_owned(),
+                joined_at: row_at,
+                role: Some(role),
+            };
+            let mut spec = match sign_family_widening(&capsule, &id, &member).await {
+                Ok(s) => s,
+                Err(e) => return signer_unavailable(e),
+            };
+            spec.cosignatures =
+                crate::roster_rows::cosignatures_for(&req.signatures, &primary, "widening", k);
+            if let Err(e) = dir
+                .add_member(Cohort::Family, &id, RosterMember::from(member), &spec)
+                .await
+            {
+                return store_unavailable(format!("add_member(role): {e:#}"));
+            }
         }
         _ => {}
     }

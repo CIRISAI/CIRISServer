@@ -1054,6 +1054,29 @@ async fn find_file(
         match page.resume {
             Some(c) => after = Some(c),
             None => {
+                // A WITHDRAWN row is not in the listing (edge v32 / persist
+                // v49 list only live rows — CIRISEdge#669), so "not listed"
+                // no longer means "never here". Read the row itself: a file
+                // row at this room's scope that a `withdraws` retired is
+                // answered as withdrawn (410 at the callers), exactly as when
+                // the listing still carried it. Anything else stays
+                // `not_in_room`, so the fallback reveals nothing a listing
+                // would not.
+                let dir = st.engine.federation_directory();
+                if let Ok(Some(row)) = dir.get_attestation(attestation_id).await {
+                    if let Some(file) = stopgap_belongs_to(room, &row) {
+                        if let Some(w) = withdrawn_by(st, attestation_id)
+                            .await
+                            .map_err(listing_failed)?
+                        {
+                            return Ok(Found {
+                                file,
+                                row,
+                                withdrawn_by: Some(w),
+                            });
+                        }
+                    }
+                }
                 return Err(match plane {
                     Plane::Drive => refuse(
                         StatusCode::NOT_FOUND,
@@ -1065,10 +1088,84 @@ async fn find_file(
                         "notes.not_found",
                         format!("{attestation_id} is not one of your notes"),
                     ),
-                })
+                });
             }
         }
     }
+}
+
+// ─── STOPGAP for CIRISEdge#693 — delete when an edge cut lets `files::in_room`
+//     take a `LifecycleView` and makes `belongs_to` public. ───────────────────
+//
+// Edge v32 / persist v49 list LIVE rows only, and edge's post-gate room check
+// is private, so a withdrawn file vanished from the drive: a read of its id
+// answered `404 drive.not_in_room` instead of `410 drive.withdrawn`, and
+// `?include_withdrawn=true` lost it. These two functions are the labelled
+// copy the ownership rule allows until upstream lands.
+
+/// COPY of edge v32.1.0's private `files::belongs_to` (src/files.rs): is `row`
+/// one of `room`'s files? The self arm checks the pointer's group slot; a
+/// targeted room checks its cohort-target envelope member.
+fn stopgap_belongs_to(
+    room: &ScopeRoom,
+    row: &ciris_persist::federation::Attestation,
+) -> Option<files::FileRow> {
+    if row.cohort_scope != room.row_scope_token() {
+        return None;
+    }
+    let file = files::FileRow::from_row(row)?;
+    let names_this_room = match room.cohort_target_field() {
+        Some(field) => {
+            row.attestation_envelope
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                == Some(room.content_group_id())
+        }
+        None => file.pointer.community_key_id == room.content_group_id(),
+    };
+    names_this_room.then_some(file)
+}
+
+/// The WITHDRAWN file rows of `room` this caller may see: persist's listing at
+/// `LifecycleView::IncludeWithdrawn` under the same caller gate `in_room`
+/// builds, kept only where a `withdraws` really retired the row.
+async fn stopgap_withdrawn_in_room(
+    st: &DriveState,
+    room: &ScopeRoom,
+    caller: &str,
+) -> Result<Vec<files::FileRow>, String> {
+    use ciris_persist::ceg::{AttestationFilter, LifecycleView};
+    use ciris_persist::scope::CallerScope;
+    let admission =
+        ciris_persist::scope::admission::build_caller_admission(&st.engine, &caller.to_owned())
+            .await
+            .map_err(|e| format!("caller admission: {e}"))?;
+    let scope = CallerScope::Authenticated { admission };
+    let mut out = Vec::new();
+    let mut cursor = None;
+    for _ in 0..64 {
+        let mut f = AttestationFilter::default();
+        f.cohort_scope = Some(room.row_scope_token().to_owned());
+        f.dimension_exact = Some(files::FILE_DIMENSION.to_owned());
+        f.lifecycle = LifecycleView::IncludeWithdrawn;
+        let page = st
+            .engine
+            .list_attestations(f, cursor, 256, scope.clone())
+            .await
+            .map_err(|e| format!("list withdrawn in {room}: {e}"))?;
+        for row in &page.items {
+            if let Some(file) = stopgap_belongs_to(room, row) {
+                if withdrawn_by(st, &row.attestation_id).await?.is_some() {
+                    out.push(file);
+                }
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// **Has a `withdraws` retired this row?** The id of the one that did.
@@ -1757,6 +1854,33 @@ async fn read_drive(
                         row,
                     )
                 }));
+                // STOPGAP (CIRISEdge#693): the live listing no longer carries
+                // withdrawn rows, so a history view asks for them directly.
+                if include_withdrawn {
+                    match stopgap_withdrawn_in_room(&st, room, &owner.key_id).await {
+                        Ok(extra) => {
+                            for f in extra {
+                                if !rows
+                                    .iter()
+                                    .any(|(_, _, r)| r.attestation_id == f.attestation_id)
+                                {
+                                    rows.push((
+                                        room.row_scope_token().to_owned(),
+                                        room.content_group_id().to_owned(),
+                                        f,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return refuse(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "drive.listing_failed",
+                                format!("list {room}: {e}"),
+                            )
+                        }
+                    }
+                }
                 if let Some(c) = page.resume {
                     resume = Some(DriveCursor {
                         room: room_key(room),

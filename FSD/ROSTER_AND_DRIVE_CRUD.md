@@ -217,10 +217,16 @@ Investigated before building, against persist v48.0.0 (`59283e3`) / verify v16.1
    `(family_key_id, removed_identity_key_id)` (V151) and the family fold (`removed_key_ids_at`) has no
    re-establishment rule (identity occurrences got one in #421). A re-add is refused by name,
    `family.readd_unsupported` (409), instead of reporting a success the fold would ignore.
+   **Resolved in 0.5.218 (persist v49.0.0, #910.1):** the fold admits a widening after a
+   revocation, so a removed member is re-added for real; the refusal and its id are retired.
 3. **Persist does not check the signer's standing** on a family supersede or revocation
    (`verify_family_admission` / the revocation gate verify a registered signature only). The server
    enforces `founder_only` for the rows it authors; a peer-authored row is admitted by persist alone —
    the family twin of CIRISPersist#908.
+   **Resolved in 0.5.218 (persist v49.0.0, #908/#910):** every roster row is judged by the group's
+   own `consensus_protocol` at the door; a multi-signature group's rows carry co-signatures, which
+   the server's envelope → cosign → assemble flow now gathers over the exact rows
+   (`src/roster_rows.rs`).
 
 **Extra ids beyond the list above** (in the localization guard's debt list with the others):
 `family.readd_unsupported` (409), `family.bad_role` (400), `family.bad_change` (409, a stale or

@@ -1269,7 +1269,25 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     )
     .await;
     assert_eq!(s, 200, "{v2}");
-    assert_eq!(v2["change_envelope"], env, "one change, one envelope");
+    // One change, one envelope — apart from the instant its rows carry, which
+    // each build pins (persist v49: every signer signs the rows, so the rows'
+    // time is part of what they sign).
+    let without_row_at = |e: &Value| {
+        let mut e = e.clone();
+        if let Some(c) = e.get_mut("community_change").and_then(Value::as_object_mut) {
+            c.remove("row_at");
+        }
+        e
+    };
+    assert_eq!(
+        without_row_at(&v2["change_envelope"]),
+        without_row_at(&env),
+        "one change, one envelope"
+    );
+    assert!(
+        v2["change_envelope"]["community_change"]["row_at"].is_string(),
+        "the rows' instant is pinned in the envelope: {v2}"
+    );
 
     // Only alice's signature → still pending.
     let (s, v) = post(
@@ -1336,10 +1354,10 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     assert_eq!((s, reason(&v)), (409, "community.change_stale"), "{v}");
 }
 
-/// A `quorum:2/3` room: the change is verified by PERSIST's
-/// `verify_membership_quorum` (through `supersede_community_with_quorum`),
-/// which re-baselines the record's protocol to the new size — so the room's
-/// SECOND size-changing change is authorizable too.
+/// A `quorum:2/3` room: persist judges each roster row by the room's protocol
+/// over the row's own co-signatures (v49.0.0, #908). M is absolute, so the
+/// room stays a "two signatures" room after it grows, and its SECOND
+/// size-changing change is authorized by two signatures too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
     let nodes = mesh(4).await;
@@ -1387,11 +1405,11 @@ async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
         .expect("lookup")
         .expect("room");
     assert_eq!(
-        record.consensus_protocol, "quorum:3/4",
-        "re-baselined to the new size"
+        record.consensus_protocol, "quorum:2/3",
+        "M is absolute (CC 4.4.3.4.2.1): adding a member does not rewrite the room's rule"
     );
 
-    // The second change: remove Dave, now under 3-of-4.
+    // The second change: remove Dave, still under "two signatures".
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/changes/envelope"),
@@ -1399,10 +1417,10 @@ async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["required"], 3);
+    assert_eq!(v["required"], 2);
     let env = v["change_envelope"].clone();
     let mut sigs = vec![v["signatures"][0].clone()];
-    for n in [b, c] {
+    for n in [b] {
         let (s, v) = post(
             n,
             &format!("/v1/communities/{room}/changes/cosign"),

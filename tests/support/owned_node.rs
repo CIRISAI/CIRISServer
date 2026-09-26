@@ -370,6 +370,18 @@ impl Person {
                 });
             }
         }
+        // persist v49.0.0 (#910): a member added after the household was
+        // created is its own signed row on the family WIDENING plane, not a
+        // grown record, so a copy that stops at the record leaves the new
+        // member unknown on their own node. Replication carries this plane
+        // (`FamilyMembershipWidening`); this helper stands in for it.
+        for served in src
+            .list_signed_family_membership_widenings_since(None, u32::MAX)
+            .await
+            .expect("list signed family widenings")
+        {
+            let _ = dst.put_family_membership_widening(served.widening).await;
+        }
         for served in src
             .list_signed_family_membership_revocations_since(None, u32::MAX)
             .await

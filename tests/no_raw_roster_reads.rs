@@ -38,18 +38,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/family_api.rs",
-        "add_member",
-        "grown",
-        "RECORD CONSTRUCTION: the grown record this handler signs and submits (families have no widening plane at persist v48; the record IS how a family grows)",
-    ),
-    (
-        "src/family_api.rs",
-        "check_addable",
-        "loaded.family",
-        "REFUSES A RE-ADD ONLY: a key already on the record is refused (`family.already_member` / `family.readd_unsupported`); membership itself is decided through the fold",
-    ),
-    (
-        "src/family_api.rs",
         "leave_inner",
         "family",
         "RECORD CONSTRUCTION: a quorum family's record is rewritten minus the leaver so verify's prior-roster binding (persist builds it from the record, not the fold) stays satisfiable",
@@ -59,12 +47,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "leave_inner",
         "next",
         "RECORD CONSTRUCTION: the rewritten roster assigned to the record being signed",
-    ),
-    (
-        "src/family_api.rs",
-        "change_role",
-        "next",
-        "RECORD CONSTRUCTION: setting the role on the record being signed",
     ),
     (
         "src/family_api.rs",

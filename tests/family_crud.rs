@@ -383,14 +383,26 @@ async fn a_founder_only_household_through_its_whole_life() {
         )
         .await;
     assert_refused(&r, 404, "family.not_a_member");
-    let r = alice
+    // A removed member CAN be re-added (persist v49.0.0, #910.1): the new
+    // widening folds after the revocation. Then removed again, so the rest of
+    // the life runs as before.
+    let (st, v) = alice
         .as_owner(
             "POST",
             &format!("/v1/families/{id}/members"),
             Some(json!({ "key_id": carol.key() })),
         )
         .await;
-    assert_refused(&r, 409, "family.readd_unsupported");
+    assert_eq!(st.as_u16(), 200, "a removed member is re-added: {v}");
+    assert!(members(&v).iter().any(|(k, _)| k == carol.key()), "{v}");
+    let (st, v) = alice
+        .as_owner(
+            "DELETE",
+            &format!("/v1/families/{id}/members/{}", carol.key()),
+            None,
+        )
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
 
     // ── Bob LEAVES on his own node; the departure reaches Alice's ───────────
     let (st, v) = bob

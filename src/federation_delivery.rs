@@ -2132,6 +2132,10 @@ mod tests {
             EnvelopeKind::IdentityOccurrenceRevocation,
             EnvelopeKind::Revocation,
             EnvelopeKind::LocationProof,
+            // persist v49.0.0 — the household roster's append plane (#910) and
+            // a member's own `listed` choice (#912).
+            EnvelopeKind::FamilyMembershipWidening,
+            EnvelopeKind::CommunityMembershipListing,
         ];
         assert_eq!(peers.len(), desired.len() * expected.len());
         for (target_index, target) in desired.iter().enumerate() {
