@@ -851,12 +851,38 @@ async fn room_key(
     use ciris_edge::mls::cohort_group::{
         key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
     };
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let room = pair_community_key_id(me, peer);
     let dir = st.engine.federation_directory();
     let mut rooms = st.rooms.lock().await;
+    // ONE store per node, durable when the host can seal it (CIRISServer#630).
+    // A room this process has not held yet may have been persisted before a
+    // restart: reload it rather than create or join a second group.
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, &room).await? {
+            // A CREATOR'S HANDSHAKE THAT NEVER FINISHED (Codex, #689). `create`
+            // and `add_member` persist before the Welcome is placed; a crash in
+            // that window reloads a group the joiner was never welcomed into,
+            // and the keyed path would report Ready forever. With no Welcome of
+            // ours in the room nobody can have joined, so the persisted group is
+            // dropped and the ordinary create-and-welcome runs again below.
+            let unfinished = matches!(PairRole::of(me, peer), PairRole::Creator)
+                && chat::welcome_from(&*dir, me, &room).await?.is_none();
+            if unfinished {
+                tracing::warn!(
+                    room = %room,
+                    "chat: reloaded pair room has no Welcome of ours — the handshake was \
+                     interrupted; recreating it"
+                );
+                crate::mls_state::forget(&store, &room).await?;
+            } else {
+                tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+                rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
+            }
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
         // Idempotent: a keyed room whose epoch has not moved costs one table
@@ -887,10 +913,7 @@ async fn room_key(
     // outlives a restart is a separate concern (the group can be rebuilt from the
     // handshake rows, which are durable CEG); what must NOT happen is two rooms
     // sharing one store.
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
+    let store = store.clone();
 
     match PairRole::of(me, peer) {
         PairRole::Creator => {
@@ -951,6 +974,9 @@ async fn room_key(
         PairRole::Joiner => {
             let material = match rooms.remove(&room) {
                 Some(RoomState::AwaitingWelcome(m)) => m,
+                // A KeyPackage published before a restart: its material was
+                // stashed, and the Welcome sealed to it can still be joined.
+                _ if let Some(m) = crate::mls_state::restore_pending(&store, &room).await? => m,
                 _ => {
                     // Publish our half once, then wait for the Welcome.
                     let (material, kp) = mint_cohort_key_material(me)
@@ -960,7 +986,10 @@ async fn room_key(
                     let row =
                         chat::key_package_attestation(author, peer, &kp_bytes, chrono::Utc::now())
                             .await?;
-                    share_in_room(
+                    // Stash BEFORE the KeyPackage is out (Codex, #689); withdraw
+                    // the stash if publication fails.
+                    crate::mls_state::stash_pending(&store, &room, &material).await?;
+                    if let Err(e) = share_in_room(
                         &*dir,
                         row,
                         &room,
@@ -969,7 +998,11 @@ async fn room_key(
                             actor: Some(author),
                         },
                     )
-                    .await?;
+                    .await
+                    {
+                        crate::mls_state::clear_pending(&store, &room).await;
+                        return Err(e);
+                    }
                     material
                 }
             };
@@ -998,9 +1031,19 @@ async fn room_key(
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
                 return Ok(RoomHandshake::JoinRequested);
             };
-            let group = CohortGroup::join(store, &room, material, &welcome, 16)
-                .await
-                .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let joined = CohortGroup::join(
+                store.clone(),
+                &room,
+                material,
+                &welcome,
+                crate::mls_state::RETAINED_EPOCHS,
+            )
+            .await;
+            // Spent either way (Codex, #689): a failed join must not restore the
+            // same material against the same Welcome forever; the next call
+            // mints and publishes a fresh KeyPackage.
+            crate::mls_state::clear_pending(&store, &room).await;
+            let group = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
             rooms.insert(room, RoomState::Keyed(group));
@@ -1053,8 +1096,7 @@ pub(crate) async fn room_key_room(
 ) -> Result<RoomHandshake, String> {
     use ciris_edge::chat;
     use ciris_edge::mls::cohort_group::{key_package_to_bytes, mint_cohort_key_material};
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let dir = st.engine.federation_directory();
     let roster = dir
@@ -1065,6 +1107,15 @@ pub(crate) async fn room_key_room(
         room_creator(&roster).ok_or_else(|| format!("room {room} has no active member"))?;
     let scope_room = ciris_edge::scope_room::ScopeRoom::community(room);
     let mut rooms = st.rooms.lock().await;
+    // One durable store per node; reload a group persisted before a restart
+    // (CIRISServer#630).
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, room).await? {
+            tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+            rooms.insert(room.to_owned(), RoomState::Keyed(Arc::new(group)));
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(room) {
         let group = Arc::clone(group);
@@ -1082,13 +1133,9 @@ pub(crate) async fn room_key_room(
     let Some(author) = author else {
         return Ok(RoomHandshake::NoAuthorSigner);
     };
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
     if me == creator {
         let group = Arc::new(
-            CohortGroup::create(store, room, me, 16)
+            CohortGroup::create(store.clone(), room, me, crate::mls_state::RETAINED_EPOCHS)
                 .await
                 .map_err(|e| format!("CohortGroup::create: {e}"))?,
         );
@@ -1099,6 +1146,7 @@ pub(crate) async fn room_key_room(
     }
     let material = match rooms.remove(room) {
         Some(RoomState::AwaitingWelcome(m)) => m,
+        _ if let Some(m) = crate::mls_state::restore_pending(&store, room).await? => m,
         _ => {
             let (material, kp) = mint_cohort_key_material(me)
                 .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
@@ -1110,7 +1158,9 @@ pub(crate) async fn room_key_room(
                 chrono::Utc::now(),
             )
             .await?;
-            share_in(
+            // Stash BEFORE the KeyPackage is out (Codex, #689).
+            crate::mls_state::stash_pending(&store, room, &material).await?;
+            if let Err(e) = share_in(
                 &*dir,
                 row,
                 &scope_room,
@@ -1119,7 +1169,11 @@ pub(crate) async fn room_key_room(
                     actor: Some(author),
                 },
             )
-            .await?;
+            .await
+            {
+                crate::mls_state::clear_pending(&store, room).await;
+                return Err(e);
+            }
             material
         }
     };
@@ -1136,15 +1190,155 @@ pub(crate) async fn room_key_room(
         rooms.insert(room.to_owned(), RoomState::AwaitingWelcome(material));
         return Ok(RoomHandshake::JoinRequested);
     };
-    let group = Arc::new(
-        CohortGroup::join(store, room, material, &welcome, 16)
-            .await
-            .map_err(|e| format!("CohortGroup::join: {e}"))?,
-    );
+    let joined = CohortGroup::join(
+        store.clone(),
+        room,
+        material,
+        &welcome,
+        crate::mls_state::RETAINED_EPOCHS,
+    )
+    .await;
+    // Spent either way (Codex, #689).
+    crate::mls_state::clear_pending(&store, room).await;
+    let group = Arc::new(joined.map_err(|e| format!("CohortGroup::join: {e}"))?);
     apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
     Ok(RoomHandshake::Ready)
+}
+
+// ─── Commits applied locally whose rows did not reach the room ──────────────
+//
+// `add_member` / `remove_member` advance the local group AND persist it before
+// the Commit row is placed. If placing fails, continuing from that epoch
+// publishes a later Commit the members cannot apply, because they never saw
+// the one before it (Codex, #689). So an unplaced Commit is kept, in order, and
+// placed again FIRST on the next pass; no new Commit is made until it lands.
+//
+// IN MEMORY ONLY, deliberately. A crash between edge persisting the epoch and
+// this queue is a window only the substrate can close (edge persists inside
+// `add_member` / `remove_member`, before the Commit reaches the host); the ask
+// is CIRISEdge#697, an outbox kept with the snapshot. When it lands, this
+// queue is deleted in favour of it.
+
+fn unplaced_commits() -> &'static std::sync::Mutex<HashMap<String, Vec<Attestation>>> {
+    static U: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Attestation>>>> =
+        std::sync::OnceLock::new();
+    U.get_or_init(Default::default)
+}
+
+fn unplaced_key(node: &str, room: &str) -> String {
+    format!("{node}\u{1f}{room}")
+}
+
+fn keep_unplaced(node: &str, room: &str, row: Attestation) {
+    if let Ok(mut u) = unplaced_commits().lock() {
+        u.entry(unplaced_key(node, room)).or_default().push(row);
+    }
+}
+
+/// Place `row` (a Commit); if it does not land, keep it for the next pass.
+async fn place_commit(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    row: Attestation,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let dir = st.engine.federation_directory();
+    let signers = ciris_edge::replication::attestation_bind::Signers {
+        node: &st.node_signer,
+        actor: Some(author),
+    };
+    if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+        keep_unplaced(&st.node_signer.key_id, room, row);
+        return Err(format!("{e} (the Commit is kept and placed again first)"));
+    }
+    Ok(())
+}
+
+/// Place every Commit an earlier pass could not, oldest first. `Err` while any
+/// is still unplaced: the caller makes no new Commit on top of it.
+async fn place_unplaced(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let key = unplaced_key(&st.node_signer.key_id, room);
+    let rows = match unplaced_commits().lock() {
+        Ok(mut u) => u.remove(&key).unwrap_or_default(),
+        Err(_) => return Ok(()),
+    };
+    let dir = st.engine.federation_directory();
+    let mut rows = rows.into_iter();
+    while let Some(row) = rows.next() {
+        let signers = ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(author),
+        };
+        if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+            if let Ok(mut u) = unplaced_commits().lock() {
+                let slot = u.entry(key).or_default();
+                let later = std::mem::take(slot);
+                slot.push(row);
+                slot.extend(rows);
+                slot.extend(later);
+            }
+            return Err(format!(
+                "an earlier Commit in {room} is still unplaced: {e}"
+            ));
+        }
+        tracing::info!(room = %room, "chat: a Commit an earlier pass could not place is placed now");
+    }
+    Ok(())
+}
+
+/// Whether `member` holds a Welcome for its CURRENT add, from any of `from`
+/// (Codex, #689). Existence is not enough: a device removed and re-added keeps
+/// its old Welcome row, and a crash after the new add but before its Welcome
+/// would read as welcomed. A Welcome counts only if it was placed at or after
+/// the member's persisted add instant (`member_added_at`, the add's claim).
+///
+/// STOPGAP: edge's `welcome_for` returns no row instant and keeps its recipient
+/// field private, so this reads the rows itself with that field's literal.
+/// Delete it when edge returns the instant (CIRISEdge#696).
+pub(crate) async fn welcomed_for_current_add(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    from: &[String],
+    room: &str,
+    member: &str,
+    group: &ciris_edge::mls::CohortGroup,
+) -> Result<bool, String> {
+    const STOPGAP_FIELD_MLS_FOR: &str = "mls_for_key_id";
+    let Some(added) = group.member_added_at(member).await else {
+        // No add instant (a group persisted before joins were kept): the old
+        // reading, any Welcome at all.
+        for f in from {
+            if ciris_edge::chat::welcome_for(dir, f, room, member)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    };
+    let added_ms = added.timestamp_millis();
+    Ok(ciris_edge::chat::rows_in_room(dir, from, room)
+        .await?
+        .iter()
+        .any(|a| {
+            let env = &a.attestation_envelope;
+            env.get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                == Some(ciris_edge::chat::WELCOME_DIMENSION)
+                && env
+                    .get(STOPGAP_FIELD_MLS_FOR)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(member)
+                && a.asserted_at.timestamp_millis() >= added_ms
+        }))
 }
 
 /// The creator's half of an N-member room: make the MLS group's members equal
@@ -1167,6 +1361,36 @@ async fn reconcile_room_group(
         node: &st.node_signer,
         actor: Some(author),
     };
+    // Nothing new on top of a Commit the members have not seen.
+    place_unplaced(st, room, scope_room, author).await?;
+    // A MEMBER IN THE TREE THAT WAS NEVER WELCOMED (Codex, #689). The group
+    // persists at `add_member`, before its Welcome is placed; a crash in that
+    // window reloads a tree naming a member who holds nothing to join with, and
+    // the add loop below skips members already in the tree. The creator's own
+    // Welcome rows are local, so the gap is visible here: remove the member
+    // (the Commit reaches everyone who did join), and the loop re-adds them
+    // with a fresh Welcome in this same pass.
+    for m in group.member_key_ids().await {
+        if m == author.key_id {
+            continue;
+        }
+        if welcomed_for_current_add(&*dir, std::slice::from_ref(&author.key_id), room, &m, group)
+            .await?
+        {
+            continue;
+        }
+        let commit = group
+            .remove_member(&m)
+            .await
+            .map_err(|e| format!("remove_member({m}) to re-welcome: {e}"))?;
+        let row = chat::commit_attestation_in(author, room, &commit).await?;
+        place_commit(st, room, scope_room, row, author).await?;
+        tracing::warn!(
+            room = %room, member = %m,
+            "chat: N-member room — a member in the tree had no Welcome (an add interrupted \
+             before its Welcome was placed); removed so it is re-added with a fresh one"
+        );
+    }
     let in_group: std::collections::BTreeSet<String> =
         group.member_key_ids().await.into_iter().collect();
     for member in roster {
@@ -1195,9 +1419,14 @@ async fn reconcile_room_group(
             chrono::Utc::now(),
         )
         .await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
-        let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        let commit_row = chat::commit_attestation_in(author, room, &commit).await?;
+        if let Err(e) = share_in(&*dir, row, scope_room, signers()).await {
+            // The add is in the local group already: its Commit must still
+            // reach the members, and the repair pass then re-welcomes.
+            keep_unplaced(&st.node_signer.key_id, room, commit_row);
+            return Err(e);
+        }
+        place_commit(st, room, scope_room, commit_row, author).await?;
         tracing::info!(
             room = %room,
             member = %member.key_id,
@@ -1216,7 +1445,7 @@ async fn reconcile_room_group(
             .await
             .map_err(|e| format!("remove_member({gone}): {e}"))?;
         let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        place_commit(st, room, scope_room, row, author).await?;
         tracing::info!(
             room = %room,
             member = %gone,
