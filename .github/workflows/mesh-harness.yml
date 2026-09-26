@@ -254,6 +254,10 @@ jobs:
         env:
           DOCKER_BUILDKIT: "0"
           SKIP_BUILD: "1"          # reuse the wheel built above
+          # Leave the stack up. The scenario tears it down on exit otherwise,
+          # so the log step below read nothing and every failed ladder uploaded
+          # empty node logs; the teardown step at the end of this job owns it.
+          KEEP: "1"
         working-directory: harness/mesh-repro
         run: |
           ./run_scenario.sh "${{ matrix.scenario }}" \
