@@ -345,6 +345,14 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             Err(e) => SelfRoomTick::Failed(e),
         },
         SelfRoomAction::Abandon { in_favour_of } => {
+            // FORGET it durably FIRST (Codex, #689): otherwise the next tick's
+            // reload restores the conceded room and this device never
+            // publishes a KeyPackage for the winner's. If the store will not
+            // delete it, nothing is dropped: the room stays held and the next
+            // tick decides again.
+            if let Err(e) = crate::mls_state::forget(&st.store(), room.content_group_id()).await {
+                return SelfRoomTick::Failed(e);
+            }
             // Drop ours and wait for their Welcome. Dropping FIRST is the
             // point: a room about to be abandoned must not be addressed, or we
             // register destinations at a group that is going away.
@@ -371,10 +379,6 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
                     );
                 }
             }
-            // FORGET it durably too (Codex, #689): otherwise the next tick's
-            // reload restores the conceded room and this device never
-            // publishes a KeyPackage for the winner's.
-            crate::mls_state::forget(&st.store(), room.content_group_id()).await;
             crate::mls_state::forget_claim(&st.node_signer.key_id, room.content_group_id());
             *st.held.lock().await = None;
             tracing::info!(
@@ -567,7 +571,7 @@ async fn join_if_welcomed(
     if st.pending.lock().await.is_none() {
         // A KeyPackage published before a restart: its material was stashed
         // (CIRISServer#630), so the Welcome sealed to it can still be joined.
-        match crate::mls_state::restore_pending(&st.store(), room.content_group_id()).await {
+        match crate::mls_state::restore_pending(&st.store(), room.content_group_id()).await? {
             Some(m) => *st.pending.lock().await = Some(m),
             None => return Ok(None),
         }
@@ -587,6 +591,24 @@ async fn join_if_welcomed(
         else {
             continue;
         };
+        // THE CLAIM OF THE NODE WHOSE WELCOME WE CONSUME — not the
+        // globally-oldest rival (Codex, CIRISServer#628). With three or more
+        // devices racing, `rival` is the oldest claim anywhere while the
+        // Welcome we found is whichever came first in roster order, and they
+        // need not be the same creator. Storing an unrelated claim makes a
+        // losing group look like it owns the winning one, so `decide` keeps
+        // two room secrets instead of converging on one.
+        //
+        // Falling back to `rival` only if that creator published no commit we
+        // can read, and to a fresh claim only if there is nothing at all.
+        //
+        // KEPT BEFORE THE JOIN (Codex, #689): a durable group without its
+        // claim would be judged by an inferred one after a restart.
+        let claim = claim_of(&*dir, node, room_id)
+            .await
+            .or_else(|| rival.cloned())
+            .unwrap_or_else(|| CommitClaim::new(chrono::Utc::now(), node.clone()));
+        crate::mls_state::remember_claim(&st.node_signer.key_id, room_id, &claim)?;
         let Some(material) = st.pending.lock().await.take() else {
             return Ok(None);
         };
@@ -604,24 +626,6 @@ async fn join_if_welcomed(
                 crate::mls_state::clear_pending(&store, room_id).await;
                 let group = Arc::new(group);
                 let members = group.member_key_ids().await.len();
-                // THE CLAIM OF THE NODE WHOSE WELCOME WE CONSUMED — not the
-                // globally-oldest rival (Codex, CIRISServer#628). With three or
-                // more devices racing, `rival` is the oldest claim anywhere
-                // while the Welcome we found is whichever came first in roster
-                // order, and they need not be the same creator. Storing an
-                // unrelated claim makes a losing group look like it owns the
-                // winning one, so `decide` keeps two room secrets and two
-                // derived address sets instead of converging on one.
-                //
-                // Falling back to `rival` only if that creator published no
-                // commit we can read, and to a fresh claim only if there is
-                // nothing at all — both are strictly better than adopting
-                // somebody else's.
-                let claim = claim_of(&*dir, node, room_id)
-                    .await
-                    .or_else(|| rival.cloned())
-                    .unwrap_or_else(|| CommitClaim::new(chrono::Utc::now(), node.clone()));
-                crate::mls_state::remember_claim(&st.node_signer.key_id, room_id, &claim);
                 *st.held.lock().await = Some(HeldGroup {
                     group: Arc::clone(&group),
                     claim,
@@ -730,15 +734,16 @@ async fn create_room(
     owner: &str,
     node_key: &str,
 ) -> Result<usize, String> {
+    // Dated ONCE, here, when the room comes into being — and KEPT before the
+    // group exists, so a restart after this node is removed still knows it
+    // and no durable group ever lacks its claim (Codex, #689).
+    let claim = CommitClaim::new(chrono::Utc::now(), node_key.to_owned());
+    crate::mls_state::remember_claim(&st.node_signer.key_id, room.content_group_id(), &claim)?;
     let group = CohortGroup::create(st.store(), room.content_group_id(), node_key, 16)
         .await
         .map_err(|e| format!("create the self room: {e}"))?;
     let group = Arc::new(group);
     let members = group.member_key_ids().await.len();
-    // Dated ONCE, here, when the room actually came into being — and KEPT, so
-    // a restart after this node is removed still knows it (Codex, #689).
-    let claim = CommitClaim::new(chrono::Utc::now(), node_key.to_owned());
-    crate::mls_state::remember_claim(&st.node_signer.key_id, room.content_group_id(), &claim);
     *st.held.lock().await = Some(HeldGroup {
         group: Arc::clone(&group),
         claim,
@@ -980,8 +985,12 @@ async fn remove_members(
                 }
             }
             // Durably as well as in memory (Codex, #689): a reload would
-            // otherwise restore the unpublished epoch and report `Idle`.
-            crate::mls_state::forget(&st.store(), room.content_group_id()).await;
+            // otherwise restore the unpublished epoch and report `Idle`. If the
+            // store will not delete it, the room stays HELD, so this process
+            // does not reload the advanced epoch as if it were placed.
+            if let Err(f) = crate::mls_state::forget(&st.store(), room.content_group_id()).await {
+                return Err(format!("{e}; and {f} — the room stays held"));
+            }
             crate::mls_state::forget_claim(&st.node_signer.key_id, room.content_group_id());
             *st.held.lock().await = None;
             return Err(e);

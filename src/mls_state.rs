@@ -234,20 +234,21 @@ fn write_claims(path: &Path, claims: &HashMap<String, CommitClaim>) -> Result<()
         .map_err(|e| format!("write room claims at {}: {e}", path.display()))
 }
 
-/// Keep the claim `room`'s group was created under. Written when the group is
-/// created or joined; a node with no claims file (in-process) keeps none.
-pub fn remember_claim(node_key_id: &str, room: &str, claim: &CommitClaim) {
+/// Keep the claim `room`'s group is created or joined under. Written BEFORE
+/// the group exists (Codex, #689): an `Err` means the caller does not create
+/// or join, because a durable group without its claim would be judged by an
+/// inferred one after a restart. A claim with no group is inert. A node with
+/// no claims file (in-process) keeps none.
+pub fn remember_claim(node_key_id: &str, room: &str, claim: &CommitClaim) -> Result<(), String> {
     let Some(path) = claims_file(node_key_id) else {
-        return;
+        return Ok(());
     };
     let mut claims = read_claims(&path);
     if claims.get(room) == Some(claim) {
-        return;
+        return Ok(());
     }
     claims.insert(room.to_owned(), claim.clone());
-    if let Err(e) = write_claims(&path, &claims) {
-        tracing::warn!(%room, error = %e, "the room's claim was not kept — a restart infers it from the group");
-    }
+    write_claims(&path, &claims)
 }
 
 /// The claim `room`'s group was created under, if it was kept.
@@ -272,10 +273,15 @@ pub fn forget_claim(node_key_id: &str, room: &str) {
 /// room this node INTENTIONALLY drops (abandoned in a creation contest, or a
 /// removal whose Commit could not be placed). Without it the reload on the
 /// next tick restores the very group the drive just discarded (Codex, #689).
-pub async fn forget(store: &ScopeStateProvider, room: &str) {
-    if let Err(e) = store.forget_room(room).await {
-        tracing::warn!(%room, error = %e, "the dropped room's durable MLS state could not be deleted — the next reload may restore it");
-    }
+///
+/// An `Err` means the group is STILL on disk (Codex, #689): the caller keeps
+/// the room held and retries, rather than dropping it in memory and letting
+/// the next reload restore it.
+pub async fn forget(store: &ScopeStateProvider, room: &str) -> Result<(), String> {
+    store
+        .forget_room(room)
+        .await
+        .map_err(|e| format!("delete the dropped room {room}'s durable MLS state: {e}"))
 }
 
 /// Register `store` for `node_key_id` directly: an operator-passphrase store
@@ -346,21 +352,26 @@ pub async fn stash_pending(
 
 /// The stashed material for `room`, if a KeyPackage was published and no
 /// Welcome consumed it yet.
-pub async fn restore_pending(store: &ScopeStateProvider, room: &str) -> Option<CohortKeyMaterial> {
-    match store.pending_join_get(room).await {
-        Ok(Some(bytes)) => match ciris_edge::mls::key_material_from_bytes(&bytes) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                tracing::warn!(%room, error = %e, "stashed pending-join material is unreadable — minting a fresh KeyPackage");
-                None
-            }
-        },
-        Ok(None) => None,
+pub async fn restore_pending(
+    store: &ScopeStateProvider,
+    room: &str,
+) -> Result<Option<CohortKeyMaterial>, String> {
+    // A backend fault is an ERROR, not an empty slot (Codex, #689): read as
+    // absent, the caller would mint and publish replacement material, and a
+    // creator that already consumed the original KeyPackage would hold a
+    // Welcome this device can never open.
+    let bytes = store
+        .pending_join_get(room)
+        .await
+        .map_err(|e| format!("read the pending-join material for {room}: {e}"))?;
+    Ok(bytes.and_then(|b| match ciris_edge::mls::key_material_from_bytes(&b) {
+        Ok(m) => Some(m),
+        // Undecodable bytes do not become readable on a retry.
         Err(e) => {
-            tracing::warn!(%room, error = %e, "pending-join material unreadable — minting a fresh KeyPackage");
+            tracing::warn!(%room, error = %e, "stashed pending-join material is undecodable — minting a fresh KeyPackage");
             None
         }
-    }
+    }))
 }
 
 /// The room's state now supersedes the pending material (edge's
@@ -461,11 +472,11 @@ mod tests {
         }
         let store = disk_store(&path);
         assert!(
-            restore_pending(&store, room).await.is_some(),
+            restore_pending(&store, room).await.expect("read").is_some(),
             "the material a published KeyPackage commits to is still here after the restart"
         );
         clear_pending(&store, room).await;
-        assert!(restore_pending(&store, room).await.is_none());
+        assert!(restore_pending(&store, room).await.expect("read").is_none());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -518,7 +529,7 @@ mod tests {
             .is_some());
 
         // FORGET: an intentionally dropped room does not reload.
-        forget(&store_for(&node), room).await;
+        forget(&store_for(&node), room).await.expect("forget");
         assert!(load(&disk_store(&path), room)
             .await
             .expect("load")
@@ -580,7 +591,7 @@ mod tests {
         let room = "self-room-x";
         assert!(remembered_claim(&node, room).is_none());
         let claim = CommitClaim::new(chrono::Utc::now(), "the-creator");
-        remember_claim(&node, room, &claim);
+        remember_claim(&node, room, &claim).expect("keep the claim");
         // A "restart": the path is registered again, the file is what remains.
         unregister(&node);
         set_claims_path(&node, dir.join(CLAIMS_FILE));

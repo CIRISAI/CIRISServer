@@ -876,7 +876,7 @@ async fn room_key(
                     "chat: reloaded pair room has no Welcome of ours — the handshake was \
                      interrupted; recreating it"
                 );
-                crate::mls_state::forget(&store, &room).await;
+                crate::mls_state::forget(&store, &room).await?;
             } else {
                 tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
                 rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
@@ -976,7 +976,7 @@ async fn room_key(
                 Some(RoomState::AwaitingWelcome(m)) => m,
                 // A KeyPackage published before a restart: its material was
                 // stashed, and the Welcome sealed to it can still be joined.
-                _ if let Some(m) = crate::mls_state::restore_pending(&store, &room).await => m,
+                _ if let Some(m) = crate::mls_state::restore_pending(&store, &room).await? => m,
                 _ => {
                     // Publish our half once, then wait for the Welcome.
                     let (material, kp) = mint_cohort_key_material(me)
@@ -1146,7 +1146,7 @@ pub(crate) async fn room_key_room(
     }
     let material = match rooms.remove(room) {
         Some(RoomState::AwaitingWelcome(m)) => m,
-        _ if let Some(m) = crate::mls_state::restore_pending(&store, room).await => m,
+        _ if let Some(m) = crate::mls_state::restore_pending(&store, room).await? => m,
         _ => {
             let (material, kp) = mint_cohort_key_material(me)
                 .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
@@ -1214,6 +1214,12 @@ pub(crate) async fn room_key_room(
 // publishes a later Commit the members cannot apply, because they never saw
 // the one before it (Codex, #689). So an unplaced Commit is kept, in order, and
 // placed again FIRST on the next pass; no new Commit is made until it lands.
+//
+// IN MEMORY ONLY, deliberately. A crash between edge persisting the epoch and
+// this queue is a window only the substrate can close (edge persists inside
+// `add_member` / `remove_member`, before the Commit reaches the host); the ask
+// is CIRISEdge#697, an outbox kept with the snapshot. When it lands, this
+// queue is deleted in favour of it.
 
 fn unplaced_commits() -> &'static std::sync::Mutex<HashMap<String, Vec<Attestation>>> {
     static U: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Attestation>>>> =
