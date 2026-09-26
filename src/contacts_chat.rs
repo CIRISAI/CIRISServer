@@ -988,7 +988,7 @@ async fn room_key(
                             .await?;
                     // Stash BEFORE the KeyPackage is out (Codex, #689); withdraw
                     // the stash if publication fails.
-                    crate::mls_state::stash_pending(&store, &room, &material).await;
+                    crate::mls_state::stash_pending(&store, &room, &material).await?;
                     if let Err(e) = share_in_room(
                         &*dir,
                         row,
@@ -1159,7 +1159,7 @@ pub(crate) async fn room_key_room(
             )
             .await?;
             // Stash BEFORE the KeyPackage is out (Codex, #689).
-            crate::mls_state::stash_pending(&store, room, &material).await;
+            crate::mls_state::stash_pending(&store, room, &material).await?;
             if let Err(e) = share_in(
                 &*dir,
                 row,
@@ -1207,6 +1207,134 @@ pub(crate) async fn room_key_room(
     Ok(RoomHandshake::Ready)
 }
 
+// ─── Commits applied locally whose rows did not reach the room ──────────────
+//
+// `add_member` / `remove_member` advance the local group AND persist it before
+// the Commit row is placed. If placing fails, continuing from that epoch
+// publishes a later Commit the members cannot apply, because they never saw
+// the one before it (Codex, #689). So an unplaced Commit is kept, in order, and
+// placed again FIRST on the next pass; no new Commit is made until it lands.
+
+fn unplaced_commits() -> &'static std::sync::Mutex<HashMap<String, Vec<Attestation>>> {
+    static U: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Attestation>>>> =
+        std::sync::OnceLock::new();
+    U.get_or_init(Default::default)
+}
+
+fn unplaced_key(node: &str, room: &str) -> String {
+    format!("{node}\u{1f}{room}")
+}
+
+fn keep_unplaced(node: &str, room: &str, row: Attestation) {
+    if let Ok(mut u) = unplaced_commits().lock() {
+        u.entry(unplaced_key(node, room)).or_default().push(row);
+    }
+}
+
+/// Place `row` (a Commit); if it does not land, keep it for the next pass.
+async fn place_commit(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    row: Attestation,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let dir = st.engine.federation_directory();
+    let signers = ciris_edge::replication::attestation_bind::Signers {
+        node: &st.node_signer,
+        actor: Some(author),
+    };
+    if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+        keep_unplaced(&st.node_signer.key_id, room, row);
+        return Err(format!("{e} (the Commit is kept and placed again first)"));
+    }
+    Ok(())
+}
+
+/// Place every Commit an earlier pass could not, oldest first. `Err` while any
+/// is still unplaced: the caller makes no new Commit on top of it.
+async fn place_unplaced(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let key = unplaced_key(&st.node_signer.key_id, room);
+    let rows = match unplaced_commits().lock() {
+        Ok(mut u) => u.remove(&key).unwrap_or_default(),
+        Err(_) => return Ok(()),
+    };
+    let dir = st.engine.federation_directory();
+    let mut rows = rows.into_iter();
+    while let Some(row) = rows.next() {
+        let signers = ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(author),
+        };
+        if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+            if let Ok(mut u) = unplaced_commits().lock() {
+                let slot = u.entry(key).or_default();
+                let later = std::mem::take(slot);
+                slot.push(row);
+                slot.extend(rows);
+                slot.extend(later);
+            }
+            return Err(format!(
+                "an earlier Commit in {room} is still unplaced: {e}"
+            ));
+        }
+        tracing::info!(room = %room, "chat: a Commit an earlier pass could not place is placed now");
+    }
+    Ok(())
+}
+
+/// Whether `member` holds a Welcome for its CURRENT add, from any of `from`
+/// (Codex, #689). Existence is not enough: a device removed and re-added keeps
+/// its old Welcome row, and a crash after the new add but before its Welcome
+/// would read as welcomed. A Welcome counts only if it was placed at or after
+/// the member's persisted add instant (`member_added_at`, the add's claim).
+///
+/// STOPGAP: edge's `welcome_for` returns no row instant and keeps its recipient
+/// field private, so this reads the rows itself with that field's literal.
+/// Delete it when edge returns the instant (CIRISEdge#696).
+pub(crate) async fn welcomed_for_current_add(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    from: &[String],
+    room: &str,
+    member: &str,
+    group: &ciris_edge::mls::CohortGroup,
+) -> Result<bool, String> {
+    const STOPGAP_FIELD_MLS_FOR: &str = "mls_for_key_id";
+    let Some(added) = group.member_added_at(member).await else {
+        // No add instant (a group persisted before joins were kept): the old
+        // reading, any Welcome at all.
+        for f in from {
+            if ciris_edge::chat::welcome_for(dir, f, room, member)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    };
+    let added_ms = added.timestamp_millis();
+    Ok(ciris_edge::chat::rows_in_room(dir, from, room)
+        .await?
+        .iter()
+        .any(|a| {
+            let env = &a.attestation_envelope;
+            env.get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                == Some(ciris_edge::chat::WELCOME_DIMENSION)
+                && env
+                    .get(STOPGAP_FIELD_MLS_FOR)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(member)
+                && a.asserted_at.timestamp_millis() >= added_ms
+        }))
+}
+
 /// The creator's half of an N-member room: make the MLS group's members equal
 /// the fold. Adds every active member whose KeyPackage has arrived (a Welcome
 /// addressed to them + the Commit for everyone already in), removes every
@@ -1227,6 +1355,8 @@ async fn reconcile_room_group(
         node: &st.node_signer,
         actor: Some(author),
     };
+    // Nothing new on top of a Commit the members have not seen.
+    place_unplaced(st, room, scope_room, author).await?;
     // A MEMBER IN THE TREE THAT WAS NEVER WELCOMED (Codex, #689). The group
     // persists at `add_member`, before its Welcome is placed; a crash in that
     // window reloads a tree naming a member who holds nothing to join with, and
@@ -1238,9 +1368,8 @@ async fn reconcile_room_group(
         if m == author.key_id {
             continue;
         }
-        if chat::welcome_for(&*dir, &author.key_id, room, &m)
+        if welcomed_for_current_add(&*dir, std::slice::from_ref(&author.key_id), room, &m, group)
             .await?
-            .is_some()
         {
             continue;
         }
@@ -1249,7 +1378,7 @@ async fn reconcile_room_group(
             .await
             .map_err(|e| format!("remove_member({m}) to re-welcome: {e}"))?;
         let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        place_commit(st, room, scope_room, row, author).await?;
         tracing::warn!(
             room = %room, member = %m,
             "chat: N-member room — a member in the tree had no Welcome (an add interrupted \
@@ -1284,9 +1413,14 @@ async fn reconcile_room_group(
             chrono::Utc::now(),
         )
         .await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
-        let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        let commit_row = chat::commit_attestation_in(author, room, &commit).await?;
+        if let Err(e) = share_in(&*dir, row, scope_room, signers()).await {
+            // The add is in the local group already: its Commit must still
+            // reach the members, and the repair pass then re-welcomes.
+            keep_unplaced(&st.node_signer.key_id, room, commit_row);
+            return Err(e);
+        }
+        place_commit(st, room, scope_room, commit_row, author).await?;
         tracing::info!(
             room = %room,
             member = %member.key_id,
@@ -1305,7 +1439,7 @@ async fn reconcile_room_group(
             .await
             .map_err(|e| format!("remove_member({gone}): {e}"))?;
         let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        place_commit(st, room, scope_room, row, author).await?;
         tracing::info!(
             room = %room,
             member = %gone,

@@ -297,20 +297,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         instance_id = %crate::node_identity::instance_id(),
         "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
-    // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
-    // before any route or loop can touch a room, and registered under the key
-    // id every room reads it by (the chat and self-room drives look it up by
-    // this signer's key id). Durable under persist's hardware-rooted key when
-    // the host can seal it; ephemeral, and saying so, when it cannot.
-    let mls_posture = crate::mls_state::open_for_node(
-        &chat_node_signer.key_id,
-        &cfg.data_dir.join("mls-state.kv"),
-    )
-    .await;
-    // Released when this serve returns, cleanly or from a failed boot (Codex,
-    // #689): the embedded restart flow can serve another identity in-process.
-    let _mls_registration = crate::mls_state::Registration::new(&chat_node_signer.key_id);
-
     // ── ONE IDENTITY, HYBRID, OR WE DO NOT BOOT (CIRISServer#380) ─────────────
     // See `crate::identity_gate` for why this is a boot error rather than a
     // warning, and why the comparison is on public-key bytes rather than key_ids.
@@ -411,6 +397,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
+    // before any route or loop can touch a room, and registered under the key
+    // id every room reads it by (the chat and self-room drives look it up by
+    // the chat signer's key id). Durable under persist's hardware-rooted key
+    // when the host can seal it; ephemeral, and saying so, when it cannot.
+    //
+    // AFTER the wire identity resolves (Codex, #689): on an actor/node split the
+    // chat signer is the ACTOR, and a host that registered its store under the
+    // wire NODE must be found there, not opened over by a second store.
+    let mls_posture = crate::mls_state::open_for_node(
+        &chat_node_signer.key_id,
+        &node_resolution.node_key_id,
+        &cfg.data_dir.join("mls-state.kv"),
+    )
+    .await;
+    // Released when this serve returns, cleanly or from a failed boot (Codex,
+    // #689): the embedded restart flow can serve another identity in-process.
+    let _mls_registration = crate::mls_state::Registration::new(&[
+        &chat_node_signer.key_id,
+        &node_resolution.node_key_id,
+    ]);
     // The serve path performs its OWN split, so it must record the actor too —
     // `set_actor_identity` was only ever called by `provision_node_identity` (the
     // embedded path), leaving a node that split HERE reporting `actor_key_id: null`

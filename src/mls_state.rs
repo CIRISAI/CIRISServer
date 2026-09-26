@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use ciris_edge::mls::cohort_group::CohortKeyMaterial;
+use ciris_edge::mls::cohort_group::{CohortKeyMaterial, CommitClaim};
 use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
 
 /// The retained-epoch window every room here opens with (the value both
@@ -65,8 +65,16 @@ fn registry() -> &'static Mutex<Registry> {
 /// Open this node's store at `path` ONCE, at boot, and register it for
 /// `node_key_id`. Never fails the boot: every outcome is a posture, and the
 /// degraded ones are logged by name.
-pub async fn open_for_node(node_key_id: &str, path: &Path) -> Posture {
+///
+/// `node_key_id` is the key every room path looks the store up by (the chat
+/// signer's). `wire_key_id` is the node's resolved WIRE identity, which on an
+/// actor/node split differs from it (Codex, #689): a host that registered its
+/// store under the wire node is found there, and the same store is then
+/// registered under `node_key_id` too, so the rooms use it rather than a
+/// second store opened beside it.
+pub async fn open_for_node(node_key_id: &str, wire_key_id: &str, path: &Path) -> Posture {
     use ciris_edge::mls::scope_state::{open_mls_state, MlsStateUnavailable};
+    set_claims_path(node_key_id, path.with_file_name(CLAIMS_FILE));
     // A store the embedding host registered ON PURPOSE (an operator
     // passphrase store, edge FSD §1) is kept: opening over it would replace a
     // durable store with an ephemeral one on a host with no hardware seed, and
@@ -74,6 +82,20 @@ pub async fn open_for_node(node_key_id: &str, path: &Path) -> Posture {
     if let Some(p) = explicit_posture(node_key_id) {
         tracing::info!(posture = ?p, "MLS state: keeping the store the host registered for this node");
         return p;
+    }
+    if wire_key_id != node_key_id {
+        let found = registry()
+            .lock()
+            .ok()
+            .and_then(|r| r.get(wire_key_id).filter(|e| e.2).cloned());
+        if let Some((store, posture, _)) = found {
+            tracing::info!(
+                posture = ?posture, wire = %wire_key_id, rooms = %node_key_id,
+                "MLS state: keeping the store the host registered under the wire node"
+            );
+            register_for_node(node_key_id, store, posture.clone());
+            return posture;
+        }
     }
     let (store, posture) = match open_mls_state(path).await {
         Ok(store) => {
@@ -140,22 +162,109 @@ pub fn unregister(node_key_id: &str) {
     if let Ok(mut r) = registry().lock() {
         r.remove(node_key_id);
     }
+    if let Ok(mut c) = claim_paths().lock() {
+        c.remove(node_key_id);
+    }
 }
 
-/// Unregisters its node's store when dropped — held by the serve function for
+/// Unregisters its nodes' stores when dropped — held by the serve function for
 /// its whole life, so a teardown AND every early return of a failed boot
-/// release the store without each path remembering to.
-pub struct Registration(String);
+/// release the store without each path remembering to. Both keys a split node
+/// registers under (the rooms' key and the wire node's) are released.
+pub struct Registration(Vec<String>);
 
 impl Registration {
-    pub fn new(node_key_id: &str) -> Self {
-        Self(node_key_id.to_owned())
+    pub fn new(node_key_ids: &[&str]) -> Self {
+        Self(node_key_ids.iter().map(|k| (*k).to_owned()).collect())
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        unregister(&self.0);
+        for k in &self.0 {
+            unregister(k);
+        }
+    }
+}
+
+// ─── The room's ORIGINAL claim, kept beside the store (Codex, #689) ─────────
+//
+// A self room's creation contest is decided by the claim its group was CREATED
+// under, and that claim cannot be rebuilt from the group once its creator is
+// removed: edge drops a removed member from the persisted join map, and exposes
+// no slot for a host's metadata (CIRISEdge#696). So the claim is kept here, one small JSON file
+// beside the MLS store. It is not secret — it is already a signed row
+// (`CommitClaim` = committer key id + instant) — and it is only read when the
+// group itself reloads, so a stale entry beside an ephemeral store is inert.
+
+const CLAIMS_FILE: &str = "mls-claims.json";
+
+fn claim_paths() -> &'static Mutex<HashMap<String, std::path::PathBuf>> {
+    static C: OnceLock<Mutex<HashMap<String, std::path::PathBuf>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Where `node_key_id`'s room claims are kept. Set by [`open_for_node`]; a
+/// test or host that registers a store directly sets it here.
+pub fn set_claims_path(node_key_id: &str, path: std::path::PathBuf) {
+    if let Ok(mut c) = claim_paths().lock() {
+        c.insert(node_key_id.to_owned(), path);
+    }
+}
+
+fn claims_file(node_key_id: &str) -> Option<std::path::PathBuf> {
+    claim_paths().lock().ok()?.get(node_key_id).cloned()
+}
+
+fn read_claims(path: &Path) -> HashMap<String, CommitClaim> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "room claims unreadable — reloaded rooms infer their claim from the group");
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn write_claims(path: &Path, claims: &HashMap<String, CommitClaim>) -> Result<(), String> {
+    let bytes = serde_json::to_vec(claims).map_err(|e| format!("encode room claims: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("write room claims at {}: {e}", path.display()))
+}
+
+/// Keep the claim `room`'s group was created under. Written when the group is
+/// created or joined; a node with no claims file (in-process) keeps none.
+pub fn remember_claim(node_key_id: &str, room: &str, claim: &CommitClaim) {
+    let Some(path) = claims_file(node_key_id) else {
+        return;
+    };
+    let mut claims = read_claims(&path);
+    if claims.get(room) == Some(claim) {
+        return;
+    }
+    claims.insert(room.to_owned(), claim.clone());
+    if let Err(e) = write_claims(&path, &claims) {
+        tracing::warn!(%room, error = %e, "the room's claim was not kept — a restart infers it from the group");
+    }
+}
+
+/// The claim `room`'s group was created under, if it was kept.
+pub fn remembered_claim(node_key_id: &str, room: &str) -> Option<CommitClaim> {
+    read_claims(&claims_file(node_key_id)?).remove(room)
+}
+
+/// Drop `room`'s kept claim, with the group ([`forget`]).
+pub fn forget_claim(node_key_id: &str, room: &str) {
+    let Some(path) = claims_file(node_key_id) else {
+        return;
+    };
+    let mut claims = read_claims(&path);
+    if claims.remove(room).is_some() {
+        if let Err(e) = write_claims(&path, &claims) {
+            tracing::warn!(%room, error = %e, "the dropped room's claim was not removed");
+        }
     }
 }
 
@@ -218,17 +327,21 @@ pub async fn load(store: &ScopeStateProvider, room: &str) -> Result<Option<Cohor
 /// Keep a published KeyPackage's private material across a restart, so the
 /// Welcome sealed to it can still be consumed (edge FSD §3). One slot per
 /// room; the newest publication wins.
-pub async fn stash_pending(store: &ScopeStateProvider, room: &str, material: &CohortKeyMaterial) {
-    let bytes = match ciris_edge::mls::key_material_to_bytes(material) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(%room, error = %e, "pending-join material could not be encoded — a restart before the Welcome will need a fresh KeyPackage");
-            return;
-        }
-    };
-    if let Err(e) = store.pending_join_put(room, &bytes).await {
-        tracing::warn!(%room, error = %e, "pending-join material not stashed — a restart before the Welcome will need a fresh KeyPackage");
-    }
+///
+/// An `Err` means the KeyPackage must NOT be published (Codex, #689): a
+/// creator could add this device to a tree whose Welcome a restarted node can
+/// never open, and a creator does not re-add a member already in its tree.
+pub async fn stash_pending(
+    store: &ScopeStateProvider,
+    room: &str,
+    material: &CohortKeyMaterial,
+) -> Result<(), String> {
+    let bytes = ciris_edge::mls::key_material_to_bytes(material)
+        .map_err(|e| format!("encode the pending-join material for {room}: {e}"))?;
+    store
+        .pending_join_put(room, &bytes)
+        .await
+        .map_err(|e| format!("stash the pending-join material for {room}: {e}"))
 }
 
 /// The stashed material for `room`, if a KeyPackage was published and no
@@ -270,6 +383,14 @@ mod tests {
             ciris_persist::encrypted_kv::XChaChaKvStore::open(path, b"mls-state-test-passphrase")
                 .expect("open the on-disk sealed store"),
         ))
+    }
+
+    /// A fresh directory: the claims file lands beside the store, so two tests
+    /// must never share one.
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let d = tmp(name).with_extension("d");
+        std::fs::create_dir_all(&d).expect("tmp dir");
+        d
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {
@@ -336,7 +457,7 @@ mod tests {
             let store = disk_store(&path);
             let (material, _kp) =
                 ciris_edge::mls::cohort_group::mint_cohort_key_material("node-b").expect("mint");
-            stash_pending(&store, room, &material).await;
+            stash_pending(&store, room, &material).await.expect("stash");
         }
         let store = disk_store(&path);
         assert!(
@@ -381,7 +502,8 @@ mod tests {
                 path: path.display().to_string(),
             },
         );
-        let posture = open_for_node(&node, &tmp("never-opened")).await;
+        let posture =
+            open_for_node(&node, &node, &tmp_dir("never-opened").join("mls-state.kv")).await;
         assert!(
             matches!(posture, Posture::Durable { .. }),
             "the boot open kept the host's durable store: {posture:?}"
@@ -404,12 +526,68 @@ mod tests {
 
         // TEARDOWN: the guard releases the registration.
         {
-            let _reg = Registration::new(&node);
+            let _reg = Registration::new(&[&node]);
         }
         assert!(
             posture_for(&node).is_none(),
             "the stopped node's store is released"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Codex #689: on an actor/node split the rooms read the store by the
+    /// chat signer's key, and a host registers it under the WIRE node. The boot
+    /// open finds it there and does not open a second store for the rooms.
+    #[tokio::test]
+    async fn a_store_registered_under_the_wire_node_is_the_rooms_store() {
+        let actor = format!("actor-{}", std::process::id());
+        let wire = format!("{actor}-node");
+        let path = tmp("wire");
+        register_for_node(
+            &wire,
+            disk_store(&path),
+            Posture::Durable {
+                path: path.display().to_string(),
+            },
+        );
+        let posture =
+            open_for_node(&actor, &wire, &tmp_dir("wire-open").join("mls-state.kv")).await;
+        assert!(matches!(posture, Posture::Durable { .. }), "{posture:?}");
+        let room = "chat:room:v1:wire";
+        let _g = CohortGroup::create(store_for(&actor), room, &actor, RETAINED_EPOCHS)
+            .await
+            .expect("create");
+        assert!(
+            load(&disk_store(&path), room)
+                .await
+                .expect("load")
+                .is_some(),
+            "the rooms wrote into the host's store"
+        );
+        drop(Registration::new(&[&actor, &wire]));
+        assert!(posture_for(&actor).is_none() && posture_for(&wire).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Codex #689: the claim a room was created under outlives its creator's
+    /// removal from the group, because it is kept beside the store rather than
+    /// rebuilt from the members.
+    #[test]
+    fn a_rooms_claim_survives_a_restart_and_goes_with_the_room() {
+        let node = format!("claims-node-{}", std::process::id());
+        let dir = tmp_dir("claims");
+        set_claims_path(&node, dir.join(CLAIMS_FILE));
+        let room = "self-room-x";
+        assert!(remembered_claim(&node, room).is_none());
+        let claim = CommitClaim::new(chrono::Utc::now(), "the-creator");
+        remember_claim(&node, room, &claim);
+        // A "restart": the path is registered again, the file is what remains.
+        unregister(&node);
+        set_claims_path(&node, dir.join(CLAIMS_FILE));
+        assert_eq!(remembered_claim(&node, room), Some(claim));
+        forget_claim(&node, room);
+        assert!(remembered_claim(&node, room).is_none());
+        unregister(&node);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

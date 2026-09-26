@@ -178,7 +178,14 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     if st.held.lock().await.is_none() {
         match crate::mls_state::load(&st.store(), &room_id).await {
             Ok(Some(group)) => {
-                let claim = reloaded_claim(&*dir, &node_key, &room_id, &group).await;
+                // The claim KEPT when the group was created or joined (Codex,
+                // #689); inferred from the group only for a room persisted
+                // before claims were kept.
+                let claim =
+                    match crate::mls_state::remembered_claim(&st.node_signer.key_id, &room_id) {
+                        Some(c) => c,
+                        None => reloaded_claim(&*dir, &node_key, &room_id, &group).await,
+                    };
                 let members = group.member_key_ids().await.len();
                 tracing::info!(
                     room = %room, members,
@@ -190,8 +197,14 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
                 });
             }
             Ok(None) => {}
+            // STOP HERE (Codex, #689). With `held` still empty, `decide` could
+            // choose `Create` and write a new genesis over state this node just
+            // failed to READ, or publish a KeyPackage as if it had no group:
+            // a recoverable read fault would become lost room secrets. The
+            // durable state is left untouched and the next tick tries again.
             Err(e) => {
-                tracing::warn!(room = %room, error = %e, "self room: the persisted group could not be reloaded")
+                tracing::warn!(room = %room, error = %e, "self room: the persisted group could not be reloaded — this tick does nothing");
+                return SelfRoomTick::Failed(e);
             }
         }
     }
@@ -243,13 +256,13 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             if m == node_key || m == creator || republished.contains(&m) {
                 continue;
             }
-            let mut welcomed = false;
-            for n in &roster {
-                if let Ok(Some(_)) = ciris_edge::chat::welcome_for(&*dir, n, &room_id, &m).await {
-                    welcomed = true;
-                    break;
-                }
-            }
+            // A Welcome for its CURRENT add (Codex, #689): an old one from before
+            // a removal and re-add does not count.
+            let welcomed = crate::contacts_chat::welcomed_for_current_add(
+                &*dir, &roster, &room_id, &m, &h.group,
+            )
+            .await
+            .unwrap_or(true);
             if !welcomed {
                 tracing::warn!(
                     member = %m, room = %room,
@@ -362,6 +375,7 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             // reload restores the conceded room and this device never
             // publishes a KeyPackage for the winner's.
             crate::mls_state::forget(&st.store(), room.content_group_id()).await;
+            crate::mls_state::forget_claim(&st.node_signer.key_id, room.content_group_id());
             *st.held.lock().await = None;
             tracing::info!(
                 owner = %owner,
@@ -607,6 +621,7 @@ async fn join_if_welcomed(
                     .await
                     .or_else(|| rival.cloned())
                     .unwrap_or_else(|| CommitClaim::new(chrono::Utc::now(), node.clone()));
+                crate::mls_state::remember_claim(&st.node_signer.key_id, room_id, &claim);
                 *st.held.lock().await = Some(HeldGroup {
                     group: Arc::clone(&group),
                     claim,
@@ -690,7 +705,7 @@ async fn publish_key_package(
     // a creator never re-adds a member already in its tree. If publication
     // fails, the stash is withdrawn so it is not mistaken for a live KeyPackage.
     let store = st.store();
-    crate::mls_state::stash_pending(&store, room.content_group_id(), &material).await;
+    crate::mls_state::stash_pending(&store, room.content_group_id(), &material).await?;
     if let Err(e) = crate::contacts_chat::share_in(
         &*st.engine.federation_directory(),
         row,
@@ -720,10 +735,13 @@ async fn create_room(
         .map_err(|e| format!("create the self room: {e}"))?;
     let group = Arc::new(group);
     let members = group.member_key_ids().await.len();
+    // Dated ONCE, here, when the room actually came into being — and KEPT, so
+    // a restart after this node is removed still knows it (Codex, #689).
+    let claim = CommitClaim::new(chrono::Utc::now(), node_key.to_owned());
+    crate::mls_state::remember_claim(&st.node_signer.key_id, room.content_group_id(), &claim);
     *st.held.lock().await = Some(HeldGroup {
         group: Arc::clone(&group),
-        // Dated ONCE, here, when the room actually came into being.
-        claim: CommitClaim::new(chrono::Utc::now(), node_key.to_owned()),
+        claim,
     });
     install_or_advance(st, room, owner, &group).await;
     tracing::info!(
@@ -964,6 +982,7 @@ async fn remove_members(
             // Durably as well as in memory (Codex, #689): a reload would
             // otherwise restore the unpublished epoch and report `Idle`.
             crate::mls_state::forget(&st.store(), room.content_group_id()).await;
+            crate::mls_state::forget_claim(&st.node_signer.key_id, room.content_group_id());
             *st.held.lock().await = None;
             return Err(e);
         }
