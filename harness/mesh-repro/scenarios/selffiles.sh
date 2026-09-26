@@ -562,13 +562,16 @@ c=collections.Counter()
 for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
     if d.endswith(("-wal","-shm")): continue
     try:
-        for att, env in sqlite3.connect(d).execute("SELECT attesting_key_id, attestation_envelope FROM federation_attestations"):
-            try: dim=json.loads(env).get("dimension","")
-            except Exception: dim=""
+        for aid, att, env, tier, scope in sqlite3.connect(d).execute("SELECT attestation_id, attesting_key_id, attestation_envelope, tier, cohort_scope FROM federation_attestations"):
+            try: e=json.loads(env)
+            except Exception: e={}
+            dim=e.get("dimension","")
             if dim.startswith("chat:key_package") or dim.startswith("chat:welcome") or dim.startswith("chat:commit"):
-                c[(dim, att)] += 1
+                target=e.get("community_key_id") or e.get("community_id") or e.get("cohort_key_id") or e.get("family_key_id")
+                c[(dim, att, tier, scope, str(target), str(e.get("references_attestation_id"))[:14], aid[:18])] += 1
     except Exception: pass
-print(json.dumps({f"{k[0]} <- {k[1]}": v for k, v in sorted(c.items())}))' 2>/dev/null | sed "s/^/    $svc: /"
+for k, v in sorted(c.items()):
+    print(f"{k[0]} by={k[1]} tier={k[2]} scope={k[3]} room={k[4]} refs={k[5]} id={k[6]} x{v}")' 2>/dev/null | sed "s/^/    $svc: /"
   done
 }
 
