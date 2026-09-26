@@ -317,3 +317,47 @@ async fn the_record_keeps_its_content_and_only_the_attestation_is_scrubbed() {
         "`{SSN}` reached the attestation:\n{minted}"
     );
 }
+
+/// CIRISServer#685: the erasure route returns the id of the audit row persist
+/// records, found by `hard_case:trace_erasure` + the agent hash + the erasure
+/// instant. Pins that those coordinates find exactly that row.
+#[tokio::test]
+async fn a_trace_erasure_audit_row_is_found_by_the_coordinates_the_route_uses() {
+    let engine = node().await;
+    let mldsa = ciris_crypto::MlDsa65Signer::from_seed(&[0x44u8; 32]).expect("ml-dsa seed");
+    use ciris_crypto::PqcSigner as _;
+    let mldsa_pk = BASE64.encode(mldsa.public_key().expect("pk"));
+    cross_register(
+        &engine,
+        AGENT_KEY,
+        &SigningKey::from_bytes(&[0x33u8; 32]),
+        &mldsa_pk,
+    )
+    .await;
+    engine
+        .receive_and_persist(&build_batch_bytes(), &EgressScrubber)
+        .await
+        .expect("ingest the batch");
+    let sum = engine
+        .delete_traces_for_agent_id_hash("cafebabe")
+        .await
+        .expect("erase");
+    assert!(
+        sum.trace_events > 0,
+        "premise: the batch's traces were erased: {sum:?}"
+    );
+    let id = ciris_server::federation_admin::erasure_audit_event_id(&engine, "cafebabe", &sum)
+        .await
+        .expect("the audit row persist recorded is found");
+    assert!(!id.is_empty());
+    // A repeat erases nothing and records nothing: no id to return.
+    let again = engine
+        .delete_traces_for_agent_id_hash("cafebabe")
+        .await
+        .expect("erase again");
+    assert!(
+        ciris_server::federation_admin::erasure_audit_event_id(&engine, "cafebabe", &again)
+            .await
+            .is_none()
+    );
+}

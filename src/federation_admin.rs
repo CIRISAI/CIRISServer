@@ -516,7 +516,8 @@ struct ConsentResponse {
 /// (raw bytes), `policy_blob` x2, `HardCaseEvent.detail`), and every erasure
 /// primitive persist exposes is keyed by a ROLE — agent, actor, content_id,
 /// tier — never by OBJECT. There is no `(table, row_id)` erasure at all.
-/// Filed as CIRISPersist#573. Until that lands, the only lever for a payload
+/// Filed as CIRISPersist#573 (closed; the live gap is CIRISPersist#914). Until
+/// that lands, the only lever for a payload
 /// outside the trace corpus is `evict_actor` on the whole key, which is the
 /// CA-distrust problem: a tool so blunt it never gets pulled.
 ///
@@ -581,6 +582,7 @@ async fn erase_agent_traces(
                 "ERASURE performed (GDPR Art. 17 / DSAR) — traces hard-deleted, detection \
                  linkage tombstoned, hard_case:trace_erasure emitted by persist"
             );
+            let audit_event_id = erasure_audit_event_id(&st.engine, &req.agent_id_hash, &sum).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -590,9 +592,11 @@ async fn erase_agent_traces(
                     "trace_llm_calls": sum.trace_llm_calls,
                     "detection_events_tombstoned": sum.detection_events_tombstoned,
                     "erased_at": sum.erased_at.to_rfc3339(),
-                    "scope_note": "traces only — payloads in attestation/registration envelopes, \
-                                   attestation_evidence, policy_blob or hard_case detail are NOT \
-                                   reached by any erasure primitive (CIRISPersist#573)",
+                    "audit_event_id": audit_event_id,
+                    "scope_note": "traces only — nothing minted today outside the trace corpus \
+                                   (attestation/registration envelopes, attestation_evidence, \
+                                   policy_blob, hard_case detail) is reached by any erasure \
+                                   primitive yet (CIRISPersist#914)",
                 })),
             )
                 .into_response()
@@ -602,6 +606,34 @@ async fn erase_agent_traces(
             format!("erasure failed: {e}"),
         ),
     }
+}
+
+/// **The audit row persist recorded for a trace erasure**, by its own
+/// coordinates (CIRISServer#685): kind `trace_erasure`, target the agent hash,
+/// emitted AT the erasure instant. Returned so a client can point the person at
+/// the record of their erasure. `None` when nothing was erased (a repeat call
+/// records no new row) or the backend cannot list hard cases.
+pub async fn erasure_audit_event_id(
+    engine: &Engine,
+    agent_id_hash: &str,
+    sum: &ciris_persist::store::types::ErasureSummary,
+) -> Option<String> {
+    if sum.trace_events + sum.trace_llm_calls + sum.detection_events_tombstoned == 0 {
+        return None;
+    }
+    let mut filter = ciris_persist::federation::hard_case::HardCaseFilter::default();
+    filter.kind = Some(ciris_persist::federation::hard_case::kind::TRACE_ERASURE.to_owned());
+    filter.since = Some(sum.erased_at);
+    engine
+        .federation_directory()
+        .list_hard_case_events(filter)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|e| {
+            e.target_key_id.as_deref() == Some(agent_id_hash) && e.emitted_at == sum.erased_at
+        })
+        .map(|e| e.event_id)
 }
 
 /// `POST /v1/federation/consent` — author THIS node's directed
