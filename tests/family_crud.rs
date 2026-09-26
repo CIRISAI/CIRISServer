@@ -645,8 +645,8 @@ async fn a_quorum_family_adds_through_envelope_cosign_assemble() {
     )
     .await;
     assert_eq!(
-        env["consensus_protocol"], "quorum:3/4",
-        "N follows the roster"
+        env["consensus_protocol"], "quorum:2/4",
+        "M is absolute (CC 4.4.3.4.2.1, CIRISServer#686); N documents the roster"
     );
 
     // ── Alice cosigns on HER node: 1 of 2, not yet met ──────────────────────
@@ -705,7 +705,7 @@ async fn a_quorum_family_adds_through_envelope_cosign_assemble() {
     let (st, v) = assemble(&alice, &id, &env, &two).await;
     assert_eq!(st.as_u16(), 200, "{v}");
     assert_eq!(v["action"], "add");
-    assert_eq!(v["consensus_protocol"], "quorum:3/4");
+    assert_eq!(v["consensus_protocol"], "quorum:2/4");
     assert_eq!(
         members(&v),
         sorted(vec![
