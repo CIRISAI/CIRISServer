@@ -4,9 +4,10 @@ compare every byte. Runs INSIDE a node container (stdlib only, loopback API).
     python3 corpus_client.py write <token> <dir>   # POST /v1/files for each file
     python3 corpus_client.py read  <token> <dir>   # GET  /v1/files/{id}?raw=1
 
-`<dir>` holds the files and `manifest.json` from `media_corpus.py`. `write`
-records `written.json` (id or refusal per file), and `read` records `read.json`
-and prints one JSON summary line. `read` is safe to call on every ladder sample:
+`<dir>` holds the files and `manifest.json` from `media_corpus.py` (and, on the
+reading device, the author's `written.json`). Results go to /tmp/corpus-state:
+`write` records `written.json` (id or refusal per file), and `read` records
+`read.json` and prints one JSON summary line. `read` is safe to call on every ladder sample:
 a file already verified is not fetched again.
 
 A file counts as OPENED only when the second device returns the raw bytes and
@@ -25,6 +26,10 @@ import urllib.request
 from pathlib import Path
 
 BASE = "http://127.0.0.1:4243"
+#: Where results go. The input directory is copied in by `docker compose cp`,
+#: which leaves it owned by root, and the node runs as its own user; so the
+#: client writes into a directory it creates itself.
+STATE = Path("/tmp/corpus-state")
 
 
 def _call(token: str, method: str, path: str, body: dict | None = None, timeout: int = 180):
@@ -68,7 +73,8 @@ def write(token: str, d: Path) -> None:
             "crossed": body.get("crossed"),
             "excluded": body.get("excluded"),
         })
-    (d / "written.json").write_text(json.dumps(out, indent=1))
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "written.json").write_text(json.dumps(out, indent=1))
     known = {r["name"] for r in manifest if r.get("known_defect")}
     good = lambda r: r["status"] == 200 and r["attestation_id"]  # noqa: E731
     print(json.dumps({
@@ -84,7 +90,8 @@ def write(token: str, d: Path) -> None:
 def read(token: str, d: Path) -> None:
     manifest = {r["name"]: r for r in json.loads((d / "manifest.json").read_text())}
     written = json.loads((d / "written.json").read_text())
-    done_path = d / "read.json"
+    STATE.mkdir(parents=True, exist_ok=True)
+    done_path = STATE / "read.json"
     done = {r["name"]: r for r in json.loads(done_path.read_text())} if done_path.exists() else {}
     for w in written:
         name = w["name"]

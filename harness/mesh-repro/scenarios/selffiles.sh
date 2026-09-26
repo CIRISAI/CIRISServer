@@ -335,7 +335,7 @@ _self_corpus_write() {
   compose exec -T "$SELF_PRIMARY" python /tmp/corpus/corpus_client.py write \
     "$(_self_token "$SELF_PRIMARY")" /tmp/corpus >"$SELF_STATE/corpus-write.json" 2>&1 || true
   echo "  $(cat "$SELF_STATE/corpus-write.json")"
-  compose cp "$SELF_PRIMARY:/tmp/corpus/written.json" "$SELF_CORPUS/written.json" >/dev/null 2>&1 || true
+  compose cp "$SELF_PRIMARY:/tmp/corpus-state/written.json" "$SELF_CORPUS/written.json" >/dev/null 2>&1 || true
   compose exec -T "$SELF_SECOND" sh -c 'rm -rf /tmp/corpus && mkdir -p /tmp/corpus' >/dev/null 2>&1 || true
   local f
   for f in manifest.json written.json corpus_client.py; do
@@ -552,6 +552,24 @@ DIAG_opened_on_b() {
   for svc in $SELF_NODES; do
     echo "  $svc blob_pull_sources: $(_self_pull_sources "$svc")"
   done
+  # WHERE THE HANDSHAKE ROWS ARE. The creator adds a device only when it holds
+  # that device's KeyPackage row; the joiner joins only when it holds a Welcome
+  # naming it. Each node's copy of each, by attester, says which hop failed.
+  echo "  self-room handshake rows (dimension -> attester -> count), per node:"
+  for svc in $SELF_NODES; do
+    compose exec -T "$svc" python -c 'import glob,json,sqlite3,collections
+c=collections.Counter()
+for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
+    if d.endswith(("-wal","-shm")): continue
+    try:
+        for att, env in sqlite3.connect(d).execute("SELECT attesting_key_id, attestation_envelope FROM federation_attestations"):
+            try: dim=json.loads(env).get("dimension","")
+            except Exception: dim=""
+            if dim.startswith("chat:key_package") or dim.startswith("chat:welcome") or dim.startswith("chat:commit"):
+                c[(dim, att)] += 1
+    except Exception: pass
+print(json.dumps({f"{k[0]} <- {k[1]}": v for k, v in sorted(c.items())}))' 2>/dev/null | sed "s/^/    $svc: /"
+  done
 }
 
 stage_corpus_written() {
@@ -580,7 +598,7 @@ HINT_corpus_opened_on_b="the second device did not return every corpus file byte
 EXIT_corpus_opened_on_b=49
 DIAG_corpus_opened_on_b() {
   cat "$SELF_STATE/corpus-read.json" 2>/dev/null; echo
-  compose exec -T "$SELF_SECOND" cat /tmp/corpus/read.json 2>/dev/null | head -c 3000; echo
+  compose exec -T "$SELF_SECOND" cat /tmp/corpus-state/read.json 2>/dev/null | head -c 3000; echo
 }
 
 harness_scenario_evidence() {

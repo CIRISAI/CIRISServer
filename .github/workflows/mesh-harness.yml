@@ -269,20 +269,24 @@ jobs:
         env:
           COMPOSE_PROFILES: ${{ steps.topo.outputs.profiles }}
         run: |
+          # The WHOLE log per node. A 400-line tail kept only the last minutes
+          # of a 15-minute ladder, and the handshake that failed happened in the
+          # first one. Compressed: the logs are DEBUG and run to megabytes.
           for svc in ${{ steps.topo.outputs.services }}; do
             echo "════════ $svc ════════"
             docker compose -p "ciris-${{ matrix.scenario }}" \
               ${{ steps.topo.outputs.files }} \
-              logs "$svc" 2>/dev/null | tail -400 || true
+              logs --no-color "$svc" 2>/dev/null || true
           done > harness-logs.txt
           tail -120 harness-logs.txt
+          gzip -k harness-logs.txt
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mesh-harness-${{ matrix.scenario }}-logs
-          path: harness/mesh-repro/harness-logs.txt
+          path: harness/mesh-repro/harness-logs.txt.gz
           if-no-files-found: ignore
           retention-days: 14
 
