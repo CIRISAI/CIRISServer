@@ -97,6 +97,13 @@ REQUIRED_outsiders_hold_nothing=1
 # Nodes that are not the person's. Their holding NOTHING of the self plane is
 # the claim; how long we watch before believing it is the soak.
 SELF_OUTSIDERS="${SELF_OUTSIDERS:-canonical node-b}"
+# A SECOND PERSON'S node, peered with the primary like a contact's. Without it
+# the negative is vacuous: in the first run both outsiders held control=0 —
+# nothing of the person reached them at all, legitimately or not, so "they hold
+# nothing" proved nothing. A contact's node is exactly where a row widened to
+# the federation would land.
+SELF_BYSTANDER="${SELF_BYSTANDER:-node-b}"
+SELF_BYSTANDER_ALIAS="${SELF_BYSTANDER_ALIAS:-ciris-bystander-two}"
 SELF_SOAK_SECS="${SELF_SOAK_SECS:-120}"
 
 SELF_STATE="${TMPDIR:-/tmp}/ciris-selffiles-${PROJECT:-ciris-selffiles}"
@@ -222,9 +229,19 @@ harness_scenario_prepare() {
     "printf '%s' '$user_alias' > /var/lib/ciris/identity/user/active_user_alias" 2>/dev/null || true
   echo "  carried $moved/4 key files"
 
-  # ── CLAIM BOTH NODES WITH THAT IDENTITY ──────────────────────────────────
-  local pin code claim claim_json token owner waited
-  for svc in $SELF_NODES; do
+  # ── THE BYSTANDER: a different person, on their own node ─────────────────
+  if [ -n "$SELF_BYSTANDER" ]; then
+    harness_wait_healthy "$SELF_BYSTANDER" 36 || true
+    echo "── selffiles: minting a SECOND person on $SELF_BYSTANDER (the contact the negative watches) ──"
+    compose exec -T "$SELF_BYSTANDER" "$SELF_CONSOLE" identity create --backend software \
+      --home /var/lib/ciris --key-id "$SELF_BYSTANDER_ALIAS" >"$SELF_STATE/mint-bystander.out" 2>&1 || true
+  fi
+
+  # ── CLAIM BOTH NODES WITH THAT IDENTITY (and the bystander with its own) ──
+  local pin code claim claim_json token owner waited alias
+  for svc in $SELF_NODES $SELF_BYSTANDER; do
+    alias="$SELF_OWNER_ALIAS"
+    if [ "$svc" = "$SELF_BYSTANDER" ]; then alias="$SELF_BYSTANDER_ALIAS"; fi
     pin=""; waited=0
     while [ "$waited" -lt 90 ]; do
       pin="$(compose exec -T "$svc" sh -c 'cat /var/lib/ciris/claim_pin 2>/dev/null' 2>/dev/null | tr -d '\r\n')"
@@ -235,7 +252,7 @@ harness_scenario_prepare() {
     code="$(compose exec -T "$svc" python -c 'import json,urllib.request;print(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/federation/node-code",timeout=10))["code"])' 2>/dev/null | tr -d '\r\n[:space:]')"
     [ -z "$code" ] && { echo "  ✗ $svc: no node-code"; continue; }
     claim="$(compose exec -T "$svc" "$SELF_CONSOLE" claim --backend software \
-               --home /var/lib/ciris --key-id "$SELF_OWNER_ALIAS" \
+               --home /var/lib/ciris --key-id "$alias" \
                --node-code "$code" --claim-pin "$pin" \
                --cohort-scope self --target-url http://127.0.0.1:4243 2>"$SELF_STATE/claim-$svc.err")"
     printf '%s\n' "$claim" >"$SELF_STATE/claim-$svc.out"
@@ -273,15 +290,20 @@ except Exception: print("")')"
   # a consented peer IS grant-covered, and a missing prefix is SILENT — the
   # same shape the `chat:` entry in that constant is commented for.
   echo "── selffiles: peering the two devices ──"
-  local a b rec peered=0
-  for svc in $SELF_NODES; do
+  local a b rec pair peered=0
+  for svc in $SELF_NODES $SELF_BYSTANDER; do
     compose exec -T "$svc" python -c 'import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/federation/test-blessed-self-record",timeout=20))))' \
       >"$SELF_STATE/record-$svc.json" 2>/dev/null || true
     [ -s "$SELF_STATE/record-$svc.json" ] || echo "  ! $svc: no blessed self record"
   done
-  for a in $SELF_NODES; do
-    for b in $SELF_NODES; do
-      [ "$a" = "$b" ] && continue
+  # The person's two devices peer with each other; the bystander peers with the
+  # PRIMARY only, both ways — a contact, not a device.
+  local pairs="" x y
+  for x in $SELF_NODES; do for y in $SELF_NODES; do [ "$x" = "$y" ] || pairs="$pairs $x:$y"; done; done
+  if [ -n "$SELF_BYSTANDER" ]; then pairs="$pairs $SELF_PRIMARY:$SELF_BYSTANDER $SELF_BYSTANDER:$SELF_PRIMARY"; fi
+  for pair in $pairs; do
+    a="${pair%%:*}"; b="${pair#*:}"
+    {
       [ -s "$SELF_STATE/record-$b.json" ] || continue
       rec="$(python3 -c '
 import json,sys
@@ -299,7 +321,7 @@ except Exception: print(0)' "$SELF_STATE/peering-$a-$b.json" 2>/dev/null | grep 
       else
         echo "  ! peering $a->$b: $(head -c 200 "$SELF_STATE/peering-$a-$b.json" 2>/dev/null)"
       fi
-    done
+    }
   done
   echo "  peered $peered pairs"
 
@@ -599,20 +621,21 @@ DIAG_file() {
 stage_self_stays_self() {
   # LATCHED: once a wide self-plane row was seen, the run is red.
   if [ -s "$SELF_STATE/leak-holder.latched" ]; then echo 0; return; fi
-  local svc j wide total=0 self_rows=0
+  # Every device is probed before the verdict, so the diagnosis shows each.
+  local svc j wide leaked=0 unread=0 self_rows=0
   for svc in $SELF_NODES; do
     j="$(_self_leak_probe "$svc" holder)"
     printf '%s\n' "$j" >"$SELF_STATE/leak-holder-$svc.json"
     wide="$(_self_json_field "$j" wide_count -1)"
-    if [ "$wide" = "-1" ]; then echo 0; return; fi
+    if [ "$wide" = "-1" ]; then unread=1; continue; fi
     if [ "$wide" -gt 0 ]; then
       printf '%s %s\n' "$svc" "$j" >>"$SELF_STATE/leak-holder.latched"
-      echo 0; return
+      leaked=1
     fi
     self_rows=$((self_rows + $(_self_json_field "$j" self_rows 0)))
   done
   # Non-vacuous: the self file IS on the author's device, at `self`.
-  if [ "$self_rows" -gt 0 ]; then echo 1; else echo 0; fi
+  if [ "$leaked" = 0 ] && [ "$unread" = 0 ] && [ "$self_rows" -gt 0 ]; then echo 1; else echo 0; fi
 }
 HINT_self_stays_self="a self-plane row (a file:v1 row, or a chat:* row in the owner's room) is at a cohort_scope wider than self on the owner's own device — the file's existence was distributed past the person. The diagnosis lists each wide row. A federation-scoped file:v1 SUPERSEDE of the original is the persist #530 consent sweep (CIRISPersist#919: promote_consented_backlog widens every grant-covered self row and strips the room)"
 EXIT_self_stays_self=50
@@ -628,18 +651,19 @@ DIAG_self_stays_self() {
 
 stage_outsiders_hold_nothing() {
   if [ -s "$SELF_STATE/leak-outsider.latched" ]; then echo 0; return; fi
-  local svc j leaked control=0
+  local svc j n leaked=0 unread=0 control=0
   for svc in $SELF_OUTSIDERS; do
     j="$(_self_leak_probe "$svc" outsider)"
     printf '%s\n' "$j" >"$SELF_STATE/leak-outsider-$svc.json"
-    leaked="$(_self_json_field "$j" leaked_count -1)"
-    if [ "$leaked" = "-1" ]; then echo 0; return; fi
-    if [ "$leaked" -gt 0 ]; then
+    n="$(_self_json_field "$j" leaked_count -1)"
+    if [ "$n" = "-1" ]; then unread=1; continue; fi
+    if [ "$n" -gt 0 ]; then
       printf '%s %s\n' "$svc" "$j" >>"$SELF_STATE/leak-outsider.latched"
-      echo 0; return
+      leaked=1
     fi
     control=$((control + $(_self_json_field "$j" control 0)))
   done
+  if [ "$leaked" = 1 ] || [ "$unread" = 1 ]; then echo 0; return; fi
   # Not believed before the soak, and not believed from nodes nothing reached.
   _self_load
   if [ $(( $(date +%s) - ${SELF_WROTE_AT:-$(date +%s)} )) -lt "$SELF_SOAK_SECS" ]; then echo 0; return; fi
