@@ -54,7 +54,7 @@ def _json(raw: bytes) -> dict:
 
 
 def write(token: str, d: Path) -> None:
-    manifest = json.loads((d / "manifest.json").read_text())
+    manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
     out = []
     for row in manifest:
         data = (d / row["name"]).read_bytes()
@@ -74,7 +74,7 @@ def write(token: str, d: Path) -> None:
             "excluded": body.get("excluded"),
         })
     STATE.mkdir(parents=True, exist_ok=True)
-    (STATE / "written.json").write_text(json.dumps(out, indent=1))
+    (STATE / "written.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     known = {r["name"] for r in manifest if r.get("known_defect")}
     good = lambda r: r["status"] == 200 and r["attestation_id"]  # noqa: E731
     print(json.dumps({
@@ -88,11 +88,11 @@ def write(token: str, d: Path) -> None:
 
 
 def read(token: str, d: Path) -> None:
-    manifest = {r["name"]: r for r in json.loads((d / "manifest.json").read_text())}
-    written = json.loads((d / "written.json").read_text())
+    manifest = {r["name"]: r for r in json.loads((d / "manifest.json").read_text(encoding="utf-8"))}
+    written = json.loads((d / "written.json").read_text(encoding="utf-8"))
     STATE.mkdir(parents=True, exist_ok=True)
     done_path = STATE / "read.json"
-    done = {r["name"]: r for r in json.loads(done_path.read_text())} if done_path.exists() else {}
+    done = {r["name"]: r for r in json.loads(done_path.read_text(encoding="utf-8"))} if done_path.exists() else {}
     for w in written:
         name = w["name"]
         if not w.get("attestation_id") or done.get(name, {}).get("match"):
@@ -109,7 +109,7 @@ def read(token: str, d: Path) -> None:
             done[name] = {"name": name, "status": status, "match": False,
                           "reason_id": body.get("reason_id"),
                           "detail": str(body.get("error") or body.get("detail") or "")[:160]}
-    done_path.write_text(json.dumps(list(done.values()), indent=1))
+    done_path.write_text(json.dumps(list(done.values()), indent=1), encoding="utf-8")
     known = {n for n, r in manifest.items() if r.get("known_defect")}
     ids = [w for w in written if w.get("attestation_id")]
     opened = [n for n, r in done.items() if r.get("match") and n not in known]

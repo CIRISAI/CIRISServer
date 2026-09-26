@@ -149,7 +149,7 @@ def generate(outdir: Path) -> list[dict]:
             "sha256": hashlib.sha256(data).hexdigest(),
             **({"known_defect": KNOWN_DEFECTS[name]} if name in KNOWN_DEFECTS else {}),
         })
-    (outdir / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+    (outdir / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
