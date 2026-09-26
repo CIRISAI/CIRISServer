@@ -297,6 +297,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         instance_id = %crate::node_identity::instance_id(),
         "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
+    // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
+    // before any route or loop can touch a room, and registered under the key
+    // id every room reads it by (the chat and self-room drives look it up by
+    // this signer's key id). Durable under persist's hardware-rooted key when
+    // the host can seal it; ephemeral, and saying so, when it cannot.
+    let mls_posture = crate::mls_state::open_for_node(
+        &chat_node_signer.key_id,
+        &cfg.data_dir.join("mls-state.kv"),
+    )
+    .await;
 
     // ── ONE IDENTITY, HYBRID, OR WE DO NOT BOOT (CIRISServer#380) ─────────────
     // See `crate::identity_gate` for why this is a boot error rather than a
@@ -1936,6 +1946,37 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     crate::conformance::prime_capabilities(&engine).await;
 
     let (self_room_sd_tx, mut self_room_sd_rx) = watch::channel(false);
+
+    // RE-ADDRESS EVERY PERSISTED ROOM, ONCE (CIRISEdge#676 §5): after the
+    // transport and the scope lifecycle are armed, before the first round. A
+    // room this node held before a restart is listening again on its derived
+    // address without waiting for a local operation to revisit it (#623).
+    // Nothing to do on an ephemeral store; logged either way.
+    if let (Some(lifecycle), crate::mls_state::Posture::Durable { .. }) =
+        (edge.scope_lifecycle(), &mls_posture)
+    {
+        let store = crate::mls_state::store_for(&chat_node_signer.key_id);
+        let groups =
+            ciris_edge::mls::CohortGroups::new(store.clone(), chat_node_signer.key_id.clone());
+        let dir = engine.federation_directory();
+        let lens = ciris_edge::contact::PersistLens::new(&*dir);
+        let report =
+            ciris_edge::mls::readdress_persisted_rooms(&store, &groups, lifecycle, &lens, None)
+                .await;
+        tracing::info!(
+            installed = report.installed.len(),
+            skipped = report.skipped.len(),
+            rooms = ?report
+                .installed
+                .iter()
+                .map(|ciris_edge::mls::InstalledRoom { room, epoch, members }| {
+                    format!("{room}@{epoch}x{members}")
+                })
+                .collect::<Vec<_>>(),
+            skipped_why = ?report.skipped,
+            "MLS state: persisted rooms re-addressed at boot (CIRISEdge#676)"
+        );
+    }
 
     // THE SELF ROOM'S DRIVER (CIRISEdge#646 / CIRISServer#622). Nobody creates
     // a self room by asking: it must appear the moment an identity owns a

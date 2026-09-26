@@ -103,30 +103,14 @@ pub struct SelfRoomState {
 }
 
 impl SelfRoomState {
-    /// The MLS state store for this identity's room. In-process for now (see
-    /// the module note) — one provider per room id, as chat does.
-    /// The MLS state store for this room — **in memory, and that is a known
-    /// limitation with a sharp edge** (Codex, CIRISServer#628 → #630).
-    ///
-    /// A restart loses this node's group AND the KeyPackage material its
-    /// Welcome was sealed to. It can publish a fresh KeyPackage, but a
-    /// surviving creator still sees it in `member_key_ids()`, so `decide`
-    /// finds no missing member, never emits a Welcome, and the restarted
-    /// device cannot rejoin or reinstall its derived addresses.
-    ///
-    /// **Why the obvious fix is not taken here.** `XChaChaKvStore::open(path,
-    /// passphrase)` exists, and swapping it in would be a one-line change —
-    /// but the passphrase this call passes is `room_id`, which for a self room
-    /// is the owner's **public** identity key id. That is harmless for a store
-    /// that never touches disk and is no encryption at all for one that does:
-    /// it would write long-lived MLS group secrets to disk under a value
-    /// anybody can read. Durable MLS state needs a real key, which is a key
-    /// management decision and not a swap. Tracked on CIRISServer#630.
-    fn store(room_id: &str) -> Result<ciris_edge::mls::ScopeStateProvider, String> {
-        Ok(ciris_edge::mls::ScopeStateProvider::new(Arc::new(
-            ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(room_id.as_bytes())
-                .map_err(|e| format!("open the self room's MLS store: {e}"))?,
-        )))
+    /// This node's MLS store — ONE per node, sealed on disk under persist's
+    /// hardware-rooted key when the host can seal it, ephemeral otherwise
+    /// (`crate::mls_state`, CIRISServer#630). It replaced a per-room
+    /// in-memory store keyed by the room id: a restart lost the group and the
+    /// KeyPackage material its Welcome was sealed to, and the restarted device
+    /// could never rejoin (a survivor saw its stale leaf as present).
+    fn store(&self) -> ciris_edge::mls::ScopeStateProvider {
+        crate::mls_state::store_for(&self.node_signer.key_id)
     }
 }
 
@@ -188,6 +172,30 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     let room = self_room::room(&owner);
     let room_id = room.content_group_id().to_owned();
 
+    // A ROOM PERSISTED BEFORE A RESTART (CIRISServer#630): reload it before
+    // deciding, so a restarted device neither creates a second room nor waits
+    // for a Welcome it already consumed.
+    if st.held.lock().await.is_none() {
+        match crate::mls_state::load(&st.store(), &room_id).await {
+            Ok(Some(group)) => {
+                let claim = reloaded_claim(&*dir, &roster, &node_key, &room_id, &group).await;
+                let members = group.member_key_ids().await.len();
+                tracing::info!(
+                    room = %room, members,
+                    "self room RELOADED from the durable MLS store"
+                );
+                *st.held.lock().await = Some(HeldGroup {
+                    group: Arc::new(group),
+                    claim,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(room = %room, error = %e, "self room: the persisted group could not be reloaded")
+            }
+        }
+    }
+
     // WHAT WE HOLD: the live tree, if this process has one.
     let held_group = st.held.lock().await.clone();
     // FOLLOW THE ROOM before deciding anything about it: `decide` reads our
@@ -210,7 +218,25 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     // the rows, because that is where a contest is visible to both sides.
     let rival = first_rival(&*dir, &roster, &node_key, &room_id).await;
 
-    let action = self_room::decide(&node_key, &roster, held.as_ref(), rival.as_ref());
+    // A member of our tree that published a FRESH KeyPackage after it was added
+    // restarted without its state: it is removed and re-added (`Rejoin`,
+    // CIRISEdge#676 §4). Pure over rows this node already holds.
+    let republished = match &held_group {
+        Some(h) => self_room::republished_members(&*dir, &room_id, &h.group)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "self room: republished members unreadable this tick");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
+    let action = self_room::decide_with_republished(
+        &node_key,
+        &roster,
+        held.as_ref(),
+        rival.as_ref(),
+        &republished,
+    );
     // The DECISION, before the work it implies. A tick reports what it DID; if
     // the doing wedges there is no report at all, and the difference between
     // "converged and quiet" and "stuck forever" is invisible. This line is the
@@ -320,6 +346,40 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
 /// `first_rival` folds every node's claims into a single winner; this asks
 /// about one node, which is what a joiner needs: it is adopting a particular
 /// creator's room, so it must store that creator's claim.
+/// The claim a RELOADED room is held under: the room's oldest commit claim on
+/// the rows — ours if we created it and committed, the creator's if we joined
+/// — which is the value the room was held under before the restart. With no
+/// commit rows yet (a creator alone in its room), the creator's recorded join
+/// instant, which edge persists with the group (CIRISEdge#676 §4.1). Edge v32
+/// writes that map only on a commit, so a room that never committed reloads
+/// without it and the claim falls back to `now()`: harmless, because such a
+/// room has no other member and no commit row, so losing a contest to a real
+/// rival abandons nothing anyone else holds.
+async fn reloaded_claim(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    roster: &[String],
+    own: &str,
+    room_id: &str,
+    group: &CohortGroup,
+) -> CommitClaim {
+    let mut best = claim_of(dir, own, room_id).await;
+    if let Some(r) = first_rival(dir, roster, own, room_id).await {
+        if best.as_ref().is_none_or(|b| r.wins_over(b)) {
+            best = Some(r);
+        }
+    }
+    match best {
+        Some(c) => c,
+        None => CommitClaim::new(
+            group
+                .member_added_at(own)
+                .await
+                .unwrap_or_else(chrono::Utc::now),
+            own.to_owned(),
+        ),
+    }
+}
+
 async fn claim_of(
     dir: &dyn ciris_persist::federation::FederationDirectory,
     node: &str,
@@ -459,7 +519,12 @@ async fn join_if_welcomed(
         return Ok(None);
     }
     if st.pending.lock().await.is_none() {
-        return Ok(None);
+        // A KeyPackage published before a restart: its material was stashed
+        // (CIRISServer#630), so the Welcome sealed to it can still be joined.
+        match crate::mls_state::restore_pending(&st.store(), room.content_group_id()).await {
+            Some(m) => *st.pending.lock().await = Some(m),
+            None => return Ok(None),
+        }
     }
     let dir = st.engine.federation_directory();
     let room_id = room.content_group_id();
@@ -479,13 +544,18 @@ async fn join_if_welcomed(
         let Some(material) = st.pending.lock().await.take() else {
             return Ok(None);
         };
-        let store = SelfRoomState::store(room_id)?;
+        let store = st.store();
         match ciris_edge::mls::cohort_group::CohortGroup::join(
-            store, room_id, material, &welcome, 16,
+            store.clone(),
+            room_id,
+            material,
+            &welcome,
+            crate::mls_state::RETAINED_EPOCHS,
         )
         .await
         {
             Ok(group) => {
+                crate::mls_state::clear_pending(&store, room_id).await;
                 let group = Arc::new(group);
                 let members = group.member_key_ids().await.len();
                 // THE CLAIM OF THE NODE WHOSE WELCOME WE CONSUMED — not the
@@ -589,6 +659,7 @@ async fn publish_key_package(
         },
     )
     .await?;
+    crate::mls_state::stash_pending(&st.store(), room.content_group_id(), &material).await;
     *pending = Some(material);
     Ok(())
 }
@@ -599,14 +670,9 @@ async fn create_room(
     owner: &str,
     node_key: &str,
 ) -> Result<usize, String> {
-    let group = CohortGroup::create(
-        SelfRoomState::store(room.content_group_id())?,
-        room.content_group_id(),
-        node_key,
-        16,
-    )
-    .await
-    .map_err(|e| format!("create the self room: {e}"))?;
+    let group = CohortGroup::create(st.store(), room.content_group_id(), node_key, 16)
+        .await
+        .map_err(|e| format!("create the self room: {e}"))?;
     let group = Arc::new(group);
     let members = group.member_key_ids().await.len();
     *st.held.lock().await = Some(HeldGroup {

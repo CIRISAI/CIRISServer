@@ -851,12 +851,21 @@ async fn room_key(
     use ciris_edge::mls::cohort_group::{
         key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
     };
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let room = pair_community_key_id(me, peer);
     let dir = st.engine.federation_directory();
     let mut rooms = st.rooms.lock().await;
+    // ONE store per node, durable when the host can seal it (CIRISServer#630).
+    // A room this process has not held yet may have been persisted before a
+    // restart: reload it rather than create or join a second group.
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, &room).await? {
+            tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+            rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
         // Idempotent: a keyed room whose epoch has not moved costs one table
@@ -887,10 +896,7 @@ async fn room_key(
     // outlives a restart is a separate concern (the group can be rebuilt from the
     // handshake rows, which are durable CEG); what must NOT happen is two rooms
     // sharing one store.
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
+    let store = store.clone();
 
     match PairRole::of(me, peer) {
         PairRole::Creator => {
@@ -951,6 +957,9 @@ async fn room_key(
         PairRole::Joiner => {
             let material = match rooms.remove(&room) {
                 Some(RoomState::AwaitingWelcome(m)) => m,
+                // A KeyPackage published before a restart: its material was
+                // stashed, and the Welcome sealed to it can still be joined.
+                _ if let Some(m) = crate::mls_state::restore_pending(&store, &room).await => m,
                 _ => {
                     // Publish our half once, then wait for the Welcome.
                     let (material, kp) = mint_cohort_key_material(me)
@@ -970,6 +979,7 @@ async fn room_key(
                         },
                     )
                     .await?;
+                    crate::mls_state::stash_pending(&store, &room, &material).await;
                     material
                 }
             };
@@ -998,9 +1008,16 @@ async fn room_key(
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
                 return Ok(RoomHandshake::JoinRequested);
             };
-            let group = CohortGroup::join(store, &room, material, &welcome, 16)
-                .await
-                .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let group = CohortGroup::join(
+                store.clone(),
+                &room,
+                material,
+                &welcome,
+                crate::mls_state::RETAINED_EPOCHS,
+            )
+            .await
+            .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            crate::mls_state::clear_pending(&store, &room).await;
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
             rooms.insert(room, RoomState::Keyed(group));
@@ -1053,8 +1070,7 @@ pub(crate) async fn room_key_room(
 ) -> Result<RoomHandshake, String> {
     use ciris_edge::chat;
     use ciris_edge::mls::cohort_group::{key_package_to_bytes, mint_cohort_key_material};
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let dir = st.engine.federation_directory();
     let roster = dir
@@ -1065,6 +1081,15 @@ pub(crate) async fn room_key_room(
         room_creator(&roster).ok_or_else(|| format!("room {room} has no active member"))?;
     let scope_room = ciris_edge::scope_room::ScopeRoom::community(room);
     let mut rooms = st.rooms.lock().await;
+    // One durable store per node; reload a group persisted before a restart
+    // (CIRISServer#630).
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, room).await? {
+            tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+            rooms.insert(room.to_owned(), RoomState::Keyed(Arc::new(group)));
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(room) {
         let group = Arc::clone(group);
@@ -1082,13 +1107,9 @@ pub(crate) async fn room_key_room(
     let Some(author) = author else {
         return Ok(RoomHandshake::NoAuthorSigner);
     };
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
     if me == creator {
         let group = Arc::new(
-            CohortGroup::create(store, room, me, 16)
+            CohortGroup::create(store.clone(), room, me, crate::mls_state::RETAINED_EPOCHS)
                 .await
                 .map_err(|e| format!("CohortGroup::create: {e}"))?,
         );
@@ -1099,6 +1120,7 @@ pub(crate) async fn room_key_room(
     }
     let material = match rooms.remove(room) {
         Some(RoomState::AwaitingWelcome(m)) => m,
+        _ if let Some(m) = crate::mls_state::restore_pending(&store, room).await => m,
         _ => {
             let (material, kp) = mint_cohort_key_material(me)
                 .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
@@ -1120,6 +1142,7 @@ pub(crate) async fn room_key_room(
                 },
             )
             .await?;
+            crate::mls_state::stash_pending(&store, room, &material).await;
             material
         }
     };
@@ -1137,10 +1160,17 @@ pub(crate) async fn room_key_room(
         return Ok(RoomHandshake::JoinRequested);
     };
     let group = Arc::new(
-        CohortGroup::join(store, room, material, &welcome, 16)
-            .await
-            .map_err(|e| format!("CohortGroup::join: {e}"))?,
+        CohortGroup::join(
+            store.clone(),
+            room,
+            material,
+            &welcome,
+            crate::mls_state::RETAINED_EPOCHS,
+        )
+        .await
+        .map_err(|e| format!("CohortGroup::join: {e}"))?,
     );
+    crate::mls_state::clear_pending(&store, room).await;
     apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
