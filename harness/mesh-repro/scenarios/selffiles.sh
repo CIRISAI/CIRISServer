@@ -53,8 +53,8 @@ PROJECT="${PROJECT:-ciris-selffiles}"
 # `not_fetched`. Edge v30.0.0 shipped the room-keyed `*_attestation_in` twins
 # and `welcome_for`; `src/self_room_drive.rs` adopts them in 0.5.216, so the
 # rung is PROMOTED to SUCCESS_STAGE and made REQUIRED.
-SUCCESS_STAGE="opened_on_b"
-STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b)
+SUCCESS_STAGE="corpus_opened_on_b"
+STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b corpus_written corpus_opened_on_b)
 
 # `mine_on_b` is the claim of this scenario: inferring it from a later stage is
 # exactly the mistake the chat ladder made with `arrived` for six releases.
@@ -63,6 +63,14 @@ REQUIRED_file=1
 # The BYTES, not inferred from the row: a green `mine_on_b` with a red
 # `opened_on_b` is exactly the 0.5.215 state this cut exists to end.
 REQUIRED_opened_on_b=1
+# EVERY TYPE, EVERY SIZE CLASS (0.5.218, maintainer: "file transfer 100%
+# predictable and reliable across platforms and file types we support"). One
+# 40-byte text file proved the path exists; the corpus (lib/media_corpus.py)
+# proves it for each type the media policy names and either side of the 1 MiB
+# inline boundary plus a 24 MiB multi-chunk file, by SHA-256 of the raw bytes
+# the second device returns — not by a listing's `bytes: "here"`.
+REQUIRED_corpus_written=1
+REQUIRED_corpus_opened_on_b=1
 
 SELF_STATE="${TMPDIR:-/tmp}/ciris-selffiles-${PROJECT:-ciris-selffiles}"
 SELF_NODES="${SELF_NODES:-node-a node-c}"
@@ -307,6 +315,33 @@ print(json.dumps({"cohort":"self","bytes_base64":base64.b64encode(sys.argv[1].en
                   "media_type":"text/plain","filename":"proof.txt"}))' "$SELF_FILE_TEXT")" \
     >"$SELF_STATE/file.json" || true
   cat "$SELF_STATE/file.json" 2>/dev/null | head -c 400; echo
+  _self_corpus_write
+}
+
+# ── THE TRANSFER CORPUS ──────────────────────────────────────────────────────
+# Generated on the host (deterministic), copied into the author's container
+# (a 24 MiB body cannot ride a process argument), written there over loopback,
+# and verified on the second device by digest. The second device needs only
+# the manifest and the ids.
+SELF_CORPUS="$SELF_STATE/corpus"
+_self_token() { local t; _self_load; eval "t=\${SELF_TOKEN_${1//-/_}:-}"; printf '%s' "$t"; }
+_self_corpus_write() {
+  echo "── selffiles: writing the transfer corpus on $SELF_PRIMARY ──"
+  rm -rf "$SELF_CORPUS"
+  python3 "$HARNESS_DIR/lib/media_corpus.py" "$SELF_CORPUS" | sed 's/^/  /'
+  cp "$HARNESS_DIR/lib/corpus_client.py" "$SELF_CORPUS/"
+  compose exec -T "$SELF_PRIMARY" rm -rf /tmp/corpus >/dev/null 2>&1 || true
+  compose cp "$SELF_CORPUS" "$SELF_PRIMARY:/tmp/corpus" >/dev/null
+  compose exec -T "$SELF_PRIMARY" python /tmp/corpus/corpus_client.py write \
+    "$(_self_token "$SELF_PRIMARY")" /tmp/corpus >"$SELF_STATE/corpus-write.json" 2>&1 || true
+  echo "  $(cat "$SELF_STATE/corpus-write.json")"
+  compose cp "$SELF_PRIMARY:/tmp/corpus/written.json" "$SELF_CORPUS/written.json" >/dev/null 2>&1 || true
+  compose exec -T "$SELF_SECOND" sh -c 'rm -rf /tmp/corpus && mkdir -p /tmp/corpus' >/dev/null 2>&1 || true
+  local f
+  for f in manifest.json written.json corpus_client.py; do
+    [ -f "$SELF_CORPUS/$f" ] && compose cp "$SELF_CORPUS/$f" "$SELF_SECOND:/tmp/corpus/$f" >/dev/null
+  done
+  return 0
 }
 
 stage_rooted() {
@@ -517,6 +552,35 @@ DIAG_opened_on_b() {
   for svc in $SELF_NODES; do
     echo "  $svc blob_pull_sources: $(_self_pull_sources "$svc")"
   done
+}
+
+stage_corpus_written() {
+  python3 -c '
+import json,sys
+try: d=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+except Exception: print(0); raise SystemExit
+print(1 if d.get("total") and d.get("written")==d.get("total") and not d.get("known_defect_now_passes") else 0)' "$SELF_STATE/corpus-write.json" 2>/dev/null || echo 0
+}
+HINT_corpus_written="the author's write gate refused a file of a type the media policy supports, OR a KNOWN_DEFECTS row in lib/media_corpus.py now writes (known_defect_now_passes: the upstream fix landed — remove the mark). corpus-write.json names each refusal as name:status:reason_id — drive.format_mismatch is the sniff table disagreeing with lib/media_corpus.py's header for that type, drive.bad_media_type the declared essence; anything else is the write path itself"
+EXIT_corpus_written=48
+DIAG_corpus_written() { cat "$SELF_STATE/corpus-write.json" 2>/dev/null; echo; }
+
+stage_corpus_opened_on_b() {
+  [ -f "$SELF_CORPUS/written.json" ] || { echo 0; return; }
+  compose exec -T "$SELF_SECOND" python /tmp/corpus/corpus_client.py read \
+    "$(_self_token "$SELF_SECOND")" /tmp/corpus >"$SELF_STATE/corpus-read.json" 2>/dev/null || true
+  python3 -c '
+import json,sys
+try: d=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+except Exception: print(0); raise SystemExit
+ok = d.get("total") and d.get("opened")==d.get("total") and not d.get("corrupt")
+print(1 if ok else 0)' "$SELF_STATE/corpus-read.json" 2>/dev/null || echo 0
+}
+HINT_corpus_opened_on_b="the second device did not return every corpus file byte-identical. corpus-read.json lists corrupt (bytes returned but the SHA-256 differs: a transfer defect, never a fixture change — the corpus is deterministic) and waiting as name:status:reason_id (409 drive.not_fetched = the bytes never crossed; 403 drive.not_granted = no wrap names this device). A pattern by size (inline_over / large only) points at the chunk path; by type, at the write or render path"
+EXIT_corpus_opened_on_b=49
+DIAG_corpus_opened_on_b() {
+  cat "$SELF_STATE/corpus-read.json" 2>/dev/null; echo
+  compose exec -T "$SELF_SECOND" cat /tmp/corpus/read.json 2>/dev/null | head -c 3000; echo
 }
 
 harness_scenario_evidence() {
