@@ -508,3 +508,101 @@ async fn the_pen_holder_announces_another_device_and_refuses_a_node_not_its_own(
         );
     }
 }
+
+// ── 5. a self file the first device wrote LISTS on the second (0.5.218) ─────
+
+/// **The second device lists its owner's self file** — the self-files
+/// ladder's `mine_on_b`, in-process. On persist v49 / edge v32 the ladder's
+/// second device READ a self file by id (`409 drive.not_fetched`: the row is
+/// there) while `GET /v1/drive` listed nothing. This carries one self file
+/// row to a second engine the way replication does and asks both doors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_self_file_written_on_the_first_device_lists_on_the_second() {
+    init_tracing();
+    let first = node_engine().await;
+    let owner = OwnerIdentity::mint().await;
+    let first_key = register_self(&first).await;
+    bind_owner(&first, &owner, &first_key).await;
+    let bearer = mint_session(&first, "wa-lists-first", WaRole::Root).await;
+    let base = serve_drive(
+        Arc::clone(&first),
+        node_edge_signer(&first).await,
+        owner.seed_dir.clone(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let (s, v) = status_json(
+        client
+            .post(format!("{base}/v1/files"))
+            .bearer_auth(&bearer)
+            .json(&serde_json::json!({
+                "cohort": "self",
+                "bytes_base64": BASE64.encode(b"listed on both devices"),
+                "media_type": "text/plain",
+                "filename": "both.txt",
+            }))
+            .send()
+            .await
+            .expect("POST /v1/files"),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+
+    // The second device: same owner, and what replication carries to it.
+    let second = other_engine("ciris-lists-second", 0xD1, 0xD2).await;
+    let second_key = register_self(&second).await;
+    bind_owner(&second, &owner, &second_key).await;
+    seed_key(&second, &first_key, 0xA1, 0xA2, identity_type::NODE).await;
+    record_claim_locally(&second, &owner, &first_key).await;
+    let row = first
+        .federation_directory()
+        .get_attestation(&id)
+        .await
+        .expect("read")
+        .expect("the file row");
+    eprintln!(
+        "ROW on first: tier={} scope={} attester={}",
+        row.tier, row.cohort_scope, row.attesting_key_id
+    );
+    second
+        .federation_directory()
+        .put_attestation(ciris_persist::federation::SignedAttestation { attestation: row })
+        .await
+        .expect("the second device admits the file row");
+
+    let bearer2 = mint_session(&second, "wa-lists-second", WaRole::Root).await;
+    let base2 = serve_drive(
+        Arc::clone(&second),
+        node_edge_signer(&second).await,
+        owner.seed_dir.clone(),
+    )
+    .await;
+    let (s, by_id) = status_json(
+        client
+            .get(format!("{base2}/v1/files/{id}?cohort=self"))
+            .bearer_auth(&bearer2)
+            .send()
+            .await
+            .expect("GET by id"),
+    )
+    .await;
+    eprintln!("BY ID on second: {s} {by_id}");
+    let (s, listing) = status_json(
+        client
+            .get(format!("{base2}/v1/drive?cohort=self"))
+            .bearer_auth(&bearer2)
+            .send()
+            .await
+            .expect("GET /v1/drive"),
+    )
+    .await;
+    eprintln!("LISTING on second: {s} {listing}");
+    assert_eq!(s, 200, "{listing}");
+    assert!(
+        listing["entries"]
+            .as_array()
+            .is_some_and(|e| e.iter().any(|x| x["attestation_id"] == id.as_str())),
+        "the second device lists its owner's self file: {listing}"
+    );
+}
