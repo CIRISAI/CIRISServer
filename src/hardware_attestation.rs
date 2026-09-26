@@ -273,7 +273,15 @@ pub fn admit_hardware_class_against_root(
 
     // ── Layer A: the substrate policy. persist authors it; we only apply it. ──
     let policy = server_policy();
-    policy.check(&record.key_id, Some(evidence_value), now)?;
+    // persist v49.0.0 (#915): the policy also takes the record's own Ed25519
+    // key, the key an Android generation-custody chain must attest. Decoded by
+    // persist's helper, never re-implemented here.
+    policy.check(
+        &record.key_id,
+        ciris_persist::federation::hardware_attestation::record_ed25519(record).as_deref(),
+        Some(evidence_value),
+        now,
+    )?;
 
     // The body deserialized cleanly inside `check` (it would have errored
     // otherwise); re-read it here to get the verified variant for Layer B and for
@@ -369,6 +377,40 @@ pub fn admit_hardware_class_against_root(
                  pinned Yubico Attestation Root 1 and bound to this record's Ed25519 key"
             );
             HardwareType::ExternalSecureElement
+        }
+        // persist v49.0.0 (CIRISPersist#915, CIRISServer#339) — Android custody
+        // attested at key GENERATION. Layer A (`policy.check` above) already
+        // walked the Android Key Attestation chain to a Google anchor from
+        // verify's baked set and proved the attested key IS this record's
+        // Ed25519 (anti-lift). The class is persist's MEASUREMENT of that chain
+        // (`check_structure` returns it), read here rather than re-derived: a
+        // second walker would be the parallel checker this module refuses to be.
+        // A software-level chain claims no hardware class, so it reports as
+        // `SoftwareUnattested`, never as a class the device does not have.
+        AttestationEvidence::AndroidGenerationCustody(_) => {
+            let measured = server_policy()
+                .check_structure(
+                    &record.key_id,
+                    ciris_persist::federation::hardware_attestation::record_ed25519(record)
+                        .as_deref(),
+                    Some(evidence_value),
+                )?
+                .unwrap_or(HardwareType::SoftwareOnly);
+            if matches!(measured, HardwareType::SoftwareOnly) {
+                tracing::info!(
+                    key_id = %record.key_id,
+                    "Android generation-custody chain verified at SOFTWARE security level — \
+                     reporting SoftwareUnattested, not a hardware class"
+                );
+                return Ok(AdmittedHardwareClass::SoftwareUnattested);
+            }
+            tracing::info!(
+                key_id = %record.key_id,
+                hardware_class = ?measured,
+                "CC 4.2.2.1: Android generation custody VERIFIED by persist — chain walked to a \
+                 Google anchor and bound to this record's Ed25519 key"
+            );
+            measured
         }
         AttestationEvidence::SoftwareOnlyTest(_) => {
             tracing::warn!(

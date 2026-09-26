@@ -352,7 +352,7 @@ itself, while a quorum roots to `humanity-accord`. The charter is 2-of-2 over a
 — a replicated row proves its own m-of-n rather than deferring to the bundle it
 arrived in. Two humans to halt, two to legitimize.
 
-Substrate pins: **persist v48.0.0 / edge v31.0.0 / verify v16.1.0** — hybrid PQ
+Substrate pins: **persist v49.0.0 / edge v32.1.0 / verify v17.1.0** — hybrid PQ
 throughout, Registry-of-Record admission, drift-witnessed policy hashes. Edge
 v15.7.x adds the realtime A/V spine (MLS X-Wing epoch keys, signed Welcome,
 fragment ARQ); the server exercises publisher → relay → subscriber

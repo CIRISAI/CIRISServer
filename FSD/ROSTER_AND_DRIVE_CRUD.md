@@ -52,6 +52,32 @@ policy, its refusals, its witness.
 8. **Every list route carries the row's envelope** (subject, attester, cohort_scope, dimension,
    consent:scope — CSD-006, #616) and a `resume` cursor.
 
+### 1.1 Which planes cross (known gap closed in 0.5.218, CIRISServer#646)
+
+Rule 7 only works for a kind that has a replication round. Through 0.5.217 `compose::build_replication_peers`
+opened rounds for 6 of persist v48's 17 `EnvelopeKind`s, so these rows were written, kicked, and never left
+the node: `CommunityMembershipWidening` (a member added after a room was created), `Family` and
+`FamilyMembershipRevocation` (every household), `IdentityOccurrenceRevocation` (a released device) and
+`Revocation`. The in-process witnesses could not see it, because they run several nodes over ONE sqlite file.
+
+From 0.5.218 the list is `compose::REPLICATED_KINDS` (12 kinds, one coordinator per peer each): the six
+above plus `LocationProof` (a geographic room admits on a proof the EVALUATING node must hold). All are
+`StructuralPlane` in persist's `consent_transferability`, so no grant names them. Deliberately NOT routed,
+each with its reason in `compose::NOT_REPLICATED_KINDS`: `KeyGrant` (it rides the Attestation plane; edge
+advertises nothing under its own kind), `AccordQuorumEvidence` (no producer in this server; cursor-served),
+and `Organization` / `OrgMembership` / `PartnerRecord` (the server builds edge without operational providers,
+so edge refuses every delivered row terminally). A gate
+(`federation_delivery::tests::every_envelope_kind_is_routed_or_excluded_by_name`) derives the routed set
+from `EnvelopeKind::ALL` minus that exclusion list, so a kind appended upstream goes red until someone
+decides.
+
+**Load.** Twelve kinds is twelve coordinators per peer on edge's single 30 s scheduler cadence. Edge v31
+has no per-kind cadence and no kick-only coordinator (`SchedulerConfig::cadence` is global; mesh-config
+relief lengthens every kind at once), so the six rarely written planes cost one round each per tick even
+when empty. An empty round is a Summary of an indexed empty listing and one round-trip; `Revocation` is
+the one listing that fans out per cohort member. Not yet measured on the production-shaped ladder; the ask
+upstream is a per-kind cadence or kick-only rounds for rarely written kinds.
+
 ## 2. Self devices
 
 | Op | Route | Policy | Notes |
@@ -182,15 +208,25 @@ Investigated before building, against persist v48.0.0 (`59283e3`) / verify v16.1
    REMOVAL crosses (its own plane), but add / role / quorum changes after first contact stay on the
    node that made them — and a member whose node is stale gets `family.bad_change` on cosign rather
    than signing an old state. The community plane solved this in v48 with a widening plane (#860);
-   the family plane needs the same.
+   the family plane needs the same. **Correction (0.5.218, #646):** through 0.5.217 neither `Family`
+   nor `FamilyMembershipRevocation` had a replication round at all, so "create crosses" and "every
+   removal crosses" were true only in the one-sqlite in-process tests; both planes are routed from
+   0.5.218 (§1.1), and the grown-record half remains CIRISPersist#910. The `devices` ladder's
+   `family_on_b` / `family_file_*` rungs are RED-EXPECTED on it (CIRISServer#647).
 2. **A removed member cannot be re-added.** `federation_family_membership_revocations` is keyed
    `(family_key_id, removed_identity_key_id)` (V151) and the family fold (`removed_key_ids_at`) has no
    re-establishment rule (identity occurrences got one in #421). A re-add is refused by name,
    `family.readd_unsupported` (409), instead of reporting a success the fold would ignore.
+   **Resolved in 0.5.218 (persist v49.0.0, #910.1):** the fold admits a widening after a
+   revocation, so a removed member is re-added for real; the refusal and its id are retired.
 3. **Persist does not check the signer's standing** on a family supersede or revocation
    (`verify_family_admission` / the revocation gate verify a registered signature only). The server
    enforces `founder_only` for the rows it authors; a peer-authored row is admitted by persist alone —
    the family twin of CIRISPersist#908.
+   **Resolved in 0.5.218 (persist v49.0.0, #908/#910):** every roster row is judged by the group's
+   own `consensus_protocol` at the door; a multi-signature group's rows carry co-signatures, which
+   the server's envelope → cosign → assemble flow now gathers over the exact rows
+   (`src/roster_rows.rs`).
 
 **Extra ids beyond the list above** (in the localization guard's debt list with the others):
 `family.readd_unsupported` (409), `family.bad_role` (400), `family.bad_change` (409, a stale or
@@ -380,6 +416,14 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
   (a three-member room), `widened_reads` (RED-EXPECTED until CIRISPersist#907), `withdrawn` (a withdrawn
   file reads 410 on the other node).
 - openapi.json lists every route here; the localization guard covers every new id.
+- 0.5.218: `selffiles` runs in the mesh-harness CI matrix (#622) and its `file` / `opened_on_b` rungs
+  fail by name on a self pull regression (#626: `NoHolders`, `NoMeaning(GroupWithoutId)`, a
+  `self:claim_index` source in `GET /v1/federation/metrics` `blob_pull_sources`, `announced: true`, a
+  `holds_bytes:` row, a tier other than `InvisibleEncrypted`, a non-empty `excluded`). A new
+  dispatch-only `devices` scenario (the chat ladder plus a second device and a household) adds
+  `second_device`, `c_peered`, `c_lists_room` (its success stage), `c_opens_history` (RED-EXPECTED: no
+  content-key rewrap to a new occurrence of an existing member) and the #647 family rungs (RED-EXPECTED
+  on CIRISPersist#910).
 
 ## 7. Deliberately later
 

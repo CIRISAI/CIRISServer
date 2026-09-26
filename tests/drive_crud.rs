@@ -1341,3 +1341,183 @@ async fn the_media_policy_is_published() {
         .iter()
         .any(|t| t == "image/heic"));
 }
+
+/// Run the ladder's transfer-corpus generator (`harness/mesh-repro/lib/
+/// media_corpus.py`) into a fresh directory and return its manifest. ONE
+/// corpus for both proofs: this test (the write gate, the seal, the chunk
+/// path and the read, on every CI platform) and the self-files ladder (the
+/// crossing to a second device). A Rust copy of the fixtures would be a
+/// second list that drifts from the first.
+fn transfer_corpus() -> (std::path::PathBuf, Vec<serde_json::Value>) {
+    let dir = std::env::temp_dir().join(format!(
+        "ciris-corpus-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("harness/mesh-repro/lib/media_corpus.py");
+    // `python3` on Linux and macOS; Windows runners ship `python`. A runner with
+    // neither fails here, loudly — a corpus test that skips is a test of nothing.
+    let ran = ["python3", "python"].iter().find_map(|py| {
+        std::process::Command::new(py)
+            .arg(&script)
+            .arg(&dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    });
+    assert!(
+        ran.is_some(),
+        "could not run {} with python3 or python",
+        script.display()
+    );
+    let manifest: Vec<serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("manifest.json")).expect("corpus manifest"),
+    )
+    .expect("manifest is JSON");
+    (dir, manifest)
+}
+
+/// **Every type the node supports, at every size class, round-trips
+/// byte-identical** (0.5.218; the maintainer's bar: "file transfer 100%
+/// predictable and reliable across platforms and file types we support").
+///
+/// Each corpus file is uploaded through the real write gate and read back
+/// raw: same bytes (SHA-256 against the generator's), the declared type
+/// returned as `Content-Type`, the drive listing it `here` with its size and
+/// name, and the JSON read's `content_digest` the plaintext's. The corpus
+/// covers the media policy's tiers A, B and C, a zip container and the honest
+/// `application/octet-stream`, and the sizes either side of the 1 MiB inline
+/// boundary plus a 24 MiB chunk DAG. This runs on Linux, macOS and Windows in
+/// CI; the self-files ladder carries the same corpus to a second device.
+#[tokio::test]
+async fn every_supported_type_round_trips_byte_identical() {
+    use sha2::{Digest, Sha256};
+    let fx = fixture().await;
+    let (dir, manifest) = transfer_corpus();
+    assert!(
+        manifest.len() >= 20,
+        "the corpus shrank: {}",
+        manifest.len()
+    );
+
+    // EVERY failure, not the first: one refused type must not hide another.
+    let mut failures: Vec<String> = Vec::new();
+    let mut ids: Vec<(serde_json::Value, String)> = Vec::new();
+    for row in &manifest {
+        let name = row["name"].as_str().expect("name");
+        let media = row["media_type"].as_str().expect("media_type");
+        let filename = row["filename"].as_str().expect("filename");
+        let bytes = std::fs::read(dir.join(name)).expect("corpus file");
+        let (s, v) = status_json(
+            fx.client
+                .post(format!("{}/v1/files", fx.base))
+                .bearer_auth(&fx.owner)
+                .json(&serde_json::json!({
+                    "cohort": "self",
+                    "bytes_base64": BASE64.encode(&bytes),
+                    "media_type": media,
+                    "filename": filename,
+                }))
+                .send()
+                .await
+                .expect("POST /v1/files"),
+        )
+        .await;
+        // A KNOWN_DEFECTS row (lib/media_corpus.py) must fail as its issue says,
+        // and a pass is red too: the upstream fix landed and the mark must go.
+        if let Some(issue) = row["known_defect"].as_str() {
+            if s == 200 {
+                failures.push(format!(
+                    "{name}: marked KNOWN DEFECT ({issue}) but it now uploads — the fix landed; \
+                     remove it from KNOWN_DEFECTS in harness/mesh-repro/lib/media_corpus.py"
+                ));
+            }
+            continue;
+        }
+        match v["attestation_id"].as_str() {
+            Some(id) if s == 200 => ids.push((row.clone(), id.to_owned())),
+            _ => failures.push(format!(
+                "{name} ({media}, {} bytes): upload {s} {}",
+                bytes.len(),
+                v["reason_id"]
+            )),
+        }
+    }
+
+    let (s, drive) = fx.get("/v1/drive?cohort=self&limit=500").await;
+    assert_eq!(s, 200, "{drive}");
+    let entries = drive["entries"].as_array().expect("entries").clone();
+
+    for (row, id) in &ids {
+        let name = row["name"].as_str().unwrap();
+        let want_sha = row["sha256"].as_str().unwrap();
+        let media = row["media_type"].as_str().unwrap();
+        let resp = fx
+            .client
+            .get(format!("{}/v1/files/{id}?cohort=self&raw=1", fx.base))
+            .bearer_auth(&fx.owner)
+            .send()
+            .await
+            .expect("raw GET");
+        let status = resp.status().as_u16();
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let got = resp.bytes().await.expect("body");
+        if status != 200 {
+            failures.push(format!("{name}: raw read {status}"));
+            continue;
+        }
+        if ctype != media {
+            failures.push(format!(
+                "{name}: Content-Type {ctype:?}, declared {media:?}"
+            ));
+        }
+        let sha = hex::encode(Sha256::digest(&got));
+        if sha != want_sha {
+            failures.push(format!(
+                "{name} ({media}): {} bytes back, digest differs from the bytes written",
+                got.len()
+            ));
+        }
+        match entries.iter().find(|e| e["attestation_id"] == id.as_str()) {
+            None => failures.push(format!("{name}: missing from the drive")),
+            Some(e) => {
+                for (k, want) in [
+                    ("bytes", serde_json::json!("here")),
+                    ("size", row["size"].clone()),
+                    ("media_type", serde_json::json!(media)),
+                    ("filename", row["filename"].clone()),
+                ] {
+                    if e[k] != want {
+                        failures.push(format!("{name}: drive {k} = {}, want {want}", e[k]));
+                    }
+                }
+            }
+        }
+        if row["size"].as_u64().unwrap() <= 2 * 1024 * 1024 {
+            let (s, v) = fx.get(&format!("/v1/files/{id}?cohort=self")).await;
+            if s != 200 || v["content_digest"] != want_sha {
+                failures.push(format!(
+                    "{name}: JSON read {s}, content_digest {}",
+                    v["content_digest"]
+                ));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "{} of {} corpus files did not round-trip:\n  {}",
+        failures.len(),
+        manifest.len(),
+        failures.join("\n  ")
+    );
+}

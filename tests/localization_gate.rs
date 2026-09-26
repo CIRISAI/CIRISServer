@@ -682,7 +682,32 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 99 -> 102 for 0.5.217: the drive write gate's `drive.bad_media_type`,
     /// `drive.format_mismatch` and `drive.bad_filename` (CIRISServer#642) — same
     /// reason, same list, same client issue (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 102;
+    ///
+    /// 102 -> 104 for 0.5.218: `self.announce_not_your_node` and
+    /// `self.announce_refused` of `POST /v1/self/nodes/{node}/announce`
+    /// (CIRISServer#678) — same reason, same list, same client issue
+    /// (CIRISClient#78).
+    ///
+    /// 102 -> 117 for 0.5.218, the contact flow — same reason, same list, same
+    /// client issue (CIRISClient#78): the contact code's
+    /// `self.contact_code_{owner_key_absent,not_a_person,key_not_derived,
+    /// no_pqc_half,unencodable}` and `self.node_not_announced` (CIRISServer#673);
+    /// withdrawing consent's `consent.{author_signer_unavailable,
+    /// delegate_may_not_withdraw,grant_not_live,grant_not_owner_authored,
+    /// malformed_body,store_unavailable,withdraw_failed}` and
+    /// `contacts.not_a_contact` (#657); and
+    /// `self.associate.hardware_custody_unavailable` (#639).
+    ///
+    /// 119 -> 140 for 0.5.218, the claim named (CIRISServer#678, the client
+    /// team's review: "refusals come back as prose with no ids"): claim-remote's
+    /// ten `claim.*` and setup/root's eleven new `auth.claim.*` — same reason,
+    /// same list, same client issue (CIRISClient#78).
+    ///
+    /// All three 0.5.218 raises together: 102 + 2 + 15 + 21 = 140.
+    ///
+    /// 140 -> 139 for 0.5.218: `family.readd_unsupported` retired — persist
+    /// v49.0.0 re-admits a removed family member (#910.1).
+    const MAX_UNCOVERED: usize = 139;
 
     let en = load_en();
     let ids = scraped_server_ids();

@@ -73,9 +73,14 @@ pub enum PullOutcome {
 /// returns as soon as the sends are dispatched — the rows land asynchronously and
 /// `owned-nodes` fills in as they do.
 pub async fn pull_owner_testimony(engine: &Arc<Engine>, node_key_id: &str) -> PullOutcome {
-    let Some(owner) = crate::auth::ownership::is_steward_bound(engine, node_key_id).await else {
+    // A split install is several keys (CIRISServer#632): the caller passes the
+    // edge signer — the ACTOR — while the owner-binding and the owner's consent
+    // grants name the NODE key. Every read below folds over all of them.
+    let own = own_keys(node_key_id);
+    let Some(owner) = owner_of_any(engine, &own).await else {
         tracing::info!(
             node_key_id = %node_key_id,
+            own_keys = %own.join(", "),
             "receive-axis pull SKIPPED — this node has no bound owner yet, so there is no subject \
              to pull testimony for (CIRISEdge#462). This is the unclaimed state, not a failure."
         );
@@ -92,20 +97,13 @@ pub async fn pull_owner_testimony(engine: &Arc<Engine>, node_key_id: &str) -> Pu
         return PullOutcome::NoRuntime;
     };
 
-    // Ask the peers we already replicate with. That set comes from consent
-    // (`consent:replication:v1`), revocation already folded in by persist — the
-    // same peers anti-entropy converges with, so the pull reaches whoever this node
-    // is already entitled to talk to and no one else.
-    let peers = engine
-        .federation_directory()
-        .list_consent_peers(node_key_id)
-        .await
-        .unwrap_or_default();
+    let peers = peers_to_ask(engine, &own).await;
 
     if peers.is_empty() {
         tracing::warn!(
             owner = %owner,
             node_key_id = %node_key_id,
+            own_keys = %own.join(", "),
             "receive-axis pull found NO PEERS — the owner's testimony exists somewhere, but this \
              node knows nowhere to ask. Distinct from 'asked and got nothing': check \
              consent:replication grants."
@@ -137,6 +135,73 @@ pub async fn pull_owner_testimony(engine: &Arc<Engine>, node_key_id: &str) -> Pu
         peers,
         failures,
     }
+}
+
+/// **This node's own keys**, the caller's first, deduped: the key the caller
+/// names, the wire identity (the NODE key on a split install) and the actor
+/// identity. A read keyed on "this node's key" must fold over all of them — the
+/// owner-binding moves to the node key at the split while the edge signer still
+/// answers the actor (CIRISServer#632).
+#[must_use]
+pub fn own_keys(node_key_id: &str) -> Vec<String> {
+    let mut own = vec![node_key_id.to_string()];
+    for k in [
+        crate::node_key::wire_identity(),
+        crate::node_key::actor_identity(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !own.iter().any(|o| o == k) {
+            own.push(k.to_string());
+        }
+    }
+    own
+}
+
+/// The bound owner of the first of `own` that has one.
+pub async fn owner_of_any(engine: &Engine, own: &[String]) -> Option<String> {
+    for k in own {
+        if let Some(owner) = crate::auth::ownership::is_steward_bound(engine, k).await {
+            return Some(owner);
+        }
+    }
+    None
+}
+
+/// **The peers a receive-axis pull asks** — sorted, deduped, never one of `own`.
+///
+/// CIRISServer#601: this read was `list_consent_peers(node)`, which answers only
+/// grants the MACHINE authored. Once a node is claimed its consent is authored
+/// by the OWNER (consent is by humans, #599) and names the machine via
+/// `for_key_id`, so every claimed node found "NO PEERS" and the owner's
+/// testimony was never pulled. The peers now come from the same by-principals
+/// read the replication runtime uses
+/// ([`crate::peer::replication_peers_from_consent`] over
+/// `consent_peers_by_principals`, revocation folded, person subjects resolved to
+/// their bound nodes), unioned over every key this node is.
+pub async fn peers_to_ask(engine: &Arc<Engine>, own: &[String]) -> Vec<String> {
+    let mut peers: Vec<String> = Vec::new();
+    for k in own {
+        match crate::peer::replication_peers_from_consent(engine, k).await {
+            Ok(found) => {
+                for p in found {
+                    if !own.contains(&p) && !peers.contains(&p) {
+                        peers.push(p);
+                    }
+                }
+            }
+            // Not swallowed into "no peers": a failed read is a different fact.
+            Err(e) => tracing::warn!(
+                key_id = %k,
+                error = %format!("{e:#}"),
+                "receive-axis pull: consent peer read FAILED for this key — its peers are \
+                 missing from the pull"
+            ),
+        }
+    }
+    peers.sort();
+    peers
 }
 
 #[cfg(test)]

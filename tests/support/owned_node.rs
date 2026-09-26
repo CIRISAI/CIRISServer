@@ -190,7 +190,21 @@ impl Person {
     /// A claimed node for `name`: node key registered as a NODE, owner fed-ID
     /// minted and registered, the owner-binding `delegates_to(owner → node)`
     /// signed with the owner's pen, and an owner session.
+    ///
+    /// The binding is placed at FEDERATION tier (`emit_steward_binding`), i.e.
+    /// this node is ANNOUNCED. [`Self::new_unannounced`] is the claim as the
+    /// wizard leaves it when the person opts out of announcing.
     pub async fn new(name: &str) -> Self {
+        Self::new_placed(name, true).await
+    }
+
+    /// A claimed node whose owner did NOT announce it: the owner-binding at
+    /// `cohort_scope: self`, as the claim writes it (CIRISServer#655 / #673).
+    pub async fn new_unannounced(name: &str) -> Self {
+        Self::new_placed(name, false).await
+    }
+
+    async fn new_placed(name: &str, announced: bool) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -218,18 +232,22 @@ impl Person {
             .put_public_key(owner.key_record())
             .await
             .expect("register the owner's key");
-        let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        ciris_server::auth::ownership::emit_steward_binding(
-            &engine,
-            &owner.signer().await,
-            &node_key_id,
-            &scopes,
-        )
-        .await
-        .expect("emit the owner-binding");
+        if announced {
+            let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            ciris_server::auth::ownership::emit_steward_binding(
+                &engine,
+                &owner.signer().await,
+                &node_key_id,
+                &scopes,
+            )
+            .await
+            .expect("emit the owner-binding");
+        } else {
+            bind_self_scoped(&engine, &owner.signer().await, &node_key_id).await;
+        }
         let wa_id = format!("wa-{}", owner.alias);
         let bearer = mint_session(&engine, &wa_id, WaRole::Root).await;
         Self {
@@ -352,6 +370,18 @@ impl Person {
                 });
             }
         }
+        // persist v49.0.0 (#910): a member added after the household was
+        // created is its own signed row on the family WIDENING plane, not a
+        // grown record, so a copy that stops at the record leaves the new
+        // member unknown on their own node. Replication carries this plane
+        // (`FamilyMembershipWidening`); this helper stands in for it.
+        for served in src
+            .list_signed_family_membership_widenings_since(None, u32::MAX)
+            .await
+            .expect("list signed family widenings")
+        {
+            let _ = dst.put_family_membership_widening(served.widening).await;
+        }
         for served in src
             .list_signed_family_membership_revocations_since(None, u32::MAX)
             .await
@@ -371,6 +401,20 @@ impl Person {
         bearer: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        self.call_on(self.router(), method, path, bearer, body)
+            .await
+    }
+
+    /// [`Self::call`] through a router the suite composed itself (a surface
+    /// [`Self::router`] does not merge, e.g. contacts).
+    pub async fn call_on(
+        &self,
+        router: Router,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
         let mut req = Request::builder().method(method).uri(path);
         if let Some(b) = bearer {
             req = req.header("authorization", format!("Bearer {b}"));
@@ -382,8 +426,7 @@ impl Person {
             }
             None => Body::empty(),
         };
-        let resp = self
-            .router()
+        let resp = router
             .oneshot(req.body(body).expect("request"))
             .await
             .expect("route");
@@ -412,6 +455,34 @@ impl Person {
         let bearer = self.bearer.clone();
         self.call(method, path, Some(&bearer), body).await
     }
+}
+
+/// The owner-binding `delegates_to(owner → node)` at `cohort_scope: self` —
+/// the claim's own placement, before any announce — signed by the owner and
+/// applied through the claim's door.
+pub async fn bind_self_scoped(engine: &Engine, owner: &LocalSigner, node_key_id: &str) {
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let self_scope = ciris_persist::federation::types::cohort_scope::SELF;
+    let binding = ciris_server::auth::ownership::build_signed_owner_binding(
+        owner,
+        node_key_id,
+        &scopes,
+        self_scope,
+    )
+    .await
+    .expect("the owner signs a self-scoped owner-binding");
+    ciris_server::auth::ownership::apply_signed_owner_binding(
+        engine,
+        node_key_id,
+        self_scope,
+        ciris_persist::prelude::HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("apply the self-scoped owner-binding");
 }
 
 /// An active `wa_cert` + a bound session bearer on `engine`.

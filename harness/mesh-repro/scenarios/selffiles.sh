@@ -22,10 +22,15 @@
 #              means it reached nobody: local-tier rows are kept out of every
 #              federation stream by persist's E5 invariant, so the file would be
 #              invisible to the other device AND to this node's own drive.
+#              Since 0.5.218 (#626) also: tier InvisibleEncrypted, `excluded`
+#              empty, no `Stored { announced: true }` and no `holds_bytes:` row
+#              on either device — a self blob emits no holder claim (CC 5.2).
 #   mine_on_b  node-c's `GET /v1/drive` LISTS the file. The row crossed. This is
 #              REQUIRED and is the rung the whole cut exists for.
 #   opened_on_b  node-c OPENS the bytes. The room's addresses resolved and the
 #              pull completed — the last rung, and the one that needs the room.
+#              Red on any self pull regression by name (#626): `NoHolders`,
+#              `NoMeaning(GroupWithoutId)`, or a `self:claim_index` source.
 #
 # `mine_on_b` and `opened_on_b` are both REQUIRED since 0.5.216 (the self-room
 # drive adopts edge's room-keyed handshake, CIRISEdge#656). A red here names its
@@ -48,8 +53,8 @@ PROJECT="${PROJECT:-ciris-selffiles}"
 # `not_fetched`. Edge v30.0.0 shipped the room-keyed `*_attestation_in` twins
 # and `welcome_for`; `src/self_room_drive.rs` adopts them in 0.5.216, so the
 # rung is PROMOTED to SUCCESS_STAGE and made REQUIRED.
-SUCCESS_STAGE="opened_on_b"
-STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b)
+SUCCESS_STAGE="corpus_opened_on_b"
+STAGES=(rooted one_owner roster room note file mine_on_b opened_on_b corpus_written corpus_opened_on_b)
 
 # `mine_on_b` is the claim of this scenario: inferring it from a later stage is
 # exactly the mistake the chat ladder made with `arrived` for six releases.
@@ -58,6 +63,14 @@ REQUIRED_file=1
 # The BYTES, not inferred from the row: a green `mine_on_b` with a red
 # `opened_on_b` is exactly the 0.5.215 state this cut exists to end.
 REQUIRED_opened_on_b=1
+# EVERY TYPE, EVERY SIZE CLASS (0.5.218, maintainer: "file transfer 100%
+# predictable and reliable across platforms and file types we support"). One
+# 40-byte text file proved the path exists; the corpus (lib/media_corpus.py)
+# proves it for each type the media policy names and either side of the 1 MiB
+# inline boundary plus a 24 MiB multi-chunk file, by SHA-256 of the raw bytes
+# the second device returns — not by a listing's `bytes: "here"`.
+REQUIRED_corpus_written=1
+REQUIRED_corpus_opened_on_b=1
 
 SELF_STATE="${TMPDIR:-/tmp}/ciris-selffiles-${PROJECT:-ciris-selffiles}"
 SELF_NODES="${SELF_NODES:-node-a node-c}"
@@ -302,6 +315,33 @@ print(json.dumps({"cohort":"self","bytes_base64":base64.b64encode(sys.argv[1].en
                   "media_type":"text/plain","filename":"proof.txt"}))' "$SELF_FILE_TEXT")" \
     >"$SELF_STATE/file.json" || true
   cat "$SELF_STATE/file.json" 2>/dev/null | head -c 400; echo
+  _self_corpus_write
+}
+
+# ── THE TRANSFER CORPUS ──────────────────────────────────────────────────────
+# Generated on the host (deterministic), copied into the author's container
+# (a 24 MiB body cannot ride a process argument), written there over loopback,
+# and verified on the second device by digest. The second device needs only
+# the manifest and the ids.
+SELF_CORPUS="$SELF_STATE/corpus"
+_self_token() { local t; _self_load; eval "t=\${SELF_TOKEN_${1//-/_}:-}"; printf '%s' "$t"; }
+_self_corpus_write() {
+  echo "── selffiles: writing the transfer corpus on $SELF_PRIMARY ──"
+  rm -rf "$SELF_CORPUS"
+  python3 "$HARNESS_DIR/lib/media_corpus.py" "$SELF_CORPUS" | sed 's/^/  /'
+  cp "$HARNESS_DIR/lib/corpus_client.py" "$SELF_CORPUS/"
+  compose exec -T "$SELF_PRIMARY" rm -rf /tmp/corpus >/dev/null 2>&1 || true
+  compose cp "$SELF_CORPUS" "$SELF_PRIMARY:/tmp/corpus" >/dev/null
+  compose exec -T "$SELF_PRIMARY" python /tmp/corpus/corpus_client.py write \
+    "$(_self_token "$SELF_PRIMARY")" /tmp/corpus >"$SELF_STATE/corpus-write.json" 2>&1 || true
+  echo "  $(cat "$SELF_STATE/corpus-write.json")"
+  compose cp "$SELF_PRIMARY:/tmp/corpus-state/written.json" "$SELF_CORPUS/written.json" >/dev/null 2>&1 || true
+  compose exec -T "$SELF_SECOND" sh -c 'rm -rf /tmp/corpus && mkdir -p /tmp/corpus' >/dev/null 2>&1 || true
+  local f
+  for f in manifest.json written.json corpus_client.py; do
+    [ -f "$SELF_CORPUS/$f" ] && compose cp "$SELF_CORPUS/$f" "$SELF_SECOND:/tmp/corpus/$f" >/dev/null
+  done
+  return 0
 }
 
 stage_rooted() {
@@ -357,17 +397,126 @@ print(1 if d.get("status")==200 and d.get("body",{}).get("attestation_id") else 
 HINT_note="the note was refused. A note is a chat row in the self room — if this fails the owner's pen is unavailable or the row could not be placed"
 EXIT_note=44
 
-stage_file() {
-  # 200 AND crossed. `crossed == false` is a file that reached nobody.
+# ── #626: the write-side checks, and the three pull regressions ─────────────
+#
+# Edge's adoption note for the file door (CIRISServer#626 §5) names what a SELF
+# write must look like, and three outcomes that must NEVER appear for a self
+# pull. Each is a distinct regression, so each is checked by NAME and the
+# diagnosis says which one fired rather than lumping them into "red".
+#
+#   write side (stage_file):
+#     tier == InvisibleEncrypted    a self file is sealed to the owner's devices
+#     excluded == []                non-empty = partial readability: those
+#                                   occurrences will read not_granted
+#     no `announced: true`          a self blob NEVER emits a holder claim (CC 5.2 /
+#                                   persist I52); edge logs the pull as
+#                                   `Stored { announced: false }`, and `true` is a
+#                                   conformance break, not a nicety
+#     no holds_bytes: row           the same fact read off the ROWS: no holder
+#                                   claim exists on either device for a self write
+#   pull side (stage_opened_on_b):
+#     no `outcome=NoHolders`        the §6.2 source rule regressed — a self pull
+#                                   must never consult the claim index
+#     no `NoMeaning(GroupWithoutId` the §6.2 projector regressed (NOT the same as
+#                                   `AuthorUnresolved`, the legitimate wait)
+#     no `self:claim_index` key     the first regression seen from edge's
+#                                   `blob_pull_sources` counter (GET
+#                                   /v1/federation/metrics, since 0.5.218)
+#
+# Every scan is `grep -c … || true` (see `_self_log_has`), and every conditional
+# is an `if`: a false `[ … ] && x` as a function's last command returns non-zero
+# under `set -e`.
+
+# How many lines in THIS service's log match? Numeric, never empty.
+_self_log_count() {
+  local svc="$1" re="$2" n
+  n="$(compose logs "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | grep -cE "$re" || true)"
+  echo "${n:-0}"
+}
+
+# The file write's own claims, from its 200 body. Prints one word per failed
+# check (empty = all hold), so the stage and its diagnosis read the same fact.
+_self_file_write_faults() {
   python3 -c '
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print(0); raise SystemExit
-b=d.get("body",{})
-print(1 if d.get("status")==200 and b.get("crossed") is True else 0)' "$SELF_STATE/file.json" 2>/dev/null || echo 0
+except Exception: print("no_response"); raise SystemExit
+b=d.get("body",{}) or {}
+out=[]
+if d.get("status")!=200: out.append("status=%s" % d.get("status"))
+if b.get("crossed") is not True: out.append("crossed=%s" % b.get("crossed"))
+if b.get("tier")!="InvisibleEncrypted": out.append("tier=%s" % b.get("tier"))
+if b.get("excluded")!=[]: out.append("excluded=%s" % json.dumps(b.get("excluded")))
+print(" ".join(out))' "$SELF_STATE/file.json" 2>/dev/null || echo "unreadable"
 }
-HINT_file="the file was not published, or was published WITHOUT crossing. crossed=false means local-tier: persist's E5 invariant keeps it out of every federation stream, so no other device and not even this node's drive will list it"
+
+# Cross-node faults a self write must never produce. One word per fault.
+_self_file_mesh_faults() {
+  local svc n out=""
+  for svc in $SELF_NODES; do
+    n="$(_self_log_count "$svc" 'Stored \{ announced: true')"
+    if [ "$n" -gt 0 ]; then out="$out announced_true@$svc=$n"; fi
+    n="$(harness_db_count "$svc" federation_attestations "attestation_type LIKE 'holds_bytes:%'")"
+    case "$n" in
+      0) ;;
+      -1|"") out="$out holds_bytes_unreadable@$svc" ;;
+      *) out="$out holds_bytes@$svc=$n" ;;
+    esac
+  done
+  echo "$out"
+}
+
+# The three pull regressions. One word per fault. Also refreshes
+# metrics-<svc>.json, which the diagnosis and the evidence tail print.
+_self_pull_faults() {
+  local svc n out=""
+  for svc in $SELF_NODES; do
+    n="$(_self_log_count "$svc" 'outcome=NoHolders')"
+    if [ "$n" -gt 0 ]; then out="$out NoHolders@$svc=$n"; fi
+    n="$(_self_log_count "$svc" 'NoMeaning\(GroupWithoutId')"
+    if [ "$n" -gt 0 ]; then out="$out GroupWithoutId@$svc=$n"; fi
+    _self_api "$svc" GET /v1/federation/metrics '' >"$SELF_STATE/metrics-$svc.json" 2>/dev/null || true
+    n="$(python3 -c '
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print(0); raise SystemExit
+src=((d.get("body") or {}).get("data") or {}).get("blob_pull_sources") or {}
+print(sum(v for k,v in src.items() if k in ("self:claim_index","family:claim_index")))' \
+      "$SELF_STATE/metrics-$svc.json" 2>/dev/null || echo 0)"
+    if [ "${n:-0}" -gt 0 ]; then out="$out claim_index_source@$svc=$n"; fi
+  done
+  echo "$out"
+}
+
+# The pull sources, as the metrics snapshot last reported them.
+_self_pull_sources() {
+  python3 -c '
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print("{}"); raise SystemExit
+print(json.dumps(((d.get("body") or {}).get("data") or {}).get("blob_pull_sources") or {}))' \
+    "$SELF_STATE/metrics-$1.json" 2>/dev/null || echo "{}"
+}
+
+stage_file() {
+  # 200 AND crossed AND the #626 write-side shape. `crossed == false` is a file
+  # that reached nobody; the rest are the conformance checks above.
+  local w m
+  w="$(_self_file_write_faults)"
+  m="$(_self_file_mesh_faults)"
+  if [ -z "${w// /}" ] && [ -z "${m// /}" ]; then echo 1; else echo 0; fi
+}
+HINT_file="the self file write is not what a self write must be (CIRISServer#626 §5); the diagnosis names the failed check. crossed=false is local-tier (persist's E5 invariant keeps it out of every federation stream, so no device lists it); tier≠InvisibleEncrypted is the wrong room tier; a non-empty excluded is partial readability (those occurrences read not_granted); announced_true or a holds_bytes: row is a self blob that emitted a holder claim, which CC 5.2 / persist I52 forbid"
 EXIT_file=45
+DIAG_file() {
+  echo "  write-side faults: $(_self_file_write_faults)"
+  echo "  mesh faults:       $(_self_file_mesh_faults)"
+  local svc
+  for svc in $SELF_NODES; do
+    echo "  $svc: Stored{announced:false}=$(_self_log_count "$svc" 'Stored \{ announced: false') Stored{announced:true}=$(_self_log_count "$svc" 'Stored \{ announced: true')"
+  done
+  echo "  write body: $(head -c 500 "$SELF_STATE/file.json" 2>/dev/null)"
+}
 
 stage_mine_on_b() {
   # THE CLAIM: the second device LISTS the file.
@@ -383,6 +532,10 @@ HINT_mine_on_b="the second device does not LIST the file. The row did not cross:
 EXIT_mine_on_b=46
 
 stage_opened_on_b() {
+  # A regression in the pull's source rule or projector fails this rung even if
+  # the bytes opened (a claim-index source can find a holder by accident on a
+  # two-node mesh) — #626 asks for each by name.
+  if [ -n "$(_self_pull_faults | tr -d ' ')" ]; then echo 0; return; fi
   python3 -c '
 import json,sys
 try: d=json.load(open(sys.argv[1]))
@@ -391,8 +544,65 @@ print(1 if any(e.get("filename")=="proof.txt" and e.get("bytes")=="here"
                for e in d.get("body",{}).get("entries",[])) else 0)' \
     "$SELF_STATE/drive-b.json" 2>/dev/null || echo 0
 }
-HINT_opened_on_b="the second device LISTS the file (mine_on_b green) but cannot OPEN its bytes. The self room did not admit it: check \`tick=Added(0)\` on the creator (it cannot see the joiner's KeyPackage — is the row in the SELF room, not \`chat:pair:v1:*\`? src/self_room_drive.rs must use key_package_attestation_in / welcome_attestation_in, CIRISEdge#656), then \`self room JOINED\` on the joiner (welcome_for must find a Welcome naming THIS node), then the scope-address install on both"
+HINT_opened_on_b="the second device cannot OPEN the file's bytes, or a self pull regressed. If the diagnosis lists NoHolders or claim_index_source, the §6.2 SOURCE RULE regressed (a self pull reads self:author_nodes, never the claim index); GroupWithoutId means the §6.2 PROJECTOR regressed (not AuthorUnresolved, the legitimate wait). Otherwise the self room did not admit it: check \`tick=Added(0)\` on the creator (it cannot see the joiner's KeyPackage — is the row in the SELF room, not \`chat:pair:v1:*\`? src/self_room_drive.rs must use key_package_attestation_in / welcome_attestation_in, CIRISEdge#656), then \`self room JOINED\` on the joiner (welcome_for must find a Welcome naming THIS node), then the scope-address install on both"
 EXIT_opened_on_b=47
+DIAG_opened_on_b() {
+  echo "  pull regressions: $(_self_pull_faults)"
+  local svc
+  for svc in $SELF_NODES; do
+    echo "  $svc blob_pull_sources: $(_self_pull_sources "$svc")"
+  done
+  # WHERE THE HANDSHAKE ROWS ARE. The creator adds a device only when it holds
+  # that device's KeyPackage row; the joiner joins only when it holds a Welcome
+  # naming it. Each node's copy of each, by attester, says which hop failed.
+  echo "  self-room handshake rows (dimension -> attester -> count), per node:"
+  for svc in $SELF_NODES; do
+    compose exec -T "$svc" python -c 'import glob,json,sqlite3,collections
+c=collections.Counter()
+for d in glob.glob("/var/lib/ciris/**/*.db*", recursive=True):
+    if d.endswith(("-wal","-shm")): continue
+    try:
+        for aid, att, env, tier, scope in sqlite3.connect(d).execute("SELECT attestation_id, attesting_key_id, attestation_envelope, tier, cohort_scope FROM federation_attestations"):
+            try: e=json.loads(env)
+            except Exception: e={}
+            dim=e.get("dimension","")
+            if dim.startswith("chat:key_package") or dim.startswith("chat:welcome") or dim.startswith("chat:commit"):
+                target=e.get("community_key_id") or e.get("community_id") or e.get("cohort_key_id") or e.get("family_key_id")
+                c[(dim, att, tier, scope, str(target), str(e.get("references_attestation_id"))[:14], aid[:18])] += 1
+    except Exception: pass
+for k, v in sorted(c.items()):
+    print(f"{k[0]} by={k[1]} tier={k[2]} scope={k[3]} room={k[4]} refs={k[5]} id={k[6]} x{v}")' 2>/dev/null | sed "s/^/    $svc: /"
+  done
+}
+
+stage_corpus_written() {
+  python3 -c '
+import json,sys
+try: d=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+except Exception: print(0); raise SystemExit
+print(1 if d.get("total") and d.get("written")==d.get("total") and not d.get("known_defect_now_passes") else 0)' "$SELF_STATE/corpus-write.json" 2>/dev/null || echo 0
+}
+HINT_corpus_written="the author's write gate refused a file of a type the media policy supports, OR a KNOWN_DEFECTS row in lib/media_corpus.py now writes (known_defect_now_passes: the upstream fix landed — remove the mark). corpus-write.json names each refusal as name:status:reason_id — drive.format_mismatch is the sniff table disagreeing with lib/media_corpus.py's header for that type, drive.bad_media_type the declared essence; anything else is the write path itself"
+EXIT_corpus_written=48
+DIAG_corpus_written() { cat "$SELF_STATE/corpus-write.json" 2>/dev/null; echo; }
+
+stage_corpus_opened_on_b() {
+  [ -f "$SELF_CORPUS/written.json" ] || { echo 0; return; }
+  compose exec -T "$SELF_SECOND" python /tmp/corpus/corpus_client.py read \
+    "$(_self_token "$SELF_SECOND")" /tmp/corpus >"$SELF_STATE/corpus-read.json" 2>/dev/null || true
+  python3 -c '
+import json,sys
+try: d=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+except Exception: print(0); raise SystemExit
+ok = d.get("total") and d.get("opened")==d.get("total") and not d.get("corrupt")
+print(1 if ok else 0)' "$SELF_STATE/corpus-read.json" 2>/dev/null || echo 0
+}
+HINT_corpus_opened_on_b="the second device did not return every corpus file byte-identical. corpus-read.json lists corrupt (bytes returned but the SHA-256 differs: a transfer defect, never a fixture change — the corpus is deterministic) and waiting as name:status:reason_id (409 drive.not_fetched = the bytes never crossed; 403 drive.not_granted = no wrap names this device). A pattern by size (inline_over / large only) points at the chunk path; by type, at the write or render path"
+EXIT_corpus_opened_on_b=49
+DIAG_corpus_opened_on_b() {
+  cat "$SELF_STATE/corpus-read.json" 2>/dev/null; echo
+  compose exec -T "$SELF_SECOND" cat /tmp/corpus-state/read.json 2>/dev/null | head -c 3000; echo
+}
 
 harness_scenario_evidence() {
   echo "── the self-room drive, both nodes ──"
@@ -403,11 +613,12 @@ harness_scenario_evidence() {
   echo "── the write ──"
   head -c 500 "$SELF_STATE/file.json" 2>/dev/null; echo
   echo "── pull sources (MUST be self:author_nodes, never self:claim_index) ──"
+  # Read from the metrics snapshot (GET /v1/federation/metrics
+  # `blob_pull_sources`, 0.5.218). This was a log grep, and edge never LOGS the
+  # counter, so it could only ever print nothing.
+  echo "  regressions: $(_self_pull_faults)"
   local svc
   for svc in $SELF_NODES; do
-    printf '  %s: ' "$svc"
-    compose logs "$svc" 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' \
-      | grep -oE 'blob_pull_sources\{[^}]*\}' | sort | uniq -c | tr '\n' ' '
-    echo
+    echo "  $svc: $(_self_pull_sources "$svc")"
   done
 }

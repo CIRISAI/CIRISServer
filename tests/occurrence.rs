@@ -8,10 +8,13 @@
 //!   1. The PRIMARY (the self's first device) signs `POST /v1/self/occurrence`
 //!      to enroll a SECOND device. After it, `signer_acts_for(second, self)` is
 //!      TRUE — the backup device can now act AS the self.
-//!   2. `GET /v1/self/occurrences` lists both devices (the client device list).
+//!   2. Both devices are in the roster (the client device list, which
+//!      `GET /v1/self/occurrences` serves to the owner's own session only —
+//!      CIRISServer#655; an unauthenticated read of this un-announced self is
+//!      empty).
 //!   3. The PRIMARY then signs `POST /v1/self/occurrence/revoke` to revoke the
 //!      second device. After it, `signer_acts_for(second, self)` is FALSE, and
-//!      the list no longer shows it.
+//!      the roster no longer holds it.
 //!   4. A signer who does NOT act for the self (an unrelated key) is rejected 403.
 
 use std::sync::Arc;
@@ -245,7 +248,16 @@ async fn enroll_second_device_then_revoke_it() {
         "after enrollment the second device MUST act for the self"
     );
 
-    // ── (2) LIST: both devices show in the roster ──
+    // ── (2) LIST: both devices are in the roster ──
+    //
+    // Read from the directory the route serves the OWNER from: this fixture has
+    // no owner session (the self here owns no node), and since CIRISServer#655
+    // an unauthenticated read of a person who announced no node is the same
+    // empty answer an unknown identity gets.
+    let ids = active_roster(&engine, identity).await;
+    assert_eq!(ids.len(), 2, "both devices bound: {ids:?}");
+    assert!(ids.contains(&primary.key_id));
+    assert!(ids.contains(&second.key_id));
     let resp = client
         .get(format!(
             "{base}/v1/self/occurrences?identity_key_id={identity}"
@@ -255,14 +267,11 @@ async fn enroll_second_device_then_revoke_it() {
         .expect("GET occurrences");
     assert_eq!(resp.status(), 200);
     let list: serde_json::Value = resp.json().await.expect("list json");
-    let occs = list["occurrences"].as_array().expect("occurrences array");
-    assert_eq!(occs.len(), 2, "both devices listed: {list}");
-    let ids: Vec<&str> = occs
-        .iter()
-        .map(|o| o["occurrence_key_id"].as_str().unwrap())
-        .collect();
-    assert!(ids.contains(&primary.key_id.as_str()));
-    assert!(ids.contains(&second.key_id.as_str()));
+    assert_eq!(
+        list["occurrences"].as_array().map(Vec::len),
+        Some(0),
+        "an unauthenticated caller sees nothing of an un-announced person: {list}"
+    );
 
     // ── (3) REVOKE: the PRIMARY revokes the (lost) SECOND device ──
     let revoke_body = serde_json::json!({
@@ -295,18 +304,26 @@ async fn enroll_second_device_then_revoke_it() {
         "the surviving device still acts for the self"
     );
 
-    // The list drops the revoked device.
-    let resp = client
-        .get(format!(
-            "{base}/v1/self/occurrences?identity_key_id={identity}"
-        ))
-        .send()
+    // The roster drops the revoked device.
+    let ids = active_roster(&engine, identity).await;
+    assert_eq!(
+        ids,
+        vec![primary.key_id.clone()],
+        "only the surviving device remains"
+    );
+}
+
+/// The ACTIVE occurrence keys of `identity` — what `GET /v1/self/occurrences`
+/// serves the identity's own owner session.
+async fn active_roster(engine: &Engine, identity: &str) -> Vec<String> {
+    engine
+        .federation_directory()
+        .list_identity_occurrences_active(identity)
         .await
-        .expect("GET occurrences after revoke");
-    let list: serde_json::Value = resp.json().await.expect("list json");
-    let occs = list["occurrences"].as_array().expect("occurrences array");
-    assert_eq!(occs.len(), 1, "only the surviving device remains: {list}");
-    assert_eq!(occs[0]["occurrence_key_id"], primary.key_id);
+        .expect("active occurrences")
+        .into_iter()
+        .map(|o| o.occurrence_key_id)
+        .collect()
 }
 
 #[tokio::test]

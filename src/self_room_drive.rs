@@ -262,6 +262,19 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
             Ok(n) => SelfRoomTick::Removed(n),
             Err(e) => SelfRoomTick::Failed(e),
         },
+        // CIRISEdge#676 (edge v32): a member whose leaf is stale — it restarted
+        // or was restored and published a fresh KeyPackage after it was added.
+        // Two commits, REMOVAL FIRST (the order `Remove` mandates), so its new
+        // Welcome reaches material it still holds. Dormant while this drive
+        // calls plain `decide` (which passes no republished set); it becomes
+        // live when the durable-MLS-state wiring (CIRISServer#630) passes one.
+        SelfRoomAction::Rejoin(nodes) => match remove_members(st, &room, &owner, &nodes).await {
+            Ok(_) => match add_members(st, &room, &owner, &nodes).await {
+                Ok(n) => SelfRoomTick::Added(n),
+                Err(e) => SelfRoomTick::Failed(e),
+            },
+            Err(e) => SelfRoomTick::Failed(e),
+        },
         SelfRoomAction::Abandon { in_favour_of } => {
             // Drop ours and wait for their Welcome. Dropping FIRST is the
             // point: a room about to be abandoned must not be addressed, or we
@@ -638,6 +651,56 @@ async fn rollback_add(group: &Arc<CohortGroup>, node: &str, cause: &str) {
     }
 }
 
+/// A device's KeyPackage is missing from `room`: say WHY when this node does
+/// hold KeyPackage rows from that device. "Not arrived yet" is the ordinary
+/// wait and stays quiet; "arrived and not matched" is the self-files ladder's
+/// `Added(0)` — rows in the database, a lookup that cannot see them — and it
+/// used to be silent for the whole ladder. Names each row's tier, scope and
+/// room target, which are the three things the lookup filters on.
+async fn note_unmatched_key_packages(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    node: &str,
+    room: &str,
+) {
+    let rows = match dir.list_attestations_by(node).await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let held: Vec<String> = rows
+        .iter()
+        .filter(|a| {
+            a.attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                == Some(ciris_edge::chat::KEY_PACKAGE_DIMENSION)
+        })
+        .map(|a| {
+            format!(
+                "{} tier={} scope={} room={:?} supersedes={:?}",
+                a.attestation_id,
+                a.tier,
+                a.cohort_scope,
+                ciris_persist::federation::admission::envelope_cohort_target(
+                    &a.attestation_envelope
+                )
+                .ok()
+                .flatten(),
+                a.attestation_envelope
+                    .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
+                    .and_then(serde_json::Value::as_str),
+            )
+        })
+        .collect();
+    if !held.is_empty() {
+        tracing::warn!(
+            %node, %room, rows = ?held,
+            "self room: this node HOLDS federation-tier KeyPackage rows from the device and \
+             the room lookup matched none of them — the device cannot be added until one names \
+             this room"
+        );
+    }
+}
+
 async fn add_members(
     st: &SelfRoomState,
     room: &ScopeRoom,
@@ -659,6 +722,7 @@ async fn add_members(
                 .await
                 .map_err(|e| format!("read {node}'s KeyPackage: {e}"))?
         else {
+            note_unmatched_key_packages(&*dir, node, room.content_group_id()).await;
             continue;
         };
         let kp = ciris_edge::mls::cohort_group::key_package_from_bytes(&kp_bytes)

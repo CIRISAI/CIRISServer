@@ -142,21 +142,34 @@ fn the_claim_response_carries_an_owner_session() {
         .split("\n}")
         .next()
         .expect("its body");
+    // The session is `Option` since CIRISServer#678: a claim made by ANOTHER
+    // device keeps it on the claimed device for its own wizard to collect
+    // (`POST /v1/setup/claimed-session`) rather than returning it to the device
+    // that delivered the claim. The self-claim, which is every OAuth owner's
+    // wizard, still gets it in the response.
     assert!(
-        decl.contains("session: super::session::SessionGrant"),
+        decl.contains("session: Option<super::session::SessionGrant>"),
         "the claim must return a session — without one it succeeds into a dead end for any owner \
          who has no password, which is every OAuth owner"
     );
     assert!(
-        decl.contains("serde(flatten)"),
+        decl.contains("serde(flatten"),
         "flattened, so the wire shape matches /v1/auth/login and the native exchanges exactly"
     );
     // Minted for the OWNER, through the ONE issuance point — not a parallel site
-    // with its own token policy.
+    // with its own token policy — on the self-claim path, and collected with the
+    // same issuance on the other-device path.
     assert!(
-        src.contains("SessionGrant::issue(\n                        &wa_id,")
-            || src.contains("SessionGrant::issue(&wa_id"),
-        "the session must be issued for the newly-bound owner via SessionGrant::issue"
+        src.contains("Some(super::session::SessionGrant::issue(\n                        &wa_id,"),
+        "the self-claim must return a session issued for the newly-bound owner via SessionGrant::issue"
+    );
+    assert!(
+        src.contains("SessionGrant::issue(&held.wa_id"),
+        "a device claimed by another must still reach its session, through the same issuance point"
+    );
+    assert!(
+        src.contains("let (session, session_pickup) = if claimed_by_other_device {"),
+        "only a claim made by ANOTHER device withholds the session from the response"
     );
 }
 

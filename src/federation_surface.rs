@@ -301,6 +301,17 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
         .collect();
+    // CIRISEdge#646 — where each blob pull found its holders, by `scope:source`
+    // (`self:author_nodes`, `community:claim_index`, …). For a `self` or `family`
+    // pull the source MUST be `*:author_nodes`: a `self:claim_index` key is the
+    // source rule regressing (a self blob emits no holder claim, CC 5.2). The
+    // selffiles ladder reads this key (CIRISServer#626); it was in edge's
+    // snapshot and the PyO3 dict, and on no HTTP surface.
+    let blob_pull_sources: serde_json::Map<_, _> = bundle
+        .blob_pull_sources
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
 
     (
         StatusCode::OK,
@@ -326,6 +337,7 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_round_routing": round_routing,
                 "bootstrap_door_outcomes": bootstrap_door,
                 "blob_route_refusals": blob_route_refusals,
+                "blob_pull_sources": blob_pull_sources,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
                 "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
                 "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),

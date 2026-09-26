@@ -166,6 +166,18 @@ impl OwnerSignerCapsule {
         &self.edge_signer
     }
 
+    /// The owner's signer in PERSIST's type, for an in-crate door whose
+    /// signature is `&LocalSigner` — `auth::ownership::promote_owner_binding_to_federation`,
+    /// reached from `POST /v1/self/nodes/{node}/announce` (CIRISServer#678).
+    ///
+    /// The same boundary as [`Self::edge_signer`]: `pub(crate)`, the authority
+    /// [`Self::sign_hybrid`] already confers, and no key material (the halves
+    /// sit behind `HardwareSigner`). It exists so the owner-binding promote has
+    /// ONE implementation, not a second one re-spelled over `sign_hybrid`.
+    pub(crate) fn local_signer(&self) -> &LocalSigner {
+        &self.signer
+    }
+
     /// Sign caller-supplied bytes with the owner's hybrid identity.
     ///
     /// The caller canonicalizes. This deliberately does not canonicalize for

@@ -64,8 +64,13 @@ const RATIFIED_VENDORED_MANIFEST_VERSION: &str = "0.3.0";
 // wire kind `KeyGrant` (StructuralPlane) joined `kind_transferability`, which
 // the grammar hash covers. Principles, restriction ops and audiences are
 // unchanged. Previous value b66870da… (v31.1.0 – v44.2.1).
+//
+// Previous value 07a677bb… (v44.3.0 – v48.0.0). v49.0.0 (#910, #912): kinds 18
+// and 19 joined `kind_transferability` (both StructuralPlane, as their room
+// twins). Principles, restriction ops and audiences unchanged; persist's own
+// published `CONSENT_GRAMMAR_HASH`.
 const RATIFIED_CONSENT_GRAMMAR_HASH: &str =
-    "07a677bbcdff236e2018f0786e8d9b0d0ef6b5b7cc2b871d41459e26ff8864a9";
+    "8230589131945c4b4db3c2e7ca2187e6c02543cd8f084b0f8862eb951d2c82ac";
 
 // ─────────────────────────── persist: transform algebra ────────────────────
 
@@ -102,8 +107,13 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// every envelope key it spells through `paths::*` are unchanged, and the
 /// holder claims it relies on are minted by persist's own blob doors, which
 /// now carry the stored length. `e7135559…` → `4d7054a6…`.
+///
+/// Re-pinned for 0.5.218 (persist v49.0.0), reviewed: ONE key added,
+/// `paths::LISTED` (`"listed"`, the #912 listing plane); nothing removed or
+/// renamed, and every key this server spells through `paths::*` is unchanged.
+/// `4d7054a6…` → `a6a84cc9…`, persist's own pin.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "4d7054a6e05306e7b37d30ab2d25c43625a4f382021f39191f55a2c1f833589b";
+    "a6a84cc9d5f4d6bd6295cfc78b42bce35145d2bb9ff14391bfe32ab027116a6a";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 

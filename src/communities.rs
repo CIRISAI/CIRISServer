@@ -87,6 +87,7 @@ use crate::contacts_chat::{
     ChatState, Owner,
 };
 use crate::owner_signer_capsule::OwnerSignerCapsule;
+use crate::roster_rows::{cosignatures_for, thresholds, ChangeSignature, RowSignature};
 
 /// The `policy_blob` member that carries a room's audience tier — persist's
 /// own documented home for the `cohort_scope` membership label
@@ -486,10 +487,11 @@ async fn load_room_as_member(
 /// millisecond as a removal would be written and silently lose. The revocation
 /// door refuses a future-dated instant, so this waits for the clock rather
 /// than stepping past it.
-async fn next_event_instant(
+/// The instant of the room's latest roster event, if any.
+async fn latest_event_instant(
     dir: &dyn FederationDirectory,
     room: &str,
-) -> Result<chrono::DateTime<chrono::Utc>, String> {
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
     let widenings = dir
         .list_community_membership_widenings_for(room)
         .await
@@ -498,11 +500,18 @@ async fn next_event_instant(
         .list_community_membership_revocations_for(room)
         .await
         .map_err(|e| format!("list revocations: {e:#}"))?;
-    let latest = widenings
+    Ok(widenings
         .iter()
         .map(|w| w.effective_at)
         .chain(revocations.iter().map(|r| r.effective_at))
-        .max();
+        .max())
+}
+
+async fn next_event_instant(
+    dir: &dyn FederationDirectory,
+    room: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let latest = latest_event_instant(dir, room).await?;
     for _ in 0..20 {
         let now = to_ms(chrono::Utc::now());
         match latest {
@@ -629,21 +638,25 @@ async fn build_change(
     st: &ChatState,
     room: &Room,
     op: &ChangeOp,
+    at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<serde_json::Value, Response> {
+    // The instant the change's rows carry. Pinned here, once, because every
+    // signer signs the rows and a row's signed bytes include it (persist v49).
+    let at = match at {
+        Some(t) => t,
+        None => next_event_instant(st.engine.federation_directory().as_ref(), room.id())
+            .await
+            .map_err(write_failed)?,
+    };
     let new_roster = roster_after(room, op);
     let new_ids: Vec<String> = new_roster.iter().map(|(k, _)| k.clone()).collect();
-    // A quorum room's `quorum:M/N` names its roster size, and verify refuses a
-    // payload whose N is not the new member count — so a change that moves the
-    // count takes persist's strict-majority default for the new N. Anything
-    // else carries the room's own protocol through unchanged.
-    let protocol = match Protocol::parse(&room.record.consensus_protocol) {
-        Some(Protocol::Quorum { n, .. })
-            if n != new_ids.len() && !matches!(op, ChangeOp::Dissolve) =>
-        {
-            None
-        }
-        _ => Some(room.record.consensus_protocol.clone()),
-    };
+    // The room's own protocol, carried through unchanged. `quorum:M/N` reads M
+    // as ABSOLUTE and N as documentary (CC 4.4.3.4.2.1; persist v49.0.0's
+    // evaluator ignores N), so adding a member to a 2-of-3 room leaves it a
+    // "two signatures" room. Before v49 verify refused an N that did not match
+    // the roster, and the server rewrote the protocol to a strict majority of
+    // the new size — a rule change no member decided.
+    let protocol = Some(room.record.consensus_protocol.clone());
     let mut env = st
         .engine
         .federation_directory()
@@ -669,6 +682,7 @@ async fn build_change(
                 "tier": room.tier.as_str(),
                 "prior_roster": roster_json(&prior),
                 "new_roster": roster_json(&new_roster),
+                "row_at": at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             }),
         );
     }
@@ -680,21 +694,144 @@ fn signing_bytes(env: &serde_json::Value) -> Result<Vec<u8>, Response> {
         .map_err(|e| write_failed(format!("canonicalize the change envelope: {e}")))
 }
 
-/// The caller's own cosignature over the envelope — bound hybrid (ML-DSA-65
-/// over `bytes ‖ ed25519_sig`), the shape verify's threshold primitive counts.
+/// A row a change writes, before anyone signs it.
+enum PlannedRow {
+    Widening {
+        member: String,
+        role: Option<String>,
+    },
+    Revocation {
+        member: String,
+        reason: &'static str,
+    },
+}
+
+/// The rows `op` writes, in the order `apply_change` writes them. Pure over
+/// the room and the op, so every signer derives the same list.
+fn planned_rows(room: &Room, op: &ChangeOp) -> Vec<PlannedRow> {
+    match op {
+        ChangeOp::Add { key_id, role } => vec![PlannedRow::Widening {
+            member: key_id.clone(),
+            role: role.clone(),
+        }],
+        ChangeOp::Role { key_id, role } => vec![PlannedRow::Widening {
+            member: key_id.clone(),
+            role: normalize_role(Some(role)),
+        }],
+        ChangeOp::Remove { key_id } => vec![PlannedRow::Revocation {
+            member: key_id.clone(),
+            reason: "removed",
+        }],
+        ChangeOp::Dissolve => room
+            .roster
+            .iter()
+            .map(|m| PlannedRow::Revocation {
+                member: m.key_id.clone(),
+                reason: "dissolved",
+            })
+            .collect(),
+    }
+}
+
+/// The instant a change's rows carry, pinned in the envelope when it is built
+/// (`community_change.row_at`) so every signer signs the same bytes.
+fn row_at(env: &serde_json::Value) -> Result<chrono::DateTime<chrono::Utc>, Response> {
+    env.get("community_change")
+        .and_then(|c| c.get("row_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .ok_or_else(|| malformed("change_envelope.community_change.row_at is missing"))
+}
+
+/// Sign every planned row with `signer`, through edge's own row builders — the
+/// same builders `put_widening` / `put_revocation` write with, so a
+/// co-signature is over exactly the bytes the door checks. The signer is not
+/// part of the signed envelope, which is what lets a second signer's scrub be
+/// a co-signature on the first signer's row.
+async fn sign_rows(
+    dir: &dyn FederationDirectory,
+    room: &str,
+    rows: &[PlannedRow],
+    at: chrono::DateTime<chrono::Utc>,
+    signer: &ciris_edge::identity::LocalSigner,
+) -> Result<Vec<RowSignature>, String> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row {
+            PlannedRow::Widening { member, role } => {
+                let (_, spec) = ciris_edge::community_roster::community_membership_widening(
+                    dir,
+                    room,
+                    member,
+                    role.as_deref(),
+                    at,
+                    signer,
+                )
+                .await?;
+                out.push(RowSignature {
+                    kind: "widening".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id: spec.authority_key_id,
+                    scrub_signature_classical: spec.scrub_signature_classical,
+                    scrub_signature_pqc: spec.scrub_signature_pqc,
+                });
+            }
+            PlannedRow::Revocation { member, reason } => {
+                let signed = ciris_edge::community_roster::community_membership_revocation(
+                    room,
+                    member,
+                    at,
+                    Some(reason),
+                    &[],
+                    signer,
+                )
+                .await?;
+                out.push(RowSignature {
+                    kind: "revocation".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id: signed.authority_key_id,
+                    scrub_signature_classical: signed.scrub_signature_classical,
+                    scrub_signature_pqc: signed.scrub_signature_pqc,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The caller's own signature on a change — bound hybrid (ML-DSA-65 over
+/// `bytes ‖ ed25519_sig`) over the envelope, the shape verify's threshold
+/// primitive counts — and over every row the change writes.
 async fn sign_change(
+    st: &ChatState,
+    room: &Room,
+    op: &ChangeOp,
     pen: &OwnerSignerCapsule,
     env: &serde_json::Value,
-) -> Result<ThresholdSignature, Response> {
+) -> Result<ChangeSignature, Response> {
     let bytes = signing_bytes(env)?;
     let (ed, pqc) =
         ciris_edge::identity::sign_bound_hybrid(pen.edge_signer(), &bytes, "community change")
             .await
             .map_err(write_failed)?;
-    Ok(ThresholdSignature {
-        member_id: pen.key_id().to_owned(),
-        ed25519_signature_base64: ed,
-        mldsa65_signature_base64: pqc,
+    let at = row_at(env)?;
+    let row_signatures = sign_rows(
+        st.engine.federation_directory().as_ref(),
+        room.id(),
+        &planned_rows(room, op),
+        at,
+        pen.edge_signer(),
+    )
+    .await
+    .map_err(write_failed)?;
+    Ok(ChangeSignature {
+        threshold: ThresholdSignature {
+            member_id: pen.key_id().to_owned(),
+            ed25519_signature_base64: ed,
+            mldsa65_signature_base64: pqc,
+        },
+        row_signatures,
     })
 }
 
@@ -716,7 +853,18 @@ async fn check_envelope_current(
     if env.get("family_key_id").and_then(serde_json::Value::as_str) != Some(room.id()) {
         return Err(change_stale("it names a different room"));
     }
-    let expected = build_change(st, room, &op).await?;
+    let at = row_at(env)?;
+    // A roster event written after this change was built moves the room; the
+    // change's rows, dated before it, would land out of order.
+    let latest = latest_event_instant(st.engine.federation_directory().as_ref(), room.id())
+        .await
+        .map_err(store_unavailable)?;
+    if latest.is_some_and(|l| l >= at) {
+        return Err(change_stale(
+            "a roster event landed after this change was built",
+        ));
+    }
+    let expected = build_change(st, room, &op, Some(at)).await?;
     if &expected != env {
         return Err(change_stale("the rebuilt envelope differs"));
     }
@@ -797,14 +945,8 @@ async fn tally(
             let n = strict_majority(everyone.len());
             (everyone.clone(), n)
         }
-        Protocol::Quorum { m, n } => {
-            let required = if n == everyone.len() {
-                m
-            } else {
-                strict_majority(everyone.len())
-            };
-            (everyone.clone(), required)
-        }
+        // M absolute (CC 4.4.3.4.2.1), exactly as persist's evaluator counts.
+        Protocol::Quorum { m, .. } => (everyone.clone(), m),
     };
     let mut members: Vec<ThresholdMember> = Vec::with_capacity(eligible.len());
     for k in &eligible {
@@ -856,6 +998,7 @@ async fn put_widening(
     role: Option<&str>,
     at: chrono::DateTime<chrono::Utc>,
     pen: &OwnerSignerCapsule,
+    cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
 ) -> Result<(), String> {
     let (member, spec) = ciris_edge::community_roster::community_membership_widening(
         dir,
@@ -878,6 +1021,7 @@ async fn put_widening(
         authority_key_id: spec.authority_key_id,
         scrub_signature_classical: spec.scrub_signature_classical,
         scrub_signature_pqc: spec.scrub_signature_pqc,
+        cosignatures,
     })
     .await
     .map_err(|e| format!("put_community_membership_widening: {e:#}"))
@@ -895,8 +1039,9 @@ async fn put_revocation(
     at: chrono::DateTime<chrono::Utc>,
     reason: &str,
     pen: &OwnerSignerCapsule,
+    cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
 ) -> Result<(), String> {
-    let signed = ciris_edge::community_roster::community_membership_revocation(
+    let mut signed = ciris_edge::community_roster::community_membership_revocation(
         room,
         member_key_id,
         at,
@@ -905,74 +1050,10 @@ async fn put_revocation(
         pen.edge_signer(),
     )
     .await?;
+    signed.cosignatures = cosignatures;
     dir.put_community_membership_revocation(signed)
         .await
         .map_err(|e| format!("put_community_membership_revocation: {e:#}"))
-}
-
-/// A `quorum:M/N` room's change goes through persist's own quorum door FIRST:
-/// `supersede_{community,affiliations}_with_quorum` runs
-/// `verify_membership_quorum` over the envelope and the cosignatures and
-/// re-baselines the record to the new roster and protocol. Without the
-/// re-baseline the record's `quorum:M/N` would keep naming the OLD size, and
-/// verify refuses a prior envelope whose N is not its member count — the
-/// room's second size-changing change could never be authorized.
-async fn quorum_rebaseline(
-    st: &ChatState,
-    room: &Room,
-    op: &ChangeOp,
-    env: &serde_json::Value,
-    signatures: &[ThresholdSignature],
-    pen: &OwnerSignerCapsule,
-) -> Result<(), Response> {
-    let protocol = env
-        .get("consensus_protocol")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(&room.record.consensus_protocol)
-        .to_owned();
-    let now = to_ms(chrono::Utc::now());
-    let members: Vec<(String, Option<String>)> = roster_after(room, op);
-    let joined: BTreeMap<&str, chrono::DateTime<chrono::Utc>> = room
-        .roster
-        .iter()
-        .map(|m| (m.key_id.as_str(), m.joined_at))
-        .collect();
-    let new_record = Community {
-        community_key_id: room.record.community_key_id.clone(),
-        community_name: room.record.community_name.clone(),
-        members: members
-            .iter()
-            .map(|(k, r)| CommunityMember {
-                key_id: k.clone(),
-                joined_at: joined.get(k.as_str()).copied().unwrap_or(now),
-                role: r.clone(),
-            })
-            .collect(),
-        founded_at: room.record.founded_at,
-        consensus_protocol: protocol.clone(),
-        policy_blob: room.record.policy_blob.clone(),
-        persist_row_hash: String::new(),
-    };
-    let signed = ciris_edge::chat::signed_community(new_record, pen.edge_signer())
-        .await
-        .map_err(write_failed)?;
-    let dir = st.engine.federation_directory();
-    let out = match room.tier {
-        Tier::Community => {
-            dir.supersede_community_with_quorum(signed, env.clone(), signatures.to_vec())
-                .await
-        }
-        Tier::Affiliations => {
-            dir.supersede_affiliations_with_quorum(signed, env.clone(), signatures.to_vec())
-                .await
-        }
-    };
-    out.map(|_| ()).map_err(|e| {
-        not_authorized(
-            &room.record.consensus_protocol,
-            format!("persist's verify_membership_quorum refused the change: {e:#}"),
-        )
-    })
 }
 
 /// Apply an AUTHORIZED change, signed by the caller's pen. Returns the room's
@@ -982,25 +1063,33 @@ async fn apply_change(
     room: &Room,
     op: &ChangeOp,
     env: &serde_json::Value,
-    signatures: &[ThresholdSignature],
+    signatures: &[ChangeSignature],
     pen: &OwnerSignerCapsule,
 ) -> Result<Vec<CommunityMember>, Response> {
-    if matches!(
-        Protocol::parse(&room.record.consensus_protocol),
-        Some(Protocol::Quorum { .. })
-    ) && !matches!(op, ChangeOp::Dissolve)
-    {
-        quorum_rebaseline(st, room, op, env, signatures, pen).await?;
-    }
+    // No record re-baseline (persist v49.0.0): the rows below carry the
+    // change, judged at the door by the room's protocol over their own
+    // co-signatures, and the room's rule does not move when its size does.
     let dir = st.engine.federation_directory();
-    let at = next_event_instant(dir.as_ref(), room.id())
-        .await
-        .map_err(write_failed)?;
+    // The rows carry the instant the envelope pinned: the co-signatures below
+    // are over rows dated exactly then (persist v49.0.0).
+    let at = row_at(env)?;
+    // The primary row's author is the EDGE signer's id (the id edge's row
+    // builders stamp), which is the one a co-signer must differ from.
+    let primary = pen.edge_signer().key_id.clone();
+    let cosigs = |kind: &str, member: &str| cosignatures_for(signatures, &primary, kind, member);
     match op {
         ChangeOp::Add { key_id, role } => {
-            put_widening(dir.as_ref(), room.id(), key_id, role.as_deref(), at, pen)
-                .await
-                .map_err(write_failed)?;
+            put_widening(
+                dir.as_ref(),
+                room.id(),
+                key_id,
+                role.as_deref(),
+                at,
+                pen,
+                cosigs("widening", key_id),
+            )
+            .await
+            .map_err(write_failed)?;
         }
         ChangeOp::Role { key_id, role } => {
             put_widening(
@@ -1010,14 +1099,47 @@ async fn apply_change(
                 normalize_role(Some(role)).as_deref(),
                 at,
                 pen,
+                cosigs("widening", key_id),
             )
             .await
             .map_err(write_failed)?;
         }
         ChangeOp::Remove { key_id } => {
-            put_revocation(dir.as_ref(), room.id(), key_id, at, "removed", pen)
+            put_revocation(
+                dir.as_ref(),
+                room.id(),
+                key_id,
+                at,
+                "removed",
+                pen,
+                cosigs("revocation", key_id),
+            )
+            .await
+            .map_err(write_failed)?;
+        }
+        // A multi-signature room's dissolve: every revocation at the pinned
+        // instant, each carrying the other signers' co-signatures, because
+        // that is the row they signed. The prior roster at that instant still
+        // names every signer, so each one's signature counts toward every row.
+        ChangeOp::Dissolve
+            if room
+                .roster
+                .iter()
+                .any(|m| !cosigs("revocation", &m.key_id).is_empty()) =>
+        {
+            for m in &room.roster {
+                put_revocation(
+                    dir.as_ref(),
+                    room.id(),
+                    &m.key_id,
+                    at,
+                    "dissolved",
+                    pen,
+                    cosigs("revocation", &m.key_id),
+                )
                 .await
                 .map_err(write_failed)?;
+            }
         }
         ChangeOp::Dissolve => {
             // Everyone else first, the signer last: every revocation is
@@ -1039,7 +1161,7 @@ async fn apply_change(
                         .await
                         .map_err(write_failed)?
                 };
-                put_revocation(dir.as_ref(), room.id(), k, at, "dissolved", pen)
+                put_revocation(dir.as_ref(), room.id(), k, at, "dissolved", pen, Vec::new())
                     .await
                     .map_err(write_failed)?;
             }
@@ -1144,16 +1266,16 @@ async fn direct_change(
         Ok(p) => p,
         Err(r) => return r,
     };
-    let env = match build_change(st, &room, &op).await {
+    let env = match build_change(st, &room, &op, None).await {
         Ok(e) => e,
         Err(r) => return r,
     };
-    let mine = match sign_change(&pen, &env).await {
+    let mine = match sign_change(st, &room, &op, &pen, &env).await {
         Ok(s) => s,
         Err(r) => return r,
     };
     let sigs = vec![mine];
-    let t = match tally(st, &room, &op, &env, &sigs).await {
+    let t = match tally(st, &room, &op, &env, &thresholds(&sigs)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1177,7 +1299,7 @@ async fn direct_change(
     }
 }
 
-fn quorum_pending(t: &Tally, env: &serde_json::Value, sigs: &[ThresholdSignature]) -> Response {
+fn quorum_pending(t: &Tally, env: &serde_json::Value, sigs: &[ChangeSignature]) -> Response {
     use base64::Engine as _;
     let bytes = ciris_verify_core::jcs::canonicalize(env).unwrap_or_default();
     refuse_with(
@@ -1645,7 +1767,17 @@ async fn leave_room(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: Ro
         Ok(t) => t,
         Err(e) => return write_failed(e),
     };
-    if let Err(e) = put_revocation(dir.as_ref(), room.id(), &owner.key_id, at, "left", &pen).await {
+    if let Err(e) = put_revocation(
+        dir.as_ref(),
+        room.id(),
+        &owner.key_id,
+        at,
+        "left",
+        &pen,
+        Vec::new(),
+    )
+    .await
+    {
         return write_failed(e);
     }
     crate::compose::kick_replication("community member left");
@@ -1719,15 +1851,15 @@ async fn change_envelope(
         Ok(p) => p,
         Err(r) => return r,
     };
-    let env = match build_change(&st, &room, &op).await {
+    let env = match build_change(&st, &room, &op, None).await {
         Ok(e) => e,
         Err(r) => return r,
     };
-    let mine = match sign_change(&pen, &env).await {
+    let mine = match sign_change(&st, &room, &op, &pen, &env).await {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let t = match tally(&st, &room, &op, &env, std::slice::from_ref(&mine)).await {
+    let t = match tally(&st, &room, &op, &env, std::slice::from_ref(&mine.threshold)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1787,7 +1919,7 @@ async fn change_cosign(
         Ok(p) => p,
         Err(r) => return r,
     };
-    let sig = match sign_change(&pen, &req.change_envelope).await {
+    let sig = match sign_change(&st, &room, &op, &pen, &req.change_envelope).await {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -1806,7 +1938,7 @@ async fn change_cosign(
 struct AssembleRequest {
     change_envelope: serde_json::Value,
     #[serde(default)]
-    signatures: Vec<ThresholdSignature>,
+    signatures: Vec<ChangeSignature>,
 }
 
 /// `POST /v1/communities/{id}/changes/assemble` `{change_envelope,
@@ -1841,7 +1973,15 @@ async fn change_assemble(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
-    let t = match tally(&st, &room, &op, &req.change_envelope, &req.signatures).await {
+    let t = match tally(
+        &st,
+        &room,
+        &op,
+        &req.change_envelope,
+        &thresholds(&req.signatures),
+    )
+    .await
+    {
         Ok(t) => t,
         Err(r) => return r,
     };

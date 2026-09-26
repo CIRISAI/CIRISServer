@@ -562,8 +562,9 @@ struct OccurrenceView {
     /// ever `true` under `include_revoked=true`.
     revoked: bool,
     /// The owner's display label for this device (`POST /v1/self/occurrence/label`).
-    /// Returned ONLY to the identity's own owner session: the roster itself is
-    /// public binding metadata, the name a person gave their phone is not.
+    /// Returned ONLY to the identity's own owner session. The roster is public
+    /// only for the nodes the owner announced (CIRISServer#655); the name a
+    /// person gave their phone is never public.
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
 }
@@ -571,6 +572,11 @@ struct OccurrenceView {
 #[derive(Debug, Serialize)]
 struct ListOccurrencesResponse {
     identity_key_id: String,
+    /// `owner` — the identity's own session read every row, labels included.
+    /// `public` — everyone else: only the occurrences that are nodes the owner
+    /// ANNOUNCED (CIRISServer#655). An owner with no announced node and an
+    /// unknown identity get the identical `public` empty answer.
+    audience: &'static str,
     /// The currently-ACTIVE occurrences (admitted, not revoked) — the device list
     /// — followed, under `include_revoked=true`, by the revoked ones.
     occurrences: Vec<OccurrenceView>,
@@ -592,28 +598,116 @@ fn occurrence_view(
     }
 }
 
+/// Who a roster read is served to (CIRISServer#655, the maintainer's ruling of
+/// 2026-09-25 under the lightnet/darknet split — CC 5.4.6).
+enum RosterAudience {
+    /// The identity's own owner session on this node: every row, with labels.
+    Owner,
+    /// Anyone else. They see the occurrences that ARE announced nodes — the
+    /// devices the person chose to announce, that people can contact them
+    /// through — and nothing else. With no announced node that is the empty
+    /// answer an unknown identity gets, so the read does not reveal that the
+    /// person exists.
+    Public,
+}
+
+impl RosterAudience {
+    fn token(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// The occurrence keys a stranger may see for `owner`: their ANNOUNCED nodes
+/// (federation-scope owner-bindings — announce is per node), each widened to
+/// every key of THIS node when it is this node, because a split install binds
+/// the node key while its content occurrence is the actor's (the same fold
+/// `peer::own_keys_of_this_node` exists for).
+async fn public_occurrence_keys(
+    engine: &Engine,
+    owner: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let announced = crate::auth::ownership::announced_nodes_of(engine, owner).await?;
+    let mut keys: std::collections::HashSet<String> = announced.iter().cloned().collect();
+    if let Ok(engine_key) = engine.local_derived_key_id().await {
+        let own = crate::peer::own_keys_of_this_node(&engine_key);
+        if own.iter().any(|k| keys.contains(k)) {
+            keys.extend(own);
+        }
+    }
+    Ok(keys)
+}
+
 async fn list_occurrences(
     State(st): State<OccurrenceState>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
     let directory = st.engine.federation_directory();
+    // WHO IS ASKING decides WHAT they see. The roster is public — people must be
+    // contactable — but not EXPOSED: a stranger sees only the devices the person
+    // chose to announce. Everything else is the owner's.
+    let audience = match crate::family_api::owner_caller(&st.engine, &headers, true).await {
+        Ok(c) if c.owner_key_id == q.identity_key_id => RosterAudience::Owner,
+        _ => RosterAudience::Public,
+    };
+    let empty = || {
+        (
+            StatusCode::OK,
+            Json(ListOccurrencesResponse {
+                identity_key_id: q.identity_key_id.clone(),
+                audience: RosterAudience::Public.token(),
+                occurrences: Vec::new(),
+            }),
+        )
+            .into_response()
+    };
+    let public_ids: Option<std::collections::HashSet<String>> = match audience {
+        RosterAudience::Owner => None,
+        RosterAudience::Public => {
+            match public_occurrence_keys(&st.engine, &q.identity_key_id).await {
+                Ok(keys) if keys.is_empty() => return empty(),
+                Ok(keys) => Some(keys),
+                // Fail CLOSED, and silently to the caller: an error answer would
+                // differ from the unknown-identity one.
+                Err(e) => {
+                    tracing::warn!(
+                        identity = %q.identity_key_id,
+                        error = %e,
+                        "occurrence roster: could not read which nodes the owner announced — \
+                         serving the empty public answer"
+                    );
+                    return empty();
+                }
+            }
+        }
+    };
+    let visible = |o: &IdentityOccurrence| {
+        public_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&o.occurrence_key_id))
+    };
     let active = match directory
         .list_identity_occurrences_active(&q.identity_key_id)
         .await
     {
         Ok(occs) => occs,
         Err(e) => {
+            if public_ids.is_some() {
+                return empty();
+            }
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("list_identity_occurrences_active: {e}"),
-            )
+            );
         }
     };
     // Labels are the OWNER's, and only the owner reads them.
-    let labels = match crate::family_api::owner_caller(&st.engine, &headers, true).await {
-        Ok(c) if c.owner_key_id == q.identity_key_id => {
-            crate::self_devices::labels_for(&st.engine, &c.owner_key_id).await
+    let labels = match audience {
+        RosterAudience::Owner => {
+            crate::self_devices::labels_for(&st.engine, &q.identity_key_id).await
         }
         _ => std::collections::HashMap::new(),
     };
@@ -621,6 +715,7 @@ async fn list_occurrences(
         active.iter().map(|o| o.occurrence_key_id.clone()).collect();
     let mut occurrences: Vec<OccurrenceView> = active
         .into_iter()
+        .filter(|o| visible(o))
         .map(|o| occurrence_view(o, false, &labels))
         .collect();
     if q.include_revoked {
@@ -630,16 +725,20 @@ async fn list_occurrences(
         {
             Ok(all) => all,
             Err(e) => {
+                if public_ids.is_some() {
+                    return empty();
+                }
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("list_identity_occurrences_for: {e}"),
-                )
+                );
             }
         };
         let mut seen = std::collections::HashSet::new();
         occurrences.extend(
             all.into_iter()
                 .filter(|o| !active_ids.contains(&o.occurrence_key_id))
+                .filter(|o| visible(o))
                 .filter(|o| seen.insert(o.occurrence_key_id.clone()))
                 .map(|o| occurrence_view(o, true, &labels)),
         );
@@ -648,6 +747,7 @@ async fn list_occurrences(
         StatusCode::OK,
         Json(ListOccurrencesResponse {
             identity_key_id: q.identity_key_id,
+            audience: audience.token(),
             occurrences,
         }),
     )

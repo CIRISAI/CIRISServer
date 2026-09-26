@@ -1308,6 +1308,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             format!("http://127.0.0.1:{}", cfg.read_api_addr().port()),
                             // Hybrid-verify policy for the local upgrade-owner apply.
                             strict,
+                            // The record every claimed target admits, so the
+                            // device that claimed it is known there (#678).
+                            Some(self_key_record_json.clone()),
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,
@@ -3999,90 +4002,193 @@ async fn setup_peer_replication(
     started
 }
 
-/// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
-/// admitted peer `key_id`s. FOUR coordinators per peer:
-///   - [`EnvelopeKind::Attestation`] — capacity:* / trace out, health:liveness in.
-///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane
-///     (verification + transport identity).
-///   - [`EnvelopeKind::IdentityOccurrence`] (CIRISEdge#305) — the KEX plane: the
-///     occurrence carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
-///     that `resolve_peer_kex_pubkeys` reads. Without this coordinator the plane is
-///     never exchanged, so a peer's enc keys never reach the directory → sealing to it
-///     resolves `None` → 0 content delivery.
-///   - [`EnvelopeKind::TransportDestination`] (CIRISEdge#406) — the PQ transport-
-///     attribution plane: the occurrence says how to SEAL, this SIGNED route says how
-///     to REACH + carries the ML-DSA-65 sig the #393 item-2 gate requires. Publish-own
-///     via the same `self_provider`. Without this coordinator the signed TD is published
-///     locally (`publish_self_transport_destination`) but never transferred, so a peer's
-///     item-2 gate reads "no hybrid-verified TransportDestination" → inbound frames
-///     drop unattributed (the item-2 dead end).
+/// The wire kinds this node runs an anti-entropy coordinator for, per admitted
+/// peer, in registration order (CIRISServer#646).
 ///
-/// Pure (no I/O) so both the compose boot path and the agent-embedded delivery
-/// controller share ONE assembly, and it is unit-testable without an engine.
+/// Until 0.5.218 this was SIX of persist v48's seventeen kinds, and the missing
+/// structural planes included rows the server itself writes on every roster
+/// change — a household (`Family`), a member leaving it
+/// (`FamilyMembershipRevocation`), a community growing
+/// (`CommunityMembershipWidening`), a device released
+/// (`IdentityOccurrenceRevocation`), a key revoked (`Revocation`). Each was
+/// admitted locally, `kick_replication` fired (§1 rule 7 of
+/// FSD/ROSTER_AND_DRIVE_CRUD.md), and the kick found no coordinator for the
+/// kind: the row stayed on the node that wrote it.
+///
+/// Every kind here is `Transferability::StructuralPlane` in persist's
+/// `consent_transferability` except `Attestation` (the one `Consentable`
+/// plane), so none of them needs a consent-object change: naming a structural
+/// kind in a grant's `payload.kinds` is REFUSED by persist. See
+/// [`NOT_REPLICATED_KINDS`] for the kinds deliberately left out and why, and
+/// `every_envelope_kind_is_routed_or_excluded_by_name` for the gate that keeps
+/// the two lists a partition of `EnvelopeKind::ALL`.
+///
+/// LOAD (the 2-vCPU canonical with 20+ peers): twelve kinds is twelve
+/// coordinators per peer, all on edge's ONE scheduler cadence (30 s,
+/// `SchedulerConfig::cadence`). Edge v31.0.0 has no per-kind cadence and no
+/// kick-only coordinator — a coordinator is scheduled or it does not exist,
+/// and the only cadence lever is mesh-config relief, which lengthens EVERY
+/// kind at once (CIRISEdge#440). So the six rarely-written planes added here
+/// cost a round each per tick even when empty. An empty round is a Summary of
+/// an indexed empty listing and one round-trip; the one non-trivial listing is
+/// `Revocation`, which edge fans out per cohort member (bridge
+/// `list_revocations`, one permit per member read). Correctness wins until edge
+/// offers a per-kind cadence or kick-only rounds; the operator's relief stays
+/// the brake.
+pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] = {
+    use ciris_edge::replication::EnvelopeKind as K;
+    [
+        // capacity:* / trace out, health:liveness in — the one Consentable
+        // plane. `key_grant:*` sets ride THIS plane (see `KeyGrant` in the
+        // exclusions).
+        K::Attestation,
+        // #144 / CIRISEdge#257 — the KERI publish-own key plane (verification
+        // + transport identity).
+        K::Key,
+        // CIRISEdge#305 — the KEX plane: the occurrence carries the
+        // content-tier `encryption_pubkeys` (x25519 + ML-KEM-768) that
+        // `resolve_peer_kex_pubkeys` reads. Without it a peer's enc keys never
+        // reach the directory, sealing to it resolves `None`: 0 content delivery.
+        K::IdentityOccurrence,
+        // CIRISEdge#406 — the PQ transport-attribution plane: paired with the
+        // publish-own `self_provider`, this offers THIS node's own SIGNED
+        // transport-dest (put via `publish_self_transport_destination`) so a
+        // peer's #393 item-2 attribution gate is satisfiable. Without a round
+        // for this kind the signed TD is published locally but never
+        // transferred (the item-2 dead end).
+        K::TransportDestination,
+        // THE COMMUNITY PLANE — the roster. A `cohort_scope: community` row is
+        // readable only by members, and the receiving node decides membership
+        // from ITS roster. Without this round the far side has no community to
+        // be a member OF, and one-sided initiation cannot work at all.
+        K::Community,
+        // Its REMOVAL primitive, wired with it deliberately: the roster is
+        // append-only, effective membership is `admitted AND NOT revoked`, so
+        // admissions without revocations replicate a roster that can only GROW
+        // — a removed member keeps passing `require_member` on the far side.
+        K::CommunityMembershipRevocation,
+        // ── CIRISServer#646 (0.5.218) — planes the server wrote and never
+        //    routed. Appended so the six above keep their order. ──
+        //
+        // persist v48 (#860): the roster's APPEND plane, the revocation's
+        // mirror. Adding a member to a room writes one (`communities.rs`,
+        // `put_community_membership_widening`); without this round a member
+        // added after first contact exists only on the node that added them,
+        // and the fold diverges per node (the `CommunityRosterFork` class the
+        // plane replaced).
+        K::CommunityMembershipWidening,
+        // The household roster (`family_api.rs` → `put_family`). Without it a
+        // household created on one device never reaches another, so a
+        // `cohort_scope: family` row sealed there has no family to be a member
+        // of anywhere else (CIRISServer#647's rung).
+        K::Family,
+        // A household member removed / leaving / a family dissolved
+        // (`family_api.rs` → `put_family_membership_revocation`). Same argument
+        // as `CommunityMembershipRevocation`: without it a removed member stays
+        // a member on every peer.
+        K::FamilyMembershipRevocation,
+        // A device released from the owner's self (`auth/occurrence.rs` →
+        // `put_identity_occurrence_revocation`). Without it a released device
+        // is still one of the owner's occurrences on every OTHER device, and
+        // keeps being sent the owner's `self` rows.
+        K::IdentityOccurrenceRevocation,
+        // Key-level revocation (`admin_ops.rs` `put_revocation_for`). A
+        // revocation that stays on the node that wrote it protects nobody:
+        // every peer keeps admitting the revoked key's new rows. Edge serves it
+        // at `Projection::Global`.
+        K::Revocation,
+        // A signed H3 rough-only location claim (`location.rs`
+        // `mint_location_proof`). A GEOGRAPHIC community admits a member on
+        // `member_in_geographic_constraint`, which reads the proof from the
+        // EVALUATING node's directory, so the proof must reach every node that
+        // holds the room. Edge advertises it at `cohort` only.
+        K::LocationProof,
+        // ── persist v49.0.0 / edge v32 (0.5.218) — kinds 18 and 19. ──
+        //
+        // #910: the HOUSEHOLD roster's append plane, the family twin of
+        // `CommunityMembershipWidening`. A member added after a family was
+        // created now travels as its own signed row; without this round the
+        // grown roster exists only on the node that added them, and a device
+        // of that member never sees the household (the devices ladder's
+        // `family_on_b` rung, and the reason it was XFAIL on #910).
+        K::FamilyMembershipWidening,
+        // #912: CC 2 `listed` — a member's OWN signed choice to appear in a
+        // room's enumerable roster. It is the member's row about themselves;
+        // without this round their choice stays on their node and every other
+        // member renders a roster that disagrees with it.
+        K::CommunityMembershipListing,
+    ]
+};
+
+/// The wire kinds this node deliberately runs NO coordinator for, each with its
+/// reason, so an exclusion is a decision someone can read and revisit rather
+/// than an omission (CIRISServer#646). `REPLICATED_KINDS ∪ NOT_REPLICATED_KINDS`
+/// must be exactly `EnvelopeKind::ALL`: a kind persist and edge append later is
+/// in NEITHER list, and `every_envelope_kind_is_routed_or_excluded_by_name`
+/// goes red until someone decides.
+///
+/// Read only by that gate: it is a decision RECORD, which is why it lives here
+/// beside the list it partitions rather than inside the test.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 5] = {
+    use ciris_edge::replication::EnvelopeKind as K;
+    [
+        (
+            K::KeyGrant,
+            "rides the Attestation plane: persist emits a key_grant set as an attestation \
+             row (`key_grant:epoch:v1` / `key_grant:content:v1`) and edge routes it by \
+             prefix to `apply_replicated_key_grant`. Edge's advertise arm for KeyGrant is \
+             an empty list ('listing it under its own kind would offer every row twice'), \
+             so a KeyGrant coordinator would run empty rounds forever",
+        ),
+        (
+            K::AccordQuorumEvidence,
+            "no producer in this server: nothing here calls `put_accord_proposal` (the \
+             accord's partials ride the Attestation plane as `accord:*` rows, under edge's \
+             accord relay gate), and the plane is cursor-served (`CursorPull`, never \
+             advertised), so a coordinator per peer would pull an empty cursor every tick. \
+             Route it when a host assembles accord evidence bundles",
+        ),
+        (
+            K::Organization,
+            "operational-data plane (CIRISRegistry): this server builds edge without \
+             `OperationalProviders`, so edge refuses every delivered row TERMINALLY \
+             ('operational-kind admission is opted out', CIRISEdge#544); a coordinator \
+             would pull rows only to refuse them, and the server writes none",
+        ),
+        (
+            K::OrgMembership,
+            "operational-data plane (CIRISRegistry): as Organization, no \
+             `OperationalProviders`, so every delivered row is refused terminally, and the \
+             server writes none",
+        ),
+        (
+            K::PartnerRecord,
+            "operational-data plane (CIRISRegistry): as Organization, no \
+             `OperationalProviders`, so every delivered row is refused terminally, and the \
+             server writes none",
+        ),
+    ]
+};
+
+/// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
+/// admitted peer `key_id`s: one coordinator per `(peer, kind)` for every kind in
+/// [`REPLICATED_KINDS`], peer-major, in that list's order.
+///
+/// Pure (no I/O) so the compose boot path, the agent-embedded delivery
+/// controller and `replication_reconcile`'s hot-add share ONE assembly, and it
+/// is unit-testable without an engine.
 pub(crate) fn build_replication_peers(
     desired: &[String],
 ) -> Vec<ciris_edge::replication::ReplicationPeer> {
-    use ciris_edge::replication::{EnvelopeKind, ReplicationPeer};
+    use ciris_edge::replication::ReplicationPeer;
     desired
         .iter()
         .flat_map(|p| {
-            [
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Attestation,
-                },
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Key,
-                },
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::IdentityOccurrence,
-                },
-                // CIRISEdge#406 — the TransportDestination plane: paired with the
-                // publish-own `self_provider`, this offers THIS node's own SIGNED
-                // transport-dest (put via `publish_self_transport_destination`) so a
-                // peer receives it and its #393 item-2 PQ attribution gate is
-                // satisfiable. Without a round for this kind the signed TD is
-                // published locally but never transferred (the item-2 dead end).
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::TransportDestination,
-                },
-                // THE COMMUNITY PLANE — the roster, and its removals.
-                //
-                // A `cohort_scope: community` row is only readable by members,
-                // and membership is decided by the ROSTER: the receiving node
-                // runs the same §4.3 predicate we do, resolving the caller's
-                // communities from `federation_communities`. Without a round for
-                // this kind the roster never crosses, so the far side has no
-                // community to be a member OF — every message it receives is
-                // scoped to a cohort it cannot see, and one-sided initiation
-                // (the common case: one person opens the chat) cannot work at
-                // all. The room existed on exactly one node.
-                //
-                // Structural plane, so this needs no consent-object change:
-                // `consent_transferability(Community)` is `StructuralPlane`, not
-                // `Consentable` — naming it in a grant's `payload.kinds` is
-                // REFUSED. It rides beside Key / IdentityOccurrence /
-                // TransportDestination, which are structural for the same reason.
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Community,
-                },
-                // Its REMOVAL primitive, wired with it deliberately. The roster
-                // is append-only; effective membership is
-                // `admitted AND NOT revoked`, and `active_community_members`
-                // composes the two. Shipping the admissions without the
-                // revocations would replicate a roster that can only ever GROW
-                // on the far side — a removed member would keep passing
-                // `require_member` there forever, which is the failure the
-                // forward-secrecy primitive exists to prevent.
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::CommunityMembershipRevocation,
-                },
-            ]
+            REPLICATED_KINDS.iter().map(move |kind| ReplicationPeer {
+                peer_key_id: p.clone(),
+                kind: *kind,
+            })
         })
         .collect()
 }
