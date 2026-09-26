@@ -85,6 +85,54 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 /// act. Reuses the same `resolve_bearer → SessionCaller → check` spine as
 /// `api_keys::require_manage_users`. Returns the verified caller, or a
 /// `401`/`403`/`503` response to short-circuit.
+/// `GET /v1/federation/peering` — every LIVE replication grant this node
+/// holds, as receipts (CIRISServer#680).
+///
+/// Without it the app could withdraw only a grant whose id it received from a
+/// `POST /v1/federation/peering` in the same session: a grant made yesterday,
+/// on another device or before a restart could not be found, so it could not
+/// be withdrawn — consent met on paper and missed in practice (CC 1.5). The
+/// list is the same revocation-folded read `POST …/peering/revoke` checks
+/// against, owner-authored rows first, so every row listed as `withdrawable`
+/// is one revoke will accept.
+async fn list_peering(State(st): State<FederationAdminState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &st.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let owner = st.engine.owner_of(&st.node_key_id).await.ok().flatten();
+    let rows: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|g| {
+            let mut receipt = crate::peer::grant_receipt(g);
+            if let Some(obj) = receipt.as_object_mut() {
+                obj.insert("peer_key_ids".into(), serde_json::json!(g.subject_key_ids));
+                // Revoke withdraws only a grant the OWNER signed (a pre-0.5.211
+                // machine-authored grant is refused by name there).
+                obj.insert(
+                    "withdrawable".into(),
+                    serde_json::json!(owner.as_deref() == Some(g.attesting_key_id.as_str())),
+                );
+            }
+            receipt
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "node_key_id": st.node_key_id, "grants": rows })),
+    )
+        .into_response()
+}
+
 async fn require_owner(
     st: &FederationAdminState,
     headers: &HeaderMap,
@@ -900,7 +948,10 @@ pub fn router(
             "/v1/federation/self-key-record",
             axum::routing::get(self_key_record),
         )
-        .route("/v1/federation/peering", axum::routing::post(peering))
+        .route(
+            "/v1/federation/peering",
+            axum::routing::post(peering).get(list_peering),
+        )
         // The explicit consent act — author a consent:replication grant at an
         // already-admitted peer (the agent wizard calls this on owner opt-in).
         .route("/v1/federation/consent", axum::routing::post(consent))
