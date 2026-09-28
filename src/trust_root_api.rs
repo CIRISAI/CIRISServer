@@ -79,6 +79,17 @@ struct RootEntry {
     verdict: serde_json::Value,
 }
 
+/// The documented wire token for a root's kind: `family` or `key`. persist's
+/// enum serializes as `Family` / `Key` (no `rename_all`), which is not what
+/// this route's contract says (CIRISServer#681).
+fn root_kind_token(kind: ciris_persist::federation::trust_root::RootKind) -> &'static str {
+    use ciris_persist::federation::trust_root::RootKind;
+    match kind {
+        RootKind::Key => "key",
+        RootKind::Family => "family",
+    }
+}
+
 /// `GET /v1/trust-root` — what is installed, and what posture the node is in.
 async fn list_roots(State(st): State<TrustRootState>) -> Response {
     let posture = st.engine.genesis_posture().await;
@@ -95,18 +106,19 @@ async fn list_roots(State(st): State<TrustRootState>) -> Response {
         .await;
         match verdict {
             Ok(v) => {
+                // TYPED fields, not JSON lookups (CIRISServer#681): the old
+                // read asked the serialized verdict for `user_accepts`, a field
+                // persist's `TrustRootVerdict` never had, so every root —
+                // including the one this node is entrenched under — read
+                // `accepted: false`. The acceptance fact is `edge_exists`: a
+                // live `delegates_to(node → root)` trust edge.
+                let accepted = v.edge_exists;
+                let root_kind = root_kind_token(v.root_kind);
                 let json = serde_json::to_value(&v).unwrap_or(serde_json::Value::Null);
                 roots.push(RootEntry {
                     root_key_id: root_ref,
-                    root_kind: json
-                        .get("root_kind")
-                        .and_then(|k| k.as_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    accepted: json
-                        .get("user_accepts")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                    root_kind: root_kind.to_owned(),
+                    accepted,
                     verdict: json,
                 });
             }

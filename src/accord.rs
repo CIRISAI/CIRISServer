@@ -2306,13 +2306,19 @@ async fn family_supersede(
     // tells an operator what is forbidden and not what to DO. On a mesh with no
     // support channel the refusal is the whole interface, so it names the remedy.
     if new.family.family_key_id == HUMANITY_ACCORD_FAMILY_KEY_ID {
-        return err(
+        // THE REAL ROUTES (CIRISServer#682): the remedy used to name
+        // `POST /v1/accord/provision`, which does not exist, so the only text an
+        // operator sees pointed nowhere. The re-mint is remint-source → propose
+        // → cosign (`accord_provision.rs`), then an import on each node.
+        return crate::auth::refusal::refuse(
             StatusCode::CONFLICT,
+            "accord.family_not_supersedable",
             "the constitutional accord family cannot be superseded — it is established by the \
              genesis ceremony and by nothing else (CIRISPersist#648), and that single door is \
              what stops one signature chartering the root of the mesh. To change a seat, run the \
              ceremony again with the roster you want and adopt the bundle it produces: \
-             POST /v1/accord/provision, then POST /v1/trust-root/import on each node.",
+             POST /v1/accord/genesis/remint-source, then /v1/accord/genesis/propose and \
+             /v1/accord/genesis/cosign, then POST /v1/trust-root/import on each node.",
         );
     }
 
@@ -2634,7 +2640,12 @@ pub fn router_with_halt(engine: Arc<Engine>, halt: AccordHalt) -> Router {
             "/v1/accord/canonical/address",
             axum::routing::post(update_canonical_address),
         )
-        // family membership change — supersede / reconstitute (2/3-authorized)
+        // family membership change — supersede / reconstitute (2/3-authorized).
+        // RESERVED (CIRISServer#682): both are hardcoded to the accord family,
+        // which persist establishes by the genesis ceremony alone, so supersede
+        // always refuses it by name (`accord.family_not_supersedable`, naming the
+        // re-mint routes). Kept for a future non-accord constitutional family
+        // rather than removed: a client that calls them gets the remedy, not a 404.
         .route(
             "/v1/accord/family/change/envelope",
             axum::routing::post(family_change_envelope),

@@ -789,6 +789,13 @@ async fn list_and_read_are_member_only_and_include_pair_rooms() {
             .contains(&json!(a.owner.key_id)),
         "a steward-bound founder is a zero-hop appointed moderator: {v}"
     );
+    // CIRISServer#688: a readable chain says so, and the row carries its
+    // envelope, signed by the founder who wrote the record.
+    assert_eq!(v["moderators_readable"], true, "{v}");
+    assert_eq!(v["envelope"]["subject"], json!(room), "{v}");
+    assert_eq!(v["envelope"]["attester"], json!(a.owner.key_id), "{v}");
+    assert_eq!(v["envelope"]["cohort_scope"], v["tier"], "{v}");
+    assert!(v["envelope"]["persist_row_hash"].as_str().is_some(), "{v}");
 
     // THE OUTSIDER cannot find out it is there: same 404 as a room that
     // does not exist, on read and on every write.

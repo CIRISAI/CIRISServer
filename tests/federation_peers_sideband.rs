@@ -472,3 +472,129 @@ async fn unauthorized_and_unknown_peer_are_rejected() {
         .expect("PUT trust (bad vocab)");
     assert_eq!(bad_vocab.status(), 400, "unknown trust token ⇒ 400");
 }
+
+/// CIRISServer#684: a mismatch is recorded AS a mismatch, the peer list carries
+/// verification state per row, and a written name reaches the row.
+#[tokio::test]
+async fn a_mismatch_is_on_record_and_the_list_shows_it() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    seed_peer(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine)).await;
+    let client = reqwest::Client::new();
+    let sas = format!("{base}/v1/federation/peers/{PEER_KEY_ID}/sas");
+    let put = |body: serde_json::Value| client.put(&sas).bearer_auth(&owner).json(&body).send();
+    let row = || async {
+        let list: serde_json::Value = client
+            .get(format!("{base}/v1/federation/peers"))
+            .send()
+            .await
+            .expect("GET peers")
+            .json()
+            .await
+            .expect("peers json");
+        let rows = list
+            .as_array()
+            .cloned()
+            .or_else(|| list["peers"].as_array().cloned())
+            .or_else(|| list["data"].as_array().cloned())
+            .unwrap_or_else(|| panic!("a peer list: {list}"));
+        rows.into_iter()
+            .find(|p| p["key_id"] == PEER_KEY_ID)
+            .unwrap_or_else(|| panic!("the seeded peer is listed: {list}"))
+    };
+
+    // Never checked: the row says so with nulls, not `false`.
+    let p = row().await;
+    assert!(
+        p["sas_verified"].is_null() && p["sas_result"].is_null(),
+        "{p}"
+    );
+
+    // A mismatch.
+    let resp = put(serde_json::json!({ "result": "mismatch" }))
+        .await
+        .expect("PUT");
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(json["data"]["sas_result"], "mismatch");
+    assert_eq!(json["data"]["verified"], false);
+    assert!(json["data"]["verified_at"].is_null());
+    assert!(
+        json["data"]["sas_result_at"].as_str().is_some(),
+        "a mismatch is stamped"
+    );
+    let detail: serde_json::Value = client
+        .get(&sas)
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(detail["data"]["sas_result"], "mismatch");
+    let p = row().await;
+    assert_eq!(p["sas_result"], "mismatch", "{p}");
+    assert_eq!(p["sas_verified"], false, "{p}");
+
+    // A match: the row carries it without a detail call.
+    put(serde_json::json!({ "result": "match" }))
+        .await
+        .expect("PUT");
+    let p = row().await;
+    assert_eq!(p["sas_result"], "match", "{p}");
+    assert_eq!(p["sas_verified"], true, "{p}");
+    assert!(p["verified_at"].as_str().is_some(), "{p}");
+
+    // The original boolean still works: false is a withdrawal, not a mismatch.
+    put(serde_json::json!({ "verified": false }))
+        .await
+        .expect("PUT");
+    let p = row().await;
+    assert_eq!(p["sas_result"], "withdrawn", "{p}");
+    assert!(p["verified_at"].is_null(), "{p}");
+
+    // Bad vocabulary, and both forms at once, refuse.
+    for body in [
+        serde_json::json!({ "result": "maybe" }),
+        serde_json::json!({ "result": "match", "verified": true }),
+        serde_json::json!({}),
+    ] {
+        let resp = put(body.clone()).await.expect("PUT");
+        assert_eq!(resp.status(), 400, "{body}");
+    }
+
+    // A written name reaches the row, and an appearance-only write keeps it.
+    let appearance = format!("{base}/v1/federation/peers/{PEER_KEY_ID}/appearance");
+    let resp = client
+        .put(&appearance)
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "alias_override": "  Bob's laptop " }))
+        .send()
+        .await
+        .expect("PUT name");
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(json["data"]["alias_override"], "Bob's laptop");
+    client
+        .put(&appearance)
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "appearance": { "icon": "laptop" } }))
+        .send()
+        .await
+        .expect("PUT appearance");
+    let p = row().await;
+    assert_eq!(p["alias_override"], "Bob's laptop", "{p}");
+    assert_eq!(p["appearance"]["icon"], "laptop", "{p}");
+    // An empty name clears it.
+    client
+        .put(&appearance)
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "alias_override": "" }))
+        .send()
+        .await
+        .expect("PUT clear");
+    assert!(row().await["alias_override"].is_null());
+}

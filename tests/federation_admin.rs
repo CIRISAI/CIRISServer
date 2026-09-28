@@ -398,6 +398,50 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
         "prefixes echoed sorted + deduped + empty-dropped"
     );
 
+    // CIRISServer#680: the grant is FINDABLE later — a fresh read lists it, so
+    // it can be withdrawn from any session, not only the one that made it.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/federation/peering"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET peering")
+        .json()
+        .await
+        .expect("peering list json");
+    let row = listed["grants"]
+        .as_array()
+        .expect("grants")
+        .iter()
+        .find(|g| g["attestation_id"] == json["grant_attestation_id"])
+        .unwrap_or_else(|| panic!("the new grant is listed: {listed}"))
+        .clone();
+    assert_eq!(
+        row["peer_key_ids"],
+        serde_json::json!([PEER_KEY_ID]),
+        "{row}"
+    );
+    // `withdrawable` is exactly "the OWNER signed it" — the rule revoke applies.
+    // Here the owner's pen is not on this host, so the node authored the grant
+    // and it lists as not withdrawable from the app (revoke would refuse it).
+    let node = node_a_key_id(&engine).await;
+    let owner_key = engine
+        .owner_of(&node)
+        .await
+        .expect("owner_of")
+        .expect("owned");
+    assert_eq!(
+        row["withdrawable"],
+        serde_json::json!(row["attesting_key_id"] == owner_key.as_str()),
+        "{row}"
+    );
+    let anon = client
+        .get(format!("{base}/v1/federation/peering"))
+        .send()
+        .await
+        .expect("GET peering without a session");
+    assert_eq!(anon.status(), 401, "the grant list is the owner's");
+
     // ── The peer key is ADMITTED into this node's federation directory ────────
     let peer_key = engine
         .federation_directory()

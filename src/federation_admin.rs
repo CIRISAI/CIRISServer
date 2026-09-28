@@ -85,6 +85,54 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 /// act. Reuses the same `resolve_bearer → SessionCaller → check` spine as
 /// `api_keys::require_manage_users`. Returns the verified caller, or a
 /// `401`/`403`/`503` response to short-circuit.
+/// `GET /v1/federation/peering` — every LIVE replication grant this node
+/// holds, as receipts (CIRISServer#680).
+///
+/// Without it the app could withdraw only a grant whose id it received from a
+/// `POST /v1/federation/peering` in the same session: a grant made yesterday,
+/// on another device or before a restart could not be found, so it could not
+/// be withdrawn — consent met on paper and missed in practice (CC 1.5). The
+/// list is the same revocation-folded read `POST …/peering/revoke` checks
+/// against, owner-authored rows first, so every row listed as `withdrawable`
+/// is one revoke will accept.
+async fn list_peering(State(st): State<FederationAdminState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &st.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let owner = st.engine.owner_of(&st.node_key_id).await.ok().flatten();
+    let rows: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|g| {
+            let mut receipt = crate::peer::grant_receipt(g);
+            if let Some(obj) = receipt.as_object_mut() {
+                obj.insert("peer_key_ids".into(), serde_json::json!(g.subject_key_ids));
+                // Revoke withdraws only a grant the OWNER signed (a pre-0.5.211
+                // machine-authored grant is refused by name there).
+                obj.insert(
+                    "withdrawable".into(),
+                    serde_json::json!(owner.as_deref() == Some(g.attesting_key_id.as_str())),
+                );
+            }
+            receipt
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "node_key_id": st.node_key_id, "grants": rows })),
+    )
+        .into_response()
+}
+
 async fn require_owner(
     st: &FederationAdminState,
     headers: &HeaderMap,
@@ -468,7 +516,8 @@ struct ConsentResponse {
 /// (raw bytes), `policy_blob` x2, `HardCaseEvent.detail`), and every erasure
 /// primitive persist exposes is keyed by a ROLE — agent, actor, content_id,
 /// tier — never by OBJECT. There is no `(table, row_id)` erasure at all.
-/// Filed as CIRISPersist#573. Until that lands, the only lever for a payload
+/// Filed as CIRISPersist#573 (closed; the live gap is CIRISPersist#914). Until
+/// that lands, the only lever for a payload
 /// outside the trace corpus is `evict_actor` on the whole key, which is the
 /// CA-distrust problem: a tool so blunt it never gets pulled.
 ///
@@ -533,6 +582,7 @@ async fn erase_agent_traces(
                 "ERASURE performed (GDPR Art. 17 / DSAR) — traces hard-deleted, detection \
                  linkage tombstoned, hard_case:trace_erasure emitted by persist"
             );
+            let audit_event_id = erasure_audit_event_id(&st.engine, &req.agent_id_hash, &sum).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -542,9 +592,11 @@ async fn erase_agent_traces(
                     "trace_llm_calls": sum.trace_llm_calls,
                     "detection_events_tombstoned": sum.detection_events_tombstoned,
                     "erased_at": sum.erased_at.to_rfc3339(),
-                    "scope_note": "traces only — payloads in attestation/registration envelopes, \
-                                   attestation_evidence, policy_blob or hard_case detail are NOT \
-                                   reached by any erasure primitive (CIRISPersist#573)",
+                    "audit_event_id": audit_event_id,
+                    "scope_note": "traces only — nothing minted today outside the trace corpus \
+                                   (attestation/registration envelopes, attestation_evidence, \
+                                   policy_blob, hard_case detail) is reached by any erasure \
+                                   primitive yet (CIRISPersist#914)",
                 })),
             )
                 .into_response()
@@ -554,6 +606,35 @@ async fn erase_agent_traces(
             format!("erasure failed: {e}"),
         ),
     }
+}
+
+/// **The audit row persist recorded for a trace erasure**, by its own
+/// coordinates (CIRISServer#685): kind `trace_erasure`, target the agent hash,
+/// emitted AT the erasure instant. Returned so a client can point the person at
+/// the record of their erasure. `None` when nothing was erased (a repeat call
+/// records no new row) or the backend cannot list hard cases.
+pub async fn erasure_audit_event_id(
+    engine: &Engine,
+    agent_id_hash: &str,
+    sum: &ciris_persist::store::types::ErasureSummary,
+) -> Option<String> {
+    if sum.trace_events + sum.trace_llm_calls + sum.detection_events_tombstoned == 0 {
+        return None;
+    }
+    let filter = ciris_persist::federation::hard_case::HardCaseFilter {
+        kind: Some(ciris_persist::federation::hard_case::kind::TRACE_ERASURE.to_owned()),
+        since: Some(sum.erased_at),
+    };
+    engine
+        .federation_directory()
+        .list_hard_case_events(filter)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|e| {
+            e.target_key_id.as_deref() == Some(agent_id_hash) && e.emitted_at == sum.erased_at
+        })
+        .map(|e| e.event_id)
 }
 
 /// `POST /v1/federation/consent` — author THIS node's directed
@@ -900,7 +981,10 @@ pub fn router(
             "/v1/federation/self-key-record",
             axum::routing::get(self_key_record),
         )
-        .route("/v1/federation/peering", axum::routing::post(peering))
+        .route(
+            "/v1/federation/peering",
+            axum::routing::post(peering).get(list_peering),
+        )
         // The explicit consent act — author a consent:replication grant at an
         // already-admitted peer (the agent wizard calls this on owner opt-in).
         .route("/v1/federation/consent", axum::routing::post(consent))

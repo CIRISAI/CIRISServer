@@ -25,18 +25,22 @@
 //!     LocalPeerState }` (the agent's `SuccessResponse(data=updated)` envelope;
 //!     the client's `decodeFederationEnvelope` unwraps `data`).
 //!   - `PUT /v1/federation/peers/{key_id}/appearance` (OWNER) — body
-//!     `{ "appearance": { "icon"?, "fg_color"?, "bg_color"? } }` → same envelope.
+//!     `{ "appearance"?: { "icon"?, "fg_color"?, "bg_color"? },
+//!     "alias_override"?: "name" }` → same envelope. `alias_override` is the
+//!     owner's local name for the peer (CIRISServer#684); `""` clears it.
 //!   - `GET /v1/federation/peers/{key_id}/sas` → `{ "data": { "key_id",
 //!     "words": [5 BIP39 words], "digits": "6 digits" } }` — the Signal-style
 //!     Short Authentication String, derived EXACTLY as the agent's Edge PyO3
 //!     `peer_sas` does (`ciris_edge::sas`, protocol constant
 //!     `ciris-edge::peer-sas::v1`), so both sides of a call read the same words.
 //!   - `PUT /v1/federation/peers/{key_id}/sas` (OWNER) — body
-//!     `{ "verified": bool }` records the out-of-band SAS comparison outcome
+//!     `{ "result": "match"|"mismatch"|"withdrawn" }` (CIRISServer#684; the
+//!     original `{ "verified": bool }` still works) records the out-of-band SAS comparison outcome
 //!     (the "SAS verification state" leg of CIRISServer#261; the agent had no
 //!     PUT — this is the server-native completion of the T-E5 "promote after
 //!     SAS verification" flow). Responds `{ "data": { "key_id", "verified",
-//!     "verified_at" } }`.
+//!     "verified_at", "sas_result", "sas_result_at" } }`. The peer rows carry
+//!     the same four fields.
 //!
 //! `LocalPeerState` JSON: `key_id`, `pubkey_ed25519_base64`, `canonical` (bool),
 //! `trust` ("trusted"|…), `first_seen` (RFC3339), `appearance` / `alias_override`
@@ -243,6 +247,21 @@ struct PeerSideband {
     /// RFC3339 timestamp of the most recent SAS verification write.
     #[serde(skip_serializing_if = "Option::is_none")]
     sas_verified_at: Option<String>,
+    /// The last comparison OUTCOME: `match` | `mismatch` | `withdrawn`
+    /// (CIRISServer#684). `sas_verified:false` alone could not tell a mismatch,
+    /// which is a safety event (a possible key substitution), from a withdrawn
+    /// verification or one that was never done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sas_result: Option<String>,
+    /// RFC3339 timestamp of that outcome. Every result is stamped, a mismatch
+    /// included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sas_result_at: Option<String>,
+    /// The owner's local name for this peer (CIRISServer#684). The row used to
+    /// project `alias_override: null` whatever was written, so every peer was
+    /// titled by its key id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alias_override: Option<String>,
 }
 
 /// The agent's `PeerAppearance` (canonical_peer.py) — `extra="forbid"` there,
@@ -350,6 +369,13 @@ struct LocalPeerState {
     alias_override: Option<String>,
     notes: Option<String>,
     last_seen: Option<String>,
+    /// SAS verification state on the row itself (CIRISServer#684), so a "who is
+    /// here" list can mark checked keys without one detail call per peer.
+    /// Same values `GET …/sas` returns.
+    sas_verified: Option<bool>,
+    verified_at: Option<String>,
+    sas_result: Option<String>,
+    sas_result_at: Option<String>,
 }
 
 /// `true` if the key is a canonical / founding bootstrap server, **and the quorum
@@ -413,9 +439,13 @@ async fn to_peer(
             .unwrap_or_else(|| "trusted".to_string()),
         first_seen: rec.valid_from.to_rfc3339(),
         appearance: sideband.and_then(|s| s.appearance.clone()),
-        alias_override: None,
+        alias_override: sideband.and_then(|s| s.alias_override.clone()),
         notes: None,
         last_seen: None,
+        sas_verified: sideband.and_then(|s| s.sas_verified),
+        verified_at: sideband.and_then(|s| s.sas_verified_at.clone()),
+        sas_result: sideband.and_then(|s| s.sas_result.clone()),
+        sas_result_at: sideband.and_then(|s| s.sas_result_at.clone()),
     }
 }
 
@@ -479,10 +509,14 @@ async fn collect_peers(st: &PeersState) -> Result<Vec<LocalPeerState>, Response>
                         .unwrap_or_else(|| "unknown".to_string()),
                     first_seen: a.first_seen_at.to_rfc3339(),
                     appearance: sideband.and_then(|s| s.appearance.clone()),
-                    alias_override: None,
+                    alias_override: sideband.and_then(|s| s.alias_override.clone()),
                     notes: None,
                     // The liveness signal an admitted row does not carry.
                     last_seen: Some(a.last_seen_at.to_rfc3339()),
+                    sas_verified: sideband.and_then(|s| s.sas_verified),
+                    verified_at: sideband.and_then(|s| s.sas_verified_at.clone()),
+                    sas_result: sideband.and_then(|s| s.sas_result.clone()),
+                    sas_result_at: sideband.and_then(|s| s.sas_result_at.clone()),
                 });
             }
         }
@@ -669,20 +703,35 @@ struct TrustUpdateRequest {
 }
 
 /// Body for `PUT /v1/federation/peers/{key_id}/appearance` — the agent's
-/// `FederationPeerAppearanceUpdateRequest`.
+/// `FederationPeerAppearanceUpdateRequest`, plus the local name
+/// (`alias_override`, CIRISServer#684). Either may be sent alone; an empty
+/// `alias_override` clears the name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppearanceUpdateRequest {
-    appearance: PeerAppearance,
+    #[serde(default)]
+    appearance: Option<PeerAppearance>,
+    #[serde(default)]
+    alias_override: Option<String>,
 }
 
 /// Body for `PUT /v1/federation/peers/{key_id}/sas` — server-native (#261);
 /// records the operator's out-of-band SAS word comparison outcome.
+///
+/// `result` (`match` | `mismatch` | `withdrawn`, CIRISServer#684) is the full
+/// form. `verified` is the original boolean, kept for existing clients:
+/// `true` is `match`, `false` is `withdrawn`. Send exactly one.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SasUpdateRequest {
-    verified: bool,
+    #[serde(default)]
+    verified: Option<bool>,
+    #[serde(default)]
+    result: Option<String>,
 }
+
+/// The SAS outcome vocabulary (CIRISServer#684).
+const SAS_RESULTS: &[&str] = &["match", "mismatch", "withdrawn"];
 
 /// Shared prologue for the three sideband PUTs: gates (serve-only floor +
 /// owner session), then the peer-existence check. Returns the caller and the
@@ -768,7 +817,19 @@ async fn set_peer_appearance(
         Ok(sb) => sb.unwrap_or_default(),
         Err(resp) => return resp,
     };
-    sideband.appearance = Some(req.appearance);
+    if req.appearance.is_none() && req.alias_override.is_none() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "bad request: send `appearance`, `alias_override`, or both",
+        );
+    }
+    if let Some(appearance) = req.appearance {
+        sideband.appearance = Some(appearance);
+    }
+    if let Some(name) = req.alias_override {
+        let name = name.trim();
+        sideband.alias_override = (!name.is_empty()).then(|| name.to_string());
+    }
     if let Err(resp) = store_sideband(&st, &key_id, &sideband, &caller.wa_id).await {
         return resp;
     }
@@ -782,10 +843,11 @@ async fn set_peer_appearance(
 }
 
 /// `PUT /v1/federation/peers/{key_id}/sas` (OWNER) — record the out-of-band
-/// SAS verification outcome → `{ "data": { "key_id", "verified",
-/// "verified_at" } }`. `verified_at` stamps a `true` write and clears on
-/// `false` (an un-verify resets the record, it doesn't preserve a stale
-/// timestamp).
+/// SAS comparison outcome → `{ "data": { "key_id", "verified", "verified_at",
+/// "sas_result", "sas_result_at" } }`. `verified_at` stamps a `match` and
+/// clears on anything else (an un-verify doesn't preserve a stale timestamp);
+/// `sas_result_at` stamps every outcome, so a mismatch is on record with its
+/// time (CIRISServer#684).
 async fn set_peer_sas(
     State(st): State<PeersState>,
     Path(key_id): Path<String>,
@@ -804,8 +866,29 @@ async fn set_peer_sas(
         Ok(sb) => sb.unwrap_or_default(),
         Err(resp) => return resp,
     };
-    sideband.sas_verified = Some(req.verified);
-    sideband.sas_verified_at = req.verified.then(|| chrono::Utc::now().to_rfc3339());
+    let result = match (req.result, req.verified) {
+        (Some(r), None) if SAS_RESULTS.contains(&r.as_str()) => r,
+        (Some(r), None) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("result must be one of {}: got {r:?}", SAS_RESULTS.join("|")),
+            )
+        }
+        (None, Some(true)) => "match".to_string(),
+        (None, Some(false)) => "withdrawn".to_string(),
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad request: send exactly one of `result` or `verified`",
+            )
+        }
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let matched = result == "match";
+    sideband.sas_verified = Some(matched);
+    sideband.sas_verified_at = matched.then(|| now.clone());
+    sideband.sas_result = Some(result);
+    sideband.sas_result_at = Some(now);
     if let Err(resp) = store_sideband(&st, &key_id, &sideband, &caller.wa_id).await {
         return resp;
     }
@@ -816,6 +899,8 @@ async fn set_peer_sas(
                 "key_id": key_id,
                 "verified": sideband.sas_verified,
                 "verified_at": sideband.sas_verified_at,
+                "sas_result": sideband.sas_result,
+                "sas_result_at": sideband.sas_result_at,
             }
         })),
     )
@@ -878,6 +963,23 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
+    // WHICH TWO KEYS (CIRISServer#683). A code both sides can compare must be
+    // over the SAME pair on both sides. For a NODE peer that is {this node,
+    // that node}. For a PERSON (a contact) it is {my person, their person} —
+    // the pair a chat uses. Computing over this NODE's key and the contact's
+    // PERSON key gave Alice sas(nodeA, Bob) and Bob sas(nodeB, Alice): never
+    // equal, so an honest comparison always read as a mismatch.
+    let peer_is_person =
+        ciris_persist::federation::types::identity_type::parse_set(&rec.identity_type)
+            .contains(&ciris_persist::federation::types::identity_type::USER);
+    if peer_is_person {
+        let local_pub = match owner_ed25519(&st).await {
+            Ok(pk) => pk,
+            Err(r) => return r,
+        };
+        return sas_response(&st, &key_id, &local_pub, &peer_pub).await;
+    }
+
     // Local pubkey — the node's composed federation signer (Ed25519 half).
     let local_pub: [u8; 32] = match st.engine.signer().public_key().await {
         Ok(b) => match <[u8; 32]>::try_from(b.as_slice()) {
@@ -897,6 +999,68 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
+    sas_response(&st, &key_id, &local_pub, &peer_pub).await
+}
+
+/// This node's OWNER's Ed25519 key — the person side of a person-to-person
+/// code. A node with no owner has no person to compare as.
+async fn owner_ed25519(st: &PeersState) -> Result<[u8; 32], Response> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    let node = self_key_id(st).await?;
+    let owner = match st.engine.owner_of(&node).await {
+        Ok(Some(o)) => o,
+        Ok(None) => {
+            return Err(crate::auth::refusal::refuse(
+                StatusCode::CONFLICT,
+                "peers.sas_no_owner",
+                "this node has no owner, so there is no person to compare a code as — a \
+                 person-to-person code is computed over the two people's keys",
+            ))
+        }
+        Err(e) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("owner_of: {e}"),
+            ))
+        }
+    };
+    let rec = match st
+        .engine
+        .federation_directory()
+        .lookup_public_key(&owner)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("the owner's key {owner:?} is not in this directory"),
+            ))
+        }
+        Err(e) => return Err(err(StatusCode::SERVICE_UNAVAILABLE, &format!("store: {e}"))),
+    };
+    BASE64
+        .decode(&rec.pubkey_ed25519_base64)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .ok_or_else(|| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the owner's pubkey is not a 32-byte Ed25519 key",
+            )
+        })
+}
+
+/// The code over `(local_pub, peer_pub)` — `ciris_edge::sas` sorts the pair,
+/// so both sides of one pair derive the same words and digits.
+async fn sas_response(
+    st: &PeersState,
+    key_id: &str,
+    local_pub: &[u8; 32],
+    peer_pub: &[u8; 32],
+) -> Response {
+    let (local_pub, peer_pub) = (*local_pub, *peer_pub);
     let words = match ciris_edge::sas::peer_sas_words(
         &local_pub,
         &peer_pub,
@@ -919,7 +1083,7 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
-    let sideband = load_sideband(&st, &key_id).await.ok().flatten();
+    let sideband = load_sideband(st, key_id).await.ok().flatten();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -929,6 +1093,8 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
                 "digits": digits,
                 "verified": sideband.as_ref().and_then(|s| s.sas_verified),
                 "verified_at": sideband.as_ref().and_then(|s| s.sas_verified_at.clone()),
+                "sas_result": sideband.as_ref().and_then(|s| s.sas_result.clone()),
+                "sas_result_at": sideband.as_ref().and_then(|s| s.sas_result_at.clone()),
             }
         })),
     )

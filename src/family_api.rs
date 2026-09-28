@@ -406,7 +406,10 @@ impl Protocol {
             return Some(Self::FounderOnly);
         }
         let (m, n) = parse_quorum(stored)?;
-        (m >= 1 && m <= n && 2 * m > n).then_some(Self::Quorum { m, n })
+        // M is absolute (CC 4.4.3.4.2.1): a stored quorum stays valid when the
+        // roster grows past a majority of it (2/3 → 2/4 after an add). Only a
+        // DECLARED protocol must be a strict majority (`normalize_protocol`).
+        (m >= 1 && m <= n).then_some(Self::Quorum { m, n })
     }
 }
 
@@ -440,16 +443,20 @@ fn normalize_protocol(declared: Option<&str>, n: usize) -> Result<String, String
     }
 }
 
-/// Re-derive a quorum family's protocol when its roster moves from `n` to
-/// `new_n`, keeping the declared RATIO (so `quorum:3/3` stays unanimous as
-/// `4/4`) and never dropping below a strict majority.
-fn rescale(m: usize, n: usize, new_n: usize) -> String {
+/// A quorum family's protocol when its roster moves to `new_n` members: **M
+/// stays what the family declared** and N is updated as documentation (CC
+/// 4.4.3.4.2.1, normative: "The M in quorum:M/N is an absolute signature count,
+/// NOT a fraction that rebases with roster size … N is documentary";
+/// CIRISServer#686). persist v49's evaluator counts M the same way. The one
+/// adjustment: M is lowered to the roster size when the roster falls below it,
+/// because persist refuses `M > N` and a household that could never act again
+/// is a deadlock, not a rule. A family that wants M to grow with its roster
+/// declares `weighted:` (not offered here yet).
+fn carry_quorum(m: usize, new_n: usize) -> String {
     if new_n == 0 {
         return quorum_string(0, 0);
     }
-    let scaled = (m * new_n).div_ceil(n.max(1));
-    let m2 = scaled.max(strict_majority(new_n)).min(new_n);
-    quorum_string(m2, new_n)
+    quorum_string(m.clamp(1, new_n), new_n)
 }
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
@@ -1215,7 +1222,7 @@ async fn leave_inner(
     // A quorum family's record must keep N == roster, or every later quorum
     // check reads a seat that has left. Rewritten FIRST (by the leaver, whose
     // own act this is); the revocation below is what replicates the departure.
-    if let Protocol::Quorum { m, n } = protocol {
+    if let Protocol::Quorum { m, .. } = protocol {
         let remaining: Vec<FamilyMember> = loaded
             .family
             .members
@@ -1225,7 +1232,7 @@ async fn leave_inner(
             .collect();
         if !remaining.is_empty() {
             let mut next = loaded.family.clone();
-            next.consensus_protocol = rescale(m, n, remaining.len());
+            next.consensus_protocol = carry_quorum(m, remaining.len());
             next.members = remaining;
             let signed = match sign_family(&capsule, next).await {
                 Ok(s) => s,
@@ -1547,7 +1554,7 @@ async fn change_envelope(
             Err(d) => return bad_protocol(d),
         },
         None if keys.len() == n => loaded.family.consensus_protocol.clone(),
-        None => rescale(m, n, keys.len()),
+        None => carry_quorum(m, keys.len()),
     };
     let dir = st.engine.federation_directory();
     let mut env = match dir
@@ -1935,12 +1942,29 @@ mod tests {
         assert!(normalize_protocol(Some("weighted:rubric"), 2).is_err());
     }
 
+    /// CIRISServer#686 / CC 4.4.3.4.2.1: M is absolute across roster changes;
+    /// only a roster smaller than M lowers it.
     #[test]
-    fn rescale_keeps_the_ratio_and_a_strict_majority() {
-        assert_eq!(rescale(2, 3, 4), "quorum:3/4");
-        assert_eq!(rescale(3, 3, 4), "quorum:4/4");
-        assert_eq!(rescale(2, 3, 2), "quorum:2/2");
-        assert_eq!(rescale(3, 5, 3), "quorum:2/3");
-        assert_eq!(rescale(1, 1, 2), "quorum:2/2");
+    fn a_roster_change_keeps_m_absolute() {
+        assert_eq!(carry_quorum(2, 4), "quorum:2/4", "an add does not raise M");
+        assert_eq!(carry_quorum(3, 5), "quorum:3/5");
+        assert_eq!(
+            carry_quorum(3, 3),
+            "quorum:3/3",
+            "a shrink to exactly M keeps M"
+        );
+        assert_eq!(
+            carry_quorum(3, 2),
+            "quorum:2/2",
+            "a roster below M lowers M to it"
+        );
+        assert_eq!(carry_quorum(2, 0), "quorum:0/0");
+        assert!(
+            matches!(
+                Protocol::of("quorum:2/4"),
+                Some(Protocol::Quorum { m: 2, n: 4 })
+            ),
+            "a carried M that is no longer a majority stays a valid stored protocol"
+        );
     }
 }

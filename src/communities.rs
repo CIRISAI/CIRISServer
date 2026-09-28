@@ -62,7 +62,7 @@
 //! rest of the chat surface uses, so a refusal is decided exactly once.
 #![allow(clippy::result_large_err)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -1463,14 +1463,57 @@ async fn create_community(
     );
     (
         StatusCode::CREATED,
-        Json(room_json(&st, &room, &owner, false).await),
+        Json(
+            room_json(
+                &st,
+                &room,
+                &owner,
+                false,
+                record_attesters(&st).await.as_ref(),
+            )
+            .await,
+        ),
     )
         .into_response()
 }
 
 /// The room as the client renders it. `detail` adds the appointed moderators
 /// and the plane counts.
-async fn room_json(st: &ChatState, room: &Room, owner: &Owner, detail: bool) -> serde_json::Value {
+/// Who signed each community record, by the record's `persist_row_hash`: the
+/// `attester` of a room row's envelope (FSD §1 rule 8, CIRISServer#688). Read
+/// once per response, not once per room. `None` when the plane is unreadable:
+/// the envelope then says `attester: null` rather than guessing.
+async fn record_attesters(st: &ChatState) -> Option<HashMap<String, String>> {
+    match st
+        .engine
+        .federation_directory()
+        .list_signed_communities_since(None, u32::MAX)
+        .await
+    {
+        Ok(rows) => Some(
+            rows.into_iter()
+                .map(|s| {
+                    (
+                        s.community.community.persist_row_hash,
+                        s.community.authority_key_id,
+                    )
+                })
+                .collect(),
+        ),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "communities: signed records unreadable — room envelopes carry no attester");
+            None
+        }
+    }
+}
+
+async fn room_json(
+    st: &ChatState,
+    room: &Room,
+    owner: &Owner,
+    detail: bool,
+    attesters: Option<&HashMap<String, String>>,
+) -> serde_json::Value {
     let mut roles: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for m in &room.roster {
         roles
@@ -1494,27 +1537,50 @@ async fn room_json(st: &ChatState, room: &Room, owner: &Owner, detail: bool) -> 
         "my_role": room.member(&owner.key_id).map(|m| role_token(m.role.as_deref())),
         "members": room.roster.iter().map(member_json).collect::<Vec<_>>(),
         "roles": roles,
+        // The row's envelope (FSD §1 rule 8, CIRISServer#688), as the family
+        // rows carry it: what it is about, who signed it, and at which audience
+        // it travels.
+        "envelope": {
+            "subject": room.id(),
+            "attester": attesters.and_then(|a| a.get(&room.record.persist_row_hash)),
+            "cohort_scope": room.tier.as_str(),
+            (ciris_persist::federation::envelope::paths::DIMENSION): "community",
+            "persist_row_hash": room.record.persist_row_hash,
+        },
     });
     if detail {
         let dir = st.engine.federation_directory();
-        let moderators = admission::appointed_moderators_of(
+        // An unreadable chain is NOT "no moderators" (CIRISServer#688): the
+        // list is null and `moderators_readable` says why, so a client never
+        // renders a store error as an empty room. The counts read the same way.
+        let moderators = match admission::appointed_moderators_of(
             dir.as_ref(),
             room.id(),
             admission::DELEGATION_SCOPE_MODERATE,
         )
         .await
-        .unwrap_or_default();
+        {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!(room = %room.id(), error = %format!("{e:#}"), "communities: moderator chain unreadable");
+                None
+            }
+        };
         let widenings = dir
             .list_community_membership_widenings_for(room.id())
             .await
             .map(|w| w.len())
-            .unwrap_or(0);
+            .ok();
         let revocations = dir
             .list_community_membership_revocations_for(room.id())
             .await
             .map(|r| r.len())
-            .unwrap_or(0);
+            .ok();
         if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "moderators_readable".to_owned(),
+                serde_json::json!(moderators.is_some()),
+            );
             obj.insert("moderators".to_owned(), serde_json::json!(moderators));
             obj.insert("widenings".to_owned(), serde_json::json!(widenings));
             obj.insert("revocations".to_owned(), serde_json::json!(revocations));
@@ -1579,6 +1645,7 @@ async fn list_communities(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
+    let attesters = record_attesters(&st).await;
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut resume: Option<String> = None;
     for id in ids
@@ -1600,7 +1667,7 @@ async fn list_communities(
                 .map(str::to_owned);
             break;
         }
-        out.push(room_json(&st, &room, &owner, false).await);
+        out.push(room_json(&st, &room, &owner, false, attesters.as_ref()).await);
     }
     let total = out.len();
     (
@@ -1628,7 +1695,16 @@ async fn read_community(
     match load_room_as_member(&st, &owner, &community_id).await {
         Ok(room) => (
             StatusCode::OK,
-            Json(room_json(&st, &room, &owner, true).await),
+            Json(
+                room_json(
+                    &st,
+                    &room,
+                    &owner,
+                    true,
+                    record_attesters(&st).await.as_ref(),
+                )
+                .await,
+            ),
         )
             .into_response(),
         Err(r) => r,
