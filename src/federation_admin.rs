@@ -105,7 +105,7 @@ async fn list_peering(State(st): State<FederationAdminState>, headers: HeaderMap
             Err(e) => {
                 return err(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    &format!("consent peer set: {e:#}"),
+                    format!("consent peer set: {e:#}"),
                 )
             }
         };
@@ -621,9 +621,10 @@ pub async fn erasure_audit_event_id(
     if sum.trace_events + sum.trace_llm_calls + sum.detection_events_tombstoned == 0 {
         return None;
     }
-    let mut filter = ciris_persist::federation::hard_case::HardCaseFilter::default();
-    filter.kind = Some(ciris_persist::federation::hard_case::kind::TRACE_ERASURE.to_owned());
-    filter.since = Some(sum.erased_at);
+    let filter = ciris_persist::federation::hard_case::HardCaseFilter {
+        kind: Some(ciris_persist::federation::hard_case::kind::TRACE_ERASURE.to_owned()),
+        since: Some(sum.erased_at),
+    };
     engine
         .federation_directory()
         .list_hard_case_events(filter)

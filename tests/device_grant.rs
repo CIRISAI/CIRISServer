@@ -872,3 +872,63 @@ async fn approve_without_owner_session_is_rejected() {
         .expect("approve observer");
     assert_eq!(forbidden.status(), 403, "non-owner role ⇒ 403");
 }
+
+/// CIRISServer#692: the unauthenticated code-request leg is capped per
+/// client_id (8 live pending grants), and expired grants do not count toward
+/// it — they read `410 expired_token` for a grace window, then are dropped.
+#[tokio::test]
+async fn pending_codes_are_capped_per_client_and_expired_ones_do_not_count() {
+    let home = ciris_home();
+    let engine = node().await;
+    let actor = "dg-actor-capped";
+    let other = "dg-actor-uncapped";
+    register_actor(&engine, actor).await;
+    register_actor(&engine, other).await;
+    let (base, _h) = serve(
+        Arc::clone(&engine),
+        "dg-owner-capped".to_string(),
+        home.clone(),
+        600,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    for _ in 0..8 {
+        request_code(&client, &base, actor).await;
+    }
+    let resp = client
+        .post(format!("{base}/v1/auth/device/code"))
+        .json(&serde_json::json!({ "client_id": actor }))
+        .send()
+        .await
+        .expect("POST device/code");
+    assert_eq!(resp.status(), 429, "the ninth live pending code is refused");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().starts_with("slow_down"),
+        "{body}"
+    );
+    // Another client is unaffected.
+    request_code(&client, &base, other).await;
+
+    // Expired grants do not hold the cap: at TTL 0 every code is born expired.
+    let (base0, _h0) = serve(
+        Arc::clone(&engine),
+        "dg-owner-capped-0".to_string(),
+        home.clone(),
+        0,
+    )
+    .await;
+    let mut first = None;
+    for _ in 0..12 {
+        let (dc, _) = request_code(&client, &base0, actor).await;
+        first.get_or_insert(dc);
+    }
+    // ...and still read as expired (inside the grace), not unknown.
+    let poll = client
+        .post(format!("{base0}/v1/auth/device/token"))
+        .json(&serde_json::json!({ "device_code": first.unwrap(), "client_id": actor }))
+        .send()
+        .await
+        .expect("poll");
+    assert_eq!(poll.status(), 410);
+}

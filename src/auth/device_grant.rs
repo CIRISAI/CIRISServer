@@ -239,6 +239,53 @@ fn edge_scope(envelope: &serde_json::Value) -> String {
     }
 }
 
+/// How long an expired grant is KEPT before it is dropped (CIRISServer#692):
+/// long enough that a late poll still reads `410 expired_token` rather than an
+/// unknown code, short enough that the map does not grow with the node's uptime.
+const EXPIRED_GRANT_GRACE_SECS: u64 = 600;
+
+/// Live PENDING grants one `client_id` may hold at once (CIRISServer#692). The
+/// code-request leg is unauthenticated by design (RFC 8628), so without a cap a
+/// caller that names a registered id can fill the map.
+const MAX_PENDING_PER_CLIENT: usize = 8;
+
+/// Admit a new grant: drop every grant past its grace (and its user_code index
+/// entry), then insert. `Err` when `cap` is set and `client_id` already holds
+/// that many live pending grants.
+fn admit_grant(
+    st: &DeviceGrantState,
+    device_code: String,
+    grant: DeviceGrant,
+    cap: Option<usize>,
+) -> Result<(), usize> {
+    let now = now_unix();
+    let mut grants = st.grants.lock().expect("grants lock");
+    let mut index = st.user_index.lock().expect("user_index lock");
+    grants.retain(|_, g| {
+        let keep = g.expires_at.saturating_add(EXPIRED_GRANT_GRACE_SECS) > now;
+        if !keep {
+            index.remove(&g.user_code);
+        }
+        keep
+    });
+    if let Some(cap) = cap {
+        let live = grants
+            .values()
+            .filter(|g| {
+                g.client_id == grant.client_id
+                    && matches!(g.status, GrantStatus::Pending)
+                    && g.expires_at > now
+            })
+            .count();
+        if live >= cap {
+            return Err(live);
+        }
+    }
+    index.insert(grant.user_code.clone(), device_code.clone());
+    grants.insert(device_code, grant);
+    Ok(())
+}
+
 fn err(code: StatusCode, error: &str) -> Response {
     (code, Json(serde_json::json!({ "error": error }))).into_response()
 }
@@ -333,14 +380,20 @@ async fn device_code(State(st): State<DeviceGrantState>, body: axum::body::Bytes
         constraints: DelegationConstraints::default(),
         status: GrantStatus::Pending,
     };
-    st.grants
-        .lock()
-        .expect("grants lock")
-        .insert(device_code.clone(), grant);
-    st.user_index
-        .lock()
-        .expect("user_index lock")
-        .insert(user_code.clone(), device_code.clone());
+    if let Err(live) = admit_grant(
+        &st,
+        device_code.clone(),
+        grant,
+        Some(MAX_PENDING_PER_CLIENT),
+    ) {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            &format!(
+                "slow_down: this client_id already has {live} pending device codes — approve, \
+                 deny or let one expire before requesting another"
+            ),
+        );
+    }
 
     // The owner approves via POST /v1/auth/device/approve from an owner session;
     // `verification_uri` documents the human-facing approval surface base.
@@ -649,14 +702,8 @@ async fn delegate(
             constraints: constraints.clone(),
             status: GrantStatus::Pending,
         };
-        st.grants
-            .lock()
-            .expect("grants lock")
-            .insert(device_code.clone(), grant);
-        st.user_index
-            .lock()
-            .expect("user_index lock")
-            .insert(user_code.clone(), device_code.clone());
+        // Owner-initiated: pruned like every insert, not capped (an owner session).
+        let _ = admit_grant(&st, device_code.clone(), grant, None);
     }
 
     // Approve INLINE — the owner authoring this delegation IS the consent (mirrors
