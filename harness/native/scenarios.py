@@ -256,16 +256,22 @@ CORPUS — one person, two devices, the transfer corpus written on the first and
     step("compared", ok=len(results) - len(bad), bad=len(bad),
          proves="each file's bytes on the first device, and on the second, against the original")
     if bad:
+        no_row = [k for k, v in bad.items() if v.get("second", {}).get("status") == 404]
         not_here = [k for k, v in bad.items() if v.get("second", {}).get("status") == 409]
         wrong = [k for k, v in bad.items() if v.get("second", {}).get("status") == 200]
         means = []
+        if no_row:
+            means.append(f"{len(no_row)} ROWS never reached the second device (404 not_in_room: the row itself is "
+                         "not held there, so no pull was attempted) — replication of the attestation, not the bytes; "
+                         "look for `stalled mid-frame` / `REFUSED` on the sender's rounds toward it")
         if not_here:
             means.append(f"{len(not_here)} never reached the second device (not_fetched): the pull over the "
                          "room's derived address failed — a `no route to peer` / `holder retired` line "
                          "is a topology fault (direct neighbours needed, CC 5.4.6), `NoHolders` is the pull's source rule")
         if wrong:
             means.append(f"{len(wrong)} arrived with DIFFERENT bytes: a transfer defect; `first_diff`/`prefix` say where")
-        step.fail("corpus_mismatch", "; ".join(means), [a, b], _BODY, files=bad)
+        step.fail("corpus_mismatch", "; ".join(means), [a, b],
+                  _BODY + r"|stalled mid-frame|delivered envelope REFUSED|frame DROPPED", files=bad)
     return {"verdict": "PASS" if not bad else "FAIL", "steps": step.log, "results": results}
 
 
