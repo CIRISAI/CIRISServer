@@ -229,7 +229,11 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   production blobs older than this). `e7135559…` → `4d7054a6…`.
     // 0.5.218 (persist v49.0.0): one key ADDED, `paths::LISTED` ("listed", the
     //   #912 listing plane); none removed or renamed. `4d7054a6…` → `a6a84cc9…`.
-    const ADOPTED: &str = "a6a84cc9d5f4d6bd6295cfc78b42bce35145d2bb9ff14391bfe32ab027116a6a";
+    // 0.5.218 (persist v51.0.0): four keys ADDED, the rc6 trust-root attach
+    //   inputs (#937/#938: attach_window_secs, witness_cadence_secs,
+    //   witness_quorum, attached_head_digest); none removed or renamed, and the
+    //   server writes none of them. `a6a84cc9…` → `c9558c98…`.
+    const ADOPTED: &str = "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

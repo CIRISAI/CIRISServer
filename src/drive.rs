@@ -605,23 +605,17 @@ struct Described {
 /// The ONE door to a file's name and type (CIRISEdge#698). Every drive path
 /// that shows, keeps or tests a name goes through here.
 ///
-/// STOPGAP: edge v33 exposes the sealed descriptor only through
-/// `FileRow::open_described`, which opens the BYTES too — a full decrypt per
-/// call, and nothing for a file whose bytes are not here. The ask is a
-/// descriptor-only `FileRow::describe` under the row's `caller_aad` (persist
-/// v51), CIRISEdge#702; at the re-pin this body becomes that one call.
+/// Edge's `FileRow::describe` (v33.0.0, CIRISEdge#702): a sealed row opens ONLY
+/// its descriptor, under the row's AAD — persist v51 refuses a pointer copied
+/// onto another row at that door — and returns no bytes. It still reads the
+/// blob to authenticate it, so a file whose bytes are not here lists `sealed`.
 async fn describe(st: &DriveState, file: &files::FileRow, viewer: &str) -> Described {
     use ciris_edge::files::Descriptor;
-    let d = match file.descriptor() {
-        Descriptor::Sealed => {
-            let content = store(&st.engine);
-            match file.open_described(&content, viewer).await {
-                Ok(opened) => opened.descriptor,
-                Err(_) => Descriptor::Sealed,
-            }
-        }
-        clear => clear,
-    };
+    let content = store(&st.engine);
+    let d = file
+        .describe(&content, viewer)
+        .await
+        .unwrap_or(Descriptor::Sealed);
     match d {
         Descriptor::Clear { format, name, .. } => Described {
             filename: name,
