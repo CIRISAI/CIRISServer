@@ -179,6 +179,7 @@ class Node:
             [str(self.binary), "--home", str(self.home), "--key-id", self.key_id],
             stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **self.env},
             start_new_session=True)
+        (self.log_path.parent / "pid").write_text(str(self.proc.pid))
 
         def healthy() -> bool:
             if self.proc and self.proc.poll() is not None:
@@ -305,6 +306,15 @@ class Node:
         rec = http("GET", f"{other.url}/v1/federation/test-blessed-self-record")[1]
         return self.must("POST", "/v1/federation/test-admit-peer", rec)
 
+    def rooted_with(self, other: "Node") -> Optional[bool]:
+        """Edge's own verdict on this pair, from the log: True once `rooted_with`
+        found a valid root in common with `other`, False if it last said none,
+        None if it has not been asked yet."""
+        lines = self.grep(rf"rooted_with: .*peer={re.escape(other.key_id)}")
+        if not lines:
+            return None
+        return "a valid root in common" in lines[-1]
+
     def knows(self, key_id: str) -> bool:
         return self.api("GET", f"/v1/federation/peers/{key_id}")[0] == 200
 
@@ -391,7 +401,10 @@ class Mesh:
         self.base_env = {**anchor_env(), "RUST_LOG": rust_log, **(extra_env or {})}
         self.nodes: Dict[str, Node] = {}
         self.canonical: Optional[Node] = None
-        self._next_port = 7242
+        # A port base per WORK DIR, so two meshes run side by side without
+        # racing for the same pair (measured: `Address already in use`).
+        import zlib
+        self._next_port = 7000 + 2 * (zlib.crc32(str(self.work).encode()) % 20000)
 
     def _node(self, name: str, env: Dict[str, str]) -> Node:
         port = free_port_pair(self._next_port)
@@ -411,13 +424,18 @@ class Mesh:
         self.nodes["canonical"] = n
         return n
 
-    def add(self, name: str, start: bool = True) -> Node:
+    def add(self, name: str, start: bool = True, dial: Optional[List["Node"]] = None) -> Node:
+        """A node that dials the canonical and, with `dial`, those nodes too —
+        DIRECT neighbours. Matters: a derived (scope-native) address answers
+        only a directly-attached neighbour (CC 5.4, CIRISEdge#499), so two
+        nodes that reach each other only through the canonical cannot fetch
+        each other's chat bodies or files."""
         if self.canonical is None:
             self.start_canonical()
         assert self.canonical is not None
         n = self._node(name, {"CIRIS_TEST_BLESS_CANONICAL": "false",
                               "CIRIS_TEST_CANONICAL_DIAL": self.canonical.transport})
-        n.configure(dial=[self.canonical.transport])
+        n.configure(dial=[self.canonical.transport] + [d.transport for d in (dial or [])])
         self.nodes[name] = n
         if start:
             n.start()
@@ -426,6 +444,27 @@ class Mesh:
     def stop(self) -> None:
         for n in self.nodes.values():
             n.stop()
+
+    @staticmethod
+    def down(work: Path) -> List[str]:
+        """Stop every node a kept mesh left running under `work` (by pidfile)."""
+        stopped = []
+        for pidfile in Path(work).glob("*/pid"):
+            try:
+                pid = int(pidfile.read_text().strip())
+                os.killpg(pid, signal.SIGTERM)
+                stopped.append(f"{pidfile.parent.name}:{pid}")
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+            pidfile.unlink(missing_ok=True)
+        return stopped
+
+    def state(self) -> Dict[str, Any]:
+        """Everything a person or the next tool needs to keep driving these nodes."""
+        return {n: {"url": x.url, "transport": x.transport, "token": x.token,
+                    "owner_key_id": x.owner_key_id, "node_key_id": x.node_key_id,
+                    "home": str(x.home), "log": str(x.log_path)}
+                for n, x in self.nodes.items()}
 
     def __enter__(self) -> "Mesh":
         if self.work.exists() and not self.keep:
