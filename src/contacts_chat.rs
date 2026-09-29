@@ -2594,9 +2594,7 @@ fn machine_authored_refusal(grants: Vec<String>) -> Response {
     crate::auth::refusal::refuse_with(
         StatusCode::CONFLICT,
         "consent.grant_not_owner_authored",
-        "that consent was authored by the node, not by you (a provisional grant from before \
-         this node was claimed). The owner migration re-signs it as yours; the node will not \
-         withdraw consent on your behalf",
+        "This node wrote that consent before you signed it, so it isn't yours to withdraw here, and the node will not withdraw consent on your behalf. It is still active.",
         serde_json::json!({ "grants": grants }),
     )
 }
@@ -2618,8 +2616,7 @@ async fn withdrawal_pen(
         crate::owner_signer_capsule::CapsuleRefusal::Delegated => refuse(
             StatusCode::FORBIDDEN,
             "consent.delegate_may_not_withdraw",
-            "a delegated session may not withdraw the owner's consent — the withdrawal is \
-             signed with the owner's own key",
+            "A delegated session can't withdraw the owner's consent. The withdrawal is signed with the owner's own key.",
         ),
         other => refuse(
             StatusCode::FORBIDDEN,

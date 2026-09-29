@@ -317,7 +317,7 @@ fn drive_no_session() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "drive.owner_session_required",
-        "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
+        "Sign in as this node's owner to use your files.".into(),
     )
 }
 
@@ -325,7 +325,7 @@ fn notes_no_session() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "notes.owner_session_required",
-        "notes are one person's, and writing or reading them is that person's own act".into(),
+        "Sign in as this node's owner to use your notes.".into(),
     )
 }
 
@@ -381,16 +381,14 @@ fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeR
             refuse(
                 StatusCode::BAD_REQUEST,
                 "drive.family_id_required",
-                "a family write must name `room_id` (the family's key id) — there is no \
-                 default family, and guessing one would place bytes in a cohort nobody chose"
-                    .into(),
+                "A family file needs to name its family. There is no default family.".into(),
             )
         }),
         Cohort::Community => room_id.map(ScopeRoom::community).ok_or_else(|| {
             refuse(
                 StatusCode::BAD_REQUEST,
                 "drive.community_id_required",
-                "a community write must name `room_id` (the community's key id)".into(),
+                "A community file needs to name its room.".into(),
             )
         }),
     }
@@ -2929,7 +2927,7 @@ fn require_note_body(body: &str) -> Result<(), Response> {
         return Err(refuse(
             StatusCode::BAD_REQUEST,
             "notes.empty",
-            "a note with no body is not a note".into(),
+            "A note with nothing in it isn't a note.".into(),
         ));
     }
     Ok(())

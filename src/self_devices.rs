@@ -85,7 +85,7 @@ fn session_required(code: StatusCode) -> Response {
     refuse(
         code,
         "self.owner_session_required",
-        "your devices are the node owner's own surface — sign in as the owner of this claimed node",
+        "Your devices are the owner's own surface. Sign in as the owner of this node.",
     )
 }
 
@@ -93,8 +93,7 @@ fn delegate_may_not_author() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "self.delegate_may_not_author",
-        "a delegated session may not change the owner's devices — the change is signed with the \
-         owner's own key, and that signature would outlive the delegation",
+        "A delegated session cannot change your devices. The change is signed with your own key, so sign in as yourself.",
     )
 }
 
@@ -102,7 +101,7 @@ fn store_unavailable(detail: String) -> Response {
     refuse_with(
         StatusCode::SERVICE_UNAVAILABLE,
         "self.store_unavailable",
-        "the identity store could not be read or written",
+        "The node could not read or write its identity store. Nothing was changed.",
         detail,
     )
 }
@@ -111,7 +110,7 @@ fn signer_unavailable(detail: String) -> Response {
     refuse_with(
         StatusCode::FORBIDDEN,
         "self.author_signer_unavailable",
-        "your federation identity could not be opened to sign this change",
+        "Your identity could not be opened to sign this change.",
         detail,
     )
 }
@@ -120,7 +119,7 @@ fn bad_request(detail: String) -> Response {
     refuse_with(
         StatusCode::BAD_REQUEST,
         "self.bad_request",
-        "the request body is not a valid device request",
+        "The node could not read that device request.",
         detail,
     )
 }
@@ -248,7 +247,7 @@ async fn release_node(
             return refuse_with(
                 StatusCode::FORBIDDEN,
                 "self.not_your_node",
-                "that node is not one you own, so it is not yours to release",
+                "That node is not one you own, so it is not yours to release.",
                 node_key_id,
             )
         }
@@ -261,8 +260,7 @@ async fn release_node(
         return refuse(
             StatusCode::CONFLICT,
             "self.release_self_requires_force",
-            "that is the node you are talking to — releasing it ends your ownership here, \
-             including this session. Send force_self: true to do it anyway",
+            "That is the node you are talking to. Releasing it ends your ownership here, including this session.",
         );
     }
     let bindings = match live_bindings(&st.engine, &caller.owner_key_id, &node_key_id).await {
@@ -311,8 +309,7 @@ async fn release_node(
         return refuse_with(
             StatusCode::INTERNAL_SERVER_ERROR,
             "self.release_incomplete",
-            "the release was signed but the node is still listed as yours — a binding this node \
-             cannot see is still live",
+            "The release was signed, but the node still lists that node as yours: an ownership record it cannot see is still live. What it could withdraw stays withdrawn.",
             format!(
                 "withdrew {} binding(s); nodes_owned_by still lists it",
                 withdrawn.len()
@@ -496,7 +493,7 @@ async fn label_occurrence(
         return refuse(
             StatusCode::BAD_REQUEST,
             "self.label_empty",
-            "a device label must be between 1 and 64 characters",
+            "A device name must be between 1 and 64 characters.",
         );
     }
     // The device must be one of the CALLER's occurrences (active or not — a
@@ -515,7 +512,7 @@ async fn label_occurrence(
         return refuse_with(
             StatusCode::NOT_FOUND,
             "self.not_your_device",
-            "that key is not one of your devices",
+            "That key is not one of your devices.",
             req.occurrence_key_id,
         );
     }
@@ -627,8 +624,7 @@ async fn contact_code(
             return refuse_with(
                 StatusCode::CONFLICT,
                 "self.contact_code_owner_key_absent",
-                "this node does not hold your federation key record, so it cannot build your \
-                 contact code",
+                "This node does not hold your identity's key record, so it can't make your contact code.",
                 owner,
             )
         }
@@ -641,8 +637,7 @@ async fn contact_code(
         return refuse_with(
             StatusCode::CONFLICT,
             "self.contact_code_not_a_person",
-            "your federation key is not registered as a person (user), and only a person can \
-             be added as a contact",
+            "Your identity is not registered as a person, and only a person can be added as a contact.",
             record.identity_type,
         );
     }
@@ -661,8 +656,7 @@ async fn contact_code(
         return refuse_with(
             StatusCode::CONFLICT,
             "self.contact_code_key_not_derived",
-            "your federation key id is not derived from its public key, so a contact code for \
-             it would be refused by everyone you share it with as an impersonation",
+            "Your identity's key id does not match its key, so everyone you shared a code with would refuse it.",
             owner,
         );
     }
@@ -676,8 +670,7 @@ async fn contact_code(
         return refuse_with(
             StatusCode::CONFLICT,
             "self.contact_code_no_pqc_half",
-            "your federation key record carries no ML-DSA-65 half, so a contact code could not \
-             commit to it and no one could admit you from it",
+            "Your identity has no post-quantum key half, so no one could add you from a code.",
             owner,
         );
     };
@@ -716,9 +709,7 @@ async fn contact_code(
                 return refuse_with(
                     StatusCode::BAD_REQUEST,
                     "self.node_not_announced",
-                    "a contact code can carry only nodes you announced — announce a node on \
-                     that node (its wizard's announce step, or POST /v1/federation/announce) \
-                     before sharing it",
+                    "That device isn't reachable, so it can't go in a code.",
                     refused
                         .iter()
                         .map(|k| k.as_str())
@@ -819,7 +810,7 @@ async fn contact_code(
             return refuse_with(
                 StatusCode::CONFLICT,
                 "self.contact_code_unencodable",
-                "your contact code could not be encoded from the keys this node holds",
+                "Your contact code could not be made from the keys this node holds.",
                 format!("{e}"),
             )
         }

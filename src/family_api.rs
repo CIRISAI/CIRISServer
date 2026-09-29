@@ -136,8 +136,7 @@ fn not_found() -> Response {
     refuse(
         StatusCode::NOT_FOUND,
         "family.not_found",
-        "no family with that id is visible to you — it does not exist, or you are not one of \
-         its members",
+        "That household isn't visible to you. It doesn't exist, or you aren't in it.",
     )
 }
 
@@ -145,7 +144,7 @@ fn not_authorized(detail: String) -> Response {
     refuse_with(
         StatusCode::FORBIDDEN,
         "family.not_authorized",
-        "this family's consensus protocol is not satisfied for that change",
+        "This household's rule doesn't let you make that change.",
         detail,
     )
 }
@@ -154,8 +153,7 @@ fn quorum_pending(detail: String) -> Response {
     refuse_with(
         StatusCode::CONFLICT,
         "family.quorum_pending",
-        "this family's protocol needs more members' signatures before the change can be applied \
-         — collect them through the change envelope, cosign and assemble routes",
+        "This household needs more members to sign before that can happen.",
         detail,
     )
 }
@@ -164,8 +162,7 @@ fn bad_protocol(detail: String) -> Response {
     refuse_with(
         StatusCode::BAD_REQUEST,
         "family.bad_consensus_protocol",
-        "that consensus protocol is not one a household can use: founder_only, majority, \
-         unanimous or quorum:M/N with a strict majority over the whole roster",
+        "That isn't a rule a household can use.",
         detail,
     )
 }
@@ -174,7 +171,7 @@ fn unknown_member_key(key_id: &str) -> Response {
     refuse_with(
         StatusCode::BAD_REQUEST,
         "family.unknown_member_key",
-        "that key is not a registered identity on this node, so it cannot be a family member",
+        "This node doesn't know that person yet, so they can't join.",
         key_id.to_owned(),
     )
 }
@@ -183,7 +180,7 @@ fn already_member(key_id: &str) -> Response {
     refuse_with(
         StatusCode::CONFLICT,
         "family.already_member",
-        "that identity is already a member of this family",
+        "They're already in this household.",
         key_id.to_owned(),
     )
 }
@@ -192,7 +189,7 @@ fn not_a_member(key_id: &str) -> Response {
     refuse_with(
         StatusCode::NOT_FOUND,
         "family.not_a_member",
-        "that identity is not a current member of this family",
+        "They aren't in this household any more.",
         key_id.to_owned(),
     )
 }
@@ -201,8 +198,7 @@ fn last_founder() -> Response {
     refuse(
         StatusCode::CONFLICT,
         "family.last_founder",
-        "you are the family's last founder and other members remain — make another member a \
-         founder first, or dissolve the family",
+        "You're the last founder. Make someone else a founder first, or dissolve the household.",
     )
 }
 
@@ -210,7 +206,7 @@ fn bad_role() -> Response {
     refuse(
         StatusCode::BAD_REQUEST,
         "family.bad_role",
-        "a role must be a short non-empty name such as founder or member",
+        "A role is a short name, like founder or member.",
     )
 }
 
@@ -218,8 +214,7 @@ fn bad_change(detail: String) -> Response {
     refuse_with(
         StatusCode::CONFLICT,
         "family.bad_change",
-        "that change envelope does not describe a change to this family as it stands now — \
-         build a fresh envelope",
+        "The household changed after this was proposed. Propose it again.",
         detail,
     )
 }
@@ -228,7 +223,7 @@ fn bad_request(detail: String) -> Response {
     refuse_with(
         StatusCode::BAD_REQUEST,
         "family.bad_request",
-        "the request body is not a valid family request",
+        "The node couldn't read that request.",
         detail,
     )
 }
@@ -237,7 +232,7 @@ fn store_unavailable(detail: String) -> Response {
     refuse_with(
         StatusCode::SERVICE_UNAVAILABLE,
         "family.store_unavailable",
-        "the family store could not be read or written",
+        "The node couldn't read or write its household records.",
         detail,
     )
 }
@@ -246,7 +241,7 @@ fn signer_unavailable(detail: String) -> Response {
     refuse_with(
         StatusCode::FORBIDDEN,
         "family.author_signer_unavailable",
-        "your federation identity could not be opened to sign this family change",
+        "Your identity couldn't be opened to sign this.",
         detail,
     )
 }
@@ -255,7 +250,7 @@ fn session_required(code: StatusCode) -> Response {
     refuse(
         code,
         "family.owner_session_required",
-        "families are the node owner's own surface — sign in as the owner of this claimed node",
+        "Households belong to this node's owner. Sign in as the owner.",
     )
 }
 
@@ -263,8 +258,7 @@ fn delegate_may_not_author() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "family.delegate_may_not_author",
-        "a delegated session may read families but may not change one — a roster row is signed \
-         with the owner's own key, and that signature would outlive the delegation",
+        "A delegated session can look at households but can't change them.",
     )
 }
 
@@ -851,7 +845,7 @@ async fn create_family(State(st): State<FamilyState>, headers: HeaderMap, body: 
         return refuse(
             StatusCode::BAD_REQUEST,
             "family.name_empty",
-            "a family needs a name of at most 200 characters",
+            "A household needs a name of up to 200 characters.",
         );
     }
     let dir = st.engine.federation_directory();

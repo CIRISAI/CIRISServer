@@ -752,28 +752,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # `drive.not_fetched` / `drive.not_granted` matter most: they are emitted
     # in NORMAL use (a file whose bytes are on another device), not only on
     # error, so they are the two a reader meets first.
-    "drive.author_signer_unavailable",
     "drive.bad_base64",
-    "drive.community_id_required",
-    "drive.family_id_required",
-    "drive.listing_failed",
-    "drive.no_node_key",
-    "drive.not_fetched",
-    "drive.not_granted",
-    "drive.not_a_member",
-    "drive.not_in_room",
-    "drive.owner_session_required",
-    "drive.publish_failed",
-    "drive.readable_by_nobody",
-    "drive.store_unavailable",
-    "drive.too_large",
-    "drive.unknown_cohort",
-    "drive.unopened",
-    "notes.author_signer_unavailable",
-    "notes.empty",
-    "notes.listing_failed",
-    "notes.no_node_key",
-    "notes.owner_session_required",
     # THE COMMUNITY PLANE (CIRISServer#594 / 0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md`
     # §4) — the same case as the drive plane above: a new surface whose refusals
     # land before the `ciris-client` bundle that carries them. The ids and their
@@ -781,22 +760,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # delegate_may_not_author` and `community.delegation_denied` are emitted
     # through `contacts_chat::require_verb`, which this guard does not scrape,
     # exactly like their `chat.*` twins — so they are not listed here.)
-    "community.already_member",
-    "community.author_signer_unavailable",
-    "community.bad_consensus_protocol",
-    "community.bad_tier",
-    "community.change_stale",
-    "community.last_founder",
-    "community.malformed_body",
-    "community.name_empty",
-    "community.not_a_contact",
-    "community.not_a_member",
-    "community.not_authorized",
-    "community.not_found",
-    "community.pair_room_fixed",
-    "community.quorum_pending",
-    "community.store_unavailable",
-    "community.write_failed",
     # THE DRIVE CRUD SURFACE (0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md` §5) — the
     # same plane, the same queue: the ids the FSD names for replace / rename /
     # withdraw / move / range / notes edit, requested of the client beside the
@@ -829,22 +792,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # release carrying their keys. The FSD lists the ids with their English so
     # the client can request them in one batch; these come off this list, and
     # the pyproject floor goes up, when a bundle carries them.
-    "family.already_member",
-    "family.author_signer_unavailable",
-    "family.bad_change",
-    "family.bad_consensus_protocol",
-    "family.bad_request",
-    "family.bad_role",
-    "family.delegate_may_not_author",
-    "family.last_founder",
-    "family.name_empty",
-    "family.not_a_member",
-    "family.not_authorized",
-    "family.not_found",
-    "family.owner_session_required",
-    "family.quorum_pending",
-    "family.store_unavailable",
-    "family.unknown_member_key",
     # ANNOUNCE ANOTHER DEVICE (0.5.218, CIRISServer#678): the per-node announce
     # made from the device holding the pen. Queued for the client bundle beside
     # the self-device ids (CIRISClient#78).
@@ -874,35 +821,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "auth.claim.owner_binding_rejected",
     "auth.claim.store_unavailable",
     "auth.claim.wrong_node",
-    "self.author_signer_unavailable",
-    "self.bad_request",
-    "self.delegate_may_not_author",
-    "self.label_empty",
-    "self.not_your_device",
-    "self.not_your_node",
-    "self.owner_session_required",
-    "self.release_incomplete",
-    "self.release_self_requires_force",
-    "self.store_unavailable",
     # THE CONTACT FLOW (0.5.218) — same queue as the planes above, requested of
     # the client with their English (CIRISClient#78): the person's contact code
     # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
     # custody this host cannot honour (#639).
-    "self.contact_code_key_not_derived",
-    "self.contact_code_no_pqc_half",
-    "self.contact_code_not_a_person",
-    "self.contact_code_owner_key_absent",
-    "self.contact_code_unencodable",
-    "self.node_not_announced",
-    "self.associate.hardware_custody_unavailable",
-    "consent.author_signer_unavailable",
-    "consent.delegate_may_not_withdraw",
-    "consent.grant_not_live",
-    "consent.grant_not_owner_authored",
-    "consent.malformed_body",
-    "consent.store_unavailable",
-    "consent.withdraw_failed",
-    "contacts.not_a_contact",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",
