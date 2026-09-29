@@ -21,7 +21,8 @@ from .scenarios import SCENARIOS
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["down"])
+    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["build", "derive", "down"])
+    ap.add_argument("--topology", type=Path, help="build/derive: a FSD/TOPOLOGY.md declaration")
     ap.add_argument("--binary", type=Path, required=True)
     ap.add_argument("--work", type=Path, default=Path("/tmp/ciris-native-mesh"))
     ap.add_argument("--keep", action="store_true", help="leave the nodes running")
@@ -39,6 +40,17 @@ def main() -> int:
     if args.scenario == "down":
         print(json.dumps({"stopped": Mesh.down(args.work)}))
         return 0
+    if args.scenario in ("build", "derive"):
+        from . import topology as topo
+        try:
+            decl = topo.load(args.topology)
+        except topo.Unrealizable as e:
+            print(json.dumps({"verdict": "UNREALIZABLE", "error": str(e)}))
+            return 2
+        if args.scenario == "derive":
+            print(json.dumps(topo.derive(decl), indent=1, default=str))
+            return 0
+        SCENARIOS["build"] = lambda mesh, a: topo.build(mesh, decl, a)
 
     mesh = Mesh(args.binary, args.work, keep=args.keep, rust_log=args.rust_log)
     code = 0
