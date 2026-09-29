@@ -182,8 +182,17 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// wider than the room's membership rows). E3 re-checked: `trace:*` still
 /// serves only to `capability:infra:serve`. Edge's own published
 /// `SERVE_ADVERTISE_POLICY_HASH`. `d6e4f0df…` → `6fbf0282…`.
+///
+/// Re-pinned for 0.5.218 on edge v34.0.0 (CIRISEdge#682, the per-node announce
+/// ruling CIRISServer#655), reviewed against the v33.1.0 → v34.0.0 diff of
+/// `replication/serve_policy.rs`: ONE row changed — `IdentityOccurrence` and
+/// `TransportDestination` leave the `Key` line's `("self_own", "public")` for
+/// `("self_own", "owned node: announced → public; unannounced → owner's nodes
+/// only")`. An unannounced device's identity rows reach its owner's other
+/// nodes and whoever holds a code, never a stranger's listing. Nothing else
+/// moved. `6fbf0282…` → `e4c4d625…`, equal to edge's published constant.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "6fbf0282408148ceea541c9e5f0b6c0726d6e10b41880b7ce9d81339ecb3e7ab";
+    "e4c4d6253afe686a01eec073da343b74b11af6da6cd26c16a6ef0aacc9804569";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

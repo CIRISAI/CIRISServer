@@ -281,7 +281,13 @@ impl WithholdClass {
             | WithholdReason::LxmfPeerSyncUnsupported
             | WithholdReason::LxmfFrameOversized
             | WithholdReason::LxmfMailboxFull
-            | WithholdReason::LxmfRetentionExpired => Self::Policy,
+            | WithholdReason::LxmfRetentionExpired
+            // edge v34.0.0 (CIRISEdge#682) — identity rows follow the node's
+            // announce state: an unannounced device's identity-plane rows are
+            // served to its owner's own nodes and to whoever holds a code,
+            // never LISTED. The peer is outside the audience the owner chose
+            // (the per-node announce ruling, CIRISServer#655) — a verdict.
+            | WithholdReason::IdentityRowNodeNotAnnounced => Self::Policy,
             // Fail-closed on a failed read, or a missing local wiring input.
             WithholdReason::LocalIdentityMissing
             | WithholdReason::SendSetUnresolved
@@ -318,7 +324,12 @@ impl WithholdClass {
             // The requester's identity did not resolve, so there is no
             // destination to scope a mailbox to. Fail-closed and Red: the node
             // withheld without being able to establish who was asking.
-            | WithholdReason::LxmfRequesterUnidentified => Self::Fault,
+            | WithholdReason::LxmfRequesterUnidentified
+            // edge v34.0.0 (CIRISEdge#682) — the announce state could not be
+            // READ (`owner_of` ambiguous, or a directory fault); fail-closed to
+            // the node itself. A read that could not be made, beside the other
+            // unresolved reads: the operator is sent to the directory.
+            | WithholdReason::IdentityRowAnnounceUnresolved => Self::Fault,
             // Local state that cannot be put on the wire at all.
             WithholdReason::EnvelopeUnfetchable
             | WithholdReason::RowNotSerializable

@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "33.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v33.1.0#22bbc92be1f26205271ed42cfd6bc58c312aa2ed"
+version = "34.0.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v34.0.0#6d9a41d58bea6538e25a8f67609dc86c864abaa8"
 dependencies = [
  "async-trait",
  "axum",
@@ -985,6 +985,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
+ "memchr",
  "openmls",
  "openmls_basic_credential",
  "openmls_libcrux_crypto",
