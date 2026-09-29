@@ -140,7 +140,8 @@ fixture's `${PEER_KEY_ID}`, `${ROOM_ID}`, `${MESSAGE_ATTESTATION_ID}`, …).
 
 Every build writes, per node, `<work>/<node>/rows.jsonl`: each admitted
 `federation_attestations` row with every column, in admission order, plus
-`keys.jsonl` (the node's `federation_keys`). That is the fold-replayable form
+`keys.jsonl` (the node's `federation_keys`) and `transport_destinations.jsonl`
+(the signed routes it holds — the #393 item-2 operands, CIRISEdge#722). That is the fold-replayable form
 CC replays `V(rows, t)` over for T8 (iii) offline, and turns a harness trace
 into a TLC trace check (CIRISConstitution#131 §5). `report.json` carries, per
 node, the count and the SHA-256 of the export. A

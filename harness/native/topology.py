@@ -173,6 +173,17 @@ def export_rows(mesh: Mesh) -> Decl:
                 line = json.dumps(dict(zip(colnames, row)), default=str, sort_keys=True)
                 f.write(line + "\n")
                 h.update(line.encode())
+        # The signed routes this node holds (persist `transport_destinations`,
+        # one row per (occurrence, transport_kind); CIRISEdge#722): the
+        # #393 item-2 gate reads attesting_key_id / signed_envelope / signature.
+        routes = n.rows("select occurrence_key_id, transport_kind, attesting_key_id, "
+                        "signed_envelope is not null, signature is not null, "
+                        "length(signed_envelope), length(signature) from transport_destinations")
+        (n.log_path.parent / "transport_destinations.jsonl").write_text(
+            "\n".join(json.dumps(dict(zip(("occurrence_key_id", "transport_kind", "attesting_key_id",
+                                            "signed_envelope_present", "signature_present",
+                                            "signed_envelope_len", "signature_len"), r)), default=str) for r in routes),
+            encoding="utf-8")
         keys = n.rows("select key_id, identity_type, valid_from, valid_until, scrub_key_id from federation_keys")
         (n.log_path.parent / "keys.jsonl").write_text(
             "\n".join(json.dumps(dict(zip(("key_id", "identity_type", "valid_from", "valid_until", "scrub_key_id"), k)), default=str) for k in keys),
@@ -187,7 +198,7 @@ def export_rows(mesh: Mesh) -> Decl:
             "accepted": r.get("accepted"),
             "lineage_head": (r.get("verdict") or {}).get("lineage_head"),
         } for r in (roots or [])} if roots else {"unreadable": tr}
-        out[name] = {"rows": len(rows), "keys": len(keys), "sha256": h.hexdigest(), "path": str(path),
+        out[name] = {"rows": len(rows), "keys": len(keys), "routes": len(routes), "sha256": h.hexdigest(), "path": str(path),
                      "roots": standing}
     return out
 
