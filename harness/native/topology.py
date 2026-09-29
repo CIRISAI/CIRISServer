@@ -184,6 +184,15 @@ def export_rows(mesh: Mesh) -> Decl:
                                             "signed_envelope_present", "signature_present",
                                             "signed_envelope_len", "signature_len"), r)), default=str) for r in routes),
             encoding="utf-8")
+        # The node's metrics snapshot (GET /v1/federation/metrics): edge's
+        # counters — blob_pull_sources, blob_pull_refusals,
+        # channel_first_skipped_over_cap (CIRISEdge#722) — as the node last
+        # reported them, beside the rows they explain.
+        try:
+            st_, metrics = n.api("GET", "/v1/federation/metrics", timeout=20)
+            (n.log_path.parent / "metrics.json").write_text(json.dumps(metrics if st_ == 200 else {"status": st_}, indent=1, default=str), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            (n.log_path.parent / "metrics.json").write_text(json.dumps({"error": str(e)[:200]}), encoding="utf-8")
         keys = n.rows("select key_id, identity_type, valid_from, valid_until, scrub_key_id from federation_keys")
         (n.log_path.parent / "keys.jsonl").write_text(
             "\n".join(json.dumps(dict(zip(("key_id", "identity_type", "valid_from", "valid_until", "scrub_key_id"), k)), default=str) for k in keys),

@@ -262,6 +262,14 @@ impl WithholdClass {
             // not in the record's own roster. Refusing is the feature.
             | WithholdReason::BlobArrivalScopeInsufficient
             | WithholdReason::BlobArrivalGroupMismatch
+            // edge v34.2.0 (CIRISEdge#718, CC 5.4.6 / CIRISConstitution#132) —
+            // a scoped body forwarded over the identity-plane link carries an
+            // in-link discriminator; one naming no derived address this node
+            // holds, or one present on a body that arrived ON a derived
+            // address, is the scope gate reaching a verdict. Refusing is the
+            // feature, beside the two arrival-scope arms above.
+            | WithholdReason::BlobDiscriminatorUnheld
+            | WithholdReason::BlobDiscriminatorOnDerivedAddress
             | WithholdReason::HoldingScopePeerNotInRoster
             // #169 LXMF — operator posture and advertised limits. Not a
             // propagation node; not holding mail for that destination; a
