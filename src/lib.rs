@@ -128,6 +128,7 @@ mod compose;
 /// The read gate is persist's own §4.3 predicate (`CallerScope::admits`), so a
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
+pub mod mls_state;
 pub mod owner_signer_capsule;
 mod roster_rows;
 
