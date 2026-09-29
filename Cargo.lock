@@ -937,8 +937,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "17.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
+version = "18.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v18.0.0#33c3695adae8b1216aaa6debcc0bf9d5bf68872c"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "32.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v32.1.0#d34df2f6e47263a39defea2c3b2a18dacbe27b3f"
+version = "33.0.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?rev=68bba8bb34ca65dbd6c450b7916997ff1ec35fad#68bba8bb34ca65dbd6c450b7916997ff1ec35fad"
 dependencies = [
  "async-trait",
  "axum",
@@ -1019,8 +1019,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "17.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
+version = "18.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v18.0.0#33c3695adae8b1216aaa6debcc0bf9d5bf68872c"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1086,8 +1086,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "49.0.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v49.0.0#a5965d42e79ff35c79509beaaebd417514b7914d"
+version = "51.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?rev=789be5b3874ea71c0dc73143bea92461712c888f#789be5b3874ea71c0dc73143bea92461712c888f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1181,8 +1181,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "17.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
+version = "18.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v18.0.0#33c3695adae8b1216aaa6debcc0bf9d5bf68872c"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1219,12 +1219,13 @@ dependencies = [
  "webpki-roots 0.26.11",
  "windows-sys 0.52.0",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "17.1.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v17.1.0#cdc6498af2605a402bbff1e399c2c0795b968180"
+version = "18.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v18.0.0#33c3695adae8b1216aaa6debcc0bf9d5bf68872c"
 dependencies = [
  "aes-gcm",
  "android_logger",
