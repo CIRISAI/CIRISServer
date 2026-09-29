@@ -44,9 +44,11 @@ pub const RETAINED_EPOCHS: u64 = 16;
 /// readers state it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Posture {
-    /// Sealed on disk under persist's hardware-rooted key: groups survive a
-    /// restart.
-    Durable { path: String },
+    /// Sealed on disk: groups survive a restart. `custody` is persist's word
+    /// for the key root (`hardware` | `software`, from the content-master row,
+    /// persist v50 #920): a host with no TPM now opens on disk under its
+    /// software master rather than falling back to memory.
+    Durable { path: String, custody: String },
     /// In memory: a restart loses every group, and a restarted device rejoins
     /// by publishing a fresh KeyPackage (the rejoin rule, `Rejoin` at the
     /// holder).
@@ -72,7 +74,12 @@ fn registry() -> &'static Mutex<Registry> {
 /// store under the wire node is found there, and the same store is then
 /// registered under `node_key_id` too, so the rooms use it rather than a
 /// second store opened beside it.
-pub async fn open_for_node(node_key_id: &str, wire_key_id: &str, path: &Path) -> Posture {
+pub async fn open_for_node(
+    engine: &ciris_persist::Engine,
+    node_key_id: &str,
+    wire_key_id: &str,
+    path: &Path,
+) -> Posture {
     use ciris_edge::mls::scope_state::{open_mls_state, MlsStateUnavailable};
     set_claims_path(node_key_id, path.with_file_name(CLAIMS_FILE));
     // A store the embedding host registered ON PURPOSE (an operator
@@ -97,15 +104,19 @@ pub async fn open_for_node(node_key_id: &str, wire_key_id: &str, path: &Path) ->
             return posture;
         }
     }
-    let (store, posture) = match open_mls_state(path).await {
-        Ok(store) => {
+    let (store, posture) = match open_mls_state(engine, path).await {
+        Ok((store, custody)) => {
+            let custody_kind = custody.kind.as_str().to_owned();
             let posture = Posture::Durable {
                 path: path.display().to_string(),
+                custody: custody_kind.clone(),
             };
             tracing::info!(
                 path = %path.display(),
+                custody = %custody_kind,
+                descriptor = %custody.descriptor,
                 "MLS state DURABLE — every room's group state is sealed on disk under persist's \
-                 hardware-rooted key; rooms survive a restart (CIRISServer#630)"
+                 content master; rooms survive a restart (CIRISServer#630)"
             );
             (store, posture)
         }
@@ -396,6 +407,21 @@ mod tests {
         ))
     }
 
+    /// An in-memory engine for `open_for_node`, which reads persist's content
+    /// master to open the store (persist v50 #920).
+    async fn test_engine() -> ciris_persist::Engine {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x51; 32]);
+        let signer = std::sync::Arc::new(ciris_persist::prelude::LocalSigner::from_parts(
+            key,
+            "mls-state-unit".to_string(),
+            None,
+            None,
+        ));
+        ciris_persist::Engine::with_signer(signer, "sqlite::memory:")
+            .await
+            .expect("in-memory engine")
+    }
+
     /// A fresh directory: the claims file lands beside the store, so two tests
     /// must never share one.
     fn tmp_dir(name: &str) -> std::path::PathBuf {
@@ -511,10 +537,16 @@ mod tests {
             disk_store(&path),
             Posture::Durable {
                 path: path.display().to_string(),
+                custody: "software".to_owned(),
             },
         );
-        let posture =
-            open_for_node(&node, &node, &tmp_dir("never-opened").join("mls-state.kv")).await;
+        let posture = open_for_node(
+            &test_engine().await,
+            &node,
+            &node,
+            &tmp_dir("never-opened").join("mls-state.kv"),
+        )
+        .await;
         assert!(
             matches!(posture, Posture::Durable { .. }),
             "the boot open kept the host's durable store: {posture:?}"
@@ -559,10 +591,16 @@ mod tests {
             disk_store(&path),
             Posture::Durable {
                 path: path.display().to_string(),
+                custody: "software".to_owned(),
             },
         );
-        let posture =
-            open_for_node(&actor, &wire, &tmp_dir("wire-open").join("mls-state.kv")).await;
+        let posture = open_for_node(
+            &test_engine().await,
+            &actor,
+            &wire,
+            &tmp_dir("wire-open").join("mls-state.kv"),
+        )
+        .await;
         assert!(matches!(posture, Posture::Durable { .. }), "{posture:?}");
         let room = "chat:room:v1:wire";
         let _g = CohortGroup::create(store_for(&actor), room, &actor, RETAINED_EPOCHS)

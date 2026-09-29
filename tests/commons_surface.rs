@@ -299,6 +299,8 @@ async fn try_put_community(
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
             supersede_proof: None,
+            cosignatures: Vec::new(),
+            lineage: Vec::new(),
         })
         .await
         .map_err(|e| e.kind().to_string())

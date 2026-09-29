@@ -421,6 +421,8 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
             supersede_proof: None,
+            cosignatures: Vec::new(),
+            lineage: Vec::new(),
         })
         .await
         .expect("put_community");

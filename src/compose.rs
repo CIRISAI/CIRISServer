@@ -407,6 +407,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // chat signer is the ACTOR, and a host that registered its store under the
     // wire NODE must be found there, not opened over by a second store.
     let mls_posture = crate::mls_state::open_for_node(
+        &engine,
         &chat_node_signer.key_id,
         &node_resolution.node_key_id,
         &cfg.data_dir.join("mls-state.kv"),

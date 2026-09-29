@@ -212,6 +212,10 @@ pub struct DriveEntry {
     pub asserted_at: String,
     pub filename: Option<String>,
     pub media_type: Option<String>,
+    /// How the name and type were read (CIRISEdge#698): `clear`, `opened`
+    /// (the sealed descriptor opened here) or `sealed` (held, not opened on
+    /// this device — `filename`/`media_type` are then unknown, not absent).
+    pub description: String,
     /// `here` when the bytes open on this node, else the reason they do not:
     /// `not_fetched`, `not_granted`, `evicted`, `withdrawn`, or a substrate
     /// fault's kind.
@@ -586,6 +590,74 @@ fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContent
     )
 }
 
+/// What a file IS — its name and media type — as this read can say
+/// (CIRISEdge#698). Since edge v33 an encrypted-tier row carries them only
+/// inside `sealed_descriptor`, so `FileRow.filename`/`media_type` read `None`
+/// on every sealed row and must never be used as the answer.
+struct Described {
+    filename: Option<String>,
+    media_type: Option<String>,
+    /// `clear` (a plaintext-tier or pre-#698 row), `opened` (the sealed
+    /// descriptor opened for this viewer) or `sealed` (held, not opened here).
+    how: &'static str,
+}
+
+/// The ONE door to a file's name and type (CIRISEdge#698). Every drive path
+/// that shows, keeps or tests a name goes through here.
+///
+/// STOPGAP: edge v33 exposes the sealed descriptor only through
+/// `FileRow::open_described`, which opens the BYTES too — a full decrypt per
+/// call, and nothing for a file whose bytes are not here. The ask is a
+/// descriptor-only `FileRow::describe` under the row's `caller_aad` (persist
+/// v51), CIRISEdge#702; at the re-pin this body becomes that one call.
+async fn describe(st: &DriveState, file: &files::FileRow, viewer: &str) -> Described {
+    use ciris_edge::files::Descriptor;
+    let d = match file.descriptor() {
+        Descriptor::Sealed => {
+            let content = store(&st.engine);
+            match file.open_described(&content, viewer).await {
+                Ok(opened) => opened.descriptor,
+                Err(_) => Descriptor::Sealed,
+            }
+        }
+        clear => clear,
+    };
+    match d {
+        Descriptor::Clear { format, name, .. } => Described {
+            filename: name,
+            media_type: Some(format),
+            how: "clear",
+        },
+        Descriptor::Opened { format, name, .. } => Described {
+            filename: name,
+            media_type: Some(format),
+            how: "opened",
+        },
+        Descriptor::Sealed => Described {
+            filename: None,
+            media_type: None,
+            how: "sealed",
+        },
+    }
+}
+
+/// [`describe`] as this node's content occurrence, for a path that has not
+/// resolved the viewer. No viewer key ⇒ the row's clear members only.
+async fn describe_here(st: &DriveState, file: &files::FileRow) -> Described {
+    match viewer_key(st).await {
+        Ok(v) => describe(st, file, &v).await,
+        Err(_) => Described {
+            filename: file.filename.clone(),
+            media_type: file.media_type.clone(),
+            how: if file.pointer.sealed_descriptor.is_some() {
+                "sealed"
+            } else {
+                "clear"
+            },
+        },
+    }
+}
+
 /// **The key every file is opened AS** — the one this node's content-KEM
 /// occurrence was provisioned under. See
 /// [`crate::backend::content_occurrence_key_id`]: on an actor/node split that
@@ -939,6 +1011,9 @@ async fn publish_into(
             room,
             bytes,
             media_type,
+            // The drive names a codec, if at all, in the media type's own
+            // parameters; edge's separate slot stays empty.
+            codec: None,
             filename,
             asserted_at: chrono::Utc::now(),
         },
@@ -1171,7 +1246,11 @@ async fn stopgap_withdrawn_in_room(
 /// **Has a `withdraws` retired this row?** The id of the one that did.
 ///
 /// Re-derives each retraction's authority NOW with persist's own
-/// `check_withdraws_admission`, never trusting the stored rule — the same
+/// `check_withdraws_admission_as_admitted`, never trusting the stored rule —
+/// at the delegation depth the row was ADMITTED under (persist v50, #690):
+/// the write-form check now uses CC 4.1.1's 5-hop default, and re-deriving a
+/// row admitted through a longer chain with it would bring a withdrawn file
+/// back to life, the retroactive change persist ruled out. The same
 /// discipline `blob_tombstone::binding_state` applies at the bytes plane, one
 /// row instead of every row binding a sha. (Persist's per-row fold,
 /// `retiring_composer`, is private; this is its withdraws arm, and the only
@@ -1188,7 +1267,9 @@ async fn withdrawn_by(st: &DriveState, attestation_id: &str) -> Result<Option<St
         if g.attestation_type != WITHDRAWS {
             continue;
         }
-        match ciris_persist::federation::admission::check_withdraws_admission(&*dir, &g).await {
+        match ciris_persist::federation::admission::check_withdraws_admission_as_admitted(&*dir, &g)
+            .await
+        {
             Ok(Some(_)) => return Ok(Some(g.attestation_id)),
             Ok(None) | Err(ciris_persist::federation::Error::WithdrawsNotAdmitted { .. }) => {}
             Err(e) => return Err(format!("re-derive {}: {e:#}", g.attestation_id)),
@@ -1946,6 +2027,7 @@ async fn read_drive(
             .await
             .ok()
             .flatten();
+        let described = describe(&st, &file, &viewer).await;
         out.push(DriveEntry {
             // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
             // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
@@ -1956,8 +2038,9 @@ async fn read_drive(
             attestation_id: file.attestation_id.clone(),
             author_key_id: file.attesting_key_id.clone(),
             asserted_at: file.asserted_at.to_rfc3339(),
-            filename: file.filename.clone(),
-            media_type: file.media_type.clone(),
+            filename: described.filename,
+            media_type: described.media_type,
+            description: described.how.to_owned(),
             bytes,
             detail,
             size,
@@ -2050,6 +2133,7 @@ async fn file_meta(
     // the substrate records no holder there and the count is not a count of
     // devices. Said as such (`holder_claims_recorded: false`) rather than a
     // bare 0 a client would render as "nobody has it".
+    let described = describe(&st, &found.file, &viewer).await;
     let recorded =
         room.row_scope_token() == ciris_persist::federation::types::cohort_scope::COMMUNITY;
     let devices_holding = match (recorded, sha_of(&found.file)) {
@@ -2064,8 +2148,9 @@ async fn file_meta(
             "attestation_id": found.file.attestation_id,
             "cohort": room.row_scope_token(),
             "room_id": room.content_group_id(),
-            "filename": found.file.filename,
-            "media_type": found.file.media_type,
+            "filename": described.filename,
+            "media_type": described.media_type,
+            "description": described.how,
             "author_key_id": found.file.attesting_key_id,
             "asserted_at": found.file.asserted_at.to_rfc3339(),
             "size": size,
@@ -2200,14 +2285,15 @@ async fn read_file(
             )
         }
     };
+    let described = describe(&st, &found.file, &viewer).await;
     if !truthy(q.raw.as_deref()) {
         return match open_whole(&st, &found, &viewer).await {
             Ok((bytes, _)) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "attestation_id": found.file.attestation_id,
-                    "media_type": found.file.media_type,
-                    "filename": found.file.filename,
+                    "media_type": described.media_type,
+                    "filename": described.filename,
                     "size": bytes.len(),
                     "content_digest": plaintext_digest(&bytes),
                     "content_digest_alg": "sha-256",
@@ -2226,8 +2312,7 @@ async fn read_file(
         ByteState::Here { size } => size,
         ByteState::Absent { state, detail } => return refuse_state(state, detail),
     };
-    let media = found
-        .file
+    let media = described
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
@@ -2239,7 +2324,7 @@ async fn read_file(
     );
     h.insert(
         header::CONTENT_DISPOSITION,
-        content_disposition(found.file.filename.as_deref()),
+        content_disposition(described.filename.as_deref()),
     );
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(
@@ -2342,13 +2427,15 @@ async fn replace_file(
         Ok(u) => u,
         Err(e) => return e,
     };
-    // Unnamed members keep the old file's: a replace changes the BYTES.
+    // Unnamed members keep the old file's: a replace changes the BYTES. The
+    // old name and type are read through the descriptor (CIRISEdge#698).
+    let old = describe_here(&st, &found.file).await;
     let media_type = up
         .media_type
         .clone()
-        .or_else(|| found.file.media_type.clone())
+        .or_else(|| old.media_type.clone())
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let filename = up.filename.clone().or_else(|| found.file.filename.clone());
+    let filename = up.filename.clone().or_else(|| old.filename.clone());
     let (published, addressed) = match publish_into(
         &st,
         &headers,
@@ -2666,8 +2753,8 @@ async fn move_file(
         Ok(b) => b,
         Err(e) => return e,
     };
-    let media_type = found
-        .file
+    let old = describe(&st, &found.file, &viewer).await;
+    let media_type = old
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
@@ -2679,7 +2766,7 @@ async fn move_file(
         &target,
         &bytes,
         &media_type,
-        found.file.filename.as_deref(),
+        old.filename.as_deref(),
         Plane::Drive,
     )
     .await
@@ -2794,11 +2881,17 @@ pub struct Note {
 /// media type alone is not enough — `POST /v1/files` can put a named `.txt` in
 /// the same room, and a notes list that swallowed it would report somebody's
 /// uploaded file as something they had written.
-fn is_note(file: &files::FileRow) -> bool {
-    file.media_type
-        .as_deref()
-        .is_some_and(|m| m.starts_with("text/plain"))
-        && file.filename.is_none()
+///
+/// Read through the DESCRIPTOR (CIRISEdge#698): a sealed row's clear members
+/// are `None`, so testing them would call every sealed upload a note. A row
+/// whose descriptor did not open here is not known to be a note and is not
+/// listed as one.
+fn is_note(d: &Described) -> bool {
+    d.how != "sealed"
+        && d.media_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("text/plain"))
+        && d.filename.is_none()
 }
 
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
@@ -2901,7 +2994,7 @@ async fn find_own_note(
     let room = ciris_edge::self_room::room(owner_key_id);
     let found = find_file(st, owner_key_id, &room, attestation_id, Plane::Notes).await?;
     // A withdrawn note, or a file that is not a note, is not one of your notes.
-    if !is_note(&found.file) || found.withdrawn_by.is_some() {
+    if !is_note(&describe_here(st, &found.file).await) || found.withdrawn_by.is_some() {
         return Err(refuse(
             StatusCode::NOT_FOUND,
             "notes.not_found",
@@ -3043,7 +3136,7 @@ async fn read_notes(
             if out.len() >= limit {
                 break 'rooms;
             }
-            if !is_note(&row) {
+            if !is_note(&describe(&st, &row, &viewer).await) {
                 continue;
             }
             match withdrawn_by(&st, &row.attestation_id).await {
