@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -422,6 +423,106 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                               layer="relations", rel="file", cc="CC 5.3.2.5")
                     raise MeshError("bytes differ")
             step(f"file:{p}", layer="relations", size=len(data), devices=devs, proves="byte-identical on every device")
+        elif k == "note":
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            src = N[rel.get("device", devs[0])]
+            text = f"{rel.get('text', 'note to self')} {int(time.time())}"
+            got = src.must("POST", "/v1/notes", {"body": text})
+            nid = got.get("attestation_id")
+            for other in devs:
+                if other == src.name:
+                    continue
+                dev = N[other]
+                try:
+                    wait_for(f"{other} to list the note", lambda: any(
+                        n.get("attestation_id") == nid for n in (dev.must("GET", "/v1/notes?limit=50").get("notes") or [])),
+                        float(rel.get("wait", 180)), every=5)
+                except MeshError:
+                    step.fail(f"note_NOT_listed:{other}", "the note row never reached the other device", [src, dev],
+                              _BODY + r"|stalled mid-frame", layer="relations", rel="note", cc="CC 5.2")
+                    raise
+            step(f"note:{p}", layer="relations", attestation_id=nid, proves="a note written on one device lists on the others")
+        elif k == "corpus":
+            # The transfer corpus (harness/mesh-repro/lib/media_corpus.py): every
+            # file written on one device, read raw on every other device of the
+            # person, compared byte for byte. Per file the outcome names its
+            # layer: 404 = the ROW never crossed (CIRISEdge#716 on a direct
+            # link), 409 = row here, bytes not pulled, 200+wrong = the bytes
+            # (CIRISEdge#717 serves a chunk-DAG's manifest), 200+match = opened.
+            import subprocess
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            src = N[rel.get("device", devs[0])]
+            out = mesh.work / "corpus"
+            from .mesh import HARNESS
+            subprocess.run([sys.executable, str(HARNESS / "mesh-repro" / "lib" / "media_corpus.py"), str(out)],
+                           check=True, capture_output=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            only = set(rel["only"]) if rel.get("only") else None
+            written = []
+            for row in manifest:
+                if only and row["name"] not in only:
+                    continue
+                data = (out / row["name"]).read_bytes()
+                got = src.write_file(data, row["media_type"], row["filename"])
+                written.append({**row, "id": got["attestation_id"]})
+            step(f"corpus_written:{p}", layer="relations", files=len(written), device=src.name)
+            deadline = time.monotonic() + float(rel.get("wait", 300))
+            results: Dict[str, Dict[str, Any]] = {w["name"]: {} for w in written}
+            pending = {(w["name"], o) for w in written for o in devs if o != src.name}
+            while pending and time.monotonic() < deadline:
+                for name, other in list(pending):
+                    w = next(x for x in written if x["name"] == name)
+                    st, raw = N[other].read_raw(w["id"])
+                    want = (out / name).read_bytes()
+                    r: Dict[str, Any] = {"status": st}
+                    if st == 200:
+                        r["match"] = raw == want
+                        r["size"] = len(raw)
+                        if not r["match"]:
+                            r["expected"] = len(want)
+                            r["first_diff"] = next((i for i in range(min(len(raw), len(want))) if raw[i] != want[i]), min(len(raw), len(want)))
+                        pending.discard((name, other))
+                    else:
+                        try:
+                            r["reason_id"] = json.loads(raw.decode()).get("reason_id")
+                        except Exception:  # noqa: BLE001
+                            r["reason_id"] = raw[:80].decode(errors="replace")
+                    results[name][other] = r
+                if pending:
+                    time.sleep(5)
+            opened = [n for n, per in results.items() if per and all(v.get("match") for v in per.values())]
+            by_class: Dict[str, List[str]] = {"row_never_crossed": [], "bytes_not_pulled": [], "wrong_bytes": [], "refused": []}
+            for n, per in results.items():
+                for other, v in per.items():
+                    if v.get("match"):
+                        continue
+                    if v.get("status") == 404:
+                        by_class["row_never_crossed"].append(f"{n}@{other}")
+                    elif v.get("status") == 409:
+                        by_class["bytes_not_pulled"].append(f"{n}@{other}")
+                    elif v.get("status") == 200:
+                        by_class["wrong_bytes"].append(f"{n}@{other}:{v.get('size')}/{v.get('expected')}")
+                    else:
+                        by_class["refused"].append(f"{n}@{other}:{v.get('status')}:{v.get('reason_id')}")
+            step(f"corpus_compared:{p}", layer="relations", opened=len(opened), total=len(written),
+                 **{k: v for k, v in by_class.items() if v},
+                 proves="each corpus file byte-identical on every other device of the person")
+            if len(opened) != len(written):
+                means = []
+                if by_class["row_never_crossed"]:
+                    means.append("rows never reached the other device — the direct link stalls multi-fragment frames (CIRISEdge#716)")
+                if by_class["bytes_not_pulled"]:
+                    means.append("rows arrived, bytes not pulled — the derived-address pull (CC 5.4.6 / CIRISEdge#499)")
+                if by_class["wrong_bytes"]:
+                    means.append("bytes returned differ — a chunk-DAG's manifest served as the file (CIRISEdge#717)")
+                if by_class["refused"]:
+                    means.append("refused by name — drive.seal_mismatch is the drive refusing #717's manifest")
+                step.fail(f"corpus_NOT_opened:{p}", "; ".join(means), [src] + [N[o] for o in devs if o != src.name],
+                          _BODY + r"|stalled mid-frame|seal_mismatch", layer="relations", rel="corpus", cc="CC 5.3.2.5")
+                if rel.get("require", True):
+                    raise MeshError("corpus did not open byte-identical on every device")
         else:
             raise MeshError(f"relation {k!r}: declared, no builder yet")
 
@@ -434,13 +535,40 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 raise MeshError(f"NEGATIVE FAILED: {neg['person']} can list the room")
             step(f"negative:cannot_list_room:{neg['person']}", layer="negatives", status=st)
         elif neg["check"] == "holds_no_row":
+            # The outsider holds no self-plane row of the person — and the check
+            # is non-vacuous only if the outsider holds SOMETHING from the
+            # person's keys (peering, owner-binding): a node nothing reached is
+            # not evidence (the selffiles ladder's first outsider was exactly that).
             n = N[neg["node"]]
+            keys = {N[d].owner_key_id for d in persons[neg["person"]]["owns"]} | {N[d].node_key_id for d in persons[neg["person"]]["owns"]}
             pid = N[persons[neg["person"]]["owns"][0]].owner_key_id
-            rows = n.rows("select attestation_id, attestation_envelope from federation_attestations")
-            hits = [a for a, env in rows if (env or "").find(neg["dimension"]) >= 0 and pid in (env or "")]
+            rows = n.rows("select attestation_id, attesting_key_id, attestation_envelope from federation_attestations")
+            control = sum(1 for _, att, _ in rows if att in keys)
+            hits = [a for a, _, env in rows if (env or "").find(neg["dimension"]) >= 0 and pid in (env or "")]
             if hits:
                 raise MeshError(f"NEGATIVE FAILED: {neg['node']} holds {len(hits)} {neg['dimension']} rows of {neg['person']}")
-            step(f"negative:holds_no_row:{neg['node']}", layer="negatives", dimension=neg["dimension"], control=len(rows))
+            if control == 0:
+                raise MeshError(f"NEGATIVE VACUOUS: {neg['node']} holds nothing at all from {neg['person']}'s keys — peer it as a contact")
+            step(f"negative:holds_no_row:{neg['node']}", layer="negatives", dimension=neg["dimension"], control=control,
+                 proves="a peered outsider holds the person's public rows and none of their self plane")
+        elif neg["check"] == "no_wider_self_rows":
+            # On the person's OWN devices, every self-plane row (file:v1, or a
+            # chat:* row naming the owner) stays at cohort_scope self — a wider
+            # row is the file's existence distributed past the person
+            # (CIRISPersist#919's shape).
+            pid = N[persons[neg["person"]]["owns"][0]].owner_key_id
+            wide: Dict[str, List[str]] = {}
+            for d in persons[neg["person"]]["owns"]:
+                rows = N[d].rows("select attestation_id, cohort_scope, attestation_envelope from federation_attestations")
+                bad = [f"{a[:18]}@{sc}" for a, sc, env in rows
+                       if (('"dimension": "file:v1"' in (env or "") or '"dimension":"file:v1"' in (env or ""))
+                           or ('"dimension": "chat:' in (env or "") and pid in (env or ""))) and sc != "self"]
+                if bad:
+                    wide[d] = bad[:8]
+            if wide:
+                raise MeshError(f"NEGATIVE FAILED: self-plane rows wider than self on the person's own devices: {wide}")
+            step(f"negative:no_wider_self_rows:{neg['person']}", layer="negatives", devices=persons[neg["person"]]["owns"],
+                 proves="every self-plane row on the person's devices is at cohort_scope self")
 
     # the actor's view, in the client fixture's shape — KEYED BY DECLARED ID
     # (CIRISClient#134 §1): `PERSON_<id>_OWNER_KEY_ID`, `NODE_<id>_URL`, …;
