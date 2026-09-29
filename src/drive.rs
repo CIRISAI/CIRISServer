@@ -1282,8 +1282,11 @@ async fn withdrawn_by(st: &DriveState, attestation_id: &str) -> Result<Option<St
 /// row's attester, and this node can sign a rule-1 `withdraws` for exactly the
 /// rows its own key attested.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-fn require_author(st: &DriveState, row: &Attestation) -> Result<(), Response> {
-    if row.attesting_key_id == st.node_signer.key_id {
+fn require_author(st: &DriveState, owner_key_id: &str, row: &Attestation) -> Result<(), Response> {
+    // Two authors a file can have (CIRISEdge#675, edge v33 `files::file_author`):
+    // the PERSON — any of their devices holds the pen — or, for a row written
+    // before a pen was in hand, this node.
+    if row.attesting_key_id == owner_key_id || row.attesting_key_id == st.node_signer.key_id {
         return Ok(());
     }
     Err(refuse(
@@ -1326,6 +1329,9 @@ struct Withdrawal {
 /// claims). A rename's bytes stay bound by the new row, so they are kept.
 async fn withdraw_rows(
     st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    plane: Plane,
     listed: &Attestation,
     file: &files::FileRow,
     reason: &str,
@@ -1352,23 +1358,41 @@ async fn withdraw_rows(
         else {
             break;
         };
-        if prior.attesting_key_id != st.node_signer.key_id {
+        if prior.attesting_key_id != st.node_signer.key_id && prior.attesting_key_id != owner_key_id
+        {
             break;
         }
         chain.push(prior.clone());
         cur = prior;
     }
     let now = chrono::Utc::now();
+    // The PERSON's pen, when a row in the chain is theirs (CIRISEdge#675): a
+    // `withdraws` is signed by the row's own attester (persist rule 1).
+    let pen = if chain.iter().any(|r| r.attesting_key_id == owner_key_id) {
+        Some(
+            author_capsule(st, headers, owner_key_id, plane)
+                .await
+                .map_err(|_| {
+                    format!(
+                        "the person's signer is unavailable to withdraw {}",
+                        listed.attestation_id
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let mut withdrawn = Vec::new();
     for row in &chain {
         if withdrawn_by(st, &row.attestation_id).await?.is_some() {
             continue;
         }
+        let signer: &ciris_edge::identity::LocalSigner = match &pen {
+            Some(p) if row.attesting_key_id == owner_key_id => p.edge_signer(),
+            _ => &st.node_signer,
+        };
         let w = ciris_edge::replication::attestation_bind::withdraws_attestation(
-            row,
-            reason,
-            now,
-            &st.node_signer,
+            row, reason, now, signer,
         )
         .await
         .map_err(|e| format!("build withdraws for {}: {e}", row.attestation_id))?;
@@ -2417,7 +2441,7 @@ async fn replace_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
@@ -2452,7 +2476,17 @@ async fn replace_file(
         Ok(p) => p,
         Err(e) => return e,
     };
-    let w = match withdraw_rows(&st, &found.row, &found.file, "replaced by its author").await {
+    let w = match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Drive,
+        &found.row,
+        &found.file,
+        "replaced by its author",
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => return withdraw_failed(e),
     };
@@ -2530,7 +2564,7 @@ async fn rename_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
@@ -2590,7 +2624,17 @@ async fn rename_file(
     };
     crate::compose::kick_replication("file renamed");
     let new_id = placed_or(&crossing.shared, &row.attestation_id).to_owned();
-    let w = match withdraw_rows(&st, &found.row, &found.file, "renamed by its author").await {
+    let w = match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Drive,
+        &found.row,
+        &found.file,
+        "renamed by its author",
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => return withdraw_failed(e),
     };
@@ -2640,13 +2684,23 @@ async fn withdraw_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    match withdraw_rows(&st, &found.row, &found.file, "withdrawn by its author").await {
+    match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Drive,
+        &found.row,
+        &found.file,
+        "withdrawn by its author",
+    )
+    .await
+    {
         Ok(w) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -2733,7 +2787,7 @@ async fn move_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     let viewer = match viewer_key(&st).await {
@@ -2777,7 +2831,17 @@ async fn move_file(
     let withdrawn = if req.keep_source {
         Vec::new()
     } else {
-        match withdraw_rows(&st, &found.row, &found.file, "moved by its author").await {
+        match withdraw_rows(
+            &st,
+            &headers,
+            &owner.key_id,
+            Plane::Drive,
+            &found.row,
+            &found.file,
+            "moved by its author",
+        )
+        .await
+        {
             Ok(w) => w.withdrawn,
             Err(e) => return withdraw_failed(e),
         }
@@ -3001,7 +3065,7 @@ async fn find_own_note(
             format!("{attestation_id} is not one of your notes"),
         ));
     }
-    require_author(st, &found.row)?;
+    require_author(st, owner_key_id, &found.row)?;
     Ok(found)
 }
 
@@ -3038,7 +3102,17 @@ async fn update_note(
         Ok(p) => p,
         Err(e) => return e,
     };
-    let w = match withdraw_rows(&st, &found.row, &found.file, "edited by its author").await {
+    let w = match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Notes,
+        &found.row,
+        &found.file,
+        "edited by its author",
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => return withdraw_failed(e),
     };
@@ -3076,7 +3150,17 @@ async fn withdraw_note(
         Ok(f) => f,
         Err(e) => return e,
     };
-    match withdraw_rows(&st, &found.row, &found.file, "withdrawn by its author").await {
+    match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Notes,
+        &found.row,
+        &found.file,
+        "withdrawn by its author",
+    )
+    .await
+    {
         Ok(w) => (
             StatusCode::OK,
             Json(serde_json::json!({

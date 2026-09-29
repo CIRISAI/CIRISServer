@@ -44,7 +44,6 @@ struct Fx {
     base: String,
     owner: String,
     owner_id: OwnerIdentity,
-    node_key: String,
     client: reqwest::Client,
 }
 
@@ -62,7 +61,6 @@ async fn fixture() -> Fx {
         base,
         owner,
         owner_id,
-        node_key,
         client: reqwest::Client::new(),
     }
 }
@@ -308,7 +306,10 @@ async fn uploads_list_meta_and_read_round_trip() {
     assert_eq!(e_small["withdrawn"], false);
     let env = &e_small["envelope"];
     assert_eq!(env["attestation_id"], small_id.as_str());
-    assert_eq!(env["attesting_key_id"], fx.node_key.as_str());
+    // The PERSON authors a file (CIRISEdge#675, edge v33 `files::file_author`):
+    // the row is signed by the owner's key, which every one of their devices
+    // holds, not by the node that happened to write it.
+    assert_eq!(env["attesting_key_id"], fx.owner_id.key_id.as_str());
     assert_eq!(env["cohort_scope"], "self");
     assert_eq!(env["dimension"], "file:v1");
     assert!(env["subject_key_ids"].is_array(), "{env}");
