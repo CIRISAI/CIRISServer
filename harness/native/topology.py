@@ -188,6 +188,7 @@ def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     # 5. relations, in declared order.
     values: Dict[str, str] = {}
     rooms: Dict[str, str] = {}
+    added: set = set()  # (host node id, guest person) pairs already POSTed by a `reachable` gate
     for rel in t["relations"]:
         k = rel["rel"]
         if k == "peered":
@@ -237,11 +238,19 @@ def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           "(CIRISServer#699): a room made now keys but its bodies read not_granted",
                           [host], r"handshake cannot complete|resolves to no node|reachable")
                 raise MeshError("reachable gate did not hold")
+            added.add((rel["node"], rel["person"]))
             step(f"reachable:{rel['node']}->{rel['person']}", layer="relations", reachable_nodes=got.get("reachable_nodes"),
                  tries=tries, proves="the guest's binding is held here; the room can address their node")
         elif k == "contact":
             p, q = rel["from"], rel["to"]
             host, guest = N[persons[p]["owns"][0]], N[persons[q]["owns"][0]]
+            if rel.get("via", "owner") == "owner" and (persons[p]["owns"][0], q) in added:
+                # The `reachable` gate's POST IS the contact. A second POST for a
+                # live contact re-issues its grant, and three builds that did so
+                # never keyed the room afterwards (2026-09-29); the scenario that
+                # posts once keys it in ~7 s. Recorded, not repeated.
+                step(f"contact:{p}->{q}", layer="relations", via="owner", added_by="reachable gate")
+                continue
             key = guest.owner_key_id if rel.get("via", "owner") == "owner" else guest.contact_code(rel.get("nodes", "all"))
             got = host.add_contact(key)
             step(f"contact:{p}->{q}", layer="relations", via=rel.get("via", "owner"), key=str(got.get("key_id"))[:60],
@@ -256,9 +265,15 @@ def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 if ca != cb:
                     raise MeshError(f"the two sides derived different pair rooms: {ca} vs {cb}")
                 rooms[rel.get("id", "pair")] = ca
+                # POLL BOTH SIDES EVERY TICK. The joiner's half of the handshake
+                # (publish the KeyPackage, consume the Welcome) advances on its
+                # transcript reads; a short-circuit `a and b` never read B while
+                # A was not ready, so B never published (five builds, 2026-09-29).
+                def both_keyed() -> bool:
+                    ra, rb = a.room(ca), b.room(ca)
+                    return bool(ra["ready"] and rb["ready"])
                 try:
-                    wait_for("the pair room to key", lambda: a.room(ca)["ready"] and b.room(ca)["ready"],
-                             float(rel.get("wait", 180)), every=3)
+                    wait_for("the pair room to key", both_keyed, float(rel.get("wait", 180)), every=3)
                 except MeshError:
                     step.fail("room_NOT_keyed", "the MLS handshake did not complete", [a, b], _HANDSHAKE)
                     raise

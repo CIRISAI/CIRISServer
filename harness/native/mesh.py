@@ -322,7 +322,11 @@ class Node:
         return self.must("POST", "/v1/contacts", {"key_id": key_or_code})
 
     def contact_code(self, nodes: str = "all") -> str:
-        got = self.must("GET", f"/v1/self/contact-code?nodes={nodes}")
+        # `nodes` absent = every announced device; a comma list = exactly those;
+        # `none` = the fed-ID only. "all" is the absent form (a literal `all` is
+        # read as a node id and refused).
+        q = "" if nodes in ("all", "", None) else f"?nodes={nodes}"
+        got = self.must("GET", f"/v1/self/contact-code{q}")
         return got.get("code") or got.get("contact_code") or ""
 
     def open_pair(self, with_key: str) -> str:
