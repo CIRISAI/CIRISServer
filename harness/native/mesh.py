@@ -364,6 +364,13 @@ class Node:
     def drive(self, cohort: str = "self") -> List[Dict[str, Any]]:
         return (self.must("GET", f"/v1/drive?cohort={cohort}&limit=500") or {}).get("entries") or []
 
+    def trust_roots(self) -> Any:
+        """`GET /v1/trust-root`: per root this node considers, persist's verdict,
+        the node's `standing` word and the witnessed `lineage_head` (digest,
+        instant) — CC T8 (vii)'s per-node line."""
+        status, body = self.api("GET", "/v1/trust-root")
+        return body if status == 200 else {"status": status, "body": str(body)[:200]}
+
     # -- the node's own database, read-only --
 
     def rows(self, sql: str, args: Tuple[Any, ...] = ()) -> List[Tuple[Any, ...]]:

@@ -175,7 +175,18 @@ def export_rows(mesh: Mesh) -> Decl:
         (n.log_path.parent / "keys.jsonl").write_text(
             "\n".join(json.dumps(dict(zip(("key_id", "identity_type", "valid_from", "valid_until", "scrub_key_id"), k)), default=str) for k in keys),
             encoding="utf-8")
-        out[name] = {"rows": len(rows), "keys": len(keys), "sha256": h.hexdigest(), "path": str(path)}
+        # CC's two per-node additions (CIRISConstitution#131): the standing
+        # verdict for each root, and the witnessed head digest + instant.
+        tr = n.trust_roots() if n.token or True else {}
+        roots = tr.get("roots") if isinstance(tr, dict) else None
+        standing = {r.get("root_key_id"): {
+            "standing": (r.get("verdict") or {}).get("standing"),
+            "valid": (r.get("verdict") or {}).get("valid"),
+            "accepted": r.get("accepted"),
+            "lineage_head": (r.get("verdict") or {}).get("lineage_head"),
+        } for r in (roots or [])} if roots else {"unreadable": tr}
+        out[name] = {"rows": len(rows), "keys": len(keys), "sha256": h.hexdigest(), "path": str(path),
+                     "roots": standing}
     return out
 
 

@@ -95,7 +95,39 @@ async fn list_roots(State(st): State<TrustRootState>) -> Response {
         .await;
         match verdict {
             Ok(v) => {
-                let json = serde_json::to_value(&v).unwrap_or(serde_json::Value::Null);
+                let mut json = serde_json::to_value(&v).unwrap_or(serde_json::Value::Null);
+                // THE WITNESSED HEAD (persist v51 #938, CC T6/T8 (vii)): the
+                // digest of the signed roster row at the version this node
+                // witnessed, and its instant. Every node holding the same rows
+                // reports the same pair — the one-line multi-node predicate the
+                // topology harness reports per node (CIRISConstitution#131).
+                let head = match st.engine.lineage_head(&root_ref).await {
+                    Ok(Some(view)) => serde_json::json!({
+                        "digest": view.witnessed_head.as_ref().map(|(d, _)| d.clone()),
+                        "at": view.witnessed_head.as_ref().map(|(_, at)| at.to_rfc3339()),
+                        "quorum": view.quorum,
+                        "judged": view.community.as_ref().and_then(|c| c.judged),
+                        "latest_cosign_at": view.latest_cosign_at.map(|t| t.to_rfc3339()),
+                    }),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                };
+                // STANDING, one word, as the T8 verdict names it: not_rooted
+                // when the five-conjunct verdict fails or a halt is latched;
+                // rooted otherwise. `stalled` (T7: valid, closed to new members)
+                // is added when persist surfaces liveness on this read.
+                let standing = if !v.valid || v.halt_latched == Some(true) {
+                    "not_rooted"
+                } else {
+                    "rooted"
+                };
+                if let serde_json::Value::Object(m) = &mut json {
+                    m.insert("lineage_head".into(), head);
+                    m.insert(
+                        "standing".into(),
+                        serde_json::Value::String(standing.into()),
+                    );
+                }
                 roots.push(RootEntry {
                     root_key_id: root_ref,
                     root_kind: json
