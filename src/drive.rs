@@ -1133,11 +1133,29 @@ async fn find_file(
                 // would not.
                 let dir = st.engine.federation_directory();
                 if let Ok(Some(row)) = dir.get_attestation(attestation_id).await {
-                    if let Some(file) = stopgap_belongs_to(room, &row) {
-                        if let Some(w) = withdrawn_by(st, attestation_id)
+                    if let Some(file) = files::belongs_to(room, &row) {
+                        // Edge's lifecycle decides WHICH retirement (CIRISEdge#693):
+                        // a `withdraws` is still re-derived here; a `supersedes`
+                        // (a rename, edge v33.1 `files::rename`) or a `recants`
+                        // from the row's own attester retires it as well.
+                        let retired = match withdrawn_by(st, attestation_id)
                             .await
                             .map_err(listing_failed)?
                         {
+                            Some(w) => Some(w),
+                            None => lifecycle_in_room(st, owner, room, attestation_id)
+                                .await
+                                .map_err(listing_failed)?
+                                .filter(|l| {
+                                    matches!(
+                                        l,
+                                        files::FileLifecycle::Superseded
+                                            | files::FileLifecycle::Recanted
+                                    )
+                                })
+                                .and(retired_by(st, &row).await),
+                        };
+                        if let Some(w) = retired {
                             return Ok(Found {
                                 file,
                                 row,
@@ -1163,78 +1181,93 @@ async fn find_file(
     }
 }
 
-// ─── STOPGAP for CIRISEdge#693 — delete when an edge cut lets `files::in_room`
-//     take a `LifecycleView` and makes `belongs_to` public. ───────────────────
-//
-// Edge v32 / persist v49 list LIVE rows only, and edge's post-gate room check
-// is private, so a withdrawn file vanished from the drive: a read of its id
-// answered `404 drive.not_in_room` instead of `410 drive.withdrawn`, and
-// `?include_withdrawn=true` lost it. These two functions are the labelled
-// copy the ownership rule allows until upstream lands.
-
-/// COPY of edge v32.1.0's private `files::belongs_to` (src/files.rs): is `row`
-/// one of `room`'s files? The self arm checks the pointer's group slot; a
-/// targeted room checks its cohort-target envelope member.
-fn stopgap_belongs_to(
+/// Edge's lifecycle for one row of `room`, as its `All` listing names it
+/// (`IncludeWithdrawn` would leave out superseded and recanted rows). `None` when the caller's listing does not carry the row at all.
+async fn lifecycle_in_room(
+    st: &DriveState,
+    caller: &str,
     room: &ScopeRoom,
-    row: &ciris_persist::federation::Attestation,
-) -> Option<files::FileRow> {
-    if row.cohort_scope != room.row_scope_token() {
-        return None;
-    }
-    let file = files::FileRow::from_row(row)?;
-    let names_this_room = match room.cohort_target_field() {
-        Some(field) => {
-            row.attestation_envelope
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                == Some(room.content_group_id())
+    attestation_id: &str,
+) -> Result<Option<files::FileLifecycle>, String> {
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::All,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        if let Some(f) = page
+            .files
+            .into_iter()
+            .find(|f| f.attestation_id == attestation_id)
+        {
+            return Ok(Some(f.lifecycle));
         }
-        None => file.pointer.community_key_id == room.content_group_id(),
-    };
-    names_this_room.then_some(file)
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => return Ok(None),
+        }
+    }
 }
 
-/// The WITHDRAWN file rows of `room` this caller may see: persist's listing at
-/// `LifecycleView::IncludeWithdrawn` under the same caller gate `in_room`
-/// builds, kept only where a `withdraws` really retired the row.
-async fn stopgap_withdrawn_in_room(
+/// The RETIRED file rows of `room` this caller may see (CIRISEdge#693, edge
+/// v33): edge's own listing at `IncludeWithdrawn`, which names each row's
+/// lifecycle by persist's hide rule. A `Withdrawn` row is kept only when a
+/// `withdraws` really retired it (persist re-derives its authority).
+async fn withdrawn_in_room(
     st: &DriveState,
     room: &ScopeRoom,
     caller: &str,
 ) -> Result<Vec<files::FileRow>, String> {
-    use ciris_persist::ceg::{AttestationFilter, LifecycleView};
-    use ciris_persist::scope::CallerScope;
-    let admission =
-        ciris_persist::scope::admission::build_caller_admission(&st.engine, &caller.to_owned())
-            .await
-            .map_err(|e| format!("caller admission: {e}"))?;
-    let scope = CallerScope::Authenticated { admission };
     let mut out = Vec::new();
-    let mut cursor = None;
-    for _ in 0..64 {
-        let mut f = AttestationFilter::default();
-        f.cohort_scope = Some(room.row_scope_token().to_owned());
-        f.dimension_exact = Some(files::FILE_DIMENSION.to_owned());
-        f.lifecycle = LifecycleView::IncludeWithdrawn;
-        let page = st
-            .engine
-            .list_attestations(f, cursor, 256, scope.clone())
-            .await
-            .map_err(|e| format!("list withdrawn in {room}: {e}"))?;
-        for row in &page.items {
-            if let Some(file) = stopgap_belongs_to(room, row) {
-                if withdrawn_by(st, &row.attestation_id).await?.is_some() {
-                    out.push(file);
-                }
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::IncludeWithdrawn,
+        )
+        .await
+        .map_err(|e| format!("list withdrawn in {room}: {e:#}"))?;
+        for f in page.files {
+            if f.lifecycle == files::FileLifecycle::Withdrawn
+                && withdrawn_by(st, &f.attestation_id).await?.is_some()
+            {
+                out.push(f);
             }
         }
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            break;
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => break,
         }
     }
     Ok(out)
+}
+
+/// The composer that retired `row` without a `withdraws` — the `supersedes`
+/// or `recants` from its own attester that edge's lifecycle named
+/// (`FileLifecycle::Superseded` / `Recanted`). Its id, for the 410's detail.
+async fn retired_by(st: &DriveState, row: &Attestation) -> Option<String> {
+    use ciris_persist::federation::types::attestation_type::{RECANTS, SUPERSEDES};
+    st.engine
+        .federation_directory()
+        .list_attestations_referencing(&row.attestation_id)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|c| {
+            (c.attestation_type == SUPERSEDES || c.attestation_type == RECANTS)
+                && c.attesting_key_id == row.attesting_key_id
+        })
+        .map(|c| c.attestation_id)
 }
 
 /// **Has a `withdraws` retired this row?** The id of the one that did.
@@ -1430,104 +1463,6 @@ fn withdraw_failed(detail: String) -> Response {
         "drive.withdraw_failed",
         detail,
     )
-}
-
-/// **A rename: a new row over the SAME bytes.**
-///
-/// No re-seal and no re-upload: the new row cites the old pointer. That is only
-/// possible because the seal's associated data is `(author, asserted_at,
-/// field)` read off the ROW (`group_content::aad_for_open`), so the new row
-/// carries the old row's author and instant verbatim — the claim's instant,
-/// exactly as a widening carries it (persist v40.0.0) — and the bytes open
-/// under it. Everything else is `files::publish`'s row shape: the file
-/// dimension, the pointer under `content`, the room's cohort target, the sha
-/// cited in `evidence_refs`, authored at `self` / local tier for the crossing
-/// to place.
-///
-/// Built here because edge's file door takes BYTES, not a pointer (upstream
-/// ask: a `files::republish(pointer, ..)`); the row shape above is edge's, and
-/// `rename_keeps_the_blob_and_the_bytes_open` in `tests/drive_crud.rs` is what
-/// fails if the two drift.
-async fn rename_row(
-    author: &ciris_edge::identity::LocalSigner,
-    room: &ScopeRoom,
-    old: &files::FileRow,
-    filename: &str,
-    replaces: &str,
-) -> Result<Attestation, String> {
-    use ciris_edge::replication::attestation_bind::{
-        bind_attestation_envelope, render_signed_instant, AttestationColumns,
-    };
-    use ciris_persist::federation::types::{attestation_tier, cohort_scope};
-    use sha2::{Digest as _, Sha256};
-
-    let author_key_id = author.key_id.as_str();
-    let asserted_at = old.asserted_at;
-    let mut envelope = serde_json::json!({
-        (ciris_persist::federation::envelope::paths::DIMENSION): files::FILE_DIMENSION,
-        (ciris_edge::chat::FIELD_CONTENT): old.pointer,
-        (files::FIELD_FILENAME): filename,
-        (FIELD_REPLACES): replaces,
-        "evidence_refs": [old.pointer.content_sha256],
-    });
-    if let Some(field) = room.cohort_target_field() {
-        envelope[field] = serde_json::json!(room.content_group_id());
-    }
-    let attestation_id = {
-        let mut h = Sha256::new();
-        h.update(files::FILE_DIMENSION.as_bytes());
-        h.update(b"\0rename\0");
-        h.update(room.table_group_id().as_bytes());
-        h.update(author_key_id.as_bytes());
-        h.update(render_signed_instant(asserted_at).as_bytes());
-        h.update(
-            ciris_persist::prelude::ceg_produce_canonicalize(&envelope)
-                .map_err(|e| format!("canonicalize: {e}"))?,
-        );
-        format!("file-{}", &hex::encode(h.finalize())[..32])
-    };
-    let subjects = vec![author_key_id.to_owned()];
-    bind_attestation_envelope(
-        &mut envelope,
-        asserted_at,
-        &AttestationColumns {
-            attestation_id: &attestation_id,
-            attesting_key_id: author_key_id,
-            attestation_type: "scores",
-            attested_key_id: author_key_id,
-            subject_key_ids: &subjects,
-            cohort_scope: cohort_scope::SELF,
-            weight: None,
-        },
-    );
-    let canonical = ciris_persist::prelude::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize: {e}"))?;
-    let digest = Sha256::digest(&canonical);
-    let (sig_classical, sig_pqc) =
-        ciris_edge::identity::sign_bound_hybrid(author, &canonical, files::FILE_DIMENSION).await?;
-    Ok(Attestation {
-        attestation_id,
-        attesting_key_id: author_key_id.to_owned(),
-        attested_key_id: author_key_id.to_owned(),
-        attestation_type: "scores".to_owned(),
-        weight: None,
-        asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(digest),
-        scrub_signature_classical: sig_classical,
-        scrub_signature_pqc: sig_pqc,
-        scrub_key_id: author_key_id.to_owned(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: None,
-        persist_row_hash: String::new(),
-        subject_key_ids: subjects,
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::SELF.to_owned(),
-        tier: attestation_tier::LOCAL.to_owned(),
-        promoted_at: None,
-        additional_scrubs: Vec::new(),
-    })
 }
 
 // ─── Byte state: typed, never parsed out of a Debug string ─────────────────
@@ -1732,6 +1667,62 @@ fn envelope_of(row: &Attestation) -> serde_json::Value {
         "consent_scope": env.get("consent_scope"),
         "asserted_at": row.asserted_at.to_rfc3339(),
     })
+}
+
+/// The row an edge rename replaced, when `file` is one (edge v33.1
+/// `files::rename`). Edge's renamed row does not name its prior; the prior's
+/// `supersedes` names the replacement (`replacement_attestation_id`). The
+/// prior is a SUPERSEDED row of the same room, author and blob, so it is found
+/// in edge's lifecycle listing, and the link read off its composer. A
+/// read-time walk, used by the metadata read only — not per listed row.
+async fn renamed_from(
+    st: &DriveState,
+    caller: &str,
+    room: &ScopeRoom,
+    file: &files::FileRow,
+) -> Option<String> {
+    use ciris_persist::federation::types::attestation_type::SUPERSEDES;
+    let dir = st.engine.federation_directory();
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::All,
+        )
+        .await
+        .ok()?;
+        for prior in page.files.iter().filter(|f| {
+            f.lifecycle == files::FileLifecycle::Superseded
+                && f.attestation_id != file.attestation_id
+                && f.attesting_key_id == file.attesting_key_id
+                && f.pointer.content_sha256 == file.pointer.content_sha256
+        }) {
+            let Ok(composers) = dir
+                .list_attestations_referencing(&prior.attestation_id)
+                .await
+            else {
+                continue;
+            };
+            if composers.iter().any(|c| {
+                c.attestation_type == SUPERSEDES
+                    && c.attesting_key_id == prior.attesting_key_id
+                    && c.attestation_envelope
+                        .get("replacement_attestation_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(file.attestation_id.as_str())
+            }) {
+                return Some(prior.attestation_id.clone());
+            }
+        }
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => return None,
+        }
+    }
 }
 
 fn replaces_of(row: &Attestation) -> Option<String> {
@@ -1953,10 +1944,10 @@ async fn read_drive(
                         row,
                     )
                 }));
-                // STOPGAP (CIRISEdge#693): the live listing no longer carries
-                // withdrawn rows, so a history view asks for them directly.
+                // The live listing does not carry withdrawn rows, so a history
+                // view asks edge's lifecycle listing for them (CIRISEdge#693).
                 if include_withdrawn {
-                    match stopgap_withdrawn_in_room(&st, room, &owner.key_id).await {
+                    match withdrawn_in_room(&st, room, &owner.key_id).await {
                         Ok(extra) => {
                             for f in extra {
                                 if !rows
@@ -2186,7 +2177,10 @@ async fn file_meta(
             "tier": format!("{:?}", found.file.pointer.tier),
             "withdrawn": found.withdrawn_by.is_some(),
             "withdrawn_by": found.withdrawn_by,
-            "replaces": replaces_of(&found.row),
+            "replaces": match replaces_of(&found.row) {
+                Some(r) => Some(r),
+                None => renamed_from(&st, &owner.key_id, &room, &found.file).await,
+            },
             "devices_holding": devices_holding,
             "holder_claims_recorded": recorded,
             "envelope": envelope_of(&found.row),
@@ -2564,74 +2558,35 @@ async fn rename_file(
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    let row = match rename_row(
-        &st.node_signer,
+    // EDGE'S RENAME (v33.1.0, CIRISEdge#702): a new row over the same bytes,
+    // the name re-sealed for it, authored by the old row's own signer and
+    // crossed like a publish; only once it crossed, a `supersedes` retires
+    // the old row. The owner's pen signs a person-authored row.
+    let capsule = match author_capsule(&st, &headers, &owner.key_id, Plane::Drive).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    let content = store(&st.engine);
+    let renamed = match files::rename(
+        &*dir,
+        &content,
+        ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(capsule.edge_signer()),
+        },
         &room,
         &found.file,
-        filename,
+        Some(filename),
         &attestation_id,
     )
     .await
     {
         Ok(r) => r,
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "drive.publish_failed",
-                format!("build the renamed row: {e}"),
-            )
-        }
-    };
-    let dir = st.engine.federation_directory();
-    if let Err(e) = dir
-        .put_attestation_authored(ciris_persist::federation::SignedAttestation {
-            attestation: row.clone(),
-        })
-        .await
-    {
-        return refuse(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "drive.publish_failed",
-            format!("author the renamed row: {e:#}"),
-        );
-    }
-    let crossing = match ciris_edge::replication::attestation_bind::share(
-        &*dir,
-        &row,
-        room.widen_to(),
-        ciris_edge::replication::attestation_bind::CrossingBasis::ProducerAuthority,
-        ciris_edge::replication::attestation_bind::Signers {
-            node: &st.node_signer,
-            actor: None,
-        },
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "drive.publish_failed",
-                format!("cross the renamed row into {room}: {e}"),
-            )
-        }
+        Err(e) => return file_error(&e, &room),
     };
     crate::compose::kick_replication("file renamed");
-    let new_id = placed_or(&crossing.shared, &row.attestation_id).to_owned();
-    let w = match withdraw_rows(
-        &st,
-        &headers,
-        &owner.key_id,
-        Plane::Drive,
-        &found.row,
-        &found.file,
-        "renamed by its author",
-    )
-    .await
-    {
-        Ok(w) => w,
-        Err(e) => return withdraw_failed(e),
-    };
+    let new_id = placed_or(&renamed.shared, &renamed.row.attestation_id).to_owned();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2641,11 +2596,10 @@ async fn rename_file(
             "content_sha256": found.file.pointer.content_sha256,
             "cohort": room.row_scope_token(),
             "room": room.to_string(),
-            "crossed": !matches!(
-                crossing.shared,
-                ciris_edge::replication::attestation_bind::Shared::AwaitingActor { .. }
-            ),
-            "withdrawn": w.withdrawn,
+            "crossed": renamed.crossed,
+            // The prior row is SUPERSEDED (edge's rename), not withdrawn: the
+            // bytes are the same bytes. Retired only once the new row crossed.
+            "superseded": renamed.crossed,
         })),
     )
         .into_response()

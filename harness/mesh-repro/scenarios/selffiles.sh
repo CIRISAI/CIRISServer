@@ -765,7 +765,34 @@ HINT_corpus_opened_on_b="the second device did not return every corpus file byte
 EXIT_corpus_opened_on_b=49
 DIAG_corpus_opened_on_b() {
   cat "$SELF_STATE/corpus-read.json" 2>/dev/null; echo
-  compose exec -T "$SELF_SECOND" cat /tmp/corpus-state/read.json 2>/dev/null | head -c 3000; echo
+  # EVERY file that did not come back byte-identical, in full — the per-file
+  # list is long, and a 3000-byte head cut exactly the rows that failed.
+  compose exec -T "$SELF_SECOND" python -c '
+import json
+for r in json.load(open("/tmp/corpus-state/read.json")):
+    if not r.get("match"): print(json.dumps(r))' 2>/dev/null
+  # WHERE the bytes differ, on BOTH devices: the originals of the corrupt
+  # files go to the second device, and each is read raw on the author too.
+  # Same bytes wrong on both = the write or the author's store; wrong on the
+  # second only = the transfer. A prefix of the original is a truncation.
+  local bad
+  bad="$(python3 -c '
+import json,sys
+try: print(",".join(json.loads(open(sys.argv[1]).read().strip().splitlines()[-1]).get("corrupt") or []))
+except Exception: print("")' "$SELF_STATE/corpus-read.json" 2>/dev/null)"
+  if [ -n "$bad" ]; then
+    local n svc
+    for n in ${bad//,/ }; do
+      [ -f "$SELF_CORPUS/$n" ] && compose cp "$SELF_CORPUS/$n" "$SELF_SECOND:/tmp/corpus/$n" >/dev/null 2>&1
+    done
+    compose cp "$HARNESS_DIR/lib/corpus_client.py" "$SELF_PRIMARY:/tmp/corpus/corpus_client.py" >/dev/null 2>&1
+    compose cp "$SELF_CORPUS/written.json" "$SELF_PRIMARY:/tmp/corpus/written.json" >/dev/null 2>&1
+    for svc in $SELF_PRIMARY $SELF_SECOND; do
+      echo "  byte probe on $svc (${bad}):"
+      compose exec -T "$svc" python /tmp/corpus/corpus_client.py probe \
+        "$(_self_token "$svc")" /tmp/corpus "$bad" 2>&1 | sed 's/^/    /'
+    done
+  fi
 }
 
 harness_scenario_evidence() {
