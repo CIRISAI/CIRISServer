@@ -29,6 +29,7 @@ BUILDABLE_ROOT = {"kind": "key", "holders": 1, "custody": "software_test",
                   "lifecycle": {"recipe": {}, "verdict": "rooted"}}
 
 LAYERS = ["roots", "canonicals", "nodes", "persons", "relations", "actor", "negatives"]
+LAST_STEPS: Any = None  # the running build's Steps, so a failure can name its first failing layer
 
 
 class Unrealizable(ValueError):
@@ -193,6 +194,9 @@ def export_rows(mesh: Mesh) -> Decl:
 def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     try:
         return _build(mesh, t, args)
+    except MeshError as e:
+        ff = getattr(LAST_STEPS, "first_failure", None) if LAST_STEPS else None
+        raise MeshError(json.dumps({"error": str(e), "first_failing_layer": ff})) from e
     finally:
         try:
             exported = export_rows(mesh)
@@ -214,6 +218,8 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
          f"  direct links: {d['direct_links'] or 'none — every pair is relayed through a canonical'}",
          "  build order: " + " → ".join(LAYERS)])
     step = Steps(plan)
+    global LAST_STEPS
+    LAST_STEPS = step
     N: Dict[str, Node] = {}
 
     # 1–2. roots + canonicals: the synthetic anchor's ceremony, one canonical.
@@ -286,7 +292,8 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             elif rel.get("require"):
                 step.fail(f"NOT_rooted:{p}<->{q}", "the two OWNERS hold no valid root in common (rooted_with walks the "
                           "owner-bindings): attestations between them are withheld", [na, nb],
-                          r"rooted_with|root_binding|accept.*root|not Rooted")
+                          r"rooted_with|root_binding|accept.*root|not Rooted",
+                          layer="relations", rel="rooted_with", cc="CC 3.2 / CIRISEdge#659")
                 raise MeshError("required rooted_with did not hold")
             else:
                 step(f"rooted_with:{p}<->{q}", layer="relations", observed=False,
@@ -311,7 +318,8 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 step.fail(f"NOT_reachable:{rel['node']}->{rel['person']}",
                           f"{rel['person']}'s owner→node binding is not held on {rel['node']} at federation scope "
                           "(CIRISServer#699): a room made now keys but its bodies read not_granted",
-                          [host], r"handshake cannot complete|resolves to no node|reachable")
+                          [host], r"handshake cannot complete|resolves to no node|reachable",
+                          layer="relations", rel="reachable", cc="CC 5.2")
                 raise MeshError("reachable gate did not hold")
             added.add((rel["node"], rel["person"]))
             step(f"reachable:{rel['node']}->{rel['person']}", layer="relations", reachable_nodes=got.get("reachable_nodes"),
@@ -340,6 +348,7 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 if ca != cb:
                     raise MeshError(f"the two sides derived different pair rooms: {ca} vs {cb}")
                 rooms[rel.get("id", "pair")] = ca
+                values["ROOM_ID"] = ca
                 # POLL BOTH SIDES EVERY TICK. The joiner's half of the handshake
                 # (publish the KeyPackage, consume the Welcome) advances on its
                 # transcript reads; a short-circuit `a and b` never read B while
@@ -350,7 +359,8 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 try:
                     wait_for("the pair room to key", both_keyed, float(rel.get("wait", 180)), every=3)
                 except MeshError:
-                    step.fail("room_NOT_keyed", "the MLS handshake did not complete", [a, b], _HANDSHAKE)
+                    step.fail("room_NOT_keyed", "the MLS handshake did not complete", [a, b], _HANDSHAKE,
+                              layer="relations", rel="room", cc="CC 4.4.3")
                     raise
                 step(f"room:{rel.get('id', 'pair')}", layer="relations", room=ca, keyed=True,
                      proves="the same room id on both sides, keyed on both")
@@ -363,7 +373,8 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                              float(rel.get("wait", 180)), every=3)
                 except MeshError:
                     step.fail("self_room_NOT_joined", "a device never joined its person's self room", devs,
-                              r"self room|KeyPackage|Welcome|Added\(|Rejoin")
+                              r"self room|KeyPackage|Welcome|Added\(|Rejoin",
+                              layer="relations", rel="room", cc="CC 4.4.3.2.4")
                     raise
                 step(f"room:self:{p}", layer="relations", devices=persons[p]["owns"], proves="the self room spans every device")
             else:
@@ -381,7 +392,7 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             except MeshError:
                 mine = [m for m in b.room(cid)["messages"] if m.get("attestation_id") == att]
                 step.fail("body_NOT_arrived", "the row may be here but its BODY did not open on the recipient",
-                          [a, b], _BODY, row_on_recipient=mine[:1])
+                          [a, b], _BODY, layer="relations", rel="message", cc="CC 5.4.6", row_on_recipient=mine[:1])
                 raise
             step(f"message:{p}->{q}", layer="relations", attestation_id=att,
                  proves="the row and its body on the other person's node")
@@ -402,11 +413,13 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 except MeshError:
                     st, body = dev.read_raw(fid)
                     step.fail(f"file_NOT_open:{other}", "the second device did not open the file", [src, dev],
-                              _BODY + r"|stalled mid-frame|not_in_room", status=st, body=body[:160].decode(errors="replace"))
+                              _BODY + r"|stalled mid-frame|not_in_room", layer="relations", rel="file", cc="CC 5.4.6",
+                              status=st, body=body[:160].decode(errors="replace"))
                     raise
                 st, raw = dev.read_raw(fid)
                 if raw != data:
-                    step.fail(f"file_WRONG_BYTES:{other}", f"{len(raw)} bytes back for {len(data)} written", [src, dev], _BODY)
+                    step.fail(f"file_WRONG_BYTES:{other}", f"{len(raw)} bytes back for {len(data)} written", [src, dev], _BODY,
+                              layer="relations", rel="file", cc="CC 5.3.2.5")
                     raise MeshError("bytes differ")
             step(f"file:{p}", layer="relations", size=len(data), devices=devs, proves="byte-identical on every device")
         else:
@@ -429,13 +442,30 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 raise MeshError(f"NEGATIVE FAILED: {neg['node']} holds {len(hits)} {neg['dimension']} rows of {neg['person']}")
             step(f"negative:holds_no_row:{neg['node']}", layer="negatives", dimension=neg["dimension"], control=len(rows))
 
-    # the actor's view, in the client fixture's shape
+    # the actor's view, in the client fixture's shape — KEYED BY DECLARED ID
+    # (CIRISClient#134 §1): `PERSON_<id>_OWNER_KEY_ID`, `NODE_<id>_URL`, …;
+    # the positional PEER_* names stay as aliases for the first non-actor
+    # person. `notes` names every value a flow might expect that this
+    # declaration did not produce.
     act = t["actor"]
     me = N[act["device"]]
+    for pid, p in persons.items():
+        first = N[p["owns"][0]]
+        values[f"PERSON_{pid.upper()}_OWNER_KEY_ID"] = first.owner_key_id
+        values[f"PERSON_{pid.upper()}_DEVICES"] = ",".join(p["owns"])
+    for nid, node in N.items():
+        values[f"NODE_{nid.upper()}_URL"] = node.url
+        values[f"NODE_{nid.upper()}_KEY_ID"] = node.node_key_id or node.key_id
     others = [p for p in persons if p != act["person"]]
     if others:
         peer = N[persons[others[0]]["owns"][0]]
         values.update({"PEER_URL": peer.url, "PEER_KEY_ID": peer.owner_key_id, "PEER_NODE_KEY_ID": peer.node_key_id,
-                       "PEER_OWNER_KEY_ID": peer.owner_key_id})
-    values.update({"LOCAL_OWNER_KEY_ID": me.owner_key_id, "LOCAL_NODE_KEY_ID": me.node_key_id})
-    return {"verdict": "PASS", "steps": step.log, "derived": d, "values": values}
+                       "PEER_OWNER_KEY_ID": peer.owner_key_id, "PEER_PERSON": others[0]})
+    else:
+        step.notes.append("no PEER_*: the declaration has one person")
+    values.update({"LOCAL_OWNER_KEY_ID": me.owner_key_id, "LOCAL_NODE_KEY_ID": me.node_key_id,
+                   "ACTOR_PERSON": act["person"], "ACTOR_DEVICE": act["device"]})
+    for want in ("ROOM_ID", "MESSAGE_ATTESTATION_ID", "PEER_CONTACT_CODE"):
+        if want not in values:
+            step.notes.append(f"no {want}: the declaration has no relation that produces it")
+    return {"verdict": "PASS", "steps": step.log, "derived": d, "values": values, "notes": step.notes}

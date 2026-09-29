@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from .mesh import HARNESS, Mesh, MeshError, Node, wait_for
 
@@ -26,6 +26,8 @@ class Steps:
     def __init__(self, plan: str) -> None:
         self.t0 = time.monotonic()
         self.log: List[Record] = []
+        self.first_failure: Optional[Record] = None
+        self.notes: List[str] = []
         print("── PLAN ──\n" + plan.strip() + "\n──", flush=True)
 
     def __call__(self, name: str, proves: str = "", **seen: Any) -> None:
@@ -35,10 +37,15 @@ class Steps:
         self.log.append(rec)
         print(json.dumps(rec), flush=True)
 
-    def fail(self, name: str, means: str, nodes: List[Node], patterns: str, **seen: Any) -> None:
-        """A step that did not happen: what that MEANS, and the evidence."""
+    def fail(self, name: str, means: str, nodes: List[Node], patterns: str,
+             layer: str = "", rel: str = "", cc: str = "", **seen: Any) -> None:
+        """A step that did not happen: what that MEANS, and the evidence —
+        structured (CIRISClient#134 §5): `layer`, `rel`, `cc` ride as fields
+        so a runner's report line can say `layer=relations/message cc=CC 5.4.6`."""
         evidence = {n.name: [line[-300:] for line in n.grep(patterns)[-8:]] for n in nodes}
-        self(name, means=means, evidence=evidence, **seen)
+        fields = {k: v for k, v in (("layer", layer), ("rel", rel), ("cc", cc)) if v}
+        self.first_failure = self.first_failure or {"step": name, **fields}
+        self(name, means=means, evidence=evidence, **fields, **seen)
         print(f"   ↳ {means}", flush=True)
         for n, lines in evidence.items():
             for line in lines:

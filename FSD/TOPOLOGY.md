@@ -142,5 +142,5 @@ its CSD's on any layer.
 ## 5. The proving set
 
 `harness/native/topologies/csd-091-user-chat.yaml`,
-`csd-092-share-contact-code.yaml`, `csd-093-second-device.yaml` — the three
-0.5.218 flows. `python -m harness.native build --topology <file> --binary <test-anchor ciris-server>`.
+`csd-092-share-contact-code.yaml`, `csd-094-approve-new-device.yaml` (CSD-094's
+post-state; CSD-093's own flow waits on CIRISServer#678) — the 0.5.218 flows. `python -m harness.native build --topology <file> --binary <test-anchor ciris-server>`.

@@ -59,6 +59,11 @@ def main() -> int:
             result = SCENARIOS[args.scenario](mesh, args)
         except MeshError as e:
             result = {"verdict": "BROKEN", "error": str(e)}
+            try:  # a build failure carries its first failing layer as JSON
+                parsed = json.loads(str(e))
+                result.update({"error": parsed.get("error"), "first_failing_layer": parsed.get("first_failing_layer")})
+            except Exception:  # noqa: BLE001
+                pass
             code = 2
         except Exception:  # noqa: BLE001
             result = {"verdict": "CRASH", "error": traceback.format_exc()[-2000:]}
