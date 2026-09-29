@@ -423,6 +423,37 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                               layer="relations", rel="file", cc="CC 5.3.2.5")
                     raise MeshError("bytes differ")
             step(f"file:{p}", layer="relations", size=len(data), devices=devs, proves="byte-identical on every device")
+        elif k == "roster":
+            # THE DEVICE ROSTER (CSD-037, CIRISServer#655 per-device announce
+            # ruling): every device of the person lists every device of the
+            # person; a node that is not the person's sees the ANNOUNCED
+            # devices only — never an unannounced one.
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            pid = N[devs[0]].owner_key_id
+            want = {N[d].node_key_id for d in devs}
+            def roster_of(n: Node) -> set:
+                st, body = n.api("GET", f"/v1/self/occurrences?identity_key_id={pid}")
+                return {o.get("occurrence_key_id") for o in (body.get("occurrences") or [])} if st == 200 and isinstance(body, dict) else set()
+            try:
+                wait_for(f"{p}'s devices to list each other", lambda: all(want <= roster_of(N[d]) for d in devs),
+                         float(rel.get("wait", 120)), every=5)
+            except MeshError:
+                step.fail(f"roster_NOT_complete:{p}", "a device of the person does not list every other device — the "
+                          "identity occurrences did not converge across the person's nodes", [N[d] for d in devs],
+                          r"occurrence|IdentityOccurrence|roster", layer="relations", rel="roster", cc="CC 2.1",
+                          seen={d: sorted(roster_of(N[d])) for d in devs})
+                raise
+            seen_by_outsiders = {}
+            for o in rel.get("visible_from", []):
+                got = roster_of(N[o])
+                announced = {N[d].node_key_id for d in devs if next(x for x in t["nodes"] if x["id"] == d).get("announced")}
+                unannounced_leak = got - announced
+                seen_by_outsiders[o] = {"listed": len(got), "announced": len(announced)}
+                if unannounced_leak:
+                    raise MeshError(f"NEGATIVE FAILED: {o} lists unannounced devices of {p}: {sorted(unannounced_leak)}")
+            step(f"roster:{p}", layer="relations", devices=devs, visible_from=seen_by_outsiders,
+                 proves="each device lists every device; an outsider sees announced devices only")
         elif k == "note":
             p = rel["person"]
             devs = persons[p]["owns"]
