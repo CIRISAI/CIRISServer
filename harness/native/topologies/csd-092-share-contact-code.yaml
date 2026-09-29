@@ -1,7 +1,7 @@
 # CSD-092 — share my contact code: bob's code names his ANNOUNCED device; alice adds him by it.
 topology:
   roots:
-    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: active}
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
   canonicals:
     - {id: C, holds: R, serves: [infra:serve, infra:attest]}
   nodes:

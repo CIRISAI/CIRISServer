@@ -2,7 +2,7 @@
 # a file written on the first opens on the second. The file relation is where CIRISEdge#716/#717 sit.
 topology:
   roots:
-    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: active}
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
   canonicals:
     - {id: C, holds: R, serves: [infra:serve, infra:attest]}
   nodes:

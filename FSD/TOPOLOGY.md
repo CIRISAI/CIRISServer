@@ -36,22 +36,28 @@ topology:
 
 ### 2.1 `roots`
 
-| field | values | meaning |
-|---|---|---|
-| `id` | name | referenced by `holds` / `accepts` |
-| `kind` | `key` \| `family` | a single holder key, or an accord family (founders, quorum) |
-| `holders` | int | key roots: holder keys |
-| `founders` | `{n, human, node_bearing}` | family roots (TLC: `Founders`, `NodeKeys`) |
-| `quorum` | int | M of `quorum:M/N` (TLC: `M`) |
-| `witnesses` | `{n, k, independent_custody}` | rc6 heads (TLC: `Witnesses`, `K`) |
-| `lifecycle` | `active` \| `stalled` \| `halted` | the T8 state under test (T7 stalled = attached pairs stay rooted, new members refused) |
-| `custody` | `software_test` \| `hardware` | what the anchor mints vs what a CSD reading holder evidence needs |
+Reviewed by CC (CIRISConstitution#131): the block is `TrustRootVerdict.cfg`'s
+constants by another name, with these corrections applied.
 
-**Buildable today:** one `key` root, one holder, `software_test`, `active` — the
-synthetic anchor (`test_bless`: `test-accord-holder-0`, charter root→root,
-capability grant root→node, trust edge node→root). A `family` root, more than
-one holder, `stalled`/`halted`, or `hardware` is declared and REFUSED by the
-builder by name until the ceremony can mint it; the declaration stays true.
+| field | values | model constant | meaning |
+|---|---|---|---|
+| `id` | name | | referenced by `holds` / `accepts` |
+| `kind` | `key` \| `infrastructure` | | a single holder key (the anchor today), or persist v51's infrastructure root under T7/T8. `family` (the accord family, CC 4.2.6) has NO model behind it and is refused |
+| `holders` | int | | key roots: holder keys |
+| `founders` | `{seated, conferrable, node_bearing}` | `Founders` = seated ∪ conferrable, `NodeKeys` | `seated` is the initial seated set (T7 needs `≥ M+1` active humans at founding); `conferrable` the unseated humans T7 recovery can widen in — without one the recovery never fires |
+| `quorum` | int | `M` | absolute M of `quorum:M/N` |
+| `witnesses` | `{n, independent_custody}` | `Witnesses`, `K` | **`k` is derived**, never declared: CC 3.2 T6 fixes `K = ⌊n/2⌋ + 1`; a declared `k` that differs is refused |
+| `charter` | `{attach_window_secs, witness_cadence_secs}` | `AttachWindow = ⌈window / cadence⌉` | CC 2.1 charter members (rc6) |
+| `lifecycle` | `{recipe, verdict}` | a value of V, not a constant | the ROWS that produce the state, and the verdict asserted after them: `{recipe: {}, verdict: rooted}` (active); `{recipe: {resignations: 1}, verdict: stalled}` (found at N = M+1, one resignation → `hard_case:community_liveness_stalled` once, widening refused); `{recipe: {halt: latched}, verdict: not_rooted}` |
+| `custody` | `software_test` \| `hardware` | | what the anchor mints vs what a CSD reading holder evidence needs |
+
+**Buildable today:** one `key` root, one holder, `software_test`, `lifecycle
+{recipe: {}, verdict: rooted}` — the synthetic anchor (`test_bless`:
+`test-accord-holder-0`, charter root→root, capability grant root→node, trust
+edge node→root). An `infrastructure` root with seated/conferrable founders, a
+witnessed head, or a non-empty recipe is declared and REFUSED by the builder
+by name until the ceremony can mint it; the declaration stays true, and CC's
+`tools/topology_to_cfg.py` (their generator) reads the same block.
 
 ### 2.2 `canonicals`
 
@@ -102,8 +108,10 @@ fixture's `${PEER_KEY_ID}`, `${ROOM_ID}`, `${MESSAGE_ATTESTATION_ID}`, …).
 
 ## 3. Realizability rules (the checker refuses, by name)
 
-1. `quorum: M` needs `founders.n >= M + 1` (one over and one under the line);
-   a witnessed head needs `witnesses.n >= 2K - 1` and `independent_custody`.
+1. `quorum: M` needs `founders.seated >= M + 1` (T7: active humans at
+   founding) and `founders.conferrable >= 1` (or T7 recovery has nobody to
+   widen in); a witnessed head derives `K = ⌊n/2⌋ + 1` and needs
+   `independent_custody`; a declared `k` is refused.
 2. A person `accepts` a root only if every node they own `accepts` it.
 3. `rooted_with(p, q)` needs both persons to `accept` a common root.
 4. `message`/`file` between two persons needs their devices to be direct
@@ -117,7 +125,17 @@ fixture's `${PEER_KEY_ID}`, `${ROOM_ID}`, `${MESSAGE_ATTESTATION_ID}`, …).
 ## 4. Derivations
 
 `nodes = |nodes| + |canonicals|`; `persons = |persons|`; `devices(p) =
-|p.owns|`; the root ceremony from `roots`; the build order from the layers. A
+|p.owns|`; the root ceremony from `roots`; `K` and `AttachWindow` from
+`witnesses.n` and `charter`; the build order from the layers.
+
+## 4.1 The row export
+
+Every build writes, per node, `<work>/<node>/rows.jsonl`: each admitted
+`federation_attestations` row with every column, in admission order, plus
+`keys.jsonl` (the node's `federation_keys`). That is the fold-replayable form
+CC replays `V(rows, t)` over for T8 (iii) offline, and turns a harness trace
+into a TLC trace check (CIRISConstitution#131 §5). `report.json` carries, per
+node, the count and the SHA-256 of the export. A
 flow may not advance to `testable` while its fixture's topology is smaller than
 its CSD's on any layer.
 

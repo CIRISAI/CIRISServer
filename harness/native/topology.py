@@ -25,7 +25,8 @@ Decl = Dict[str, Any]
 
 # What the synthetic anchor mints today (src/test_bless.rs): ONE key root, ONE
 # software holder, lifecycle active. Everything else is declared and refused.
-BUILDABLE_ROOT = {"kind": "key", "holders": 1, "custody": "software_test", "lifecycle": "active"}
+BUILDABLE_ROOT = {"kind": "key", "holders": 1, "custody": "software_test",
+                  "lifecycle": {"recipe": {}, "verdict": "rooted"}}
 
 LAYERS = ["roots", "canonicals", "nodes", "persons", "relations", "actor", "negatives"]
 
@@ -58,12 +59,24 @@ def check(t: Decl) -> List[str]:
     not_yet: List[str] = []
     for r in roots.values():
         if r.get("kind") == "family":
+            raise Unrealizable(f"root {r['id']}: kind `family` (the accord family, CC 4.2.6) has no model "
+                               "behind it and is not a trust root the harness can mint — use `key` or `infrastructure`")
+        if r.get("kind") == "infrastructure":
             f, m = r.get("founders", {}), r.get("quorum", 0)
-            if f.get("n", 0) < m + 1:
-                raise Unrealizable(f"rule 1: root {r['id']} quorum {m} needs founders.n >= {m + 1}")
+            if f.get("seated", 0) < m + 1:
+                raise Unrealizable(f"rule 1: root {r['id']} quorum {m} needs founders.seated >= {m + 1} (T7)")
+            if f.get("conferrable", 0) < 1:
+                raise Unrealizable(f"rule 1: root {r['id']} needs founders.conferrable >= 1, or T7 recovery has nobody to widen in")
             w = r.get("witnesses")
-            if w and (w.get("n", 0) < 2 * w.get("k", 1) - 1 or not w.get("independent_custody")):
-                raise Unrealizable(f"rule 1: root {r['id']} witnesses need n >= 2k-1 and independent_custody")
+            if w:
+                if "k" in w:
+                    raise Unrealizable(f"rule 1: root {r['id']}: `k` is derived (CC T6: K = floor(n/2)+1), not declared")
+                if not w.get("independent_custody"):
+                    raise Unrealizable(f"rule 1: root {r['id']} witnesses need independent_custody")
+        lc = r.get("lifecycle")
+        if isinstance(lc, str):
+            raise Unrealizable(f"root {r['id']}: lifecycle is a row recipe + asserted verdict, e.g. "
+                               "{recipe: {resignations: 1}, verdict: stalled}, not the flag {lc!r}")
         for k, v in BUILDABLE_ROOT.items():
             if r.get(k, v) != v:
                 not_yet.append(f"root {r['id']}: {k}={r.get(k)!r} (the anchor mints {v!r})")
@@ -110,14 +123,30 @@ def check(t: Decl) -> List[str]:
     return not_yet
 
 
+def _root_derived(r: Decl) -> Decl:
+    """The model constants CC derives from the block (CIRISConstitution#131)."""
+    out: Decl = {}
+    w = r.get("witnesses") or {}
+    if w.get("n"):
+        out["K"] = w["n"] // 2 + 1
+    c = r.get("charter") or {}
+    if c.get("attach_window_secs") and c.get("witness_cadence_secs"):
+        out["AttachWindow"] = -(-c["attach_window_secs"] // c["witness_cadence_secs"])
+    f = r.get("founders") or {}
+    if f:
+        out["Founders"] = f.get("seated", 0) + f.get("conferrable", 0)
+        out["NodeKeys"] = f.get("node_bearing", 0)
+    return out
+
+
 def derive(t: Decl) -> Decl:
     persons = _ids(t, "persons")
     return {
         "nodes": len(t["nodes"]) + len(t["canonicals"]),
         "persons": len(persons),
         "devices": {p: len(v["owns"]) for p, v in persons.items()},
-        "roots": [{k: r.get(k) for k in ("id", "kind", "holders", "founders", "quorum", "witnesses", "lifecycle", "custody")}
-                  for r in t["roots"]],
+        "roots": [{**{k: r.get(k) for k in ("id", "kind", "holders", "founders", "quorum", "witnesses", "charter", "lifecycle", "custody")},
+                   "derived": _root_derived(r)} for r in t["roots"]],
         "direct_links": [(n["id"], d) for n in t["nodes"] for d in n.get("dials", []) if d not in _ids(t, "canonicals")],
         "build_order": LAYERS,
         "not_buildable_yet": check(t),
@@ -127,7 +156,42 @@ def derive(t: Decl) -> Decl:
 # ── build ───────────────────────────────────────────────────────────────────
 
 
+def export_rows(mesh: Mesh) -> Decl:
+    """Per node: every admitted federation row, in admission order, as JSONL —
+    the fold-replayable form (FSD/TOPOLOGY.md §4.1)."""
+    out: Decl = {}
+    for name, n in mesh.nodes.items():
+        rows = n.rows("select * from federation_attestations order by rowid")
+        cols = n.rows("select name from pragma_table_info('federation_attestations') order by cid")
+        colnames = [c[0] for c in cols]
+        path = n.log_path.parent / "rows.jsonl"
+        h = hashlib.sha256()
+        with open(path, "w", encoding="utf-8") as f:
+            for row in rows:
+                line = json.dumps(dict(zip(colnames, row)), default=str, sort_keys=True)
+                f.write(line + "\n")
+                h.update(line.encode())
+        keys = n.rows("select key_id, identity_type, valid_from, valid_until, scrub_key_id from federation_keys")
+        (n.log_path.parent / "keys.jsonl").write_text(
+            "\n".join(json.dumps(dict(zip(("key_id", "identity_type", "valid_from", "valid_until", "scrub_key_id"), k)), default=str) for k in keys),
+            encoding="utf-8")
+        out[name] = {"rows": len(rows), "keys": len(keys), "sha256": h.hexdigest(), "path": str(path)}
+    return out
+
+
 def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
+    try:
+        return _build(mesh, t, args)
+    finally:
+        try:
+            exported = export_rows(mesh)
+            print(json.dumps({"step": "rows_exported", "layer": "export", **{k: {kk: vv for kk, vv in v.items() if kk != "path"} for k, v in exported.items()}}), flush=True)
+            (mesh.work / "rows_export.json").write_text(json.dumps(exported, indent=1), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001 — the export must never mask the verdict
+            print(json.dumps({"step": "rows_export_failed", "error": str(e)[:200]}), flush=True)
+
+
+def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     d = derive(t)
     if d["not_buildable_yet"]:
         raise MeshError("declared but not buildable yet: " + "; ".join(d["not_buildable_yet"]))
