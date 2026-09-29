@@ -1636,6 +1636,23 @@ async fn open_whole(
     }
     let content = store(&st.engine);
     match found.file.open(&content, viewer).await {
+        // THE BYTES MUST BE THE FILE (CIRISServer#697 selffiles byte probe,
+        // 2026-09-29): a second device that pulled a chunk-DAG file held its
+        // MANIFEST under the pointer's sha and served it as the file — 518
+        // bytes of `{"chunk_tier":…` for a 1 MiB video, status 200. The
+        // pointer declares the plaintext size (CIRISEdge#638), so a body of
+        // another length is row and bytes disagreeing, refused by name, never
+        // handed over as content.
+        Ok(b) if found.file.pointer.size.is_some_and(|n| n != b.len() as u64) => Err(refuse_state(
+            "seal_mismatch",
+            format!(
+                "{}: the row declares {} bytes and the bytes here are {} — a pulled chunk-DAG \
+                 stored as its manifest reads exactly like this (CIRISEdge#717)",
+                state_detail("seal_mismatch"),
+                found.file.pointer.size.unwrap_or(0),
+                b.len()
+            ),
+        )),
         Ok(b) => Ok((b, size)),
         Err(reason) => match unopened(&reason) {
             ByteState::Absent { state, detail } => Err(refuse_state(state, detail)),

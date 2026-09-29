@@ -761,7 +761,7 @@ except Exception: print(0); raise SystemExit
 ok = d.get("total") and d.get("opened")==d.get("total") and not d.get("corrupt")
 print(1 if ok else 0)' "$SELF_STATE/corpus-read.json" 2>/dev/null || echo 0
 }
-HINT_corpus_opened_on_b="the second device did not return every corpus file byte-identical. corpus-read.json lists corrupt (bytes returned but the SHA-256 differs: a transfer defect, never a fixture change — the corpus is deterministic) and waiting as name:status:reason_id (409 drive.not_fetched = the bytes never crossed; 403 drive.not_granted = no wrap names this device). A pattern by size (inline_over / large only) points at the chunk path; by type, at the write or render path"
+HINT_corpus_opened_on_b="the second device did not return every corpus file byte-identical. A returned size of a few hundred bytes to ~10 KiB beginning {\"chunk_tier\" is the chunk-DAG MANIFEST served as the file: the puller stored it inline and fetched no chunks (CIRISEdge#717; the drive now refuses it as drive.seal_mismatch). corpus-read.json lists corrupt (bytes returned but the SHA-256 differs: a transfer defect, never a fixture change — the corpus is deterministic) and waiting as name:status:reason_id (409 drive.not_fetched = the bytes never crossed; 403 drive.not_granted = no wrap names this device). A pattern by size (inline_over / large only) points at the chunk path; by type, at the write or render path"
 EXIT_corpus_opened_on_b=49
 DIAG_corpus_opened_on_b() {
   cat "$SELF_STATE/corpus-read.json" 2>/dev/null; echo
