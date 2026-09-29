@@ -112,12 +112,26 @@ async fn list_roots(State(st): State<TrustRootState>) -> Response {
                     Ok(None) => serde_json::Value::Null,
                     Err(e) => serde_json::json!({ "error": e.to_string() }),
                 };
-                // STANDING, one word, as the T8 verdict names it: not_rooted
+                // STANDING, one word, as the T8 verdict names it: `not_rooted`
                 // when the five-conjunct verdict fails or a halt is latched;
-                // rooted otherwise. `stalled` (T7: valid, closed to new members)
-                // is added when persist surfaces liveness on this read.
+                // `stalled` when the root is valid but its community resolves
+                // with `live: false` (CC T7: fewer than M+1 active founders —
+                // attached pairs stay rooted, new members are refused, edge's
+                // FIRST_CONTACT.md I12); `rooted` otherwise. A key root has no
+                // community to resolve and is never stalled.
+                let live = match ciris_persist::federation::canonical_community::resolve_community(
+                    st.engine.federation_directory().as_ref(),
+                    &root_ref,
+                )
+                .await
+                {
+                    Ok(Some(c)) => Some(c.live),
+                    Ok(None) | Err(_) => None,
+                };
                 let standing = if !v.valid || v.halt_latched == Some(true) {
                     "not_rooted"
+                } else if live == Some(false) {
+                    "stalled"
                 } else {
                     "rooted"
                 };
@@ -127,6 +141,7 @@ async fn list_roots(State(st): State<TrustRootState>) -> Response {
                         "standing".into(),
                         serde_json::Value::String(standing.into()),
                     );
+                    m.insert("live".into(), serde_json::json!(live));
                 }
                 roots.push(RootEntry {
                     root_key_id: root_ref,
