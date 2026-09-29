@@ -335,6 +335,10 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_duplicate_total": duplicates,
                 "replication_round_outcomes_total": round_outcomes,
                 "replication_round_routing": round_routing,
+                // edge v34.1.0+ (CIRISEdge#716/#722): frames that skipped the
+                // Channel-first path because they exceed its fragment cap and
+                // went Resource-first. Top-level on the snapshot; folded here.
+                "channel_first_skipped_over_cap": bundle.channel_first_skipped_over_cap,
                 "bootstrap_door_outcomes": bootstrap_door,
                 "blob_route_refusals": blob_route_refusals,
                 "blob_pull_sources": blob_pull_sources,
