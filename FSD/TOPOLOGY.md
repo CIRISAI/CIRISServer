@@ -114,8 +114,16 @@ fixture's `${PEER_KEY_ID}`, `${ROOM_ID}`, `${MESSAGE_ATTESTATION_ID}`, …).
    `independent_custody`; a declared `k` is refused.
 2. A person `accepts` a root only if every node they own `accepts` it.
 3. `rooted_with(p, q)` needs both persons to `accept` a common root.
-4. `message`/`file` between two persons needs their devices to be direct
-   neighbours (`dials`) or a relay-routable scoped address (none exists).
+4. Scoped content reaches a member over the room's DERIVED address, which
+   is never announced (CC 5.4.6, CIRISEdge#499). So: a `self` or `family`
+   room needs every other device to hold a direct link (`dials`) to the
+   AUTHOR's node; a `community` room needs the member nodes to form a
+   CONNECTED graph (any member node can relay, including a person's home
+   node — CIRISEdge#718 is the witness); a pair room whose two members sit
+   behind a non-member canonical with no direct link waits on a ruling
+   (CIRISConstitution#132: may a scoped body ride the identity-plane link).
+   The refusal is edge's admission gate, not reachability: both nodes can
+   reach each other through the canonical as a Reticulum transport node.
 5. `reachable(A, q)` needs one of q's nodes `announced: true`.
 6. `contact(p, q, via: code)` needs q's node `announced` (the code names
    announced devices) and the route (0.5.218+).
