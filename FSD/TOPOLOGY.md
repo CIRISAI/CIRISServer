@@ -95,6 +95,7 @@ that accepted a root whose owner did not is Attributed, never Rooted.
 | `room(pair\|self, members, keyed: true, epoch?)` | the pair room opened on both sides and keyed; the self room joined by every device |
 | `message(from, to, room)` | sent by `from`; the row AND its body on `to`'s node |
 | `file(person, device, size, cohort)` | written on `device`; byte-identical on every other device of `person` |
+| `session(person, device, require?)` | the person active on `device` (owner-bearer requests); `GET /v1/self/sessions` on EVERY device of `person` names the same handler for each listed exchange, and at least one is listed (CC 3.1.3.1, FSD/SESSION_CLAIMS.md) |
 | `member(p, community, role)`, `quorum_change(...)` | declared; builder refuses until the community/household scenarios exist |
 
 ### 2.6 `actor` and `negatives`

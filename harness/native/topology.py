@@ -15,7 +15,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -704,6 +704,55 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           _BODY + r"|stalled mid-frame|seal_mismatch", layer="relations", rel="corpus", cc="CC 5.3.2.5")
                 if rel.get("require", True):
                     raise MeshError("corpus did not open byte-identical on every device")
+        elif k == "session":
+            # ONE DEVICE HANDLES EACH EXCHANGE (CC 3.1.3.1, FSD/SESSION_CLAIMS.md):
+            # the person is active on `device` (every owner-bearer request marks
+            # the device attended — `resolve_bearer`), and every device of the
+            # person must name the SAME handler for every exchange it lists on
+            # `GET /v1/self/sessions`. Non-vacuous: at least one exchange must be
+            # listed (the self room's commit duty or a re-wrap, claimed when the
+            # second device joined and renewed while the person stays); an empty
+            # list on every device proves nothing and fails by name.
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            src = N[rel.get("device", devs[0])]
+
+            def handlers(n: Node) -> Dict[Tuple[str, str], str]:
+                st, body = n.api("GET", "/v1/self/sessions")
+                if st != 200 or not isinstance(body, dict):
+                    return {}
+                return {(x.get("community_id"), x.get("session_id")): x.get("handler_occurrence_key_id")
+                        for x in (body.get("sessions") or [])}
+
+            seen: Dict[str, Dict[Tuple[str, str], str]] = {}
+
+            def agree() -> bool:
+                src.api("GET", "/v1/self/sessions")  # the person's activity on `device`
+                for d in devs:
+                    seen[d] = handlers(N[d])
+                first = seen[devs[0]]
+                return bool(first) and all(seen[d] == first for d in devs)
+
+            try:
+                wait_for(f"{p}'s devices to name one handler per exchange", agree,
+                         float(rel.get("wait", 180)), every=5)
+            except MeshError:
+                empty = all(not v for v in seen.values())
+                step.fail(f"session_NOT_agreed:{p}",
+                          "no device lists any claimed exchange — nothing was ever gated, or the claim "
+                          "never crossed (session:claim:v1 rides the self plane)" if empty else
+                          "the person's devices name DIFFERENT handlers for one exchange — two devices "
+                          "would act", [N[d] for d in devs],
+                          r"session claim|session:claim|handled by occurrence|unclaimed", layer="relations",
+                          rel="session", cc="CC 3.1.3.1",
+                          seen={d: {f"{c[:12]}/{s_}": h for (c, s_), h in v.items()} for d, v in seen.items()})
+                if rel.get("require", True):
+                    raise
+            else:
+                one = seen[devs[0]]
+                step(f"session:{p}", layer="relations", device=src.name, exchanges=len(one),
+                     handlers=sorted({h for h in one.values()}),
+                     proves="every device of the person names the same handler for each exchange")
         else:
             raise MeshError(f"relation {k!r}: declared, no builder yet")
 
