@@ -181,6 +181,13 @@ fn compatible(declared: &str, sniffed: &str) -> bool {
     }
 }
 
+/// **How much of a file the write gate ever reads: its first 64 KiB.**
+/// [`sniff`] looks at 2 KiB of it; the `text/*` UTF-8 / NUL check at all of
+/// it. Named because a STREAMED upload peeks exactly this window before the
+/// rest of the body goes to the seal (0.5.218) — a peek any shorter would
+/// make the gate a different gate on the streaming path.
+pub const FORMAT_HEAD_BYTES: usize = 64 * 1024;
+
 /// The honesty check: parse the declared type and require the bytes to be
 /// what it says. `application/octet-stream` is an honest "I don't know" and
 /// is accepted for bytes this table does not recognise, never for bytes it
@@ -188,6 +195,11 @@ fn compatible(declared: &str, sniffed: &str) -> bool {
 /// smuggled). `text/*` must be valid UTF-8 with no NUL.
 ///
 /// Returns the normalised essence to store.
+///
+/// Reads at most the first [`FORMAT_HEAD_BYTES`] of `bytes` — so a streamed
+/// upload (0.5.218, `drive::multipart`) runs the SAME gate by handing it only
+/// the leading window it peeked, and the verdict is identical to the one a
+/// whole buffer would get.
 pub fn check_format(declared: &str, bytes: &[u8]) -> Result<String, TypeRefusal> {
     let essence = parse_essence(declared)?;
     let sniffed = sniff(bytes);
@@ -208,11 +220,11 @@ pub fn check_format(declared: &str, bytes: &[u8]) -> Result<String, TypeRefusal>
         });
     }
     if essence.starts_with("text/") {
-        let head = &bytes[..bytes.len().min(64 * 1024)];
+        let head = &bytes[..bytes.len().min(FORMAT_HEAD_BYTES)];
         // A multi-byte sequence cut at the 64 KiB boundary is not a lie.
         let valid = match std::str::from_utf8(head) {
             Ok(_) => true,
-            Err(e) => e.error_len().is_none() && head.len() == 64 * 1024,
+            Err(e) => e.error_len().is_none() && head.len() == FORMAT_HEAD_BYTES,
         };
         if !valid || head.contains(&0) {
             return Err(TypeRefusal::Mismatch {

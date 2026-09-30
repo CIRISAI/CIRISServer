@@ -472,12 +472,17 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             # Byte-identical and timed is the claim; the numbers are recorded,
             # never asserted — a floor belongs in the CSD, not here.
             #
-            # CEILING TODAY (server-owned, named by the step): `drive.rs`
-            # `UPLOAD_BODY_LIMIT` = 64 MiB whole-read cap ×4/3 + 1 MiB, so an
-            # upload above ~85 MiB answers 413 on any pinned edge — the drive
-            # whole-buffers both doors. That is the server's lane beside edge's
-            # v34.4.0 DAG pull (#733) and range reader (#737); this rung is red
-            # by name until it lands, green the hour it does.
+            # CEILING (server-owned, named by the step): since 0.5.218 the
+            # drive STREAMS both doors — a multipart upload with a `size` field
+            # before the `file` part goes through edge's `files::publish_stream`
+            # (CIRISEdge#744) and `?raw=1` above 64 MiB streams back through
+            # `FileRow::chunks()` (#737). The ceiling is `drive.rs`
+            # `STREAMED_FILE_CEILING` = edge's stated ~2.5 GiB single-file limit
+            # (persist's inline manifest cap until persist v52), with
+            # `STREAMED_UPLOAD_BODY_LIMIT` = that + 1 MiB of form. A 413 here is
+            # a file above THAT, or an upload that omitted `size` (which falls
+            # back to the 64 MiB whole-buffered cap, `UPLOAD_BODY_LIMIT` for
+            # the JSON form).
             import random
             p = rel["person"]
             devs = persons[p]["owns"]
@@ -505,10 +510,10 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             publish_s = time.monotonic() - t0
             if st == 413:
                 step.fail(f"bigfile_REFUSED_BY_DRIVE:{p}",
-                          f"the drive refused {size} bytes with 413: UPLOAD_BODY_LIMIT (64 MiB whole-read cap ×4/3 + 1 MiB) — "
-                          "the server whole-buffers the upload and the JSON read; a streamed upload above the cap is the "
-                          "server's lane beside CIRISEdge#734 (#733 DAG pull, #737 range reader)", [src],
-                          r"413|payload too large|UPLOAD_BODY_LIMIT", layer="relations", rel="bigfile", cc="CC 5.3.2.5",
+                          f"the drive refused {size} bytes with 413: above STREAMED_FILE_CEILING (edge's ~2.5 GiB "
+                          "single-file limit, persist's inline manifest cap until v52), or the upload carried no `size` "
+                          "field and fell back to the 64 MiB whole-buffered cap", [src],
+                          r"413|payload too large|drive\.too_large|STREAMED_FILE_CEILING", layer="relations", rel="bigfile", cc="CC 5.3.2.5",
                           size=size, status=st, body=str(got)[:200])
                 raise MeshError("bigfile refused by the drive's body limit")
             if st not in (200, 201):

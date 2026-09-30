@@ -370,17 +370,23 @@ class Node:
         """`POST /v1/files` as `multipart/form-data`, the file part streamed from
         `path` (the JSON form base64s the bytes — 4/3 inflation and the whole
         body in memory; multipart is what the drive names for a large file).
-        Returns (status, parsed body); a 413 is the node's `UPLOAD_BODY_LIMIT`
-        (`drive.rs`: 64 MiB whole-read cap ×4/3 + 1 MiB), a ceiling of the
-        DRIVE, not of the wire."""
+        Returns (status, parsed body).
+
+        Since 0.5.218 the node STREAMS this form into the seal, which needs
+        the file's exact length declared BEFORE its bytes: the `size` field,
+        sent before the `file` part (every field must precede the file — a
+        field after it is `400 drive.field_after_file`). A 413 is then the
+        drive's `STREAMED_FILE_CEILING` (edge's ~2.5 GiB single-file limit), a
+        ceiling of the DRIVE, not of the wire; a body that is not `size` bytes
+        is `400 drive.declared_length_mismatch`."""
         boundary = "----ciris-native-" + os.urandom(12).hex()
         head = b""
-        for name, value in (("cohort", cohort), ("media_type", media_type)):
+        size = path.stat().st_size
+        for name, value in (("cohort", cohort), ("media_type", media_type), ("size", str(size))):
             head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
         head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
                  f"Content-Type: {media_type}\r\n\r\n").encode()
         tail = f"\r\n--{boundary}--\r\n".encode()
-        size = path.stat().st_size
 
         class _Chain:
             """A read()-able over head + file + tail; urllib streams it when
