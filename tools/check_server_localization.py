@@ -804,6 +804,15 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # the self-device ids (CIRISClient#78).
     "self.announce_not_your_node",
     "self.announce_refused",
+    # EVICTING A DEVICE (0.5.218, CSD-037): release and occurrence/revoke became
+    # ONE signed act, and a part of it that did not complete is named by this
+    # id. CONSENT TO JOIN (0.5.218, the maintainer's ruling of 2026-09-30,
+    # CIRISConstitution#133 / CIRISPersist#955): every roster-growing door of
+    # the family and community surfaces refuses with ONE shared id until the
+    # invite flow ships. Both queued for the client bundle with their English
+    # (CIRISClient#78).
+    "self.evict_incomplete",
+    "membership.consent_required",
     # THE CLAIM, NAMED (0.5.218, CIRISServer#678 client review: "refusals come
     # back as prose"): claim-remote on the approving device, and setup/root on
     # the device being claimed. Same queue (CIRISClient#78).

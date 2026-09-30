@@ -12,6 +12,9 @@
 //!   is that projection), and the node itself reverts to the unowned
 //!   fail-closed floor. Releasing the node you are TALKING TO ends your own
 //!   session's authority here, so it needs `force_self: true`.
+//!   Since 0.5.218 a release also revokes the node's content-KEM occurrence of
+//!   the owner (signed, replicating) — without it the released machine kept
+//!   being wrapped every new self file ([`evict_device`]).
 //! - `POST /v1/self/occurrence/label` — a display name for a device key. The
 //!   persist occurrence row has no label member and its admission is
 //!   idempotent on `(identity, occurrence)`, so a label cannot be written INTO
@@ -23,6 +26,15 @@
 //!   contact code: a v3 fedcode naming them and, by their choice (`?nodes=`),
 //!   any of their ANNOUNCED nodes with each node's transport key. The string
 //!   (and its QR form) another person pastes into `POST /v1/contacts`.
+//!
+//! - `POST /v1/self/occurrence/revoke` (0.5.218, CSD-037) — revoke a device
+//!   occurrence. Moved here from [`crate::auth::occurrence`], and it and
+//!   `release` are now ONE act, [`evict_device`]: withdraw the owner-binding(s)
+//!   the device is a node under, write a SIGNED occurrence revocation (the
+//!   replicating door, signed by the owner's pen), kick replication, and read
+//!   both halves back from persist. **Eviction withholds new content only**:
+//!   already-shared history stays readable by the evicted device — no DEK is
+//!   rotated and nothing is re-encrypted ([`EVICTION_HISTORY_NOTE`]).
 //!
 //! - `POST /v1/self/nodes/{node_key_id}/announce` — announce ANOTHER of the
 //!   owner's devices from the device holding the pen (CIRISServer#678): the
@@ -170,6 +182,401 @@ pub(crate) async fn emit_as_owner(
         .map_err(|e| format!("{e}"))
 }
 
+// ─── EVICT A DEVICE — the one act both routes converge on ───────────────────
+
+/// What eviction does NOT do, said in every answer and never softened
+/// (CSD-037, CC 3.3.6.1). An eviction stops the device receiving anything NEW:
+/// the next self file is wrapped to the owner's ACTIVE occurrences only, and the
+/// self room removes the node at its next epoch. It does not reach back. Every
+/// DEK the device was already granted stays granted — there is no DEK rotation
+/// and no re-encryption of history — so whatever it could already read, it can
+/// still read, on the device and in any copy taken from it.
+pub const EVICTION_HISTORY_NOTE: &str = "Already-shared history stays readable by the evicted \
+     device: nothing already granted to it is rotated or re-encrypted. Only new content and new \
+     self-room epochs are withheld from it.";
+
+/// One part of an eviction that did not complete, by name.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EvictFailure {
+    /// `owner_binding_withdrawal` | `owner_binding_witness` |
+    /// `occurrence_revocation` | `occurrence_witness`.
+    pub part: &'static str,
+    /// The binding, node or occurrence the part was about.
+    pub target: String,
+    /// The store's / signer's own words (`{:#}` — the whole chain).
+    pub error: String,
+}
+
+/// **What an eviction did, part by part** — the answer both
+/// `POST /v1/self/nodes/{node}/release` and `POST /v1/self/occurrence/revoke`
+/// return, because they are now the same act.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct EvictionReport {
+    /// The owner's nodes whose owner-bindings this eviction withdrew.
+    pub nodes: Vec<String>,
+    /// One entry per withdrawn owner-binding:
+    /// `{node_key_id, binding, withdraws, cohort_scope}`.
+    pub withdrawn: Vec<serde_json::Value>,
+    /// One entry per SIGNED occurrence revocation written:
+    /// `{occurrence_key_id, attesting_key_id, effective_at}`.
+    pub occurrences_revoked: Vec<serde_json::Value>,
+    /// Occurrences of the owner the eviction named that were already out of the
+    /// active roster — nothing to sign for them.
+    pub occurrences_already_revoked: Vec<String>,
+    /// Every part that did not complete, by name. Empty on a full eviction.
+    pub failed: Vec<EvictFailure>,
+    /// `true` when a replication round was kicked NOW; `false` when this
+    /// process runs no replication runtime (a bare harness engine), in which
+    /// case the rows ride the next cadence round of whatever runtime serves
+    /// this store.
+    pub replication_kicked: bool,
+    /// The owner's nodes as persist's projection lists them AFTER the act.
+    pub nodes_owned_by: Vec<String>,
+    /// [`EVICTION_HISTORY_NOTE`], verbatim, in every answer.
+    pub history: &'static str,
+}
+
+impl EvictionReport {
+    fn fail(&mut self, part: &'static str, target: &str, error: String) {
+        self.failed.push(EvictFailure {
+            part,
+            target: target.to_owned(),
+            error,
+        });
+    }
+}
+
+/// Build and sign ONE occurrence revocation as the owner, for persist's SIGNED
+/// door (`put_identity_occurrence_revocation`, CIRISPersist#421).
+///
+/// The envelope carries exactly the members the gate reads back
+/// (`identity_key_id`, `occurrence_key_id`, `revoked_at`, `effective_at`) plus
+/// the witness set and reason, so what is signed is what is stored. It is
+/// canonicalized with persist's OWN canonicalizer — the bytes its gate
+/// re-canonicalizes — and signed with the owner's pen, which is the identity
+/// the occurrence belongs to: `signer_acts_for(owner, owner)` holds by
+/// construction, and no other key has the mandate (a node key signing its
+/// owner's revocation is the infrastructure-authors-the-human's-act class,
+/// CC 3.3.6).
+///
+/// The instant is NOT truncated. The fold revokes only when
+/// `effective_at >= occurrence.asserted_at`, occurrences are asserted at
+/// nanosecond precision, and RFC-3339 with nanoseconds round-trips exactly
+/// through the gate's `ts_field` comparison, so a millisecond cut would only
+/// open a window in which the revocation revokes nothing.
+async fn signed_occurrence_revocation(
+    capsule: &OwnerSignerCapsule,
+    owner: &str,
+    occurrence: &str,
+    reason: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ciris_persist::federation::SignedIdentityOccurrenceRevocation, String> {
+    let at = now.to_rfc3339();
+    let mut envelope = serde_json::json!({
+        "identity_key_id": owner,
+        "occurrence_key_id": occurrence,
+        "revoked_at": at,
+        "effective_at": at,
+        "witness_set": [capsule.key_id()],
+    });
+    if let Some(r) = reason {
+        envelope["reason"] = serde_json::Value::String(r.to_owned());
+    }
+    let bytes = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
+        .map_err(|e| format!("canonicalize the revocation envelope: {e:#}"))?;
+    let sig = capsule.sign_hybrid(&bytes).await?;
+    Ok(
+        ciris_persist::federation::SignedIdentityOccurrenceRevocation {
+            identity_occurrence_revocation:
+                ciris_persist::federation::types::IdentityOccurrenceRevocation {
+                    identity_key_id: owner.to_owned(),
+                    occurrence_key_id: occurrence.to_owned(),
+                    revoked_at: now,
+                    effective_at: now,
+                    reason: reason.map(str::to_owned),
+                    witness_set: vec![capsule.key_id().to_owned()],
+                    persist_row_hash: String::new(),
+                },
+            attesting_key_id: capsule.key_id().to_owned(),
+            signed_envelope: envelope,
+            signature: ciris_verify_core::transport_binding::TransportBindingSignature {
+                ed25519_signature_base64: B64.encode(&sig.classical_signature),
+                mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
+            },
+        },
+    )
+}
+
+/// **Evict a device from its owner's self — ONE act** (CSD-037, the
+/// stolen-device path; 0.5.218).
+///
+/// # Why one act
+///
+/// Until 0.5.218 there were two unconnected routes and neither finished the
+/// job. `release` withdrew the owner-binding, so the self room dropped the node
+/// on its next tick (edge `self_room::decide` reads `nodes_owned_by`) — but it
+/// left the node's content-KEM identity OCCURRENCE live, and persist wraps every
+/// new self file to `list_identity_occurrences_active(owner)`
+/// (`at_rest_cascade::resolve_recipients`), so the "released" machine kept being
+/// handed the key to every new file. `occurrence/revoke` wrote the revocation
+/// through the trusted-LOCAL door (`put_identity_occurrence_revocation_local`):
+/// unsigned, and EXCLUDED from replication by construction, so every other
+/// device of the owner went on wrapping to the stolen one; and it never touched
+/// the owner-binding, so the room kept it too. Each half looked done from the
+/// device that ran it.
+///
+/// # What it does
+///
+/// 1. **Withdraw** every live owner-binding the owner holds on each of `nodes`
+///    — the owner's signed `withdraws`, at the binding's own audience (a
+///    federation binding is withdrawn where peers see it, a self one where the
+///    owner's devices do).
+/// 2. **Revoke** each of `occurrences` that is still active, through persist's
+///    SIGNED door, signed by the owner's pen
+///    ([`signed_occurrence_revocation`]). A signed revocation is what the
+///    `IdentityOccurrenceRevocation` replication plane carries (`compose.rs`,
+///    CIRISServer#646); an unsigned one never leaves this store.
+/// 3. **Kick** replication so both ride this round, not the next cadence.
+/// 4. **Witness** each half from persist's own projections rather than from our
+///    writes: `nodes_owned_by(owner)` must no longer list the nodes, and
+///    `list_identity_occurrences_active(owner)` must no longer list the
+///    occurrences.
+///
+/// Every part is attempted even when an earlier one failed — a half-eviction
+/// that stops at the first error leaves the stolen device with the other half —
+/// and every failure is reported by part and target, never folded into an
+/// `Ok`.
+///
+/// # What it does not do
+///
+/// [`EVICTION_HISTORY_NOTE`]: no DEK is rotated and nothing already shared is
+/// re-encrypted. Content the device was granted before the eviction stays
+/// readable to it. Only NEW content (new self files are wrapped to active
+/// occurrences only) and NEW self-room epochs are withheld.
+pub(crate) async fn evict_device(
+    engine: &Engine,
+    capsule: &OwnerSignerCapsule,
+    owner: &str,
+    nodes: &[String],
+    occurrences: &[String],
+    reason: Option<&str>,
+) -> EvictionReport {
+    let dir = engine.federation_directory();
+    let mut report = EvictionReport {
+        nodes: nodes.to_vec(),
+        history: EVICTION_HISTORY_NOTE,
+        ..EvictionReport::default()
+    };
+
+    // (1) The owner-bindings.
+    for node in nodes {
+        let bindings = match live_bindings(engine, owner, node).await {
+            Ok(b) => b,
+            Err(e) => {
+                report.fail("owner_binding_withdrawal", node, e);
+                continue;
+            }
+        };
+        for b in &bindings {
+            // At the BINDING's own audience: a federation-scoped binding is
+            // withdrawn where peers can see the withdrawal, a self-scoped one
+            // where the owner's devices can.
+            let spec = crate::attest::Spec::new(
+                attestation_type::WITHDRAWS,
+                b.cohort_scope.clone(),
+                ciris_persist::federation::withdraws_attestation_envelope(
+                    &b.attestation_id,
+                    attestation_type::DELEGATES_TO,
+                ),
+            )
+            .about(node);
+            match emit_as_owner(engine, capsule, spec).await {
+                Ok(id) => report.withdrawn.push(serde_json::json!({
+                    "node_key_id": node,
+                    "binding": b.attestation_id,
+                    "withdraws": id,
+                    "cohort_scope": b.cohort_scope,
+                })),
+                Err(e) => report.fail("owner_binding_withdrawal", &b.attestation_id, e),
+            }
+        }
+    }
+
+    // (2) The occurrences — signed, so they replicate.
+    let active: Option<std::collections::HashSet<String>> =
+        match dir.list_identity_occurrences_active(owner).await {
+            Ok(v) => Some(v.into_iter().map(|o| o.occurrence_key_id).collect()),
+            Err(e) => {
+                for occ in occurrences {
+                    report.fail(
+                        "occurrence_revocation",
+                        occ,
+                        format!("list_identity_occurrences_active({owner}): {e:#}"),
+                    );
+                }
+                None
+            }
+        };
+    if let Some(active) = &active {
+        for occ in occurrences {
+            if !active.contains(occ) {
+                report.occurrences_already_revoked.push(occ.clone());
+                continue;
+            }
+            let now = chrono::Utc::now();
+            let signed = match signed_occurrence_revocation(capsule, owner, occ, reason, now).await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    report.fail("occurrence_revocation", occ, e);
+                    continue;
+                }
+            };
+            match dir.put_identity_occurrence_revocation(signed).await {
+                Ok(()) => report.occurrences_revoked.push(serde_json::json!({
+                    "occurrence_key_id": occ,
+                    "attesting_key_id": capsule.key_id(),
+                    "effective_at": now.to_rfc3339(),
+                })),
+                Err(e) => report.fail(
+                    "occurrence_revocation",
+                    occ,
+                    format!("put_identity_occurrence_revocation: {e:#}"),
+                ),
+            }
+        }
+    }
+
+    // (3) Make both halves cross now.
+    report.replication_kicked = crate::compose::kick_replication("self:evict_device");
+
+    // (4) The witnesses, read back rather than assumed.
+    match nodes_owned_by(dir.as_ref(), owner).await {
+        Ok(still) => {
+            for node in nodes {
+                if still.iter().any(|n| n == node) {
+                    report.fail(
+                        "owner_binding_witness",
+                        node,
+                        "nodes_owned_by still lists it: an owner-binding this node cannot see is \
+                         still live"
+                            .to_owned(),
+                    );
+                }
+            }
+            report.nodes_owned_by = still;
+        }
+        Err(e) => report.fail(
+            "owner_binding_witness",
+            owner,
+            format!("nodes_owned_by: {e:#}"),
+        ),
+    }
+    if !occurrences.is_empty() {
+        match dir.list_identity_occurrences_active(owner).await {
+            Ok(v) => {
+                for occ in occurrences {
+                    if v.iter().any(|o| &o.occurrence_key_id == occ) {
+                        report.fail(
+                            "occurrence_witness",
+                            occ,
+                            "list_identity_occurrences_active still lists it".to_owned(),
+                        );
+                    }
+                }
+            }
+            Err(e) => report.fail(
+                "occurrence_witness",
+                owner,
+                format!("list_identity_occurrences_active: {e:#}"),
+            ),
+        }
+    }
+    tracing::info!(
+        owner = %owner,
+        nodes = ?nodes,
+        occurrences = ?occurrences,
+        withdrawn = report.withdrawn.len(),
+        revoked = report.occurrences_revoked.len(),
+        failed = report.failed.len(),
+        replication_kicked = report.replication_kicked,
+        "self: device EVICTED — owner-binding(s) withdrawn and occurrence(s) revoked as ONE \
+         signed act; already-shared history stays readable to the device (no DEK rotation)"
+    );
+    report
+}
+
+/// The answer an eviction route gives: 200 with the report when every part
+/// completed, else a refusal naming what did not — carrying the same report,
+/// so the caller sees what DID complete (it stays done).
+fn eviction_response(report: &EvictionReport, extra: serde_json::Value) -> Response {
+    let mut body = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(b), Some(x)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in x {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    if report.failed.is_empty() {
+        return Json(body).into_response();
+    }
+    // A binding persist still sees as live, and nothing else wrong, is the
+    // release's own long-standing refusal; any other incomplete part is named
+    // under the eviction's.
+    let only_binding_witness = report
+        .failed
+        .iter()
+        .all(|f| f.part == "owner_binding_witness");
+    let (id, text): (&'static str, &'static str) = if only_binding_witness {
+        (
+            "self.release_incomplete",
+            "The release was signed, but the node still lists that node as yours: an ownership record it cannot see is still live. What it could withdraw stays withdrawn.",
+        )
+    } else {
+        (
+            "self.evict_incomplete",
+            "Part of removing that device did not complete. What was done stays done; the answer names what was not.",
+        )
+    };
+    let detail = report
+        .failed
+        .iter()
+        .map(|f| format!("{} {}: {}", f.part, f.target, f.error))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some(b) = body.as_object_mut() {
+        b.insert("error".into(), text.into());
+        b.insert("reason_id".into(), id.into());
+        b.insert("detail".into(), detail.into());
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+}
+
+/// Every key the node `node` may hold its owner's content occurrence under.
+/// For another machine that is its node key: since the split fix a claim
+/// provisions the content occurrence under the wire key
+/// (`ensure_content_occurrence` takes it explicitly), and a pre-split install
+/// has one key. For THIS node it is every key this node is — a split install
+/// that predates that fix still holds its occurrence under the ACTOR key
+/// (`actor-vs-node-key-on-a-split-install`; [`crate::peer::own_keys_of_this_node`]).
+///
+/// What this cannot see: another machine's ACTOR key when that machine is a
+/// pre-fix split install. Nothing in the directory links a remote node key to
+/// its actor key, so that occurrence is not found from here; revoking it by
+/// its own key (`POST /v1/self/occurrence/revoke`) reaches it.
+async fn occurrence_keys_of_node(engine: &Engine, node: &str, is_this_node: bool) -> Vec<String> {
+    let mut keys = vec![node.to_owned()];
+    if is_this_node {
+        if let Ok(engine_key) = engine.local_derived_key_id().await {
+            for k in crate::peer::own_keys_of_this_node(&engine_key) {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
+    }
+    keys
+}
+
 // ─── POST /v1/self/nodes/{node_key_id}/release ──────────────────────────────
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,6 +624,11 @@ async fn live_bindings(
         .collect())
 }
 
+/// **Release a node — an eviction** (0.5.218). The owner's signed `withdraws`
+/// of every owner-binding on the node AND the signed revocation of the node's
+/// content-KEM occurrence of the owner, through [`evict_device`]. Before
+/// 0.5.218 a release withdrew the binding only, and the released machine kept
+/// being wrapped every new self file.
 async fn release_node(
     State(st): State<SelfState>,
     headers: HeaderMap,
@@ -263,73 +675,180 @@ async fn release_node(
             "That is the node you are talking to. Releasing it ends your ownership here, including this session.",
         );
     }
-    let bindings = match live_bindings(&st.engine, &caller.owner_key_id, &node_key_id).await {
-        Ok(b) => b,
-        Err(e) => return store_unavailable(e),
+    // The node's content occurrence(s) of the owner: the keys it may hold one
+    // under, filtered to those that ARE occurrences of the owner — a node that
+    // never provisioned one has nothing to revoke, which is not a failure.
+    let occurrences = match dir
+        .list_identity_occurrences_for(&caller.owner_key_id)
+        .await
+    {
+        Ok(all) => {
+            let keys = occurrence_keys_of_node(&st.engine, &node_key_id, is_this_node).await;
+            let mut occ: Vec<String> = all
+                .into_iter()
+                .map(|o| o.occurrence_key_id)
+                .filter(|k| keys.contains(k))
+                .collect();
+            occ.sort();
+            occ.dedup();
+            occ
+        }
+        Err(e) => return store_unavailable(format!("list_identity_occurrences_for: {e:#}")),
     };
     let capsule = match pen(&st, &caller).await {
         Ok(c) => c,
         Err(r) => return r,
     };
-    let mut withdrawn = Vec::with_capacity(bindings.len());
-    for b in &bindings {
-        // At the BINDING's own audience: a federation-scoped binding is
-        // withdrawn where peers can see the withdrawal, a self-scoped one where
-        // the owner's devices can.
-        let spec = crate::attest::Spec::new(
-            attestation_type::WITHDRAWS,
-            b.cohort_scope.clone(),
-            ciris_persist::federation::withdraws_attestation_envelope(
-                &b.attestation_id,
-                attestation_type::DELEGATES_TO,
-            ),
+    let report = evict_device(
+        &st.engine,
+        &capsule,
+        &caller.owner_key_id,
+        std::slice::from_ref(&node_key_id),
+        &occurrences,
+        Some("released by its owner"),
+    )
+    .await;
+    tracing::info!(
+        owner = %caller.owner_key_id, node = %node_key_id,
+        bindings = report.withdrawn.len(), occurrences = report.occurrences_revoked.len(),
+        failed = report.failed.len(), released_self = is_this_node,
+        "self: node RELEASED — the owner withdrew every owner-binding on it and revoked its \
+         content occurrence"
+    );
+    let released = report.failed.is_empty();
+    eviction_response(
+        &report,
+        serde_json::json!({
+            "node_key_id": node_key_id,
+            "released": released,
+            "released_self": is_this_node,
+        }),
+    )
+}
+
+// ─── POST /v1/self/occurrence/revoke ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct RevokeOccurrenceRequest {
+    /// The identity the occurrence belongs to — must be the caller's own.
+    identity_key_id: String,
+    /// The occurrence (device) to remove from the self.
+    occurrence_key_id: String,
+    /// Optional annotation (e.g. "laptop lost 2026-06-23"), carried in the
+    /// signed revocation envelope.
+    #[serde(default)]
+    reason: Option<String>,
+    /// Required when the occurrence is (one of the keys of) the node this
+    /// request is served BY: evicting it withdraws this node's owner-binding
+    /// and ends the owner's authority here, as a self-release does.
+    #[serde(default)]
+    force_self: bool,
+}
+
+/// **Revoke a device occurrence — an eviction** (0.5.218, CSD-037).
+///
+/// Authorised like [`release_node`]: the OWNER's session on this node, and the
+/// revocation is signed server-side with the owner's pen. Before 0.5.218 this
+/// route wanted a request hybrid-signed by a surviving device key, which the
+/// app (a bearer client) never sends — every revoke from the app answered 401 —
+/// and then wrote the revocation through the trusted-LOCAL door, unsigned and
+/// excluded from replication (the #227 S2 carriage gap). Now it is the signed,
+/// replicating door, and when the occurrence IS one of the owner's nodes the
+/// same act withdraws that node's owner-binding, so the self room drops it too
+/// ([`evict_device`]).
+///
+/// Refused: no session (401), a session that is not the owner's, a delegated
+/// session (the row is signed with the owner's key and would outlive the
+/// delegation), and an identity or occurrence that is not the caller's — under
+/// ONE id (`self.not_your_device`) whether the key is someone else's or nobody's.
+async fn revoke_occurrence(
+    State(st): State<SelfState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let caller = match gate(owner_caller(&st.engine, &headers, false).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let req: RevokeOccurrenceRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(e.to_string()),
+    };
+    let not_yours = |k: &str| {
+        refuse_with(
+            StatusCode::NOT_FOUND,
+            "self.not_your_device",
+            "That key is not one of your devices.",
+            k.to_owned(),
         )
-        .about(&node_key_id);
-        match emit_as_owner(&st.engine, &capsule, spec).await {
-            Ok(id) => withdrawn.push(serde_json::json!({
-                "binding": b.attestation_id,
-                "withdraws": id,
-                "cohort_scope": b.cohort_scope,
-            })),
-            Err(e) => {
-                return store_unavailable(format!(
-                    "withdraws(owner-binding {}): {e}",
-                    b.attestation_id
-                ))
-            }
-        }
+    };
+    if req.identity_key_id != caller.owner_key_id {
+        return not_yours(&req.occurrence_key_id);
     }
-    // THE WITNESS, read back rather than assumed: the projection every other
-    // surface (the switcher, the self room's roster) reads must no longer list it.
-    let still = match nodes_owned_by(dir.as_ref(), &caller.owner_key_id).await {
+    let dir = st.engine.federation_directory();
+    // One of the caller's occurrences, active or not: an occurrence revoked
+    // under the old LOCAL door is still the owner's, and re-running the
+    // eviction on it withdraws whatever owner-binding that door left behind.
+    match dir
+        .list_identity_occurrences_for(&caller.owner_key_id)
+        .await
+    {
+        Ok(v)
+            if v.iter()
+                .any(|o| o.occurrence_key_id == req.occurrence_key_id) => {}
+        Ok(_) => return not_yours(&req.occurrence_key_id),
+        Err(e) => return store_unavailable(format!("list_identity_occurrences_for: {e:#}")),
+    }
+    // Is the device one of the owner's NODES? Directly (its occurrence is under
+    // its node key), or as one of THIS node's keys (a split install's actor
+    // occurrence of a node bound under its wire key).
+    let owned = match nodes_owned_by(dir.as_ref(), &caller.owner_key_id).await {
         Ok(v) => v,
         Err(e) => return store_unavailable(format!("nodes_owned_by: {e:#}")),
     };
-    if still.iter().any(|n| n == &node_key_id) {
-        return refuse_with(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "self.release_incomplete",
-            "The release was signed, but the node still lists that node as yours: an ownership record it cannot see is still live. What it could withdraw stays withdrawn.",
-            format!(
-                "withdrew {} binding(s); nodes_owned_by still lists it",
-                withdrawn.len()
-            ),
+    let this_keys = occurrence_keys_of_node(&st.engine, &caller.node_key_id, true).await;
+    let mut nodes: Vec<String> = Vec::new();
+    if owned.contains(&req.occurrence_key_id) {
+        nodes.push(req.occurrence_key_id.clone());
+    }
+    if this_keys.contains(&req.occurrence_key_id)
+        && owned.contains(&caller.node_key_id)
+        && !nodes.contains(&caller.node_key_id)
+    {
+        nodes.push(caller.node_key_id.clone());
+    }
+    let is_this_node = nodes.iter().any(|n| this_keys.contains(n));
+    if is_this_node && !req.force_self {
+        return refuse(
+            StatusCode::CONFLICT,
+            "self.release_self_requires_force",
+            "That is the node you are talking to. Releasing it ends your ownership here, including this session.",
         );
     }
-    tracing::info!(
-        owner = %caller.owner_key_id, node = %node_key_id, bindings = withdrawn.len(),
-        released_self = is_this_node,
-        "self: node RELEASED — the owner withdrew every owner-binding on it"
-    );
-    let _ = crate::compose::kick_replication("self:release_node");
-    Json(serde_json::json!({
-        "node_key_id": node_key_id,
-        "released": true,
-        "released_self": is_this_node,
-        "withdrawn": withdrawn,
-        "nodes_owned_by": still,
-    }))
-    .into_response()
+    let capsule = match pen(&st, &caller).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let report = evict_device(
+        &st.engine,
+        &capsule,
+        &caller.owner_key_id,
+        &nodes,
+        std::slice::from_ref(&req.occurrence_key_id),
+        req.reason.as_deref(),
+    )
+    .await;
+    let revoked = report.failed.is_empty();
+    eviction_response(
+        &report,
+        serde_json::json!({
+            "identity_key_id": req.identity_key_id,
+            "occurrence_key_id": req.occurrence_key_id,
+            "revoked": revoked,
+            "revoked_by": capsule.key_id(),
+            "released_self": is_this_node,
+        }),
+    )
 }
 
 // ─── POST /v1/self/nodes/{node_key_id}/announce ─────────────────────────────
@@ -855,6 +1374,13 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
         .route(
             "/v1/self/occurrence/label",
             axum::routing::post(label_occurrence),
+        )
+        // 0.5.218 (CSD-037): moved here from `auth::occurrence` — the revoke is
+        // the owner's act, authorised by the owner's session and signed with
+        // the owner's pen, which is this router's posture, not that one's.
+        .route(
+            "/v1/self/occurrence/revoke",
+            axum::routing::post(revoke_occurrence),
         )
         // CIRISServer#673 — the person's shareable contact code (and QR form).
         .route("/v1/self/contact-code", axum::routing::get(contact_code))

@@ -525,3 +525,164 @@ async fn only_the_announced_nodes_are_public() {
         assert!(mine.contains(k), "{k} missing from the owner's view: {v}");
     }
 }
+
+// ─── 0.5.218: release is an EVICTION (CSD-037) ──────────────────────────────
+
+/// The content-KEM occurrence a claimed machine provisions for its owner,
+/// under its node key, with real enc keys (so it is a wrap recipient).
+async fn node_occurrence(p: &Person, node_key_id: &str, tag: u8) {
+    p.engine
+        .federation_directory()
+        .put_identity_occurrence_local(IdentityOccurrence {
+            identity_key_id: p.key().to_owned(),
+            occurrence_key_id: node_key_id.to_owned(),
+            device_class: "server".to_owned(),
+            hardware_attestation: None,
+            asserted_at: chrono::Utc::now(),
+            valid_until: None,
+            encryption_pubkeys: Some(
+                ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
+            ),
+            transport_binding: None,
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("the node's content occurrence");
+}
+
+async fn active_occurrences(p: &Person) -> Vec<String> {
+    p.engine
+        .federation_directory()
+        .list_identity_occurrences_active(p.key())
+        .await
+        .expect("active occurrences")
+        .into_iter()
+        .map(|o| o.occurrence_key_id)
+        .collect()
+}
+
+/// **(ii) A release revokes the released node's occurrence** — signed, on the
+/// surface replication re-publishes — as well as withdrawing its binding.
+/// Before 0.5.218 the binding went and the occurrence stayed, so the machine
+/// kept being wrapped every new self file.
+#[tokio::test]
+async fn releasing_a_node_also_revokes_its_occurrence_signed() {
+    let alice = Person::new("rel-occ").await;
+    let n2 = second_node(&alice, 0xE8).await;
+    node_occurrence(&alice, &n2, 0xE9).await;
+    assert!(
+        active_occurrences(&alice).await.contains(&n2),
+        "precondition"
+    );
+
+    let (st, v) = alice
+        .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["released"], true);
+    assert_eq!(v["withdrawn"].as_array().map(Vec::len), Some(1), "{v}");
+    let revoked = v["occurrences_revoked"]
+        .as_array()
+        .expect("occurrences_revoked");
+    assert_eq!(revoked.len(), 1, "{v}");
+    assert_eq!(revoked[0]["occurrence_key_id"], n2.as_str());
+    assert_eq!(revoked[0]["attesting_key_id"], alice.key());
+    assert!(v["failed"].as_array().is_some_and(Vec::is_empty), "{v}");
+    assert!(
+        v["history"]
+            .as_str()
+            .is_some_and(|h| h.contains("Already-shared history stays readable")),
+        "{v}"
+    );
+    assert!(!active_occurrences(&alice).await.contains(&n2));
+    let signed = alice
+        .engine
+        .federation_directory()
+        .list_signed_identity_occurrence_revocations_for(alice.key())
+        .await
+        .expect("signed revocations");
+    assert!(
+        signed
+            .iter()
+            .any(|r| r.identity_occurrence_revocation.occurrence_key_id == n2
+                && r.attesting_key_id == alice.key()),
+        "the node's revocation is SIGNED (replicable), by the owner: {signed:?}"
+    );
+}
+
+/// **(iii) After an eviction, a new self file carries no wrap to the evicted
+/// device — and an OLD one still does** (the honesty half, CC 3.3.6.1: no DEK
+/// rotation, no re-encryption of what was already shared).
+#[tokio::test]
+async fn after_eviction_new_self_files_are_not_wrapped_to_the_evicted_device() {
+    let alice = Person::new("rel-wrap").await;
+    let here = provision_node_occurrence(&alice).await;
+    let n2 = second_node(&alice, 0xEC).await;
+    node_occurrence(&alice, &n2, 0xED).await;
+
+    let before = alice
+        .engine
+        .put_blob_scoped(
+            "self",
+            Some(alice.key()),
+            b"before the theft",
+            Some("text/plain"),
+            None,
+        )
+        .await
+        .expect("a self file before the eviction");
+    assert!(
+        before.granted.contains(&n2) && before.granted.contains(&here),
+        "precondition: both devices are wrapped: {:?}",
+        before.granted
+    );
+
+    let (st, v) = alice
+        .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+
+    let after = alice
+        .engine
+        .put_blob_scoped(
+            "self",
+            Some(alice.key()),
+            b"after the theft",
+            Some("text/plain"),
+            None,
+        )
+        .await
+        .expect("a self file after the eviction");
+    assert!(
+        !after.granted.contains(&n2) && !after.excluded.contains(&n2),
+        "a NEW self file names no wrap to the evicted device: {:?} / {:?}",
+        after.granted,
+        after.excluded
+    );
+    assert!(
+        after.granted.contains(&here),
+        "the remaining device is: {:?}",
+        after.granted
+    );
+    use ciris_persist::federation::blobs::BlobStorage as _;
+    let backend = alice.engine.sqlite_backend().expect("sqlite");
+    let new_recipients = backend
+        .list_at_rest_grant_recipients(&after.at_rest_sha256)
+        .await
+        .expect("grant recipients");
+    assert!(
+        !new_recipients.contains(&n2),
+        "no key_grant to the evicted occurrence on the new file: {new_recipients:?}"
+    );
+    // What eviction does NOT do, pinned so nobody claims otherwise: the grant
+    // on the file shared BEFORE stays.
+    let old_recipients = backend
+        .list_at_rest_grant_recipients(&before.at_rest_sha256)
+        .await
+        .expect("grant recipients");
+    assert!(
+        old_recipients.contains(&n2),
+        "already-shared history stays readable by the evicted device (no DEK rotation): \
+         {old_recipients:?}"
+    );
+}
