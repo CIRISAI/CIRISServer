@@ -70,9 +70,19 @@ invitation for a membership.
 The ADMISSION rule is persist's (every host would otherwise write it; one rule,
 one implementation): CIRISPersist#955 asks for
 the proposal and acceptance rows and a gate on both the local put and the
-replication apply. Until it lands the server withholds a new member's widening
-until the acceptance row is present — an interim check that is DELETED when
-persist's gate lands, never kept beside it.
+replication apply. It is a persist MAJOR (v52).
+
+**Interim (the maintainer's choice, 2026-09-30): refuse, don't hold.** Until v52
+the server has no way to deliver a proposal to a non-member or to record an
+acceptance (the dimensions are not in the strict registry). So every
+roster-growing door refuses with 409 `membership.consent_required`: a direct
+add, a quorum envelope that adds, and a founding roster naming anyone besides
+the founder. Creating a group, removing members, changing roles, leaving and
+dissolving are unaffected. This keeps no server-side copy of the rule, only a
+closed door.
+
+**Founding members too** (same ruling): the founding record admits only the
+founder; everyone else named in it joins by proposal → acceptance.
 
 ## 5. Not in scope
 
