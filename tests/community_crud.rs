@@ -28,6 +28,18 @@
 //! * the quorum flow (envelope → cosign on each signer's own node → assemble)
 //!   for `unanimous` and `quorum:M/N`;
 //! * the CIRISPersist#907 gap as an IGNORED red test, named for the issue.
+//!   (0.5.218: persist v49 closed #907 — the test runs, un-ignored.)
+//!
+//! # Consent to join (0.5.218)
+//!
+//! Every roster-growing door now answers 409 `membership.consent_required`
+//! (CIRISConstitution#133, CIRISPersist#955, `FSD/MEMBERSHIP_INVITES.md`): a
+//! direct add, a quorum add, and a create naming anyone but the founder. The
+//! tests below assert each refusal; where a test's PURPOSE is what a
+//! multi-member room does (read, remove, role, moderator, quorum, the #907
+//! read), the roster is built by the `test_only_*` fixtures, which write the
+//! owner-signed record / widening rows straight through persist — the same
+//! rows the routes wrote before 0.5.218, and never a production path.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -121,6 +133,19 @@ impl OwnerIdentity {
         .await
         .expect("re-open the owner's minted fed-ID")
         .0
+    }
+
+    /// The same fed-ID in EDGE's signer type — what a record / widening is
+    /// signed with (the capsule's `edge_signer`).
+    async fn edge_signer(&self) -> ciris_edge::identity::LocalSigner {
+        ciris_server::identity::hardware_user_signers(
+            UserIdentityBackend::Software,
+            &self.alias,
+            self.seed_dir.clone(),
+        )
+        .await
+        .expect("re-open the owner's minted fed-ID")
+        .1
     }
 }
 
@@ -377,24 +402,102 @@ async fn contact(on: &Node, who: &Node) {
     assert_eq!(s, 200, "add contact: {v}");
 }
 
-/// Found a room on `founder` with `members`, after making each a contact.
-async fn found(founder: &Node, name: &str, members: &[&Node], extra: Value) -> String {
+// ─── TEST-ONLY roster fixtures — the consent-to-join BYPASS ─────────────────
+//
+// Since 0.5.218 `POST /v1/communities` refuses a founding roster naming anyone
+// but the founder, and every add is `membership.consent_required`
+// (CIRISConstitution#133, CIRISPersist#955). These write the rows the routes
+// wrote before — owner-signed, through persist's own doors — so the tests of
+// what a multi-member room DOES keep a room to do it in. Under `tests/` only;
+// there is no production bypass.
+
+/// TEST-ONLY (bypasses the consent-to-join door): found a room on `founder`
+/// with `members` on its founding RECORD, after making each a contact — the
+/// record `POST /v1/communities` wrote before 0.5.218, signed by the founder's
+/// pen, plus the founder's content occurrence the route provisioned. `extra`
+/// takes `consensus_protocol` and `tier` as the route did.
+async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: Value) -> String {
     for m in members {
         contact(founder, m).await;
     }
-    let mut body = json!({
-        "name": name,
-        "members": members.iter().map(|m| m.owner.key_id.clone()).collect::<Vec<_>>(),
-    });
-    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
-        for (k, v) in e {
-            b.insert(k.clone(), v.clone());
-        }
+    let protocol = extra["consensus_protocol"]
+        .as_str()
+        .unwrap_or("founder_only")
+        .to_owned();
+    let community_id = ciris_edge::chat::new_room_community_key_id();
+    let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
+        .expect("ms instant");
+    let mut roster: Vec<(&str, Option<&str>)> = vec![(
+        founder.owner.key_id.as_str(),
+        Some(ciris_persist::federation::admission::MEMBER_ROLE_FOUNDER),
+    )];
+    roster.extend(members.iter().map(|m| (m.owner.key_id.as_str(), None)));
+    let mut record =
+        ciris_edge::chat::community(&community_id, name, &roster, &protocol, founded_at)
+            .expect("TEST-ONLY: the room record");
+    if extra["tier"] == json!("affiliations") {
+        record.policy_blob = Some(json!({ "cohort_scope": "affiliations" }));
     }
-    let (s, v) = post(founder, "/v1/communities", body).await;
-    assert_eq!(s, 201, "create: {v}");
-    assert_eq!(v["kind"], "room");
-    v["community_id"].as_str().expect("community_id").to_owned()
+    let signed = ciris_edge::chat::signed_community(record, &founder.owner.edge_signer().await)
+        .await
+        .expect("TEST-ONLY: the founder signs the room");
+    founder
+        .engine
+        .federation_directory()
+        .put_community(signed)
+        .await
+        .expect("TEST-ONLY: put the multi-member room directly");
+    ciris_server::backend::provision_engine_occurrence(&founder.engine, &founder.owner.key_id)
+        .await
+        .expect("the founder's content occurrence");
+    community_id
+}
+
+/// TEST-ONLY (bypasses the consent-to-join door): widen `room` by `who` at
+/// `role`, signed by `on`'s owner — the `CommunityMembershipWidening` row
+/// `POST /v1/communities/{id}/members` wrote before 0.5.218. Single-signed:
+/// for a room whose protocol one signature meets (founder_only, a founder).
+async fn test_only_widen(on: &Node, room: &str, who: &Node, role: Option<&str>) {
+    use ciris_persist::federation::types::{
+        CommunityMembershipWidening, SignedCommunityMembershipWidening,
+    };
+    // Strictly after any event just written (a re-add after a removal).
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let dir = on.engine.federation_directory();
+    let (member, spec) = ciris_edge::community_roster::community_membership_widening(
+        dir.as_ref(),
+        room,
+        &who.owner.key_id,
+        role,
+        chrono::Utc::now(),
+        &on.owner.edge_signer().await,
+    )
+    .await
+    .expect("TEST-ONLY: build the widening");
+    dir.put_community_membership_widening(SignedCommunityMembershipWidening {
+        community_membership_widening: CommunityMembershipWidening {
+            community_key_id: room.to_owned(),
+            member_key_id: member.key_id,
+            joined_at: member.joined_at,
+            effective_at: member.joined_at,
+            role: member.role,
+            persist_row_hash: String::new(),
+        },
+        authority_key_id: spec.authority_key_id,
+        scrub_signature_classical: spec.scrub_signature_classical,
+        scrub_signature_pqc: spec.scrub_signature_pqc,
+        cosignatures: Vec::new(),
+    })
+    .await
+    .expect("TEST-ONLY: widen the room directly");
+}
+
+fn consent_refused(s: u16, v: &Value) {
+    assert_eq!(
+        (s, reason(v)),
+        (409, "membership.consent_required"),
+        "nobody joins without their own consent: {v}"
+    );
 }
 
 /// The active roster by persist's fold, sorted.
@@ -532,7 +635,7 @@ async fn appoint_moderator(appointer: &Node, who: &Node) {
 async fn a_three_member_room_where_all_three_read_each_other() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
-    let room = found(a, "the three of us", &[b, c], json!({})).await;
+    let room = test_only_found(a, "the three of us", &[b, c], json!({})).await;
     assert!(
         room.starts_with(ciris_edge::chat::ROOM_COMMUNITY_PREFIX),
         "{room}"
@@ -636,20 +739,27 @@ async fn create_refuses_with_a_typed_reason_each() {
             "community.bad_consensus_protocol",
         ),
         (
-            json!({ "name": "x", "consensus_protocol": "quorum:1/2", "members": [b.owner.key_id] }),
+            // A quorum's N is the roster size: a founder alone is not a 2/3.
+            json!({ "name": "x", "consensus_protocol": "quorum:2/3" }),
             400,
             "community.bad_consensus_protocol",
         ),
+        // CONSENT TO JOIN (0.5.218): a founding roster naming anyone but the
+        // founder is refused — contact or not, whatever the protocol.
         (
-            // A quorum's N is the roster size: 2 people are not a 2/3.
-            json!({ "name": "x", "consensus_protocol": "quorum:2/3", "members": [b.owner.key_id] }),
-            400,
-            "community.bad_consensus_protocol",
+            json!({ "name": "x", "consensus_protocol": "quorum:1/2", "members": [b.owner.key_id] }),
+            409,
+            "membership.consent_required",
+        ),
+        (
+            json!({ "name": "x", "members": [b.owner.key_id] }),
+            409,
+            "membership.consent_required",
         ),
         (
             json!({ "name": "x", "members": [c.owner.key_id] }),
-            403,
-            "community.not_a_contact",
+            409,
+            "membership.consent_required",
         ),
         (json!({ "nombre": "x" }), 400, "community.malformed_body"),
     ] {
@@ -699,11 +809,12 @@ async fn create_refuses_with_a_typed_reason_each() {
     let v: Value = resp.json().await.expect("json");
     assert_eq!(reason(&v), "community.author_signer_unavailable", "{v}");
 
-    // The happy path, for contrast, with the default protocol and tier.
+    // The happy path, for contrast, with the default protocol and tier: the
+    // founder alone (naming yourself is not naming anyone else).
     let (s, v) = post(
         a,
         "/v1/communities",
-        json!({ "name": "  Book club  ", "members": [b.owner.key_id] }),
+        json!({ "name": "  Book club  ", "members": [a.owner.key_id] }),
     )
     .await;
     assert_eq!(s, 201, "{v}");
@@ -711,7 +822,7 @@ async fn create_refuses_with_a_typed_reason_each() {
     assert_eq!(v["tier"], "community");
     assert_eq!(v["consensus_protocol"], "founder_only");
     assert_eq!(v["my_role"], "founder");
-    assert_eq!(v["member_count"], 2);
+    assert_eq!(v["member_count"], 1);
 }
 
 /// A second edge signer over the same node key — the router needs one, and the
@@ -728,7 +839,7 @@ async fn node_edge_signer_for(n: &Node) -> Arc<ciris_edge::identity::LocalSigner
 async fn list_and_read_are_member_only_and_include_pair_rooms() {
     let nodes = mesh(4).await;
     let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    let room = found(a, "garden", &[b, c], json!({})).await;
+    let room = test_only_found(a, "garden", &[b, c], json!({})).await;
     // A pair room too, the existing way.
     let (s, v) = post(a, "/v1/chat", json!({ "key_id": b.owner.key_id })).await;
     assert_eq!(s, 200, "{v}");
@@ -849,27 +960,35 @@ async fn list_and_read_are_member_only_and_include_pair_rooms() {
 async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     let nodes = mesh(4).await;
     let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    let room = found(a, "widen me", &[b], json!({})).await;
+    let room = test_only_found(a, "widen me", &[b], json!({})).await;
     let dir = a.engine.federation_directory();
 
-    // A member not yet a contact is refused.
+    // CONSENT TO JOIN (0.5.218): the add route is closed — contact or not.
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_a_contact"), "{v}");
+    consent_refused(s, &v);
     contact(a, c).await;
-
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "add: {v}");
-    assert_eq!(v["applied"], true);
+    consent_refused(s, &v);
+    assert!(
+        dir.list_community_membership_widenings_for(&room)
+            .await
+            .expect("widenings")
+            .is_empty(),
+        "the refused add wrote no row"
+    );
+    // What the rest pins is the WIDENING plane, so Carol is widened onto the
+    // room by the test-only fixture — the row the route wrote before 0.5.218.
+    test_only_widen(a, &room, c, None).await;
 
     // THE ROW: one widening, on its own plane — and the record untouched.
     let widenings = dir
@@ -912,7 +1031,8 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     .await;
     assert_eq!((s, reason(&v)), (409, "community.already_member"), "{v}");
 
-    // POLICY: a plain member may not add; an outsider cannot see the room.
+    // POLICY: a plain member may not add either (the consent door answers
+    // first); an outsider cannot see the room.
     contact(b, d).await;
     let (s, v) = post(
         b,
@@ -920,7 +1040,7 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
         json!({ "key_id": d.owner.key_id }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    consent_refused(s, &v);
     let (s, v) = post(
         d,
         &format!("/v1/communities/{room}/members"),
@@ -969,15 +1089,17 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     .await;
     assert_eq!((s, reason(&v)), (409, "community.not_a_member"), "{v}");
 
-    // RE-ADD: a second widening strictly after the removal; the fold's latest
-    // event wins and she is back.
+    // RE-ADD: through the route it is a join like any other, so it is closed;
+    // at the substrate a second widening strictly after the removal folds her
+    // back (the fold's latest event wins).
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "re-add: {v}");
+    consent_refused(s, &v);
+    test_only_widen(a, &room, c, None).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     assert_eq!(
         dir.list_community_membership_widenings_for(&room)
@@ -1002,20 +1124,18 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
 /// `list_communities_for_member_active` walks the RECORD's members only
 /// (persist `scope/admission.rs` ~195, `federation/mod.rs` ~3615). Not worked
 /// around server-side: the admission is persist's. Un-ignore when #907 lands.
+///
+/// **0.5.218: #907 landed in persist v49** — the caller admission folds the
+/// widening plane — so this runs, un-ignored. The widening is written by the
+/// test-only fixture (the add route is closed until the joiner can consent,
+/// CIRISPersist#955); what is pinned is the READ a widened member gets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "CIRISPersist#907 — persist's caller admission ignores the widening plane, so a widened member is refused chat.not_a_member"]
 async fn a_widened_member_reads_the_rooms_messages_cirispersist_907() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
-    let room = found(a, "late joiner", &[b], json!({})).await;
+    let room = test_only_found(a, "late joiner", &[b], json!({})).await;
     contact(a, c).await;
-    let (s, v) = post(
-        a,
-        &format!("/v1/communities/{room}/members"),
-        json!({ "key_id": c.owner.key_id }),
-    )
-    .await;
-    assert_eq!(s, 200, "{v}");
+    test_only_widen(a, &room, c, None).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     let (s, v) = get(c, &format!("/v1/chat/{room}/messages")).await;
     assert_eq!(s, 200, "a widened member reads the transcript: {v}");
@@ -1027,7 +1147,7 @@ async fn a_widened_member_reads_the_rooms_messages_cirispersist_907() {
 async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     let nodes = mesh(4).await;
     let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    let room = found(a, "moderated", &[b, c], json!({})).await;
+    let room = test_only_found(a, "moderated", &[b, c], json!({})).await;
     appoint_moderator(a, b).await;
     let (_, v) = get(a, &format!("/v1/communities/{room}")).await;
     assert!(
@@ -1040,28 +1160,32 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     contact(b, d).await;
     contact(c, d).await;
 
-    // Bob, appointed, adds Dave and removes him.
+    // Bob, appointed, may not ADD Dave — nobody may, until Dave can consent
+    // (0.5.218) — but removes a plain member. Dave is put on the roster by
+    // the test-only fixture so the removal has someone to remove.
     let (s, v) = post(
         b,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": d.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "an appointed moderator adds a plain member: {v}");
+    consent_refused(s, &v);
+    test_only_widen(a, &room, d, None).await;
     let (s, v) = delete(
         b,
         &format!("/v1/communities/{room}/members/{}", d.owner.key_id),
     )
     .await;
     assert_eq!(s, 200, "…and removes one: {v}");
-    // But may not add a FOUNDER, remove the founder, or change a role.
+    // But may not add a FOUNDER (closed to everyone — the consent door
+    // answers first), remove the founder, or change a role.
     let (s, v) = post(
         b,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": d.owner.key_id, "role": "founder" }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    consent_refused(s, &v);
     let (s, v) = post(
         b,
         &format!("/v1/communities/{room}/members/{}/role", c.owner.key_id),
@@ -1078,7 +1202,7 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
         json!({ "key_id": d.owner.key_id }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    consent_refused(s, &v);
 
     // Removing a founder: make Carol a second founder first, so the refusal
     // below is about WHO removes, not about orphaning the room.
@@ -1110,7 +1234,7 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
 async fn leave_role_and_the_last_founder_rule() {
     let nodes = mesh(2).await;
     let (a, b) = (&nodes[0], &nodes[1]);
-    let room = found(a, "handover", &[b], json!({})).await;
+    let room = test_only_found(a, "handover", &[b], json!({})).await;
 
     // The last founder of a room with other members may not leave, by either
     // door, nor be demoted.
@@ -1174,7 +1298,7 @@ async fn leave_role_and_the_last_founder_rule() {
 async fn dissolve_is_the_founders_and_empties_the_fold() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
-    let room = found(a, "short-lived", &[b, c], json!({})).await;
+    let room = test_only_found(a, "short-lived", &[b, c], json!({})).await;
     let (s, v) = delete(b, &format!("/v1/communities/{room}")).await;
     assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
     let (s, v) = delete(a, &format!("/v1/communities/{room}")).await;
@@ -1202,7 +1326,7 @@ async fn dissolve_is_the_founders_and_empties_the_fold() {
 async fn affiliations_is_the_same_machinery_at_its_own_tier() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
-    let room = found(a, "the guild", &[b], json!({ "tier": "affiliations" })).await;
+    let room = test_only_found(a, "the guild", &[b], json!({ "tier": "affiliations" })).await;
     let record = a
         .engine
         .federation_directory()
@@ -1224,7 +1348,9 @@ async fn affiliations_is_the_same_machinery_at_its_own_tier() {
         json!({ "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "{v}");
+    consent_refused(s, &v);
+    // The same widening machinery at this tier, through the test-only fixture.
+    test_only_widen(a, &room, c, None).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
 }
 
@@ -1233,11 +1359,16 @@ async fn affiliations_is_the_same_machinery_at_its_own_tier() {
 /// A `unanimous` room: one signature is not enough, the direct route says so
 /// WITH the envelope, each other member cosigns on their OWN node, assemble
 /// applies it — and the spent envelope is stale afterwards.
+///
+/// Until 0.5.218 the change walked here was an ADD. Every add is now
+/// `membership.consent_required` however many members sign
+/// (CIRISConstitution#133, CIRISPersist#955) — asserted at each quorum step —
+/// so the flow is walked on a ROLE change, which admits nobody.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     let nodes = mesh(4).await;
     let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    let room = found(
+    let room = test_only_found(
         a,
         "consensus",
         &[b, c],
@@ -1246,10 +1377,29 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     .await;
     contact(a, d).await;
 
+    // CONSENT TO JOIN: an add is refused at the direct route and at the
+    // envelope route, even with unanimity on offer.
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/members"),
         json!({ "key_id": d.owner.key_id }),
+    )
+    .await;
+    consent_refused(s, &v);
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/changes/envelope"),
+        json!({ "op": "add", "key_id": d.owner.key_id }),
+    )
+    .await;
+    consent_refused(s, &v);
+
+    // The direct role route: one signature of three → pending, WITH the
+    // envelope and the caller's signature.
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/members/{}/role", c.owner.key_id),
+        json!({ "role": "founder" }),
     )
     .await;
     assert_eq!((s, reason(&v)), (409, "community.quorum_pending"), "{v}");
@@ -1265,7 +1415,7 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     let (s, v2) = post(
         a,
         &format!("/v1/communities/{room}/changes/envelope"),
-        json!({ "op": "add", "key_id": d.owner.key_id }),
+        json!({ "op": "role", "key_id": c.owner.key_id, "role": "founder" }),
     )
     .await;
     assert_eq!(s, 200, "{v2}");
@@ -1342,7 +1492,11 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     )
     .await;
     assert_eq!(s, 200, "assemble: {v}");
-    assert!(fold(&a.engine, &room).await.contains(&d.owner.key_id));
+    let (_, v) = get(c, &format!("/v1/communities/{room}")).await;
+    assert_eq!(
+        v["my_role"], "founder",
+        "the unanimous role change applied: {v}"
+    );
 
     // The same envelope again describes a room that no longer exists.
     let (s, v) = post(
@@ -1354,49 +1508,69 @@ async fn a_unanimous_room_changes_through_envelope_cosign_assemble() {
     assert_eq!((s, reason(&v)), (409, "community.change_stale"), "{v}");
 }
 
-/// A `quorum:2/3` room: persist judges each roster row by the room's protocol
+/// A `quorum:3/4` room: persist judges each roster row by the room's protocol
 /// over the row's own co-signatures (v49.0.0, #908). M is absolute, so the
-/// room stays a "two signatures" room after it grows, and its SECOND
-/// size-changing change is authorized by two signatures too.
+/// room stays a "three signatures" room after its roster changes size, and
+/// its SECOND size-changing change is authorized by three signatures too.
+///
+/// Until 0.5.218 the first size change was an ADD through the quorum flow;
+/// that is now `membership.consent_required` at the envelope, cosign and
+/// assemble steps alike (CIRISConstitution#133, CIRISPersist#955), so the room
+/// is founded at four by the test-only fixture and shrinks twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
     let nodes = mesh(4).await;
     let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
-    let room = found(
+    let room = test_only_found(
         a,
-        "two of three",
-        &[b, c],
-        json!({ "consensus_protocol": "quorum:2/3" }),
+        "three of four",
+        &[b, c, d],
+        json!({ "consensus_protocol": "quorum:3/4" }),
     )
     .await;
-    contact(a, d).await;
 
+    // An add of someone ALREADY in is not a join, and keeps its own answer.
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/changes/envelope"),
         json!({ "op": "add", "key_id": d.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["required"], 2);
-    let env = v["change_envelope"].clone();
-    let mut sigs = vec![v["signatures"][0].clone()];
+    assert_eq!(
+        (s, reason(&v)),
+        (409, "community.already_member"),
+        "someone already in is not joining: {v}"
+    );
+
+    // The first change: remove Dave, under "two signatures".
     let (s, v) = post(
-        b,
-        &format!("/v1/communities/{room}/changes/cosign"),
-        json!({ "change_envelope": env }),
+        a,
+        &format!("/v1/communities/{room}/changes/envelope"),
+        json!({ "op": "remove", "key_id": d.owner.key_id }),
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    sigs.push(v["signature"].clone());
+    assert_eq!(v["required"], 3);
+    let env = v["change_envelope"].clone();
+    let mut sigs = vec![v["signatures"][0].clone()];
+    for n in [b, c] {
+        let (s, v) = post(
+            n,
+            &format!("/v1/communities/{room}/changes/cosign"),
+            json!({ "change_envelope": env }),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        sigs.push(v["signature"].clone());
+    }
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/changes/assemble"),
         json!({ "change_envelope": env, "signatures": sigs }),
     )
     .await;
-    assert_eq!(s, 200, "persist verifies 2-of-3 and applies: {v}");
-    assert_eq!(fold(&a.engine, &room).await.len(), 4);
+    assert_eq!(s, 200, "persist verifies 3-of-4 and applies: {v}");
+    assert_eq!(fold(&a.engine, &room).await.len(), 3);
     let record = a
         .engine
         .federation_directory()
@@ -1405,22 +1579,32 @@ async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
         .expect("lookup")
         .expect("room");
     assert_eq!(
-        record.consensus_protocol, "quorum:2/3",
-        "M is absolute (CC 4.4.3.4.2.1): adding a member does not rewrite the room's rule"
+        record.consensus_protocol, "quorum:3/4",
+        "M is absolute (CC 4.4.3.4.2.1): a size change does not rewrite the room's rule"
     );
 
-    // The second change: remove Dave, still under "two signatures".
+    // Now Dave is out, an add of him is a JOIN — refused, whoever signs.
     let (s, v) = post(
         a,
         &format!("/v1/communities/{room}/changes/envelope"),
-        json!({ "op": "remove", "key_id": d.owner.key_id }),
+        json!({ "op": "add", "key_id": d.owner.key_id }),
+    )
+    .await;
+    consent_refused(s, &v);
+
+    // The second change: remove Carol, still under "three signatures" — of
+    // the three who remain, Carol's own among them.
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/changes/envelope"),
+        json!({ "op": "remove", "key_id": c.owner.key_id }),
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["required"], 2);
+    assert_eq!(v["required"], 3);
     let env = v["change_envelope"].clone();
     let mut sigs = vec![v["signatures"][0].clone()];
-    for n in [b] {
+    for n in [b, c] {
         let (s, v) = post(
             n,
             &format!("/v1/communities/{room}/changes/cosign"),
@@ -1437,7 +1621,7 @@ async fn a_quorum_room_is_verified_by_persist_and_stays_changeable() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert!(!fold(&a.engine, &room).await.contains(&d.owner.key_id));
+    assert!(!fold(&a.engine, &room).await.contains(&c.owner.key_id));
 }
 
 // ─── 10. The pair room is listed, and fixed ─────────────────────────────────

@@ -707,7 +707,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 140 -> 139 for 0.5.218: `family.readd_unsupported` retired — persist
     /// v49.0.0 re-admits a removed family member (#910.1).
-    const MAX_UNCOVERED: usize = 139;
+    ///
+    /// 139 -> 141 for 0.5.218: `self.evict_incomplete` (release and
+    /// occurrence/revoke are one signed act, CSD-037) and
+    /// `membership.consent_required` (nobody joins without their own consent,
+    /// CIRISConstitution#133 / CIRISPersist#955) — same reason, same list,
+    /// same client issue (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 141;
 
     let en = load_en();
     let ids = scraped_server_ids();
