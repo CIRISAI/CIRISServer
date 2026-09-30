@@ -17,6 +17,14 @@
 #   2. HOUSEHOLD (CIRISServer#647). Person A charters a family, adds person B,
 #      and writes a `cohort: family` file. Does B's node see the household, list
 #      the file, and open it?
+#      0.5.218 — CONSENT TO JOIN (the maintainer's ruling of 2026-09-30,
+#      CIRISConstitution#133, FSD/MEMBERSHIP_INVITES.md): nobody joins a
+#      household without their own acceptance, and until persist can record one
+#      (CIRISPersist#955, v52) the add answers 409 `membership.consent_required`.
+#      The `family` rung now asserts THAT refusal; the rungs downstream of B
+#      being a member (family_on_b, family_file_listed_on_b,
+#      family_file_opened_on_b) are RED-EXPECTED on #955 — there is no
+#      production door that can put B on the roster, and the harness adds none.
 #
 # WHY A SEPARATE SCENARIO and not more rungs on chat.sh: the chat ladder gates
 # the tag and runs in CI on every substrate PR; these rungs are RED-EXPECTED by
@@ -47,6 +55,10 @@
 #                     family record neither re-indexes the wire
 #                     (`supersede_group_row`) nor re-puts at a peer that holds
 #                     the founding one (`put_family` is a plain INSERT).
+#                     0.5.218: persist v49 CLOSED #910 (a widening plane for
+#                     families, amendments carry their proof). These rungs are
+#                     now red-expected on a different piece: consent to join
+#                     (CIRISPersist#955) — no door may add B until B accepts.
 #
 # EACH IS PROMOTED TO REQUIRED WHEN ITS PIECE LANDS — not before, and not left
 # RED-EXPECTED after: a marked stage that has gone green is a claim nobody is
@@ -84,9 +96,9 @@ REQUIRED_family=1
 REQUIRED_family_file=1
 
 XFAIL_c_opens_history="no content-key REWRAP to a new occurrence of an EXISTING member: the message was sealed under the minter's community epoch DEK and wrapped to the member occurrences persist knew then; node-c's occurrence of B is provisioned later (ensure_owner_content_occurrence) and nothing wraps existing epochs to it — persist has rekey_self_occurrence_add (self blobs; the server calls it only from POST /v1/self/occurrence, not on claim-remote) and rekey_family_member_add (a new member), and no community-epoch occurrence-add; ensure_epoch_dek fills a late occurrence only on the minter's NEXT seal in the SAME epoch. Ask: a persist door that wraps every epoch/blob an existing occurrence of the identity can open to the new occurrence, driven by the server when a claimed node's content occurrence appears"
-XFAIL_family_on_b="EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: CIRISServer#646 (no Family replication round; fixed on this branch) + CIRISPersist#910: B is added AFTER create, so B's node needs the GROWN record, and supersede_group_row re-stamps admitted_at without re-indexing the wire while put_family is a plain INSERT at a peer holding the founding record"
-XFAIL_family_file_listed_on_b="EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: downstream of family_on_b (CIRISPersist#910): a family row's audience is the family's members' nodes as B's node folds them, and B's node does not hold the grown record naming B"
-XFAIL_family_file_opened_on_b="EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: downstream of family_file_listed_on_b (CIRISPersist#910); REQUIRED once the family plane converges (#647 asks for the bytes stage to be REQUIRED)"
+XFAIL_family_on_b="CONSENT TO JOIN (0.5.218): B cannot be added until B can accept — the add answers 409 membership.consent_required until the invite flow (CIRISPersist#955 v52, CIRISConstitution#133, FSD/MEMBERSHIP_INVITES.md); promote when #955 lands and the rung drives propose → accept. Before that ruling: EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: CIRISServer#646 (no Family replication round; fixed on this branch) + CIRISPersist#910: B is added AFTER create, so B's node needs the GROWN record, and supersede_group_row re-stamps admitted_at without re-indexing the wire while put_family is a plain INSERT at a peer holding the founding record"
+XFAIL_family_file_listed_on_b="CONSENT TO JOIN (0.5.218): downstream of family_on_b, which is red-expected on CIRISPersist#955 (B cannot join without accepting). Before that ruling: EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: downstream of family_on_b (CIRISPersist#910): a family row's audience is the family's members' nodes as B's node folds them, and B's node does not hold the grown record naming B"
+XFAIL_family_file_opened_on_b="CONSENT TO JOIN (0.5.218): downstream of family_on_b, which is red-expected on CIRISPersist#955 (B cannot join without accepting). Before that ruling: EXPECTED TO PASS from 0.5.218 (persist v49.0.0 fixed CIRISPersist#910 and the server routes FamilyMembershipWidening, kind 18) — remove this mark after the first green devices run. Was: downstream of family_file_listed_on_b (CIRISPersist#910); REQUIRED once the family plane converges (#647 asks for the bytes stage to be REQUIRED)"
 
 _dev_load() { _chat_load; [ -f "$CHAT_STATE/dev.sh" ] && . "$CHAT_STATE/dev.sh"; return 0; }
 
@@ -261,6 +273,8 @@ _dev_household() {
   if [ -z "$fid" ]; then return 0; fi
   # ADDED AFTER CREATE, deliberately: that is the grown-record path #910 names,
   # and the one a real household takes (you found it, then you invite).
+  # 0.5.218: this add is REFUSED — 409 membership.consent_required — until B
+  # can accept (CIRISPersist#955); the `family` rung asserts the refusal.
   _dev_api "${CHAT_SENDER_SVC:-node-a}" "$CHAT_A_TOKEN" POST "/v1/families/$fid/members" \
     "$(python3 -c 'import json,sys;print(json.dumps({"key_id":sys.argv[1]}))' "$CHAT_B_OWNER")" \
     >"$CHAT_STATE/family-add.json"
@@ -390,15 +404,20 @@ DIAG_c_opens_history() {
 
 # ── the household rungs (CIRISServer#647) ────────────────────────────────────
 stage_family() {
-  local c a
+  # 0.5.218 CONSENT TO JOIN: green = A charters the household (2xx) AND the
+  # add of B is refused by name — 409 membership.consent_required
+  # (CIRISConstitution#133, CIRISPersist#955). An add that SUCCEEDS is a red
+  # rung now: it would mean a door admitted B without B's acceptance.
+  local c a r
   c="$(_dev_field "$CHAT_STATE/family-create.json" status)"
   a="$(_dev_field "$CHAT_STATE/family-add.json" status)"
-  case "$c:$a" in
-    20?:20?) echo 1 ;;
+  r="$(_dev_field "$CHAT_STATE/family-add.json" body.reason_id)"
+  case "$c:$a:$r" in
+    20?:409:membership.consent_required) echo 1 ;;
     *) echo 0 ;;
   esac
 }
-HINT_family="person A could not charter a household or add person B on A's own node. family.unknown_member_key = B's owner key is not registered on node-a (the contact phase admits it); family.not_authorized = the founder_only rule; read family-create.json / family-add.json"
+HINT_family="0.5.218: green means A chartered the household AND the add of B was refused 409 membership.consent_required (nobody joins without their own acceptance — CIRISPersist#955, CIRISConstitution#133). A 200 on the add is a door admitting B without consent; a create failure is below. Before the consent ruling this rung read: person A could not charter a household or add person B on A's own node. family.unknown_member_key = B's owner key is not registered on node-a (the contact phase admits it); family.not_authorized = the founder_only rule; read family-create.json / family-add.json"
 EXIT_family=64
 DIAG_family() {
   echo "  create: $(head -c 400 "$CHAT_STATE/family-create.json" 2>/dev/null)"
@@ -419,7 +438,7 @@ rows=rows or []
 print(1 if d.get("status")==200 and any((r.get("family_id") if isinstance(r, dict) else None)==sys.argv[2] for r in rows) else 0)' \
     "$CHAT_STATE/family-b.json" "$DEV_FAMILY_ID" 2>/dev/null || echo 0
 }
-HINT_family_on_b="B's node does not list the household it was added to. With #646 on this branch the Family plane has a round, so this is the grown-record gap (CIRISPersist#910) unless the diagnosis shows node-b holding NO family row at all"
+HINT_family_on_b="B's node does not list the household it was added to. With #646 on this branch the Family plane has a round, so this is the grown-record gap (CIRISPersist#910) unless the diagnosis shows node-b holding NO family row at all. 0.5.218: #910 is fixed in persist v49; the rung is red-expected on consent to join (CIRISPersist#955) — B was never added, by design"
 EXIT_family_on_b=65
 DIAG_family_on_b() {
   echo "  node-b families: $(head -c 400 "$CHAT_STATE/family-b.json" 2>/dev/null)"

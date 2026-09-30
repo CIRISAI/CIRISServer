@@ -708,12 +708,25 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 140 -> 139 for 0.5.218: `family.readd_unsupported` retired — persist
     /// v49.0.0 re-admits a removed family member (#910.1).
     ///
-    /// 139 -> 142 for 0.5.218, one device handles each exchange (CC 3.1.3.1,
+    /// 139 -> 141 for 0.5.218: `self.evict_incomplete` (release and
+    /// occurrence/revoke are one signed act, CSD-037) and
+    /// `membership.consent_required` (nobody joins without their own consent,
+    /// CIRISConstitution#133 / CIRISPersist#955) — same reason, same list,
+    /// same client issue (CIRISClient#78).
+    ///
+    /// 141 -> 144 for 0.5.218, one device handles each exchange (CC 3.1.3.1,
     /// FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions`'s
     /// `session.state.handled_here`, `session.state.handled_elsewhere` and
     /// `self.sessions_unavailable` — same reason, same list, same client issue
     /// (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 142;
+    const MAX_UNCOVERED: usize = 144;
+    ///
+    /// 141 -> 144 for 0.5.218, one device handles each exchange (CC 3.1.3.1,
+    /// FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions`'s
+    /// `session.state.handled_here`, `session.state.handled_elsewhere` and
+    /// `self.sessions_unavailable` — same reason, same list, same client issue
+    /// (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 144;
 
     let en = load_en();
     let ids = scraped_server_ids();

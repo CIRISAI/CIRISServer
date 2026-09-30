@@ -57,6 +57,27 @@
 //! The route is built anyway; `tests/community_crud.rs` pins the gap as an
 //! ignored red test named for #907.
 //!
+//! **Corrected 0.5.218 (persist v49.0.0).** Both sections above describe the
+//! pins before v49. #908 landed: every replicated widening and revocation is
+//! judged at persist's door by the room's own `consensus_protocol` over the
+//! row's co-signatures (`crate::roster_rows` gathers them), so a peer-authored
+//! row no longer rides on the signature alone. #907 landed: the caller
+//! admission folds the widening plane, so a widened member reads the room's
+//! messages — `a_widened_member_reads_the_rooms_messages_cirispersist_907`
+//! runs, un-ignored.
+//!
+//! # Consent to join (0.5.218)
+//!
+//! Nobody joins a room without their own acceptance (the maintainer's ruling
+//! of 2026-09-30; CIRISConstitution#133, `FSD/MEMBERSHIP_INVITES.md`). A
+//! contact grant is THIS node's consent toward them, not theirs to join. Until
+//! persist can carry a proposal and record the acceptance (CIRISPersist#955,
+//! v52), `POST /v1/communities/{id}/members`, the quorum flow's envelope /
+//! cosign / assemble on an `add`, and a create naming anyone but the founder
+//! answer 409 `membership.consent_required` (`refuse_if_joining`,
+//! [`crate::family_api::membership_consent_required`]). Pair rooms keep their
+//! own consent — the contact grant each side authors — and are untouched.
+//!
 //! This file deliberately allows `clippy::result_large_err`: its helpers
 //! return the finished refusal `Response` as their error, the same shape the
 //! rest of the chat surface uses, so a refusal is decided exactly once.
@@ -1387,6 +1408,17 @@ async fn create_community(
             members.push(m.to_owned());
         }
     }
+    // CONSENT TO JOIN (CIRISConstitution#133; the same ruling covers founding
+    // members, `FSD/MEMBERSHIP_INVITES.md` §4): the founding record admits the
+    // founder alone. A room founded with others named is REFUSED, not trimmed —
+    // a silently smaller room would read as success to the caller who named
+    // them. A founder-only room is created as before.
+    if !members.is_empty() {
+        return crate::family_api::membership_consent_required(crate::family_api::consent_detail(
+            "POST /v1/communities",
+            &members,
+        ));
+    }
     let protocol = req
         .consensus_protocol
         .as_deref()
@@ -1670,7 +1702,39 @@ async fn add_member(
         role: req.role,
     }
     .normalized();
+    // CONSENT TO JOIN (0.5.218; CIRISConstitution#133, CIRISPersist#955): a
+    // contact grant is OUR consent toward them, not theirs to join. Someone
+    // already in is not joining — that keeps `community.already_member` via the
+    // precheck below; anyone else is refused until the invite flow.
+    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/members") {
+        return r;
+    }
     direct_change(&st, &headers, &owner, room, op).await
+}
+
+/// **The consent-to-join door** (CIRISConstitution#133, `FSD/MEMBERSHIP_INVITES.md`
+/// §4 "refuse, don't hold"): `Some(refusal)` when `op` would ADD someone not
+/// already active in `room`. Called at the HTTP doors only — the direct add
+/// and the three quorum steps — never from [`precheck`] or [`apply_change`],
+/// which the pair room and the self room never reach but which are the
+/// shape any future internal caller would share. The refusal itself is
+/// [`crate::family_api::membership_consent_required`], one sentence for both
+/// group kinds.
+fn refuse_if_joining(room: &Room, op: &ChangeOp, door: &str) -> Option<Response> {
+    // A pair room's roster is its identity and never changes here; it keeps
+    // its own, more specific answer (`community.pair_room_fixed`, from the
+    // precheck) — and its own consent: the contact grant each side authors.
+    if room.is_pair() {
+        return None;
+    }
+    match op {
+        ChangeOp::Add { key_id, .. } if room.member(key_id).is_none() => {
+            Some(crate::family_api::membership_consent_required(
+                crate::family_api::consent_detail(door, std::slice::from_ref(key_id)),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// `DELETE /v1/communities/{id}/members/{key_id}` — remove a member. Naming
@@ -1847,6 +1911,10 @@ async fn change_envelope(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
+    // CONSENT TO JOIN: M of N members cannot stand in for the joiner.
+    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/envelope") {
+        return r;
+    }
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
@@ -1915,6 +1983,11 @@ async fn change_cosign(
         Ok(op) => op,
         Err(r) => return r,
     };
+    // CONSENT TO JOIN: no member's signature on an envelope that admits
+    // someone who has not accepted.
+    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/cosign") {
+        return r;
+    }
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
@@ -1971,6 +2044,10 @@ async fn change_assemble(
         Err(r) => return r,
     };
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
+        return r;
+    }
+    // CONSENT TO JOIN: refused however many members signed.
+    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/assemble") {
         return r;
     }
     let t = match tally(

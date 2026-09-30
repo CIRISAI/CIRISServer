@@ -4160,6 +4160,10 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
         // `put_identity_occurrence_revocation`). Without it a released device
         // is still one of the owner's occurrences on every OTHER device, and
         // keeps being sent the owner's `self` rows.
+        // (0.5.218, CSD-037: the plane carries SIGNED rows only, and until
+        // `self_devices::evict_device` no server path wrote one — release
+        // revoked nothing and `occurrence/revoke` used the unsigned local
+        // door. The producer is now the owner-signed eviction.)
         K::IdentityOccurrenceRevocation,
         // Key-level revocation (`admin_ops.rs` `put_revocation_for`). A
         // revocation that stays on the node that wrote it protects nobody:
