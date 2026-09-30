@@ -813,6 +813,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # (CIRISClient#78).
     "self.evict_incomplete",
     "membership.consent_required",
+    # ONE DEVICE HANDLES EACH EXCHANGE (0.5.218, CC 3.1.3.1,
+    # FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions` says which of the
+    # person's devices is answering — two states and one refusal, queued for
+    # the client bundle beside the self-device ids (CIRISClient#78).
+    "self.sessions_unavailable",
+    "session.state.handled_elsewhere",
+    "session.state.handled_here",
     # THE CLAIM, NAMED (0.5.218, CIRISServer#678 client review: "refusals come
     # back as prose"): claim-remote on the approving device, and setup/root on
     # the device being claimed. Same queue (CIRISClient#78).

@@ -728,7 +728,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// part is not the `size` the form declared) and `drive.field_after_file`
     /// (a form field after the streamed file part) — same reason, same list,
     /// same client issue (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 153;
+    ///
+    /// 153 -> 156 for 0.5.218, one device handles each exchange (CC 3.1.3.1,
+    /// FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions`'s
+    /// `session.state.handled_here`, `session.state.handled_elsewhere` and
+    /// `self.sessions_unavailable` — same reason, same list, same client issue
+    /// (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 156;
 
     let en = load_en();
     let ids = scraped_server_ids();

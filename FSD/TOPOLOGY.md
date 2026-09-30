@@ -96,6 +96,7 @@ that accepted a root whose owner did not is Attributed, never Rooted.
 | `message(from, to, room)` | sent by `from`; the row AND its body on `to`'s node |
 | `file(person, device, size, cohort)` | written on `device`; byte-identical on every other device of `person` |
 | `custody(person, file: last\|<corpus name>, device?, cohort?)` | `GET /v1/files/{id}/custody` on the AUTHOR device (the one the `file`/`corpus` relation wrote on, unless `device` names another) names every other device of `person` with `holds: received` (a delivery receipt, CC 5.3.3.6) and `devices_total` = the person's device count; `last` = the most recent `file`, or the last file a `corpus` wrote; an inline (≤ 1 MiB) file fails by name (`receipts_supported: false`). `FSD/FILE_CUSTODY.md` |
+| `session(person, device, require?)` | the person active on `device` (owner-bearer requests); `GET /v1/self/sessions` on EVERY device of `person` names the same handler for each listed exchange, and at least one is listed (CC 3.1.3.1, FSD/SESSION_CLAIMS.md) |
 | `member(p, community, role)`, `quorum_change(...)` | declared; builder refuses until the community/household scenarios exist |
 
 ### 2.6 `actor` and `negatives`
