@@ -286,6 +286,23 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             N[n["id"]].announce()
         N[n["id"]].self_record()
     step("announced", layer="nodes", announced=[n["id"] for n in t["nodes"] if n.get("announced")])
+    # A claimed node that dials a canonical also PEERS with it — the owner's
+    # HTTP act in production (`POST /v1/federation/peering` with the canonical's
+    # record, traceflow_prod.sh step 7, after claim + announce; the baked seed
+    # primes the canonical's key on a production node,
+    # `compose::prime_canonical_bootstrap_peers`). Dialling alone makes the
+    # canonical a Reticulum relay and nothing more: no round ever targets an
+    # unkeyed peer, so the canonical admits no node key, roots with nobody and
+    # distributes nothing (edge's v34.3.0 run: the canonical's keys.jsonl held
+    # only its own key; every relation rode the direct links).
+    peered_canonicals = []
+    for n in t["nodes"]:
+        for c in n.get("dials", []):
+            if c in _ids(t, "canonicals"):
+                N[n["id"]].peer_with(N[c])
+                peered_canonicals.append((n["id"], c))
+    step("canonical_peered", layer="nodes", pairs=peered_canonicals,
+         proves="every claimed node holds the record of the canonical it dials, as the owner's peering act leaves it in production")
 
     # 5. relations, in declared order.
     values: Dict[str, str] = {}
@@ -443,6 +460,119 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                               layer="relations", rel="file", cc="CC 5.3.2.5")
                     raise MeshError("bytes differ")
             step(f"file:{p}", layer="relations", size=len(data), devices=devs, proves="byte-identical on every device")
+        elif k == "bigfile":
+            # ONE self file of `size` bytes (CIRISEdge#734 lane 7 asked for the
+            # end-to-end that includes the drive; edge benches the wire alone):
+            # written on `device` as streamed multipart, timed; pulled by every
+            # other device, timed from the row's arrival (`/meta` 200) to its
+            # byte-state `here`; read back through a streamed `?raw=1` and
+            # compared by SHA-256 — the bytes never sit in this process.
+            # `resume_at: 0.5` stops the puller once its home has grown by that
+            # fraction of the file and restarts it; the pull must then finish.
+            # Byte-identical and timed is the claim; the numbers are recorded,
+            # never asserted — a floor belongs in the CSD, not here.
+            #
+            # CEILING TODAY (server-owned, named by the step): `drive.rs`
+            # `UPLOAD_BODY_LIMIT` = 64 MiB whole-read cap ×4/3 + 1 MiB, so an
+            # upload above ~85 MiB answers 413 on any pinned edge — the drive
+            # whole-buffers both doors. That is the server's lane beside edge's
+            # v34.4.0 DAG pull (#733) and range reader (#737); this rung is red
+            # by name until it lands, green the hour it does.
+            import random
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            src = N[rel.get("device", devs[0])]
+            size = int(rel.get("size", 2 << 30))
+            seed = int(rel.get("seed", 7))
+            blob = mesh.work / f"bigfile-{size}.bin"
+            h = hashlib.sha256()
+            if not blob.exists() or blob.stat().st_size != size:
+                rng = random.Random(seed)
+                with open(blob, "wb") as f:
+                    left = size
+                    while left:
+                        piece = rng.randbytes(min(1 << 20, left))
+                        f.write(piece)
+                        h.update(piece)
+                        left -= len(piece)
+                want_sha = h.hexdigest()
+                (blob.with_suffix(".sha256")).write_text(want_sha)
+            else:
+                want_sha = blob.with_suffix(".sha256").read_text().strip()
+            t0 = time.monotonic()
+            st, got = src.write_file_streamed(blob, rel.get("media_type", "application/octet-stream"),
+                                              rel.get("name", f"bigfile-{size}.bin"))
+            publish_s = time.monotonic() - t0
+            if st == 413:
+                step.fail(f"bigfile_REFUSED_BY_DRIVE:{p}",
+                          f"the drive refused {size} bytes with 413: UPLOAD_BODY_LIMIT (64 MiB whole-read cap ×4/3 + 1 MiB) — "
+                          "the server whole-buffers the upload and the JSON read; a streamed upload above the cap is the "
+                          "server's lane beside CIRISEdge#734 (#733 DAG pull, #737 range reader)", [src],
+                          r"413|payload too large|UPLOAD_BODY_LIMIT", layer="relations", rel="bigfile", cc="CC 5.3.2.5",
+                          size=size, status=st, body=str(got)[:200])
+                raise MeshError("bigfile refused by the drive's body limit")
+            if st not in (200, 201):
+                step.fail(f"bigfile_NOT_WRITTEN:{p}", f"POST /v1/files answered {st}", [src], _BODY,
+                          layer="relations", rel="bigfile", cc="CC 5.3.2.5", size=size, status=st, body=str(got)[:200])
+                raise MeshError(f"bigfile write answered {st}")
+            fid = got["attestation_id"]
+            seal_lines = src.grep(r"chunk|sealed|publish")[-3:]
+            timings: Dict[str, Any] = {"size": size, "publish_s": round(publish_s, 2),
+                                       "publish_MiB_s": round(size / (1 << 20) / max(publish_s, 1e-6), 1),
+                                       "sha256": want_sha, "attestation_id": fid, "seal_evidence": seal_lines, "pulls": {}}
+            resume_at = rel.get("resume_at")
+            deadline = time.monotonic() + float(rel.get("wait", 3600))
+            for other in devs:
+                if other == src.name:
+                    continue
+                dev = N[other]
+                base_disk = dev.disk_bytes()
+                t_row = t_here = None
+                resumed = False
+                state = None
+                while time.monotonic() < deadline:
+                    ms, meta = dev.file_meta(fid)
+                    if ms == 200 and t_row is None:
+                        t_row = time.monotonic()
+                    # `bytes` is the drive's byte-state word (`drive::BYTE_STATES`:
+                    # here | not_fetched | not_granted | …), the same word `GET /v1/drive` uses.
+                    state = meta.get("bytes") if isinstance(meta, dict) else None
+                    if ms == 200 and state == "here":
+                        t_here = time.monotonic()
+                        break
+                    if resume_at and not resumed and t_row is not None and dev.disk_bytes() - base_disk >= resume_at * size:
+                        dev.stop()
+                        time.sleep(2)
+                        dev.start()
+                        resumed = True
+                        timings["pulls"][other] = {"resumed_at_bytes": dev.disk_bytes() - base_disk}
+                    time.sleep(2)
+                if t_here is None:
+                    step.fail(f"bigfile_NOT_PULLED:{other}",
+                              f"the file never reached byte-state `here` on {other} (last meta state {state!r}, "
+                              f"{dev.disk_bytes() - base_disk} bytes grown)", [src, dev],
+                              _BODY + r"|chunk|DAG|manifest|not_fetched", layer="relations", rel="bigfile", cc="CC 5.4.6",
+                              size=size, resumed=resumed)
+                    raise MeshError("bigfile not pulled")
+                t1 = time.monotonic()
+                rs, sha, n, body = dev.read_raw_digest(fid)
+                read_s = time.monotonic() - t1
+                if rs != 200 or sha != want_sha or n != size:
+                    step.fail(f"bigfile_WRONG_BYTES:{other}",
+                              f"{other} read {n} bytes (status {rs}) sha {sha[:16]}… for {size} bytes sha {want_sha[:16]}…",
+                              [src, dev], _BODY + r"|seal_mismatch|chunk", layer="relations", rel="bigfile", cc="CC 5.3.2.5",
+                              status=rs, body=body[:160].decode(errors="replace"))
+                    raise MeshError("bigfile bytes differ")
+                pull_s = t_here - (t_row or t0)
+                timings["pulls"][other] = {**timings["pulls"].get(other, {}),
+                                           "row_seen_after_s": round((t_row or t_here) - t0, 2),
+                                           "pull_s": round(pull_s, 2), "pull_MiB_s": round(size / (1 << 20) / max(pull_s, 1e-6), 1),
+                                           "read_s": round(read_s, 2), "read_MiB_s": round(size / (1 << 20) / max(read_s, 1e-6), 1),
+                                           "resumed": resumed}
+            values[f"BIGFILE_ATTESTATION_ID"] = fid
+            step(f"bigfile:{p}", layer="relations", **timings,
+                 proves="one file of the declared size, streamed in, pulled by every other device"
+                        + (" (one of them restarted mid-pull)" if resume_at else "") + ", read back streamed, SHA-256 equal")
         elif k == "roster":
             # THE DEVICE ROSTER (CSD-037, CIRISServer#655 per-device announce
             # ruling): every device of the person lists every device of the

@@ -1,0 +1,36 @@
+# One BIG self file, end to end, timed (CIRISEdge#734 lane 7 — "a multi-GiB
+# file transfer, happy and fast"): ONE person on TWO devices under the synthetic
+# root; a 2 GiB file streamed into D1's drive, pulled by D2 over the direct link
+# (a self room's scoped bytes are one-hop, CC 5.4.6), read back on D2 through a
+# streamed `?raw=1` and compared by SHA-256; D2 is stopped at half the pull and
+# restarted, and the pull must still finish. Publish, pull and read rates are
+# RECORDED per run, never asserted — a floor belongs in the CSD.
+#
+# What must land for this to be green, by name:
+#   * the server's `drive.rs` UPLOAD_BODY_LIMIT (64 MiB whole-read cap ×4/3 +
+#     1 MiB) — today any upload above it answers 413; the step names it
+#     (`bigfile_REFUSED_BY_DRIVE`). A streamed upload above the cap is the
+#     server's lane.
+#   * edge v34.4.0 (PR #733, persist v51.3.0): the chunk-DAG pull — until it
+#     lands a ≥1 MiB file on the second device is a manifest, refused by name
+#     (CIRISEdge#717, `drive.seal_mismatch` / 409 `drive.not_fetched`).
+#   * edge #737: the range reader, so the drive streams a raw read above 64 MiB
+#     instead of whole-reading.
+# Quick form: bigfile-quick.yaml (256 MiB, no resume).
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}   # the puller dials the author: one-hop bytes
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: room, kind: self, person: one}
+    - {rel: bigfile, person: one, device: D1, size: 2147483648, resume_at: 0.5, wait: 7200}
+  actor: {person: one, device: D2}
+  negatives:
+    - {check: no_wider_self_rows, person: one}

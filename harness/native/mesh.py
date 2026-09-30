@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import base64
 import glob
+import hashlib
+import io
 import json
 import os
 import re
@@ -360,6 +362,97 @@ class Node:
     def read_raw(self, attestation_id: str, cohort: str = "self") -> Tuple[int, bytes]:
         return self.api("GET", f"/v1/files/{attestation_id}?cohort={cohort}&raw=1",
                         raw=True, timeout=300)
+
+    # -- big files: nothing above a few MiB ever sits in this process --
+
+    def write_file_streamed(self, path: Path, media_type: str, filename: str,
+                            cohort: str = "self", timeout: float = 3600.0) -> Tuple[int, Any]:
+        """`POST /v1/files` as `multipart/form-data`, the file part streamed from
+        `path` (the JSON form base64s the bytes — 4/3 inflation and the whole
+        body in memory; multipart is what the drive names for a large file).
+        Returns (status, parsed body); a 413 is the node's `UPLOAD_BODY_LIMIT`
+        (`drive.rs`: 64 MiB whole-read cap ×4/3 + 1 MiB), a ceiling of the
+        DRIVE, not of the wire."""
+        boundary = "----ciris-native-" + os.urandom(12).hex()
+        head = b""
+        for name, value in (("cohort", cohort), ("media_type", media_type)):
+            head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
+        head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+                 f"Content-Type: {media_type}\r\n\r\n").encode()
+        tail = f"\r\n--{boundary}--\r\n".encode()
+        size = path.stat().st_size
+
+        class _Chain:
+            """A read()-able over head + file + tail; urllib streams it when
+            Content-Length is set."""
+            def __init__(self) -> None:
+                self.parts = [io.BytesIO(head), open(path, "rb"), io.BytesIO(tail)]
+                self.i = 0
+            def read(self, n: int = -1) -> bytes:
+                out = b""
+                while self.i < len(self.parts) and (n < 0 or len(out) < n):
+                    piece = self.parts[self.i].read(n - len(out) if n >= 0 else -1)
+                    if not piece:
+                        self.parts[self.i].close()
+                        self.i += 1
+                        continue
+                    out += piece
+                return out
+
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}",
+                   "Content-Length": str(len(head) + size + len(tail))}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        req = urllib.request.Request(self.url + "/v1/files", method="POST", data=_Chain(), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                payload, status = r.read(), r.status
+        except urllib.error.HTTPError as e:
+            payload, status = e.read(), e.code
+        except Exception as e:  # noqa: BLE001
+            return 0, {"detail": repr(e)[:300]}
+        try:
+            return status, json.loads(payload.decode() or "{}")
+        except Exception:  # noqa: BLE001
+            return status, {"raw": payload[:300].decode(errors="replace")}
+
+    def read_raw_digest(self, attestation_id: str, cohort: str = "self",
+                        timeout: float = 3600.0) -> Tuple[int, str, int, bytes]:
+        """Stream `GET /v1/files/{id}?cohort&raw=1` through SHA-256 in 1 MiB
+        pieces: (status, sha256 hex, byte count, first 300 bytes of a non-200
+        body). The bytes are never held."""
+        req = urllib.request.Request(f"{self.url}/v1/files/{attestation_id}?cohort={cohort}&raw=1",
+                                     headers={"Authorization": "Bearer " + self.token} if self.token else {})
+        h, n = hashlib.sha256(), 0
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                status = r.status
+                while True:
+                    piece = r.read(1 << 20)
+                    if not piece:
+                        break
+                    h.update(piece)
+                    n += len(piece)
+        except urllib.error.HTTPError as e:
+            return e.code, "", 0, e.read()[:300]
+        except Exception as e:  # noqa: BLE001
+            return 0, "", n, repr(e)[:300].encode()
+        return status, h.hexdigest(), n, b""
+
+    def file_meta(self, attestation_id: str, cohort: str = "self") -> Tuple[int, Any]:
+        return self.api("GET", f"/v1/files/{attestation_id}/meta?cohort={cohort}", timeout=30)
+
+    def disk_bytes(self) -> int:
+        """Bytes under this node's home — the pull's progress from the outside,
+        without asking the node."""
+        total = 0
+        for root, _dirs, files in os.walk(self.home):
+            for f in files:
+                try:
+                    total += os.stat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+        return total
 
     def drive(self, cohort: str = "self") -> List[Dict[str, Any]]:
         return (self.must("GET", f"/v1/drive?cohort={cohort}&limit=500") or {}).get("entries") or []
