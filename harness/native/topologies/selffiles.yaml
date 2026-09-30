@@ -22,6 +22,7 @@ topology:
     - {rel: roster, person: one, visible_from: [X]}              # CSD-037: the device roster, per-device announce
     - {rel: note, person: one, device: D1}
     - {rel: corpus, person: one, device: D1, require: false}   # recorded per file; the negatives still run
+    - {rel: custody, person: one, file: large}                 # FSD/FILE_CUSTODY.md: D1's custody names D2 received
   actor: {person: one, device: D2}
   negatives:
     - {check: no_wider_self_rows, person: one}

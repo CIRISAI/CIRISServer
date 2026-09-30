@@ -233,6 +233,15 @@ pub struct DriveEntry {
     /// The row's CEG envelope (CSD-006 / CIRISServer#616): who it is about,
     /// who signed it, who can see it, what it is.
     pub envelope: serde_json::Value,
+    /// Where it is, compactly (`FSD/FILE_CUSTODY.md`): the person's device
+    /// count and how many of those devices this node holds a delivery receipt
+    /// from — `received_on: null` for an inline file, which has no receipt at
+    /// this pin (unknowable, not zero). CHEAP BY CONSTRUCTION: the roster is
+    /// read once per page, and a row costs one receipt-list query when it is a
+    /// chunk DAG and nothing when it is inline — no manifest, no custody door.
+    /// `null` on a withdrawn row, or when the roster could not be read.
+    /// `GET /v1/files/{id}/custody` is the full answer.
+    pub custody: Option<crate::file_custody::CompactCustody>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2026,6 +2035,20 @@ async fn read_drive(
         }
     };
     let dir = st.engine.federation_directory();
+    // The person's devices, ONCE per page (the per-row custody summary below).
+    // A roster that cannot be read leaves `custody: null` on every row rather
+    // than failing a listing whose job is the files.
+    let devices = match crate::file_custody::owner_devices(&st.engine, &owner.key_id).await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "drive: the device roster could not be read — rows list with `custody: null`"
+            );
+            None
+        }
+    };
+    let content = store(&st.engine);
     let mut out = Vec::with_capacity(rows.len());
     for (cohort, room_id, file) in rows {
         let withdrawn = match withdrawn_by(&st, &file.attestation_id).await {
@@ -2064,6 +2087,13 @@ async fn read_drive(
             .ok()
             .flatten();
         let described = describe(&st, &file, &viewer).await;
+        let custody = match (&devices, withdrawn.is_some()) {
+            (Some(d), false) => Some(crate::file_custody::compact(
+                d,
+                &crate::file_custody::receipts_of(&file, &content).await,
+            )),
+            _ => None,
+        };
         out.push(DriveEntry {
             // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
             // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
@@ -2086,6 +2116,7 @@ async fn read_drive(
                 .as_ref()
                 .map(envelope_of)
                 .unwrap_or(serde_json::Value::Null),
+            custody,
         });
     }
     // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
@@ -2211,6 +2242,124 @@ async fn file_meta(
             "devices_holding": devices_holding,
             "holder_claims_recorded": recorded,
             "envelope": envelope_of(&found.row),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/files/{attestation_id}/custody` — **which of my devices this file
+/// is on, out of how many** (`FSD/FILE_CUSTODY.md`; the source walk is in
+/// [`crate::file_custody`]'s module doc).
+///
+/// THE SAME DOORS AS THE BYTES, IN THE SAME ORDER. The owner session
+/// (`drive.owner_session_required`), the cohort named and membership-checked
+/// (`room_from_query`), the row found through edge's gated reader
+/// (`find_file`), a withdrawn row answered 410 exactly as a read is — and then
+/// persist's custody door, asked as the drive's viewer key, which runs
+/// `read_any_for_viewer`'s tier gate: a viewer who cannot open the bytes gets
+/// the byte read's refusal (`drive.not_granted`, `drive.not_fetched`, …)
+/// through the same `refuse_state`, and learns nothing about who else can.
+/// A custody view is not a side door to the access list.
+///
+/// A device that holds the ROW but not yet the bytes is `409 drive.not_fetched`
+/// here too: persist's custody reads the blob's head row, which a device that
+/// has not pulled does not have. Asking the device that wrote the file is the
+/// complete answer — it is also the device that admits every receipt.
+async fn file_custody(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Path(attestation_id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return drive_no_session();
+    };
+    let (_, room) = match room_from_query(&st, &owner.key_id, &q).await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let found = match find_file(&st, &owner.key_id, &room, &attestation_id, Plane::Drive).await {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    if let Some(w) = &found.withdrawn_by {
+        return row_withdrawn_refusal(w);
+    }
+    let viewer = match viewer_key(&st).await {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.no_node_key",
+                format!("resolve this node's key: {e}"),
+            )
+        }
+    };
+    let content = store(&st.engine);
+    let custody = match found.file.custody(&content, &viewer).await {
+        Ok(c) => c,
+        Err(reason) => {
+            return match unopened(&reason) {
+                ByteState::Absent { state, detail } => refuse_state(state, detail),
+                ByteState::Here { .. } => refuse_state("unopened", reason.to_string()),
+            }
+        }
+    };
+    let devices = match crate::file_custody::owner_devices(&st.engine, &owner.key_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.store_unavailable",
+                format!("read your devices: {e}"),
+            )
+        }
+    };
+    let receipts = crate::file_custody::receipts_of(&found.file, &content).await;
+    // The AUTHOR DEVICE is the stream's producer — the node whose store holds
+    // the published root every receipt is admitted against. An inline file has
+    // no stream; its author device is the row's attester.
+    let author_device = ciris_edge::receipts::StreamSthClaim::from_row(&found.row)
+        .map(|c| c.producer_key_id)
+        .unwrap_or_else(|| found.file.attesting_key_id.clone());
+    let this_device_is_author = devices
+        .iter()
+        .any(|d| d.this_device && d.keys.contains(&author_device))
+        || author_device == st.node_signer.key_id;
+    let access = crate::file_custody::access_device_keys(&custody);
+    let half = crate::file_custody::device_half(
+        &devices,
+        &access,
+        custody.held_here,
+        &receipts,
+        this_device_is_author,
+    );
+    let mut why = crate::file_custody::substrate_why(&custody);
+    why.extend(half.why);
+    let receipts_supported = !matches!(receipts, crate::file_custody::Receipts::Unsupported);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": found.file.attestation_id,
+            "cohort": room.row_scope_token(),
+            "room_id": room.content_group_id(),
+            "tier": custody.tier,
+            "size_bytes": custody.size_bytes,
+            "at_rest_sha256": custody.sha256_hex,
+            "author_device": author_device,
+            "this_device_is_author": this_device_is_author,
+            "devices_total": half.devices.len(),
+            "devices": half.devices,
+            "held_here": custody.held_here,
+            "copies_known": custody.copies_known,
+            "copies_observable": custody.copies_observable,
+            "announced_holders": custody.announced_holders,
+            "access": custody.access,
+            "receipts_supported": receipts_supported,
+            "receipts_unsupported_reason": (!receipts_supported)
+                .then_some(crate::file_custody::WHY_INLINE_NO_RECEIPT.reason_id),
+            "receipts_from_other_keys": half.other_receipts,
+            "why": why,
         })),
     )
         .into_response()
@@ -3294,6 +3443,7 @@ pub fn router(
                 .layer(upload_limit),
         )
         .route("/v1/files/{attestation_id}/meta", get(file_meta))
+        .route("/v1/files/{attestation_id}/custody", get(file_custody))
         .route("/v1/files/{attestation_id}/rename", post(rename_file))
         .route("/v1/files/{attestation_id}/move", post(move_file))
         .route("/v1/notes", get(read_notes).post(write_note))

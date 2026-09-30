@@ -308,6 +308,12 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     values: Dict[str, str] = {}
     rooms: Dict[str, str] = {}
     added: set = set()  # (host node id, guest person) pairs already POSTed by a `reachable` gate
+    # Files the relations wrote, for a later `custody` relation: `last` is the
+    # most recent `file` (or the last file a `corpus` wrote); a corpus file is
+    # also named by its manifest name (`large`, `inline_over`, ...). Each entry
+    # records the device it was written on — the AUTHOR device, the one whose
+    # store admits every delivery receipt.
+    files_written: Dict[str, Dict[str, Any]] = {}
     for rel in t["relations"]:
         k = rel["rel"]
         if k == "peered":
@@ -459,6 +465,7 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                     step.fail(f"file_WRONG_BYTES:{other}", f"{len(raw)} bytes back for {len(data)} written", [src, dev], _BODY,
                               layer="relations", rel="file", cc="CC 5.3.2.5")
                     raise MeshError("bytes differ")
+            files_written["last"] = {"id": fid, "device": src.name, "size": len(data), "person": p}
             step(f"file:{p}", layer="relations", size=len(data), devices=devs, proves="byte-identical on every device")
         elif k == "bigfile":
             # ONE self file of `size` bytes (CIRISEdge#734 lane 7 asked for the
@@ -648,6 +655,9 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 data = (out / row["name"]).read_bytes()
                 got = src.write_file(data, row["media_type"], row["filename"])
                 written.append({**row, "id": got["attestation_id"]})
+                files_written[row["name"]] = {"id": got["attestation_id"], "device": src.name,
+                                              "size": len(data), "person": p}
+                files_written["last"] = files_written[row["name"]]
             step(f"corpus_written:{p}", layer="relations", files=len(written), device=src.name)
             deadline = time.monotonic() + float(rel.get("wait", 300))
             results: Dict[str, Dict[str, Any]] = {w["name"]: {} for w in written}
@@ -704,6 +714,67 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           _BODY + r"|stalled mid-frame|seal_mismatch", layer="relations", rel="corpus", cc="CC 5.3.2.5")
                 if rel.get("require", True):
                     raise MeshError("corpus did not open byte-identical on every device")
+        elif k == "custody":
+            # WHERE THE FILE IS (FSD/FILE_CUSTODY.md): `GET /v1/files/{id}/custody`
+            # on the AUTHOR device must name every other device of the person as
+            # `received` (a delivery receipt, CC 5.3.3.6 — signed by the puller on
+            # its DAG pull, admitted here by the bridge) and count the person's
+            # devices. `file: last | <corpus name>` picks the file. Only a chunk
+            # DAG (> 1 MiB) carries receipts at this pin; an inline file answers
+            # `receipts_supported: false` and fails this relation by name.
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            which = rel.get("file", "last")
+            if which not in files_written:
+                raise MeshError(f"custody: no file {which!r} was written before this relation "
+                                f"(have: {sorted(files_written)}) — declare a `file` or `corpus` first")
+            f = files_written[which]
+            src = N[rel.get("device", f["device"])]
+            others = [N[o] for o in devs if o != src.name]
+            want = {o.node_key_id for o in others}
+            path = f"/v1/files/{f['id']}/custody?cohort={rel.get('cohort', 'self')}"
+            seen: Dict[str, Any] = {}
+
+            def all_received() -> bool:
+                st, got = src.api("GET", path)
+                seen.clear()
+                seen.update({"status": st, "body": got})
+                if st != 200 or not isinstance(got, dict):
+                    return False
+                if got.get("receipts_supported") is False:
+                    return True  # answered below by name: an inline file has no receipt to wait for
+                received = {d.get("node_key_id") for d in got.get("devices", []) if d.get("holds") == "received"}
+                return want <= received
+            try:
+                wait_for(f"{src.name}'s custody of {which} to name every other device as received",
+                         all_received, float(rel.get("wait", 180)), every=5)
+            except MeshError:
+                body = seen.get("body") if isinstance(seen.get("body"), dict) else {}
+                step.fail(f"custody_NOT_received:{which}",
+                          "the author device holds no delivery receipt from the other device — the puller did not "
+                          "sign one (on_dag_pulled), the receipt row did not cross, or the bridge refused it",
+                          [src] + others, r"delivery receipt|NOT receipted|delivery_receipt|receipt_",
+                          layer="relations", rel="custody", cc="CC 5.3.3.6", status=seen.get("status"),
+                          devices=(body or {}).get("devices"), why=(body or {}).get("why"),
+                          other_keys=(body or {}).get("receipts_from_other_keys"))
+                raise
+            got = seen["body"]
+            if got.get("receipts_supported") is False:
+                step.fail(f"custody_INLINE:{which}",
+                          f"{which} is an inline file ({got.get('receipts_unsupported_reason')}) — it carries no "
+                          "delivery receipt at this pin; name a chunk-DAG file (> 1 MiB)",
+                          [src], r"custody", layer="relations", rel="custody", cc="CC 5.3.3.6", why=got.get("why"))
+                raise MeshError("custody: an inline file has no receipts to assert")
+            if got.get("devices_total") != len(devs):
+                step.fail(f"custody_WRONG_TOTAL:{which}",
+                          f"devices_total {got.get('devices_total')} for a person owning {len(devs)} devices",
+                          [src], r"custody|nodes_owned_by", layer="relations", rel="custody", cc="CC 5.2",
+                          devices=got.get("devices"))
+                raise MeshError("custody devices_total differs from the person's device count")
+            step(f"custody:{which}", layer="relations", device=src.name, devices_total=got.get("devices_total"),
+                 received=[d["node_key_id"] for d in got["devices"] if d.get("holds") == "received"],
+                 held_here=got.get("held_here"), copies_observable=got.get("copies_observable"),
+                 proves="the author device's custody names every other device of the person as received")
         else:
             raise MeshError(f"relation {k!r}: declared, no builder yet")
 

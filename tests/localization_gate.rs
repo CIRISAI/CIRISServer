@@ -713,7 +713,12 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `membership.consent_required` (nobody joins without their own consent,
     /// CIRISConstitution#133 / CIRISPersist#955) — same reason, same list,
     /// same client issue (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 141;
+    ///
+    /// 141 -> 149 for 0.5.218, where each file is (`FSD/FILE_CUSTODY.md`): the
+    /// eight `custody.*` partial-answer reasons of
+    /// `GET /v1/files/{id}/custody` (`src/file_custody.rs`, one `msg` call per
+    /// id) — same reason, same list, same client issue (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 149;
 
     let en = load_en();
     let ids = scraped_server_ids();
