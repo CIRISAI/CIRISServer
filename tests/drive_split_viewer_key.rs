@@ -156,7 +156,9 @@ async fn a_split_node_opens_the_files_it_wrote() {
     assert!(
         matches!(
             as_actor,
-            Err(ciris_edge::chat::UnopenedReason::NotGranted { .. })
+            Err(ciris_edge::files::FileError::Unopened(
+                ciris_edge::chat::UnopenedReason::NotGranted { .. }
+            ))
         ),
         "the actor key holds no grant on a split node — which is exactly why the drive \
          must not open as it: {as_actor:?}"

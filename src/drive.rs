@@ -1652,10 +1652,22 @@ async fn open_whole(
             ),
         )),
         Ok(b) => Ok((b, size)),
-        Err(reason) => match unopened(&reason) {
+        // edge v36 (CIRISEdge#737): `FileRow::open` answers `FileError`. The
+        // unopened reasons keep their byte-state words; the whole-read cap is
+        // edge's own check, reached here only when the pointer declared no size
+        // for the gate above to read.
+        Err(files::FileError::Unopened(reason)) => match unopened(&reason) {
             ByteState::Absent { state, detail } => Err(refuse_state(state, detail)),
             ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
         },
+        Err(files::FileError::AboveWholeReadCap { bytes, .. }) => {
+            Err(too_large_for_whole_read(bytes))
+        }
+        Err(e) => Err(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "drive.unopened",
+            format!("open the file's bytes: {e}"),
+        )),
     }
 }
 
@@ -3210,10 +3222,13 @@ async fn read_notes(
                         "the bytes opened but are not UTF-8 text".to_owned(),
                     ),
                 },
-                Err(reason) => match unopened(&reason) {
+                Err(files::FileError::Unopened(reason)) => match unopened(&reason) {
                     ByteState::Absent { state, detail } => (None, state.to_owned(), detail),
                     ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
                 },
+                // A note is text; one above the 64 MiB whole-read cap, or any
+                // other edge refusal, is reported as unreadable with the reason.
+                Err(e) => (None, "unreadable".to_owned(), e.to_string()),
             };
             out.push(Note {
                 attestation_id: row.attestation_id.clone(),
