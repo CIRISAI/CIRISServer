@@ -191,8 +191,19 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// only")`. An unannounced device's identity rows reach its owner's other
 /// nodes and whoever holds a code, never a stranger's listing. Nothing else
 /// moved. `6fbf0282…` → `e4c4d625…`, equal to edge's published constant.
+///
+/// Re-pinned for 0.5.218 on edge v37.1.0 (CIRISEdge#752, the maintainer's
+/// ruling that announced devices are discoverable — CC 5.4.6, CIRISServer#701),
+/// reviewed against the v37.0.0 → v37.1.0 diff of `replication/serve_policy.rs`:
+/// ONE row changed — the Attestation line's first-contact arm widens from "own
+/// allegiance facts" to "own allegiance facts + live federation owner-bindings
+/// of nodes in the Key/IdentityOccurrence publish set". A stranger peered only
+/// with a relay learns which announced devices belong to whom; consent grants,
+/// self-plane rows, `self`-scoped bindings and bindings of unpublished nodes
+/// stay withheld, and the Rooted floor still applies. `trace:*` unchanged.
+/// `e4c4d625…` → `b86a7042…`, equal to edge's published constant.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "e4c4d6253afe686a01eec073da343b74b11af6da6cd26c16a6ef0aacc9804569";
+    "b86a7042ad9ccc81d7e54abc9b9a2fb8d8a415e7d1c85be025484292150347eb";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {
