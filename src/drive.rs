@@ -3712,8 +3712,8 @@ mod tests {
         assert_eq!(WHOLE_READ_CAP, 64 * 1024 * 1024);
         // The streamed form: edge's ~2.5 GiB, well above the whole-read cap,
         // and its body limit leaves room for the form around the file.
-        assert!(STREAMED_FILE_CEILING > WHOLE_READ_CAP as u64 * 32);
-        assert!(STREAMED_UPLOAD_BODY_LIMIT > STREAMED_FILE_CEILING);
+        const { assert!(STREAMED_FILE_CEILING > WHOLE_READ_CAP as u64 * 32) };
+        const { assert!(STREAMED_UPLOAD_BODY_LIMIT > STREAMED_FILE_CEILING) };
     }
 
     #[test]
