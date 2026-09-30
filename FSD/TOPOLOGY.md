@@ -103,8 +103,13 @@ that accepted a root whose owner did not is Attributed, never Rooted.
 builder's `values.json` is written from its point of view (the client
 fixture's `${PEER_KEY_ID}`, `${ROOM_ID}`, `${MESSAGE_ATTESTATION_ID}`, …).
 
-`negatives` are checked last: `cannot_list_room(p, room)`,
-`holds_no_row(node, dimension_prefix, person)`.
+`negatives` are checked last:
+
+| negative | asserts |
+|---|---|
+| `cannot_list_room(p, room)` | person `p`'s node cannot list the room (a non-member reads nothing) |
+| `holds_no_row(node, dimension, person)` | an outsider `node` holds none of `person`'s self-plane rows of `dimension`, with a NON-VACUOUS control: the same node must hold ≥ 1 of that person's public rows, or the negative fails as unproven |
+| `no_wider_self_rows(person)` | every self-plane row on every device of `person` is at `cohort_scope: self` — nothing of the self plane was widened (CIRISPersist#919) |
 
 ## 3. Realizability rules (the checker refuses, by name)
 
