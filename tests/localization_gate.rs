@@ -722,7 +722,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 149 -> 151 for 0.5.218, the maintainer's ruling on #704 ("no copy here
     /// is a receipt"): `custody.no_copy_reports_pending` and
     /// `custody.no_copy_here` — same reason, same list, same client issue.
-    const MAX_UNCOVERED: usize = 151;
+    ///
+    /// 151 -> 153 for 0.5.218, the streamed drive upload (edge v36.1.0
+    /// `files::publish_stream`): `drive.declared_length_mismatch` (the file
+    /// part is not the `size` the form declared) and `drive.field_after_file`
+    /// (a form field after the streamed file part) — same reason, same list,
+    /// same client issue (CIRISClient#78).
+    const MAX_UNCOVERED: usize = 153;
 
     let en = load_en();
     let ids = scraped_server_ids();

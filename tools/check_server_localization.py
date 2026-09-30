@@ -784,6 +784,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "drive.too_large_for_whole_read",
     "drive.withdraw_failed",
     "drive.withdrawn",
+    # THE STREAMED UPLOAD (0.5.218, edge v36.1.0 `files::publish_stream`): a
+    # multipart body whose file part disagrees with its declared `size`, and a
+    # form field sent after the file part (the file streams to the seal, so
+    # every field must precede it). Queued for the client bundle beside the
+    # drive CRUD ids (CIRISClient#78).
+    "drive.declared_length_mismatch",
+    "drive.field_after_file",
     "notes.delegate_may_not_author",
     "notes.not_found",
     # THE HOUSEHOLD AND SELF-DEVICE PLANES (CIRISServer#627 / 0.5.216,

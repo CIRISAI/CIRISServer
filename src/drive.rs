@@ -41,15 +41,14 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use ciris_edge::files::{self, FileWrite};
+use ciris_edge::files::{self, FileStreamWrite};
 use ciris_edge::scope_room::ScopeRoom;
 use ciris_persist::federation::{Attestation, BlobError};
 use ciris_persist::prelude::Engine;
@@ -58,22 +57,62 @@ use ciris_persist::prelude::Engine;
 /// the writer and the reader cannot disagree about which files are notes.
 const NOTE_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
-/// **The largest file this node writes or reads whole: persist's chunk-DAG
-/// whole-read cap (64 MiB).**
+mod multipart;
+mod streaming;
+
+/// **The largest file this node reads WHOLE: persist's chunk-DAG whole-read
+/// cap (64 MiB).**
 ///
-/// One number for both directions, on purpose. An upload above it would seal
-/// fine (edge seals anything above 1 MiB as a chunk DAG) but could then never be
-/// opened by the JSON read, `GET /v1/files/{id}`, or by `move`, which all read
-/// whole — so the node would accept bytes it cannot give back the same way. A
-/// file received from a peer above it is still served, by `?raw=1` with `Range`.
+/// Since 0.5.218 this bounds only the paths that must hold a file in memory:
+/// the JSON read `GET /v1/files/{id}` (it base64s the bytes into one JSON
+/// value), the JSON upload form (it arrives as one base64 string), a
+/// multipart upload that declares no `size` (the node cannot declare a length
+/// to the seal it does not know, so it collects the part — up to this — and
+/// declares what it collected), and the plaintext digest on `/meta`. Every
+/// other path streams: a multipart upload WITH `size` seals through edge's
+/// `files::publish_stream` chunk by chunk ([`STREAMED_FILE_CEILING`]), `?raw=1`
+/// serves a file above this through `FileRow::chunks()` and any `Range`
+/// through `FileRow::open_range` windows, and `move` above it re-seals from
+/// the source's chunk walk.
+///
+/// Before 0.5.218 this was one number for both directions ON PURPOSE — an
+/// upload above it would seal but could not be read back whole, so the node
+/// refused to accept what it could not give back the same way. Edge v36.1.0
+/// (CIRISEdge#737 / #744) removed the reason: there is now a way back for
+/// every size the way in accepts.
 pub const WHOLE_READ_CAP: usize =
     ciris_persist::federation::chunk_dag_cascade::DAG_WHOLE_READ_CAP_BYTES as usize;
 
-/// The request-body ceiling for the upload routes: the cap, as base64 (the JSON
-/// form inflates by 4/3), plus 1 MiB for the form's other members and multipart
-/// framing. Applied to `POST /v1/files` and `PUT /v1/files/{id}` ONLY — every
-/// other route keeps axum's 2 MB default, which is the right size for JSON.
+/// The request-body ceiling for the JSON upload form: the cap, as base64 (the
+/// JSON form inflates by 4/3), plus 1 MiB for the form's other members. The
+/// JSON form cannot stream — its bytes are one string value, and serde needs
+/// the value whole — so it keeps the whole-read cap. Enforced by the upload
+/// handlers themselves (they read the raw body so the multipart form can
+/// stream), and applied to `POST /v1/files` and `PUT /v1/files/{id}` ONLY —
+/// every other route keeps axum's 2 MB default, which is the right size for
+/// JSON.
 pub const UPLOAD_BODY_LIMIT: usize = WHOLE_READ_CAP.div_ceil(3) * 4 + 1024 * 1024;
+
+/// **The largest single file this node takes through the streamed upload:
+/// edge's stated single-file ceiling, ~2.5 GiB.**
+///
+/// Edge v36.0.0's release notes (#744): "one file maxes out near 2.5 GiB
+/// because persist stores the sealed manifest inline under its 1 MiB cap
+/// (CIRISPersist#954, persist v52)". Edge exports no constant for it — the
+/// limit is an emergent property of the manifest's size, not a check anyone
+/// makes — so this node states it, at edge's number, and refuses above it by
+/// name (`drive.too_large`, 413) before a byte is sealed, rather than
+/// streaming 2.6 GiB to a manifest persist then refuses as a 500. A file
+/// within a few MiB BELOW it may still meet persist's manifest cap and answer
+/// `drive.publish_failed`; edge measured 2 GiB end to end. Raise it when this
+/// node adopts persist v52 (edge v37).
+pub const STREAMED_FILE_CEILING: u64 = 2560 * 1024 * 1024;
+
+/// The request-body ceiling for the streamed (multipart) upload:
+/// [`STREAMED_FILE_CEILING`] plus 1 MiB for the form's fields and framing.
+/// Checked against `Content-Length` before the body is read and counted as it
+/// is read, since a chunked request declares no length.
+pub const STREAMED_UPLOAD_BODY_LIMIT: u64 = STREAMED_FILE_CEILING + 1024 * 1024;
 
 /// The most rows one `GET /v1/drive` page returns. A bigger `limit` is clamped,
 /// not refused: a client asking for "everything" gets a page and a `resume`.
@@ -127,7 +166,8 @@ pub struct FileWriteRequest {
     pub room_id: Option<String>,
     /// Base64 bytes, up to [`WHOLE_READ_CAP`] decoded. Edge seals anything
     /// above its 1 MiB envelope bound as a chunk DAG (CIRISEdge#633); for a
-    /// large file prefer `multipart/form-data`, which skips the 4/3 inflation.
+    /// large file use `multipart/form-data` with a `size` field, which skips
+    /// the 4/3 inflation AND streams (up to [`STREAMED_FILE_CEILING`]).
     pub bytes_base64: String,
     #[serde(default)]
     pub media_type: Option<String>,
@@ -698,92 +738,157 @@ async fn ensure_owner_is_a_kem_target(st: &DriveState, owner_key_id: &str) {
 
 // ─── Upload bodies: JSON or multipart ──────────────────────────────────────
 
+/// Where an upload's bytes are once its form has been read.
+enum UploadBytes {
+    /// In hand: the JSON form, or a multipart file whose uploader declared no
+    /// `size` (collected up to [`WHOLE_READ_CAP`]).
+    Whole(Vec<u8>),
+    /// **Not yet read**: the multipart reader, positioned at the file part's
+    /// first byte, and the length its uploader declared. The seal reads the
+    /// rest straight off the request body.
+    Streamed {
+        body: Box<multipart::Multipart>,
+        declared: u64,
+    },
+}
+
 /// One upload, whichever form carried it.
-#[derive(Debug, Default)]
 struct Upload {
     cohort: Option<String>,
     room_id: Option<String>,
-    bytes: Vec<u8>,
+    bytes: UploadBytes,
     media_type: Option<String>,
     filename: Option<String>,
 }
 
-/// `drive.too_large` — the one sentence for "bigger than this node takes whole".
-fn too_large(size: usize) -> Response {
+/// `drive.too_large` — the one sentence for "bigger than this node takes
+/// whole" (the JSON form, or a multipart file without `size`).
+fn too_large(size: u64) -> Response {
     refuse(
         StatusCode::PAYLOAD_TOO_LARGE,
         "drive.too_large",
         format!(
-            "{size} bytes exceeds this node's {WHOLE_READ_CAP}-byte file cap — the chunk-DAG \
-             whole-read cap, above which a file could be stored but never read back whole"
+            "{size} bytes exceeds this node's {WHOLE_READ_CAP}-byte cap for an upload it must \
+             hold whole — send it as multipart/form-data with a `size` field before the `file` \
+             part, which streams up to {STREAMED_FILE_CEILING} bytes"
         ),
     )
 }
 
-/// Parse an upload body: `application/json` ([`FileWriteRequest`]) or
-/// `multipart/form-data` (fields `cohort`, `room_id`, `media_type`,
-/// `filename`, and the bytes in a part named `file` — whose own filename and
-/// `Content-Type` are used when the fields are absent).
+/// `drive.too_large` for the streamed form — above edge's single-file ceiling.
+fn too_large_streamed(size: u64) -> Response {
+    refuse(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "drive.too_large",
+        format!(
+            "{size} bytes exceeds this node's {STREAMED_FILE_CEILING}-byte single-file ceiling — \
+             edge's, set by persist's inline manifest cap until persist v52"
+        ),
+    )
+}
+
+/// A multipart reader's typed failure → its refusal. Each has its own
+/// remedy: send less, reorder the form, or resend.
+fn multipart_refusal(f: &multipart::Failure) -> Response {
+    use multipart::Failure as F;
+    match f {
+        F::TooLarge { .. } => refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "drive.too_large",
+            format!(
+                "{f} — {STREAMED_FILE_CEILING} bytes of file plus 1 MiB of form is the most this \
+                 node reads"
+            ),
+        ),
+        F::FieldAfterFile => refuse(
+            StatusCode::BAD_REQUEST,
+            "drive.field_after_file",
+            format!(
+                "{f}. Put `cohort`, `room_id`, `media_type`, `filename` and `size` BEFORE the \
+                 `file` part (with FormData: append the file last). Nothing was written."
+            ),
+        ),
+        F::Truncated | F::Malformed(_) | F::Transport(_) => bad_body(f.to_string()),
+    }
+}
+
+/// Read a JSON body whole, refusing past `limit` by name.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-fn parse_upload(
+async fn collect_bounded(
     headers: &HeaderMap,
-    body: Result<Bytes, BytesRejection>,
-) -> Result<Upload, Response> {
-    let body = body.map_err(|rej| {
-        if rej.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            too_large(UPLOAD_BODY_LIMIT)
-        } else {
-            bad_body(format!("read the request body: {rej}"))
+    body: Body,
+    limit: usize,
+) -> Result<Vec<u8>, Response> {
+    use futures_util::StreamExt as _;
+    if let Some(n) = content_length(headers).filter(|n| *n > limit as u64) {
+        return Err(too_large(n));
+    }
+    let mut out = Vec::new();
+    let mut frames = body.into_data_stream();
+    while let Some(frame) = frames.next().await {
+        let frame = frame.map_err(|e| bad_body(format!("read the request body: {e}")))?;
+        if out.len() + frame.len() > limit {
+            return Err(too_large((out.len() + frame.len()) as u64));
         }
-    })?;
+        out.extend_from_slice(&frame);
+    }
+    Ok(out)
+}
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// Read an upload's FORM: `application/json` ([`FileWriteRequest`], whole) or
+/// `multipart/form-data` (streamed — the file part is left unread for the
+/// seal).
+///
+/// # The multipart form, 0.5.218
+///
+/// Fields `cohort`, `room_id`, `media_type`, `filename` and **`size`**, then
+/// the bytes in a part named `file` (whose own filename and `Content-Type`
+/// are used when the fields are absent). **Every field precedes the file**:
+/// the file's bytes go to the seal as they arrive, so anything after them
+/// would arrive after the decisions it names — refused by name,
+/// `drive.field_after_file`, with nothing written.
+///
+/// **`size` is the declared length** — the file part's exact byte count, as
+/// a decimal form field before the file. Edge's `files::publish_stream`
+/// chooses the seal's shape (inline or chunk DAG) from the declared length
+/// before it reads a byte, and refuses a body of any other length by name
+/// (`FileError::DeclaredLengthMismatch` → `drive.declared_length_mismatch`,
+/// nothing sealed, no row). A form FIELD, not the part's own
+/// `Content-Length` header, because the field is what a client can set:
+/// browsers' `FormData` writes no per-part `Content-Length` and gives
+/// script no way to add one, while `form.append("size", file.size)` before
+/// `form.append("file", file)` is one line on every platform. With `size`,
+/// the file streams up to [`STREAMED_FILE_CEILING`]; without it, the node
+/// collects the part up to [`WHOLE_READ_CAP`] (the pre-0.5.218 behaviour,
+/// so a client that has never heard of `size` keeps working for the files it
+/// could always send) and refuses above that naming `size` as the remedy.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn parse_upload(headers: &HeaderMap, body: Body) -> Result<Upload, Response> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
-    let upload = if ct
+    if !ct
         .trim_start()
         .to_ascii_lowercase()
         .starts_with("multipart/form-data")
     {
-        let boundary = multipart::boundary(ct).ok_or_else(|| {
-            bad_body("multipart/form-data without a `boundary` parameter".to_owned())
-        })?;
-        let parts = multipart::parse(&body, &boundary).map_err(bad_body)?;
-        let mut up = Upload::default();
-        let mut saw_file = false;
-        for p in parts {
-            let text = || String::from_utf8(p.data.clone()).ok();
-            match p.name.as_str() {
-                "file" | "bytes" => {
-                    saw_file = true;
-                    if up.filename.is_none() {
-                        up.filename = p.filename.clone();
-                    }
-                    if up.media_type.is_none() {
-                        up.media_type = p.content_type.clone();
-                    }
-                    up.bytes = p.data;
-                }
-                "cohort" => up.cohort = text(),
-                "room_id" => up.room_id = text(),
-                // Explicit fields win over the part's own headers.
-                "media_type" => up.media_type = text(),
-                "filename" => up.filename = text(),
-                _ => {}
-            }
-        }
-        if !saw_file {
-            return Err(bad_body(
-                "multipart/form-data upload has no part named `file`".to_owned(),
-            ));
-        }
-        up
-    } else {
+        let body = collect_bounded(headers, body, UPLOAD_BODY_LIMIT).await?;
         let req: FileWriteRequest = serde_json::from_slice(&body)
             .map_err(|e| bad_body(format!("not a file-write JSON body: {e}")))?;
         let bytes = base64_decode(&req.bytes_base64)
             .map_err(|e| refuse(StatusCode::BAD_REQUEST, "drive.bad_base64", e))?;
-        Upload {
+        if bytes.len() > WHOLE_READ_CAP {
+            return Err(too_large(bytes.len() as u64));
+        }
+        return Ok(Upload {
             cohort: req.cohort.map(|c| {
                 match c {
                     Cohort::SelfCollective => "self",
@@ -793,109 +898,113 @@ fn parse_upload(
                 .to_owned()
             }),
             room_id: req.room_id,
-            bytes,
+            bytes: UploadBytes::Whole(bytes),
             media_type: req.media_type,
             filename: req.filename,
+        });
+    }
+
+    if let Some(n) = content_length(headers).filter(|n| *n > STREAMED_UPLOAD_BODY_LIMIT) {
+        return Err(too_large_streamed(n));
+    }
+    let boundary = multipart::boundary(ct)
+        .ok_or_else(|| bad_body("multipart/form-data without a `boundary` parameter".to_owned()))?;
+    let frames: multipart::ByteStream = {
+        use futures_util::StreamExt as _;
+        Box::pin(
+            body.into_data_stream()
+                .map(|r| r.map_err(|e| e.to_string())),
+        )
+    };
+    let mut mp = Box::new(multipart::Multipart::new(
+        frames,
+        &boundary,
+        STREAMED_UPLOAD_BODY_LIMIT,
+    ));
+    let (mut cohort, mut room_id, mut media_type, mut filename, mut size) =
+        (None, None, None, None, None);
+    let file_head = loop {
+        let head = match mp.next_part().await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                return Err(bad_body(
+                    "multipart/form-data upload has no part named `file`".to_owned(),
+                ))
+            }
+            Err(f) => return Err(multipart_refusal(&f)),
+        };
+        if matches!(head.name.as_str(), "file" | "bytes") {
+            break head;
+        }
+        let value = match mp.read_part(multipart::FIELD_CAP).await {
+            Ok(v) => v,
+            Err(multipart::ReadPartError::AboveCap) => {
+                return Err(bad_body(format!(
+                    "form field `{}` is longer than {} bytes — only the `file` part carries bytes",
+                    head.name,
+                    multipart::FIELD_CAP
+                )))
+            }
+            Err(multipart::ReadPartError::Failed(f)) => return Err(multipart_refusal(&f)),
+        };
+        let text = String::from_utf8(value).ok();
+        match head.name.as_str() {
+            "cohort" => cohort = text,
+            "room_id" => room_id = text,
+            // Explicit fields win over the part's own headers.
+            "media_type" => media_type = text,
+            "filename" => filename = text,
+            "size" => size = text,
+            _ => {}
         }
     };
-    if upload.bytes.len() > WHOLE_READ_CAP {
-        return Err(too_large(upload.bytes.len()));
+    if filename.is_none() {
+        filename = file_head.filename.clone();
     }
-    Ok(upload)
+    if media_type.is_none() {
+        media_type = file_head.content_type.clone();
+    }
+    let bytes = match size {
+        Some(raw) => {
+            let declared: u64 = raw.trim().parse().map_err(|_| {
+                bad_body(format!(
+                    "`size` must be the file part's byte count as a decimal integer, not {raw:?}"
+                ))
+            })?;
+            if declared > STREAMED_FILE_CEILING {
+                return Err(too_large_streamed(declared));
+            }
+            UploadBytes::Streamed { body: mp, declared }
+        }
+        None => {
+            let bytes = match mp.read_part(WHOLE_READ_CAP).await {
+                Ok(b) => b,
+                Err(multipart::ReadPartError::AboveCap) => {
+                    return Err(too_large(WHOLE_READ_CAP as u64 + 1))
+                }
+                Err(multipart::ReadPartError::Failed(f)) => return Err(multipart_refusal(&f)),
+            };
+            // The same rule as the streamed form, so a client learns ONE
+            // shape: the file is the last part.
+            match mp.next_part().await {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(multipart_refusal(&multipart::Failure::FieldAfterFile)),
+                Err(f) => return Err(multipart_refusal(&f)),
+            }
+            UploadBytes::Whole(bytes)
+        }
+    };
+    Ok(Upload {
+        cohort,
+        room_id,
+        bytes,
+        media_type,
+        filename,
+    })
 }
 
 fn bad_body(detail: String) -> Response {
     refuse(StatusCode::BAD_REQUEST, "drive.bad_body", detail)
-}
-
-/// A minimal `multipart/form-data` reader (RFC 7578) — enough for one upload
-/// form, with no new dependency. Bounded by the route's body limit, so the
-/// whole body is already in memory; this only slices it.
-mod multipart {
-    pub struct Part {
-        pub name: String,
-        pub filename: Option<String>,
-        pub content_type: Option<String>,
-        pub data: Vec<u8>,
-    }
-
-    /// The `boundary` parameter of a `multipart/form-data` content type.
-    pub fn boundary(content_type: &str) -> Option<String> {
-        content_type.split(';').skip(1).find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            if k.trim().eq_ignore_ascii_case("boundary") {
-                let v = v.trim().trim_matches('"');
-                (!v.is_empty()).then(|| v.to_owned())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-        if needle.is_empty() || from > hay.len() {
-            return None;
-        }
-        hay[from..]
-            .windows(needle.len())
-            .position(|w| w == needle)
-            .map(|p| p + from)
-    }
-
-    /// A `Content-Disposition` parameter, quotes stripped.
-    fn disposition_param(value: &str, key: &str) -> Option<String> {
-        value.split(';').skip(1).find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            k.trim()
-                .eq_ignore_ascii_case(key)
-                .then(|| v.trim().trim_matches('"').to_owned())
-        })
-    }
-
-    pub fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
-        let delim = format!("--{boundary}").into_bytes();
-        let next_delim = format!("\r\n--{boundary}").into_bytes();
-        let mut at = find(body, &delim, 0)
-            .ok_or_else(|| "multipart body does not contain its boundary".to_owned())?
-            + delim.len();
-        let mut parts = Vec::new();
-        loop {
-            // After a delimiter: `--` closes the body, CRLF opens a part.
-            if body[at..].starts_with(b"--") {
-                return Ok(parts);
-            }
-            if !body[at..].starts_with(b"\r\n") {
-                return Err("malformed multipart delimiter line".to_owned());
-            }
-            at += 2;
-            let head_end = find(body, b"\r\n\r\n", at)
-                .ok_or_else(|| "multipart part has no header terminator".to_owned())?;
-            let head = std::str::from_utf8(&body[at..head_end])
-                .map_err(|_| "multipart part headers are not UTF-8".to_owned())?;
-            let (mut name, mut filename, mut content_type) = (None, None, None);
-            for line in head.split("\r\n") {
-                let Some((k, v)) = line.split_once(':') else {
-                    continue;
-                };
-                if k.trim().eq_ignore_ascii_case("content-disposition") {
-                    name = disposition_param(v, "name");
-                    filename = disposition_param(v, "filename");
-                } else if k.trim().eq_ignore_ascii_case("content-type") {
-                    content_type = Some(v.trim().to_owned());
-                }
-            }
-            let data_start = head_end + 4;
-            let data_end = find(body, &next_delim, data_start)
-                .ok_or_else(|| "multipart part is not closed by its boundary".to_owned())?;
-            parts.push(Part {
-                name: name.ok_or_else(|| "multipart part has no `name`".to_owned())?,
-                filename,
-                content_type,
-                data: body[data_start..data_end].to_vec(),
-            });
-            at = data_end + next_delim.len();
-        }
-    }
 }
 
 // ─── Publishing, finding, and withdrawing rows ─────────────────────────────
@@ -938,27 +1047,26 @@ async fn author_capsule(
     })
 }
 
-/// A new file row in `room`: seal, author, cross — edge's one door
-/// (`files::publish`), with this server's reporting around it.
+/// What the write gate lets through: the normalised essence and the cleaned
+/// display name.
+struct Gated {
+    media_type: String,
+    filename: Option<String>,
+}
+
+/// THE WRITE GATE (CIRISServer#642, CC 3.3.13 / CC 5.3.2.6): the node is the
+/// first consumer of these bytes, and every peer inherits what this row says
+/// they are. The declared type must be an RFC 6838 essence the leading bytes
+/// agree with, and the name is display-only (RFC 6266 §4.3) — no path, no
+/// control or bidi characters. Every write door comes through here.
+///
+/// `head` is the file's LEADING bytes — the whole file, or (on a streamed
+/// upload or a streamed `move`) the first [`crate::media_gate::FORMAT_HEAD_BYTES`]
+/// peeked without consuming them. The gate never reads past that window, so
+/// the verdict is the same either way; the streamed path is not a weaker gate.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-#[allow(clippy::too_many_arguments)]
-async fn publish_into(
-    st: &DriveState,
-    headers: &HeaderMap,
-    owner_key_id: &str,
-    cohort: Cohort,
-    room: &ScopeRoom,
-    bytes: &[u8],
-    media_type: &str,
-    filename: Option<&str>,
-    plane: Plane,
-) -> Result<(files::PublishedFile, bool), Response> {
-    // THE WRITE GATE (CIRISServer#642, CC 3.3.13 / CC 5.3.2.6): the node is the
-    // first consumer of these bytes, and every peer inherits what this row
-    // says they are. The declared type must be an RFC 6838 essence the leading
-    // bytes agree with, and the name is display-only (RFC 6266 §4.3) — no path,
-    // no control or bidi characters. Every write door comes through here.
-    let essence = match crate::media_gate::check_format(media_type, bytes) {
+fn write_gate(media_type: &str, head: &[u8], filename: Option<&str>) -> Result<Gated, Response> {
+    let essence = match crate::media_gate::check_format(media_type, head) {
         Ok(e) => e,
         Err(crate::media_gate::TypeRefusal::BadEssence(d)) => {
             return Err(refuse(
@@ -994,30 +1102,93 @@ async fn publish_into(
             }
         },
     };
-    let media_type = essence.as_str();
-    let filename = clean_name.as_deref();
+    Ok(Gated {
+        media_type: essence,
+        filename: clean_name,
+    })
+}
+
+/// A new file row in `room` from bytes in hand: [`write_gate`], then
+/// [`publish_gated`] over the slice.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_into(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    bytes: &[u8],
+    media_type: &str,
+    filename: Option<&str>,
+    plane: Plane,
+) -> Result<(files::PublishedFile, bool), Response> {
+    let gated = write_gate(media_type, bytes, filename)?;
+    publish_gated(
+        st,
+        headers,
+        owner_key_id,
+        cohort,
+        room,
+        &gated,
+        bytes.len() as u64,
+        bytes,
+        plane,
+    )
+    .await
+}
+
+/// A new file row in `room`: seal, author, cross — edge's one door
+/// (`files::publish_stream`; `files::publish` is edge's wrapper over it for a
+/// slice, CIRISEdge#744), with this server's reporting around it. The bytes
+/// come from `reader`, exactly `declared_len` of them; the gate has already
+/// run on their head.
+///
+/// A reader that yields any other count is edge's
+/// `FileError::DeclaredLengthMismatch` (`drive.declared_length_mismatch`) and
+/// a reader that fails is `FileError::Read`; neither leaves a manifest or a
+/// row, and edge evicts the chunks it had sealed (§6.7.4). A caller whose
+/// reader keeps a typed cause (the multipart body, a chunk walk) answers
+/// THAT cause when this fails — edge carries a reader's error only as prose.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_gated<R>(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    gated: &Gated,
+    declared_len: u64,
+    reader: R,
+    plane: Plane,
+) -> Result<(files::PublishedFile, bool), Response>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     ensure_owner_is_a_kem_target(st, owner_key_id).await;
     let addressed = addressed_or_warn(st, room, cohort);
     let capsule = author_capsule(st, headers, owner_key_id, plane).await?;
     let dir = st.engine.federation_directory();
     let content = store(&st.engine);
-    let published = files::publish(
+    let published = files::publish_stream(
         &*dir,
         &content,
         ciris_edge::replication::attestation_bind::Signers {
             node: &st.node_signer,
             actor: Some(capsule.edge_signer()),
         },
-        &FileWrite {
+        &FileStreamWrite {
             room,
-            bytes,
-            media_type,
+            declared_len,
+            media_type: &gated.media_type,
             // The drive names a codec, if at all, in the media type's own
             // parameters; edge's separate slot stays empty.
             codec: None,
-            filename,
+            filename: gated.filename.as_deref(),
             asserted_at: chrono::Utc::now(),
         },
+        reader,
     )
     .await
     .map_err(|e| file_error(&e, room))?;
@@ -1042,6 +1213,65 @@ async fn publish_into(
         );
     }
     Ok((published, addressed))
+}
+
+/// An upload's bytes → a new row: whole bytes through [`publish_into`], a
+/// streamed file part through the gate on its PEEKED head and then
+/// [`publish_gated`] straight off the request body.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_upload(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    bytes: UploadBytes,
+    media_type: &str,
+    filename: Option<&str>,
+) -> Result<(files::PublishedFile, bool), Response> {
+    match bytes {
+        UploadBytes::Whole(b) => {
+            publish_into(
+                st,
+                headers,
+                owner_key_id,
+                cohort,
+                room,
+                &b,
+                media_type,
+                filename,
+                Plane::Drive,
+            )
+            .await
+        }
+        UploadBytes::Streamed { mut body, declared } => {
+            // PEEK, THEN CHAIN: the gate reads the first 64 KiB where they
+            // sit in the multipart reader's own buffer; they are not consumed,
+            // so the seal below reads the file from its first byte.
+            let gated = match body.peek(crate::media_gate::FORMAT_HEAD_BYTES).await {
+                Ok(head) => write_gate(media_type, head, filename)?,
+                Err(f) => return Err(multipart_refusal(&f)),
+            };
+            let out = publish_gated(
+                st,
+                headers,
+                owner_key_id,
+                cohort,
+                room,
+                &gated,
+                declared,
+                &mut *body,
+                Plane::Drive,
+            )
+            .await;
+            match (out, body.failure()) {
+                // The body's own cause beats edge's `Read` prose.
+                (Err(_), Some(f)) => Err(multipart_refusal(f)),
+                (out, _) => out,
+            }
+        }
+    }
 }
 
 fn write_response(
@@ -1618,19 +1848,42 @@ fn too_large_for_whole_read(size: u64) -> Response {
         StatusCode::PAYLOAD_TOO_LARGE,
         "drive.too_large_for_whole_read",
         format!(
-            "this file is {size} bytes, above the {WHOLE_READ_CAP}-byte whole-read cap — read \
-             it with `?raw=1` and an HTTP `Range` header"
+            "this file is {size} bytes, above the {WHOLE_READ_CAP}-byte whole-read cap, and \
+             this read answers it as one JSON value — read it with `?raw=1`, which streams it \
+             (and serves any HTTP `Range`)"
         ),
     )
 }
 
+/// What a whole read found: the bytes, or — past every state check — a file
+/// too big to hold, which a STREAMING caller serves instead of refusing.
+enum WholeRead {
+    Bytes(Vec<u8>, Option<u64>),
+    /// Above [`WHOLE_READ_CAP`]: the file's size. The row is live and the
+    /// bytes are here and open for this viewer (the probe said so); only the
+    /// holding is refused.
+    AboveCap(u64),
+}
+
 /// The whole plaintext, after the state and size checks a whole read owes.
+/// A file above the cap is `drive.too_large_for_whole_read` — the caller
+/// that can stream asks [`read_whole`] instead.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
 async fn open_whole(
     st: &DriveState,
     found: &Found,
     viewer: &str,
 ) -> Result<(Vec<u8>, Option<u64>), Response> {
+    match read_whole(st, found, viewer).await? {
+        WholeRead::Bytes(b, size) => Ok((b, size)),
+        WholeRead::AboveCap(n) => Err(too_large_for_whole_read(n)),
+    }
+}
+
+/// [`open_whole`] without the last refusal: above the cap it answers
+/// [`WholeRead::AboveCap`] so `?raw=1` and `move` can stream.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn read_whole(st: &DriveState, found: &Found, viewer: &str) -> Result<WholeRead, Response> {
     if let Some(w) = &found.withdrawn_by {
         return Err(row_withdrawn_refusal(w));
     }
@@ -1639,7 +1892,7 @@ async fn open_whole(
         ByteState::Absent { state, detail } => return Err(refuse_state(state, detail)),
     };
     if let Some(n) = size.filter(|n| *n > WHOLE_READ_CAP as u64) {
-        return Err(too_large_for_whole_read(n));
+        return Ok(WholeRead::AboveCap(n));
     }
     let content = store(&st.engine);
     match found.file.open(&content, viewer).await {
@@ -1660,7 +1913,7 @@ async fn open_whole(
                 b.len()
             ),
         )),
-        Ok(b) => Ok((b, size)),
+        Ok(b) => Ok(WholeRead::Bytes(b, size)),
         // edge v36 (CIRISEdge#737): `FileRow::open` answers `FileError`. The
         // unopened reasons keep their byte-state words; the whole-read cap is
         // edge's own check, reached here only when the pointer declared no size
@@ -1669,9 +1922,7 @@ async fn open_whole(
             ByteState::Absent { state, detail } => Err(refuse_state(state, detail)),
             ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
         },
-        Err(files::FileError::AboveWholeReadCap { bytes, .. }) => {
-            Err(too_large_for_whole_read(bytes))
-        }
+        Err(files::FileError::AboveWholeReadCap { bytes, .. }) => Ok(WholeRead::AboveCap(bytes)),
         Err(e) => Err(refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "drive.unopened",
@@ -1774,7 +2025,10 @@ fn replaces_of(row: &Attestation) -> Option<String> {
 async fn write_file(
     State(st): State<DriveState>,
     headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    // The RAW body: the multipart form streams it (0.5.218), so no extractor
+    // may buffer it first. Both forms' ceilings are enforced in
+    // `parse_upload`.
+    body: Body,
 ) -> Response {
     let owner = match drive_author(&st, &headers).await {
         Ok(o) => o,
@@ -1797,7 +2051,7 @@ async fn write_file(
     {
         return resp;
     }
-    let up = match parse_upload(&headers, body) {
+    let up = match parse_upload(&headers, body).await {
         Ok(u) => u,
         Err(e) => return e,
     };
@@ -1823,16 +2077,15 @@ async fn write_file(
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    match publish_into(
+    match publish_upload(
         &st,
         &headers,
         &owner.key_id,
         cohort,
         &room,
-        &up.bytes,
+        up.bytes,
         &media_type,
         up.filename.as_deref(),
-        Plane::Drive,
     )
     .await
     {
@@ -2433,9 +2686,15 @@ enum RangeAsk {
 
 /// RFC 9110 §14.1.2, one range. A multi-range or malformed header is IGNORED
 /// (the whole representation is served), which the RFC permits; a range past
-/// the end is 416. A satisfiable range longer than [`WHOLE_READ_CAP`] is
-/// SHORTENED to it — a 206's `Content-Range` names what was actually sent, and
-/// every range client continues from there.
+/// the end is 416; an end past the file is clamped to it (RFC 9110 §14.1.2 —
+/// the HTTP door clamps, edge's `open_range` does not, so the clamp is HERE
+/// and edge is only ever asked for bytes that exist).
+///
+/// No cap on a range's LENGTH since 0.5.218. Before it, a satisfiable range
+/// longer than [`WHOLE_READ_CAP`] was shortened to it, because the range was
+/// read into memory in one call. It is now served in [`streaming::RANGE_WINDOW`]
+/// windows (edge's `FileRow::open_range`, CIRISEdge#737), so `bytes=0-` on a
+/// 2 GiB file is 2 GiB in 1 MiB steps, never 2 GiB held.
 fn parse_range(h: Option<&str>, total: u64) -> RangeAsk {
     let Some(spec) = h.and_then(|v| v.trim().strip_prefix("bytes=")) else {
         return RangeAsk::Whole;
@@ -2473,8 +2732,7 @@ fn parse_range(h: Option<&str>, total: u64) -> RangeAsk {
         }
         (s, e.min(total - 1))
     };
-    let cap = WHOLE_READ_CAP as u64;
-    RangeAsk::Part(start, end.min(start.saturating_add(cap - 1)))
+    RangeAsk::Part(start, end)
 }
 
 /// `Content-Disposition: attachment` with the file's name — an ASCII fallback
@@ -2502,6 +2760,33 @@ fn content_disposition(filename: Option<&str>) -> HeaderValue {
 
 /// `GET /v1/files/{attestation_id}` — the bytes, or the reason they are not
 /// here. JSON by default; `?raw=1` answers the bytes themselves, with `Range`.
+///
+/// # What streams and what does not (0.5.218)
+///
+/// * **JSON** (no `raw`): whole, always — the bytes are one base64 value.
+///   Above [`WHOLE_READ_CAP`] it is `413 drive.too_large_for_whole_read`,
+///   pointing at `?raw=1`.
+/// * **`?raw=1`, no `Range`, at or below the cap**: whole, as before, with
+///   RFC 9530 `Repr-Digest` computed over the bytes in hand.
+/// * **`?raw=1`, no `Range`, above the cap**: STREAMED from edge's
+///   `FileRow::chunks()` (one ≤ 1 MiB chunk in hand, [`streaming::IN_FLIGHT`]
+///   queued), `Content-Length` from the probe. **No `Repr-Digest`**: the
+///   header precedes the body, and the digest of a streamed body is known
+///   only after its last byte. Computing it first would mean decrypting the
+///   whole file twice or holding it — the exact cost streaming exists to
+///   avoid — and a header that promised a digest the node had not computed
+///   would be worse than none. The plaintext digest a client verifies
+///   against is `content_digest` on the JSON read or `/meta`, where it can be
+///   computed (at or below the cap); above it a client hashes what it
+///   receives against the row's own claim when edge's file row carries one
+///   (CIRISEdge#638).
+/// * **`?raw=1` with `Range`**: any satisfiable single range, of any length,
+///   through `FileRow::open_range` in [`streaming::RANGE_WINDOW`] windows —
+///   never a `Repr-Digest` (a 206 is not the representation).
+///
+/// A streamed body's FIRST item is awaited before the status line, so a
+/// refusal the probe could not foresee is still a status; a failure after it
+/// tears the body (see `drive/streaming.rs`).
 async fn read_file(
     State(st): State<DriveState>,
     headers: HeaderMap,
@@ -2583,12 +2868,30 @@ async fn read_file(
         (Some(_), None) => RangeAsk::Whole,
     };
     match ask {
-        RangeAsk::Whole => match open_whole(&st, &found, &viewer).await {
-            Ok((bytes, _)) => {
+        RangeAsk::Whole => match read_whole(&st, &found, &viewer).await {
+            Ok(WholeRead::Bytes(bytes, _)) => {
                 if let Some(v) = repr_digest(&bytes) {
                     h.insert(header::HeaderName::from_static("repr-digest"), v);
                 }
                 (StatusCode::OK, h, bytes).into_response()
+            }
+            // Above the cap: the whole file, streamed. See the doc above for
+            // why there is no `Repr-Digest` here.
+            Ok(WholeRead::AboveCap(total)) => {
+                let mut rx = streaming::spawn_chunks(
+                    Arc::clone(&st.engine),
+                    found.file.clone(),
+                    viewer.clone(),
+                );
+                let first = match streaming::first_item(&mut rx).await {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => return read_refusal(&e),
+                    None => Vec::new(),
+                };
+                if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
+                    h.insert(header::CONTENT_LENGTH, v);
+                }
+                (StatusCode::OK, h, streaming::body(first, rx, Some(total))).into_response()
             }
             Err(e) => e,
         },
@@ -2605,31 +2908,64 @@ async fn read_file(
             resp
         }
         RangeAsk::Part(start, end) => {
-            let Some(sha) = sha_of(&found.file) else {
-                return refuse_state("malformed_row", state_detail("malformed_row").to_owned());
+            // Edge's range door (CIRISEdge#737) in windows: the row's own
+            // binding and AAD, only the covering chunks opened, no length cap.
+            let mut rx = streaming::spawn_range(
+                Arc::clone(&st.engine),
+                found.file.clone(),
+                viewer.clone(),
+                start,
+                end,
+            );
+            let first = match streaming::first_item(&mut rx).await {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => return read_refusal(&e),
+                None => Vec::new(),
             };
-            let aad = aad_for(&found.file);
-            match st
-                .engine
-                .read_blob_range_as(&sha, &viewer, start, end, aad.as_deref())
-                .await
+            let len = end - start + 1;
+            if let Ok(v) =
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{}", size.unwrap_or(0)))
             {
-                Ok(bytes) => {
-                    let sent_end = start + (bytes.len() as u64).saturating_sub(1);
-                    if let Ok(v) = HeaderValue::from_str(&format!(
-                        "bytes {start}-{sent_end}/{}",
-                        size.unwrap_or(0)
-                    )) {
-                        h.insert(header::CONTENT_RANGE, v);
-                    }
-                    (StatusCode::PARTIAL_CONTENT, h, bytes).into_response()
-                }
-                Err(e) => match blob_state(&e) {
-                    ByteState::Absent { state, detail } => refuse_state(state, detail),
-                    ByteState::Here { .. } => unreachable!("blob_state always answers Absent"),
-                },
+                h.insert(header::CONTENT_RANGE, v);
             }
+            if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
+                h.insert(header::CONTENT_LENGTH, v);
+            }
+            (
+                StatusCode::PARTIAL_CONTENT,
+                h,
+                streaming::body(first, rx, Some(len)),
+            )
+                .into_response()
         }
+    }
+}
+
+/// An edge read refusal on a raw read, before the status line: the byte-state
+/// words for an unopened file, 416 for a range edge found outside it.
+fn read_refusal(e: &files::FileError) -> Response {
+    match e {
+        files::FileError::Unopened(reason) => match unopened(reason) {
+            ByteState::Absent { state, detail } => refuse_state(state, detail),
+            ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
+        },
+        files::FileError::RangeNotSatisfiable { size, .. } => {
+            let total = size.unwrap_or(0);
+            let mut resp = refuse(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "drive.range_not_satisfiable",
+                format!("the requested range is outside this {total}-byte file"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                resp.headers_mut().insert(header::CONTENT_RANGE, v);
+            }
+            resp
+        }
+        other => refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "drive.unopened",
+            format!("open the file's bytes: {other}"),
+        ),
     }
 }
 
@@ -2641,7 +2977,8 @@ async fn replace_file(
     headers: HeaderMap,
     Path(attestation_id): Path<String>,
     Query(q): Query<FileQuery>,
-    body: Result<Bytes, BytesRejection>,
+    // Raw, as `write_file`'s: the multipart form streams.
+    body: Body,
 ) -> Response {
     let owner = match drive_author(&st, &headers).await {
         Ok(o) => o,
@@ -2667,7 +3004,7 @@ async fn replace_file(
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    let up = match parse_upload(&headers, body) {
+    let up = match parse_upload(&headers, body).await {
         Ok(u) => u,
         Err(e) => return e,
     };
@@ -2680,16 +3017,15 @@ async fn replace_file(
         .or_else(|| old.media_type.clone())
         .unwrap_or_else(|| "application/octet-stream".to_owned());
     let filename = up.filename.clone().or_else(|| old.filename.clone());
-    let (published, addressed) = match publish_into(
+    let (published, addressed) = match publish_upload(
         &st,
         &headers,
         &owner.key_id,
         cohort,
         &room,
-        &up.bytes,
+        up.bytes,
         &media_type,
         filename.as_deref(),
-        Plane::Drive,
     )
     .await
     {
@@ -2983,28 +3319,68 @@ async fn move_file(
     // A RESEAL, not a re-pointer: the target room's tier and group decide the
     // seal (a community DEK is not a self wrap), so the bytes are opened here
     // and sealed again there.
-    let (bytes, _) = match open_whole(&st, &found, &viewer).await {
-        Ok(b) => b,
-        Err(e) => return e,
-    };
+    //
+    // ABOVE THE WHOLE-READ CAP (0.5.218): the reseal STREAMS — the source's
+    // `FileRow::chunks()` walk is the reader for the target's
+    // `files::publish_stream`, so a 2 GiB move holds a chunk on each side,
+    // never the file. The declared length is the probe's size (a chunk DAG's
+    // pointer declares it, or its manifest does); the gate reads the walk's
+    // first 64 KiB without consuming them, as it does on a streamed upload. A
+    // walk that fails mid-file fails the publish (edge: `FileError::Read`,
+    // nothing sealed, no row) and answers the walk's own refusal.
     let old = describe(&st, &found.file, &viewer).await;
     let media_type = old
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let (published, addressed) = match publish_into(
-        &st,
-        &headers,
-        &owner.key_id,
-        target_cohort,
-        &target,
-        &bytes,
-        &media_type,
-        old.filename.as_deref(),
-        Plane::Drive,
-    )
-    .await
-    {
+    let published = match read_whole(&st, &found, &viewer).await {
+        Err(e) => return e,
+        Ok(WholeRead::Bytes(bytes, _)) => {
+            publish_into(
+                &st,
+                &headers,
+                &owner.key_id,
+                target_cohort,
+                &target,
+                &bytes,
+                &media_type,
+                old.filename.as_deref(),
+                Plane::Drive,
+            )
+            .await
+        }
+        Ok(WholeRead::AboveCap(total)) => {
+            let mut walk = streaming::ChunkReader::new(streaming::spawn_chunks(
+                Arc::clone(&st.engine),
+                found.file.clone(),
+                viewer.clone(),
+            ));
+            let gated = match walk.peek(crate::media_gate::FORMAT_HEAD_BYTES).await {
+                Ok(head) => match write_gate(&media_type, head, old.filename.as_deref()) {
+                    Ok(g) => g,
+                    Err(e) => return e,
+                },
+                Err(e) => return read_refusal(&e),
+            };
+            let out = publish_gated(
+                &st,
+                &headers,
+                &owner.key_id,
+                target_cohort,
+                &target,
+                &gated,
+                total,
+                &mut walk,
+                Plane::Drive,
+            )
+            .await;
+            match (out, walk.failure()) {
+                (Err(_), Some(e)) => Err(read_refusal(e)),
+                (out, _) => out,
+            }
+        }
+    };
+    let (published, addressed) = match published {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -3045,7 +3421,24 @@ fn file_error(e: &files::FileError, room: &ScopeRoom) -> Response {
         // Unreachable from `files::publish` since CIRISEdge#633 (it seals above
         // the 1 MiB envelope bound as a chunk DAG). Kept, under the same id as
         // this node's own cap, for a store that implements only `seal`.
-        F::TooLargeForInline { size, .. } => too_large(*size),
+        F::TooLargeForInline { size, .. } => too_large(*size as u64),
+        // CIRISEdge#744: the upload's body was not the length its `size` said.
+        // Nothing was sealed and there is no row; the remedy is to resend
+        // with the right count, so it is the CLIENT's 400, never a 500.
+        F::DeclaredLengthMismatch { declared, read } => refuse_with(
+            StatusCode::BAD_REQUEST,
+            "drive.declared_length_mismatch",
+            format!(
+                "the form declared `size` = {declared} bytes and the file part carried {} — \
+                 nothing was written; resend with `size` equal to the file's exact byte count",
+                if read > declared {
+                    format!("more than that (stopped at {read})")
+                } else {
+                    read.to_string()
+                }
+            ),
+            serde_json::json!({ "declared": declared, "read": read }),
+        ),
         F::ReadableByNobody { .. } => refuse(
             StatusCode::CONFLICT,
             "drive.readable_by_nobody",
@@ -3479,24 +3872,26 @@ pub fn router(
         user_seed_dir,
         scope_lifecycle,
     };
-    // THE UPLOAD ROUTES ONLY carry the raised body limit. axum's 2 MB default
+    // THE UPLOAD ROUTES ONLY carry a raised body limit. axum's 2 MB default
     // stands everywhere else; before 0.5.216 it stood HERE too, so the largest
     // file anyone could upload was ~1.5 MB of base64 while the comment on the
     // form said edge capped at 1 MiB — two stale numbers, neither the real one.
-    let upload_limit = DefaultBodyLimit::max(UPLOAD_BODY_LIMIT);
+    //
+    // Since 0.5.218 the upload handlers take the RAW body (the multipart form
+    // streams it to the seal) and enforce their two ceilings themselves —
+    // [`UPLOAD_BODY_LIMIT`] for JSON, [`STREAMED_UPLOAD_BODY_LIMIT`] for
+    // multipart — in `parse_upload`, so no `DefaultBodyLimit` layer is needed
+    // (axum's limit applies only to the buffering extractors).
     use axum::routing::{get, post, put};
     Router::new()
-        .route("/v1/files", post(write_file).layer(upload_limit))
+        .route("/v1/files", post(write_file))
         .route("/v1/drive", get(read_drive))
         // Public: a node's render policy is what its clients need BEFORE they
         // hold a session, and it discloses nothing about anyone (#643).
         .route("/v1/media/policy", get(media_policy))
         .route(
             "/v1/files/{attestation_id}",
-            get(read_file)
-                .put(replace_file)
-                .delete(withdraw_file)
-                .layer(upload_limit),
+            get(read_file).put(replace_file).delete(withdraw_file),
         )
         .route("/v1/files/{attestation_id}/meta", get(file_meta))
         .route("/v1/files/{attestation_id}/custody", get(file_custody))
@@ -3521,6 +3916,10 @@ mod tests {
         assert!(b64.len() <= 4 * 1024);
         assert!(UPLOAD_BODY_LIMIT > WHOLE_READ_CAP.div_ceil(3) * 4);
         assert_eq!(WHOLE_READ_CAP, 64 * 1024 * 1024);
+        // The streamed form: edge's ~2.5 GiB, well above the whole-read cap,
+        // and its body limit leaves room for the form around the file.
+        const { assert!(STREAMED_FILE_CEILING > WHOLE_READ_CAP as u64 * 32) };
+        const { assert!(STREAMED_UPLOAD_BODY_LIMIT > STREAMED_FILE_CEILING) };
     }
 
     #[test]
@@ -3541,6 +3940,13 @@ mod tests {
         assert!(matches!(
             parse_range(Some("bytes=8-100"), 10),
             RangeAsk::Part(8, 9)
+        ));
+        // No length cap (0.5.218): a range longer than the whole-read cap is
+        // served whole, in windows.
+        let big = 3 * WHOLE_READ_CAP as u64;
+        assert!(matches!(
+            parse_range(Some("bytes=0-"), big),
+            RangeAsk::Part(0, e) if e == big - 1
         ));
         assert!(matches!(
             parse_range(Some("bytes=10-"), 10),
@@ -3563,31 +3969,6 @@ mod tests {
             parse_range(Some("items=0-1"), 10),
             RangeAsk::Whole
         ));
-    }
-
-    #[test]
-    fn multipart_reads_the_file_part_and_the_fields() {
-        let body = b"--XyZ\r\nContent-Disposition: form-data; name=\"cohort\"\r\n\r\nself\r\n\
---XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"boat.jpg\"\r\n\
-Content-Type: image/jpeg\r\n\r\n\x00\x01\r\n\x02\r\n--XyZ--\r\n";
-        assert_eq!(
-            multipart::boundary("multipart/form-data; boundary=XyZ").as_deref(),
-            Some("XyZ")
-        );
-        assert_eq!(
-            multipart::boundary("multipart/form-data; boundary=\"XyZ\"").as_deref(),
-            Some("XyZ")
-        );
-        let parts = multipart::parse(body, "XyZ").expect("parse");
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].name, "cohort");
-        assert_eq!(parts[0].data, b"self");
-        assert_eq!(parts[1].name, "file");
-        assert_eq!(parts[1].filename.as_deref(), Some("boat.jpg"));
-        assert_eq!(parts[1].content_type.as_deref(), Some("image/jpeg"));
-        // CRLF INSIDE the bytes survives: only CRLF + delimiter ends a part.
-        assert_eq!(parts[1].data, b"\x00\x01\r\n\x02");
-        assert!(multipart::parse(b"no boundary here", "XyZ").is_err());
     }
 
     #[test]
