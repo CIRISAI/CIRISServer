@@ -104,3 +104,24 @@ founder; everyone else named in it joins by proposal → acceptance.
   CSD-070); `reverse_quorum:` is refused as a family or community protocol.
 - **Subject take-back** (removing oneself from rows already shared) stays deferred.
 - **Pair rooms** (1:1 chat) keep their own consent: the contact grant each side authors.
+
+## 6. Persist's contract, as the maintainer resolved it (CIRISPersist#955, 2026-09-30)
+
+- **Signing the founding record is consent.** A founding member is admitted iff
+  they signed it, as the authority or as a cosigner. A listed but unsigned member
+  is refused as `membership_founding_member_unsigned`. `POST /v1/families` and
+  `POST /v1/communities` sign with the founder alone, and the server has no
+  founding-cosign flow, so the interim 409 on a founding roster beyond the
+  founder stays correct. If the server gains a founding-cosign flow, co-signing
+  founders are admitted.
+- **A supersede never adds members.** Every addition is a widening; a quorum
+  add is a widening carrying the M-of-N. A roster-growing supersede is refused
+  as `membership_supersede_cannot_add`. **At v52 adoption the family quorum
+  add (envelope → cosign → assemble, today `supersede_family_with_quorum`
+  with a grown roster) must become a quorum-carrying widening.** It is
+  refused by our 409 until then.
+- **Leave and dissolve replicate** (CIRISPersist#956, in v52): leave is a roster
+  supersede removing only its own signer, admitted on that one signature;
+  dissolve is a quorum-verified terminal amendment. The ignored test
+  `a_quorum_dissolve_replicates_as_an_amendment` (CIRISServer#700) is un-ignored
+  at v52.
