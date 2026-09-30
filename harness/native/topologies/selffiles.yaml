@@ -19,7 +19,7 @@ topology:
     - {rel: reachable, node: D1, person: two, min: 1}
     - {rel: contact, from: one, to: two, via: owner}
     - {rel: room, kind: self, person: one}
-    - {rel: roster, person: one, visible_from: [X]}              # CSD-037: the device roster, per-device announce
+    - {rel: roster, person: one, visible_from: [X], visible_from_complete: true}   # CSD-037 + CC 5.4.6: X lists EVERY announced device (the canonical relays D2)
     - {rel: note, person: one, device: D1}
     - {rel: corpus, person: one, device: D1, require: false}   # recorded per file; the negatives still run
   actor: {person: one, device: D2}

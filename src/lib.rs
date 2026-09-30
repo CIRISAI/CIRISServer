@@ -76,6 +76,11 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 
+/// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
+/// Key and IdentityOccurrence rows of every announced device and its owner,
+/// through edge's per-kind `SelfOwn` publish selector (CIRISEdge#678).
+pub mod announced_relay;
+
 /// The v39 tier crossing (`enter_mesh` + `widen_audience`) composed in one
 /// place, replacing `attestation_promote`.
 pub mod attestation_crossing;

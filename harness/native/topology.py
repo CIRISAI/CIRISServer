@@ -595,15 +595,39 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           seen={d: sorted(roster_of(N[d])) for d in devs})
                 raise
             seen_by_outsiders = {}
+            announced = {N[d].node_key_id for d in devs if next(x for x in t["nodes"] if x["id"] == d).get("announced")}
+            # `visible_from_complete: true` (default false, so a topology that
+            # did not declare it keeps the leak-only semantics): an outsider
+            # must list ALL of the person's announced devices, not a subset.
+            # CC 5.4.6 (CIRISConstitution#111) — "a person is contactable
+            # through the nodes they chose to announce, and that set IS their
+            # public roster" — and the canonical relays them (0.5.218,
+            # `announced_relay`), so an outsider that peers only ONE of the
+            # person's devices still converges on every announced one.
+            complete = bool(rel.get("visible_from_complete", False))
             for o in rel.get("visible_from", []):
+                if complete:
+                    try:
+                        wait_for(f"{o} to list every announced device of {p}",
+                                 lambda: announced <= roster_of(N[o]), float(rel.get("wait", 120)), every=5)
+                    except MeshError:
+                        got = roster_of(N[o])
+                        step.fail(f"roster_NOT_public:{p}@{o}", "an outsider does not list every device the person "
+                                  "announced — the canonical did not relay an announced device's key/occurrence "
+                                  "(CC 5.4.6, announced_relay)", [N[o]] + [N[d] for d in devs],
+                                  r"announced relay|IdentityOccurrence|first contact|occurrence",
+                                  layer="relations", rel="roster", cc="CC 5.4.6",
+                                  seen={o: sorted(got), "announced": sorted(announced),
+                                        "missing": sorted(announced - got)})
+                        raise
                 got = roster_of(N[o])
-                announced = {N[d].node_key_id for d in devs if next(x for x in t["nodes"] if x["id"] == d).get("announced")}
                 unannounced_leak = got - announced
-                seen_by_outsiders[o] = {"listed": len(got), "announced": len(announced)}
+                seen_by_outsiders[o] = {"listed": len(got), "announced": len(announced), "complete_required": complete}
                 if unannounced_leak:
                     raise MeshError(f"NEGATIVE FAILED: {o} lists unannounced devices of {p}: {sorted(unannounced_leak)}")
             step(f"roster:{p}", layer="relations", devices=devs, visible_from=seen_by_outsiders,
-                 proves="each device lists every device; an outsider sees announced devices only")
+                 proves="each device lists every device; an outsider sees announced devices only"
+                        + (", and ALL of them (CC 5.4.6)" if complete else ""))
         elif k == "note":
             p = rel["person"]
             devs = persons[p]["owns"]
