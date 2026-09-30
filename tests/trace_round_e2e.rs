@@ -519,7 +519,7 @@ struct RoundSide<'a> {
     key_id: &'a str,
 }
 
-fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
+async fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
     let RoundSide {
         session: initiator,
         provider: init_provider,
@@ -534,7 +534,8 @@ fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
     } = responder;
     let mut admitted_total = 0usize;
 
-    let mut to_responder: Vec<ReplicationMessage> = match initiator.start_round(init_provider) {
+    let mut to_responder: Vec<ReplicationMessage> = match initiator.start_round(init_provider).await
+    {
         ReplicationOutcome::Send(msgs) => msgs,
         ReplicationOutcome::SendAndComplete { msgs, .. } => msgs,
         other => panic!("initiator start_round produced no messages: {other:?}"),
@@ -548,7 +549,10 @@ fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
             break;
         }
         for msg in std::mem::take(&mut to_responder) {
-            match responder.on_message(msg, resp_provider, resp_applier, Some(init_peer)) {
+            match responder
+                .on_message(msg, resp_provider, resp_applier, Some(init_peer))
+                .await
+            {
                 ReplicationOutcome::Send(msgs) => to_initiator.extend(msgs),
                 ReplicationOutcome::SendAndComplete { msgs, .. } => to_initiator.extend(msgs),
                 ReplicationOutcome::Applied { admitted, .. } => admitted_total += admitted,
@@ -556,7 +560,10 @@ fn drive_round(initiator: RoundSide<'_>, responder: RoundSide<'_>) -> usize {
             }
         }
         for msg in std::mem::take(&mut to_initiator) {
-            match initiator.on_message(msg, init_provider, init_applier, Some(resp_peer)) {
+            match initiator
+                .on_message(msg, init_provider, init_applier, Some(resp_peer))
+                .await
+            {
                 ReplicationOutcome::Send(msgs) => to_responder.extend(msgs),
                 ReplicationOutcome::SendAndComplete { msgs, .. } => to_responder.extend(msgs),
                 ReplicationOutcome::Applied { admitted, .. } => admitted_total += admitted,
@@ -739,7 +746,7 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     let mut agent_applier = MutableDirectoryStateAdapter::new(agent_bridge);
     let mut canon_applier = MutableDirectoryStateAdapter::new(canon_bridge);
 
-    let offered_refs = agent_provider.local_refs(EnvelopeKind::Attestation);
+    let offered_refs = agent_provider.local_refs(EnvelopeKind::Attestation).await;
     eprintln!(
         "AGENT OFFERS {} ref(s) to the canonical",
         offered_refs.len()
@@ -860,7 +867,8 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
                 applier: &mut canon_applier,
                 key_id: &canonical.key_id,
             },
-        );
+        )
+        .await;
     }
 
     assert!(
@@ -980,7 +988,7 @@ async fn without_a_grant_the_producer_offers_nothing() {
     let agent_bridge = bridge(&agent);
     let provider = DirectoryStateAdapter::new(agent_bridge).with_peer(canonical.key_id.clone());
 
-    let refs = provider.local_refs(EnvelopeKind::Attestation);
+    let refs = provider.local_refs(EnvelopeKind::Attestation).await;
     assert!(
         refs.is_empty(),
         "a producer with NO consent:replication grant toward the peer must advertise \
