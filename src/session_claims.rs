@@ -529,12 +529,35 @@ pub async fn gate(
     session: &str,
     site: &'static str,
 ) -> Verdict {
+    gate_at(
+        engine,
+        attendance,
+        who,
+        community,
+        session,
+        site,
+        chrono::Utc::now(),
+    )
+    .await
+}
+
+/// [`gate`] at a stated instant — a claim written here is dated `now`. For a
+/// test that must see a claim lapse without waiting out the TTL; production
+/// always passes the clock through [`gate`].
+pub async fn gate_at(
+    engine: &Engine,
+    attendance: &Attendance,
+    who: &Occupant,
+    community: &str,
+    session: &str,
+    site: &'static str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Verdict {
     let dir = engine.federation_directory();
     let read = |now| {
         let dir = Arc::clone(&dir);
         async move { handler_for(dir.as_ref(), &who.owner, community, session, now, ttl()).await }
     };
-    let now = chrono::Utc::now();
     let mut handler = match read(now).await {
         Ok(h) => h,
         Err(e) => {
@@ -551,7 +574,7 @@ pub async fn gate(
     if handler.is_none() && attendance.attended() {
         match claim_now(engine, attendance, who, community, session, now).await {
             Ok(()) => {
-                handler = read(chrono::Utc::now()).await.unwrap_or(None);
+                handler = read(now).await.unwrap_or(None);
             }
             Err(e) => tracing::warn!(
                 site, community, session, error = %e,
@@ -623,11 +646,19 @@ pub struct RenewalLine {
 
 /// **One renewal pass** over every exchange this device has offered.
 pub async fn renew_once(engine: &Engine, attendance: &Attendance) -> Vec<RenewalLine> {
+    renew_once_at(engine, attendance, chrono::Utc::now()).await
+}
+
+/// [`renew_once`] at a stated instant (see [`gate_at`]).
+pub async fn renew_once_at(
+    engine: &Engine,
+    attendance: &Attendance,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<RenewalLine> {
     let dir = engine.federation_directory();
     let attended = attendance.attended();
     let mut out = Vec::new();
     for ((community, session), ex) in attendance.snapshot() {
-        let now = chrono::Utc::now();
         let handler = match handler_for(dir.as_ref(), &ex.owner, &community, &session, now, ttl())
             .await
         {
