@@ -1652,6 +1652,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         crate::user_seed_dir(&cfg),
                     ))
+                    // WHICH DEVICE IS ANSWERING (CC 3.1.3.1, FSD/SESSION_CLAIMS.md):
+                    // `GET /v1/self/sessions` — every exchange of the person's a
+                    // device holds, and which one, for "answering on <device>".
+                    .merge(crate::session_claims::router(Arc::clone(&engine)))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -2063,6 +2067,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         | crate::self_room_drive::SelfRoomTick::NotInRoster
                         | crate::self_room_drive::SelfRoomTick::NoOwner
                         | crate::self_room_drive::SelfRoomTick::PublishedKeyPackage
+                        | crate::self_room_drive::SelfRoomTick::NotHandledHere { .. }
                 );
                 if !quiet || last.as_ref() != Some(&tick) {
                     match &tick {
@@ -2082,6 +2087,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             tracing::info!("self room drive stopped");
         })
     };
+
+    // ONE DEVICE HANDLES EACH EXCHANGE (CC 3.1.3.1, CIRISPersist#782). The
+    // gate at each ACT site claims on demand while the person is here; this
+    // loop keeps a held claim renewed while they stay and lets it lapse when
+    // they go, so their other device can take the exchange. SUPERVISED like
+    // the self-room drive, whose Add/Remove it gates: an unsupervised renewer
+    // would keep claiming for a torn-down engine across an embedded restart.
+    let (session_claims_sd_tx, session_claims_sd_rx) = watch::channel(false);
+    let session_claims_join =
+        crate::session_claims::spawn(Arc::clone(&engine), session_claims_sd_rx);
 
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
@@ -2195,6 +2210,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the edge is gone would install destinations nothing can answer for.
     let _ = self_room_sd_tx.send(true);
     stop_step("self room drive", self_room_join).await;
+    let _ = session_claims_sd_tx.send(true);
+    stop_step("session claims", session_claims_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.

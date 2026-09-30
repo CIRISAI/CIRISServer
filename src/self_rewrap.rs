@@ -29,12 +29,28 @@
 //! second device itself) does nothing here and says so at debug; the device
 //! that approved the claim holds the pen and does the work. Never a machine
 //! key: `for_owned_node` refuses rather than falling back to one.
+//!
+//! # One device re-wraps (CC 3.1.3.1, 0.5.218)
+//!
+//! "The device holding the pen" is not one device once the person's fed-ID
+//! is portable: every device they signed in on holds it, every one of them saw
+//! the new occurrence arrive, and every one re-wrapped the same blobs and
+//! wrote its own key-grant set for one grant. The re-wrap for a new device is
+//! therefore an EXCHANGE — `(self room, self_rewrap:<occurrence>)` — and only
+//! the device [`crate::session_claims::gate`] names does it. Per occurrence,
+//! because the new device can never re-wrap for itself (it holds none of the
+//! old DEKs), so it must never be the one the fold names; it is also never
+//! pending for itself here, so it never claims. The gate runs AFTER the pen
+//! check: a device that cannot do the work must not take the duty. And an
+//! unclaimed re-wrap waits — for the person to be on a device that holds the
+//! pen — rather than run on whichever device ticks first.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use ciris_persist::federation::admission::{nodes_owned_by, owner_of};
+use ciris_persist::federation::admission::nodes_owned_by;
 use ciris_persist::prelude::Engine;
+
+use crate::session_claims::{self, Attendance, Occupant, Verdict};
 
 /// What one pass did — returned so a test can read it; the log carries the
 /// same facts for an operator.
@@ -49,37 +65,44 @@ pub struct RewrapReport {
     /// `true` when there was something to do and this node does not hold the
     /// owner's pen, so nothing ran here.
     pub no_pen_here: bool,
+    /// `(occurrence, handler)` for every pending re-wrap this device did NOT
+    /// run because the session gate said so: `Some(device)` = that device
+    /// does it, `None` = unclaimed, nobody does it yet (CC 3.1.3.1).
+    pub not_handled_here: Vec<(String, Option<String>)>,
 }
 
-/// `owner \0 occurrence \0 x25519` — a new KEM key for the same occurrence is
-/// a new wrap target and is re-wrapped again.
-fn memo() -> &'static Mutex<HashSet<String>> {
-    static MEMO: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(HashSet::new()))
+/// `rewrap \0 owner \0 occurrence \0 x25519` — the ACT's id for the
+/// idempotence ledger (`Attendance::record_act`). A new KEM key for the same
+/// occurrence is a new wrap target and is re-wrapped again.
+fn act_id(owner: &str, occurrence: &str, x25519: &str) -> String {
+    format!("rewrap\u{0}{owner}\u{0}{occurrence}\u{0}{x25519}")
 }
 
-fn memo_key(owner: &str, occurrence: &str, x25519: &str) -> String {
-    format!("{owner}\u{0}{occurrence}\u{0}{x25519}")
-}
-
-/// One pass. Never fails: every error is logged and the pass ends, because
-/// the caller is the peer-convergence tick and must not be stopped by this.
+/// One pass, gated on this process's attendance. Never fails: every error is
+/// logged and the pass ends, because the caller is the peer-convergence tick
+/// and must not be stopped by this.
 pub async fn rewrap_for_new_devices(engine: &Arc<Engine>, node_key_id: &str) -> RewrapReport {
+    rewrap_for_new_devices_with(engine, node_key_id, Attendance::global()).await
+}
+
+/// [`rewrap_for_new_devices`] against an explicit [`Attendance`] — a test that
+/// stands two devices up in one process gives each its own.
+pub async fn rewrap_for_new_devices_with(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    attendance: &Attendance,
+) -> RewrapReport {
     let mut report = RewrapReport::default();
     let own = crate::peer::own_keys_of_this_node(node_key_id);
     let dir = engine.federation_directory();
 
-    // Which of this node's keys is bound, and to whom.
-    let mut bound: Option<(String, String)> = None;
-    for k in &own {
-        if let Ok(Some(o)) = owner_of(dir.as_ref(), k).await {
-            bound = Some((k.clone(), o));
-            break;
-        }
-    }
-    let Some((bound_key, owner)) = bound else {
+    // Which of this node's keys is bound, and to whom — the NODE key first
+    // (`Occupant::of_node`), the occurrence the session fold knows.
+    let Some(who) = Occupant::of_node(engine, node_key_id).await else {
         return report;
     };
+    let bound_key = who.occurrence.clone();
+    let owner = who.owner.clone();
     report.owner = Some(owner.clone());
 
     let owned: Vec<String> = match nodes_owned_by(dir.as_ref(), &owner).await {
@@ -98,19 +121,16 @@ pub async fn rewrap_for_new_devices(engine: &Arc<Engine>, node_key_id: &str) -> 
     };
     // Cheap first: what is new? The pen is opened only when something is.
     let mut todo: Vec<(String, String)> = Vec::new();
-    {
-        let held = memo().lock().expect("self re-wrap memo poisoned");
-        for o in &occurrences {
-            let Some(enc) = o.encryption_pubkeys.as_ref() else {
-                continue;
-            };
-            if own.contains(&o.occurrence_key_id) || !owned.contains(&o.occurrence_key_id) {
-                continue;
-            }
-            let key = memo_key(&owner, &o.occurrence_key_id, &enc.x25519_base64);
-            if !held.contains(&key) {
-                todo.push((o.occurrence_key_id.clone(), key));
-            }
+    for o in &occurrences {
+        let Some(enc) = o.encryption_pubkeys.as_ref() else {
+            continue;
+        };
+        if own.contains(&o.occurrence_key_id) || !owned.contains(&o.occurrence_key_id) {
+            continue;
+        }
+        let key = act_id(&owner, &o.occurrence_key_id, &enc.x25519_base64);
+        if !attendance.already_acted(&key) {
+            todo.push((o.occurrence_key_id.clone(), key));
         }
     }
     if todo.is_empty() {
@@ -131,7 +151,32 @@ pub async fn rewrap_for_new_devices(engine: &Arc<Engine>, node_key_id: &str) -> 
         return report;
     }
 
+    let community = session_claims::self_community(&owner);
     for (occurrence, key) in todo {
+        // ONE DEVICE RE-WRAPS for each new device (CC 3.1.3.1) — see the
+        // module note. The gate logs its refusal by name.
+        match session_claims::gate(
+            engine,
+            attendance,
+            &who,
+            &community,
+            &session_claims::rewrap_session(&occurrence),
+            "self_rewrap",
+        )
+        .await
+        {
+            Verdict::Act => {}
+            Verdict::HandledElsewhere {
+                occurrence: handler,
+            } => {
+                report.not_handled_here.push((occurrence, Some(handler)));
+                continue;
+            }
+            Verdict::Unclaimed => {
+                report.not_handled_here.push((occurrence, None));
+                continue;
+            }
+        }
         match engine
             .rekey_self_occurrence_add(&owner, std::slice::from_ref(&occurrence))
             .await
@@ -152,10 +197,7 @@ pub async fn rewrap_for_new_devices(engine: &Arc<Engine>, node_key_id: &str) -> 
                     "self files RE-WRAPPED for a new device of this owner — every self file \
                      written before it was claimed now opens there (CIRISServer#678)"
                 );
-                memo()
-                    .lock()
-                    .expect("self re-wrap memo poisoned")
-                    .insert(key);
+                attendance.record_act(&key);
                 if !r.changed_blobs.is_empty() {
                     crate::compose::kick_replication("self files re-wrapped for a new device");
                 }

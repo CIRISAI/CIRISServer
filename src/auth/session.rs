@@ -807,6 +807,16 @@ pub async fn resolve_bearer(
         return Ok(None);
     }
     let role = UserRole::from_wa_role(cert.role);
+    // THE PERSON IS ON THIS DEVICE (CC 3.1.3.1, `crate::session_claims`). This
+    // is the one line every one of their authenticated requests passes, so it
+    // is where attendance is observed — not at boot, which would make whichever
+    // device came up first take the person's exchanges. Only the OWNER's own
+    // session counts: the delegated branch above returned before here (a
+    // helper acting for the person is not the person), and a lesser role on a
+    // shared node is not the person whose self this node is.
+    if role == UserRole::SystemAdmin {
+        crate::session_claims::Attendance::global().note_presence();
+    }
     Ok(Some(SessionCaller {
         wa_id: cert.wa_id,
         name: cert.name,

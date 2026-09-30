@@ -330,6 +330,11 @@ pub mod self_devices;
 /// (CIRISServer#678).
 pub mod self_rewrap;
 pub mod self_room_drive;
+/// **One device handles each exchange** (CC 3.1.3.1, CIRISPersist#782): the
+/// session-claim gate every autonomous act for the person passes, the
+/// attendance that decides where a claim is taken, the renewal loop, and
+/// `GET /v1/self/sessions` (`FSD/SESSION_CLAIMS.md`).
+pub mod session_claims;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);

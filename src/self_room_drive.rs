@@ -68,6 +68,12 @@ pub enum SelfRoomTick {
     Removed(usize),
     /// Another node's claim wins; ours is dropped and we join from theirs.
     Abandoned,
+    /// A commit was due (`Add` / `Remove` / `Rejoin`) and this device does not
+    /// hold the room's commit duty (CC 3.1.3.1, [`crate::session_claims`]):
+    /// `handler` names the device that does, `None` means nobody holds it and
+    /// nobody commits until the person is on a device in the room. Never acted
+    /// on here — two devices committing at one epoch fork the room.
+    NotHandledHere { handler: Option<String> },
     /// Converged — the tree matches the directory.
     Idle,
     /// The tick could not complete. The string names the rung, not the symptom.
@@ -291,6 +297,43 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
         rival = rival.is_some(),
         "self room: decided"
     );
+    // ONE COMMITTER (CC 3.1.3.1, `crate::session_claims`). `decide` returns
+    // Add / Remove / Rejoin to EVERY device holding the group — edge confines
+    // only `Create` to the lowest key — so with the person's devices all in
+    // the room, each of them committed the same add at the same epoch and the
+    // room forked. The commit duty is one exchange, `(self room,
+    // SELF_ROOM_MEMBERSHIP_SESSION)`; only the device the fold names commits.
+    // A device reaches this only while it HOLDS the group (those three arms
+    // need one), so the joiner — which cannot add itself — never claims it.
+    if matches!(
+        action,
+        SelfRoomAction::Add(_) | SelfRoomAction::Remove(_) | SelfRoomAction::Rejoin(_)
+    ) {
+        let who = crate::session_claims::Occupant {
+            owner: owner.clone(),
+            occurrence: node_key.clone(),
+        };
+        let verdict = crate::session_claims::gate(
+            &st.engine,
+            crate::session_claims::Attendance::global(),
+            &who,
+            &room_id,
+            crate::session_claims::SELF_ROOM_MEMBERSHIP_SESSION,
+            "self_room_commit",
+        )
+        .await;
+        match verdict {
+            crate::session_claims::Verdict::Act => {}
+            crate::session_claims::Verdict::HandledElsewhere { occurrence } => {
+                return SelfRoomTick::NotHandledHere {
+                    handler: Some(occurrence),
+                }
+            }
+            crate::session_claims::Verdict::Unclaimed => {
+                return SelfRoomTick::NotHandledHere { handler: None }
+            }
+        }
+    }
     match action {
         SelfRoomAction::NotInRoster => SelfRoomTick::NotInRoster,
         SelfRoomAction::SoleDevice => SelfRoomTick::SoleDevice,
