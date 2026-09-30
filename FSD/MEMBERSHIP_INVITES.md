@@ -26,18 +26,32 @@ enrolled person's node begins receiving the group's rows and wraps.
 inviter(s)                      invitee K                          group
 ─────────                       ─────────                          ─────
 propose(K, role) ──────────────▶ inbox: pending proposal
-  (founder_only: 1 signature;
-   quorum:M/N: envelope → cosign
-   → the proposal is complete
-   when M have signed)
-                                 accept(proposal) — K's pen ─────▶ widening admitted
+  (ONE inviter signs: the founder
+   under founder_only, any member
+   otherwise)
+                                 accept(proposal) — K's pen
+                                                    │
+  growth record (supersede / widening) under the ◀──┘
+  group's consensus_protocol, citing the acceptance:
+  founder_only = 1 signature; quorum:M/N = envelope
+  → cosign → assemble, as today ──────────────────────────────────▶ member admitted
                                  decline(proposal) — K's pen ────▶ proposal closed
                                  (no act before expiry) ──────────▶ proposal expired
 ```
 
 - **A proposal is not membership.** It grants nothing: no rows, no wraps, no
-  room address. It names the group, K, the offered role, the proposer(s) and an
-  expiry, and it reaches K's node so K can see it.
+  room address. It names the group, K (in `subject_key_ids`; AV-84 keeps a
+  targeted row's `attested_key_id` its producer), the offered role, the one
+  inviter and an `expires_at` (bounded at 30 days), and persist serves it to K
+  through a narrow read arm so K's node can see it.
+- **The quorum stays on the growth record, not the invitation** (persist's
+  #955 design): one inviter proposes; the supersede / widening that admits K
+  carries the protocol's M-of-N exactly as today. One quorum check, not two
+  that could drift. So under a quorum protocol K may accept and still not be
+  admitted if the quorum never assembles.
+- **Expiry is judged on signed instants** — the acceptance's and the growth
+  record's `asserted_at` against the proposal's `expires_at` — never on a
+  receiver's clock.
 - **Acceptance is K's own act,** signed by K's person key through the server-side pen
   (the same authority `release_node` uses — a session bearer suffices). It binds the
   proposal (its attestation id / content hash) and the role; accepting a different role
@@ -54,7 +68,7 @@ propose(K, role) ──────────────▶ inbox: pending pr
 
 | Route | Who | Does |
 |---|---|---|
-| `POST /v1/families/{id}/invites`, `POST /v1/communities/{id}/invites` | a member with authority under the protocol | writes the proposal (founder_only), or opens the quorum envelope whose completion is the proposal |
+| `POST /v1/families/{id}/invites`, `POST /v1/communities/{id}/invites` | the founder (founder_only) or any member | writes the proposal, signed by that one inviter |
 | `GET /v1/families/{id}/invites`, `GET /v1/communities/{id}/invites` | members | pending / accepted / declined / expired, per invitee |
 | `DELETE …/invites/{proposal_id}` | the proposer(s) | withdraws a pending proposal |
 | `GET /v1/self/invites` | the invitee | the inbox: every proposal addressed to me, across families and communities |
