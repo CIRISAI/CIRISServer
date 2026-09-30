@@ -126,6 +126,14 @@ pub const WHY_COMMONS_READABLE: Why = msg(
     "custody.commons_readable_by_holders",
     "This file is public: anyone holding the bytes can read them, so who can open it is not a list.",
 );
+pub const WHY_NO_COPY_REPORTS_PENDING: Why = msg(
+    "custody.no_copy_reports_pending",
+    "Your other devices cannot yet report that they hold no copy; those reports arrive with within-cohort custody acknowledgements. Until then a device without a delivery receipt is shown as unknown.",
+);
+pub const WHY_NO_COPY_HERE: Why = msg(
+    "custody.no_copy_here",
+    "This device holds no copy of the file, so who can open it and how many copies are announced are answered by a device that holds it.",
+);
 
 /// Every custody reason, for the FSD table and the gates.
 pub const ALL_WHY: &[Why] = &[
@@ -137,12 +145,24 @@ pub const ALL_WHY: &[Why] = &[
     WHY_RECEIPT_FROM_OTHER_KEY,
     WHY_RECEIPTS_UNREADABLE,
     WHY_COMMONS_READABLE,
+    WHY_NO_COPY_REPORTS_PENDING,
+    WHY_NO_COPY_HERE,
 ];
 
 /// `holds` tokens: one word per fact, like the drive's byte states.
+///
+/// The maintainer's ruling on #704: "no copy here is a receipt (node
+/// responsive, no copy)." A device that ANSWERS that it holds nothing has said
+/// something about custody, so `none` is a fact, never folded into `unknown`.
+/// At this pin only THIS device can say it (`checked_at`); a remote device's
+/// signed "no copy" arrives with persist's within-cohort custody
+/// acknowledgements (CIRISConstitution#130), and will carry `reported_at`.
 pub const HOLDS_HERE: &str = "here";
 pub const HOLDS_RECEIVED: &str = "received";
+pub const HOLDS_NONE: &str = "none";
 pub const HOLDS_UNKNOWN: &str = "unknown";
+/// Every `holds` token, in the order a client should rank them.
+pub const HOLDS: &[&str] = &[HOLDS_HERE, HOLDS_RECEIVED, HOLDS_NONE, HOLDS_UNKNOWN];
 
 /// One of the person's devices, with every key it answers to.
 #[derive(Debug, Clone)]
@@ -243,12 +263,21 @@ pub struct DeviceCustody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub this_device: bool,
-    /// A key of this device is a grant recipient in persist's access list.
-    pub can_open: bool,
+    /// A key of this device is a grant recipient in persist's access list;
+    /// `null` when the access list is not answerable here (this device holds
+    /// no copy — [`WHY_NO_COPY_HERE`]).
+    pub can_open: Option<bool>,
     pub received: Option<ReceivedView>,
-    /// `here` (this device, bytes held), `received` (a delivery receipt names
-    /// it) or `unknown` (nothing this node can see says either way).
+    /// `here` (this device holds the bytes), `received` (a delivery receipt
+    /// names it), `none` (the device answered: it holds no copy — this device
+    /// only, until remote reports exist) or `unknown` (nothing says either way).
     pub holds: &'static str,
+    /// THIS device's statement time (RFC 3339): `holds` for this device is a
+    /// live answer, not an inference. `null` on every other device.
+    pub checked_at: Option<String>,
+    /// When a remote device reported its `holds` — always `null` until
+    /// persist's within-cohort custody acknowledgements carry such reports.
+    pub reported_at: Option<String>,
 }
 
 /// What the receipt read found.
@@ -279,13 +308,16 @@ fn received_view(r: &ciris_edge::receipts::Received) -> ReceivedView {
 /// **The per-device answer**: each device against the access list and the
 /// receipts, plus the receipts no device answers to, plus why it is partial.
 /// `access_devices` is every device key persist's custody names as able to
-/// open the blob; `held_here` is persist's.
+/// open the blob (`None` when this device holds no copy and persist's custody
+/// could not be asked); `held_here` is persist's, `false` on that path;
+/// `checked_at` is the moment this device answered.
 pub fn device_half(
     devices: &[Device],
-    access_devices: &HashSet<String>,
+    access_devices: Option<&HashSet<String>>,
     held_here: bool,
     receipts: &Receipts,
     this_device_is_author: bool,
+    checked_at: &str,
 ) -> DeviceHalf {
     let mut why = Vec::new();
     let held: &[ciris_edge::receipts::Received] = match receipts {
@@ -309,20 +341,25 @@ pub fn device_half(
                     received_view(r)
                 })
             });
-            let holds = if d.this_device && held_here {
-                HOLDS_HERE
-            } else if received.is_some() {
-                HOLDS_RECEIVED
-            } else {
-                HOLDS_UNKNOWN
+            // THIS device answers for itself: it holds the bytes or it does
+            // not, and either is a fact. A receipt this device once signed does
+            // not outrank its own "no copy" now (an eviction does not retract
+            // a receipt at this pin). Other devices: a receipt, or unknown.
+            let holds = match (d.this_device, held_here, received.is_some()) {
+                (true, true, _) => HOLDS_HERE,
+                (true, false, _) => HOLDS_NONE,
+                (false, _, true) => HOLDS_RECEIVED,
+                (false, _, false) => HOLDS_UNKNOWN,
             };
             DeviceCustody {
                 node_key_id: d.node_key_id.clone(),
                 label: d.label.clone(),
                 this_device: d.this_device,
-                can_open: d.keys.iter().any(|k| access_devices.contains(k)),
+                can_open: access_devices.map(|a| d.keys.iter().any(|k| a.contains(k))),
                 received,
                 holds,
+                checked_at: d.this_device.then(|| checked_at.to_owned()),
+                reported_at: None,
             }
         })
         .collect::<Vec<_>>();
@@ -355,6 +392,15 @@ pub fn device_half(
         if !other_receipts.is_empty() {
             why.push(WHY_RECEIPT_FROM_OTHER_KEY);
         }
+    }
+    if access_devices.is_none() {
+        why.push(WHY_NO_COPY_HERE);
+    }
+    if rows
+        .iter()
+        .any(|d| !d.this_device && d.holds == HOLDS_UNKNOWN)
+    {
+        why.push(WHY_NO_COPY_REPORTS_PENDING);
     }
     DeviceHalf {
         devices: rows,
@@ -422,15 +468,16 @@ pub fn access_device_keys(
         .collect()
 }
 
-/// The substrate's own partial-answer reasons, as ids: persist's `why` is a
+/// The substrate's partial-answer reasons, as ids: persist's `why` is a
 /// sentence keyed by TIER, so the tier picks the id (a reword upstream cannot
-/// move an answer between reasons).
-pub fn substrate_why(custody: &ciris_persist::federation::blob_custody::BlobCustody) -> Vec<Why> {
+/// move an answer between reasons). Taken from persist's custody when this
+/// device holds a copy, from the row's pointer when it does not.
+pub fn substrate_why(copies_observable: bool, tier: &str) -> Vec<Why> {
     let mut out = Vec::new();
-    if !custody.copies_observable {
+    if !copies_observable {
         out.push(WHY_COPIES_UNOBSERVABLE);
     }
-    if custody.tier == "plaintext" {
+    if tier == "plaintext" {
         out.push(WHY_COMMONS_READABLE);
     }
     out
@@ -464,14 +511,20 @@ mod tests {
         let access: HashSet<String> = ["a".into(), "b".into()].into();
         let half = device_half(
             &devices,
-            &access,
+            Some(&access),
             true,
             &Receipts::Held(vec![rec("b"), rec("stranger")]),
             true,
+            "2026-09-30T00:00:00Z",
         );
         assert_eq!(half.devices[0].holds, HOLDS_HERE);
         assert_eq!(half.devices[1].holds, HOLDS_RECEIVED);
-        assert!(half.devices.iter().all(|d| d.can_open));
+        assert!(half.devices.iter().all(|d| d.can_open == Some(true)));
+        assert_eq!(
+            half.devices[0].checked_at.as_deref(),
+            Some("2026-09-30T00:00:00Z")
+        );
+        assert_eq!(half.devices[1].checked_at, None);
         assert_eq!(half.other_receipts.len(), 1);
         let ids: Vec<_> = half.why.iter().map(|w| w.reason_id).collect();
         assert!(ids.contains(&"custody.receipt_is_delivery_not_holding"));
@@ -484,16 +537,50 @@ mod tests {
     #[test]
     fn an_inline_file_says_why_it_has_no_receipt() {
         let devices = vec![dev("a", true), dev("b", false)];
+        let access = HashSet::new();
         let half = device_half(
             &devices,
-            &HashSet::new(),
+            Some(&access),
             true,
             &Receipts::Unsupported,
             true,
+            "t",
         );
-        assert_eq!(half.why, vec![WHY_INLINE_NO_RECEIPT]);
+        assert_eq!(
+            half.why,
+            vec![WHY_INLINE_NO_RECEIPT, WHY_NO_COPY_REPORTS_PENDING]
+        );
         assert_eq!(half.devices[1].holds, HOLDS_UNKNOWN);
         assert_eq!(compact(&devices, &Receipts::Unsupported).received_on, None);
+    }
+
+    /// The maintainer's ruling on #704: a device that holds the row and not the
+    /// bytes answers `none` for itself, with the time it answered — never 409.
+    #[test]
+    fn this_device_without_a_copy_says_none_and_when() {
+        let devices = vec![dev("b", true), dev("a", false)];
+        let half = device_half(
+            &devices,
+            None,
+            false,
+            &Receipts::Held(vec![rec("b")]),
+            false,
+            "2026-09-30T12:00:00Z",
+        );
+        assert_eq!(
+            half.devices[0].holds, HOLDS_NONE,
+            "its own answer outranks its old receipt"
+        );
+        assert_eq!(
+            half.devices[0].checked_at.as_deref(),
+            Some("2026-09-30T12:00:00Z")
+        );
+        assert_eq!(half.devices[0].can_open, None);
+        assert_eq!(half.devices[1].holds, HOLDS_UNKNOWN);
+        assert_eq!(half.devices[1].reported_at, None);
+        let ids: Vec<_> = half.why.iter().map(|w| w.reason_id).collect();
+        assert!(ids.contains(&"custody.no_copy_here"), "{ids:?}");
+        assert!(ids.contains(&"custody.no_copy_reports_pending"), "{ids:?}");
     }
 
     #[test]

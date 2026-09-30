@@ -29,8 +29,18 @@ drive.withdrawn` — then persist's custody door, asked as the drive's viewer
 key (the split-install content occurrence, `drive::viewer_key`), which runs
 the byte read's tier gate. A viewer who cannot open the bytes gets the byte
 read's refusal through the same `refuse_state` (`drive.not_granted`,
-`drive.not_fetched`, `drive.evicted`, …) and learns nothing about who else
-can open them. No new refusal id.
+`drive.evicted`, …) and learns nothing about who else can open them. No new
+refusal id.
+
+**Authorized by the ROW, not the bytes** (maintainer's ruling on #704: "no
+copy here is a receipt (node responsive, no copy)"). A device that holds the
+row but not the bytes is NOT refused `409 drive.not_fetched` (the byte read
+still is): the view answers 200, its own entry is `holds: "none"` with
+`checked_at`, `held_here: false`, `copies_known: 0`, and — because persist's
+custody reads the blob's head row, which is not there — `access: null`,
+`size_bytes: null`, `announced_holders: []`, every device's `can_open: null`,
+with `custody.no_copy_here` in `why`. The tier and `copies_observable` come
+from the row's pointer.
 
 ```jsonc
 {
@@ -39,13 +49,16 @@ can open them. No new refusal id.
   "size_bytes": 25168000,                 // the stored (at-rest) length
   "at_rest_sha256": "…",
   "author_device": "<node key>",          // the stream's producer (or the row's attester, inline)
+  "checked_at": "2026-09-30T…Z",          // when THIS device answered
   "this_device_is_author": true,
   "devices_total": 2,                     // the person's devices (§2.1)
   "devices": [
     { "node_key_id": "…", "label": "laptop", "this_device": true,
-      "can_open": true, "received": null, "holds": "here" },
+      "can_open": true, "received": null, "holds": "here",
+      "checked_at": "2026-09-30T…Z", "reported_at": null },
     { "node_key_id": "…", "this_device": false,
-      "can_open": true, "received": { "epoch": 0, "k": 25, "at": null }, "holds": "received" }
+      "can_open": true, "received": { "epoch": 0, "k": 25, "at": null }, "holds": "received",
+      "checked_at": null, "reported_at": null }
   ],
   "held_here": true,
   "copies_known": 1,                      // persist: held_here + announced holders elsewhere
@@ -61,8 +74,16 @@ can open them. No new refusal id.
 
 `holds` is one word per fact, like the drive's byte states: `here` (this
 device, bytes held — persist's `held_here`), `received` (a delivery receipt
-names the device), `unknown` (nothing this node can see says either way —
-NOT "absent").
+names the device), `none` (the device ANSWERED that it holds no copy — at this
+pin only this device can, and its entry carries `checked_at`, the moment it
+answered; a live statement, not an inference), `unknown` (nothing this node
+can see says either way — NOT "absent"). A device's own `none` outranks a
+receipt it once signed (an eviction does not retract a receipt, §4.3).
+`reported_at` is on every entry and always `null` today: a remote device's
+signed "no copy" arrives with persist's within-cohort custody
+acknowledgements (CIRISConstitution#130), and will fill `holds: "none"` +
+`reported_at` for other devices then. `can_open` is `null` when the access
+list is not answerable on this device.
 
 ### 1.2 `GET /v1/drive` — `custody: {devices_total, received_on}` per row
 
@@ -130,7 +151,7 @@ the server already builds:
 
 Each rides a 200 in `why[]` as `{reason_id, detail}`. String-literal ids,
 one `msg` call each in `src/file_custody.rs`, listed as localization debt in
-`tools/check_server_localization.py` (ratchet 139 → 147 in
+`tools/check_server_localization.py` (ratchet 139 → 151 across this cut, in
 `tests/localization_gate.rs`) for the client bundle (CIRISClient#78):
 
 | id | when | English |
@@ -143,11 +164,13 @@ one `msg` call each in `src/file_custody.rs`, listed as localization debt in
 | `custody.receipt_signer_not_your_device` | a receipt no listed device answers to | Some receipts were signed by devices that are not among your devices (another member of the room, or an agent's own key); they are listed separately. |
 | `custody.receipts_unreadable` | the stream log read failed | This device could not read its delivery receipts just now; which devices received the file is unknown until it can. |
 | `custody.commons_readable_by_holders` | plaintext (commons) tier | This file is public: anyone holding the bytes can read them, so who can open it is not a list. |
+| `custody.no_copy_reports_pending` | another device reads `unknown` | Your other devices cannot yet report that they hold no copy; those reports arrive with within-cohort custody acknowledgements. Until then a device without a delivery receipt is shown as unknown. |
+| `custody.no_copy_here` | this device holds the row, not the bytes | This device holds no copy of the file, so who can open it and how many copies are announced are answered by a device that holds it. |
 
-Also known, not a `why`: a device that holds the ROW but has not pulled the
-bytes answers `409 drive.not_fetched` — persist's custody reads the blob's
-head row, which it does not have yet, exactly as the byte read refuses. The
-author device is the complete answer.
+~~Also known, not a `why`: a device that holds the ROW but has not pulled the
+bytes answers `409 drive.not_fetched`.~~ Superseded by the #704 ruling (§1.1):
+that device answers 200 with its own `holds: "none"`; the author device is
+still the complete answer for access and receipts.
 
 ## 4. Gaps to file upstream (named here, not filed)
 
@@ -171,9 +194,16 @@ author device is the complete answer.
    `receipts_from_other_keys`. Needs a directory read from an actor key to
    the node that hosts it (persist).
 6. **Custody on a device that has not pulled** — `blob_custody` refuses
-   `NotHeld` without the blob head; a head-less answer (access from the
-   row's grants, receipts from the local log) would let every device render
-   the view (persist).
+   `NotHeld` without the blob head. Since the #704 ruling the view answers
+   anyway (`holds: "none"` for itself), but `access`, `size_bytes` and
+   `can_open` are `null` there; a head-less persist answer (access from the
+   row's grants) would fill them (persist).
+8. **Remote "no copy" reports** — only THIS device can say `none` today; a
+   signed per-device "I hold no copy" from the person's other devices is
+   persist's within-cohort custody acknowledgement (CIRISConstitution#130,
+   CIRISPersist#942 part 2). The per-device shape is ready: `holds` ∈
+   here | received | none | unknown, plus `reported_at` (`why`:
+   `custody.no_copy_reports_pending`).
 7. **Receipts are admitted only where the STH was published** — a
    non-author device holds only its own receipt (and any whose STH it
    re-put while pulling). Replicating the author's admitted receipt set to

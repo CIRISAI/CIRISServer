@@ -2257,14 +2257,18 @@ async fn file_meta(
 /// (`find_file`), a withdrawn row answered 410 exactly as a read is — and then
 /// persist's custody door, asked as the drive's viewer key, which runs
 /// `read_any_for_viewer`'s tier gate: a viewer who cannot open the bytes gets
-/// the byte read's refusal (`drive.not_granted`, `drive.not_fetched`, …)
+/// the byte read's refusal (`drive.not_granted`, `drive.evicted`, …)
 /// through the same `refuse_state`, and learns nothing about who else can.
 /// A custody view is not a side door to the access list.
 ///
-/// A device that holds the ROW but not yet the bytes is `409 drive.not_fetched`
-/// here too: persist's custody reads the blob's head row, which a device that
-/// has not pulled does not have. Asking the device that wrote the file is the
-/// complete answer — it is also the device that admits every receipt.
+/// A device that holds the ROW but not yet the bytes gets a 200, not the byte
+/// read's 409 (the maintainer's ruling on #704: "no copy here is a receipt
+/// (node responsive, no copy)"): the view is authorized by the row, and this
+/// device's own entry is `holds: "none"` with `checked_at`. Persist's custody
+/// reads the blob's head row, which such a device does not have, so `access`,
+/// `size_bytes` and the announced holders are `null`/empty there and a `why`
+/// says so; the device that wrote the file is the complete answer — it is
+/// also the device that admits every receipt.
 async fn file_custody(
     State(st): State<DriveState>,
     headers: HeaderMap,
@@ -2296,8 +2300,20 @@ async fn file_custody(
         }
     };
     let content = store(&st.engine);
+    // AUTHORIZED BY THE ROW (the maintainer's ruling on #704: "no copy here is
+    // a receipt (node responsive, no copy)"). Everything above — the session,
+    // the cohort's membership, edge's gated reader, the withdrawn row — is
+    // what lets this caller see the ROW, and that is the gate. Persist's
+    // custody door then answers from the blob's head row, which a device that
+    // has not pulled does not have: its `NotFetched` is not a refusal here but
+    // this device's own custody fact — it answered, and it holds no copy —
+    // reported as `holds: "none"` with the time it answered. Every OTHER
+    // refusal of that door (`not_granted` — this device's key holds no grant —
+    // an eviction, a seal fault) stays the byte read's refusal, by the same
+    // `refuse_state`.
     let custody = match found.file.custody(&content, &viewer).await {
-        Ok(c) => c,
+        Ok(c) => Some(c),
+        Err(reason) if reason.kind() == "not_fetched" => None,
         Err(reason) => {
             return match unopened(&reason) {
                 ByteState::Absent { state, detail } => refuse_state(state, detail),
@@ -2305,6 +2321,7 @@ async fn file_custody(
             }
         }
     };
+    let checked_at = chrono::Utc::now().to_rfc3339();
     let devices = match crate::file_custody::owner_devices(&st.engine, &owner.key_id).await {
         Ok(d) => d,
         Err(e) => {
@@ -2326,15 +2343,48 @@ async fn file_custody(
         .iter()
         .any(|d| d.this_device && d.keys.contains(&author_device))
         || author_device == st.node_signer.key_id;
-    let access = crate::file_custody::access_device_keys(&custody);
+    let access = custody
+        .as_ref()
+        .map(crate::file_custody::access_device_keys);
+    let held_here = custody.as_ref().is_some_and(|c| c.held_here);
     let half = crate::file_custody::device_half(
         &devices,
-        &access,
-        custody.held_here,
+        access.as_ref(),
+        held_here,
         &receipts,
         this_device_is_author,
+        &checked_at,
     );
-    let mut why = crate::file_custody::substrate_why(&custody);
+    // Without a copy here the tier comes from the ROW (the pointer names the
+    // tier the bytes were sealed at), and so does CC 5.2's observability: a
+    // self/family blob is never announced, whoever asks.
+    let (tier, size_bytes, at_rest, copies_known, copies_observable, announced) = match &custody {
+        Some(c) => (
+            c.tier.clone(),
+            Some(c.size_bytes),
+            c.sha256_hex.clone(),
+            c.copies_known,
+            c.copies_observable,
+            serde_json::to_value(&c.announced_holders).unwrap_or_default(),
+        ),
+        None => {
+            use ciris_persist::federation::types::cohort_scope::CryptoTier;
+            let tier = match found.file.pointer.tier {
+                CryptoTier::Plaintext => "plaintext",
+                CryptoTier::InvisibleEncrypted => "invisible_encrypted",
+                CryptoTier::CommunityDek => "community_dek",
+            };
+            (
+                tier.to_owned(),
+                None,
+                found.file.pointer.content_sha256.clone(),
+                0,
+                tier != "invisible_encrypted",
+                serde_json::json!([]),
+            )
+        }
+    };
+    let mut why = crate::file_custody::substrate_why(copies_observable, &tier);
     why.extend(half.why);
     let receipts_supported = !matches!(receipts, crate::file_custody::Receipts::Unsupported);
     (
@@ -2343,18 +2393,24 @@ async fn file_custody(
             "attestation_id": found.file.attestation_id,
             "cohort": room.row_scope_token(),
             "room_id": room.content_group_id(),
-            "tier": custody.tier,
-            "size_bytes": custody.size_bytes,
-            "at_rest_sha256": custody.sha256_hex,
+            "tier": tier,
+            // The stored length, from persist's custody; `null` when this
+            // device holds no copy (the row does not carry it).
+            "size_bytes": size_bytes,
+            "at_rest_sha256": at_rest,
             "author_device": author_device,
             "this_device_is_author": this_device_is_author,
             "devices_total": half.devices.len(),
             "devices": half.devices,
-            "held_here": custody.held_here,
-            "copies_known": custody.copies_known,
-            "copies_observable": custody.copies_observable,
-            "announced_holders": custody.announced_holders,
-            "access": custody.access,
+            "held_here": held_here,
+            // A device with no copy is never counted as one.
+            "copies_known": copies_known,
+            "copies_observable": copies_observable,
+            "announced_holders": announced,
+            // `null` when this device holds no copy: who can open the blob is
+            // answered by persist from the blob's head row, which is not here.
+            "access": custody.as_ref().map(|c| &c.access),
+            "checked_at": checked_at,
             "receipts_supported": receipts_supported,
             "receipts_unsupported_reason": (!receipts_supported)
                 .then_some(crate::file_custody::WHY_INLINE_NO_RECEIPT.reason_id),

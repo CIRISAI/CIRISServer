@@ -718,7 +718,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// eight `custody.*` partial-answer reasons of
     /// `GET /v1/files/{id}/custody` (`src/file_custody.rs`, one `msg` call per
     /// id) — same reason, same list, same client issue (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 149;
+    ///
+    /// 149 -> 151 for 0.5.218, the maintainer's ruling on #704 ("no copy here
+    /// is a receipt"): `custody.no_copy_reports_pending` and
+    /// `custody.no_copy_here` — same reason, same list, same client issue.
+    const MAX_UNCOVERED: usize = 151;
 
     let en = load_en();
     let ids = scraped_server_ids();

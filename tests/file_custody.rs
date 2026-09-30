@@ -21,9 +21,13 @@
 //!    received_on: 1}`;
 //! 2. an inline file answers `receipts_supported: false` with its reason id;
 //! 3. every refusal is the byte read's refusal, status AND id — no session, a
-//!    cohort the caller is not in, a row that is not there, and (on B, which
-//!    holds the row and not the bytes) `not_fetched`; and persist's custody
-//!    door itself refuses a viewer key that cannot open the bytes.
+//!    cohort the caller is not in, a row that is not there, a withdrawn file
+//!    (410); and persist's custody door itself refuses a viewer key that
+//!    cannot open the bytes (`not_granted`);
+//! 4. the maintainer's ruling on #704 — "no copy here is a receipt (node
+//!    responsive, no copy)": on B, which holds the row and not the bytes, the
+//!    view is a 200 whose own entry is `holds: "none"` with `checked_at`,
+//!    `held_here: false`, `copies_known: 0`, while the byte read stays 409.
 
 use std::sync::Arc;
 
@@ -398,7 +402,10 @@ async fn the_author_device_names_the_device_that_received_the_file() {
         Ok(c) => panic!("a stranger's viewer key read the custody view: {c:?}"),
     }
 
-    // B holds the ROW, not the bytes: the custody view is B's byte read's 409.
+    // B holds the ROW, not the bytes. The maintainer's ruling on #704: "no copy
+    // here is a receipt (node responsive, no copy)" — the view is authorized by
+    // the ROW, and B's own entry says `none`, with when it said so. The byte
+    // read still answers 409: the BYTES are not here; the custody FACT is.
     seed_key(&second, &first_key, 0xA1, 0xA2, identity_type::NODE).await;
     record_claim_locally(&second, &owner, &first_key).await;
     second
@@ -415,19 +422,106 @@ async fn the_author_device_names_the_device_that_received_the_file() {
         owner.seed_dir.clone(),
     )
     .await;
-    let read = get(
+    let (s, read) = get(
         &client,
         &base2,
         Some(&bearer2),
         &format!("/v1/files/{big_id}?cohort=self&raw=1"),
     )
     .await;
-    let custody = get(
+    assert_eq!(
+        (s, read["reason_id"].as_str()),
+        (409, Some("drive.not_fetched")),
+        "precondition: B holds the row, not the bytes: {read}"
+    );
+    let (s, v) = get(
         &client,
         &base2,
         Some(&bearer2),
         &format!("/v1/files/{big_id}/custody?cohort=self"),
     )
     .await;
-    same("row here, bytes not", read, custody);
+    assert_eq!(s, 200, "no copy here is an answer, not a refusal: {v}");
+    assert_eq!(v["held_here"], false, "{v}");
+    assert_eq!(
+        v["copies_known"], 0,
+        "a device with no copy is not a copy: {v}"
+    );
+    assert_eq!(v["devices_total"], 2, "{v}");
+    assert!(
+        v["access"].is_null(),
+        "not answerable without the blob: {v}"
+    );
+    let mine = v["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .find(|d| d["this_device"] == true)
+        .unwrap_or_else(|| panic!("B lists itself: {v}"))
+        .clone();
+    assert_eq!(mine["node_key_id"], second_key.as_str(), "{v}");
+    assert_eq!(mine["holds"], "none", "{v}");
+    assert!(
+        mine["checked_at"]
+            .as_str()
+            .is_some_and(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok()),
+        "a live statement carries its time: {v}"
+    );
+    let a_from_b = v["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .find(|d| d["node_key_id"] == first_key.as_str())
+        .unwrap_or_else(|| panic!("A is listed on B: {v}"))
+        .clone();
+    assert_eq!(a_from_b["holds"], "unknown", "{v}");
+    assert!(
+        a_from_b["checked_at"].is_null() && a_from_b["reported_at"].is_null(),
+        "{v}"
+    );
+    let why: Vec<&str> = v["why"]
+        .as_array()
+        .expect("why")
+        .iter()
+        .filter_map(|w| w["reason_id"].as_str())
+        .collect();
+    for id in [
+        "custody.no_copy_here",
+        "custody.no_copy_reports_pending",
+        "custody.copies_unobservable_by_design",
+        "custody.receipts_admitted_on_author_device",
+    ] {
+        assert!(why.contains(&id), "{id} in {why:?}");
+    }
+
+    // A WITHDRAWN file stays the byte read's 410, on the author.
+    let (s, w) = status_json(
+        client
+            .delete(format!("{base}/v1/files/{big_id}?cohort=self"))
+            .bearer_auth(&bearer)
+            .send()
+            .await
+            .expect("DELETE"),
+    )
+    .await;
+    assert_eq!(s, 200, "withdraw: {w}");
+    let read = get(
+        &client,
+        &base,
+        Some(&bearer),
+        &format!("/v1/files/{big_id}?cohort=self&raw=1"),
+    )
+    .await;
+    assert_eq!(read.0, 410, "{}", read.1);
+    same(
+        "withdrawn",
+        read,
+        get(
+            &client,
+            &base,
+            Some(&bearer),
+            &format!("/v1/files/{big_id}/custody?cohort=self"),
+        )
+        .await,
+    );
 }

@@ -843,6 +843,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "custody.receipt_signer_not_your_device",
     "custody.receipts_unreadable",
     "custody.commons_readable_by_holders",
+    # The maintainer's ruling on #704 ("no copy here is a receipt"): a device
+    # with the row and no bytes answers `holds: none` for itself; the other
+    # devices' "no copy" reports wait on persist's within-cohort custody
+    # acknowledgements (CIRISConstitution#130).
+    "custody.no_copy_reports_pending",
+    "custody.no_copy_here",
     # THE CONTACT FLOW (0.5.218) — same queue as the planes above, requested of
     # the client with their English (CIRISClient#78): the person's contact code
     # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
