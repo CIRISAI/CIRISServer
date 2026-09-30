@@ -4368,6 +4368,10 @@ pub(crate) fn kick_replication(reason: &'static str) -> bool {
         );
         return false;
     };
+    // CC 5.4.6 — whatever this kick carries may have moved the announced relay
+    // (an announce, a release, a claim). A nudge is a coalesced `Notify`: free
+    // on a node that is not a relay, one recompute on one that is.
+    crate::announced_relay::nudge();
     handle.spawn(async move {
         // ADMIT THE OWNER FIRST, HERE, so no caller has to remember. A round
         // publishes a self-plane row only if its attester is in the publish-own
@@ -4592,6 +4596,16 @@ pub(crate) async fn start_replication_runtime(
             //
             // `owed` outlives one iteration on purpose — see the kick below.
             let mut owed = false;
+            // CC 5.4.6 (CIRISServer#655) — the announced relay rides THIS loop:
+            // it is the one that keeps the self-publish set current, and the
+            // relay's answer is `own ∪ relayed`, so the two are refreshed by one
+            // hand. The role check (`infra:serve` from a root we trust) runs on
+            // the relay's own period; a nudge from `kick_replication` wakes the
+            // loop early and recomputes the sets only on a node that relays
+            // (see `announced_relay::refresh`).
+            let mut relay_due = tokio::time::Instant::now();
+            let mut relay_owed = false;
+            let mut nudged = false;
             loop {
                 // THE SET CHANGED ⇒ CARRY THE ROWS. Adding the owner without a
                 // kick left the rows it unlocks (owner-binding, occurrences)
@@ -4624,8 +4638,36 @@ pub(crate) async fn start_replication_runtime(
                 // polls every second instead — a bounded, startup-only window
                 // that ends on the first dispatch, since `owed` can only be set
                 // by a set that GAINED the owner and that happens once.
-                let wait = if owed { 1 } else { 30 };
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                // THE ANNOUNCED RELAY. A changed set is rows that just became
+                // publishable (or stopped being), so it carries a kick exactly
+                // as the owner's admission does — and the same debt rule: a
+                // kick that found no runtime yet is still owed.
+                let periodic = tokio::time::Instant::now() >= relay_due;
+                if periodic || nudged {
+                    if let Some(held) = SELF_PUBLISH.get() {
+                        if crate::announced_relay::refresh(
+                            &held.engine,
+                            &held.own_key_ids,
+                            periodic,
+                        )
+                        .await
+                        {
+                            relay_owed = true;
+                        }
+                    }
+                    if periodic {
+                        relay_due =
+                            tokio::time::Instant::now() + crate::announced_relay::RELAY_REFRESH;
+                    }
+                }
+                if relay_owed && kick_replication("announced relay set changed") {
+                    relay_owed = false;
+                }
+                let wait = if owed || relay_owed { 1 } else { 30 };
+                nudged = crate::announced_relay::wait_for_nudge(std::time::Duration::from_secs(
+                    wait,
+                ))
+                .await;
             }
         }
     });
@@ -4679,6 +4721,20 @@ pub(crate) async fn start_replication_runtime(
             pull_sink,
             revocations,
         }),
+        // CIRISEdge#678 / CC 5.4.6 (CIRISServer#655) — the per-kind `SelfOwn`
+        // publish set. Installed on EVERY node and inert on all but a relay:
+        // until `announced_relay::refresh` finds this node holding
+        // `infra:serve` from a root it trusts, the closure answers `None` for
+        // every plane and edge keeps each on the self-publish set — the
+        // single-provider behaviour, byte for byte. On a relay it answers the
+        // Key and IdentityOccurrence planes with `own ∪ announced devices (∪
+        // their owners, Key only)`, reading the SAME live set the
+        // `self_provider` above reads, so an owner admitted after the claim is
+        // in the union without a rebuild. Routes (`TransportDestination`) are
+        // never relayed. The closure does no I/O; see `announced_relay`.
+        kind_publish_selector: Some(crate::announced_relay::selector(Arc::clone(
+            &self_publish_keys,
+        ))),
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(
