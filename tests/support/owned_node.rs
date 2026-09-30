@@ -393,6 +393,36 @@ impl Person {
         }
     }
 
+    /// Offer every SIGNED family record `from` serves to this node's replicated
+    /// `put_family` door — INCLUDING ids this node already holds, which is
+    /// how an AMENDMENT (a superseded record carrying its quorum proof,
+    /// persist v49 #910.5) arrives. Returns, per family id, what the door
+    /// answered: `Ok(())` when it inserted, re-verified-and-applied, or found
+    /// the identical record; `Err(text)` when it refused (a differing record
+    /// without a proof is the #758 conflict). Records only — no roster rows,
+    /// so the amendment is judged against this node's roster as it stands.
+    pub async fn receive_family_records_from(
+        &self,
+        from: &Person,
+    ) -> Vec<(String, Result<(), String>)> {
+        let src = from.engine.federation_directory();
+        let dst = self.engine.federation_directory();
+        let mut out = Vec::new();
+        for served in src
+            .list_signed_families_since(None, u32::MAX)
+            .await
+            .expect("list signed families")
+        {
+            let id = served.family.family.family_key_id.clone();
+            let r = dst
+                .put_family(served.family)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            out.push((id, r));
+        }
+        out
+    }
+
     /// One request through the router, as this node's owner (or `bearer`).
     pub async fn call(
         &self,
@@ -483,6 +513,125 @@ pub async fn bind_self_scoped(engine: &Engine, owner: &LocalSigner, node_key_id:
     )
     .await
     .expect("apply the self-scoped owner-binding");
+}
+
+// ─── TEST-ONLY roster fixtures — the consent-to-join BYPASS ──────────────────
+//
+// Since 0.5.218 every roster-growing HTTP door refuses
+// `membership.consent_required` (the maintainer's ruling of 2026-09-30;
+// CIRISConstitution#133, CIRISPersist#955, `FSD/MEMBERSHIP_INVITES.md`): nobody
+// joins a household without their own acceptance, and the acceptance cannot be
+// recorded until persist v52. Tests whose PURPOSE is downstream of a
+// multi-member roster (quorum remove / role / leave / dissolve) still need one.
+// These helpers write it the way the pre-0.5.218 routes did — owner-signed rows
+// through persist's own SIGNED doors — WITHOUT going through the server.
+//
+// They exist only here, under `tests/`. There is no production bypass, and a
+// test that uses one is asserting what happens AFTER a join, never that a join
+// is allowed.
+
+impl Person {
+    /// TEST-ONLY (bypasses the consent-to-join door): a household founded by
+    /// this person with `others` already on its founding record, signed by this
+    /// person's pen through persist's replicated `put_family`. Every key must
+    /// already be registered on this node (`knows`).
+    pub async fn test_only_family_founded_with(
+        &self,
+        name: &str,
+        others: &[&Person],
+        consensus_protocol: &str,
+    ) -> String {
+        use ciris_persist::federation::types::{Family, FamilyMember, SignedFamily};
+        let at = chrono::Utc::now();
+        let mut members = vec![FamilyMember {
+            key_id: self.key().to_owned(),
+            joined_at: at,
+            role: Some("founder".to_owned()),
+        }];
+        members.extend(others.iter().map(|p| FamilyMember {
+            key_id: p.key().to_owned(),
+            joined_at: at,
+            role: Some("member".to_owned()),
+        }));
+        let family_id = format!("family:v1:{}", uuid::Uuid::new_v4().simple());
+        let family = Family {
+            family_key_id: family_id.clone(),
+            family_name: name.to_owned(),
+            members,
+            founded_at: at,
+            consensus_protocol: consensus_protocol.to_owned(),
+            consensus_protocol_entrenched: false,
+            persist_row_hash: String::new(),
+        };
+        let canonical =
+            ceg_produce_canonicalize(&family.signing_envelope()).expect("canonicalize family");
+        let sig = self
+            .owner
+            .signer()
+            .await
+            .sign_hybrid(&canonical)
+            .await
+            .expect("owner signs the family");
+        self.engine
+            .federation_directory()
+            .put_family(SignedFamily {
+                family,
+                authority_key_id: self.key().to_owned(),
+                scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+                scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+                supersede_proof: None,
+            })
+            .await
+            .expect("TEST-ONLY: put the multi-member family directly");
+        family_id
+    }
+
+    /// TEST-ONLY (bypasses the consent-to-join door): widen `family_id` by
+    /// `member_key_id` at `role`, signed by this person's pen — the
+    /// `FamilyMembershipWidening` row `POST /v1/families/{id}/members` wrote
+    /// before 0.5.218, through persist's own `add_member`.
+    pub async fn test_only_widen_family(&self, family_id: &str, member_key_id: &str, role: &str) {
+        use ciris_persist::federation::cohort::{AdmitSpec, Cohort, RosterMember};
+        use ciris_persist::federation::types::{FamilyMember, FamilyMembershipWidening};
+        let member = FamilyMember {
+            key_id: member_key_id.to_owned(),
+            joined_at: chrono::Utc::now(),
+            role: Some(role.to_owned()),
+        };
+        let row = FamilyMembershipWidening {
+            family_key_id: family_id.to_owned(),
+            member_key_id: member.key_id.clone(),
+            joined_at: member.joined_at,
+            effective_at: member.joined_at,
+            role: member.role.clone(),
+            persist_row_hash: String::new(),
+        };
+        let canonical =
+            ceg_produce_canonicalize(&row.signing_envelope()).expect("canonicalize widening");
+        let sig = self
+            .owner
+            .signer()
+            .await
+            .sign_hybrid(&canonical)
+            .await
+            .expect("owner signs the widening");
+        let spec = AdmitSpec {
+            authority_key_id: self.key().to_owned(),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            cosignatures: Vec::new(),
+        };
+        let added = self
+            .engine
+            .federation_directory()
+            .add_member(Cohort::Family, family_id, RosterMember::from(member), &spec)
+            .await
+            .expect("TEST-ONLY: widen the family directly");
+        assert!(
+            added,
+            "TEST-ONLY widening admitted nothing for {member_key_id}"
+        );
+    }
 }
 
 /// An active `wa_cert` + a bound session bearer on `engine`.
