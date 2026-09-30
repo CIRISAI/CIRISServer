@@ -321,6 +321,9 @@ pub mod location;
 /// Rendering an error with its whole cause chain, for the one line an operator
 /// reads (CIRISServer#586).
 pub mod error_chain;
+/// Where each file is — the custody view (`FSD/FILE_CUSTODY.md`): the person's
+/// devices against persist's custody and edge's delivery receipts.
+pub mod file_custody;
 pub mod media_gate;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a

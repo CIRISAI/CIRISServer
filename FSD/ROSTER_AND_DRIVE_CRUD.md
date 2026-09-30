@@ -460,6 +460,11 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
    split). The owner's `self` gate admits them only because `move_owner_binding_to_node_key` adds the
    node-key binding without withdrawing the actor's; a change that retires the actor binding would
    hide a split node's files from its own drive.
+9. **Where each file is (0.5.218).** `GET /v1/files/{id}/custody` answers which of the person's
+   devices hold a file, out of how many (persist's custody view + edge's delivery receipts), and
+   each `GET /v1/drive` row carries `custody: {devices_total, received_on}`. Point 7's
+   `devices_holding` stays as it was. Sources, gaps and the later copy-to / remove-from design:
+   `FSD/FILE_CUSTODY.md`.
 
 ## 6. Witnesses
 

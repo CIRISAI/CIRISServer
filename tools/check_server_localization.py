@@ -830,6 +830,25 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "auth.claim.owner_binding_rejected",
     "auth.claim.store_unavailable",
     "auth.claim.wrong_node",
+    # WHERE EACH FILE IS (0.5.218, `FSD/FILE_CUSTODY.md`): the custody view's
+    # partial-answer reasons — NOT refusals; each rides a 200 in `why[]` and
+    # says what the view cannot know (an inline file's missing receipt, CC 5.2's
+    # uncountable self/family copies, a receipt that proves delivery only).
+    # Same queue as the planes above (CIRISClient#78); the English is in the FSD.
+    "custody.inline_no_receipt",
+    "custody.copies_unobservable_by_design",
+    "custody.receipt_is_delivery_not_holding",
+    "custody.receipt_time_unknown",
+    "custody.receipts_admitted_on_author_device",
+    "custody.receipt_signer_not_your_device",
+    "custody.receipts_unreadable",
+    "custody.commons_readable_by_holders",
+    # The maintainer's ruling on #704 ("no copy here is a receipt"): a device
+    # with the row and no bytes answers `holds: none` for itself; the other
+    # devices' "no copy" reports wait on persist's within-cohort custody
+    # acknowledgements (CIRISConstitution#130).
+    "custody.no_copy_reports_pending",
+    "custody.no_copy_here",
     # THE CONTACT FLOW (0.5.218) — same queue as the planes above, requested of
     # the client with their English (CIRISClient#78): the person's contact code
     # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
