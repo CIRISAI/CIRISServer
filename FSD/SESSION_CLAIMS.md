@@ -229,3 +229,27 @@ for a person with two online devices, drives the person's activity on `device`,
 then asserts that `GET /v1/self/sessions` on EVERY device of the person names
 the same handler for every listed exchange. In `topologies/selffiles.yaml`
 after the `note` step.
+
+## 7. At persist v52.0.1 (0.5.218, edge v38.1 adopt) — renewal keeps `claimed_at`
+
+persist v52.0.1 shipped the read half of #946: `handler_for` judges each claim
+row live iff `now < its signed valid_until` (`session_claim::row_is_live`); the
+consumer TTL is only the fallback for a pre-v52 row. The successor-lease
+workaround of §4 is gone:
+
+- A **renewal** is a new self-report `scores` row that KEEPS the exchange's
+  ORIGINAL `claimed_at` (earliest-wins is stable, so another device never sees
+  the handler move) with `valid_until = now + 120 s`, capped at
+  `claimed_at + 86 400 s` (`session_claims::lease_for` / `renewal_lease`).
+- Past the cap the holder writes a **fresh claim** dated now; its older row is
+  live to the cap, so the handler does not change through the handover.
+- Not a `supersedes`: persist's own v52.0.1 renewal witness writes a second
+  claim row the same way, the fold is type-agnostic, and a `supersedes` is the
+  substrate's placement/widening primitive.
+- The original `claimed_at` comes from the fold (`handler_for`), with
+  `Attendance::claimed_at` as this process's record of it.
+
+Witness: `tests/one_device_handles_each_exchange.rs`
+`renewals_keep_claimed_at_and_the_other_device_never_sees_the_handler_move`
+(three renewals; B defers across each, including past where the pre-v52.0.1
+fold dropped A; the cap forces a fresh claim).

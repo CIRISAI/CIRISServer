@@ -385,6 +385,7 @@ async fn a_claim_authored_by_a_third_party_is_refused_at_admission() {
         &community,
         SELF_ROOM_MEMBERSHIP_SESSION,
         chrono::Utc::now(),
+        chrono::Utc::now() + chrono::Duration::from_std(session_claims::SESSION_CLAIM_TTL).unwrap(),
     )
     .await
     .expect("a self-report about oneself admits");
@@ -507,6 +508,8 @@ async fn the_rewrap_runs_only_on_the_device_the_fold_names() {
         &community,
         &session,
         chrono::Utc::now() - ttl + chrono::Duration::seconds(10),
+        // persist v52.0.1 judges the SIGNED lease: it ends ~10 s from now.
+        chrono::Utc::now() + chrono::Duration::seconds(10),
     )
     .await
     .expect("B claims");
@@ -544,4 +547,154 @@ async fn the_rewrap_runs_only_on_the_device_the_fold_names() {
         again.pending.is_empty() && again.rewrapped.is_empty(),
         "{again:?}"
     );
+}
+
+// ── persist v52.0.1: a renewal keeps claimed_at ────────────────────────────
+
+/// The `claimed_at` every claim row `key` wrote on `engine` carries, oldest row
+/// first (by `valid_until`).
+async fn claimed_ats(engine: &Engine, key: &str) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = claims_by(engine, key)
+        .await
+        .into_iter()
+        .map(|r| {
+            let e = &r.attestation.attestation_envelope;
+            (
+                e["valid_until"].as_str().unwrap_or_default().to_owned(),
+                e["claimed_at"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// **A renewed claim never moves the handler** (persist v52.0.1,
+/// CIRISPersist#946 read side). A claims and renews THREE times; every
+/// renewal row keeps A's ORIGINAL `claimed_at` and carries a later signed
+/// `valid_until`. B, with each row carried to it, defers to A at every step —
+/// including the instant just past the first lease's end, where the pre-v52.0.1
+/// fold (`now − claimed_at < ttl`) would have dropped A and let B take over.
+/// Then the cap: once a renewal would push `valid_until` past `claimed_at +
+/// 1 day`, A writes a FRESH claim dated then, and B still defers (A's older
+/// row is live to the cap).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renewals_keep_claimed_at_and_the_other_device_never_sees_the_handler_move() {
+    init_tracing();
+    let p = Person::two_devices("ciris-sessions-renew-b").await;
+    let (att_a, att_b) = (Attendance::new(), Attendance::new());
+    att_a.note_presence();
+    att_b.note_presence();
+    let community = p.community();
+    let s = SELF_ROOM_MEMBERSHIP_SESSION;
+    let ttl = chrono::Duration::from_std(session_claims::SESSION_CLAIM_TTL).unwrap();
+    let t0 =
+        ciris_persist::federation::admission::truncate_to_substrate_resolution(chrono::Utc::now());
+    let b_defers = |at: chrono::DateTime<chrono::Utc>, why: &'static str| {
+        let (p, att_b, community) = (&p, &att_b, community.clone());
+        async move {
+            let v = session_claims::gate_at(
+                &p.b,
+                att_b,
+                &p.occupant(&p.b_key),
+                &community,
+                s,
+                "test",
+                at,
+            )
+            .await;
+            assert_eq!(
+                v,
+                Verdict::HandledElsewhere {
+                    occurrence: p.a_key.clone()
+                },
+                "{why}"
+            );
+            assert!(
+                claims_by(&p.b, &p.b_key).await.is_empty(),
+                "B never wrote a competing claim ({why})"
+            );
+        }
+    };
+
+    let v = session_claims::gate_at(
+        &p.a,
+        &att_a,
+        &p.occupant(&p.a_key),
+        &community,
+        s,
+        "test",
+        t0,
+    )
+    .await;
+    assert_eq!(v, Verdict::Act);
+    let original = att_a.claimed_at(&community, s).expect("A's claimed_at");
+    carry_claims(&p.a, &p.a_key, &p.b).await;
+    b_defers(t0, "A just claimed").await;
+
+    // Three renewals, each at the renewal threshold; B checks across each.
+    let step = chrono::Duration::from_std(session_claims::SESSION_CLAIM_RENEW_AFTER).unwrap()
+        + chrono::Duration::seconds(1);
+    let mut now = t0;
+    for n in 1..=3 {
+        now += step;
+        let lines = session_claims::renew_once_at(&p.a, &att_a, now).await;
+        assert_eq!(lines[0].step, Step::Renew, "renewal {n}: {lines:?}");
+        carry_claims(&p.a, &p.a_key, &p.b).await;
+        assert_eq!(
+            att_a.claimed_at(&community, s),
+            Some(original),
+            "renewal {n} keeps the original claimed_at"
+        );
+        // Just past where the PREVIOUS lease ended — and, from the second
+        // renewal on, past t0 + TTL, where the old ttl-from-claimed_at fold
+        // dropped A.
+        b_defers(now + chrono::Duration::seconds(1), "across a renewal").await;
+    }
+    assert!(
+        now + chrono::Duration::seconds(1) > t0 + ttl,
+        "the test crossed the first lease's end"
+    );
+    let rows = claimed_ats(&p.a, &p.a_key).await;
+    assert_eq!(rows.len(), 4, "a claim and three renewals: {rows:?}");
+    let original_s = session_claims::canonical_instant(original);
+    assert!(
+        rows.iter().all(|(_, c)| *c == original_s),
+        "every renewal keeps claimed_at {original_s}: {rows:?}"
+    );
+
+    // THE CAP: a renewal past claimed_at + 1 day is a fresh claim. The day of
+    // renewals is stood in by A's longest admissible lease on the original
+    // claim (valid_until = claimed_at + 1 day, persist's bound), so the
+    // holder is still A, by that claimed_at, a minute before the cap.
+    let cap = original
+        + chrono::Duration::seconds(ciris_persist::federation::admission::SESSION_LEASE_MAX_SECS);
+    session_claims::write_claim(
+        &p.a,
+        ciris_server::attest::KeySigner::Engine(&p.a),
+        &community,
+        s,
+        original,
+        cap,
+    )
+    .await
+    .expect("persist admits a lease of exactly a day");
+    carry_claims(&p.a, &p.a_key, &p.b).await;
+    let past_cap = cap - chrono::Duration::seconds(60);
+    b_defers(past_cap, "a minute before the cap, on the day-long lease").await;
+    let lines = session_claims::renew_once_at(&p.a, &att_a, past_cap).await;
+    assert_eq!(lines[0].step, Step::Renew, "{lines:?}");
+    let fresh = att_a.claimed_at(&community, s).expect("claimed_at");
+    assert_eq!(
+        fresh, past_cap,
+        "a renewal would pass the cap, so the holder claims afresh, dated now"
+    );
+    let rows = claimed_ats(&p.a, &p.a_key).await;
+    assert_eq!(
+        rows.last().map(|(_, c)| c.clone()),
+        Some(session_claims::canonical_instant(past_cap)),
+        "{rows:?}"
+    );
+    carry_claims(&p.a, &p.a_key, &p.b).await;
+    b_defers(past_cap, "across the cap's fresh claim").await;
 }
