@@ -1329,17 +1329,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
                     ))
-                    // TRUST ROOT, the federation-facing read: GET
-                    // /v1/trust-root/bundle. Deliberately NOT loopback-gated —
-                    // unlike the import/list/delete verbs above, which are the
-                    // operator's own act, this is how a peer bootstrapping into
-                    // the mesh fetches the portable root and checks it against
-                    // its own roster. The bundle is self-authenticating and the
-                    // outer envelope claims no authority; see the module docs
-                    // for why signing the wrapper would be worthless
-                    // (CIRISRegistry#133 — this is what retires
-                    // /v1/steward-key).
-                    .merge(crate::trust_root_broadcast::router(
+                    // REGISTRY SLICE, public reads (CIRISRegistry FSD-004 §5):
+                    // GET /v1/trust-root/bundle, /v1/steward-key and
+                    // /v1/agent_files/{kind}, served by ciris-registry-core's
+                    // fold router over the SHARED Engine. One implementation
+                    // for the standalone registry and for this node, so the
+                    // two cannot drift. Deliberately NOT loopback-gated and
+                    // NOT behind the role gate: these are tier-P objects that
+                    // authenticate themselves (the bundle carries its own
+                    // accord authorizations; the outer envelope claims none),
+                    // and a peer bootstrapping into the mesh must be able to
+                    // fetch the root from ANY node. The role gate in
+                    // compose_registry governs what a node may ASSERT, not
+                    // what it may relay (CIRISRegistry#133).
+                    .merge(ciris_registry_core::fold::router(
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
                     ))

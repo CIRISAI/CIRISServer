@@ -1,12 +1,15 @@
 # FSD — The registry slice is conferred, not configured
 
-**Status:** Phase 1 IMPLEMENTED (the gate). Phases 2–4 are the surface work.
+**Status:** Phase 1 IMPLEMENTED (the gate). Phase 2a IMPLEMENTED: `ciris-registry-core`
+v4.0.0 is composed without default features and its `fold::router` is mounted, serving
+`/v1/trust-root/bundle`, `/v1/steward-key` and `/v1/agent_files/{kind}` over the shared
+Engine. Phases 2b–4 are the remaining surface work.
 **Companion:** [`REGISTRY_FOLD_DERISK.md`](REGISTRY_FOLD_DERISK.md) (what the fold needs),
 [`TRUST_ROOT_CAPABILITY_GATE.md`](TRUST_ROOT_CAPABILITY_GATE.md) (the capability model this
 applies), [`MESH_SEED_RUNBOOK_POST_DELEGATION.md`](MESH_SEED_RUNBOOK_POST_DELEGATION.md)
 (the ceremony that confers it).
 **Upstream:** CIRISRegistry#76 (co-bump, **done** — registry-core now resolves on
-persist v32.3.0 / edge v17.4.1 / verify v13.3.1, matching this repo's pins exactly),
+this repo's exact triple (persist v52.0.1 / edge v38.1.0 / verify v18.0.0 at registry v4.0.0)),
 CIRISRegistry#62 (the three-siblings umbrella), CIRISServer#441 (the admission quorum).
 
 ---
