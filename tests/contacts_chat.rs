@@ -66,6 +66,15 @@ use ciris_server::auth::store;
 use ciris_server::contacts_chat::{self, pair_community_key_id};
 use ciris_server::identity::UserIdentityBackend;
 
+/// EVERY software fed-ID mint in this binary takes this lock — the fixture's
+/// owner AND the code tests' strangers and friends. The software seal keeps
+/// a master key per keyring DIRECTORY (process-global), and parallel first
+/// mints race on creating it; serializing only the fixture's mint left the
+/// code tests minting beside it, and macOS failed the fixture's re-open with
+/// `ECIES decryption failed … too small input packet` (#679's matrix,
+/// 2026-10-01) — the same race, a different symptom. Held for the mint only.
+static MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const NODE_KEY_ID: &str = "ciris-server";
 
 /// The contact the owner chats with.
@@ -294,7 +303,6 @@ impl OwnerIdentity {
         // material exists, distinct aliases read back independently, and
         // holding this any longer would serialize the whole file for nothing.
         // A `tokio::sync::Mutex` because the guard spans an `.await`.
-        static MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _minting = MINT.lock().await;
         let alias = format!(
             "alice-owner-{}-{}",
@@ -3403,6 +3411,7 @@ async fn a_code_whose_key_is_not_held_says_it_cannot_pull_without_a_runtime() {
     let (_engine, base, owner, _owner_id, _h) = fixture().await;
     let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
+    let _minting = MINT.lock().await;
     let stranger = ciris_server::identity::mint_user_identity(
         ciris_server::identity::UserIdentityBackend::Software,
         "code-stranger",
@@ -3442,6 +3451,7 @@ async fn a_code_admits_when_the_held_key_matches_its_commitment() {
     let (engine, base, owner, _owner_id, _h) = fixture().await;
     let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
+    let _minting = MINT.lock().await;
     let friend = ciris_server::identity::mint_user_identity(
         ciris_server::identity::UserIdentityBackend::Software,
         "code-friend",
@@ -3485,6 +3495,7 @@ async fn a_code_is_refused_when_the_held_key_breaks_its_commitment() {
     let mint = |alias: &'static str| async move {
         let dir = std::env::temp_dir().join(format!("ciris-code-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _minting = MINT.lock().await;
         ciris_server::identity::mint_user_identity(
             ciris_server::identity::UserIdentityBackend::Software,
             alias,

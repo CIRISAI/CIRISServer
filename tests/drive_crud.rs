@@ -1015,32 +1015,98 @@ async fn a_non_author_cannot_change_a_file() {
 #[tokio::test]
 async fn an_upload_above_the_cap_is_too_large() {
     let fx = fixture().await;
-    let body = vec![b'a'; ciris_server::drive::UPLOAD_BODY_LIMIT + 1];
-    let (s, v) = status_json(
-        fx.client
-            .post(format!("{}/v1/files", fx.base))
-            .bearer_auth(&fx.owner)
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .expect("oversized POST"),
+    // The node refuses on the DECLARED length, before reading a byte of the
+    // body — which is the point (it never buffers what it will refuse). So the
+    // request here declares the oversized length and sends no body: writing
+    // ~85 MB at a server that has already answered and closed made Windows
+    // abort the client's socket mid-write (WSAECONNABORTED 10053) before the
+    // response could be read, a red on the #679 matrix that said nothing about
+    // the node. A raw request reads the answer the same on every platform.
+    let (s, v) = raw_post(
+        &fx.base,
+        &fx.owner,
+        "/v1/files",
+        ciris_server::drive::UPLOAD_BODY_LIMIT + 1,
+        false,
     )
     .await;
     assert_eq!((s, reason(&v)), (413, "drive.too_large"), "{v}");
     // Other routes keep axum's default: a 3 MB rename body is refused.
-    let (s, _) = status_json(
-        fx.client
-            .post(format!("{}/v1/files/x/rename", fx.base))
-            .bearer_auth(&fx.owner)
-            .header("content-type", "application/json")
-            .body(vec![b' '; 3 * 1024 * 1024])
-            .send()
-            .await
-            .expect("big rename"),
+    // axum's default limit reads the body until the limit, so this one SENDS
+    // it — through the same raw request, writing and reading concurrently, so
+    // a writer the server stops reading cannot hide the answer.
+    let (s, _) = raw_post(
+        &fx.base,
+        &fx.owner,
+        "/v1/files/x/rename",
+        3 * 1024 * 1024,
+        true,
     )
     .await;
-    assert_eq!(s, 400, "the raised limit is the upload routes' only");
+    assert!(
+        s == 400 || s == 413,
+        "the raised limit is the upload routes' only — a 3 MB rename must be refused, got {s}"
+    );
+}
+
+/// POST `path` declaring `content_length`, sending that many bytes only when
+/// `send_body`, and read the node's answer: (status, JSON body). The body is
+/// written on its own task and its errors ignored, so a refusal on the
+/// declared length is read the same on every platform — Windows aborts a
+/// writer whose bytes the server will not read (WSAECONNABORTED 10053), which
+/// through a request client surfaces as a send error instead of the 413.
+async fn raw_post(
+    base: &str,
+    bearer: &str,
+    path: &str,
+    content_length: usize,
+    send_body: bool,
+) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let authority = base
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let sock = tokio::net::TcpStream::connect(&authority)
+        .await
+        .expect("connect");
+    let (mut rd, mut wr) = sock.into_split();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {bearer}\r\n\
+         Content-Type: application/json\r\nContent-Length: {content_length}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    wr.write_all(head.as_bytes()).await.expect("send head");
+    let writer = tokio::spawn(async move {
+        if send_body {
+            let chunk = vec![b' '; 64 * 1024];
+            let mut left = content_length;
+            while left > 0 {
+                let n = left.min(chunk.len());
+                if wr.write_all(&chunk[..n]).await.is_err() {
+                    break;
+                }
+                left -= n;
+            }
+        }
+        wr
+    });
+    let mut raw = Vec::new();
+    let _ =
+        tokio::time::timeout(std::time::Duration::from_secs(30), rd.read_to_end(&mut raw)).await;
+    writer.abort();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json = body
+        .find('{')
+        .and_then(|a| body.rfind('}').map(|b| &body[a..=b]))
+        .unwrap_or("{}");
+    (status, serde_json::from_str(json).unwrap_or_default())
 }
 
 /// A file above the whole-read cap — sealed straight through edge's door, as
