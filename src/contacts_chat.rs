@@ -12,6 +12,20 @@
 //! | `POST /v1/chat/{id}/messages` | a `chat:message:v1` `scores` attestation | `attestation_upsert_local` + `attestation_promote(community)` |
 //! | `GET /v1/chat/{id}/messages` | the same rows, read back | `active_community_members` + `list_attestations_by` |
 //!
+//! **`POST /v1/chat` at edge v38.0.0 / persist v52.0.0** (CIRISPersist#955):
+//! the 2-member record above is gone — a founding record seats only its
+//! signers. The route now opens the room as edge does (`chat::open_pair_room`:
+//! founded by the caller alone, the peer PROPOSED as `founder`), or, when the
+//! peer opened it first and their invitation is held here, ACCEPTS it
+//! (`chat::accept_pair_proposal`); the opener's node widens on the
+//! acceptance. The answer gains `state` (`open` / `invited` / `accepted` /
+//! `awaiting_invitation`) and `proposal_id`; `member_key_ids` is the active
+//! roster. Residual, as edge names it for its harness: two people opening the
+//! SAME pair before either's record reaches the other author two different
+//! records under one id (a `Conflict` on replication); edge's harness avoids it
+//! by letting only `PairRole::Creator` open, and a person-driven route cannot
+//! wait for the other side, so it is named here rather than prevented.
+//!
 //! # Why a contact IS a replication-consent grant
 //!
 //! The client's `ContactsScreen` already renders `GET /v1/federation/peers`
@@ -3004,75 +3018,81 @@ async fn start_chat(
         }
     }
 
+    // ── THE PAIR ROOM BY CONSENT (edge v38.0.0 / persist v52.0.0) ───────────
+    //
+    // Until 0.5.218 this route authored a TWO-founder `Community` record with
+    // both people on it, and "the pair room keeps its own consent — the contact
+    // grant each side authors". persist v52 (CIRISPersist#955, Q1) admits a
+    // founding record only for the members who SIGNED it, so that record is now
+    // refused `membership_founding_member_unsigned` at the door — and the
+    // ruling behind it says why that is right: a contact grant is OUR consent
+    // toward them, not theirs to share a room with us. So the room is opened the
+    // way edge's own harness opens it (`chat::open_pair_room`): the OPENER founds
+    // it alone as `founder`, and PROPOSES the other person at role `founder`; the
+    // other person's node holds the proposal (it reaches strangers under first
+    // contact, CIRISEdge#756), and when THEY call this route their node ACCEPTS
+    // it (`chat::accept_pair_proposal`); the opener's node then widens the roster
+    // on the acceptance's arrival (`ReplicationRuntimeConfig::membership_widener`)
+    // — or here, on the opener's next call, with the opener's own pen. The END
+    // STATE is the pre-v52 one: two founders, `unanimous`, each an authority
+    // root (CC 4.5.4).
+    //
+    // Who signs what: the RECORD and the PROPOSAL are the node signer acting
+    // for its owner (the record's bytes stay a function of (opener, peer,
+    // founded_at), as before); the ACCEPTANCE is the node acting for its owner
+    // too — persist admits a device's reply for its person (`signer_acts_for`),
+    // and this call IS the person's act; the WIDENING is the opener's PERSON key
+    // (the roster counts seat keys), which is why it needs their pen.
     let community_id = pair_community_key_id(&owner.key_id, &key_id);
-    let mut expected_members = vec![owner.key_id.clone(), key_id.clone()];
-    expected_members.sort();
+    let mut pair_members = vec![owner.key_id.clone(), key_id.clone()];
+    pair_members.sort();
     // Before the branch: an existing room needs this as much as a new one.
     ensure_owner_content_occurrence(&st, &owner.key_id).await;
-    match directory.lookup_community(&community_id).await {
-        Ok(Some(existing)) => {
-            // THE ROSTER IS PART OF THE IDENTITY. The pair id is derivable by
-            // anyone, so a peer can pre-replicate a community under it carrying
-            // the pair PLUS an extra member — and a front door that accepts any
-            // row at the derived id would open that room, with every subsequent
-            // community-scoped message readable by the stowaway. Same sorted-
-            // member equality the insert-race arm applies: a room at this id
-            // that is not EXACTLY this pair is a conflict, not a chat.
-            //
-            // THE FOLD, NOT THE RECORD (persist v48, CIRISPersist#860). A
-            // stowaway no longer needs a record with three names on it: the
-            // record is never rewritten to grow, and a widening row naming a
-            // third member rides its own plane. Comparing `existing.members`
-            // would have passed a pair record with a widened third party and
-            // opened the room with them in it.
-            let mut existing_members: Vec<String> =
-                match active_roster(&*directory, &existing).await {
-                    Ok(r) => r.into_iter().map(|m| m.key_id).collect(),
-                    Err(e) => {
-                        return refuse(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "chat.store_unavailable",
-                            format!("active roster: {e}"),
-                        )
-                    }
-                };
-            existing_members.sort();
-            if existing_members != expected_members {
+
+    // 1. The other person already opened it and invited us: accepting IS
+    //    opening the chat from this side.
+    let pending =
+        match ciris_edge::chat::pair_proposal_for(&*directory, &owner.key_id, &key_id).await {
+            Ok(p) => p,
+            Err(e) => {
                 return refuse(
-                    StatusCode::CONFLICT,
-                    "chat.community_shape_conflict",
-                    format!(
-                        "a community already exists under the derived pair id but its                          roster is not this pair ({} member(s), expected 2) — refusing                          to open it as this chat",
-                        existing_members.len()
-                    ),
-                );
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("pair_proposal_for: {e}"),
+                )
             }
-            return (
-                StatusCode::OK,
-                Json(StartChatResponse {
-                    community_id: existing.community_key_id,
-                    community_name: existing.community_name,
-                    member_key_ids: existing_members,
-                    cohort_scope: cohort_scope::COMMUNITY,
-                    freshly_created: false,
-                }),
-            )
-                .into_response();
+        };
+    if let Some(pending) = pending {
+        if let Err(e) = ciris_edge::chat::accept_pair_proposal(
+            &*directory,
+            &pending.proposal.attestation_id,
+            &st.node_signer,
+        )
+        .await
+        {
+            return crate::membership_invites::refused(&e);
         }
-        Ok(None) => {}
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chat.store_unavailable",
-                format!("lookup_community: {e}"),
-            )
-        }
+        crate::compose::kick_replication("pair room invitation accepted");
+        tracing::info!(
+            room = %community_id, peer = %key_id,
+            "chat: accepted the pair room's invitation — the opener's node seats us"
+        );
+        return pair_room_response(
+            &st,
+            &community_id,
+            &pair_members,
+            false,
+            PAIR_STATE_ACCEPTED,
+            Some(pending.proposal.attestation_id),
+        )
+        .await;
     }
 
-    // `founded_at` is DERIVED, not read from a clock: the later `valid_from` of
-    // the two member key records. A community cannot predate its members, and a
-    // derived instant is the same on both nodes — a `Utc::now()` here would make
-    // the two ends author rows that differ in a signed field.
+    // 2. Open it (or re-open it) as the opener: found alone, propose the peer.
+    //    `founded_at` is DERIVED, not read from a clock: the later `valid_from`
+    //    of the two member key records — a community cannot predate its
+    //    members, and a re-open re-derives the same instant, so the idempotent
+    //    re-put is byte-identical.
     let mut founded_at = None;
     for member in [&owner.key_id, &key_id] {
         match directory.lookup_public_key(member).await {
@@ -3105,117 +3125,208 @@ async fn start_chat(
             "could not resolve either member's key record",
         );
     };
-
-    let member_key_ids = expected_members;
-    // ── THE ROOM RECORD IS EDGE'S (CIRISServer#524) ─────────────────────────
-    //
-    // This built the `Community` by hand, and the roster it produced differed
-    // from edge's in the one way that matters: both members carried
-    // `role: None`. Edge names both people `founder` outright, and says why —
-    // CC 4.5.4 / §11.11, no unmoderated federated space: "persist refuses to
-    // federate any content keyed on a community that has no live named
-    // moderator, and a named moderator exists iff the community has a
-    // steward-bound AUTHORITY root". A pair room is two equals, so the record
-    // makes each an authority root BY CONSTRUCTION rather than by the accident
-    // of a protocol setting.
-    //
-    // `community_name` was a second copy too — a sorted `"{a} <-> {b}"`, the
-    // same string edge formats — and it sits INSIDE `Community::signing_envelope`,
-    // so a drift there would have been two different signed records under one id.
-    //
-    // Edge's own note: "Everything that opens a pair room — the mesh harness,
-    // the tests, a consumer — builds it here, so the roster shape cannot drift
-    // between them." We were the consumer that drifted.
-    let signed = match ciris_edge::chat::signed_pair_community(
+    // THE ROSTER IS PART OF THE IDENTITY. The pair id is derivable by anyone,
+    // so a peer can pre-replicate a community under it carrying a third
+    // member — and a front door that opened any row at the derived id would
+    // open that room with a stowaway in it. The FOLD (never the record) must
+    // name no one outside the pair; since v52 a pending room names only its
+    // opener, which is a subset, not a conflict.
+    let held = match directory.lookup_community(&community_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("lookup_community: {e}"),
+            )
+        }
+    };
+    if let Some(existing) = &held {
+        let roster: Vec<String> = match active_roster(&*directory, existing).await {
+            Ok(r) => r.into_iter().map(|m| m.key_id).collect(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("active roster: {e}"),
+                )
+            }
+        };
+        if roster.iter().any(|k| !pair_members.contains(k)) {
+            return refuse(
+                StatusCode::CONFLICT,
+                "chat.community_shape_conflict",
+                format!(
+                    "a community already exists under the derived pair id but its roster is \
+                     not this pair ({} member(s), expected at most 2) — refusing to open it \
+                     as this chat",
+                    roster.len()
+                ),
+            );
+        }
+        // The other person founded it and their invitation has not reached
+        // this node yet: there is nothing to accept and nothing to found.
+        if !roster.iter().any(|k| k == &owner.key_id) && roster.iter().any(|k| k == &key_id) {
+            return pair_room_response(
+                &st,
+                &community_id,
+                &pair_members,
+                false,
+                PAIR_STATE_AWAITING_INVITATION,
+                None,
+            )
+            .await;
+        }
+    }
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::days(crate::membership_invites::DEFAULT_INVITE_DAYS);
+    let opened = match ciris_edge::chat::open_pair_room(
+        &*directory,
         &owner.key_id,
         &key_id,
         founded_at,
+        expires_at,
         &st.node_signer,
     )
     .await
     {
-        Ok(c) => c,
+        Ok(o) => o,
         Err(e) => {
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "chat.store_unavailable",
-                format!("signed_pair_community: {e}"),
+                "chat.community_create_failed",
+                format!("open_pair_room: {e}"),
             )
         }
     };
-    // Signed by edge over `Community::signing_envelope()` — the JCS field-set
-    // gate verifies exactly those bytes, which is why the record is never
-    // hand-rolled on either side of the room.
-    // The name the record actually carries — read off the signed room rather
-    // than re-derived, so the response cannot describe a room differently from
-    // the bytes that were stored.
-    let community_name = signed.community.community_name.clone();
-    if let Err(e) = st.engine.federation_directory().put_community(signed).await {
-        // A LOST RACE IS A SUCCESS SOMEONE ELSE ALREADY HAD. Two concurrent
-        // POSTs (double-tap, client retry, two devices) can both observe
-        // `lookup_community` returning None above; one insert wins and the
-        // other lands here on the primary-key conflict.
-        //
-        // persist v38.2.0 NARROWED when this arm fires: an IDENTICAL re-put is
-        // now an Ok no-op at the door (first-accepted authority signature
-        // preserved), so the ordinary race never errors at all. What still
-        // reaches here is the typed Conflict for DIFFERING content under the
-        // id — a roster-fork signal — plus any backend that predates the
-        // verdict semantics. The roster-equality re-read below is exactly the
-        // fork discriminator: matching roster → idempotent success;
-        // differing → the 500 carries the substrate's own Conflict message. The room the loser
-        // asked for EXISTS — reporting 500 would break the route's advertised
-        // idempotency exactly on the inputs where idempotency matters. So on
-        // failure, re-read the derived id: if the room is there with the same
-        // convergent identity, this call is the second arrival, not an error.
-        // A re-read that finds nothing (or a different shape) is a REAL
-        // failure and keeps the 500 with the original error.
-        if let Ok(Some(existing)) = directory.lookup_community(&community_id).await {
-            // The fold, for the same reason as the lookup arm above.
-            let mut existing_members: Vec<String> = active_roster(&*directory, &existing)
+    if opened.founded {
+        // The ROSTER is a row too — and so is the invitation. `share_in_room`
+        // kicks for every chat row that goes through it, but the record and
+        // the proposal are written straight to the directory here, so without
+        // this they would wait for a cadence tick while the KeyPackage sent
+        // milliseconds later did not.
+        crate::compose::kick_replication("chat room founded and peer invited");
+    }
+
+    // 3. The peer accepted and this node has not seated them yet (the bridge's
+    //    widener seats them on arrival; this covers a node whose runtime
+    //    started before its claim): the opener's own pen widens, now.
+    let state = match &opened.proposal {
+        None => PAIR_STATE_OPEN,
+        Some(proposal) => {
+            let invitee_accepted = directory
+                .list_attestations_for(&key_id)
+                .await
+                .map(|rows| {
+                    rows.into_iter().find(|r| {
+                        ciris_edge::membership::dimension_of(r)
+                            == Some(ciris_edge::membership::ACCEPTANCE_DIMENSION)
+                            && r.attestation_envelope
+                                .get("references_attestation_id")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(proposal.attestation_id.as_str())
+                    })
+                })
+                .unwrap_or(None);
+            match invitee_accepted {
+                Some(acceptance) => {
+                    match crate::owner_signer_capsule::acquire(
+                        &st.engine,
+                        bearer_of(&headers),
+                        &owner.key_id,
+                        st.user_seed_dir.clone(),
+                    )
+                    .await
+                    {
+                        Ok(pen) => {
+                            let widener =
+                                ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(
+                                    pen.edge_signer(),
+                                )]);
+                            match ciris_edge::membership::widen_on_acceptance(
+                                &*directory,
+                                &acceptance,
+                                &widener,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    crate::compose::kick_replication("pair room peer seated");
+                                    PAIR_STATE_OPEN
+                                }
+                                Err(e) => return crate::membership_invites::refused(&e),
+                            }
+                        }
+                        // A delegate cannot open the pen: the bridge seats them.
+                        Err(_) => PAIR_STATE_ACCEPTED,
+                    }
+                }
+                None => PAIR_STATE_INVITED,
+            }
+        }
+    };
+    pair_room_response(
+        &st,
+        &community_id,
+        &pair_members,
+        opened.founded,
+        state,
+        opened.proposal.map(|p| p.attestation_id),
+    )
+    .await
+}
+
+/// The pair room is open: both people are active founders.
+const PAIR_STATE_OPEN: &str = "open";
+/// This side opened it and invited the other person; they have not accepted.
+const PAIR_STATE_INVITED: &str = "invited";
+/// The invitation is accepted; the opener's node has not seated the joiner yet
+/// (on the joiner's side: always, until the widening replicates back).
+const PAIR_STATE_ACCEPTED: &str = "accepted";
+/// The other person opened the room, and their invitation has not reached this
+/// node yet. Nothing to accept; call again when it arrives.
+const PAIR_STATE_AWAITING_INVITATION: &str = "awaiting_invitation";
+
+/// `POST /v1/chat`'s answer: the room as the FOLD sees it now, plus where the
+/// two-step join stands (`state`, and the invitation's id when there is one).
+/// 200 in every state — the route has always been idempotent, and a client
+/// tells the states apart by `state` (and by `member_key_ids`, which lists
+/// only the active members).
+async fn pair_room_response(
+    st: &ChatState,
+    community_id: &str,
+    pair_members: &[String],
+    freshly_created: bool,
+    state: &'static str,
+    proposal_id: Option<String>,
+) -> Response {
+    let directory = st.engine.federation_directory();
+    let (name, mut members) = match directory.lookup_community(community_id).await {
+        Ok(Some(c)) => {
+            let roster: Vec<String> = active_roster(&*directory, &c)
                 .await
                 .map(|r| r.into_iter().map(|m| m.key_id).collect())
                 .unwrap_or_default();
-            existing_members.sort();
-            if existing_members == member_key_ids {
-                return (
-                    StatusCode::OK,
-                    Json(StartChatResponse {
-                        community_id: existing.community_key_id,
-                        community_name: existing.community_name,
-                        member_key_ids: existing_members,
-                        cohort_scope: cohort_scope::COMMUNITY,
-                        freshly_created: false,
-                    }),
-                )
-                    .into_response();
-            }
+            (c.community_name, roster)
         }
-        return refuse(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chat.community_create_failed",
-            format!("put_community: {e}"),
-        );
+        // The joiner's side before the record has replicated: the name is the
+        // sorted pair, the same string edge signs into the record.
+        _ => (pair_members.join(" <-> "), Vec::new()),
+    };
+    members.sort();
+    let mut body = serde_json::to_value(StartChatResponse {
+        community_id: community_id.to_owned(),
+        community_name: name,
+        member_key_ids: members,
+        cohort_scope: cohort_scope::COMMUNITY,
+        freshly_created,
+    })
+    .unwrap_or_default();
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("state".into(), serde_json::json!(state));
+        obj.insert("proposal_id".into(), serde_json::json!(proposal_id));
     }
-    // The ROSTER is a row too. `share_in_room` kicks for every chat row that
-    // goes through it (KeyPackage, Welcome, message), but the `Community`
-    // record is written straight to the directory here and returns — so
-    // without this the invitation itself was the one row in the conversation
-    // that waited for a cadence tick, while the KeyPackage sent milliseconds
-    // later did not. Fresh create only: the idempotent second arrival above
-    // returns early, so a client retry does not re-round.
-    crate::compose::kick_replication("chat room roster created");
-    (
-        StatusCode::OK,
-        Json(StartChatResponse {
-            community_id: community_id.clone(),
-            community_name,
-            member_key_ids,
-            cohort_scope: cohort_scope::COMMUNITY,
-            freshly_created: true,
-        }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 // ─── The message row ────────────────────────────────────────────────────────

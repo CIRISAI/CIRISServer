@@ -1647,6 +1647,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         crate::user_seed_dir(&cfg),
                     ))
+                    // THE INVITE INBOX (0.5.218, CIRISPersist#955,
+                    // FSD/MEMBERSHIP_INVITES.md): the invitee's half of
+                    // consent-to-join — `GET /v1/self/invites`, and accept /
+                    // decline signed with the owner's own pen. The group's
+                    // half lives on the family and community routes.
+                    .merge(crate::membership_invites::router(
+                        Arc::clone(&engine),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // THE OWNER'S DEVICES (FSD §2): release a node, relabel a key.
                     .merge(crate::self_devices::router(
                         Arc::clone(&engine),

@@ -44,6 +44,23 @@
 //!    unaffected, and re-adding someone already active keeps
 //!    `family.already_member`.
 //!
+//!    **At persist v52.0.0 / edge v38.0.0 the door opens as the invite flow**
+//!    (`crate::membership_invites`): `POST …/invites` (and `POST …/members`,
+//!    its alias) writes a `membership:proposal:v1` signed by ONE inviter — a
+//!    founder under `founder_only`, any member under a quorum — and answers
+//!    202 `{state: "invited", proposal_id}`; the invitee accepts on their own
+//!    node with their own pen (`POST /v1/self/invites/{p}/accept`); the
+//!    WIDENING that seats them is persist-gated on that acceptance. Under
+//!    `founder_only` the widening is the founder's single signature — written
+//!    by edge's bridge on the acceptance's arrival (`membership_widener`) or
+//!    here when a member lists the invites; under `quorum:M/N` it is the
+//!    `add` of envelope → cosign → assemble, now a co-signed WIDENING (persist
+//!    Q2: a supersede never adds, `membership_supersede_cannot_add`). A
+//!    founding roster naming anyone but the founder is refused
+//!    `membership.founding_member_unsigned` (persist Q1: signing the founding
+//!    record is consent, and this surface has no founding-cosign flow). The
+//!    interim `membership.consent_required` is gone.
+//!
 //! # What persist admits at these pins (v48.0.0), and what it does not
 //!
 //! Measured while building this, and written down in the FSD §3.5 as well:
@@ -201,44 +218,6 @@ fn not_a_member(key_id: &str) -> Response {
         "family.not_a_member",
         "They aren't in this household any more.",
         key_id.to_owned(),
-    )
-}
-
-/// **Nobody joins a household — or a room — without their own consent** (the
-/// maintainer's ruling of 2026-09-30; CIRISConstitution#133,
-/// `FSD/MEMBERSHIP_INVITES.md`).
-///
-/// The ONE refusal every roster-growing HTTP door answers until persist can
-/// carry a proposal to a non-member and record their acceptance
-/// (CIRISPersist#955, persist v52): a direct add, a quorum change whose proposed
-/// roster ADDS anyone, and a founding roster naming anyone besides the founder.
-/// Shared with [`crate::communities`] so the id carries exactly one sentence
-/// (the localization guard's single-valued check). Removing, re-roling,
-/// leaving and dissolving are not joining and are never refused by it; neither
-/// is re-adding someone already active (that keeps its `*.already_member`).
-///
-/// "Refuse, don't hold" (FSD §4): the server keeps no copy of the admission
-/// rule — the rule is persist's — only a closed door, removed when the invite
-/// flow ships. The refusal lives at the HTTP doors only, never in a shared
-/// helper: the pair room and the self room grow through their own paths.
-pub(crate) fn membership_consent_required(detail: String) -> Response {
-    refuse_with(
-        StatusCode::CONFLICT,
-        "membership.consent_required",
-        "Adding someone needs their acceptance, which ships with the invite flow. Nobody joins without their own consent.",
-        detail,
-    )
-}
-
-/// The detail every consent refusal carries: which door, which keys, and the
-/// two issues that will open it.
-pub(crate) fn consent_detail(door: &str, key_ids: &[String]) -> String {
-    format!(
-        "{door}: {} would join without their own acceptance. Adding a member needs the \
-         joiner's consent (CIRISConstitution#133), which persist gates in CIRISPersist#955 \
-         (v52) and the server ships as the invite flow (FSD/MEMBERSHIP_INVITES.md); until \
-         then every roster-growing door is closed",
-        key_ids.join(", ")
     )
 }
 
@@ -746,6 +725,19 @@ enum FamilyRow {
 fn family_rows(loaded: &Loaded, action: &str, env: &serde_json::Value) -> Vec<FamilyRow> {
     let target = env.get("target_key_id").and_then(|v| v.as_str());
     match (action, target) {
+        // persist v52 Q2: an add is a co-signed WIDENING at the offered role.
+        ("add", Some(k)) => {
+            let role = env
+                .get("roles")
+                .and_then(|r| r.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or(ROLE_MEMBER)
+                .to_owned();
+            vec![FamilyRow::Widening {
+                member: k.to_owned(),
+                role,
+            }]
+        }
         ("remove", Some(k)) => vec![FamilyRow::Revocation {
             member: k.to_owned(),
             reason: "removed",
@@ -762,13 +754,13 @@ fn family_rows(loaded: &Loaded, action: &str, env: &serde_json::Value) -> Vec<Fa
                 role,
             }]
         }
-        ("dissolve", _) => dissolve_order(loaded)
-            .into_iter()
-            .map(|member| FamilyRow::Revocation {
-                member,
-                reason: "dissolved",
-            })
-            .collect(),
+        // A quorum dissolve writes no rows since persist v52 (#956): the
+        // terminal amendment alone empties the fold. `loaded` stays a
+        // parameter for the shapes that read the roster.
+        ("dissolve", _) => {
+            let _ = loaded;
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -897,12 +889,13 @@ async fn create_family(State(st): State<FamilyState>, headers: HeaderMap, body: 
             "A household needs a name of up to 200 characters.",
         );
     }
-    // CONSENT TO JOIN (CIRISConstitution#133): the founding record admits the
-    // founder alone. Everyone else joins by proposal → their own acceptance,
-    // which is not buildable until CIRISPersist#955 — so a founding roster that
-    // names anyone else is REFUSED, not trimmed (a silently smaller household
-    // would read as success to the caller who named them). The loop below then
-    // only ever sees the founder named twice, which stays `already_member`.
+    // CONSENT TO JOIN (CIRISConstitution#133; persist v52 Q1): a founding
+    // record seats exactly the members who SIGNED it, and this route signs with
+    // the founder alone — so a founding roster that names anyone else is
+    // REFUSED, not trimmed (a silently smaller household would read as success
+    // to the caller who named them), by persist's own rule name. They join by
+    // invitation once the household exists (`POST …/invites`). The loop below
+    // then only ever sees the founder named twice, which stays `already_member`.
     let joining: Vec<String> = req
         .members
         .iter()
@@ -910,7 +903,12 @@ async fn create_family(State(st): State<FamilyState>, headers: HeaderMap, body: 
         .cloned()
         .collect();
     if !joining.is_empty() {
-        return membership_consent_required(consent_detail("POST /v1/families", &joining));
+        return crate::membership_invites::founding_member_unsigned(format!(
+            "POST /v1/families: {} would be founding members without signing the founding \
+             record (membership_founding_member_unsigned) — found the household alone, then \
+             POST /v1/families/{{id}}/invites for each",
+            joining.join(", ")
+        ));
     }
     let dir = st.engine.federation_directory();
     let mut others: Vec<String> = Vec::new();
@@ -1091,15 +1089,42 @@ struct AddRequest {
     key_id: String,
     #[serde(default)]
     role: Option<String>,
+    /// How long the invitation lives (1..=30 days; default
+    /// [`crate::membership_invites::DEFAULT_INVITE_DAYS`]).
+    #[serde(default)]
+    expires_in_days: Option<i64>,
 }
 
+/// `POST /v1/families/{id}/members` — an ALIAS for `…/invites` since persist
+/// v52 (`FSD/MEMBERSHIP_INVITES.md` §3). A direct add was admission on the
+/// household's authority alone: a founder could enrol any key they could
+/// name, and that person's node began receiving the household's rows and
+/// wraps. The route now answers 202 `{state: "invited", proposal_id}`, so no
+/// caller mistakes an invitation for a membership.
 async fn add_member(
+    st: State<FamilyState>,
+    headers: HeaderMap,
+    id: Path<String>,
+    body: Bytes,
+) -> Response {
+    invite(st, headers, id, body).await
+}
+
+/// `POST /v1/families/{id}/invites` — invite `key_id` at `role`.
+///
+/// ONE inviter signs (persist FSD §4: "the quorum stays on the growth record,
+/// not the invitation"): a founder under `founder_only` — persist refuses any
+/// other proposer there, and the check is repeated here only so the refusal is
+/// the household's own `family.not_authorized` rather than prose — and any
+/// active member under a quorum. The invitee must be a registered identity
+/// (their key is what the widening will name) and not already active.
+async fn invite(
     State(st): State<FamilyState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    let (_caller, loaded, _protocol) = match write_preamble(&st, &headers, &id).await {
+    let (caller, loaded, protocol) = match write_preamble(&st, &headers, &id).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1111,23 +1136,158 @@ async fn add_member(
     if !role_ok(&role) {
         return bad_role();
     }
-    // Someone already in is not joining: the no-op keeps its own answer.
-    if loaded.member(&req.key_id).is_some() {
-        return already_member(&req.key_id);
+    if protocol == Protocol::FounderOnly {
+        if let Err(r) = require_founder(&loaded, &caller.owner_key_id) {
+            return r;
+        }
     }
-    // CONSENT TO JOIN (0.5.218; CIRISConstitution#133, CIRISPersist#955). A
-    // direct add was admission on the household's authority alone — a founder
-    // could enrol any key they could name, and that person's node began
-    // receiving the household's rows and wraps. Closed for every protocol
-    // until the invite flow (`FSD/MEMBERSHIP_INVITES.md` §3: this route becomes
-    // an alias for `…/invites` answering 202 `invited`). Until 0.5.218 the rest
-    // of this handler signed a `FamilyMembershipWidening` for the target and
-    // re-wrapped the household's DEKs to them (`rewrap`); the widening door
-    // itself is unchanged and still carries role changes.
-    membership_consent_required(consent_detail(
-        "POST /v1/families/{id}/members",
-        std::slice::from_ref(&req.key_id),
-    ))
+    if let Err(r) = check_addable(&st.engine, &loaded, &req.key_id).await {
+        return r;
+    }
+    let expires_at = match crate::membership_invites::expiry(req.expires_in_days) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let capsule = match pen(&st, &caller).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    match ciris_edge::membership::propose(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Family,
+        &id,
+        &req.key_id,
+        Some(&role),
+        expires_at,
+        capsule.edge_signer(),
+    )
+    .await
+    {
+        Ok(proposal) => {
+            tracing::info!(
+                family = %id, invitee = %req.key_id, proposal = %proposal.attestation_id,
+                "family: invitation sent — the invitee joins only on their own acceptance"
+            );
+            kick("family:invite");
+            crate::membership_invites::invited(
+                ciris_edge::membership::GroupScope::Family,
+                &id,
+                &proposal,
+                &req.key_id,
+                Some(&role),
+            )
+        }
+        Err(e) => crate::membership_invites::refused(&e),
+    }
+}
+
+/// `GET /v1/families/{id}/invites` — every invitation into the household and
+/// its state (`pending` / `accepted` / `joined` / `declined` / `expired` /
+/// `withdrawn`). Members only (a non-member gets `family.not_found`, as for
+/// every route); a delegate may read.
+///
+/// Reading is also when an ACCEPTED invitee of a `founder_only` household is
+/// seated, if edge's bridge has not already done it (`compose`'s
+/// `membership_widener` block names the window): a founder's own session, its
+/// own pen, edge's `widen_on_acceptance` — then the household's existing
+/// content is re-wrapped to them, exactly as the pre-v52 direct add did.
+async fn list_invites(
+    State(st): State<FamilyState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = match gate(owner_caller(&st.engine, &headers, true).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let mut loaded = match load(&st.engine, &id, &caller.owner_key_id).await {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    let scope = ciris_edge::membership::GroupScope::Family;
+    let active = |l: &Loaded| -> std::collections::HashSet<String> {
+        l.active.iter().map(|m| m.key_id.clone()).collect()
+    };
+    let mut invites =
+        match crate::membership_invites::group_invites(dir.as_ref(), scope, &id, &active(&loaded))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return store_unavailable(e),
+        };
+    let accepted = invites
+        .iter()
+        .any(|(v, _)| v.state == crate::membership_invites::STATE_ACCEPTED);
+    let founder_only =
+        Protocol::of(&loaded.family.consensus_protocol) == Some(Protocol::FounderOnly);
+    let mut seated: Vec<String> = Vec::new();
+    if accepted && founder_only && require_founder(&loaded, &caller.owner_key_id).is_ok() {
+        // A delegate's bearer cannot open the pen; that is a read, not an error.
+        if let Ok(capsule) = pen(&st, &caller).await {
+            let widener = ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(
+                capsule.edge_signer(),
+            )]);
+            seated =
+                crate::membership_invites::widen_held_acceptances(dir.as_ref(), &invites, &widener)
+                    .await;
+        }
+    }
+    let mut rewrapped = serde_json::Map::new();
+    if !seated.is_empty() {
+        for k in &seated {
+            rewrapped.insert(k.clone(), rewrap(&st.engine, &id, k).await);
+        }
+        loaded = match load(&st.engine, &id, &caller.owner_key_id).await {
+            Ok(l) => l,
+            Err(r) => return r,
+        };
+        invites = match crate::membership_invites::group_invites(
+            dir.as_ref(),
+            scope,
+            &id,
+            &active(&loaded),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return store_unavailable(e),
+        };
+    }
+    Json(serde_json::json!({
+        "family_id": id,
+        "invites": invites.into_iter().map(|(v, _)| v).collect::<Vec<_>>(),
+        "seated_now": seated,
+        "dek_rewrap": rewrapped,
+    }))
+    .into_response()
+}
+
+/// `DELETE /v1/families/{id}/invites/{proposal_id}` — the proposer withdraws a
+/// pending invitation (a `withdraws` of the proposal, signed by them).
+async fn withdraw_invite(
+    State(st): State<FamilyState>,
+    headers: HeaderMap,
+    Path((id, proposal_id)): Path<(String, String)>,
+) -> Response {
+    let (caller, _loaded, _protocol) = match write_preamble(&st, &headers, &id).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let capsule = match pen(&st, &caller).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    crate::membership_invites::withdraw(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Family,
+        &id,
+        &proposal_id,
+        &capsule,
+    )
+    .await
 }
 
 /// A target may join iff it is a registered identity and not already an
@@ -1247,9 +1407,26 @@ async fn leave_inner(
         Ok(c) => c,
         Err(r) => return r,
     };
-    // A quorum family's record must keep N == roster, or every later quorum
-    // check reads a seat that has left. Rewritten FIRST (by the leaver, whose
-    // own act this is); the revocation below is what replicates the departure.
+    // A quorum family's record must not keep a seat that has left. Rewritten
+    // FIRST (by the leaver, whose own act this is); the revocation below folds
+    // the departure into the roster planes.
+    //
+    // persist v52 (CIRISPersist#956) — THE SELF-LEAVE AMENDMENT, which the
+    // audit note below asked for, is what this now writes: an amendment whose
+    // ONLY change removes one member from the held record, admitted on THAT
+    // member's signature over the change envelope with no quorum, on the local
+    // door and on a peer's apply — so it REPLICATES. persist's shape, from its
+    // note to the server: `supersede_family_with_quorum(record minus the
+    // leaver, envelope from build_membership_change_envelope(..remaining..),
+    // signed by the leaver alone)`. "Every other seat must be identical and in
+    // order, and nothing else may change" — so the protocol is NOT rescaled
+    // here any more (that was a second change), and the envelope names the
+    // held roster as `supersedes.prior_member_key_ids` (persist's builder
+    // does). A member who joined by a WIDENING (persist v52 Q2: the record
+    // never grows) is not on the record, so there is nothing to amend and the
+    // revocation alone is their departure.
+    //
+    // The pre-v52 account, kept as the record of why this was stopped:
     //
     // THIS REWRITE DOES NOT REPLICATE (0.5.218 audit, fix 2 — stopped, not
     // faked). It is the plain `supersede_family`, which persist v49 strips of
@@ -1262,7 +1439,8 @@ async fn leave_inner(
     // need a self-leave amendment: a supersede whose ONLY roster delta removes
     // its signer, admitted on that signer's signature alone (on the local door
     // and in `route_occupied_family` on the peer). No proof is synthesised here.
-    if let Protocol::Quorum { m, n } = protocol {
+    let on_record = loaded.family.members.iter().any(|fm| fm.key_id == me);
+    if matches!(protocol, Protocol::Quorum { .. }) && on_record {
         let remaining: Vec<FamilyMember> = loaded
             .family
             .members
@@ -1271,23 +1449,48 @@ async fn leave_inner(
             .cloned()
             .collect();
         if !remaining.is_empty() {
+            let dir = st.engine.federation_directory();
+            let keys: Vec<String> = remaining.iter().map(|fm| fm.key_id.clone()).collect();
+            let env = match dir
+                .build_membership_change_envelope(
+                    Cohort::Family,
+                    &id,
+                    &keys,
+                    false,
+                    Some(&loaded.family.consensus_protocol),
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return store_unavailable(format!(
+                        "build_membership_change_envelope(leave): {e:#}"
+                    ))
+                }
+            };
+            let bytes = match ciris_verify_core::jcs::canonicalize(&env) {
+                Ok(b) => b,
+                Err(e) => return store_unavailable(format!("canonicalize the leave: {e}")),
+            };
+            let sig = match capsule.sign_hybrid(&bytes).await {
+                Ok(s) => s,
+                Err(e) => return signer_unavailable(e),
+            };
+            let mine = vec![ThresholdSignature {
+                member_id: sig.key_id.clone(),
+                ed25519_signature_base64: B64.encode(&sig.classical_signature),
+                mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
+            }];
             let mut next = loaded.family.clone();
-            next.consensus_protocol = rescale(m, n, remaining.len());
             next.members = remaining;
             let signed = match sign_family(&capsule, next).await {
                 Ok(s) => s,
                 Err(e) => return signer_unavailable(e),
             };
-            if let Err(e) = st
-                .engine
-                .federation_directory()
-                .supersede_family(
-                    signed,
-                    Some(serde_json::json!({ "action": "leave", "member": me })),
-                )
-                .await
-            {
-                return store_unavailable(format!("supersede_family(leave): {e:#}"));
+            if let Err(e) = dir.supersede_family_with_quorum(signed, env, mine).await {
+                return store_unavailable(format!(
+                    "supersede_family_with_quorum(self-leave): {e:#}"
+                ));
             }
         }
     }
@@ -1393,7 +1596,6 @@ async fn dissolve(
         &capsule,
         &loaded,
         serde_json::json!({ "action": "dissolve", "protocol": FOUNDER_ONLY }),
-        None,
     )
     .await
 }
@@ -1421,33 +1623,14 @@ async fn terminal_dissolve(
     capsule: &OwnerSignerCapsule,
     loaded: &Loaded,
     authorization: serde_json::Value,
-    quorum: Option<(
-        chrono::DateTime<chrono::Utc>,
-        &[crate::roster_rows::ChangeSignature],
-    )>,
 ) -> Response {
     let id = loaded.family.family_key_id.clone();
-    match quorum {
-        // A quorum dissolve: every revocation at the pinned instant, each
-        // carrying the other signers' co-signatures over that exact row.
-        Some((at, sigs)) => {
-            let primary = capsule.key_id().to_owned();
-            for k in dissolve_order(loaded) {
-                let row = revocation_row(&id, &k, at, "dissolved", Vec::new());
-                let cosigs = crate::roster_rows::cosignatures_for(sigs, &primary, "revocation", &k);
-                if let Err(e) = put_revocation_row(&st.engine, capsule, row, cosigs).await {
-                    return store_unavailable(e);
-                }
-            }
-        }
-        // Founders last: persist refuses the last founder's removal while
-        // anyone else remains (`roster_last_founder`, v49.0.0).
-        None => {
-            for k in dissolve_order(loaded) {
-                if let Err(e) = write_revocation(&st.engine, capsule, &id, &k, "dissolved").await {
-                    return store_unavailable(e);
-                }
-            }
+    // Founders last: persist refuses the last founder's removal while anyone
+    // else remains (`roster_last_founder`, v49.0.0). A QUORUM dissolve no
+    // longer comes here (persist v52, #956 — [`quorum_terminal_dissolve`]).
+    for k in dissolve_order(loaded) {
+        if let Err(e) = write_revocation(&st.engine, capsule, &id, &k, "dissolved").await {
+            return store_unavailable(e);
         }
     }
     let mut next = loaded.family.clone();
@@ -1469,6 +1652,63 @@ async fn terminal_dissolve(
     Json(serde_json::json!({ "family_id": id, "dissolved": true })).into_response()
 }
 
+/// **A quorum household's dissolve — the TERMINAL AMENDMENT** (persist v52,
+/// CIRISPersist#956; the shape persist's note gives the server verbatim):
+/// `supersede_family_with_quorum(record with dissolved_at = t, the change
+/// envelope built from the SAME members plus "dissolved_at": t, M-of-N
+/// signatures)`. Nothing else on the record moves — name, founding instant,
+/// protocol, entrenchment and every seat stay byte-identical — and `t` is the
+/// instant the quorum signed inside the envelope (`DISSOLVED_AT`), never a
+/// fresh clock read, or persist refuses the record as one "whose instant the
+/// quorum did not sign".
+///
+/// This is what `a_quorum_dissolve_replicates_as_an_amendment` waited on:
+/// before v52 the terminal record went through the plain supersede, persist
+/// stripped its proof (#910.5), and a peer kept the household live forever.
+async fn quorum_terminal_dissolve(
+    st: &FamilyState,
+    caller: &OwnerCaller,
+    capsule: &OwnerSignerCapsule,
+    loaded: &Loaded,
+    env: &serde_json::Value,
+    thresholds: Vec<ThresholdSignature>,
+) -> Response {
+    let id = loaded.family.family_key_id.clone();
+    let Some(at) = env
+        .get(DISSOLVED_AT)
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+    else {
+        return bad_change(
+            "a dissolve envelope must pin dissolved_at — rebuild it with \
+             POST /v1/families/{id}/changes/envelope"
+                .to_owned(),
+        );
+    };
+    let mut terminal = loaded.family.clone();
+    terminal.dissolved_at = Some(at);
+    let signed = match sign_family(capsule, terminal).await {
+        Ok(s) => s,
+        Err(e) => return signer_unavailable(e),
+    };
+    if let Err(e) = st
+        .engine
+        .federation_directory()
+        .supersede_family_with_quorum(signed, env.clone(), thresholds)
+        .await
+    {
+        return quorum_refusal(&e, &loaded.family.consensus_protocol);
+    }
+    tracing::info!(
+        family = %id, by = %caller.owner_key_id, dissolved_at = %at,
+        "family: dissolved by a quorum terminal amendment (CIRISPersist#956) — it replicates"
+    );
+    kick("family:dissolve");
+    Json(serde_json::json!({ "family_id": id, "dissolved": true, "dissolved_at": at.to_rfc3339() }))
+        .into_response()
+}
+
 // ─── The quorum flow: envelope → cosign → assemble ──────────────────────────
 //
 // The accord's three steps (`/v1/accord/family/change/envelope` + supersede),
@@ -1481,6 +1721,11 @@ async fn terminal_dissolve(
 // roster, not the roles).
 
 const ACTIONS: &[&str] = &["add", "remove", "role", "dissolve"];
+
+/// The change-envelope member a quorum dissolve pins its terminal instant in
+/// (persist v52, CIRISPersist#956: the amendment's `dissolved_at` must equal
+/// the one the quorum signed inside the envelope).
+const DISSOLVED_AT: &str = "dissolved_at";
 
 #[derive(Debug, Deserialize)]
 struct EnvelopeRequest {
@@ -1551,13 +1796,19 @@ async fn change_envelope(
                 return r;
             }
             // CONSENT TO JOIN (CIRISConstitution#133 / CIRISPersist#955): M of
-            // N existing members cannot stand in for the joiner. The quorum
-            // path is closed for additions exactly as the direct door is;
-            // remove, role and dissolve envelopes are unaffected.
-            return membership_consent_required(consent_detail(
-                "POST /v1/families/{id}/changes/envelope",
-                &[k.to_owned()],
-            ));
+            // N existing members cannot stand in for the joiner — and they no
+            // longer have to. The joiner's own acceptance of a live invitation
+            // is what persist checks when the co-signed WIDENING this change
+            // writes reaches its door (`check_growth_accepted`); without one
+            // the assemble is refused `membership.awaiting_acceptance`. The
+            // envelope names the grown roster so verify's quorum gate counts
+            // the change; the record itself never grows (persist Q2).
+            let role = req.role.clone().unwrap_or_else(|| ROLE_MEMBER.to_owned());
+            if !role_ok(&role) {
+                return bad_role();
+            }
+            keys.push(k.to_owned());
+            roles.insert(k.to_owned(), serde_json::json!(role));
         }
         "remove" => {
             let Some(k) = target.as_deref() else {
@@ -1629,10 +1880,19 @@ async fn change_envelope(
         );
         // The instant the change's rows carry (persist v49.0.0): every signer
         // signs the rows too, and a row's signed bytes include its instant.
+        let at = now();
         obj.insert(
             "row_at".into(),
-            serde_json::json!(now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            serde_json::json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         );
+        // A DISSOLVE is a quorum-verified TERMINAL amendment (persist v52,
+        // CIRISPersist#956): the record keeps every seat and gains
+        // `dissolved_at`, and persist binds that instant to the one the quorum
+        // signed INSIDE this envelope — so it is pinned here, before anyone
+        // signs, spelled exactly as persist's note gives it (`to_rfc3339()`).
+        if req.action == "dissolve" {
+            obj.insert(DISSOLVED_AT.into(), serde_json::json!(at.to_rfc3339()));
+        }
     }
     let bytes = match ciris_verify_core::jcs::canonicalize(&env) {
         Ok(b) => b,
@@ -1717,15 +1977,9 @@ async fn cosign(
     if let Err(r) = check_envelope(&loaded, &req.change_envelope) {
         return r;
     }
-    // CONSENT TO JOIN: no member's signature goes on an envelope that would
-    // admit someone who has not accepted (CIRISConstitution#133).
-    let joiners = envelope_joiners(&loaded, &req.change_envelope);
-    if !joiners.is_empty() {
-        return membership_consent_required(consent_detail(
-            "POST /v1/families/{id}/changes/cosign",
-            &joiners,
-        ));
-    }
+    // CONSENT TO JOIN: a member may co-sign an `add`; the joiner's own
+    // acceptance is checked by persist when the co-signed widening is written
+    // (assemble), not assumed from the signatures gathered here.
     let bytes = match ciris_verify_core::jcs::canonicalize(&req.change_envelope) {
         Ok(b) => b,
         Err(e) => return bad_change(format!("canonicalize: {e}")),
@@ -1830,15 +2084,21 @@ async fn assemble(
         Ok(a) => a,
         Err(r) => return r,
     };
-    // CONSENT TO JOIN: an envelope whose proposed roster grows is refused
-    // however many members signed it (CIRISConstitution#133 /
-    // CIRISPersist#955) — a quorum cannot stand in for the joiner.
+    // CONSENT TO JOIN (CIRISConstitution#133 / CIRISPersist#955): an `add`
+    // is the only action that grows the roster, and it is written below as a
+    // co-signed WIDENING whose admission persist gates on the joiner's own
+    // acceptance. A hand-built envelope that grows the roster under ANOTHER
+    // action name is refused here — it would reach the supersede door, which
+    // never adds (persist Q2).
     let joiners = envelope_joiners(&loaded, &req.change_envelope);
-    if !joiners.is_empty() {
-        return membership_consent_required(consent_detail(
-            "POST /v1/families/{id}/changes/assemble",
-            &joiners,
-        ));
+    if action != "add" && !joiners.is_empty() {
+        return crate::membership_invites::refused(
+            &ciris_edge::membership::MembershipError::Refused {
+                group_key_id: id.clone(),
+                member_key_id: joiners.join(", "),
+                rule: ciris_edge::membership::RULE_SUPERSEDE_CANNOT_ADD,
+            },
+        );
     }
     let capsule = match pen(&st, &caller).await {
         Ok(c) => c,
@@ -1854,29 +2114,70 @@ async fn assemble(
     let primary = capsule.key_id().to_owned();
 
     if action == "dissolve" {
-        // An empty roster is not a verifiable membership change (verify's
-        // WeakQuorum at m = 0), so the quorum authorizes the dissolve-marked
-        // envelope over the CURRENT roster, and that proof rides the terminal
-        // supersede as its authorization.
+        // persist v52 (CIRISPersist#956): a quorum dissolve is a TERMINAL
+        // AMENDMENT through `supersede_family_with_quorum` — the record with
+        // every seat byte-identical and `dissolved_at` set to the instant the
+        // quorum signed inside the envelope (pinned at envelope time). It
+        // replicates: a peer re-verifies the quorum against its own roster and
+        // applies it, after which the family has no active members and every
+        // write naming it is refused `federation_group_dissolved`. No removal
+        // rows are written — after the amendment persist would refuse them,
+        // and the fold is already empty.
+        //
+        // Before v52 this wrote one co-signed revocation per member and a
+        // plain supersede to an empty roster, which persist stripped of any
+        // proof (#910.5) and no peer ever applied (#700 audit, fix 2).
+        let _ = row_at;
+        return quorum_terminal_dissolve(&st, &caller, &capsule, &loaded, env, thresholds).await;
+    }
+
+    if action == "add" {
+        // persist v52 Q2: a supersede never adds — the quorum's add is a
+        // co-signed WIDENING. The quorum is verified over the envelope first
+        // (verify's membership-change gate, as for every quorum change), then
+        // the widening carries the other signers' scrubs over this exact row,
+        // and persist admits it only on the joiner's live acceptance.
         if let Err(e) = dir
             .verify_membership_quorum(Cohort::Family, &id, env, &thresholds)
             .await
         {
             return quorum_refusal(&e, &proto_now);
         }
-        return terminal_dissolve(
-            &st,
-            &caller,
-            &capsule,
-            &loaded,
-            serde_json::json!({
-                "action": "dissolve",
-                "change_envelope": env,
-                "quorum_signatures": thresholds,
-            }),
-            Some((row_at, req.signatures.as_slice())),
-        )
-        .await;
+        let Some(k) = env.get("target_key_id").and_then(|v| v.as_str()) else {
+            return bad_change("an add names no target_key_id".to_owned());
+        };
+        let role = env
+            .get("roles")
+            .and_then(|r| r.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or(ROLE_MEMBER)
+            .to_owned();
+        let member = FamilyMember {
+            key_id: k.to_owned(),
+            joined_at: row_at,
+            role: Some(role),
+        };
+        let mut spec = match sign_family_widening(&capsule, &id, &member).await {
+            Ok(s) => s,
+            Err(e) => return signer_unavailable(e),
+        };
+        spec.cosignatures =
+            crate::roster_rows::cosignatures_for(&req.signatures, &primary, "widening", k);
+        if let Err(e) = dir
+            .add_member(Cohort::Family, &id, RosterMember::from(member), &spec)
+            .await
+        {
+            return crate::membership_invites::persist_refusal(&e)
+                .unwrap_or_else(|| quorum_refusal(&e, &proto_now));
+        }
+        let extra = serde_json::json!({
+            "action": action,
+            "added": k,
+            "dek_rewrap": rewrap(&st.engine, &id, k).await,
+        });
+        tracing::info!(family = %id, member = %k, "family: quorum add applied as a co-signed widening");
+        kick("family:quorum_change");
+        return respond_with_family(&st, &id, &caller, extra).await;
     }
 
     // add / remove / role: the new record IS the envelope — its roster, its
@@ -1931,9 +2232,6 @@ async fn assemble(
         .map(str::to_owned);
     let mut extra = serde_json::json!({ "action": action, "version": version });
     match (action.as_str(), target.as_deref()) {
-        ("add", Some(k)) => {
-            extra["dek_rewrap"] = rewrap(&st.engine, &id, k).await;
-        }
         ("remove", Some(k)) => {
             // The supersede shrank the record; the revocation is what
             // REPLICATES the removal. persist v49.0.0 judges it by the
@@ -1992,6 +2290,11 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
         .route("/v1/families", get(list_families).post(create_family))
         .route("/v1/families/{id}", get(read_family).delete(dissolve))
         .route("/v1/families/{id}/members", post(add_member))
+        .route("/v1/families/{id}/invites", get(list_invites).post(invite))
+        .route(
+            "/v1/families/{id}/invites/{proposal_id}",
+            delete(withdraw_invite),
+        )
         .route("/v1/families/{id}/members/{key_id}", delete(remove_member))
         .route("/v1/families/{id}/members/{key_id}/role", post(change_role))
         .route("/v1/families/{id}/leave", post(leave))

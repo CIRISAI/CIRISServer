@@ -849,10 +849,11 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # says what the view cannot know (an inline file's missing receipt, CC 5.2's
     # uncountable self/family copies, a receipt that proves delivery only).
     # Same queue as the planes above (CIRISClient#78); the English is in the FSD.
-    "custody.inline_no_receipt",
+    # (`custody.inline_no_receipt` and `custody.receipt_time_unknown` retired at
+    # edge v38.0.0 / persist v52: every file is receiptable and a receipt says
+    # when — CIRISPersist#953; no longer emitted, so no longer debt.)
     "custody.copies_unobservable_by_design",
     "custody.receipt_is_delivery_not_holding",
-    "custody.receipt_time_unknown",
     "custody.receipts_admitted_on_author_device",
     "custody.receipt_signer_not_your_device",
     "custody.receipts_unreadable",

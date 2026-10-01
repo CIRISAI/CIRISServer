@@ -78,6 +78,23 @@
 //! [`crate::family_api::membership_consent_required`]). Pair rooms keep their
 //! own consent — the contact grant each side authors — and are untouched.
 //!
+//! **At persist v52.0.0 / edge v38.0.0 the door opens as the invite flow**
+//! (`crate::membership_invites`, `FSD/MEMBERSHIP_INVITES.md` §3): `POST
+//! …/invites` (and `POST …/members`, its alias, answering 202 `{state:
+//! "invited", proposal_id}`) writes a `membership:proposal:v1` signed by one
+//! inviter — a founder under `founder_only`, any member otherwise; the invitee
+//! accepts with their own pen on their own node; persist admits the WIDENING
+//! that seats them only on that acceptance (`check_growth_accepted`). Under
+//! `founder_only` the founder's single-signature widening is written by edge's
+//! bridge on the acceptance's arrival (`membership_widener`) or when a member
+//! lists the invites; under any other protocol the group seats them with the
+//! existing `add` (direct or envelope → cosign → assemble), which persist now
+//! refuses by name until the acceptance is held. `refuse_if_joining` and the
+//! interim 409 are gone; a create naming others is refused
+//! `membership.founding_member_unsigned` (persist Q1). The PAIR room no longer
+//! keeps "its own consent" either: since edge v38 it is founded by its opener
+//! alone and the other person joins by accepting (`contacts_chat::start_chat`).
+//!
 //! This file deliberately allows `clippy::result_large_err`: its helpers
 //! return the finished refusal `Response` as their error, the same shape the
 //! rest of the chat surface uses, so a refusal is decided exactly once.
@@ -1020,7 +1037,7 @@ async fn put_widening(
     at: chrono::DateTime<chrono::Utc>,
     pen: &OwnerSignerCapsule,
     cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
-) -> Result<(), String> {
+) -> Result<(), Response> {
     let (member, spec) = ciris_edge::community_roster::community_membership_widening(
         dir,
         room,
@@ -1029,7 +1046,8 @@ async fn put_widening(
         at,
         pen.edge_signer(),
     )
-    .await?;
+    .await
+    .map_err(write_failed)?;
     dir.put_community_membership_widening(SignedCommunityMembershipWidening {
         community_membership_widening: CommunityMembershipWidening {
             community_key_id: room.to_owned(),
@@ -1045,7 +1063,12 @@ async fn put_widening(
         cosignatures,
     })
     .await
-    .map_err(|e| format!("put_community_membership_widening: {e:#}"))
+    // persist v52 (CIRISPersist#955): a growth without the joiner's live
+    // acceptance is refused BY RULE — named `membership.*`, not a 500.
+    .map_err(|e| {
+        crate::membership_invites::persist_refusal(&e)
+            .unwrap_or_else(|| write_failed(format!("put_community_membership_widening: {e:#}")))
+    })
 }
 
 /// Write one revocation through persist's door (rotates the room's DEK in the
@@ -1109,8 +1132,7 @@ async fn apply_change(
                 pen,
                 cosigs("widening", key_id),
             )
-            .await
-            .map_err(write_failed)?;
+            .await?;
         }
         ChangeOp::Role { key_id, role } => {
             put_widening(
@@ -1122,8 +1144,7 @@ async fn apply_change(
                 pen,
                 cosigs("widening", key_id),
             )
-            .await
-            .map_err(write_failed)?;
+            .await?;
         }
         ChangeOp::Remove { key_id } => {
             put_revocation(
@@ -1414,9 +1435,11 @@ async fn create_community(
     // a silently smaller room would read as success to the caller who named
     // them. A founder-only room is created as before.
     if !members.is_empty() {
-        return crate::family_api::membership_consent_required(crate::family_api::consent_detail(
-            "POST /v1/communities",
-            &members,
+        return crate::membership_invites::founding_member_unsigned(format!(
+            "POST /v1/communities: {} would be founding members without signing the founding \
+             record (membership_founding_member_unsigned) — found the room alone, then \
+             POST /v1/communities/{{id}}/invites for each",
+            members.join(", ")
         ));
     }
     let protocol = req
@@ -1667,15 +1690,39 @@ async fn read_community(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AddMemberRequest {
+/// `POST /v1/communities/{id}/members` — widen the roster by one. Since
+/// persist v52 the widening follows the joiner's acceptance, so this invites.
+async fn add_member(
+    st: State<ChatState>,
+    headers: HeaderMap,
+    community_id: Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    // An ALIAS for `…/invites` since persist v52 (`FSD/MEMBERSHIP_INVITES.md`
+    // §3): a contact grant is OUR consent toward them, not theirs to join, so
+    // the route invites and answers 202 `{state: "invited", proposal_id}`.
+    invite(st, headers, community_id, body).await
+}
+
+#[derive(Deserialize)]
+struct InviteRequest {
     key_id: String,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    expires_in_days: Option<i64>,
 }
 
-/// `POST /v1/communities/{id}/members` — widen the roster by one.
-async fn add_member(
+/// `POST /v1/communities/{id}/invites` — invite `key_id` into the room.
+///
+/// One inviter: a founder under `founder_only` (persist refuses any other
+/// proposer there; repeated here so the refusal is the room's own
+/// `community.not_authorized`), any active member otherwise. A contact grant
+/// is NOT required: an invitation reaches a stranger's nodes under first
+/// contact (CIRISEdge#756, CC rc6 3.1.3.2 — readable "without that node
+/// holding the group's roster"), and the invitee's acceptance is their own.
+/// A pair room's roster is its identity: its invitation is `POST /v1/chat`.
+async fn invite(
     State(st): State<ChatState>,
     headers: HeaderMap,
     Path(community_id): Path<String>,
@@ -1689,52 +1736,181 @@ async fn add_member(
         Ok(r) => r,
         Err(r) => return r,
     };
-    let req: AddMemberRequest = match serde_json::from_slice(&body) {
+    if room.is_pair() {
+        return pair_room_fixed(room.id());
+    }
+    let req: InviteRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return malformed(format!(
-                "expected {{\"key_id\": \"…\", \"role\"?: \"…\"}}: {e}"
+                "expected {{\"key_id\": \"…\", \"role\"?: \"…\", \"expires_in_days\"?: n}}: {e}"
             ))
         }
     };
-    let op = ChangeOp::Add {
-        key_id: req.key_id,
-        role: req.role,
+    let key_id = req.key_id.trim().to_owned();
+    if key_id.is_empty() {
+        return malformed("key_id must be a non-empty federation key id");
     }
-    .normalized();
-    // CONSENT TO JOIN (0.5.218; CIRISConstitution#133, CIRISPersist#955): a
-    // contact grant is OUR consent toward them, not theirs to join. Someone
-    // already in is not joining — that keeps `community.already_member` via the
-    // precheck below; anyone else is refused until the invite flow.
-    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/members") {
-        return r;
+    if room.member(&key_id).is_some() {
+        return already_member(&key_id);
     }
-    direct_change(&st, &headers, &owner, room, op).await
+    let protocol = room.record.consensus_protocol.clone();
+    if Protocol::parse(&protocol) == Some(Protocol::FounderOnly) && !room.is_founder(&owner.key_id)
+    {
+        return not_authorized(
+            &protocol,
+            "under founder_only only a founder invites (CIRISPersist#955)",
+        );
+    }
+    let role = normalize_role(req.role.as_deref());
+    let expires_at = match crate::membership_invites::expiry(req.expires_in_days) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let pen = match pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    match ciris_edge::membership::propose(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Community,
+        room.id(),
+        &key_id,
+        role.as_deref(),
+        expires_at,
+        pen.edge_signer(),
+    )
+    .await
+    {
+        Ok(proposal) => {
+            tracing::info!(
+                room = %room.id(), invitee = %key_id, proposal = %proposal.attestation_id,
+                "communities: invitation sent — the invitee joins only on their own acceptance"
+            );
+            crate::compose::kick_replication("community invitation sent");
+            crate::membership_invites::invited(
+                ciris_edge::membership::GroupScope::Community,
+                room.id(),
+                &proposal,
+                &key_id,
+                role.as_deref(),
+            )
+        }
+        Err(e) => crate::membership_invites::refused(&e),
+    }
 }
 
-/// **The consent-to-join door** (CIRISConstitution#133, `FSD/MEMBERSHIP_INVITES.md`
-/// §4 "refuse, don't hold"): `Some(refusal)` when `op` would ADD someone not
-/// already active in `room`. Called at the HTTP doors only — the direct add
-/// and the three quorum steps — never from [`precheck`] or [`apply_change`],
-/// which the pair room and the self room never reach but which are the
-/// shape any future internal caller would share. The refusal itself is
-/// [`crate::family_api::membership_consent_required`], one sentence for both
-/// group kinds.
-fn refuse_if_joining(room: &Room, op: &ChangeOp, door: &str) -> Option<Response> {
-    // A pair room's roster is its identity and never changes here; it keeps
-    // its own, more specific answer (`community.pair_room_fixed`, from the
-    // precheck) — and its own consent: the contact grant each side authors.
-    if room.is_pair() {
-        return None;
-    }
-    match op {
-        ChangeOp::Add { key_id, .. } if room.member(key_id).is_none() => {
-            Some(crate::family_api::membership_consent_required(
-                crate::family_api::consent_detail(door, std::slice::from_ref(key_id)),
-            ))
+/// `GET /v1/communities/{id}/invites` — every invitation into the room, with
+/// its state. Members only; a delegate granted `chat_read` may read. As for a
+/// household, listing is when a `founder_only` room's accepted invitees are
+/// seated if the bridge has not yet done it (the caller's own founder pen).
+async fn list_invites(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path(community_id): Path<String>,
+) -> Response {
+    let owner = match read_preamble(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let mut room = match load_room_as_member(&st, &owner, &community_id).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    let scope = ciris_edge::membership::GroupScope::Community;
+    let active = |r: &Room| -> std::collections::HashSet<String> {
+        r.roster.iter().map(|m| m.key_id.clone()).collect()
+    };
+    let mut invites = match crate::membership_invites::group_invites(
+        dir.as_ref(),
+        scope,
+        room.id(),
+        &active(&room),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return store_unavailable(e),
+    };
+    let accepted = invites
+        .iter()
+        .any(|(v, _)| v.state == crate::membership_invites::STATE_ACCEPTED);
+    let mut seated = Vec::new();
+    if accepted
+        && Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+        && room.is_founder(&owner.key_id)
+        && require_verb(
+            &owner,
+            CapabilityVerb::ChatAuthor,
+            "community.delegate_may_not_author",
+        )
+        .is_none()
+    {
+        if let Ok(pen) = pen(&st, &headers, &owner).await {
+            let widener =
+                ciris_edge::membership::MembershipWidener::new(vec![std::sync::Arc::clone(
+                    pen.edge_signer(),
+                )]);
+            seated =
+                crate::membership_invites::widen_held_acceptances(dir.as_ref(), &invites, &widener)
+                    .await;
         }
-        _ => None,
     }
+    if !seated.is_empty() {
+        room = match load_room_as_member(&st, &owner, &community_id).await {
+            Ok(r) => r,
+            Err(r) => return r,
+        };
+        invites = match crate::membership_invites::group_invites(
+            dir.as_ref(),
+            scope,
+            room.id(),
+            &active(&room),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return store_unavailable(e),
+        };
+    }
+    Json(serde_json::json!({
+        "community_id": room.id(),
+        "invites": invites.into_iter().map(|(v, _)| v).collect::<Vec<_>>(),
+        "seated_now": seated,
+    }))
+    .into_response()
+}
+
+/// `DELETE /v1/communities/{id}/invites/{proposal_id}` — the proposer
+/// withdraws a pending invitation.
+async fn withdraw_invite(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, proposal_id)): Path<(String, String)>,
+) -> Response {
+    let owner = match write_preamble(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let room = match load_room_as_member(&st, &owner, &community_id).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let pen = match pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    crate::membership_invites::withdraw(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Community,
+        room.id(),
+        &proposal_id,
+        &pen,
+    )
+    .await
 }
 
 /// `DELETE /v1/communities/{id}/members/{key_id}` — remove a member. Naming
@@ -1911,10 +2087,10 @@ async fn change_envelope(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
-    // CONSENT TO JOIN: M of N members cannot stand in for the joiner.
-    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/envelope") {
-        return r;
-    }
+    // CONSENT TO JOIN: M of N members cannot stand in for the joiner — and
+    // need not: the `add` widening this change writes is admitted by persist
+    // only on the joiner's own live acceptance (`membership.awaiting_acceptance`
+    // otherwise, at assemble).
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
@@ -1983,11 +2159,8 @@ async fn change_cosign(
         Ok(op) => op,
         Err(r) => return r,
     };
-    // CONSENT TO JOIN: no member's signature on an envelope that admits
-    // someone who has not accepted.
-    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/cosign") {
-        return r;
-    }
+    // CONSENT TO JOIN: co-signing an `add` is the group's decision; the
+    // joiner's consent is persist's check at the widening's door.
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
@@ -2046,10 +2219,8 @@ async fn change_assemble(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
-    // CONSENT TO JOIN: refused however many members signed.
-    if let Some(r) = refuse_if_joining(&room, &op, "POST /v1/communities/{id}/changes/assemble") {
-        return r;
-    }
+    // CONSENT TO JOIN: however many members signed, persist admits the
+    // widening only on the joiner's acceptance (`put_widening` names it).
     let t = match tally(
         &st,
         &room,
@@ -2099,6 +2270,14 @@ pub(crate) fn routes() -> Router<ChatState> {
             get(read_community).delete(dissolve_community),
         )
         .route("/v1/communities/{community_id}/members", post(add_member))
+        .route(
+            "/v1/communities/{community_id}/invites",
+            get(list_invites).post(invite),
+        )
+        .route(
+            "/v1/communities/{community_id}/invites/{proposal_id}",
+            delete(withdraw_invite),
+        )
         .route(
             "/v1/communities/{community_id}/members/{key_id}",
             delete(remove_member),
