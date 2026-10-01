@@ -4669,6 +4669,21 @@ pub(crate) async fn start_replication_runtime(
                 // as the owner's admission does — and the same debt rule: a
                 // kick that found no runtime yet is still owed.
                 let periodic = tokio::time::Instant::now() >= relay_due;
+                // THE MEMBERSHIP SWEEP (persist v52 / edge v38, CIRISPersist#955)
+                // rides the relay's period: a runtime built before the claim
+                // has no `membership_widener`, so an acceptance of this owner's
+                // invitation would be stored and never seated. The sweep is the
+                // widener's own call, on the owner binding's authority.
+                if periodic {
+                    if let Some(held) = SELF_PUBLISH.get() {
+                        let node = held.own_key_ids.first().cloned().unwrap_or_default();
+                        let _ = crate::membership_invites::widen_own_accepted_proposals(
+                            &held.engine,
+                            crate::node_key::wire_identity().unwrap_or(&node),
+                        )
+                        .await;
+                    }
+                }
                 if periodic || nudged {
                     if let Some(held) = SELF_PUBLISH.get() {
                         if crate::announced_relay::refresh(

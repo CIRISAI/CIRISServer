@@ -536,6 +536,116 @@ pub(crate) async fn widen_held_acceptances(
     seated
 }
 
+/// **The widener this node's runtime may not have** — seat every invitee who
+/// accepted a proposal THIS node's owner (or this node, for them) issued.
+///
+/// Edge's bridge widens on an acceptance's arrival only when the runtime was
+/// built with a `membership_widener`, and the runtime is built once, at boot —
+/// before the claim on every first-boot node (the production path, and the
+/// native harness's). Measured on the v38 chat ladder: "membership widener NOT
+/// installed … this node is not claimed", so a pair room's acceptance arrived
+/// and nobody ever seated the joiner. This sweep is the same edge call
+/// ([`em::widen_on_acceptance`]) with the owner's person pen opened on the
+/// owner BINDING (`for_owned_node` — a loop's authority), run on the compose
+/// loop's cadence: idempotent (a seated member is `AlreadyMember`, nothing
+/// written), bounded by the owner's OWN proposals (`list_attestations_by`),
+/// and silent on a node with no owner. A quorum group's single-signature
+/// widening is refused by persist and left for the group's change flow.
+///
+/// Returns the members it seated.
+pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &str) -> Vec<String> {
+    let Ok(capsule) = owner_signer_capsule::for_owned_node(engine, node_key_id).await else {
+        return Vec::new();
+    };
+    let dir = engine.federation_directory();
+    let widener = MembershipWidener::new(vec![Arc::clone(capsule.edge_signer())]);
+    let now = chrono::Utc::now();
+    let mut proposals = Vec::new();
+    for author in [capsule.key_id().to_owned(), node_key_id.to_owned()] {
+        match dir.list_attestations_by(&author).await {
+            Ok(rows) => proposals.extend(rows.into_iter().filter(|p| {
+                dimension_of(p) == Some(PROPOSAL_DIMENSION) && p.expires_at.is_none_or(|t| t > now)
+            })),
+            Err(e) => {
+                tracing::debug!(author = %author, error = %e, "membership sweep: proposals unreadable");
+                return Vec::new();
+            }
+        }
+    }
+    // The joiner's half: a pair room this node's person ASKED to open
+    // (`contacts_chat::intends_pair_room`) whose invitation has now arrived.
+    if let Ok(pending) = em::pending_proposals_for(dir.as_ref(), capsule.key_id()).await {
+        for p in pending {
+            if !crate::contacts_chat::intends_pair_room(&p.group_key_id) {
+                continue;
+            }
+            match em::reply(
+                dir.as_ref(),
+                &p.proposal.attestation_id,
+                true,
+                capsule.edge_signer(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(room = %p.group_key_id, "membership sweep: accepted the pair room invitation the person asked for");
+                    let _ = crate::compose::kick_replication("pair room invitation accepted");
+                }
+                Err(e) => {
+                    tracing::debug!(room = %p.group_key_id, error = %e, "membership sweep: pair invitation not accepted")
+                }
+            }
+        }
+    }
+    let mut seated = Vec::new();
+    for p in proposals {
+        let Some(invitee) = p.subject_key_ids.first() else {
+            continue;
+        };
+        let Ok((Some(acceptance), _)) = replies_to(dir.as_ref(), invitee, &p.attestation_id).await
+        else {
+            continue;
+        };
+        match em::widen_on_acceptance(dir.as_ref(), &acceptance, &widener).await {
+            Ok(em::WidenOutcome::Widened {
+                scope,
+                group_key_id,
+                member_key_id,
+                ..
+            }) => {
+                tracing::info!(
+                    group = %group_key_id, member = %member_key_id,
+                    "membership: an accepted invitee seated by this node's owner \
+                     (CIRISPersist#955; the runtime had no widener)"
+                );
+                if scope == GroupScope::Family {
+                    // The household's existing content, re-wrapped to them —
+                    // what the pre-v52 direct add did, now after their consent.
+                    if let Err(e) = engine
+                        .rekey_family_member_add(&group_key_id, &member_key_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            family = %group_key_id, member = %member_key_id, error = %e,
+                            "membership: seated, but the DEK re-wrap failed"
+                        );
+                    }
+                }
+                seated.push(member_key_id);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                proposal = %p.attestation_id, rule = e.rule().unwrap_or("-"), error = %e,
+                "membership sweep: not widened here"
+            ),
+        }
+    }
+    if !seated.is_empty() {
+        let _ = crate::compose::kick_replication("membership: accepted invitees seated");
+    }
+    seated
+}
+
 /// The invitation's `expires_at` from a client's `expires_in_days`.
 #[allow(clippy::result_large_err)]
 pub(crate) fn expiry(days: Option<i64>) -> Result<chrono::DateTime<chrono::Utc>, Response> {
