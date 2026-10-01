@@ -3663,6 +3663,9 @@ fn is_ignored_announce(message: &str) -> bool {
 }
 
 pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
+    // Both boot paths (compose, and the agent-embedded delivery controller)
+    // pass through here, so the backend learns its own key on both.
+    arm_backend_node_key(engine).await?;
     // THE WIRE IDENTITY, not the engine's signer (CIRISEdge#541 review).
     //
     // The de-admission self is a TRANSPORT-plane fact: the refusal predicate
@@ -3706,6 +3709,59 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
                  silently does nothing (CIRISPersist#543)"
             );
             anyhow::bail!("AV-77 arm failed: set_self_key_id({key_id}) read back as {other:?}")
+        }
+    }
+}
+
+/// **Tell the backend which key is THIS node** (edge v38.1.0, CIRISEdge#768 /
+/// #774; persist #607 / #916 / CIRISPersist#966).
+///
+/// persist's node-relative doors read the backend's `node_key_id`: the #916
+/// member-device RE-WRAP compares an epoch's minter against it (a room this
+/// node minted is re-wrapped to a member's device that arrives late), and the
+/// #607 "does THIS NODE trust that root" gates ask on its behalf. persist sets
+/// it only inside `Engine::register_self_federation_key`, which this server
+/// never calls — it registers its key through `attest::register_key` — so on
+/// every server node the field was unset, the re-wrap skipped every epoch this
+/// node minted ("no node key set on this backend … (#916)"), and a member
+/// device that reached this node after a room's epoch was minted read the
+/// room `NotGranted` for good: edge's #768 bug, on the server's side of it.
+/// Edge's own fix (#774) sets it in `PersistGroupContentStore::from_shared_hybrid`;
+/// the server builds its stores with `PersistGroupContentStore::new` over the
+/// compose engine, which sets nothing, so the server sets it here, once, at
+/// boot.
+///
+/// WHICH KEY: the engine's own signer (`local_derived_key_id`) — the MINTER
+/// the re-wrap compares, as edge's fix uses — not the wire identity the AV-77
+/// gate arms (on a split node those differ; the epoch is minted by the
+/// engine's signer). Read back through the directory, like the AV-77 arm: a
+/// node key that did not stick is refused at boot rather than shipped silent.
+async fn arm_backend_node_key(engine: &Arc<Engine>) -> Result<()> {
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .context("resolve the engine's derived key id for the backend's node key")?;
+    if let Some(b) = engine.sqlite_backend() {
+        b.set_node_key_id(key_id.clone());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(b) = engine.postgres_backend() {
+        b.set_node_key_id(key_id.clone());
+    }
+    match engine.federation_directory().node_key_id() {
+        Some(live) if live == key_id => {
+            tracing::info!(
+                node_key_id = %key_id,
+                "backend node key SET (CIRISEdge#768 / persist #916): epochs this node \
+                 minted are re-wrapped to a member's device that arrives late"
+            );
+            Ok(())
+        }
+        other => {
+            anyhow::bail!(
+                "backend node key did not stick: set {key_id}, read back {other:?} — the #916 \
+                 re-wrap would skip every epoch this node minted"
+            )
         }
     }
 }
@@ -4851,6 +4907,13 @@ pub(crate) async fn start_replication_runtime(
         // adopt) keeps edge's default of 16 through `..PullConfig::default()`
         // in `backend::spawn_puller_with` — the default is the measured one
         // (CIRISPersist#957's flat per-chunk adopt time at 2 GiB).
+        //
+        // edge v38.1.0: NO new host-set field. The pending-KeyGrant emitter
+        // (CIRISEdge#775) is runtime-owned — spawned per sealed-content engine,
+        // so it runs because `sealed_content` is set above — and its wake and
+        // release-kick plumbing (`with_key_grant_wake`, `install_release_kick`)
+        // is wired by the runtime itself. The one host fact #768 needed, the
+        // backend's own node key, is set at boot (`arm_backend_node_key`).
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(
