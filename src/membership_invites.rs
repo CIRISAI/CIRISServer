@@ -572,30 +572,16 @@ pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &st
             }
         }
     }
-    // The joiner's half: a pair room this node's person ASKED to open
-    // (`contacts_chat::intends_pair_room`) whose invitation has now arrived.
-    if let Ok(pending) = em::pending_proposals_for(dir.as_ref(), capsule.key_id()).await {
-        for p in pending {
-            if !crate::contacts_chat::intends_pair_room(&p.group_key_id) {
-                continue;
-            }
-            match em::reply(
-                dir.as_ref(),
-                &p.proposal.attestation_id,
-                true,
-                capsule.edge_signer(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    tracing::info!(room = %p.group_key_id, "membership sweep: accepted the pair room invitation the person asked for");
-                    let _ = crate::compose::kick_replication("pair room invitation accepted");
-                }
-                Err(e) => {
-                    tracing::debug!(room = %p.group_key_id, error = %e, "membership sweep: pair invitation not accepted")
-                }
-            }
-        }
+    // The joiner's half: a pair room this node's person ASKED to open, whose
+    // matching invitation has now arrived (`crate::pair_intents`).
+    if let Some((seed_dir, _)) = crate::node_key::held_user_seed_dir() {
+        let _ = crate::pair_intents::advance(
+            dir.as_ref(),
+            &seed_dir,
+            capsule.key_id(),
+            capsule.edge_signer(),
+        )
+        .await;
     }
     let mut seated = Vec::new();
     for p in proposals {
@@ -905,6 +891,15 @@ async fn answer(st: InboxState, headers: HeaderMap, proposal_id: String, accept:
         Ok(r) => r,
         Err(e) => return refused(&e),
     };
+    // A declined pair-room invitation ends the person's standing request for
+    // that room (`crate::pair_intents`): nothing may auto-accept a re-offer.
+    if !accept {
+        if let Some(room) = GroupScope::of_row(&proposal).and_then(|s| group_of(&proposal, s)) {
+            if let Err(e) = crate::pair_intents::forget(&st.user_seed_dir, room) {
+                tracing::warn!(room, error = %e, "pair intent could not be removed after a decline");
+            }
+        }
+    }
     let _ = crate::compose::kick_replication(if accept {
         "membership: invitation accepted"
     } else {

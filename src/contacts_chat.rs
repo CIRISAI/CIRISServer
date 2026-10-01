@@ -30,7 +30,8 @@
 //! the two records then withheld each other (CIRISEdge#758's group-record
 //! gate). So the route follows edge's rule after all: only the creator founds;
 //! the joiner answers `awaiting_invitation` until the creator's invitation is
-//! held, then accepts it.
+//! held, then accepts it — the request kept on disk (`crate::pair_intents`),
+//! so a restart in between does not forget it.
 //!
 //! # Why a contact IS a replication-consent grant
 //!
@@ -3068,7 +3069,31 @@ async fn start_chat(
                 )
             }
         };
-    record_pair_intent(&community_id);
+    // THE PERSON'S ACT, KEPT (`crate::pair_intents`): written BEFORE anything
+    // depends on it — the joiner's `awaiting_invitation` below promises that
+    // the creator's invitation will be accepted when it lands, even across a
+    // restart, so an intent that could not be stored refuses here instead.
+    if let Err(e) = crate::pair_intents::record(&st.user_seed_dir, &community_id, &key_id) {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chat.store_unavailable",
+            format!("record the pair-room request: {e}"),
+        );
+    }
+    // Only an invitation FROM this contact's person is accepted here: the
+    // derived id names the pair, but anyone can propose into an id.
+    let pending = match pending {
+        Some(p) => {
+            let proposer = ciris_persist::federation::admission::admission_identity_for_writer(
+                &*directory,
+                &p.proposal.attesting_key_id,
+            )
+            .await
+            .unwrap_or_default();
+            (proposer == key_id).then_some(p)
+        }
+        None => None,
+    };
     if let Some(pending) = pending {
         if let Err(e) = ciris_edge::chat::accept_pair_proposal(
             &*directory,
@@ -3307,34 +3332,6 @@ async fn start_chat(
     .await
 }
 
-/// **Which pair rooms this node's person has ASKED to open** — the joiner's
-/// half of the two-step join. A joiner's `POST /v1/chat` before the creator's
-/// invitation has arrived records the room here; when the invitation lands,
-/// the next read of the room ([`advance_pair_join`]) or the compose loop's
-/// membership sweep accepts it on the person's behalf. That is consent: the
-/// person asked for THIS chat with THIS peer, by name, and the acceptance is
-/// signed for them. Without it the joiner would have to call again at exactly
-/// the right moment — the native chat ladder opens each side once and polls
-/// the transcript. Process memory, deliberately: a restart forgets it, and the
-/// person's next `POST /v1/chat` records it again (nothing is accepted that
-/// was not asked for since the process started).
-fn pair_intents() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(Default::default)
-}
-
-fn record_pair_intent(room: &str) {
-    if let Ok(mut s) = pair_intents().lock() {
-        s.insert(room.to_owned());
-    }
-}
-
-/// Has this node's person asked to open `room` (see [`pair_intents`])?
-pub(crate) fn intends_pair_room(room: &str) -> bool {
-    pair_intents().lock().is_ok_and(|s| s.contains(room))
-}
-
 /// **Advance a pair room's two-step join on a read** — the joiner accepts a
 /// held invitation it asked for; the creator seats a held acceptance with the
 /// person's own pen. Both are the same edge calls `POST /v1/chat` makes; this
@@ -3343,36 +3340,26 @@ pub(crate) fn intends_pair_room(room: &str) -> bool {
 /// failure is logged and left for the next read: a read never fails on it.
 async fn advance_pair_join(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: &str) {
     let directory = st.engine.federation_directory();
-    if intends_pair_room(room) {
-        if let Ok(Some(pending)) =
-            ciris_edge::membership::pending_proposals_for(&*directory, &owner.key_id)
-                .await
-                .map(|v| v.into_iter().find(|p| p.group_key_id == room))
-        {
-            match ciris_edge::chat::accept_pair_proposal(
-                &*directory,
-                &pending.proposal.attestation_id,
-                &st.node_signer,
-            )
-            .await
-            {
-                Ok(_) => {
-                    crate::compose::kick_replication("pair room invitation accepted");
-                    tracing::info!(
-                        room,
-                        "chat: accepted the pair room's invitation the person asked for"
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!(room, error = %e, "chat: pair invitation not accepted yet")
-                }
-            }
-        }
-    }
+    // The joiner's half: accept ONLY an invitation that matches an intent the
+    // person recorded with their own `POST /v1/chat` (`crate::pair_intents`).
+    let _ = crate::pair_intents::advance(
+        &*directory,
+        &st.user_seed_dir,
+        &owner.key_id,
+        &st.node_signer,
+    )
+    .await;
     let Ok(Some(record)) = directory.lookup_community(room).await else {
         return;
     };
-    let founder = record.members.iter().any(|m| m.key_id == owner.key_id);
+    // A founder BY THE FOLD (an active `founder` seat), never the record.
+    let founder = active_roster(&*directory, &record).await.is_ok_and(|r| {
+        r.iter().any(|m| {
+            m.key_id == owner.key_id
+                && m.role.as_deref()
+                    == Some(ciris_persist::federation::admission::MEMBER_ROLE_FOUNDER)
+        })
+    });
     if !founder {
         return;
     }

@@ -3521,3 +3521,201 @@ async fn a_code_is_refused_when_the_held_key_breaks_its_commitment() {
         "{body}"
     );
 }
+
+// ─── The joiner asks first (edge v38 two-step pair room) ────────────────────
+
+/// Two contacts whose fed-IDs sort BEFORE the owner's (`alice-owner-…`), so in
+/// a pair room with them the owner is the JOINER (`PairRole`).
+const AARON_KEY_ID: &str = "aaron-v1";
+const ABEL_KEY_ID: &str = "abel-v1";
+
+/// A seeded person as edge's signer, under the plain alias it is registered as.
+fn edge_signer_for(alias: &str, ed: u8, pqc: u8) -> ciris_edge::identity::LocalSigner {
+    let classical = ciris_keyring::SealedEd25519Signer::adopt(
+        alias.to_string(),
+        keystore_dir(alias),
+        &[ed; 32],
+    )
+    .expect("adopt the sealed ed25519 key");
+    let pqc = MlDsa65SoftwareSigner::from_seed_bytes(&[pqc; 32], format!("{alias}-pqc"))
+        .expect("ML-DSA-65 seed");
+    ciris_edge::identity::LocalSigner::new(
+        alias.to_string(),
+        Arc::new(classical),
+        Some(Arc::new(pqc)),
+    )
+}
+
+fn intents_on_disk(seed_dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read(seed_dir.join(ciris_server::pair_intents::PAIR_INTENTS_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// **The joiner asks first, the node restarts, the creator opens — and the
+/// joiner is seated.** Nothing the person did not ask for is accepted.
+///
+/// The owner is the JOINER against Aaron. Their `POST /v1/chat` answers
+/// `awaiting_invitation` and founds nothing, but their request is written to
+/// `pair-intents.json` (`{pair_id, contact_person, asked_at}`). The router is
+/// then torn down and a fresh one started on the same store and seed dir — a
+/// restart: nothing of the request survives in memory. Aaron's node opens the
+/// room (its record and its invitation land here as replication carries them),
+/// and so does Abel's, into a room the owner NEVER asked for. The owner's next
+/// read of Aaron's room accepts Aaron's invitation — the recorded intent's —
+/// and leaves Abel's pending in the inbox. Aaron's node seats the owner; the
+/// next read finds the owner seated and removes the intent.
+#[tokio::test]
+async fn a_joiner_who_asks_first_is_seated_across_a_restart_and_nothing_else_is_accepted() {
+    let (engine, base, owner, owner_id, handle) = fixture().await;
+    let client = reqwest::Client::new();
+    seed_user_key(&engine, AARON_KEY_ID, 0xE0, 0xE1).await;
+    seed_user_key(&engine, ABEL_KEY_ID, 0xE2, 0xE3).await;
+    assert_eq!(
+        ciris_edge::chat::PairRole::of(&owner_id.key_id, AARON_KEY_ID),
+        ciris_edge::chat::PairRole::Joiner,
+        "the owner must be the joiner against {AARON_KEY_ID}"
+    );
+    for k in [AARON_KEY_ID, ABEL_KEY_ID] {
+        let resp = client
+            .post(format!("{base}/v1/contacts"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "key_id": k }))
+            .send()
+            .await
+            .expect("POST /v1/contacts");
+        assert_eq!(resp.status(), 200, "add {k}: {:?}", resp.text().await);
+    }
+    let pair = pair_community_key_id(&owner_id.key_id, AARON_KEY_ID);
+    let abel_pair = pair_community_key_id(&owner_id.key_id, ABEL_KEY_ID);
+
+    // The joiner asks first: nothing founded, the request kept on disk.
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": AARON_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(v["state"], "awaiting_invitation", "{v}");
+    assert_eq!(v["community_id"], serde_json::json!(pair));
+    let dir = engine.federation_directory();
+    assert!(
+        dir.lookup_community(&pair).await.expect("lookup").is_none(),
+        "the joiner founds nothing"
+    );
+    let on_disk = intents_on_disk(&owner_id.seed_dir);
+    assert_eq!(on_disk.len(), 1, "{on_disk:?}");
+    assert_eq!(on_disk[0]["pair_id"], serde_json::json!(pair));
+    assert_eq!(on_disk[0]["contact_person"], AARON_KEY_ID);
+    assert!(on_disk[0]["asked_at"].is_string(), "{on_disk:?}");
+
+    // RESTART: a fresh router on the same store and seed dir.
+    handle.abort();
+    let (base, _handle) = serve(Arc::clone(&engine), owner_id.seed_dir.clone()).await;
+
+    // The creators open their rooms (as replication lands them here).
+    let aaron = edge_signer_for(AARON_KEY_ID, 0xE0, 0xE1);
+    let abel = edge_signer_for(ABEL_KEY_ID, 0xE2, 0xE3);
+    let now = chrono::Utc::now();
+    let opened = ciris_edge::chat::open_pair_room(
+        dir.as_ref(),
+        AARON_KEY_ID,
+        &owner_id.key_id,
+        now,
+        now + chrono::Duration::days(1),
+        &aaron,
+    )
+    .await
+    .expect("Aaron opens the room and invites the owner");
+    let proposal = opened.proposal.expect("an invitation").attestation_id;
+    ciris_edge::chat::open_pair_room(
+        dir.as_ref(),
+        ABEL_KEY_ID,
+        &owner_id.key_id,
+        now,
+        now + chrono::Duration::days(1),
+        &abel,
+    )
+    .await
+    .expect("Abel opens a room the owner never asked for");
+
+    // The owner reads Aaron's room: the recorded intent's invitation is
+    // accepted; Abel's is not.
+    let _ = client
+        .get(format!("{base}/v1/chat/{pair}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages");
+    let pending: Vec<String> =
+        ciris_edge::membership::pending_proposals_for(dir.as_ref(), &owner_id.key_id)
+            .await
+            .expect("inbox")
+            .into_iter()
+            .map(|p| p.group_key_id)
+            .collect();
+    assert!(
+        !pending.contains(&pair),
+        "Aaron's invitation was accepted: {pending:?}"
+    );
+    assert!(
+        pending.contains(&abel_pair),
+        "an invitation the person never asked for is NEVER auto-accepted: {pending:?}"
+    );
+
+    // Aaron's node seats the owner on the acceptance.
+    let acceptance = dir
+        .list_attestations_for(&owner_id.key_id)
+        .await
+        .expect("replies")
+        .into_iter()
+        .find(|r| {
+            ciris_edge::membership::dimension_of(r)
+                == Some(ciris_edge::membership::ACCEPTANCE_DIMENSION)
+                && r.attestation_envelope
+                    .get("references_attestation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(proposal.as_str())
+        })
+        .expect("the owner's acceptance of Aaron's invitation");
+    let widened = ciris_edge::membership::widen_on_acceptance(
+        dir.as_ref(),
+        &acceptance,
+        &ciris_edge::membership::MembershipWidener::new(vec![Arc::new(aaron)]),
+    )
+    .await
+    .expect("Aaron's node widens");
+    assert!(
+        matches!(
+            widened,
+            ciris_edge::membership::WidenOutcome::Widened { .. }
+        ),
+        "{widened:?}"
+    );
+    let members: Vec<String> = dir
+        .active_community_members(&pair)
+        .await
+        .expect("roster")
+        .into_iter()
+        .map(|m| m.key_id)
+        .collect();
+    assert!(members.contains(&owner_id.key_id), "{members:?}");
+
+    // Seated: the next read removes the request.
+    let _ = client
+        .get(format!("{base}/v1/chat/{pair}/messages"))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET messages");
+    assert!(
+        intents_on_disk(&owner_id.seed_dir)
+            .iter()
+            .all(|i| i["pair_id"] != serde_json::json!(pair)),
+        "a seated room's intent is removed"
+    );
+}
