@@ -109,6 +109,28 @@
 //! then a server-side liveness fold over `valid_until` would be a second copy
 //! of persist's rule (the mirrored-rule class), so none is written here.
 //!
+//! # At persist v52.0.1 — the read half landed; a renewal keeps `claimed_at`
+//!
+//! persist v52.0.1 (CIRISPersist#946 read side, found by this server's v52
+//! adopt) judges each claim row live iff `now < its signed valid_until`
+//! (`session_claim::row_is_live`), the consumer ttl only a fallback for a
+//! pre-v52 row with none. So the successor-lease workaround above is GONE.
+//! A renewal is now a new self-report row that KEEPS the exchange's ORIGINAL
+//! `claimed_at` — earliest-wins is stable across renewals, so another device
+//! never sees the handler move — and carries `valid_until = now + TTL`,
+//! capped at `claimed_at + SESSION_LEASE_MAX_SECS` (86 400 s, persist's
+//! bound). Past the cap no renewal can extend the lease, so the holder writes
+//! a FRESH claim with a new `claimed_at`; its older claim stays live to the cap,
+//! so the holder is unchanged through the handover.
+//!
+//! The renewal is a fresh `scores` row, not a `supersedes`: persist's own
+//! v52.0.1 renewal witness writes it exactly so (a second claim row, same
+//! `claimed_at`, a later `valid_until`), the fold is type-agnostic, and in this
+//! substrate a `supersedes` is the placement/widening primitive — re-placing a
+//! `self`-scoped claim through it buys nothing a reader can see. The original
+//! `claimed_at` is the one the fold names (`handler_for`), kept per exchange
+//! in [`Attendance`] too so a renewal never re-derives it from the clock.
+//!
 //! Every one of this person's devices runs this binary, so every one of them
 //! applies the same [`SESSION_CLAIM_TTL`] — the convergence argument needs one
 //! horizon, and until the horizon is in the row, one constant is how it gets
@@ -316,8 +338,13 @@ impl Verdict {
 struct Exchange {
     owner: String,
     occurrence: String,
-    /// The `claimed_at` of the newest lease THIS process wrote, if any.
+    /// When THIS process last wrote a lease (a claim or a renewal), if ever —
+    /// what the renewal cadence measures.
     newest_lease: Option<chrono::DateTime<chrono::Utc>>,
+    /// The exchange's ORIGINAL `claimed_at` — every renewal carries it
+    /// (persist v52.0.1: a renewal keeps `claimed_at`, so earliest-wins is
+    /// stable). `None` until this process claims or reads it from the fold.
+    claimed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// **Whether the person is on this device, and which exchanges this device
@@ -375,10 +402,17 @@ impl Attendance {
                 owner: owner.to_owned(),
                 occurrence: occurrence.to_owned(),
                 newest_lease: None,
+                claimed_at: None,
             });
     }
 
-    fn leased(&self, community: &str, session: &str, at: chrono::DateTime<chrono::Utc>) {
+    fn leased(
+        &self,
+        community: &str,
+        session: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        claimed_at: chrono::DateTime<chrono::Utc>,
+    ) {
         if let Some(e) = self
             .exchanges
             .lock()
@@ -386,7 +420,22 @@ impl Attendance {
             .get_mut(&(community.to_owned(), session.to_owned()))
         {
             e.newest_lease = Some(at);
+            e.claimed_at = Some(claimed_at);
         }
+    }
+
+    /// The exchange's original `claimed_at`, as this process last wrote it.
+    #[must_use]
+    pub fn claimed_at(
+        &self,
+        community: &str,
+        session: &str,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.exchanges
+            .lock()
+            .expect("attendance poisoned")
+            .get(&(community.to_owned(), session.to_owned()))
+            .and_then(|e| e.claimed_at)
     }
 
     fn snapshot(&self) -> Vec<((String, String), Exchange)> {
@@ -485,12 +534,42 @@ pub async fn write_claim(
     community: &str,
     session: &str,
     claimed_at: chrono::DateTime<chrono::Utc>,
+    valid_until: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, crate::attest::Error> {
-    let envelope = claim_envelope(community, session, claimed_at);
+    let envelope = claim_envelope(community, session, claimed_at, valid_until);
     let spec = crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::SELF, envelope)
         .weighing(Some(1.0))
-        .expiring(Some(claimed_at + ttl()));
+        .expiring(Some(valid_until));
     crate::attest::emit(engine, signer, spec).await
+}
+
+/// **The lease a claim written `now` carries** (persist v52.0.1): `now +
+/// TTL`, never past `claimed_at + SESSION_LEASE_MAX_SECS` (persist's bound,
+/// `check_session_lease_bound`). `None` once the cap leaves less than a full
+/// TTL — then a renewal could not keep the session a full period, and the
+/// holder claims afresh instead ([`lease_for`]).
+#[must_use]
+pub fn renewal_lease(
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let cap = claimed_at
+        + chrono::Duration::seconds(ciris_persist::federation::admission::SESSION_LEASE_MAX_SECS);
+    let wanted = now + ttl();
+    (wanted <= cap).then_some(wanted)
+}
+
+/// `(claimed_at, valid_until)` for the lease this device writes now: a renewal
+/// keeping `original` while the cap allows, else a fresh claim dated `now`.
+#[must_use]
+pub fn lease_for(
+    original: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    match original.and_then(|c| renewal_lease(c, now).map(|v| (c, v))) {
+        Some(renewal) => renewal,
+        None => (now, now + ttl()),
+    }
 }
 
 /// The signed members of one claim — ONE builder, so the unit test that runs
@@ -499,6 +578,7 @@ fn claim_envelope(
     community: &str,
     session: &str,
     claimed_at: chrono::DateTime<chrono::Utc>,
+    valid_until: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
     serde_json::json!({
         (paths::DIMENSION): SESSION_CLAIM_DIMENSION,
@@ -506,7 +586,7 @@ fn claim_envelope(
         COMMUNITY_ID: community,
         SESSION_ID: session,
         CLAIMED_AT: canonical_instant(claimed_at),
-        VALID_UNTIL: canonical_instant(claimed_at + ttl()),
+        VALID_UNTIL: canonical_instant(valid_until),
     })
 }
 
@@ -611,7 +691,7 @@ pub async fn gate_at(
     };
     attendance.offer(community, session, &who.owner, &who.occurrence);
     if handler.is_none() && attendance.attended() {
-        match claim_now(engine, attendance, who, community, session, now).await {
+        match claim_now(engine, attendance, who, community, session, now, None).await {
             Ok(()) => {
                 handler = read(now).await.unwrap_or(None);
             }
@@ -643,6 +723,9 @@ pub async fn gate_at(
     verdict
 }
 
+/// Write this device's lease on `(community, session)`: a RENEWAL keeping
+/// `original` when there is one and the cap allows (persist v52.0.1), else a
+/// fresh claim dated `now` ([`lease_for`]).
 async fn claim_now(
     engine: &Engine,
     attendance: &Attendance,
@@ -650,7 +733,9 @@ async fn claim_now(
     community: &str,
     session: &str,
     now: chrono::DateTime<chrono::Utc>,
+    original: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), String> {
+    let (claimed_at, valid_until) = lease_for(original, now);
     let Some(pen) = NodePen::for_occurrence(engine, &who.occurrence).await else {
         return Err(format!(
             "this process holds no pen for occurrence {} — a claim is its self-report",
@@ -662,14 +747,18 @@ async fn claim_now(
         pen.signer(engine, &who.occurrence),
         community,
         session,
-        now,
+        claimed_at,
+        valid_until,
     )
     .await
     .map_err(|e| format!("{e}"))?;
-    attendance.leased(community, session, now);
+    attendance.leased(community, session, now, claimed_at);
     tracing::info!(
         community, session, occurrence = %who.occurrence, attestation_id = %id,
-        "session claim WRITTEN — this device takes the exchange while the person is here"
+        claimed_at = %canonical_instant(claimed_at),
+        valid_until = %canonical_instant(valid_until),
+        renewal = original == Some(claimed_at),
+        "session claim WRITTEN — this device holds the exchange while the person is here"
     );
     let _ = crate::compose::kick_replication("session:claim");
     Ok(())
@@ -720,7 +809,17 @@ pub async fn renew_once_at(
                     owner: ex.owner.clone(),
                     occurrence: ex.occurrence.clone(),
                 };
-                if let Err(e) = claim_now(engine, attendance, &who, &community, &session, now).await
+                // A renewal keeps the exchange's ORIGINAL claimed_at — the one
+                // the fold names (it is ours: Step::Renew means we hold it),
+                // else the one this process wrote. A fresh claim has none.
+                let original = match &s {
+                    Step::Renew => handler.as_ref().map(|h| h.claimed_at).or(ex.claimed_at),
+                    _ => None,
+                };
+                if let Err(e) = claim_now(
+                    engine, attendance, &who, &community, &session, now, original,
+                )
+                .await
                 {
                     tracing::warn!(%community, %session, error = %e, "session claim renewal could not write");
                 }
@@ -1051,7 +1150,8 @@ mod tests {
     /// admits: `valid_until` present, after `claimed_at`, within a day.
     #[test]
     fn a_written_claim_is_one_persist_can_read() {
-        let env = claim_envelope("c1", SELF_ROOM_MEMBERSHIP_SESSION, at(NOW));
+        let (claimed_at, valid_until) = lease_for(None, at(NOW));
+        let env = claim_envelope("c1", SELF_ROOM_MEMBERSHIP_SESSION, claimed_at, valid_until);
         ciris_persist::federation::admission::check_session_lease_bound(
             SESSION_CLAIM_DIMENSION,
             &env,
@@ -1075,6 +1175,40 @@ mod tests {
         );
         assert_eq!(got.claimed_at, at(NOW));
         assert_eq!(canonical_instant(at(NOW)), "2026-09-30T12:00:00.000Z");
+    }
+
+    /// persist v52.0.1: a renewal KEEPS the exchange's original `claimed_at`
+    /// and moves `valid_until` to `now + TTL`, never past `claimed_at + 1 day`
+    /// (persist's bound, which its gate admits); once the cap leaves less than
+    /// a full TTL the holder claims afresh, dated now.
+    #[test]
+    fn a_renewal_keeps_claimed_at_until_the_cap_forces_a_fresh_claim() {
+        let original = at(NOW);
+        // Three renewals, an hour apart: same claimed_at, a moving lease.
+        for hours in [1, 2, 3] {
+            let now = original + chrono::Duration::hours(hours);
+            let (c, v) = lease_for(Some(original), now);
+            assert_eq!(c, original, "renewal {hours} keeps claimed_at");
+            assert_eq!(v, now + ttl(), "renewal {hours} leases a full TTL from now");
+            ciris_persist::federation::admission::check_session_lease_bound(
+                SESSION_CLAIM_DIMENSION,
+                &claim_envelope("c1", "s", c, v),
+            )
+            .expect("persist admits the renewal");
+        }
+        // The last renewal the cap allows: exactly at the bound.
+        let cap = original
+            + chrono::Duration::seconds(
+                ciris_persist::federation::admission::SESSION_LEASE_MAX_SECS,
+            );
+        let last = cap - ttl();
+        assert_eq!(lease_for(Some(original), last), (original, cap));
+        // Past it: a FRESH claim, dated now — the renewal would exceed a day.
+        let past = last + chrono::Duration::seconds(1);
+        assert_eq!(lease_for(Some(original), past), (past, past + ttl()));
+        assert!(renewal_lease(original, past).is_none());
+        // No original: a fresh claim.
+        assert_eq!(lease_for(None, original), (original, original + ttl()));
     }
 
     #[test]
