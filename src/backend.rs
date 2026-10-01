@@ -357,7 +357,7 @@ where
 /// [`BlobChunkSource`]: ciris_edge::blob_swarm::BlobChunkSource
 /// [`BlobMeaning::project`]: ciris_edge::blob_swarm::BlobMeaning::project
 /// [`ContentScope`]: ciris_edge::blob_swarm::ContentScope
-pub(crate) struct ServerBlobChunkSource {
+pub struct ServerBlobChunkSource {
     inner: ciris_edge::blob_swarm::PersistBlobChunkSource,
     directory: Arc<dyn ciris_persist::federation::FederationDirectory>,
     /// The engine itself, for the community-DEK epoch binding — the
@@ -375,7 +375,7 @@ pub(crate) struct ServerBlobChunkSource {
 }
 
 impl ServerBlobChunkSource {
-    pub(crate) fn new(engine: &Engine) -> Self {
+    pub fn new(engine: &Engine) -> Self {
         Self {
             inner: ciris_edge::blob_swarm::PersistBlobChunkSource::new(Engine::clone(engine))
                 .with_revocations(Some(revocation_register())),
@@ -435,11 +435,22 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
     ///    there and copied here by shape, not by hand: a different group id on
     ///    the serve side is a fetch that arrives on the right address and is
     ///    refused as the wrong room.
-    /// 2. **A referencing row** — THE FALLBACK, for the tiers (1) does not
-    ///    cover. A plaintext or self/family blob has no community-DEK binding,
-    ///    so any attestation whose `evidence_refs` cites the sha projects
-    ///    through `BlobMeaning` (a `holds_bytes` claim is possession, not
-    ///    meaning, and `project` refuses it itself).
+    /// 2. **Edge's serve scope** — THE FALLBACK, for the tiers (1) does not
+    ///    cover (plaintext, self, family): `BlobMeaning::serve_scope` (edge
+    ///    v38.0.0, CIRISEdge#736), which reads every row placing the blob —
+    ///    persist's binding index PLUS each row's `supersedes` widening — and
+    ///    answers from the WIDENING first. Until 0.5.218 this arm was the
+    ///    server's own walk over `attestations_binding_content`, returning the
+    ///    first row that projected. On a family file's AUTHOR node that is the
+    ///    author's `self` row (every producer authors at `self` and crosses by
+    ///    a two-row widening, `FSD/CONTENT_TRANSFER.md` §6.9), and the binding
+    ///    index returns only `scores` rows, so the family placement was never
+    ///    seen: every member's chunk fetch arrived on a `family` address and
+    ///    was refused `blob_serve_arrival_scope_insufficient`. Edge found the
+    ///    same bug in its own source and fixed it once; the server's copy of
+    ///    the choice is DELETED rather than patched (the mirrored-rule class —
+    ///    one rule, one implementation). A `holds_bytes` claim is still
+    ///    possession, not meaning: `project`, inside it, refuses one.
     ///
     ///    Worth knowing what this arm could NOT do until recently: it reads
     ///    `attestations_binding_content`, and a chat row did not cite its blob
@@ -488,31 +499,19 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
                 "blob chunk source: the community-DEK binding could not be read"
             ),
         }
-        let rows = match self.directory.attestations_binding_content(&sha_hex).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!(
-                    blob = %sha_hex,
-                    error = %e,
-                    "blob chunk source: the rows referencing this blob could not be read — \
-                     scope undeterminable, the serve will be withheld"
-                );
-                return None;
-            }
-        };
-        for row in &rows {
-            if let Ok(meaning) = ciris_edge::blob_swarm::BlobMeaning::project(row, &blob_sha256) {
-                return Some(meaning.scope().clone());
-            }
+        let scope =
+            ciris_edge::blob_swarm::BlobMeaning::serve_scope(self.directory.as_ref(), &blob_sha256)
+                .await;
+        if scope.is_none() {
+            // edge logs a failed read itself; this names the other `None`.
+            tracing::warn!(
+                blob = %sha_hex,
+                "blob chunk source: no community-DEK binding and no row placing this blob \
+                 projects a scope — scope undeterminable, the serve will be withheld (a \
+                 holds_bytes claim alone is possession, not meaning)"
+            );
         }
-        tracing::warn!(
-            blob = %sha_hex,
-            referencing_rows = rows.len(),
-            "blob chunk source: no community-DEK binding and no referencing row projects a \
-             scope for this blob — scope undeterminable, the serve will be withheld (a \
-             holds_bytes claim alone is possession, not meaning)"
-        );
-        None
+        scope
     }
 }
 
