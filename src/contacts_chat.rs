@@ -4289,6 +4289,25 @@ async fn other_member(
             .find(|k| *k != owner.key_id)
         {
             Some(peer) => Ok(peer),
+            // edge v38 / persist v52: a pair room between its two steps — the
+            // opener founded it alone and the other person has not been seated
+            // yet. The other person is named by the INVITATION, so the room
+            // reads as "waiting on the peer", not as a malformed room.
+            None if community_id.starts_with(ciris_edge::chat::PAIR_COMMUNITY_PREFIX) => {
+                crate::membership_invites::pending_pair_invitee(
+                    &*directory,
+                    community_id,
+                    &owner.key_id,
+                )
+                .await
+                .ok_or_else(|| {
+                    refuse(
+                        StatusCode::CONFLICT,
+                        "chat.not_a_pair_room",
+                        NOT_A_PAIR_ROOM,
+                    )
+                })
+            }
             None => Err(refuse(
                 StatusCode::CONFLICT,
                 "chat.not_a_pair_room",

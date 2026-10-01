@@ -772,6 +772,34 @@ async fn open_chat(
         .as_str()
         .expect("community_id")
         .to_string();
+    // edge v38 / persist v52 (CIRISPersist#955): the room is founded by the
+    // owner ALONE and the contact is PROPOSED. The fixture plays the contact
+    // accepting with their own key, then the owner's second call seats them
+    // (the opener's pen widens on a held acceptance) — the two-step join a
+    // real pair of nodes performs, on one node.
+    assert_eq!(json["state"], "invited", "{json}");
+    let proposal_id = json["proposal_id"]
+        .as_str()
+        .expect("the pair room's invitation")
+        .to_string();
+    ciris_edge::membership::reply(
+        engine.federation_directory().as_ref(),
+        &proposal_id,
+        true,
+        contact_edge_signer().await.as_ref(),
+    )
+    .await
+    .expect("the contact accepts the pair room's invitation");
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat (seat the contact)");
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.expect("start chat json");
+    assert_eq!(json["state"], "open", "the contact is seated: {json}");
 
     // WHICH HALF THE FIXTURE PUBLISHES, stated rather than assumed. `PairRole`
     // is order-free — it hands the smaller fed-ID the creator's role — so the
@@ -1290,14 +1318,29 @@ async fn chat_creation_is_convergent_and_idempotent_for_a_pair() {
         "a room the two ends can only reach by agreeing who initiated is not a room"
     );
 
-    // The row is a real 2-member persist Community.
+    // A real persist Community, founded by the opener ALONE (persist v52 Q1
+    // seats only a founding record's signers) — and both people are in its
+    // FOLD once the contact accepted and the opener's pen widened.
     let community = engine
         .federation_directory()
         .lookup_community(&community_id)
         .await
         .expect("lookup_community")
         .expect("the community must exist after POST /v1/chat");
-    let mut members: Vec<String> = community.members.iter().map(|m| m.key_id.clone()).collect();
+    let founding: Vec<String> = community.members.iter().map(|m| m.key_id.clone()).collect();
+    assert_eq!(
+        founding,
+        vec![owner_id.key_id.clone()],
+        "founded by its opener alone"
+    );
+    let mut members: Vec<String> = engine
+        .federation_directory()
+        .active_community_members(&community_id)
+        .await
+        .expect("active roster")
+        .into_iter()
+        .map(|m| m.key_id)
+        .collect();
     members.sort();
     let mut expected = vec![owner_id.key_id.clone(), CONTACT_KEY_ID.to_string()];
     expected.sort();
@@ -1316,6 +1359,7 @@ async fn chat_creation_is_convergent_and_idempotent_for_a_pair() {
     assert_eq!(again["community_id"], serde_json::json!(community_id));
     assert_eq!(again["freshly_created"], false);
     assert_eq!(again["cohort_scope"], cohort_scope::COMMUNITY);
+    assert_eq!(again["state"], "open", "{again}");
 }
 
 #[tokio::test]
@@ -1582,6 +1626,49 @@ async fn a_withdrawn_message_reads_back_as_withdrawn() {
 
 // ─── 4. THE contextual-integrity line ───────────────────────────────────────
 
+/// A `Community` authored by this NODE and CO-SIGNED by every other listed
+/// member's seeded key (`(key_id, ed_seed, pqc_seed)` as `seed_*_key`
+/// registered it) — persist v52 (CIRISPersist#955, Q1) seats a founding
+/// member only if they signed the founding record.
+async fn put_community_cosigned(
+    engine: &Engine,
+    community: ciris_persist::federation::types::Community,
+    cosigners: &[(&str, u8, u8)],
+) -> Result<(), ciris_persist::federation::Error> {
+    use ciris_keyring::PqcSigner as _;
+    use ed25519_dalek::Signer as _;
+    let canonical =
+        ceg_produce_canonicalize(&community.signing_envelope()).expect("canonicalize community");
+    let sig = engine.sign_hybrid(&canonical).await.expect("node signs");
+    let mut cosignatures = Vec::new();
+    for (k, ed_seed, pqc_seed) in cosigners {
+        let ed = SigningKey::from_bytes(&[*ed_seed; 32]);
+        let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[*pqc_seed; 32], format!("{k}-pqc"))
+            .expect("ML-DSA-65 seed");
+        let ed_sig = ed.sign(&canonical).to_bytes();
+        let mut bound = canonical.clone();
+        bound.extend_from_slice(&ed_sig);
+        let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign");
+        cosignatures.push(ciris_persist::federation::types::RosterCosignature {
+            authority_key_id: (*k).to_owned(),
+            scrub_signature_classical: BASE64.encode(ed_sig),
+            scrub_signature_pqc: Some(BASE64.encode(pqc_sig)),
+        });
+    }
+    engine
+        .federation_directory()
+        .put_community(ciris_persist::federation::types::SignedCommunity {
+            community,
+            authority_key_id: engine.local_derived_key_id().await.expect("node id"),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
+            cosignatures,
+            lineage: Vec::new(),
+        })
+        .await
+}
+
 /// A community of two strangers, authored by this node (as a replicated row
 /// would be), holding a real message. The owner is deliberately not on it.
 async fn strangers_community(engine: &Engine) -> (String, LocalSigner, String) {
@@ -1590,8 +1677,11 @@ async fn strangers_community(engine: &Engine) -> (String, LocalSigner, String) {
     seed_user_key_at(engine, &a_key_id, 0xC0, 0xC1).await;
     let community_id = pair_community_key_id(&a_key_id, STRANGER_B_KEY_ID);
     let now = chrono::Utc::now();
-    engine
-        .put_community_self_signed(Community {
+    // persist v52 Q1: both founding members CO-SIGN (this node vouches as
+    // authority but is in neither seat).
+    put_community_cosigned(
+        engine,
+        Community {
             community_key_id: community_id.clone(),
             community_name: format!("{a_key_id} <-> {STRANGER_B_KEY_ID}"),
             members: [a_key_id.as_str(), STRANGER_B_KEY_ID]
@@ -1606,9 +1696,14 @@ async fn strangers_community(engine: &Engine) -> (String, LocalSigner, String) {
             consensus_protocol: "unanimous".to_string(),
             policy_blob: None,
             persist_row_hash: String::new(),
-        })
-        .await
-        .expect("author the strangers' community");
+        },
+        &[
+            (a_key_id.as_str(), 0xC0, 0xC1),
+            (STRANGER_B_KEY_ID, 0xD0, 0xD1),
+        ],
+    )
+    .await
+    .expect("author the strangers' community");
     (community_id, a_signer, a_key_id)
 }
 
@@ -3047,8 +3142,12 @@ async fn a_poisoned_roster_under_the_pair_id_is_refused() {
 
     let community_id = pair_community_key_id(&owner_id.key_id, CONTACT_KEY_ID);
     let now = chrono::Utc::now();
-    engine
-        .put_community_self_signed(Community {
+    // The planter co-signs as every listed member (persist v52 Q1) — the
+    // stowaway's room is a well-formed founding record; the front door must
+    // refuse it on its SHAPE.
+    put_community_cosigned(
+        &engine,
+        Community {
             community_key_id: community_id.clone(),
             community_name: "poisoned".to_string(),
             members: [owner_id.key_id.as_str(), CONTACT_KEY_ID, STRANGER_A_KEY_ID]
@@ -3063,9 +3162,14 @@ async fn a_poisoned_roster_under_the_pair_id_is_refused() {
             consensus_protocol: "unanimous".to_string(),
             policy_blob: None,
             persist_row_hash: String::new(),
-        })
-        .await
-        .expect("pre-plant the poisoned room");
+        },
+        &[
+            (CONTACT_KEY_ID, 0xB0, 0xB1),
+            (STRANGER_A_KEY_ID, 0xC0, 0xC1),
+        ],
+    )
+    .await
+    .expect("pre-plant the poisoned room");
 
     let resp = client
         .post(format!("{base}/v1/chat"))

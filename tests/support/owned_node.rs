@@ -114,6 +114,20 @@ impl OwnerIdentity {
         .0
     }
 
+    /// The owner's EDGE signer (the same custody) — the type edge's
+    /// `membership` producers sign with (a proposal, an acceptance).
+    #[allow(dead_code)]
+    pub async fn edge_signer(&self) -> ciris_edge::identity::LocalSigner {
+        ciris_server::identity::hardware_user_signers(
+            UserIdentityBackend::Software,
+            &self.alias,
+            self.seed_dir.clone(),
+        )
+        .await
+        .expect("re-open the owner's minted fed-ID")
+        .1
+    }
+
     /// The owner's key record, as a registration any node can hold.
     pub fn key_record(&self) -> SignedKeyRecord {
         user_record(
@@ -267,6 +281,10 @@ impl Person {
     /// The routes under test, over THIS node.
     pub fn router(&self) -> Router {
         ciris_server::family_api::router(Arc::clone(&self.engine), self.owner.seed_dir.clone())
+            .merge(ciris_server::membership_invites::router(
+                Arc::clone(&self.engine),
+                self.owner.seed_dir.clone(),
+            ))
             .merge(ciris_server::self_devices::router(
                 Arc::clone(&self.engine),
                 self.owner.seed_dir.clone(),
@@ -368,8 +386,20 @@ impl Person {
                 dst.put_family(served.family).await.unwrap_or_else(|e| {
                     panic!("{} admits {id} from {}: {e}", self.name, from.name)
                 });
+            } else {
+                // persist v52 (#956): a self-leave or a quorum dissolve is an
+                // AMENDMENT of a record this node already holds — offered,
+                // re-verified against this node's roster, applied. The
+                // identical record is a no-op; a proof-less differing one is
+                // refused (#758), which is that row's answer, not this helper's.
+                let _ = dst.put_family(served.family).await;
             }
         }
+        // persist v52 (CIRISPersist#955): a widening is admitted on the
+        // replicated apply only beside the member's acceptance of a live
+        // proposal, so the membership ceremony crosses FIRST, as replication
+        // carries it (the proposal to the invitee's nodes, the reply back).
+        self.receive_membership_rows_from(from).await;
         // persist v49.0.0 (#910): a member added after the household was
         // created is its own signed row on the family WIDENING plane, not a
         // grown record, so a copy that stops at the record leaves the new
@@ -390,6 +420,39 @@ impl Person {
             let _ = dst
                 .put_family_membership_revocation(served.revocation)
                 .await;
+        }
+    }
+
+    /// Carry every `membership:{proposal,acceptance,decline}:v1` row `from`
+    /// holds onto this node through the ordinary attestation door — what edge
+    /// v38's serve arms route (a proposal to the invitee's nodes, a reply back
+    /// to the proposer's). Already-held and refused rows are skipped: each is
+    /// persist's own answer for that row.
+    pub async fn receive_membership_rows_from(&self, from: &Person) {
+        let src = from.engine.federation_directory();
+        let dst = self.engine.federation_directory();
+        let mut since = None;
+        loop {
+            let page = src
+                .list_attestations_since(since.clone(), 512)
+                .await
+                .expect("list attestations");
+            let full = page.len() == 512;
+            since = page
+                .last()
+                .map(ciris_persist::federation::types::ServedAttestation::resume_pair);
+            for served in page {
+                if ciris_edge::membership::is_membership_row(&served.attestation) {
+                    let _ = dst
+                        .put_attestation(ciris_persist::federation::SignedAttestation {
+                            attestation: served.attestation,
+                        })
+                        .await;
+                }
+            }
+            if !full {
+                break;
+            }
         }
     }
 
@@ -573,6 +636,24 @@ impl Person {
             .sign_hybrid(&canonical)
             .await
             .expect("owner signs the family");
+        // persist v52 Q1 (CIRISPersist#955): a founding member is seated only
+        // if they SIGNED the founding record. The server has no founding-cosign
+        // flow, so this fixture plays each member co-signing with their pen.
+        let mut cosignatures = Vec::new();
+        for p in others {
+            let c = p
+                .owner
+                .signer()
+                .await
+                .sign_hybrid(&canonical)
+                .await
+                .expect("a founding member co-signs");
+            cosignatures.push(ciris_persist::federation::types::RosterCosignature {
+                authority_key_id: p.key().to_owned(),
+                scrub_signature_classical: BASE64.encode(&c.classical.signature),
+                scrub_signature_pqc: Some(BASE64.encode(&c.pqc.signature)),
+            });
+        }
         self.engine
             .federation_directory()
             .put_family(SignedFamily {
@@ -581,7 +662,7 @@ impl Person {
                 scrub_signature_classical: BASE64.encode(&sig.classical.signature),
                 scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
                 supersede_proof: None,
-                cosignatures: Vec::new(),
+                cosignatures,
             })
             .await
             .expect("TEST-ONLY: put the multi-member family directly");
@@ -592,9 +673,35 @@ impl Person {
     /// `member_key_id` at `role`, signed by this person's pen — the
     /// `FamilyMembershipWidening` row `POST /v1/families/{id}/members` wrote
     /// before 0.5.218, through persist's own `add_member`.
-    pub async fn test_only_widen_family(&self, family_id: &str, member_key_id: &str, role: &str) {
+    pub async fn test_only_widen_family(&self, family_id: &str, who: &Person, role: &str) {
         use ciris_persist::federation::cohort::{AdmitSpec, Cohort, RosterMember};
         use ciris_persist::federation::types::{FamilyMember, FamilyMembershipWidening};
+        let member_key_id = who.key();
+        // persist v52 (CIRISPersist#955): the member's CONSENT first — this
+        // person's proposal and `who`'s own acceptance, both through edge's
+        // producers and the ordinary door on this node. Only the widening that
+        // follows is the bypass (it skips the HTTP flow, not the rule).
+        let dir = self.engine.federation_directory();
+        let proposal = ciris_edge::membership::propose(
+            dir.as_ref(),
+            ciris_edge::membership::GroupScope::Family,
+            family_id,
+            member_key_id,
+            Some(role),
+            chrono::Utc::now() + chrono::Duration::days(1),
+            &self.owner.edge_signer().await,
+        )
+        .await
+        .expect("TEST-ONLY: the proposal");
+        ciris_edge::membership::reply(
+            dir.as_ref(),
+            &proposal.attestation_id,
+            true,
+            &who.owner.edge_signer().await,
+        )
+        .await
+        .expect("TEST-ONLY: the member's own acceptance");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let member = FamilyMember {
             key_id: member_key_id.to_owned(),
             joined_at: chrono::Utc::now(),

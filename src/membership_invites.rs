@@ -368,6 +368,25 @@ async fn proposals_into(
     Ok(out)
 }
 
+/// **Who a pair room is waiting for** — the invitee of the newest proposal
+/// into `room` that does not name `me`. Since edge v38 a pair room is founded
+/// by its opener alone and the other person joins by accepting, so between
+/// the two steps the FOLD names one person; the other is named only by the
+/// invitation. `None` when nothing invites anyone into it.
+pub(crate) async fn pending_pair_invitee(
+    dir: &dyn FederationDirectory,
+    room: &str,
+    me: &str,
+) -> Option<String> {
+    proposals_into(dir, GroupScope::Community, room)
+        .await
+        .ok()?
+        .into_iter()
+        .rev()
+        .filter_map(|p| p.subject_key_ids.first().cloned())
+        .find(|k| k != me)
+}
+
 /// The invitee's replies to `proposal_id`: (acceptance, decline).
 async fn replies_to(
     dir: &dyn FederationDirectory,
@@ -419,10 +438,18 @@ pub(crate) async fn group_invites(
             continue;
         };
         let (accepted, declined) = replies_to(dir, &invitee, &p.attestation_id).await?;
+        // An acceptance SIGNED after the proposal lapsed seats nobody: persist
+        // judges expiry on the two signed instants (`asserted_at` against
+        // `expires_at`), never on a reader's clock, and so does this view.
+        let accepted_in_time = accepted
+            .as_ref()
+            .is_some_and(|a| p.expires_at.is_none_or(|t| a.asserted_at <= t));
         let state = if active.contains(&invitee) && accepted.is_some() {
             STATE_JOINED
-        } else if accepted.is_some() {
+        } else if accepted_in_time {
             STATE_ACCEPTED
+        } else if accepted.is_some() {
+            STATE_EXPIRED
         } else if declined.is_some() {
             STATE_DECLINED
         } else if withdrawn(dir, &p.attestation_id).await? {
@@ -683,6 +710,14 @@ async fn inbox(State(st): State<InboxState>, headers: HeaderMap) -> Response {
     };
     let mut invites = Vec::with_capacity(pending.len());
     for p in pending {
+        // Edge's inbox drops answered and lapsed proposals; a WITHDRAWN one
+        // (the proposer's `withdraws`, which persist reads as expiring it) is
+        // dropped here, so the invitee is never offered what is gone.
+        match withdrawn(dir.as_ref(), &p.proposal.attestation_id).await {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(e) => return store_unavailable(e),
+        }
         invites.push(serde_json::json!({
             "proposal_id": p.proposal.attestation_id,
             "group_kind": kind_token(p.scope),
@@ -718,6 +753,27 @@ async fn answer(st: InboxState, headers: HeaderMap, proposal_id: String, accept:
             "{proposal_id} invites {:?}, not this node's owner",
             proposal.subject_key_ids.first()
         ));
+    }
+    // Do not ask the person to sign an answer to an invitation that has
+    // visibly lapsed or been withdrawn. This is not the admission rule —
+    // persist judges the signed instants wherever the rows land — only a
+    // refusal to author a row that can no longer seat anyone, named by the
+    // same id persist's rule maps to.
+    let lapsed = proposal.expires_at.is_some_and(|t| t <= chrono::Utc::now());
+    let pulled = match withdrawn(dir.as_ref(), &proposal_id).await {
+        Ok(w) => w,
+        Err(e) => return store_unavailable(e),
+    };
+    if lapsed || pulled {
+        let group = GroupScope::of_row(&proposal)
+            .and_then(|s| group_of(&proposal, s))
+            .unwrap_or_default()
+            .to_owned();
+        return refused(&MembershipError::Refused {
+            group_key_id: group,
+            member_key_id: caller.owner_key_id.clone(),
+            rule: em::RULE_PROPOSAL_EXPIRED,
+        });
     }
     let capsule = match owner_signer_capsule::acquire(
         &st.engine,
