@@ -209,6 +209,23 @@ still the complete answer for access and receipts.
    re-put while pulling). Replicating the author's admitted receipt set to
    the person's other devices would make the view device-independent (edge).
 
+### 4.1 Closed at edge v38.0.0 / persist v52.0.0 (0.5.218)
+
+- **Gap 1 closed** — an inline file is a one-leaf stream
+  (`inline_blob_stream_id(sha)`, CIRISPersist#953 item 2); edge publishes its
+  STH and the puller emits its receipt (`receipts::on_file_pulled`, CIRISEdge#755).
+  `receipts_supported` is now `true` for every file and
+  `receipts_unsupported_reason` always `null` (both kept on the wire, constant);
+  a drive row's `received_on` is a count for inline files too (`0`, not `null`,
+  before any device receipts it). `custody.inline_no_receipt` is no longer
+  emitted and was deleted from `src/file_custody.rs`.
+- **Gap 2 closed** — `list_stored_delivery_receipts_for` returns each receipt's
+  `received_at` (#953 item 3); edge's `Received::at` is a `DateTime`, and the
+  view's `received.at` / `receipts_from_other_keys[].at` are always an RFC 3339
+  string. `custody.receipt_time_unknown` is no longer emitted and was deleted.
+- The §3 table above keeps both rows as the record of what 0.5.218's first cut
+  said; the localization ratchet drops by the two ids.
+
 ## 5. Later cut: copy-to and remove-from a device (design, NOT built)
 
 - **The request is an owner-signed, device-addressed row.** `POST

@@ -164,12 +164,25 @@ async fn register_actor(
 /// The shared body: the RECORD lands at `record_key_id`, the KEY MATERIAL is the
 /// one `alias` seeds. They are the same string for `register_party` and differ
 /// for `register_actor`, which is the entire difference between the two.
+/// Which seed alias each registered record key was minted from — so a
+/// fixture can re-open the signer of a MEMBER it only knows by key id (an
+/// actor's record id is derived, not its alias).
+fn seed_alias_of() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
 async fn register_party_at(
     engine: &Engine,
     record_key_id: &str,
     alias: &str,
     identity_type_str: &str,
 ) -> LocalSigner {
+    seed_alias_of()
+        .lock()
+        .expect("seed alias map")
+        .insert(record_key_id.to_owned(), alias.to_owned());
     let signer = party_signer(alias);
     let key_id = record_key_id;
     let key_id_for_seeds = alias;
@@ -489,6 +502,27 @@ async fn put_community(engine: &Engine, community_id: &str, members: &[(&str, &s
         .sign_hybrid(&canonical)
         .await
         .expect("sign community declaration");
+    // persist v52 Q1 (CIRISPersist#955): a founding record seats only the
+    // members who SIGNED it, so every listed member co-signs with the key the
+    // fixture registered for them.
+    let mut cosignatures = Vec::new();
+    for (k, _) in members {
+        let alias = seed_alias_of()
+            .lock()
+            .expect("seed alias map")
+            .get(*k)
+            .cloned()
+            .unwrap_or_else(|| (*k).to_owned());
+        let c = party_signer(&alias)
+            .sign_hybrid(&canonical)
+            .await
+            .expect("a founding member co-signs");
+        cosignatures.push(ciris_persist::federation::types::RosterCosignature {
+            authority_key_id: (*k).to_string(),
+            scrub_signature_classical: BASE64.encode(&c.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&c.pqc.signature)),
+        });
+    }
     engine
         .federation_directory()
         .put_community(SignedCommunity {
@@ -497,7 +531,7 @@ async fn put_community(engine: &Engine, community_id: &str, members: &[(&str, &s
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
             supersede_proof: None,
-            cosignatures: Vec::new(),
+            cosignatures,
             lineage: Vec::new(),
         })
         .await

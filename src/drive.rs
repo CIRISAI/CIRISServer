@@ -275,10 +275,11 @@ pub struct DriveEntry {
     pub envelope: serde_json::Value,
     /// Where it is, compactly (`FSD/FILE_CUSTODY.md`): the person's device
     /// count and how many of those devices this node holds a delivery receipt
-    /// from — `received_on: null` for an inline file, which has no receipt at
-    /// this pin (unknowable, not zero). CHEAP BY CONSTRUCTION: the roster is
-    /// read once per page, and a row costs one receipt-list query when it is a
-    /// chunk DAG and nothing when it is inline — no manifest, no custody door.
+    /// from — `received_on: null` only when the receipt log could not be read
+    /// (unknowable, not zero; an inline file is receipted like any other since
+    /// edge v38.0.0 / persist v52, CIRISPersist#953). CHEAP BY CONSTRUCTION:
+    /// the roster is read once per page, and a row costs one receipt-list
+    /// query — no manifest, no custody door.
     /// `null` on a withdrawn row, or when the roster could not be read.
     /// `GET /v1/files/{id}/custody` is the full answer.
     pub custody: Option<crate::file_custody::CompactCustody>,
@@ -1810,6 +1811,28 @@ async fn probe(st: &DriveState, file: &files::FileRow, viewer: &str) -> ByteStat
         .read_blob_range_as(&sha, viewer, past_the_end, past_the_end, aad.as_deref())
         .await
     {
+        // A chunk-DAG pull adopts the MANIFEST first, as an inline envelope at
+        // the file's address, and flips it to `chunk_dag` only when every chunk
+        // is held (persist `promote_adopted_manifest_to_dag`, CIRISPersist#947).
+        // Mid-pull the range probe therefore answers with the MANIFEST's length
+        // — a few hundred bytes for a 256 MiB file — and reporting that as
+        // `here` sent a reader to a raw read that 416'd (found by the native
+        // `bigfile-quick` run on edge v38, 2026-10-01). The pointer declares the
+        // plaintext size (CIRISEdge#638): bytes of any other length are not this
+        // file yet, so they read `not_fetched` — "still arriving" — never `here`.
+        Err(BlobError::RangeNotSatisfiable { size, .. })
+            if file.pointer.size.is_some_and(|declared| declared != size) =>
+        {
+            ByteState::Absent {
+                state: "not_fetched",
+                detail: format!(
+                    "{} (the pull is in progress: {size} of {} bytes' worth is held — the \
+                     chunk DAG's manifest arrives before its chunks)",
+                    state_detail("not_fetched"),
+                    file.pointer.size.unwrap_or(0)
+                ),
+            }
+        }
         Err(BlobError::RangeNotSatisfiable { size, .. }) => ByteState::Here { size: Some(size) },
         Ok(_) => ByteState::Here { size: None },
         Err(e) => blob_state(&e),
@@ -2639,7 +2662,6 @@ async fn file_custody(
     };
     let mut why = crate::file_custody::substrate_why(copies_observable, &tier);
     why.extend(half.why);
-    let receipts_supported = !matches!(receipts, crate::file_custody::Receipts::Unsupported);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2664,9 +2686,11 @@ async fn file_custody(
             // answered by persist from the blob's head row, which is not here.
             "access": custody.as_ref().map(|c| &c.access),
             "checked_at": checked_at,
-            "receipts_supported": receipts_supported,
-            "receipts_unsupported_reason": (!receipts_supported)
-                .then_some(crate::file_custody::WHY_INLINE_NO_RECEIPT.reason_id),
+            // Every file is receiptable since edge v38.0.0 / persist v52 (an
+            // inline file has a one-leaf log, CIRISPersist#953): both fields
+            // stay on the wire for the client that reads them, constant.
+            "receipts_supported": true,
+            "receipts_unsupported_reason": serde_json::Value::Null,
             "receipts_from_other_keys": half.other_receipts,
             "why": why,
         })),

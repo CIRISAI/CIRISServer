@@ -1202,6 +1202,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             }
         }
     };
+    // THE PAIR-ROOM DRIVER (edge v38 / persist v52, CIRISPersist#955): the chat
+    // router and its driver share ONE room state, so a read and a tick never
+    // key a room twice. A person asks for a chat once and waits — the driver
+    // completes the two-step join and the MLS handshake with nobody reading
+    // (`contacts_chat::PairRoomDriver`). Supervised like the session claims.
+    let (pair_rooms_sd_tx, pair_rooms_sd_rx) = watch::channel(false);
+    let (chat_router, pair_room_driver) = crate::contacts_chat::router_with_driver(
+        Arc::clone(&engine),
+        Arc::clone(&chat_node_signer),
+        crate::user_seed_dir(&cfg),
+        // The live transport, so the contact ladder can run its `discover`
+        // rung — "is there somewhere to send" — through edge's own `RouteLens`
+        // instead of this module deciding what reachable means.
+        edge.reticulum_transport(),
+        // CIRISEdge#499 — the host drives the scope-address plane it armed: a
+        // keyed room is installed, advanced on every epoch, sealed on the
+        // cadence loop below.
+        edge.scope_lifecycle().cloned(),
+    );
+    let pair_rooms_join = pair_room_driver.spawn(pair_rooms_sd_rx);
     let read = {
         let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
@@ -1611,20 +1631,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // grant, a chat is a two-member `Community` under a derived
                     // id, and a message is a `chat:message:v1` attestation at
                     // `cohort_scope: community`. See `crate::contacts_chat`.
-                    .merge(crate::contacts_chat::router(
-                        Arc::clone(&engine),
-                        Arc::clone(&chat_node_signer),
-                        crate::user_seed_dir(&cfg),
-                        // The live transport, so the contact ladder can run its
-                        // `discover` rung — "is there somewhere to send" — through
-                        // edge's own `RouteLens` instead of this module deciding
-                        // what reachable means.
-                        edge.reticulum_transport(),
-                        // CIRISEdge#499 — the host drives the scope-address
-                        // plane it armed: a keyed room is installed, advanced
-                        // on every epoch, sealed on the cadence loop below.
-                        edge.scope_lifecycle().cloned(),
-                    ))
+                    // (built above with its pair-room driver)
+                    .merge(chat_router)
                     // FILES, THE DRIVE AND NOTES (CIRISServer#622/#615): one
                     // door for a file at any cohort, the drive that lists what
                     // this identity can reach with `row held, bytes absent` as
@@ -1644,6 +1652,15 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // dissolve, and envelope → cosign → assemble for a quorum
                     // family. Owner-gated; every row signed by the owner's fed-ID.
                     .merge(crate::family_api::router(
+                        Arc::clone(&engine),
+                        crate::user_seed_dir(&cfg),
+                    ))
+                    // THE INVITE INBOX (0.5.218, CIRISPersist#955,
+                    // FSD/MEMBERSHIP_INVITES.md): the invitee's half of
+                    // consent-to-join — `GET /v1/self/invites`, and accept /
+                    // decline signed with the owner's own pen. The group's
+                    // half lives on the family and community routes.
+                    .merge(crate::membership_invites::router(
                         Arc::clone(&engine),
                         crate::user_seed_dir(&cfg),
                     ))
@@ -2212,6 +2229,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     stop_step("self room drive", self_room_join).await;
     let _ = session_claims_sd_tx.send(true);
     stop_step("session claims", session_claims_join).await;
+    let _ = pair_rooms_sd_tx.send(true);
+    stop_step("pair-room driver", pair_rooms_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.
@@ -4660,6 +4679,21 @@ pub(crate) async fn start_replication_runtime(
                 // as the owner's admission does — and the same debt rule: a
                 // kick that found no runtime yet is still owed.
                 let periodic = tokio::time::Instant::now() >= relay_due;
+                // THE MEMBERSHIP SWEEP (persist v52 / edge v38, CIRISPersist#955)
+                // rides the relay's period: a runtime built before the claim
+                // has no `membership_widener`, so an acceptance of this owner's
+                // invitation would be stored and never seated. The sweep is the
+                // widener's own call, on the owner binding's authority.
+                if periodic {
+                    if let Some(held) = SELF_PUBLISH.get() {
+                        let node = held.own_key_ids.first().cloned().unwrap_or_default();
+                        let _ = crate::membership_invites::widen_own_accepted_proposals(
+                            &held.engine,
+                            crate::node_key::wire_identity().unwrap_or(&node),
+                        )
+                        .await;
+                    }
+                }
                 if periodic || nudged {
                     if let Some(held) = SELF_PUBLISH.get() {
                         if crate::announced_relay::refresh(
@@ -4712,6 +4746,61 @@ pub(crate) async fn start_replication_runtime(
     // chunk source refuse and the backend evict (CIRISEdge#614).
     let (pull_sink, revocations) =
         crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
+    // ── THE MEMBERSHIP WIDENER (edge v38.0.0 / persist v52.0.0, CIRISPersist#955) ──
+    //
+    // Nobody joins a family or community without their own signed acceptance
+    // (CIRISConstitution#133). The flow is three rows: the inviter's
+    // `membership:proposal:v1`, the invitee's `membership:acceptance:v1`, and
+    // the ROSTER WIDENING that seats them — and the widening is the only one of
+    // the three that changes who is in the group. Edge's bridge performs it on
+    // arrival of an acceptance of a proposal one of the widener's identities
+    // issued, so the inviter's person takes no second action. Left `None` (the
+    // default), acceptances are STORED and nothing is ever widened by this node:
+    // every invite accepted on the invitee's device would sit "accepted" here
+    // forever. That is exactly the host-hooks-left-unset class (an optional
+    // edge hook the server never set disabled chat bodies for six releases), so
+    // it is set here, and the reason it can still be `None` is written down.
+    //
+    // WHOSE KEY. The widening must carry the founder's PERSON signature: the
+    // roster's consensus counts raw SEAT keys, and a seat is the person's
+    // fed-ID, never a device acting for it (an acceptance may be device-signed;
+    // a widening may not). So the signer is the owner's fed-ID pen, opened on
+    // the owner binding's authority (`for_owned_node` — a loop's authority is
+    // the binding, not a session bearer, which a boot-time hook never has).
+    //
+    // WHEN IT IS `None`. An UNCLAIMED node at boot has no owner and no pen;
+    // the runtime is composed once per process (`RUNTIME`), and edge takes the
+    // widener by value, so a node claimed AFTER the runtime started has no
+    // widener until its next restart. The invite routes cover that window
+    // (`membership_invites::widen_held_acceptances`): listing a group's
+    // invites as a member re-attempts the widening for every accepted,
+    // unseated invitee with the caller's own pen — idempotent, and the same
+    // edge call (`membership::widen_on_acceptance`), not a second copy of it.
+    // A quorum group's widening needs M-of-N and is never auto-widened by a
+    // single pen (persist refuses it); see `FSD/MEMBERSHIP_INVITES.md` §3.1.
+    let membership_widener =
+        match crate::owner_signer_capsule::for_owned_node(engine, wire).await {
+            Ok(capsule) => {
+                tracing::info!(
+                    owner = %capsule.key_id(),
+                    "membership widener installed: an acceptance of a proposal this node's \
+                     owner issued is widened on arrival, signed by the owner's person key \
+                     (CIRISPersist#955)"
+                );
+                Some(ciris_edge::membership::MembershipWidener::new(vec![
+                    Arc::clone(capsule.edge_signer()),
+                ]))
+            }
+            Err(e) => {
+                tracing::info!(
+                    reason = %e,
+                    "membership widener NOT installed (no owner pen at runtime start) — \
+                     acceptances are stored and widened when a member lists the group's \
+                     invites; a restart after the claim installs it"
+                );
+                None
+            }
+        };
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
@@ -4752,6 +4841,16 @@ pub(crate) async fn start_replication_runtime(
         kind_publish_selector: Some(crate::announced_relay::selector(Arc::clone(
             &self_publish_keys,
         ))),
+        // persist v52 / edge v38 (CIRISPersist#955) — see the block above.
+        membership_widener,
+        // Every OTHER field edge v38.0.0 added to a host-set surface, named so
+        // the next adopt diffs against a list rather than a memory:
+        // `ReplicationRuntimeConfig::membership_widener` (set, above) is the
+        // only new runtime field; `SealedContentWiring` is unchanged; and
+        // `PullConfig::dag_adopt_batch_chunks` (CIRISEdge#765, the batched DAG
+        // adopt) keeps edge's default of 16 through `..PullConfig::default()`
+        // in `backend::spawn_puller_with` — the default is the measured one
+        // (CIRISPersist#957's flat per-chunk adopt time at 2 GiB).
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(

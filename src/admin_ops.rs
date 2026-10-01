@@ -2103,9 +2103,37 @@ async fn put_revocation_for(
         );
     }
 
+    // persist v52 (CIRISPersist#784): the revocation's SUBJECT is the SHA-256
+    // of the revoked key's raw Ed25519 public key, signed into the binding; the
+    // `revoked_key_id` label is optional and, when present, must name a held
+    // key with that digest. De-admission always names a key this node holds
+    // (it resolved the delegation through it), so the digest is read from the
+    // stored record — never computed from the label, which would publish the
+    // keystore alias as if it were the subject.
+    let subject = match engine
+        .federation_directory()
+        .lookup_public_key(revoked_key_id)
+        .await
+    {
+        Ok(Some(rec)) => {
+            ciris_persist::federation::key_digest::Sha256Ed25519Raw::from_pubkey_base64(
+                &rec.pubkey_ed25519_base64,
+            )
+            .map(|d| d.to_hex())
+            .map_err(|e| DeAdmitFailure::local("digest the revoked key", e))?
+        }
+        Ok(None) => {
+            return Err(DeAdmitFailure::local(
+                "digest the revoked key",
+                format!("{revoked_key_id} is not held here — its subject digest is unknown"),
+            ))
+        }
+        Err(e) => return Err(DeAdmitFailure::local("lookup the revoked key", e)),
+    };
     let mut revocation = Revocation {
         revocation_id: crate::ids::new_id(),
-        revoked_key_id: revoked_key_id.to_owned(),
+        revoked_key_id: Some(revoked_key_id.to_owned()),
+        revoked_key_sha256_ed25519_raw: subject,
         revoking_key_id: revoking_key_id.clone(),
         reason: Some(reason.to_owned()),
         revoked_at: now,

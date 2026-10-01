@@ -31,8 +31,12 @@
 //!    cannot open the bytes learns nothing, not even the access list.
 //! 3. **Delivery receipts** — edge's `FileRow::received_by` →
 //!    `receipts::received_for` (CIRISEdge#738, CC 5.3.3.6): one
-//!    `(node, epoch, K)` per device that stored every chunk of a chunk-DAG file
-//!    under the root the author published. The receiving node signs it on the
+//!    `(node, epoch, K, at)` per device that stored every chunk of a file
+//!    under the root the author published. Since edge v38.0.0 / persist v52
+//!    (CIRISPersist#953, CIRISEdge#755) EVERY file is a stream: a chunk DAG's
+//!    is its `stream_id`, an inline file's (≤ 1 MiB) is persist's one-leaf log
+//!    `inline_blob_stream_id(sha)`, and `at` is the instant the author's store
+//!    took the receipt (`list_stored_delivery_receipts_for`'s `received_at`). The receiving node signs it on the
 //!    pull (`on_dag_pulled`); the author's node admits it on arrival
 //!    (`admit_and_count`, in the replication bridge). A receipt is proof of
 //!    DELIVERY — it is never retracted by an eviction at this pin — so a device
@@ -66,14 +70,20 @@
 //!
 //! Every partial answer carries a `why` entry with a stable id (one
 //! [`msg`] call per reason, so the localization guard sees each):
-//! an inline file (≤ 1 MiB) has no stream and therefore no receipt until edge
-//! adopts persist v52's one-leaf log (CIRISPersist#953); `self`/`family` copies
-//! elsewhere are unobservable BY DESIGN (CC 5.2 — never announced); a receipt
-//! proves delivery, not current holding; persist does not return a receipt's
-//! time at this pin; receipts are ADMITTED on the author's device, so another
+//! `self`/`family` copies elsewhere are unobservable BY DESIGN (CC 5.2 — never
+//! announced); a receipt proves delivery, not current holding; receipts are
+//! ADMITTED on the author's device, so another
 //! device's view holds only its own; and a receipt signed by a key that is not
 //! one of the person's listed devices (a family or community member, or an
 //! agent-split ACTOR key) is listed separately rather than dropped.
+//!
+//! **Retired at edge v38.0.0 / persist v52 (0.5.218):** `custody.inline_no_receipt`
+//! (an inline file now has a one-leaf log and is receipted like any other —
+//! CIRISPersist#953 item 2, CIRISEdge#755) and `custody.receipt_time_unknown`
+//! (`Received::at` is the store's `received_at`, never absent — #953 item 3).
+//! Both conditions are now false on every path, so neither id is emitted
+//! anywhere; they are deleted rather than kept as dead constants, and the
+//! localization ratchet's count drops by two.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -94,10 +104,6 @@ const fn msg(reason_id: &'static str, detail: &'static str) -> Why {
     Why { reason_id, detail }
 }
 
-pub const WHY_INLINE_NO_RECEIPT: Why = msg(
-    "custody.inline_no_receipt",
-    "This file is small enough to be stored in one piece, and a file stored in one piece has no delivery receipt yet: your other devices may hold it, but this device cannot be told so.",
-);
 pub const WHY_COPIES_UNOBSERVABLE: Why = msg(
     "custody.copies_unobservable_by_design",
     "Your own and your family's files are never announced to anyone, so copies on other devices cannot be counted; a delivery receipt is the only sign a device received one.",
@@ -105,10 +111,6 @@ pub const WHY_COPIES_UNOBSERVABLE: Why = msg(
 pub const WHY_RECEIPT_IS_DELIVERY: Why = msg(
     "custody.receipt_is_delivery_not_holding",
     "A delivery receipt proves a device received the whole file. It does not prove the device still holds it: removing a copy does not withdraw its receipt yet.",
-);
-pub const WHY_RECEIPT_TIME_UNKNOWN: Why = msg(
-    "custody.receipt_time_unknown",
-    "The time each device received the file is not available yet.",
 );
 pub const WHY_RECEIPTS_ON_AUTHOR_DEVICE: Why = msg(
     "custody.receipts_admitted_on_author_device",
@@ -137,10 +139,8 @@ pub const WHY_NO_COPY_HERE: Why = msg(
 
 /// Every custody reason, for the FSD table and the gates.
 pub const ALL_WHY: &[Why] = &[
-    WHY_INLINE_NO_RECEIPT,
     WHY_COPIES_UNOBSERVABLE,
     WHY_RECEIPT_IS_DELIVERY,
-    WHY_RECEIPT_TIME_UNKNOWN,
     WHY_RECEIPTS_ON_AUTHOR_DEVICE,
     WHY_RECEIPT_FROM_OTHER_KEY,
     WHY_RECEIPTS_UNREADABLE,
@@ -243,8 +243,10 @@ pub async fn owner_devices(engine: &Engine, owner: &str) -> Result<Vec<Device>, 
 pub struct ReceivedView {
     pub epoch: u64,
     pub k: u64,
-    /// `null` at this pin — see [`WHY_RECEIPT_TIME_UNKNOWN`].
-    pub at: Option<String>,
+    /// When the author's store took the receipt (RFC 3339) — persist's
+    /// `received_at` (CIRISPersist#953), the store's fact rather than the
+    /// receiving device's claim. Always present since persist v52.
+    pub at: String,
 }
 
 /// A receipt that no listed device answers to.
@@ -253,7 +255,7 @@ pub struct OtherReceipt {
     pub node_key_id: String,
     pub epoch: u64,
     pub k: u64,
-    pub at: Option<String>,
+    pub at: String,
 }
 
 /// One device's row in the view.
@@ -280,10 +282,10 @@ pub struct DeviceCustody {
     pub reported_at: Option<String>,
 }
 
-/// What the receipt read found.
+/// What the receipt read found. Since edge v38.0.0 every file — inline or
+/// chunked — has a receipt stream, so there is no "unsupported" arm: the only
+/// partial answer is a read that failed.
 pub enum Receipts {
-    /// An inline file: no stream, no receipt at this pin.
-    Unsupported,
     /// The stream log could not be read.
     Unreadable,
     /// The receipts this node's stream log holds for the file.
@@ -301,7 +303,7 @@ fn received_view(r: &ciris_edge::receipts::Received) -> ReceivedView {
     ReceivedView {
         epoch: r.epoch,
         k: r.k,
-        at: r.at.map(|t| t.to_rfc3339()),
+        at: r.at.to_rfc3339(),
     }
 }
 
@@ -322,10 +324,6 @@ pub fn device_half(
     let mut why = Vec::new();
     let held: &[ciris_edge::receipts::Received] = match receipts {
         Receipts::Held(r) => r,
-        Receipts::Unsupported => {
-            why.push(WHY_INLINE_NO_RECEIPT);
-            &[]
-        }
         Receipts::Unreadable => {
             why.push(WHY_RECEIPTS_UNREADABLE);
             &[]
@@ -378,14 +376,11 @@ pub fn device_half(
             node_key_id: r.node_key_id.clone(),
             epoch: r.epoch,
             k: r.k,
-            at: r.at.map(|t| t.to_rfc3339()),
+            at: r.at.to_rfc3339(),
         })
         .collect();
     if matches!(receipts, Receipts::Held(_)) {
         why.push(WHY_RECEIPT_IS_DELIVERY);
-        if held.iter().any(|r| r.at.is_none()) {
-            why.push(WHY_RECEIPT_TIME_UNKNOWN);
-        }
         if !this_device_is_author {
             why.push(WHY_RECEIPTS_ON_AUTHOR_DEVICE);
         }
@@ -410,8 +405,9 @@ pub fn device_half(
 }
 
 /// The compact per-row summary `GET /v1/drive` carries: the device count and
-/// how many of them hold a receipt — `received_on: null` for an inline file
-/// (unknowable, not zero) or when the stream log could not be read.
+/// how many of them hold a receipt — `received_on: null` only when the stream
+/// log could not be read (unknowable, not zero). An inline file counts like
+/// any other since edge v38.0.0.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompactCustody {
     pub devices_total: usize,
@@ -428,7 +424,7 @@ pub fn compact(devices: &[Device], receipts: &Receipts) -> CompactCustody {
                 .filter(|d| held.iter().any(|r| d.keys.contains(&r.node_key_id)))
                 .count(),
         ),
-        Receipts::Unsupported | Receipts::Unreadable => None,
+        Receipts::Unreadable => None,
     };
     CompactCustody {
         devices_total: devices.len(),
@@ -436,14 +432,13 @@ pub fn compact(devices: &[Device], receipts: &Receipts) -> CompactCustody {
     }
 }
 
-/// Read a file row's receipts through the drive's store.
+/// Read a file row's receipts through the drive's store — inline and chunked
+/// alike (edge names the stream, `receipts::receipt_stream_id`; this module
+/// never decides which files are receiptable).
 pub async fn receipts_of(
     file: &ciris_edge::files::FileRow,
     store: &dyn ciris_edge::group_content::GroupContentStore,
 ) -> Receipts {
-    if file.pointer.stream_id.is_none() {
-        return Receipts::Unsupported;
-    }
     match file.received_by(store).await {
         Ok(r) => Receipts::Held(r),
         Err(e) => {
@@ -501,7 +496,7 @@ mod tests {
             node_key_id: node.into(),
             epoch: 0,
             k: 25,
-            at: None,
+            at: "2026-09-30T00:00:00Z".parse().expect("fixture instant"),
         }
     }
 
@@ -534,24 +529,28 @@ mod tests {
         assert_eq!((c.devices_total, c.received_on), (2, Some(1)));
     }
 
+    /// Since edge v38.0.0 a receipt always carries the store's `received_at`,
+    /// and nothing in the view says the time is unknown.
     #[test]
-    fn an_inline_file_says_why_it_has_no_receipt() {
+    fn a_receipt_says_when_and_no_time_reason_is_given() {
         let devices = vec![dev("a", true), dev("b", false)];
         let access = HashSet::new();
         let half = device_half(
             &devices,
             Some(&access),
             true,
-            &Receipts::Unsupported,
+            &Receipts::Held(vec![rec("b")]),
             true,
             "t",
         );
+        let got = half.devices[1].received.as_ref().expect("b receipted");
+        assert_eq!(got.at, "2026-09-30T00:00:00+00:00");
+        assert_eq!(half.why, vec![WHY_RECEIPT_IS_DELIVERY]);
         assert_eq!(
-            half.why,
-            vec![WHY_INLINE_NO_RECEIPT, WHY_NO_COPY_REPORTS_PENDING]
+            compact(&devices, &Receipts::Unreadable).received_on,
+            None,
+            "an unreadable log is unknown, not zero"
         );
-        assert_eq!(half.devices[1].holds, HOLDS_UNKNOWN);
-        assert_eq!(compact(&devices, &Receipts::Unsupported).received_on, None);
     }
 
     /// The maintainer's ruling on #704: a device that holds the row and not the

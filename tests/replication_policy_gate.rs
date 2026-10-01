@@ -202,8 +202,33 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// self-plane rows, `self`-scoped bindings and bindings of unpublished nodes
 /// stay withheld, and the Rooted floor still applies. `trace:*` unchanged.
 /// `e4c4d625…` → `b86a7042…`, equal to edge's published constant.
+///
+/// Re-pinned for 0.5.218 on edge v38.0.0 (persist v52, CIRISPersist#955 —
+/// nobody joins a group without their own consent), reviewed against the
+/// v37.1.0 → v38.0.0 diff of `replication/serve_policy.rs`. THREE rows changed,
+/// all in the direction the consent ruling needs:
+///
+/// - **Attestation** (CIRISEdge#756): the first-contact arm also serves the
+///   membership ceremony addressed to the peer's own person — a
+///   `membership:proposal:v1` naming `owner_of(peer)`, and the invitee's
+///   `membership:acceptance|decline:v1` to a proposal held here that
+///   `owner_of(peer)` issued — with no Rooted floor on those two (CC rc6
+///   3.1.3.2: an invitation must be readable by someone who is not yet in the
+///   group). Nothing else reaches a stranger; `trace:*` still serves only to
+///   `capability:infra:serve` (E3 re-checked).
+/// - **Family** and **Community** (CIRISEdge#758 / #762): the group RECORD
+///   leaves `("cohort", "public")`. A private group's record now reaches only a
+///   peer whose person is a live member or the invitee of a live proposal held
+///   here, else it is withheld `group_record_not_member_or_invitee`. PUBLIC
+///   groups keep `public` — an `infrastructure` community, the accord / genesis
+///   / WA reclaim families — so every node still resolves its trust root and
+///   reclaim authority through them. This NARROWS what a stranger learns: a
+///   household or a room no longer announces that it exists.
+///
+/// `LocationProof` keeps `public` (split out of the old shared line, value
+/// unchanged). `b86a7042…` → `e3070d53…`, equal to edge's published constant.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "b86a7042ad9ccc81d7e54abc9b9a2fb8d8a415e7d1c85be025484292150347eb";
+    "e3070d5327d6518b7ef50b0988f1af92790e2ea4efb9833cc4213a4127fc41b0";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

@@ -56,20 +56,110 @@ fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContent
     )
 }
 
-/// The whole file, one chunk per item, through `FileRow::chunks()`.
+/// How long a streamed read waits, without progress, for a chunk whose key
+/// grant has not arrived yet before it gives up.
+///
+/// A pulled chunk DAG is PROMOTED when every chunk's bytes are held, but each
+/// chunk's key grant replicates on its own afterwards, in seq order, at about
+/// 2.4 chunks/s (CIRISEdge#779, measured on the 256 MiB native run: chunk
+/// 781's wrap arrived 18 s before the read that died on chunk 782). A
+/// `NotGranted` on a just-pulled DAG is therefore usually "not yet", not "no":
+/// CIRISEdge#772 records that NotGranted is not terminal. So the walk waits and
+/// retries the same offset — progress resets the clock — and only a grant that
+/// stays missing this long ends the stream (the client sees a body shorter than
+/// its Content-Length, never wrong bytes). Edge's #779 gates the reported state
+/// on grants; this is the reader's belt until then.
+pub const GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Between retries of a chunk whose grant has not arrived.
+const GRANT_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn grant_pending(e: &FileError) -> bool {
+    matches!(
+        e,
+        FileError::Unopened(ciris_edge::chat::UnopenedReason::NotGranted { .. })
+    )
+}
+
+/// The whole file, one chunk per item, through `FileRow::chunks()`. A chunk
+/// refused `NotGranted` hands the rest of the walk to the range reader from
+/// the first byte not yet sent, which waits for the grant ([`GRANT_WAIT`]).
 pub fn spawn_chunks(engine: Arc<Engine>, file: FileRow, viewer: String) -> mpsc::Receiver<Item> {
     let (tx, rx) = mpsc::channel(IN_FLIGHT);
     tokio::spawn(async move {
         let content = store(&engine);
-        let mut chunks = file.chunks(&content, &viewer);
-        while let Some(item) = chunks.next().await {
-            let stop = item.is_err();
-            if tx.send(item).await.is_err() || stop {
+        let mut sent: u64 = 0;
+        {
+            let mut chunks = file.chunks(&content, &viewer);
+            while let Some(item) = chunks.next().await {
+                match item {
+                    Ok(bytes) => {
+                        sent += bytes.len() as u64;
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) if grant_pending(&e) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+        }
+        let Some(total) = file.pointer.size else {
+            return;
+        };
+        if sent >= total {
+            return;
+        }
+        tracing::info!(
+            attestation_id = %file.attestation_id, sent, total,
+            "drive: a chunk's key grant has not arrived yet — waiting for it (CIRISEdge#779) \
+             and continuing from the first unsent byte"
+        );
+        walk_range(&content, &file, &viewer, sent, total - 1, &tx).await;
+    });
+    rx
+}
+
+/// `[start, end]` in [`RANGE_WINDOW`] windows, each retried while its grant is
+/// pending (up to [`GRANT_WAIT`] without progress).
+async fn walk_range(
+    content: &ciris_edge::group_content::PersistGroupContentStore,
+    file: &FileRow,
+    viewer: &str,
+    start: u64,
+    end: u64,
+    tx: &mpsc::Sender<Item>,
+) {
+    let mut at = start;
+    let mut stalled_since: Option<tokio::time::Instant> = None;
+    while at <= end {
+        let window_end = ((at / RANGE_WINDOW) + 1) * RANGE_WINDOW - 1;
+        let last = window_end.min(end);
+        match file.open_range(content, viewer, at, last - at + 1).await {
+            Ok(bytes) => {
+                stalled_since = None;
+                if tx.send(Ok(bytes)).await.is_err() {
+                    return;
+                }
+                at = last + 1;
+            }
+            Err(e) if grant_pending(&e) => {
+                let since = *stalled_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= GRANT_WAIT {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                tokio::time::sleep(GRANT_RETRY).await;
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
                 return;
             }
         }
-    });
-    rx
+    }
 }
 
 /// `[start, end]` inclusive, in [`RANGE_WINDOW`] windows through
@@ -89,17 +179,7 @@ pub fn spawn_range(
     let (tx, rx) = mpsc::channel(IN_FLIGHT);
     tokio::spawn(async move {
         let content = store(&engine);
-        let mut at = start;
-        while at <= end {
-            let window_end = ((at / RANGE_WINDOW) + 1) * RANGE_WINDOW - 1;
-            let last = window_end.min(end);
-            let item = file.open_range(&content, &viewer, at, last - at + 1).await;
-            let stop = item.is_err();
-            if tx.send(item).await.is_err() || stop {
-                return;
-            }
-            at = last + 1;
-        }
+        walk_range(&content, &file, &viewer, start, end, &tx).await;
     });
     rx
 }

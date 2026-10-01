@@ -83,6 +83,32 @@
 //! lease ≤ 86 400 s, a renewal is a `supersedes` that keeps `claimed_at`);
 //! persist v52 (#946) carries it, and [`write_claim`] names the spot.
 //!
+//! # At persist v52.0.0 — the lease is in the row; the fold still is not
+//!
+//! v52 (CIRISPersist#946) made `valid_until` REQUIRED on every `session:*` row
+//! and bounded it (`claimed_at ≤ valid_until ≤ claimed_at + 86 400 s`,
+//! `admission::check_session_lease_bound`, at every door), so every claim
+//! written here now carries `valid_until = claimed_at + TTL` — the honest end
+//! of a [`SESSION_CLAIM_TTL`] lease, signed.
+//!
+//! What v52 did NOT move is the READ. `session_claim::handler_for` still folds
+//! `claim_is_live(claim, now, ttl)` = `now − claimed_at < ttl` with the
+//! CONSUMER's ttl; it reads neither `valid_until` nor `supersedes` (and
+//! `list_attestations_for` does not drop a superseded row). So the renewal CC
+//! 3.1.3.1 describes — a `supersedes` of the previous lease that KEEPS
+//! `claimed_at` and moves `valid_until` forward — would be judged by its
+//! unchanged `claimed_at` and expire the holder at `claimed_at + TTL` in every
+//! view, on every device: the session would be handed over every two minutes
+//! while the person sat at the holder. That is worse than the v51 behaviour
+//! it is meant to improve, so the renewal stays the successor lease described
+//! above (a fresh claim by the device the fold already names, its own
+//! `claimed_at`, its own `valid_until`), which v52's bound admits and v52's
+//! fold keeps live. The day persist's fold reads `valid_until` and honours
+//! `supersedes` (the read half of #946), [`renew_once`] turns into that
+//! supersedes and `SESSION_CLAIM_TTL` stops being a consumer constant; until
+//! then a server-side liveness fold over `valid_until` would be a second copy
+//! of persist's rule (the mirrored-rule class), so none is written here.
+//!
 //! Every one of this person's devices runs this binary, so every one of them
 //! applies the same [`SESSION_CLAIM_TTL`] — the convergence argument needs one
 //! horizon, and until the horizon is in the row, one constant is how it gets
@@ -177,6 +203,11 @@ pub fn self_community(owner_key_id: &str) -> String {
 const COMMUNITY_ID: &str = "community_id";
 const SESSION_ID: &str = "session_id";
 const CLAIMED_AT: &str = "claimed_at";
+/// persist v52 (CIRISPersist#946): the lease's signed end. Persist's gate
+/// spells it inline too (`check_session_lease_bound`); the round-trip test
+/// below writes a claim through the real door, so a rename upstream refuses
+/// the row and fails the test.
+const VALID_UNTIL: &str = "valid_until";
 
 /// CC 2.6.2 canonical instant: RFC 3339, milliseconds, `Z`.
 #[must_use]
@@ -440,17 +471,14 @@ impl NodePen {
 /// at `self`, through the one attest door. `claimed_at` is the caller's (a
 /// fresh claim and a v51 successor lease both pass `now`).
 ///
-/// `expires_at` states the lease honestly (`claimed_at + TTL`) so the row
-/// carries its own end for anything that sweeps expired rows; the FOLD does
-/// not read it (v51's horizon is the consumer TTL).
-///
-/// TODO(CIRISPersist#946): persist v52 adds the signed lease bound — a
-/// `valid_until` member (≤ 86 400 s after `claimed_at`, CC 3.1.3.1) that
-/// replaces the consumer TTL as the horizon, and a renewal becomes a
-/// `supersedes` of the previous lease that KEEPS `claimed_at`. Write
-/// `valid_until` here, and turn the successor lease in [`renew_once`] into
-/// that supersedes, when the pin moves; not before — v51 has no member for it
-/// and an invented one would be refused by the strict envelope.
+/// The lease is in the SIGNED envelope (persist v52, CIRISPersist#946, CC
+/// 3.1.3.1): `valid_until = claimed_at + TTL` — required on every `session:*`
+/// row, refused without it (`check_session_lease_bound`), and bounded to a
+/// day, which a 120 s lease is far inside. `expires_at` states the same
+/// instant for anything that sweeps expired rows. persist's fold still reads
+/// the consumer TTL from `claimed_at` (see the module docs, "At persist
+/// v52.0.0"), and both horizons are the same [`SESSION_CLAIM_TTL`], so the
+/// row's lease and the fold's agree on every device.
 pub async fn write_claim(
     engine: &Engine,
     signer: crate::attest::KeySigner<'_>,
@@ -458,17 +486,28 @@ pub async fn write_claim(
     session: &str,
     claimed_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, crate::attest::Error> {
-    let envelope = serde_json::json!({
+    let envelope = claim_envelope(community, session, claimed_at);
+    let spec = crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::SELF, envelope)
+        .weighing(Some(1.0))
+        .expiring(Some(claimed_at + ttl()));
+    crate::attest::emit(engine, signer, spec).await
+}
+
+/// The signed members of one claim — ONE builder, so the unit test that runs
+/// persist's own lease gate over it judges exactly what [`write_claim`] signs.
+fn claim_envelope(
+    community: &str,
+    session: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
         (paths::DIMENSION): SESSION_CLAIM_DIMENSION,
         "score": 1.0,
         COMMUNITY_ID: community,
         SESSION_ID: session,
         CLAIMED_AT: canonical_instant(claimed_at),
-    });
-    let spec = crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::SELF, envelope)
-        .weighing(Some(1.0))
-        .expiring(Some(claimed_at + ttl()));
-    crate::attest::emit(engine, signer, spec).await
+        VALID_UNTIL: canonical_instant(claimed_at + ttl()),
+    })
 }
 
 /// Who this device is, for its person: the occurrence the owner-binding
@@ -1007,15 +1046,28 @@ mod tests {
         );
     }
 
-    /// The members this module writes are the ones persist's reader reads.
+    /// The members this module writes are the ones persist's reader reads —
+    /// and, since persist v52 (CIRISPersist#946), the ones persist's lease gate
+    /// admits: `valid_until` present, after `claimed_at`, within a day.
     #[test]
     fn a_written_claim_is_one_persist_can_read() {
-        let env = serde_json::json!({
-            (paths::DIMENSION): SESSION_CLAIM_DIMENSION,
-            COMMUNITY_ID: "c1",
-            SESSION_ID: SELF_ROOM_MEMBERSHIP_SESSION,
-            CLAIMED_AT: canonical_instant(at(NOW)),
-        });
+        let env = claim_envelope("c1", SELF_ROOM_MEMBERSHIP_SESSION, at(NOW));
+        ciris_persist::federation::admission::check_session_lease_bound(
+            SESSION_CLAIM_DIMENSION,
+            &env,
+        )
+        .expect("persist v52's lease bound admits the claim this module signs");
+        assert_eq!(env[VALID_UNTIL], "2026-09-30T12:02:00.000Z");
+        let mut bare = env.clone();
+        bare.as_object_mut().expect("object").remove(VALID_UNTIL);
+        assert!(
+            ciris_persist::federation::admission::check_session_lease_bound(
+                SESSION_CLAIM_DIMENSION,
+                &bare,
+            )
+            .is_err(),
+            "a claim without valid_until is malformed at v52 — the pre-v52 row shape"
+        );
         let (c, s, got) = claim_from_envelope(&env, "occ").expect("persist folds it");
         assert_eq!(
             (c.as_str(), s.as_str()),

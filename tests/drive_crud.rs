@@ -152,22 +152,28 @@ impl Fx {
             .expect("base64")
     }
 
-    /// A community the OWNER founded (and so a member of), plus `others`.
-    async fn owners_community(&self, name: &str, others: &[&str]) -> String {
+    /// A community the OWNER founded (and so a member of), plus `others` —
+    /// each `(key_id, ed_seed, pqc_seed)` as `seed_key` registered it, because
+    /// since persist v52 every founding member co-signs the record.
+    async fn owners_community(&self, name: &str, others: &[(&str, u8, u8)]) -> String {
         let id = format!("community-{name}-{}", std::process::id());
         let now = chrono::Utc::now();
-        self.engine
-            .put_community_self_signed(Community {
+        let keys: Vec<&str> = others.iter().map(|(k, _, _)| *k).collect();
+        put_community_cosigned(
+            &self.engine,
+            Community {
                 community_key_id: id.clone(),
                 community_name: name.to_owned(),
-                members: founded_by(&self.owner_id.key_id, others, now),
+                members: founded_by(&self.owner_id.key_id, &keys, now),
                 founded_at: now,
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
-            })
-            .await
-            .expect("author the owner's community");
+            },
+            others,
+        )
+        .await
+        .expect("author the owner's community");
         id
     }
 
@@ -177,8 +183,11 @@ impl Fx {
         seed_key(&self.engine, "dave-drive", 0xD0, 0xD1, identity_type::USER).await;
         let id = format!("community-strangers-{}", std::process::id());
         let now = chrono::Utc::now();
-        self.engine
-            .put_community_self_signed(Community {
+        // Both strangers co-sign their founding record (persist v52 Q1); the
+        // node's signature as authority vouches for nothing it is not in.
+        put_community_cosigned(
+            &self.engine,
+            Community {
                 community_key_id: id.clone(),
                 community_name: "strangers".to_owned(),
                 members: ["carol-drive", "dave-drive"]
@@ -193,9 +202,11 @@ impl Fx {
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
-            })
-            .await
-            .expect("author the strangers' community");
+            },
+            &[("carol-drive", 0xC0, 0xC1), ("dave-drive", 0xD0, 0xD1)],
+        )
+        .await
+        .expect("author the strangers' community");
         id
     }
 }
@@ -916,7 +927,7 @@ async fn a_non_author_cannot_change_a_file() {
     // through edge's own file door with her own key.
     let erin = "erin-drive";
     seed_key(&fx.engine, erin, 0xE0, 0xE1, identity_type::USER).await;
-    let community = fx.owners_community("shared", &[erin]).await;
+    let community = fx.owners_community("shared", &[(erin, 0xE0, 0xE1)]).await;
     // The owner's content occurrence on this node — what the room's DEK is
     // wrapped to, so erin's file is readable by somebody.
     ciris_server::backend::provision_engine_occurrence(&fx.engine, &fx.owner_id.key_id)
@@ -1932,4 +1943,125 @@ async fn the_streamed_path_keeps_the_write_gate_and_the_form_order() {
     )
     .await;
     assert_eq!((s, reason(&v)), (413, "drive.too_large"), "{v}");
+}
+
+// ─── A family file's chunks are served under the FAMILY ────────────────────
+
+/// edge v38.0.0 (CIRISEdge#736) found it on its own lane and the server had
+/// the same bug: a family file is authored at `self` and crossed by a two-row
+/// widening, so on its AUTHOR's node persist's binding index returns the
+/// author's `self` row, and the server's old first-row-wins walk scoped every
+/// family chunk `self` — each member's fetch, arriving on a `family` address,
+/// was withheld `blob_serve_arrival_scope_insufficient`. `chunk_scope` now
+/// asks edge's `BlobMeaning::serve_scope`, which answers from the widening.
+///
+/// Pinned on the real drive: the owner founds a household (alone — persist v52
+/// seats only the founding record's signers), uploads a file into it, and the
+/// node's own chunk source scopes the blob as that family, not as `self`.
+#[tokio::test]
+async fn a_family_files_chunks_are_served_under_the_family() {
+    use ciris_edge::blob_swarm::{BlobChunkSource, ContentScope};
+    use ciris_edge::cohort_scope::CohortScope;
+    use ciris_persist::federation::types::{Family, FamilyMember, SignedFamily};
+    use ciris_persist::prelude::ceg_produce_canonicalize;
+
+    let fx = fixture().await;
+    let at =
+        ciris_persist::federation::admission::truncate_to_substrate_resolution(chrono::Utc::now());
+    let family_id = format!("family:v1:{}", uuid::Uuid::new_v4().simple());
+    let family = Family {
+        family_key_id: family_id.clone(),
+        family_name: "household".to_owned(),
+        members: vec![FamilyMember {
+            key_id: fx.owner_id.key_id.clone(),
+            joined_at: at,
+            role: Some("founder".to_owned()),
+        }],
+        founded_at: at,
+        consensus_protocol: "founder_only".to_owned(),
+        consensus_protocol_entrenched: false,
+        dissolved_at: None,
+        persist_row_hash: String::new(),
+    };
+    let canonical =
+        ceg_produce_canonicalize(&family.signing_envelope()).expect("canonicalize family");
+    let sig = fx
+        .owner_id
+        .signer()
+        .await
+        .sign_hybrid(&canonical)
+        .await
+        .expect("the owner signs the founding record");
+    fx.engine
+        .federation_directory()
+        .put_family(SignedFamily {
+            family,
+            authority_key_id: fx.owner_id.key_id.clone(),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
+            cosignatures: Vec::new(),
+        })
+        .await
+        .expect("the founder's household");
+
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "family",
+                "room_id": family_id,
+                "bytes_base64": BASE64.encode(b"the family's shopping list"),
+                "media_type": "text/plain",
+                "filename": "list.txt",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "family upload: {v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let (s, meta) = fx
+        .get(&format!(
+            "/v1/files/{id}/meta?cohort=family&room_id={family_id}"
+        ))
+        .await;
+    assert_eq!(s, 200, "{meta}");
+    let sha: [u8; 32] = hex::decode(meta["content_sha256"].as_str().expect("sha"))
+        .expect("hex")
+        .try_into()
+        .expect("32 bytes");
+
+    // The premise, measured: the binding index's first projecting row — what
+    // the deleted walk answered from — is the author's `self` row here.
+    let rows = fx
+        .engine
+        .federation_directory()
+        .attestations_binding_content(&hex::encode(sha))
+        .await
+        .expect("binding index");
+    let old_answer = rows
+        .iter()
+        .find_map(|r| ciris_edge::blob_swarm::BlobMeaning::project(r, &sha).ok())
+        .map(|m| m.scope().clone());
+    assert!(
+        matches!(
+            old_answer,
+            Some(ContentScope::Group {
+                scope: CohortScope::SelfOnly,
+                ..
+            })
+        ),
+        "the first-row walk would have scoped this family file `self` (the bug): {old_answer:?}"
+    );
+
+    let source = ciris_server::backend::ServerBlobChunkSource::new(&fx.engine);
+    match source.chunk_scope(sha).await {
+        Some(ContentScope::Group {
+            scope: CohortScope::Family,
+            group_id,
+        }) => assert_eq!(group_id, family_id, "served under THIS family"),
+        other => panic!(
+            "a family file's chunks must be served under the family (edge's \
+             BlobMeaning::serve_scope prefers the widening), got {other:?}"
+        ),
+    }
 }

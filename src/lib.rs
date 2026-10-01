@@ -322,6 +322,8 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+pub mod membership_invites;
+pub mod pair_intents;
 
 /// Rendering an error with its whole cause chain, for the one line an operator
 /// reads (CIRISServer#586).

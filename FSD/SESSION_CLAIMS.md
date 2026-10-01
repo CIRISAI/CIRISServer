@@ -161,6 +161,15 @@ signed lease bound `valid_until` (≤ 86 400 s after `claimed_at`) replaces the
 consumer TTL as the horizon, and a renewal becomes a `supersedes` that keeps
 `claimed_at`. Not invented before the pin moves: v51 has no member for it.
 
+**At persist v52.0.0 (0.5.218, edge v38 adopt) — half landed.** Every claim now
+carries the signed `valid_until = claimed_at + 120 s`; v52 refuses a `session:*`
+row without it and bounds the lease at a day (`check_session_lease_bound`), and
+the TODO is gone from `write_claim`. The renewal is STILL the successor lease:
+v52's `session_claim::handler_for` folds `now − claimed_at < ttl` with the
+consumer's ttl and reads neither `valid_until` nor `supersedes`, so a renewal
+that keeps `claimed_at` would expire the holder at `claimed_at + TTL` in every
+view. The supersedes renewal waits on that read half of #946 (named in §6).
+
 ## 5. The surface
 
 `GET /v1/self/sessions` — owner-authenticated (a delegate may read):
@@ -202,6 +211,10 @@ the ratchet in `tests/localization_gate.rs` 139 → 142):
 - **persist v52 / #946** — `valid_until` on `session:*` (the signed horizon)
   and the `supersedes` renewal; then the successor-lease workaround and the
   shared-constant TTL go.
+  *v52.0.0 shipped the write half (the member, required and bounded); the
+  read half — `handler_for` judging liveness by `valid_until` and folding a
+  renewing `supersedes` — is still owed, so the successor lease and the shared
+  TTL stay (§4).*
 - **persist** — exported envelope path constants for `community_id`,
   `session_id`, `claimed_at` (its reader spells them inline; the server names
   them once and round-trips a written envelope through `claim_from_envelope` in

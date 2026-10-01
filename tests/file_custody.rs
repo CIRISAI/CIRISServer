@@ -19,7 +19,10 @@
 //!    both devices, B `received` with the file's chunk count, A `here`,
 //!    `devices_total == 2`; the drive row carries `{devices_total: 2,
 //!    received_on: 1}`;
-//! 2. an inline file answers `receipts_supported: false` with its reason id;
+//! 2. an inline file is receiptable like any other (edge v38.0.0 / persist
+//!    v52's one-leaf log, CIRISPersist#953): `receipts_supported: true`, no
+//!    reason, no `custody.inline_no_receipt`, and its drive row counts
+//!    `received_on: 0` (known, none yet) rather than `null`;
 //! 3. every refusal is the byte read's refusal, status AND id — no session, a
 //!    cohort the caller is not in, a row that is not there, a withdrawn file
 //!    (410); and persist's custody door itself refuses a viewer key that
@@ -275,6 +278,14 @@ async fn the_author_device_names_the_device_that_received_the_file() {
         .unwrap_or_else(|| panic!("B is listed: {v}"));
     assert_eq!(b["holds"], "received", "{v}");
     assert_eq!(b["received"]["k"], claim.tree_size, "{v}");
+    // persist v52's `received_at` (CIRISPersist#953 item 3): the instant A's
+    // store took the receipt, always present.
+    assert!(
+        b["received"]["at"]
+            .as_str()
+            .is_some_and(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok()),
+        "a receipt carries the store's received_at: {v}"
+    );
     assert!(claim.tree_size >= 2, "a 2 MiB file is several chunks: {v}");
     let why: Vec<&str> = v["why"]
         .as_array()
@@ -295,7 +306,7 @@ async fn the_author_device_names_the_device_that_received_the_file() {
         "{v}"
     );
 
-    // 2. The inline file says why it has no receipt.
+    // 2. The inline file is receiptable — nothing says otherwise.
     let (s, v) = get(
         &client,
         &base,
@@ -304,15 +315,13 @@ async fn the_author_device_names_the_device_that_received_the_file() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["receipts_supported"], false, "{v}");
-    assert_eq!(
-        v["receipts_unsupported_reason"], "custody.inline_no_receipt",
-        "{v}"
-    );
+    assert_eq!(v["receipts_supported"], true, "{v}");
+    assert!(v["receipts_unsupported_reason"].is_null(), "{v}");
     assert!(
-        v["why"].as_array().is_some_and(|w| w
+        !v["why"].as_array().is_some_and(|w| w
             .iter()
-            .any(|x| x["reason_id"] == "custody.inline_no_receipt")),
+            .any(|x| x["reason_id"] == "custody.inline_no_receipt"
+                || x["reason_id"] == "custody.receipt_time_unknown")),
         "{v}"
     );
     assert_eq!(v["devices_total"], 2, "{v}");
@@ -336,7 +345,7 @@ async fn the_author_device_names_the_device_that_received_the_file() {
     );
     assert_eq!(
         entry(&small_id)["custody"],
-        serde_json::json!({"devices_total": 2, "received_on": null}),
+        serde_json::json!({"devices_total": 2, "received_on": 0}),
         "{drive}"
     );
 

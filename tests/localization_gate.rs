@@ -734,7 +734,17 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `session.state.handled_here`, `session.state.handled_elsewhere` and
     /// `self.sessions_unavailable` — same reason, same list, same client issue
     /// (CIRISClient#78).
-    const MAX_UNCOVERED: usize = 156;
+    ///
+    /// 156 -> 171 for 0.5.218 at persist v52.0.0 / edge v38.0.0: consent to
+    /// join, BUILT (CIRISPersist#955, `FSD/MEMBERSHIP_INVITES.md`). Down three
+    /// — `membership.consent_required` (the interim door, now the invite
+    /// flow), `custody.inline_no_receipt` and `custody.receipt_time_unknown`
+    /// (every file is receiptable and a receipt says when, CIRISPersist#953) —
+    /// and up eighteen: the invite flow's `membership.*` ids
+    /// (`src/membership_invites.rs`, one function per id: persist's eight
+    /// consent rules, the inbox gate, the invitation's lifecycle). Same
+    /// reason, same list, same client issue (CIRISClient#78). 156 − 3 + 18.
+    const MAX_UNCOVERED: usize = 171;
 
     let en = load_en();
     let ids = scraped_server_ids();

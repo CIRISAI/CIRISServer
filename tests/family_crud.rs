@@ -136,8 +136,9 @@ async fn a_founder_only_household_through_its_whole_life() {
         .await;
     // Since 0.5.218 a founding roster naming anyone but the founder is refused
     // before the key is even looked up: nobody joins without their own
-    // consent (CIRISConstitution#133, CIRISPersist#955).
-    assert_refused(&r, 409, "membership.consent_required");
+    // consent (CIRISConstitution#133, CIRISPersist#955) — at persist v52 by
+    // persist's own rule name (Q1: signing the founding record is consent).
+    assert_refused(&r, 409, "membership.founding_member_unsigned");
     let r = alice
         .as_owner(
             "POST",
@@ -145,7 +146,7 @@ async fn a_founder_only_household_through_its_whole_life() {
             Some(json!({ "name": "x", "members": [bob.key()] })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_refused(&r, 409, "membership.founding_member_unsigned");
     let r = alice
         .as_owner(
             "POST",
@@ -176,11 +177,12 @@ async fn a_founder_only_household_through_its_whole_life() {
         .await;
     assert_refused(&r, 404, "family.not_found");
 
-    // ── add: CLOSED until the joiner can consent (0.5.218) ──────────────────
+    // ── add: an INVITATION since persist v52 (CIRISPersist#955) ─────────────
     //
-    // Every add is `membership.consent_required`, whoever the target —
-    // registered or not — because a founder's say-so is not the joiner's
-    // (CIRISConstitution#133; the invite flow reopens this, CIRISPersist#955).
+    // A founder's say-so is not the joiner's (CIRISConstitution#133): the
+    // route proposes, answers 202 `invited`, and writes no roster row. The
+    // invitee must be a registered identity (their key is what the widening
+    // will name).
     let r = alice
         .as_owner(
             "POST",
@@ -188,7 +190,7 @@ async fn a_founder_only_household_through_its_whole_life() {
             Some(json!({ "key_id": "nobody-registered-this" })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_refused(&r, 400, "family.unknown_member_key");
     let r = alice
         .as_owner(
             "POST",
@@ -197,25 +199,27 @@ async fn a_founder_only_household_through_its_whole_life() {
         )
         .await;
     assert_refused(&r, 400, "family.bad_role");
-    let r = alice
+    let (st, v) = alice
         .as_owner(
             "POST",
             &format!("/v1/families/{id}/members"),
             Some(json!({ "key_id": bob.key() })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_eq!(st.as_u16(), 202, "{v}");
+    assert_eq!(v["state"], "invited", "{v}");
     let (_, v) = alice
         .as_owner("GET", &format!("/v1/families/{id}"), None)
         .await;
     assert_eq!(
         members(&v),
         vec![pair(&alice, "founder")],
-        "the refused add wrote nothing: {v}"
+        "an invitation is not a membership: {v}"
     );
-    // What follows is about a household that HAS a second member, so Bob is
-    // put on its roster by the test-only fixture, straight through persist.
-    alice.test_only_widen_family(&id, bob.key(), "member").await;
+    // What follows is about a household that HAS a second member: Bob's
+    // consent and the widening, through the test-only fixture (the real
+    // cross-node flow is `an_invited_person_joins_only_by_their_own_acceptance`).
+    alice.test_only_widen_family(&id, &bob, "member").await;
     // Re-adding someone already in is not joining: it keeps its own answer.
     let r = alice
         .as_owner(
@@ -237,8 +241,8 @@ async fn a_founder_only_household_through_its_whole_life() {
     assert_eq!(v["families"].as_array().map(Vec::len), Some(1), "{v}");
 
     // ── the policy matrix: a MEMBER may not govern a founder_only family ────
-    // (an add is closed to everyone first — the consent door answers before
-    // the household's own rule is consulted)
+    // (nor invite into it: under founder_only only a founder proposes —
+    // persist's rule, named by the household's own id)
     let r = bob
         .as_owner(
             "POST",
@@ -246,7 +250,7 @@ async fn a_founder_only_household_through_its_whole_life() {
             Some(json!({ "key_id": carol.key() })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_refused(&r, 403, "family.not_authorized");
     let r = bob
         .as_owner(
             "DELETE",
@@ -375,9 +379,7 @@ async fn a_founder_only_household_through_its_whole_life() {
     );
 
     // ── remove ──────────────────────────────────────────────────────────────
-    alice
-        .test_only_widen_family(&id, carol.key(), "member")
-        .await;
+    alice.test_only_widen_family(&id, &carol, "member").await;
     let (st, v) = alice
         .as_owner(
             "DELETE",
@@ -399,22 +401,24 @@ async fn a_founder_only_household_through_its_whole_life() {
         )
         .await;
     assert_refused(&r, 404, "family.not_a_member");
-    // A removed member CAN be re-added at the substrate (persist v49.0.0,
-    // #910.1): the new widening folds after the revocation. Through the route
-    // it is a JOIN like any other, so it is closed (0.5.218); the substrate
-    // behaviour is witnessed through the test-only fixture. Then removed
-    // again, so the rest of the life runs as before.
-    let r = alice
+    // A removed member CAN be re-added (persist v49.0.0, #910.1): the new
+    // widening folds after the revocation. Through the route it is a JOIN like
+    // any other, so it is an invitation (persist v52); her acceptance and the
+    // widening come through the test-only fixture. Then removed again, so the
+    // rest of the life runs as before.
+    let (st, v) = alice
         .as_owner(
             "POST",
             &format!("/v1/families/{id}/members"),
             Some(json!({ "key_id": carol.key() })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
-    alice
-        .test_only_widen_family(&id, carol.key(), "member")
-        .await;
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (202, Some("invited")),
+        "{v}"
+    );
+    alice.test_only_widen_family(&id, &carol, "member").await;
     let (_, v) = alice
         .as_owner("GET", &format!("/v1/families/{id}"), None)
         .await;
@@ -511,9 +515,7 @@ async fn a_founder_may_leave_once_another_founder_remains() {
     let id = create(&alice, json!({ "name": "two founders" })).await;
     // A second founder, by the test-only fixture (the add route is closed
     // until the joiner can consent — CIRISPersist#955).
-    alice
-        .test_only_widen_family(&id, bob.key(), "founder")
-        .await;
+    alice.test_only_widen_family(&id, &bob, "founder").await;
     let (st, v) = alice
         .as_owner("POST", &format!("/v1/families/{id}/leave"), None)
         .await;
@@ -553,10 +555,11 @@ async fn the_family_list_pages() {
 // ─── quorum:2/3 — envelope → cosign → assemble ──────────────────────────────
 
 /// A `quorum:2/3` household of Alice (founder), Bob and Carol, held by all
-/// three nodes. Founded by the TEST-ONLY fixture: since 0.5.218 a founding
-/// roster naming anyone but the founder is `membership.consent_required`
-/// (CIRISPersist#955), and what these tests exercise is what a quorum family
-/// does once it exists.
+/// three nodes. Founded by the TEST-ONLY fixture, which has Bob and Carol
+/// CO-SIGN the founding record (persist v52 Q1 seats only its signers; the
+/// server has no founding-cosign flow, so `POST /v1/families` naming others is
+/// `membership.founding_member_unsigned`), and what these tests exercise is
+/// what a quorum family does once it exists.
 async fn quorum_family(alice: &Person, bob: &Person, carol: &Person) -> String {
     let id = alice
         .test_only_family_founded_with("the trio", &[bob, carol], "quorum:2/3")
@@ -610,7 +613,7 @@ async fn assemble(
 }
 
 #[tokio::test]
-async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
+async fn a_quorum_family_cannot_admit_anyone_without_their_acceptance() {
     let alice = Person::new("qa").await;
     let bob = Person::new("qb").await;
     let carol = Person::new("qc").await;
@@ -618,28 +621,36 @@ async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
     acquainted(&[&alice, &bob, &carol, &dave]).await;
     let id = quorum_family(&alice, &bob, &carol).await;
 
-    // ── CONSENT TO JOIN (0.5.218): no door grows the roster ─────────────────
+    // ── CONSENT TO JOIN (persist v52): M of N cannot stand in for Dave ──────
     //
     // Until 0.5.218 this test walked an add through envelope → cosign →
-    // assemble and Dave was in. M of N members cannot stand in for Dave's own
-    // acceptance (CIRISConstitution#133), so every step of that walk is now
-    // refused by name until the invite flow ships (CIRISPersist#955).
-    let r = alice
+    // assemble and Dave was in. Now the walk still runs — an invitation by any
+    // member, an add envelope, the quorum's co-signatures — and persist
+    // refuses the co-signed WIDENING at assemble by rule
+    // (`membership.awaiting_acceptance`): Dave never accepted.
+    let (st, v) = bob
         .as_owner(
             "POST",
             &format!("/v1/families/{id}/members"),
             Some(json!({ "key_id": dave.key() })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
-    let r = alice
-        .as_owner(
-            "POST",
-            &format!("/v1/families/{id}/changes/envelope"),
-            Some(json!({ "action": "add", "key_id": dave.key() })),
-        )
-        .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (202, Some("invited")),
+        "any member invites into a quorum household: {v}"
+    );
+    let env_add = envelope(
+        &alice,
+        &id,
+        json!({ "action": "add", "key_id": dave.key() }),
+    )
+    .await;
+    let a_add = cosign(&alice, &id, &env_add, &json!([])).await;
+    let ab_add = cosign(&bob, &id, &env_add, &a_add["signatures"]).await;
+    assert_eq!(ab_add["quorum_met"], true, "{ab_add}");
+    let r = assemble(&alice, &id, &env_add, &ab_add["signatures"]).await;
+    assert_refused(&r, 409, "membership.awaiting_acceptance");
     let r = alice
         .as_owner(
             "POST",
@@ -647,7 +658,7 @@ async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
             Some(json!({ "action": "add", "key_id": dave.key(), "consensus_protocol": "quorum:2/4" })),
         )
         .await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_refused(&r, 400, "family.bad_consensus_protocol");
     // Someone already in is not joining, and keeps its own answer.
     let r = alice
         .as_owner(
@@ -672,11 +683,12 @@ async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
         .await;
     assert_refused(&r, 400, "family.bad_request");
 
-    // ── an ADD envelope built elsewhere (an older node, or by hand) ─────────
+    // ── a GROWING envelope under another action (an older node, or by hand) ─
     //
-    // The cosign and assemble steps read what the envelope's roster DOES, not
-    // the route that built it: a proposed roster naming Dave is refused at
-    // both, however many members signed.
+    // The assemble step reads what the envelope's roster DOES, not the action
+    // it is labelled with: a proposed roster naming Dave under anything but
+    // `add` would reach the supersede door, which never adds (persist Q2) —
+    // refused by that rule's name, however many members signed.
     let dir = alice.engine.federation_directory();
     let record = dir
         .lookup_family(&id)
@@ -697,7 +709,7 @@ async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
         )
         .await
         .expect("an add envelope, built the pre-0.5.218 way");
-    add_env["action"] = json!("add");
+    add_env["action"] = json!("role");
     add_env["target_key_id"] = json!(dave.key());
     add_env["roles"] = json!({
         alice.key(): "founder", bob.key(): "member", carol.key(): "member", dave.key(): "member",
@@ -705,16 +717,8 @@ async fn a_quorum_family_cannot_admit_anyone_even_with_its_quorum() {
     add_env["prior_persist_row_hash"] = json!(record.persist_row_hash);
     add_env["row_at"] =
         json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    let r = alice
-        .as_owner(
-            "POST",
-            &format!("/v1/families/{id}/changes/cosign"),
-            Some(json!({ "change_envelope": add_env, "signatures": [] })),
-        )
-        .await;
-    assert_refused(&r, 409, "membership.consent_required");
     let r = assemble(&alice, &id, &add_env, &json!([])).await;
-    assert_refused(&r, 409, "membership.consent_required");
+    assert_refused(&r, 409, "membership.supersede_cannot_add");
     let (_, v) = alice
         .as_owner("GET", &format!("/v1/families/{id}"), None)
         .await;
@@ -918,22 +922,19 @@ async fn a_quorum_family_dissolves_only_with_its_quorum() {
     assert_refused(&r, 404, "family.not_found");
 }
 
-/// **RED, pinned: a quorum dissolve should replicate as an AMENDMENT**
-/// (0.5.218 audit, fix 2 — not buildable at persist v51.1.0).
+/// **A quorum dissolve replicates as an AMENDMENT** (CIRISServer#700;
+/// persist v52.0.0, CIRISPersist#956 — un-ignored at the v38 adopt).
 ///
-/// The terminal record goes through the PLAIN `supersede_family`, which
-/// persist v49 strips of any proof (#910.5), so only the removal rows travel
-/// and every peer keeps the full record. Routing it through
-/// `supersede_family_with_quorum` needs a change envelope that proposes the
-/// EMPTY roster the record carries (`assert_change_envelope_matches`), and
-/// persist refuses that envelope structurally, verbatim:
-/// `verify_membership_quorum: membership change not authorized: malformed
-/// accord family envelope: group has no members`. What persist would need: a
-/// quorum-verified TERMINAL amendment — e.g. `dissolve_family_with_quorum`,
-/// or an explicit dissolve marker `verify_membership_quorum` accepts with an
-/// empty new roster — that `route_occupied_family` applies on the peer.
+/// Before v52 the terminal record went through the PLAIN `supersede_family`,
+/// which persist v49 strips of any proof (#910.5), so only the removal rows
+/// travelled and every peer kept the household live. persist v52 ships the
+/// terminal amendment this test asked for: the record with every seat
+/// byte-identical and `dissolved_at` set to the instant the quorum signed
+/// inside the change envelope, through `supersede_family_with_quorum`. Bob's
+/// node, holding the old record and the full roster, re-verifies the quorum
+/// against ITS OWN roster and applies it — the record alone, no removal row —
+/// after which the household has no active members there.
 #[tokio::test]
-#[ignore = "persist: supersede_family_with_quorum refuses an empty proposed roster (\"group has no members\") — a terminal dissolve cannot carry its quorum proof"]
 async fn a_quorum_dissolve_replicates_as_an_amendment() {
     let alice = Person::new("dra").await;
     let bob = Person::new("drb").await;
@@ -941,16 +942,16 @@ async fn a_quorum_dissolve_replicates_as_an_amendment() {
     acquainted(&[&alice, &bob, &carol]).await;
     let id = quorum_family(&alice, &bob, &carol).await;
     let env = envelope(&alice, &id, json!({ "action": "dissolve" })).await;
+    assert!(
+        env["dissolved_at"].is_string(),
+        "the dissolve envelope pins the terminal instant the quorum signs: {env}"
+    );
     let a = cosign(&alice, &id, &env, &json!([])).await;
     let ac = cosign(&carol, &id, &env, &a["signatures"]).await;
     let (st, v) = assemble(&alice, &id, &env, &ac["signatures"]).await;
     assert_eq!(st.as_u16(), 200, "{v}");
 
-    // ── what should hold: the terminal record is an AMENDMENT that replicates
-    //
-    // Before 0.5.218 it went through the plain supersede, which persist v49
-    // strips of any proof (#910.5), so only the removal rows travelled and a
-    // peer kept the full record forever. It should carry the quorum's proof …
+    // The served record is the terminal amendment, carrying its quorum proof.
     let served = alice
         .engine
         .federation_directory()
@@ -961,8 +962,13 @@ async fn a_quorum_dissolve_replicates_as_an_amendment() {
         .find(|s| s.family.family.family_key_id == id)
         .expect("the dissolved household is still served");
     assert!(
-        served.family.family.members.is_empty(),
+        served.family.family.dissolved_at.is_some(),
         "the served record is the terminal one"
+    );
+    assert_eq!(
+        served.family.family.members.len(),
+        3,
+        "a dissolve changes nothing but dissolved_at (persist #956)"
     );
     let proof = served
         .family
@@ -970,15 +976,11 @@ async fn a_quorum_dissolve_replicates_as_an_amendment() {
         .as_ref()
         .expect("the terminal record carries its quorum proof");
     assert!(
-        proof.change_envelope["members"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "the proof authorizes exactly the empty roster: {}",
+        proof.change_envelope["dissolved_at"].is_string(),
+        "the proof authorizes the terminal instant: {}",
         proof.change_envelope
     );
-    // … and Bob's node, holding the old record and the full roster, re-verifies
-    // it against ITS OWN roster and applies it — the record alone, before any
-    // removal row arrives.
+    // … and Bob's node applies it — the record alone.
     let offered = bob.receive_family_records_from(&alice).await;
     let (_, applied) = offered
         .iter()
@@ -996,9 +998,18 @@ async fn a_quorum_dissolve_replicates_as_an_amendment() {
         .expect("lookup")
         .expect("held");
     assert!(
-        held.members.is_empty(),
-        "Bob's node holds the terminal record: {:?}",
-        held.members
+        held.dissolved_at.is_some(),
+        "Bob's node holds the terminal record"
+    );
+    let active = bob
+        .engine
+        .federation_directory()
+        .active_family_members(&id)
+        .await
+        .expect("active members");
+    assert!(
+        active.is_empty(),
+        "a dissolved household has no active members on Bob's node: {active:?}"
     );
 }
 
@@ -1006,7 +1017,7 @@ async fn a_quorum_dissolve_replicates_as_an_amendment() {
 /// verify's membership-change gate counts.
 ///
 /// Since 0.5.218 a household is founded by its founder alone (a founding
-/// roster naming anyone else is `membership.consent_required`,
+/// roster naming anyone else is `membership.founding_member_unsigned`,
 /// CIRISConstitution#133 / CIRISPersist#955), so the aliases are witnessed on
 /// the one roster a create can have: N = 1.
 #[tokio::test]
@@ -1027,7 +1038,7 @@ async fn declared_majority_and_unanimous_are_stored_as_quorum() {
                 })),
             )
             .await;
-        assert_refused(&r, 409, "membership.consent_required");
+        assert_refused(&r, 409, "membership.founding_member_unsigned");
         let (st, v) = alice
             .as_owner(
                 "POST",
@@ -1038,4 +1049,244 @@ async fn declared_majority_and_unanimous_are_stored_as_quorum() {
         assert_eq!(st.as_u16(), 201, "{v}");
         assert_eq!(v["consensus_protocol"], "quorum:1/1");
     }
+}
+
+// ─── The invite flow (persist v52, CIRISPersist#955) ────────────────────────
+
+fn proposal_ids(v: &serde_json::Value) -> Vec<String> {
+    v["invites"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no invites in {v}"))
+        .iter()
+        .map(|i| i["proposal_id"].as_str().expect("proposal_id").to_owned())
+        .collect()
+}
+
+fn state_of(v: &serde_json::Value, proposal: &str) -> String {
+    v["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .find(|i| i["proposal_id"] == proposal)
+        .unwrap_or_else(|| panic!("{proposal} not listed: {v}"))["state"]
+        .as_str()
+        .expect("state")
+        .to_owned()
+}
+
+/// **An invited person joins only by their own acceptance — across nodes.**
+///
+/// Alice's node writes the proposal; it crosses to Bob's node (the rows edge
+/// v38's serve arms route: a proposal to the invitee's nodes, a reply back to
+/// the proposer's), Bob sees it in HIS inbox and accepts with HIS pen on HIS
+/// node; until the acceptance crosses back, Alice's list seats nobody; once
+/// it has, her list seats him (`joined`) and his node holds the household as
+/// a member. Carol declines: terminal, and she is never seated.
+#[tokio::test]
+async fn an_invited_person_joins_only_by_their_own_acceptance() {
+    let alice = Person::new("ia").await;
+    let bob = Person::new("ib").await;
+    let carol = Person::new("ic").await;
+    acquainted(&[&alice, &bob, &carol]).await;
+    let id = create(&alice, json!({ "name": "home" })).await;
+
+    let (st, v) = alice
+        .as_owner(
+            "POST",
+            &format!("/v1/families/{id}/invites"),
+            Some(json!({ "key_id": bob.key() })),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (202, Some("invited")),
+        "{v}"
+    );
+    let p = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+
+    // The invitation reaches Bob's node; it is in his inbox, nobody else's.
+    bob.receive_membership_rows_from(&alice).await;
+    let (st, inbox) = bob.as_owner("GET", "/v1/self/invites", None).await;
+    assert_eq!(st.as_u16(), 200, "{inbox}");
+    assert_eq!(proposal_ids(&inbox), vec![p.clone()], "{inbox}");
+    assert_eq!(inbox["invites"][0]["group_kind"], "family");
+    assert_eq!(inbox["invites"][0]["group_id"], id.as_str());
+    carol.receive_membership_rows_from(&alice).await;
+    let (_, inbox) = carol.as_owner("GET", "/v1/self/invites", None).await;
+    assert!(proposal_ids(&inbox).is_empty(), "{inbox}");
+    // A delegate sees the inbox but cannot answer it.
+    let delegate = bob.delegated_session().await;
+    let r = bob
+        .call(
+            "POST",
+            &format!("/v1/self/invites/{p}/accept"),
+            Some(&delegate),
+            Some(json!({})),
+        )
+        .await;
+    assert_refused(&r, 403, "membership.delegate_may_not_answer");
+
+    let (st, v) = bob
+        .as_owner(
+            "POST",
+            &format!("/v1/self/invites/{p}/accept"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (200, Some("accepted")),
+        "{v}"
+    );
+
+    // Before the acceptance crosses back, Alice's node seats nobody.
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}/invites"), None)
+        .await;
+    assert_eq!(state_of(&v, &p), "pending", "{v}");
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}"), None)
+        .await;
+    assert_eq!(members(&v), vec![pair(&alice, "founder")], "{v}");
+
+    // It crosses; the founder's read seats him.
+    alice.receive_membership_rows_from(&bob).await;
+    let (st, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}/invites"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["seated_now"], json!([bob.key()]), "{v}");
+    assert_eq!(state_of(&v, &p), "joined", "{v}");
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}"), None)
+        .await;
+    assert_eq!(
+        members(&v),
+        sorted(vec![pair(&alice, "founder"), pair(&bob, "member")]),
+        "{v}"
+    );
+    bob.receive_families_from(&alice).await;
+    let (st, v) = bob
+        .as_owner("GET", &format!("/v1/families/{id}"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["my_role"], "member", "{v}");
+
+    // Carol declines: terminal.
+    let (_, v) = alice
+        .as_owner(
+            "POST",
+            &format!("/v1/families/{id}/invites"),
+            Some(json!({ "key_id": carol.key() })),
+        )
+        .await;
+    let pc = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+    carol.receive_membership_rows_from(&alice).await;
+    let (st, v) = carol
+        .as_owner(
+            "POST",
+            &format!("/v1/self/invites/{pc}/decline"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(
+        (st.as_u16(), v["state"].as_str()),
+        (200, Some("declined")),
+        "{v}"
+    );
+    let r = carol
+        .as_owner(
+            "POST",
+            &format!("/v1/self/invites/{pc}/accept"),
+            Some(json!({})),
+        )
+        .await;
+    assert_refused(&r, 409, "membership.already_answered");
+    alice.receive_membership_rows_from(&carol).await;
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}/invites"), None)
+        .await;
+    assert_eq!(state_of(&v, &pc), "declined", "{v}");
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}"), None)
+        .await;
+    assert!(
+        !members(&v).iter().any(|(k, _)| k == carol.key()),
+        "a decline seats nobody: {v}"
+    );
+    // An answered invitation cannot be withdrawn.
+    let r = alice
+        .as_owner("DELETE", &format!("/v1/families/{id}/invites/{pc}"), None)
+        .await;
+    assert_refused(&r, 409, "membership.invite_closed");
+}
+
+/// **A quorum household seats an accepted invitee by its co-signed WIDENING**
+/// (persist v52 Q2: a supersede never adds). Bob invites Dave; Dave accepts on
+/// his node; the reply reaches Alice; Alice and Bob sign the add — Bob on
+/// HIS node — and assemble writes the widening carrying both signatures.
+#[tokio::test]
+async fn a_quorum_family_seats_an_accepted_invitee_by_a_cosigned_widening() {
+    let alice = Person::new("wa").await;
+    let bob = Person::new("wb").await;
+    let carol = Person::new("wc").await;
+    let dave = Person::new("wd").await;
+    acquainted(&[&alice, &bob, &carol, &dave]).await;
+    let id = quorum_family(&alice, &bob, &carol).await;
+    let (st, v) = bob
+        .as_owner(
+            "POST",
+            &format!("/v1/families/{id}/invites"),
+            Some(json!({ "key_id": dave.key() })),
+        )
+        .await;
+    assert_eq!(st.as_u16(), 202, "{v}");
+    let p = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+    dave.receive_membership_rows_from(&bob).await;
+    let (st, v) = dave
+        .as_owner(
+            "POST",
+            &format!("/v1/self/invites/{p}/accept"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    alice.receive_membership_rows_from(&bob).await;
+    alice.receive_membership_rows_from(&dave).await;
+    // A quorum household's read never seats anyone on one signature.
+    let (_, v) = alice
+        .as_owner("GET", &format!("/v1/families/{id}/invites"), None)
+        .await;
+    assert_eq!(
+        state_of(&v, &p),
+        "accepted",
+        "accepted, awaiting the group: {v}"
+    );
+
+    let env = envelope(
+        &alice,
+        &id,
+        json!({ "action": "add", "key_id": dave.key() }),
+    )
+    .await;
+    let a = cosign(&alice, &id, &env, &json!([])).await;
+    let ab = cosign(&bob, &id, &env, &a["signatures"]).await;
+    let (st, v) = assemble(&alice, &id, &env, &ab["signatures"]).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["added"], dave.key(), "{v}");
+    assert!(
+        members(&v).iter().any(|(k, _)| k == dave.key()),
+        "the accepted invitee is seated by the quorum's widening: {v}"
+    );
+    let record = alice
+        .engine
+        .federation_directory()
+        .lookup_family(&id)
+        .await
+        .expect("lookup")
+        .expect("family");
+    assert!(
+        !record.members.iter().any(|m| m.key_id == dave.key()),
+        "the record never grows (persist Q2) — the widening plane carries him"
+    );
 }
