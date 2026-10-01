@@ -107,6 +107,7 @@ pub async fn run(report: &mut Report) {
         founded_at: chrono::Utc::now(),
         consensus_protocol: "founder_only".into(),
         consensus_protocol_entrenched: false,
+        dissolved_at: None,
         persist_row_hash: String::new(),
     };
     match family::create_family(&engine, fam).await {

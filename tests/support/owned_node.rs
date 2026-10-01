@@ -561,6 +561,7 @@ impl Person {
             founded_at: at,
             consensus_protocol: consensus_protocol.to_owned(),
             consensus_protocol_entrenched: false,
+            dissolved_at: None,
             persist_row_hash: String::new(),
         };
         let canonical =
@@ -580,6 +581,7 @@ impl Person {
                 scrub_signature_classical: BASE64.encode(&sig.classical.signature),
                 scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
                 supersede_proof: None,
+                cosignatures: Vec::new(),
             })
             .await
             .expect("TEST-ONLY: put the multi-member family directly");

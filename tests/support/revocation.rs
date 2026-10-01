@@ -418,9 +418,26 @@ pub async fn revoke(
     // so it is set here — truncated, because a sub-microsecond bound is refused
     // outright rather than rounded (postgres TIMESTAMPTZ, CIRISPersist#659).
     let revoked_after = revoked_after.map(trunc);
+    // persist v52 (CIRISPersist#784): the subject is the SHA-256 of the
+    // revoked key's RAW Ed25519 key, signed into the binding; the label is
+    // optional. Read from the held record, as production does.
+    let subject = {
+        let rec = engine
+            .federation_directory()
+            .lookup_public_key(revoked_key_id)
+            .await
+            .expect("lookup_public_key")
+            .unwrap_or_else(|| panic!("revoked key {revoked_key_id} is not held"));
+        ciris_persist::federation::key_digest::Sha256Ed25519Raw::from_pubkey_base64(
+            &rec.pubkey_ed25519_base64,
+        )
+        .expect("held pubkey decodes")
+        .to_hex()
+    };
     let mut row = Revocation {
         revocation_id: format!("rev-{revoked_key_id}"),
-        revoked_key_id: revoked_key_id.to_string(),
+        revoked_key_id: Some(revoked_key_id.to_string()),
+        revoked_key_sha256_ed25519_raw: subject,
         revoking_key_id: revoking.key_id().to_string(),
         reason: None,
         revoked_at: effective_at,

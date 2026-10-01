@@ -612,6 +612,7 @@ async fn sign_family(capsule: &OwnerSignerCapsule, family: Family) -> Result<Sig
         // A founder-signed record carries no quorum proof; persist stamps one
         // itself on `supersede_family_with_quorum` (v49.0.0, #910.5).
         supersede_proof: None,
+        cosignatures: Vec::new(),
     })
 }
 
@@ -950,6 +951,7 @@ async fn create_family(State(st): State<FamilyState>, headers: HeaderMap, body: 
         founded_at: at,
         consensus_protocol: protocol,
         consensus_protocol_entrenched: false,
+        dissolved_at: None,
         persist_row_hash: String::new(),
     };
     let signed = match sign_family(&capsule, family).await {

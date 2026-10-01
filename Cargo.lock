@@ -964,8 +964,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "37.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v37.1.0#8e1896a73e65e4392419cf877f0e4d7f56c5951c"
+version = "38.0.0"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v38.0.0#ffee0c9272cf1c487f5d115afb0abff411649656"
 dependencies = [
  "async-trait",
  "axum",
@@ -1087,8 +1087,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "51.3.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v51.3.0#412a679f04c0455a747abd6deec37f4d0c70ee4e"
+version = "52.0.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v52.0.0#5ce36224bbec38ecd5c2e0e0bce64a74384c9a7a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1119,6 +1119,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
