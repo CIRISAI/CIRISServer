@@ -1714,9 +1714,7 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
         attestation_id: binding.as_ref().map(|a| a.attestation_id.clone()),
         cohort_scope: binding.as_ref().map(|a| a.cohort_scope.clone()),
         identity_type: None,
-        federation_visible: binding
-            .as_ref()
-            .is_some_and(|a| a.cohort_scope == cohort_scope::FEDERATION),
+        federation_visible: binding.as_ref().is_some_and(is_federation_placed),
         needed_for: "a peer walks node → owner (and fedID → nodes); without it this node is \
                      in no community audience",
     });
@@ -1846,9 +1844,51 @@ fn widest_owner_binding(inbound: &[Attestation], owner: &str) -> Option<Attestat
     inbound
         .iter()
         .filter(is_binding)
-        .find(|a| a.cohort_scope == cohort_scope::FEDERATION)
+        .find(|a| is_federation_placed(a))
         .or_else(|| inbound.iter().find(is_binding))
         .cloned()
+}
+
+/// Is `row` placed at the WIDEST tier — the one a peer can hold? One spelling
+/// for the reads here (the cohort_scope emit-site audit, CIRISServer#38, counts
+/// every mention of the federation constant; these are reads).
+fn is_federation_placed(row: &Attestation) -> bool {
+    row.cohort_scope == cohort_scope::FEDERATION
+}
+
+/// **The nodes `owner` chose to announce** (CIRISServer#655 / #673): every node
+/// this node knows `owner` owns whose owner-binding from `owner` is placed at
+/// federation tier. Announce is PER NODE — each node's wizard asks, and
+/// `POST /v1/federation/announce` widens the binding user → THAT node — so the
+/// answer is a set, and a node the person did not announce is never in it,
+/// whatever their other nodes chose. These are the devices people can contact
+/// the person through (the lightnet view, CC 5.4.6). A released node drops out
+/// (`nodes_owned_by` folds the owner's `withdraws`). Sorted.
+///
+/// Keys are as the BINDING names them; a caller matching them against keys it
+/// holds for THIS node must fold over this node's own keys (a split install
+/// binds the node key and signs occurrences as the actor).
+///
+/// # Errors
+/// The directory could not be read.
+pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<String>, String> {
+    let dir = engine.federation_directory();
+    let mut nodes = ciris_persist::federation::admission::nodes_owned_by(dir.as_ref(), owner)
+        .await
+        .map_err(|e| format!("nodes_owned_by({owner}): {e:#}"))?;
+    nodes.sort();
+    nodes.dedup();
+    let mut announced = Vec::new();
+    for node in nodes {
+        let inbound = dir
+            .list_attestations_for(&node)
+            .await
+            .map_err(|e| format!("list_attestations_for({node}): {e:#}"))?;
+        if widest_owner_binding(&inbound, owner).is_some_and(|a| is_federation_placed(&a)) {
+            announced.push(node);
+        }
+    }
+    Ok(announced)
 }
 
 #[cfg(test)]

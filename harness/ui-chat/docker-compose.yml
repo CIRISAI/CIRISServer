@@ -1,0 +1,104 @@
+# ui-chat — a message typed by a person in the UI on node A must ARRIVE in the
+# UI transcript on node B.
+#
+# The mesh-repro `chat` scenario proves the same delivery over HTTP. This proves
+# it through the SURFACE A PERSON USES: the contact is added in the UI, consent
+# is given in the UI, the message is typed and sent in the UI, and the assertion
+# reads node B's on-screen transcript. Everything between is the real substrate.
+#
+# THREE CONTAINERS, THREE NETNS. Each node is 127.0.0.1:4243 to its own UI, so
+# the client's hardcoded LOCAL_NODE_URL (CIRISClient#26) is correct rather than
+# merely tolerated, and no node needs its ports moved off the defaults.
+
+x-test-anchor-env: &test-anchor-env
+  CIRIS_TESTING_MODE: "true"
+  # 15s announce instead of the 300s production cycle — rooting converges in
+  # ~30s. test-anchor-fenced in compose.rs, so it cannot leak into a prod node.
+  CIRIS_TEST_ANNOUNCE_SECS: "15"
+  # ALL FIVE. Setting only the classical half boots a node that roots, arms its
+  # gates, and then dies adopting its own blessed record:
+  #   "adopt the test-root-blessed self record: scrub-signature verification
+  #    failed: registration hybrid-verify: PQC signature without pubkey"
+  # The hybrid record carries a PQC signature, so the PQC pubkey is not optional
+  # — the optional-half class, and the error names it precisely.
+  CIRIS_TEST_TRUST_ROOT: "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="
+  CIRIS_TEST_TRUST_ROOT_PQC: "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"
+  CIRIS_TEST_TRUST_ROOT_SCRUB: "1LzFAFfuS+7JtBJ/q8bFcRn6L/fN0NZ+QarCsMOyVZ04niuwhgtbQOl+qJMsRLkGmf52hEYXVaWKRY+mwDCfDg=="
+  CIRIS_TEST_TRUST_ROOT_SCRUB_PQC: "KbkDGbJafNVjNXmLo4fvySmTXabN2urspGMobbRm2Slp2CpGT7BR/U8kCNNGDwskungTOUHCSgV3kVh/1hmPta0duv4/p5V0Z0ktqwC80Wxy6R/ag+iSTsZy05LShsQImy8Q/p96/fXfKceLK1ulEieCM5NKYAmUKsFFfo+BgtLozRowd98oY0mcyD1S/y/z4p02LUHIjAuCbWFbz3dQf39OCOkPXCA4zWPr1KIitOmp2BQrP0yq2ztzQ/ul3ZrAVG3PzlRqt1YcHyfxAxVGcmHxLYjfCefWjPcEr0LI3QRBoW2CxnHBHU31nz1p0gVxL/BZ1OG7Q1h6+o8ssr4N6a6k/LfBt+yFvTDA0qFYz8lVJVfaqSCmZlcA7xS/qbSDfaiSUa1TqrFC5i73w2cRlS9vFcspoYn/o+6cedekSEors4txOIVQA0fMiGT2XjjJMTM+kw8aCBJoobMfymeVdDL5t0FxTT0JelodgY0KfBPQRDfzTbEqllkUpjN2oe2fAgNjixnXUbMJGvL20ij9I6HSVZ52lNWqJjCrhy8ejJfoGCMenCShlWS06W4EWFcGJItLQzhZDB4jA6aWL5G/Dy8Ie4YTiAgT7sz/7v9M9CEhQjLUBL9Q35EBT1iYNuGJKP0fAuMwKq7RfN2z9FRdkKMCrO9DjnbrdDhBbFuJ+Bk9bM8e6rcCvMuZlJpr2l4pLyNOnwoijOrMMI+rwnPyf/z0b8Ak48Ma+gd2tQDroeWw6/H/FKT14iMaKF2etaeaaKT0sH2CBQWFluj8R5wyMppdvZp4LIUUZ2Ejk7D9KK//bj3CQ0C1/xM0HtJFcr0Lgk+Zv4LWeBXbZ1AV7w2RUu+gWyOpg4VqvWjdwsO+Uo/aetmmaoHrSVdbbmnkz5rcO1wJ7q5NZ38EHC9mUetlUVNbCmeqcyHWSJqj8zMJG9liYIIHuSLU95HXTQ69VRNGDUmJlJAnBm692Fg46wZuD/fTu+bTJK741/HYfhHAzkmkNcbDzOofQl53JXSeMoxShMAxDsEUQu5518JpowhnWCucpB+yRZO9Qc8YiHbZZrXOLFbUUbfRSzb6u1ZgddY6Jp1Ucqomc0TFi53EyhXeH4mDoWQpCyAsZ6DEFjjgRlyi3fvPCbqJ6w5eeZpDwanHxyw9cyR3do/U1HPSfbvHr7JVVU2Y6lgtyTG1BSHEQeNb39rM2FQ4566hv/5uk+B9/RyBQm+pl/QAHGDjdHdWmHBOplG7M58SL1Ns/Xd1fOv9Mr61s/8cxiZqHNAqHyKFReZsL4NWjpZ6hH3+mpIifKK8RNO+aWHmoD96wgc3J0xaO+UV96y5pmSN2FbNfRZ5PPJXEMtGOoFsT8cTTppBmdr49M+ZoAH9hkD6UZ6CMR8U5BiTvaKUi/LgYOjAHAZ6FY+DafuW6Lz5eOWCRJAW4zDGBMZvZq38Fv2uH6cdleJnUKkF8Ds5laP5Bca1FUqsnshEpzMZHSQYO6yS8EVEAllE0g8+i0VSy4FfBn+8DJpgi/BdVLU4fjfCZp6IqrY1EjI9nWPSXihM2DD8fgvOHDrV3Eor7CJGJeSalUtryUkwJkYxgAh6RTIiRZD4RZAtVKO9ItsRcMnXWNu14DC05PdXwfCj2Sf6YBIsd2IW4DL6BIdiLxrjzjseFKGSAayjZNxN0G1UmFMHLhb4qItStZ+clzPwj0XmDdoPp+xI9EhmvvqpU8mmoyTAI6wrY16TQrpLNsOS8B/gfI1zSktuZYUBbze6eUN3Di3S1wE6XS+BYtB+uU0eDLlZDot9O36okBgkUCE5C5T7EVgQZuQSy5VqZ43qEfKBGUcNEE/viodElTchZmmbu3dZuop/1NDLEYHAPJQBXGnxS4rUwpsRsRpPAthL8Jw04+0mZZ3+fxyVr2LugbARESM4S2i6HSbQsRrIkvvhc8aHoXalH2km9f+Hbcgn+ap6t0x9iQyuwOvKiKVwZ9r6w+pdu1XZVOfx+H6aaguC9Wlr4BDaO+yhQpy8mfjLL/5EE0ulR5iYw4WPIoMVRNznsrHWeExWCuiptMErml0kxkqS31Jnj5etTwsJPdE5Bm5rPdC9yEtDEXl22hoz9lEwVL35MWb5EDaPmWR1FG/PETG5f824xcixx6ztHbrg6q5XuFtskw7kP2It8CtwzeiMEGZgUQny4G2hMQ6mGqzzr/BaWt8JEn+VcaKu4nRTeDYDzEm/xPCW28/8f1WXYmc9g9YGyaMVyEBKWtZxNiJdEv6mvNUeO/8blwJ0PHiD0Um8IHZGRcCayeGAD+blXWV88kO/s6zIKA7oYfBV6Lo2Njzag6hBuVenaCX89bdQRawBKYxORoqUPuVQLpRw5Wcc6QdGNAecv3SJBqDgGjKjHaZorOlixEETAyvUSnUqPpp9OIPUOIc+vEcMzQ3H5Uu/5Z8ozxgFZHEB40475kLURt31YFCU1SDUTbB2E884LLR7mqFS1dVGLNZFsDFFz2r/Wk1ErcualnGUhumV894FmC0LkGDiW3PfpU+srQ1QrKlSq82l/BilBYCZNPLO/KFmCj30tbRT7RM8tmsuwu0rHku+CYANBpAAaOiHtgkHZrB7sJyj5UJZDFcDam0IXkMhI7AZ4Aujxl6zgu7hU6uU+jkPiceoX73o0Kksl6ATagd/i7MjPSRv9JeHlJszczWxtRVxeRdqwwPiFXG/FmGriPDcY5dHOIH58g+hgFt4pVxzYMgfS7FuVbfVtpLyeAdr3hOFRHMpTMRnR2dwMre8BXNfRtQ1RUzFecYkOuw+Epl/44cY/0qQyy/uu026S7OtOyk09PiGELuZ/vH81f6tftVh0WRIuMegqTEvMOpTpgEtz6fjenWXKKOOhjR/e688kZQGUfYSyDt4afzqFS+gcrVoD9SN1ZWr6/0kxnN9HFhWYzbvtYUifNkOD/GOktyGT5CFMLjIJIa5ajeAhgKpTDU9xOcJ+yjl9tsjzZCAP2GCoreuT4pe9czAQawCA20OTD1DEos12A3ZtYLQOgCiGqh9NP+bUJsJuAMBtIzimDLMQCEgtKi+2cqWqQEh6mlwRzT+VoWGx+jfxjPfwUx2eZH6SAqdQc8i+9spsYeBOzSPZa5U+BXQCnoqdWFGHutvZMPIFN1GElf/p5w9J3RKVNhI5CCW0wTeiTxNHqCHoOExM+OSjVlIFDcllb/HrsNFiUi/yRIayIR3ULIYPIn0XHq2kR+CGrW+z6gSaQXZ9LLTwNlVlXOxV9JOwsut7PWJkHkMN28o3lqKKRUWqOJJD6F6IzcqM09ncNhSZHaY4VmE4YxR7/8YSS+SltfsONor1WNwyes4ap3YpxXbM9p2vljtWvE4NydIM19ldOjwKv4KNO8kNCwWIjUj7qUPYPOWcFv/A5gIGUoKKqNsUo6bHjygkz9Hbzwe5W8dShcoCTScRYVwOpC1DcUwELqj7FYoOMzaZLNtWkgU8OpfTIUuQ6xvblShcETXW5NEOyeC37qWEQ89bA6akywvfCNrJdeAiruJviyBQPn/d5Pc+YoqK0VwDnCeJ2qMzDEBr389jwX9jTqLkF3iI8M4ez1Viwuj+UkRYiJnb7WKElJQdMm194HJdPD0FckcJPy40ZcWoWvb0ibz8w5XpxldfwmhOiIO5cvtXLEXUZp3VsKCmP6Dm2E4iL3TCyT0HRxisDTljhCZ6COPETQKFYnGpjrseCQ7nJ6k4+DR2Qzil39Fa4Rtsiyuxh66PEQENKEM0r1erSyCGcZ+cFiOUQfsztO8gRSedTTdNVVlsCyHBWZLQbexxDCi0/aJMd4TH+jzryIpXm8LLh7vzDdFRH5lfyaQvqIOLNfMDaDvOszlWk8u7McF5TEGBAmuDMqAV3K/zPgu9iY5r5MNCKWwH1wjHdrMXxOw2QWScTj28oI/DVqN6ckAWgunNa9g1SD17wdxEPekHtuZw6NRBLnBEDv1H/K9wAkHKbQzhGV/0MMs0HYRN3eC3w+4jUrbH3f5AuxPBgaoESvLW8iYMLbFxGr+xKb4fVsfOANWRLP1F/D6purJc1pa7JRsEOUx1JE0dTkO9bY3DuvNF6FVqGJ3dI6MyjYnKk2Q0xRCxPC98JZVUk2juKWftsdAFPibyYTms3zgrN9s3QNqoLn9YmLj/SC/LKF6knraGJb64R35vMVcvX2vRf2x7TK3Iip/ZAC7OLi7S5F30duOGB+OMgJD9OIEt4NE2RYMsGo2JxGtFExW5SugmzFBEMiMlLxOyH0Vu6aKkSPCBgtYZmYkU+OXQJCbmexunlSclbfdS+bxHRiW5nTyZDPXM7AvYlnQy5Vjoxei5Jgin+3kZQ7jHYZig6UGFVxga3hxu8LN0OsiRll3odLza2+nyev6ERo5aZa+w9Tl/zc5lckAAAAAAAAAAAAAAAAAAAAABgwTGSMn"
+  CIRIS_TEST_TRUST_ROOT_SEED: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+  CIRIS_TEST_CANONICAL_DIAL: "172.29.78.10:4242"
+
+services:
+  canonical:
+    build: .
+    image: ciris-uichat:latest
+    environment:
+      <<: *test-anchor-env
+      UI_ROLE: "canonical"
+      CIRIS_KEY_ID: "ciris-canonical-1"
+      # The only node blessed as one. node-a/node-b are ordinary owner-claimed
+      # nodes, which is what makes the delivery claim non-trivial.
+      CIRIS_TEST_BLESS_CANONICAL: "true"
+      RUST_LOG: "info,ciris_edge=debug"
+    networks:
+      mesh:
+        ipv4_address: 172.29.78.10
+    # A VOLUME, not tmpfs. The wizard's opt-in is boot-structural, so the harness
+    # restarts the node to apply it — and a tmpfs home makes that restart wipe
+    # the identity, the claim and the config the restart existed to apply. The
+    # run then loops: every boot is a first boot.
+    volumes: [canonical-home:/var/lib/ciris]
+
+  node-a:
+    build: .
+    image: ciris-uichat:latest
+    depends_on: [canonical]
+    environment:
+      <<: *test-anchor-env
+      UI_ROLE: "node"
+      CIRIS_KEY_ID: "node-a"
+      # The synthetic canonical, injected as this node's dial set. Without it
+      # `/v1/accord/canonical/servers` stays empty and nothing discovers anything.
+      CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.78.10:4242"]' 
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+      RUST_LOG: "info,ciris_edge=debug"
+    ports:
+      - "9101:9092"    # UI automation (via socat; the server itself is loopback-only)
+      - "14243:4243"   # read API, for out-of-band assertions
+    networks:
+      mesh:
+        ipv4_address: 172.29.78.11
+    volumes: [node-a-home:/var/lib/ciris]
+
+  node-b:
+    build: .
+    image: ciris-uichat:latest
+    depends_on: [canonical]
+    environment:
+      <<: *test-anchor-env
+      UI_ROLE: "node"
+      CIRIS_KEY_ID: "node-b"
+      # The synthetic canonical, injected as this node's dial set. Without it
+      # `/v1/accord/canonical/servers` stays empty and nothing discovers anything.
+      CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.78.10:4242"]' 
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+      RUST_LOG: "info,ciris_edge=debug"
+    ports:
+      - "9102:9092"
+      - "24243:4243"
+    networks:
+      mesh:
+        ipv4_address: 172.29.78.12
+    volumes: [node-b-home:/var/lib/ciris]
+
+volumes:
+  canonical-home:
+  node-a-home:
+  node-b-home:
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.78.0/24

@@ -476,6 +476,7 @@ async fn owned_remote(
         home.to_path_buf(),
         "http://127.0.0.1:1".to_string(),
         ciris_persist::prelude::HybridPolicy::Strict,
+        None,
     ));
     let responder = Arc::new(MeshControlResponder::with_router(
         Arc::clone(engine),

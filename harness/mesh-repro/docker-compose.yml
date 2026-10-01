@@ -26,14 +26,21 @@ name: ciris-mesh-repro
 # matched persist's terminus — and nothing noticed for months, because edge
 # < v20 did not require a Rooted provenance to carry the Attestation plane;
 # v20 does, and the ladder went red the day we adopted it. CIRISEdge hit the
-# mirror image transcribing OUR block (edge 82d8650). Mint
-# with the substrate's generator — CIRISPersist#805 asks persist to ship it —
-# and until it lands, CIRISEdge's `tests/anchor_block_generate.rs` prints the
-# identical bytes ONLY while edge pins the same persist + verify as Cargo.lock
-# here. Ed25519 is deterministic: if its SCRUB differs from the one below, the
-# pins differ, and its block is not yours.
-# (regenerate-and-paste is always safe; the ML-DSA signature is randomized but
-# any emitted signature verifies).
+# mirror image transcribing OUR block (edge 82d8650).
+#
+# MINT IT WITH PERSIST (v47.4.0+, CIRISPersist#805 — CIRISServer#637), from a
+# checkout of CIRISPersist at the tag Cargo.lock pins here:
+#
+#   cargo run --example mint_test_anchor --features test-anchor
+#
+# No argument mints the seed every harness shares, so it prints this block
+# with the scrubs that verify under THAT persist/verify pair, plus the
+# `CIRIS_TEST_TRUST_ROOT_MINTED_BY` line naming the pair — paste all seven.
+# The persist checkout must pin the same verify as this repo does (Cargo.lock),
+# or its scrubs are not yours. Edge's old `tests/anchor_block_generate.rs` is
+# deleted; do not look for it. Ed25519 is deterministic: if SCRUB differs from
+# the one below, the pairs differ. (Regenerate-and-paste is always safe; the
+# ML-DSA signature is randomized but any emitted signature verifies.)
 x-test-anchor-env: &test-anchor-env
   CIRIS_TESTING_MODE: "true"
   # Harness-only announce cadence (test-anchor-fenced in compose.rs): rooting

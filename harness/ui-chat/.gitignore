@@ -1,6 +1,8 @@
-# Build artifacts, same as the mesh harness next door: a ~70 MB desktop jar and
-# a ~34 MB wheel, both reproducible from the tree and neither belonging in git.
-# They were committed once by a `git add -A harness/` and had to be taken back
-# out; this is what stops the next one.
+# Build inputs staged by run.sh, never committed: a 34 MB wheel and a 70 MB
+# uber-jar are exactly the "distribute via releases and fetch on install" case
+# the repo-size rule excludes. run.sh copies them in and tells you how to build
+# either one if it cannot find it.
 wheels/
 jars/
+.client-src/
+.venv-client/

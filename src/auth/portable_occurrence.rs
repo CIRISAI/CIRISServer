@@ -895,6 +895,27 @@ async fn associate_handler(
             )
         }
     };
+    // AN EXPLICIT HARDWARE CUSTODY IS A REQUIREMENT, NOT A PREFERENCE
+    // (CIRISServer#639). The seal below degrades to encrypted software where no
+    // hardware storage is reachable, and this route used to answer 200 with a
+    // software device key and a `platform-sealed` marker beside it — the one
+    // outcome `device: "tpm"` exists to prevent. Asked before the authorizer is
+    // opened (a YubiKey PIN and touch are not spent on a request that cannot
+    // succeed) and before anything is minted, registered or bound.
+    if device_custody == crate::identity::DeviceCustody::PlatformSealed {
+        if let Err(why) = crate::identity::hardware_sealed_storage_probe() {
+            return crate::auth::refusal::refuse_with(
+                StatusCode::CONFLICT,
+                "self.associate.hardware_custody_unavailable",
+                format!(
+                    "device \"tpm\" was requested, but this host cannot seal a key in \
+                     hardware: {why}. Nothing was minted or enrolled. Retry with \
+                     device: \"software\" to accept software custody explicitly"
+                ),
+                serde_json::json!({ "requested_device": "tpm" }),
+            );
+        }
+    }
 
     // ── (1+2) WHICH identity, and PROVE possession of it ────────────────────
     //
@@ -1255,6 +1276,76 @@ mod custody_matrix_tests {
             body.contains("nobody-here-v1-abcdef"),
             "the refusal names the identity: {body}"
         );
+    }
+
+    /// CIRISServer#639 — `device: "tpm"` on a host with no hardware-sealed
+    /// storage is refused BY NAME, before the authorizer is opened: the
+    /// `source_dir` here does not exist, so any answer that mentions it means
+    /// the route got past the custody check. Nothing is written into the home.
+    ///
+    /// On a host that CAN seal (a TPM with the plugin loaded) the probe passes
+    /// and the refusal cannot be exercised; the test then only checks the probe
+    /// agrees with itself, and says so.
+    #[tokio::test]
+    async fn an_explicit_tpm_custody_without_sealed_storage_is_refused_before_anything_is_minted() {
+        use tower::ServiceExt as _;
+        let cfg = cfg_at("tpm-unavailable");
+        let seed_dir = crate::user_seed_dir(&cfg);
+        let pqc = Arc::new(
+            ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+                &[0x62; 32],
+                "tpm-probe-node-pqc".to_string(),
+            )
+            .expect("node ML-DSA-65 seed"),
+        );
+        let signer = Arc::new(ciris_persist::prelude::LocalSigner::from_parts(
+            ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]),
+            "tpm-probe-node".to_string(),
+            Some(pqc),
+            Some("tpm-probe-node-pqc".to_string()),
+        ));
+        let engine = Arc::new(
+            Engine::with_signer(signer, "sqlite::memory:")
+                .await
+                .expect("in-memory engine"),
+        );
+        let app = router(engine, Arc::new(cfg));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/self/associate")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "device": "tpm",
+                    "source_dir": "/nonexistent/ciris-639-usb",
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        let resp = app.oneshot(req).await.expect("route");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        match crate::identity::hardware_sealed_storage_probe() {
+            Err(_) => {
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(
+                    body["reason_id"], "self.associate.hardware_custody_unavailable",
+                    "{body}"
+                );
+                assert!(
+                    !body.to_string().contains("ciris-639-usb"),
+                    "refused before the authorizer was opened: {body}"
+                );
+                let written = std::fs::read_dir(&seed_dir).map(|d| d.count()).unwrap_or(0);
+                assert_eq!(written, 0, "nothing minted into {}", seed_dir.display());
+            }
+            Ok(diag) => eprintln!(
+                "this host seals in hardware ({diag}); the #639 refusal is not reachable here"
+            ),
+        }
     }
 
     /// The custody word is what the SIGNER reports, not what was asked for. A

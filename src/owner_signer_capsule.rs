@@ -166,6 +166,18 @@ impl OwnerSignerCapsule {
         &self.edge_signer
     }
 
+    /// The owner's signer in PERSIST's type, for an in-crate door whose
+    /// signature is `&LocalSigner` — `auth::ownership::promote_owner_binding_to_federation`,
+    /// reached from `POST /v1/self/nodes/{node}/announce` (CIRISServer#678).
+    ///
+    /// The same boundary as [`Self::edge_signer`]: `pub(crate)`, the authority
+    /// [`Self::sign_hybrid`] already confers, and no key material (the halves
+    /// sit behind `HardwareSigner`). It exists so the owner-binding promote has
+    /// ONE implementation, not a second one re-spelled over `sign_hybrid`.
+    pub(crate) fn local_signer(&self) -> &LocalSigner {
+        &self.signer
+    }
+
     /// Sign caller-supplied bytes with the owner's hybrid identity.
     ///
     /// The caller canonicalizes. This deliberately does not canonicalize for
@@ -313,7 +325,44 @@ pub async fn for_owned_node(
                 .into(),
         ));
     };
-    let alias = crate::active_user_alias(&seed_dir, &default_alias);
+    open_owned(engine, &owner, seed_dir, &default_alias).await
+}
+
+/// [`for_owned_node`] with the seed directory named by the caller — for a
+/// loop that holds its router's own seed dir (the pair-room driver), so an
+/// in-process node with no process-global registration still opens ITS
+/// owner's pen. Same binding check, same refusals.
+///
+/// # Errors
+/// As [`for_owned_node`].
+pub async fn for_owned_node_in(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    seed_dir: std::path::PathBuf,
+) -> Result<OwnerSignerCapsule, CapsuleRefusal> {
+    let owner = match ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        node_key_id,
+    )
+    .await
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Err(CapsuleRefusal::Unowned),
+        Err(e) => return Err(CapsuleRefusal::Unavailable(e.to_string())),
+    };
+    let default_alias = crate::node_key::held_user_seed_dir()
+        .map(|(_, a)| a)
+        .unwrap_or_default();
+    open_owned(engine, &owner, seed_dir, &default_alias).await
+}
+
+async fn open_owned(
+    engine: &Arc<Engine>,
+    owner: &str,
+    seed_dir: std::path::PathBuf,
+    default_alias: &str,
+) -> Result<OwnerSignerCapsule, CapsuleRefusal> {
+    let alias = crate::active_user_alias(&seed_dir, default_alias);
     match crate::compose::resolve_user_signers(
         engine,
         crate::compose::FedIdUse::OwnerSession,
@@ -322,7 +371,7 @@ pub async fn for_owned_node(
     )
     .await
     {
-        Ok(Some((signer, edge_signer))) if crate::peer::signer_holds(&signer, &owner) => {
+        Ok(Some((signer, edge_signer))) if crate::peer::signer_holds(&signer, owner) => {
             Ok(OwnerSignerCapsule {
                 signer,
                 edge_signer,

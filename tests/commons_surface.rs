@@ -291,6 +291,30 @@ async fn try_put_community(
         .sign_hybrid(&canonical)
         .await
         .expect("sign community");
+    // persist v52 Q1 (CIRISPersist#955): every listed member co-signs the
+    // founding record with the key `register_party` minted for them.
+    let node_key = engine.local_derived_key_id().await.expect("node key id");
+    let mut cosignatures = Vec::new();
+    for (k, _) in members {
+        // This node's own seat is signed by the engine; every party seat by
+        // the key `register_party` minted.
+        let c = if *k == node_key {
+            engine
+                .sign_hybrid(&canonical)
+                .await
+                .expect("this node co-signs its seat")
+        } else {
+            party_signer(k)
+                .sign_hybrid(&canonical)
+                .await
+                .expect("a founding member co-signs")
+        };
+        cosignatures.push(ciris_persist::federation::types::RosterCosignature {
+            authority_key_id: (*k).to_string(),
+            scrub_signature_classical: BASE64.encode(&c.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&c.pqc.signature)),
+        });
+    }
     engine
         .federation_directory()
         .put_community(SignedCommunity {
@@ -298,6 +322,9 @@ async fn try_put_community(
             authority_key_id: community_id.to_string(),
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
+            cosignatures,
+            lineage: Vec::new(),
         })
         .await
         .map_err(|e| e.kind().to_string())

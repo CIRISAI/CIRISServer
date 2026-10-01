@@ -41,15 +41,14 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use ciris_edge::files::{self, FileWrite};
+use ciris_edge::files::{self, FileStreamWrite};
 use ciris_edge::scope_room::ScopeRoom;
 use ciris_persist::federation::{Attestation, BlobError};
 use ciris_persist::prelude::Engine;
@@ -58,22 +57,62 @@ use ciris_persist::prelude::Engine;
 /// the writer and the reader cannot disagree about which files are notes.
 const NOTE_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
-/// **The largest file this node writes or reads whole: persist's chunk-DAG
-/// whole-read cap (64 MiB).**
+mod multipart;
+mod streaming;
+
+/// **The largest file this node reads WHOLE: persist's chunk-DAG whole-read
+/// cap (64 MiB).**
 ///
-/// One number for both directions, on purpose. An upload above it would seal
-/// fine (edge seals anything above 1 MiB as a chunk DAG) but could then never be
-/// opened by the JSON read, `GET /v1/files/{id}`, or by `move`, which all read
-/// whole — so the node would accept bytes it cannot give back the same way. A
-/// file received from a peer above it is still served, by `?raw=1` with `Range`.
+/// Since 0.5.218 this bounds only the paths that must hold a file in memory:
+/// the JSON read `GET /v1/files/{id}` (it base64s the bytes into one JSON
+/// value), the JSON upload form (it arrives as one base64 string), a
+/// multipart upload that declares no `size` (the node cannot declare a length
+/// to the seal it does not know, so it collects the part — up to this — and
+/// declares what it collected), and the plaintext digest on `/meta`. Every
+/// other path streams: a multipart upload WITH `size` seals through edge's
+/// `files::publish_stream` chunk by chunk ([`STREAMED_FILE_CEILING`]), `?raw=1`
+/// serves a file above this through `FileRow::chunks()` and any `Range`
+/// through `FileRow::open_range` windows, and `move` above it re-seals from
+/// the source's chunk walk.
+///
+/// Before 0.5.218 this was one number for both directions ON PURPOSE — an
+/// upload above it would seal but could not be read back whole, so the node
+/// refused to accept what it could not give back the same way. Edge v36.1.0
+/// (CIRISEdge#737 / #744) removed the reason: there is now a way back for
+/// every size the way in accepts.
 pub const WHOLE_READ_CAP: usize =
     ciris_persist::federation::chunk_dag_cascade::DAG_WHOLE_READ_CAP_BYTES as usize;
 
-/// The request-body ceiling for the upload routes: the cap, as base64 (the JSON
-/// form inflates by 4/3), plus 1 MiB for the form's other members and multipart
-/// framing. Applied to `POST /v1/files` and `PUT /v1/files/{id}` ONLY — every
-/// other route keeps axum's 2 MB default, which is the right size for JSON.
+/// The request-body ceiling for the JSON upload form: the cap, as base64 (the
+/// JSON form inflates by 4/3), plus 1 MiB for the form's other members. The
+/// JSON form cannot stream — its bytes are one string value, and serde needs
+/// the value whole — so it keeps the whole-read cap. Enforced by the upload
+/// handlers themselves (they read the raw body so the multipart form can
+/// stream), and applied to `POST /v1/files` and `PUT /v1/files/{id}` ONLY —
+/// every other route keeps axum's 2 MB default, which is the right size for
+/// JSON.
 pub const UPLOAD_BODY_LIMIT: usize = WHOLE_READ_CAP.div_ceil(3) * 4 + 1024 * 1024;
+
+/// **The largest single file this node takes through the streamed upload:
+/// edge's stated single-file ceiling, ~2.5 GiB.**
+///
+/// Edge v36.0.0's release notes (#744): "one file maxes out near 2.5 GiB
+/// because persist stores the sealed manifest inline under its 1 MiB cap
+/// (CIRISPersist#954, persist v52)". Edge exports no constant for it — the
+/// limit is an emergent property of the manifest's size, not a check anyone
+/// makes — so this node states it, at edge's number, and refuses above it by
+/// name (`drive.too_large`, 413) before a byte is sealed, rather than
+/// streaming 2.6 GiB to a manifest persist then refuses as a 500. A file
+/// within a few MiB BELOW it may still meet persist's manifest cap and answer
+/// `drive.publish_failed`; edge measured 2 GiB end to end. Raise it when this
+/// node adopts persist v52 (edge v37).
+pub const STREAMED_FILE_CEILING: u64 = 2560 * 1024 * 1024;
+
+/// The request-body ceiling for the streamed (multipart) upload:
+/// [`STREAMED_FILE_CEILING`] plus 1 MiB for the form's fields and framing.
+/// Checked against `Content-Length` before the body is read and counted as it
+/// is read, since a chunked request declares no length.
+pub const STREAMED_UPLOAD_BODY_LIMIT: u64 = STREAMED_FILE_CEILING + 1024 * 1024;
 
 /// The most rows one `GET /v1/drive` page returns. A bigger `limit` is clamped,
 /// not refused: a client asking for "everything" gets a page and a `resume`.
@@ -127,7 +166,8 @@ pub struct FileWriteRequest {
     pub room_id: Option<String>,
     /// Base64 bytes, up to [`WHOLE_READ_CAP`] decoded. Edge seals anything
     /// above its 1 MiB envelope bound as a chunk DAG (CIRISEdge#633); for a
-    /// large file prefer `multipart/form-data`, which skips the 4/3 inflation.
+    /// large file use `multipart/form-data` with a `size` field, which skips
+    /// the 4/3 inflation AND streams (up to [`STREAMED_FILE_CEILING`]).
     pub bytes_base64: String,
     #[serde(default)]
     pub media_type: Option<String>,
@@ -212,6 +252,10 @@ pub struct DriveEntry {
     pub asserted_at: String,
     pub filename: Option<String>,
     pub media_type: Option<String>,
+    /// How the name and type were read (CIRISEdge#698): `clear`, `opened`
+    /// (the sealed descriptor opened here) or `sealed` (held, not opened on
+    /// this device — `filename`/`media_type` are then unknown, not absent).
+    pub description: String,
     /// `here` when the bytes open on this node, else the reason they do not:
     /// `not_fetched`, `not_granted`, `evicted`, `withdrawn`, or a substrate
     /// fault's kind.
@@ -229,6 +273,16 @@ pub struct DriveEntry {
     /// The row's CEG envelope (CSD-006 / CIRISServer#616): who it is about,
     /// who signed it, who can see it, what it is.
     pub envelope: serde_json::Value,
+    /// Where it is, compactly (`FSD/FILE_CUSTODY.md`): the person's device
+    /// count and how many of those devices this node holds a delivery receipt
+    /// from — `received_on: null` only when the receipt log could not be read
+    /// (unknowable, not zero; an inline file is receipted like any other since
+    /// edge v38.0.0 / persist v52, CIRISPersist#953). CHEAP BY CONSTRUCTION:
+    /// the roster is read once per page, and a row costs one receipt-list
+    /// query — no manifest, no custody door.
+    /// `null` on a withdrawn row, or when the roster could not be read.
+    /// `GET /v1/files/{id}/custody` is the full answer.
+    pub custody: Option<crate::file_custody::CompactCustody>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,7 +367,7 @@ fn drive_no_session() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "drive.owner_session_required",
-        "a drive is one person's view of their own reach, and reading or writing in it is that person's own act".into(),
+        "Sign in as this node's owner to use your files.".into(),
     )
 }
 
@@ -321,7 +375,7 @@ fn notes_no_session() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         "notes.owner_session_required",
-        "notes are one person's, and writing or reading them is that person's own act".into(),
+        "Sign in as this node's owner to use your notes.".into(),
     )
 }
 
@@ -377,16 +431,14 @@ fn room_for(cohort: Cohort, room_id: Option<&str>, owner: &str) -> Result<ScopeR
             refuse(
                 StatusCode::BAD_REQUEST,
                 "drive.family_id_required",
-                "a family write must name `room_id` (the family's key id) — there is no \
-                 default family, and guessing one would place bytes in a cohort nobody chose"
-                    .into(),
+                "A family file needs to name its family. There is no default family.".into(),
             )
         }),
         Cohort::Community => room_id.map(ScopeRoom::community).ok_or_else(|| {
             refuse(
                 StatusCode::BAD_REQUEST,
                 "drive.community_id_required",
-                "a community write must name `room_id` (the community's key id)".into(),
+                "A community file needs to name its room.".into(),
             )
         }),
     }
@@ -586,6 +638,68 @@ fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContent
     )
 }
 
+/// What a file IS — its name and media type — as this read can say
+/// (CIRISEdge#698). Since edge v33 an encrypted-tier row carries them only
+/// inside `sealed_descriptor`, so `FileRow.filename`/`media_type` read `None`
+/// on every sealed row and must never be used as the answer.
+struct Described {
+    filename: Option<String>,
+    media_type: Option<String>,
+    /// `clear` (a plaintext-tier or pre-#698 row), `opened` (the sealed
+    /// descriptor opened for this viewer) or `sealed` (held, not opened here).
+    how: &'static str,
+}
+
+/// The ONE door to a file's name and type (CIRISEdge#698). Every drive path
+/// that shows, keeps or tests a name goes through here.
+///
+/// Edge's `FileRow::describe` (v33.0.0, CIRISEdge#702): a sealed row opens ONLY
+/// its descriptor, under the row's AAD — persist v51 refuses a pointer copied
+/// onto another row at that door — and returns no bytes. It still reads the
+/// blob to authenticate it, so a file whose bytes are not here lists `sealed`.
+async fn describe(st: &DriveState, file: &files::FileRow, viewer: &str) -> Described {
+    use ciris_edge::files::Descriptor;
+    let content = store(&st.engine);
+    let d = file
+        .describe(&content, viewer)
+        .await
+        .unwrap_or(Descriptor::Sealed);
+    match d {
+        Descriptor::Clear { format, name, .. } => Described {
+            filename: name,
+            media_type: Some(format),
+            how: "clear",
+        },
+        Descriptor::Opened { format, name, .. } => Described {
+            filename: name,
+            media_type: Some(format),
+            how: "opened",
+        },
+        Descriptor::Sealed => Described {
+            filename: None,
+            media_type: None,
+            how: "sealed",
+        },
+    }
+}
+
+/// [`describe`] as this node's content occurrence, for a path that has not
+/// resolved the viewer. No viewer key ⇒ the row's clear members only.
+async fn describe_here(st: &DriveState, file: &files::FileRow) -> Described {
+    match viewer_key(st).await {
+        Ok(v) => describe(st, file, &v).await,
+        Err(_) => Described {
+            filename: file.filename.clone(),
+            media_type: file.media_type.clone(),
+            how: if file.pointer.sealed_descriptor.is_some() {
+                "sealed"
+            } else {
+                "clear"
+            },
+        },
+    }
+}
+
 /// **The key every file is opened AS** — the one this node's content-KEM
 /// occurrence was provisioned under. See
 /// [`crate::backend::content_occurrence_key_id`]: on an actor/node split that
@@ -625,92 +739,157 @@ async fn ensure_owner_is_a_kem_target(st: &DriveState, owner_key_id: &str) {
 
 // ─── Upload bodies: JSON or multipart ──────────────────────────────────────
 
+/// Where an upload's bytes are once its form has been read.
+enum UploadBytes {
+    /// In hand: the JSON form, or a multipart file whose uploader declared no
+    /// `size` (collected up to [`WHOLE_READ_CAP`]).
+    Whole(Vec<u8>),
+    /// **Not yet read**: the multipart reader, positioned at the file part's
+    /// first byte, and the length its uploader declared. The seal reads the
+    /// rest straight off the request body.
+    Streamed {
+        body: Box<multipart::Multipart>,
+        declared: u64,
+    },
+}
+
 /// One upload, whichever form carried it.
-#[derive(Debug, Default)]
 struct Upload {
     cohort: Option<String>,
     room_id: Option<String>,
-    bytes: Vec<u8>,
+    bytes: UploadBytes,
     media_type: Option<String>,
     filename: Option<String>,
 }
 
-/// `drive.too_large` — the one sentence for "bigger than this node takes whole".
-fn too_large(size: usize) -> Response {
+/// `drive.too_large` — the one sentence for "bigger than this node takes
+/// whole" (the JSON form, or a multipart file without `size`).
+fn too_large(size: u64) -> Response {
     refuse(
         StatusCode::PAYLOAD_TOO_LARGE,
         "drive.too_large",
         format!(
-            "{size} bytes exceeds this node's {WHOLE_READ_CAP}-byte file cap — the chunk-DAG \
-             whole-read cap, above which a file could be stored but never read back whole"
+            "{size} bytes exceeds this node's {WHOLE_READ_CAP}-byte cap for an upload it must \
+             hold whole — send it as multipart/form-data with a `size` field before the `file` \
+             part, which streams up to {STREAMED_FILE_CEILING} bytes"
         ),
     )
 }
 
-/// Parse an upload body: `application/json` ([`FileWriteRequest`]) or
-/// `multipart/form-data` (fields `cohort`, `room_id`, `media_type`,
-/// `filename`, and the bytes in a part named `file` — whose own filename and
-/// `Content-Type` are used when the fields are absent).
+/// `drive.too_large` for the streamed form — above edge's single-file ceiling.
+fn too_large_streamed(size: u64) -> Response {
+    refuse(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "drive.too_large",
+        format!(
+            "{size} bytes exceeds this node's {STREAMED_FILE_CEILING}-byte single-file ceiling — \
+             edge's, set by persist's inline manifest cap until persist v52"
+        ),
+    )
+}
+
+/// A multipart reader's typed failure → its refusal. Each has its own
+/// remedy: send less, reorder the form, or resend.
+fn multipart_refusal(f: &multipart::Failure) -> Response {
+    use multipart::Failure as F;
+    match f {
+        F::TooLarge { .. } => refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "drive.too_large",
+            format!(
+                "{f} — {STREAMED_FILE_CEILING} bytes of file plus 1 MiB of form is the most this \
+                 node reads"
+            ),
+        ),
+        F::FieldAfterFile => refuse(
+            StatusCode::BAD_REQUEST,
+            "drive.field_after_file",
+            format!(
+                "{f}. Put `cohort`, `room_id`, `media_type`, `filename` and `size` BEFORE the \
+                 `file` part (with FormData: append the file last). Nothing was written."
+            ),
+        ),
+        F::Truncated | F::Malformed(_) | F::Transport(_) => bad_body(f.to_string()),
+    }
+}
+
+/// Read a JSON body whole, refusing past `limit` by name.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-fn parse_upload(
+async fn collect_bounded(
     headers: &HeaderMap,
-    body: Result<Bytes, BytesRejection>,
-) -> Result<Upload, Response> {
-    let body = body.map_err(|rej| {
-        if rej.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            too_large(UPLOAD_BODY_LIMIT)
-        } else {
-            bad_body(format!("read the request body: {rej}"))
+    body: Body,
+    limit: usize,
+) -> Result<Vec<u8>, Response> {
+    use futures_util::StreamExt as _;
+    if let Some(n) = content_length(headers).filter(|n| *n > limit as u64) {
+        return Err(too_large(n));
+    }
+    let mut out = Vec::new();
+    let mut frames = body.into_data_stream();
+    while let Some(frame) = frames.next().await {
+        let frame = frame.map_err(|e| bad_body(format!("read the request body: {e}")))?;
+        if out.len() + frame.len() > limit {
+            return Err(too_large((out.len() + frame.len()) as u64));
         }
-    })?;
+        out.extend_from_slice(&frame);
+    }
+    Ok(out)
+}
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// Read an upload's FORM: `application/json` ([`FileWriteRequest`], whole) or
+/// `multipart/form-data` (streamed — the file part is left unread for the
+/// seal).
+///
+/// # The multipart form, 0.5.218
+///
+/// Fields `cohort`, `room_id`, `media_type`, `filename` and **`size`**, then
+/// the bytes in a part named `file` (whose own filename and `Content-Type`
+/// are used when the fields are absent). **Every field precedes the file**:
+/// the file's bytes go to the seal as they arrive, so anything after them
+/// would arrive after the decisions it names — refused by name,
+/// `drive.field_after_file`, with nothing written.
+///
+/// **`size` is the declared length** — the file part's exact byte count, as
+/// a decimal form field before the file. Edge's `files::publish_stream`
+/// chooses the seal's shape (inline or chunk DAG) from the declared length
+/// before it reads a byte, and refuses a body of any other length by name
+/// (`FileError::DeclaredLengthMismatch` → `drive.declared_length_mismatch`,
+/// nothing sealed, no row). A form FIELD, not the part's own
+/// `Content-Length` header, because the field is what a client can set:
+/// browsers' `FormData` writes no per-part `Content-Length` and gives
+/// script no way to add one, while `form.append("size", file.size)` before
+/// `form.append("file", file)` is one line on every platform. With `size`,
+/// the file streams up to [`STREAMED_FILE_CEILING`]; without it, the node
+/// collects the part up to [`WHOLE_READ_CAP`] (the pre-0.5.218 behaviour,
+/// so a client that has never heard of `size` keeps working for the files it
+/// could always send) and refuses above that naming `size` as the remedy.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn parse_upload(headers: &HeaderMap, body: Body) -> Result<Upload, Response> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
-    let upload = if ct
+    if !ct
         .trim_start()
         .to_ascii_lowercase()
         .starts_with("multipart/form-data")
     {
-        let boundary = multipart::boundary(ct).ok_or_else(|| {
-            bad_body("multipart/form-data without a `boundary` parameter".to_owned())
-        })?;
-        let parts = multipart::parse(&body, &boundary).map_err(bad_body)?;
-        let mut up = Upload::default();
-        let mut saw_file = false;
-        for p in parts {
-            let text = || String::from_utf8(p.data.clone()).ok();
-            match p.name.as_str() {
-                "file" | "bytes" => {
-                    saw_file = true;
-                    if up.filename.is_none() {
-                        up.filename = p.filename.clone();
-                    }
-                    if up.media_type.is_none() {
-                        up.media_type = p.content_type.clone();
-                    }
-                    up.bytes = p.data;
-                }
-                "cohort" => up.cohort = text(),
-                "room_id" => up.room_id = text(),
-                // Explicit fields win over the part's own headers.
-                "media_type" => up.media_type = text(),
-                "filename" => up.filename = text(),
-                _ => {}
-            }
-        }
-        if !saw_file {
-            return Err(bad_body(
-                "multipart/form-data upload has no part named `file`".to_owned(),
-            ));
-        }
-        up
-    } else {
+        let body = collect_bounded(headers, body, UPLOAD_BODY_LIMIT).await?;
         let req: FileWriteRequest = serde_json::from_slice(&body)
             .map_err(|e| bad_body(format!("not a file-write JSON body: {e}")))?;
         let bytes = base64_decode(&req.bytes_base64)
             .map_err(|e| refuse(StatusCode::BAD_REQUEST, "drive.bad_base64", e))?;
-        Upload {
+        if bytes.len() > WHOLE_READ_CAP {
+            return Err(too_large(bytes.len() as u64));
+        }
+        return Ok(Upload {
             cohort: req.cohort.map(|c| {
                 match c {
                     Cohort::SelfCollective => "self",
@@ -720,109 +899,113 @@ fn parse_upload(
                 .to_owned()
             }),
             room_id: req.room_id,
-            bytes,
+            bytes: UploadBytes::Whole(bytes),
             media_type: req.media_type,
             filename: req.filename,
+        });
+    }
+
+    if let Some(n) = content_length(headers).filter(|n| *n > STREAMED_UPLOAD_BODY_LIMIT) {
+        return Err(too_large_streamed(n));
+    }
+    let boundary = multipart::boundary(ct)
+        .ok_or_else(|| bad_body("multipart/form-data without a `boundary` parameter".to_owned()))?;
+    let frames: multipart::ByteStream = {
+        use futures_util::StreamExt as _;
+        Box::pin(
+            body.into_data_stream()
+                .map(|r| r.map_err(|e| e.to_string())),
+        )
+    };
+    let mut mp = Box::new(multipart::Multipart::new(
+        frames,
+        &boundary,
+        STREAMED_UPLOAD_BODY_LIMIT,
+    ));
+    let (mut cohort, mut room_id, mut media_type, mut filename, mut size) =
+        (None, None, None, None, None);
+    let file_head = loop {
+        let head = match mp.next_part().await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                return Err(bad_body(
+                    "multipart/form-data upload has no part named `file`".to_owned(),
+                ))
+            }
+            Err(f) => return Err(multipart_refusal(&f)),
+        };
+        if matches!(head.name.as_str(), "file" | "bytes") {
+            break head;
+        }
+        let value = match mp.read_part(multipart::FIELD_CAP).await {
+            Ok(v) => v,
+            Err(multipart::ReadPartError::AboveCap) => {
+                return Err(bad_body(format!(
+                    "form field `{}` is longer than {} bytes — only the `file` part carries bytes",
+                    head.name,
+                    multipart::FIELD_CAP
+                )))
+            }
+            Err(multipart::ReadPartError::Failed(f)) => return Err(multipart_refusal(&f)),
+        };
+        let text = String::from_utf8(value).ok();
+        match head.name.as_str() {
+            "cohort" => cohort = text,
+            "room_id" => room_id = text,
+            // Explicit fields win over the part's own headers.
+            "media_type" => media_type = text,
+            "filename" => filename = text,
+            "size" => size = text,
+            _ => {}
         }
     };
-    if upload.bytes.len() > WHOLE_READ_CAP {
-        return Err(too_large(upload.bytes.len()));
+    if filename.is_none() {
+        filename = file_head.filename.clone();
     }
-    Ok(upload)
+    if media_type.is_none() {
+        media_type = file_head.content_type.clone();
+    }
+    let bytes = match size {
+        Some(raw) => {
+            let declared: u64 = raw.trim().parse().map_err(|_| {
+                bad_body(format!(
+                    "`size` must be the file part's byte count as a decimal integer, not {raw:?}"
+                ))
+            })?;
+            if declared > STREAMED_FILE_CEILING {
+                return Err(too_large_streamed(declared));
+            }
+            UploadBytes::Streamed { body: mp, declared }
+        }
+        None => {
+            let bytes = match mp.read_part(WHOLE_READ_CAP).await {
+                Ok(b) => b,
+                Err(multipart::ReadPartError::AboveCap) => {
+                    return Err(too_large(WHOLE_READ_CAP as u64 + 1))
+                }
+                Err(multipart::ReadPartError::Failed(f)) => return Err(multipart_refusal(&f)),
+            };
+            // The same rule as the streamed form, so a client learns ONE
+            // shape: the file is the last part.
+            match mp.next_part().await {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(multipart_refusal(&multipart::Failure::FieldAfterFile)),
+                Err(f) => return Err(multipart_refusal(&f)),
+            }
+            UploadBytes::Whole(bytes)
+        }
+    };
+    Ok(Upload {
+        cohort,
+        room_id,
+        bytes,
+        media_type,
+        filename,
+    })
 }
 
 fn bad_body(detail: String) -> Response {
     refuse(StatusCode::BAD_REQUEST, "drive.bad_body", detail)
-}
-
-/// A minimal `multipart/form-data` reader (RFC 7578) — enough for one upload
-/// form, with no new dependency. Bounded by the route's body limit, so the
-/// whole body is already in memory; this only slices it.
-mod multipart {
-    pub struct Part {
-        pub name: String,
-        pub filename: Option<String>,
-        pub content_type: Option<String>,
-        pub data: Vec<u8>,
-    }
-
-    /// The `boundary` parameter of a `multipart/form-data` content type.
-    pub fn boundary(content_type: &str) -> Option<String> {
-        content_type.split(';').skip(1).find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            if k.trim().eq_ignore_ascii_case("boundary") {
-                let v = v.trim().trim_matches('"');
-                (!v.is_empty()).then(|| v.to_owned())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-        if needle.is_empty() || from > hay.len() {
-            return None;
-        }
-        hay[from..]
-            .windows(needle.len())
-            .position(|w| w == needle)
-            .map(|p| p + from)
-    }
-
-    /// A `Content-Disposition` parameter, quotes stripped.
-    fn disposition_param(value: &str, key: &str) -> Option<String> {
-        value.split(';').skip(1).find_map(|param| {
-            let (k, v) = param.split_once('=')?;
-            k.trim()
-                .eq_ignore_ascii_case(key)
-                .then(|| v.trim().trim_matches('"').to_owned())
-        })
-    }
-
-    pub fn parse(body: &[u8], boundary: &str) -> Result<Vec<Part>, String> {
-        let delim = format!("--{boundary}").into_bytes();
-        let next_delim = format!("\r\n--{boundary}").into_bytes();
-        let mut at = find(body, &delim, 0)
-            .ok_or_else(|| "multipart body does not contain its boundary".to_owned())?
-            + delim.len();
-        let mut parts = Vec::new();
-        loop {
-            // After a delimiter: `--` closes the body, CRLF opens a part.
-            if body[at..].starts_with(b"--") {
-                return Ok(parts);
-            }
-            if !body[at..].starts_with(b"\r\n") {
-                return Err("malformed multipart delimiter line".to_owned());
-            }
-            at += 2;
-            let head_end = find(body, b"\r\n\r\n", at)
-                .ok_or_else(|| "multipart part has no header terminator".to_owned())?;
-            let head = std::str::from_utf8(&body[at..head_end])
-                .map_err(|_| "multipart part headers are not UTF-8".to_owned())?;
-            let (mut name, mut filename, mut content_type) = (None, None, None);
-            for line in head.split("\r\n") {
-                let Some((k, v)) = line.split_once(':') else {
-                    continue;
-                };
-                if k.trim().eq_ignore_ascii_case("content-disposition") {
-                    name = disposition_param(v, "name");
-                    filename = disposition_param(v, "filename");
-                } else if k.trim().eq_ignore_ascii_case("content-type") {
-                    content_type = Some(v.trim().to_owned());
-                }
-            }
-            let data_start = head_end + 4;
-            let data_end = find(body, &next_delim, data_start)
-                .ok_or_else(|| "multipart part is not closed by its boundary".to_owned())?;
-            parts.push(Part {
-                name: name.ok_or_else(|| "multipart part has no `name`".to_owned())?,
-                filename,
-                content_type,
-                data: body[data_start..data_end].to_vec(),
-            });
-            at = data_end + next_delim.len();
-        }
-    }
 }
 
 // ─── Publishing, finding, and withdrawing rows ─────────────────────────────
@@ -865,27 +1048,26 @@ async fn author_capsule(
     })
 }
 
-/// A new file row in `room`: seal, author, cross — edge's one door
-/// (`files::publish`), with this server's reporting around it.
+/// What the write gate lets through: the normalised essence and the cleaned
+/// display name.
+struct Gated {
+    media_type: String,
+    filename: Option<String>,
+}
+
+/// THE WRITE GATE (CIRISServer#642, CC 3.3.13 / CC 5.3.2.6): the node is the
+/// first consumer of these bytes, and every peer inherits what this row says
+/// they are. The declared type must be an RFC 6838 essence the leading bytes
+/// agree with, and the name is display-only (RFC 6266 §4.3) — no path, no
+/// control or bidi characters. Every write door comes through here.
+///
+/// `head` is the file's LEADING bytes — the whole file, or (on a streamed
+/// upload or a streamed `move`) the first [`crate::media_gate::FORMAT_HEAD_BYTES`]
+/// peeked without consuming them. The gate never reads past that window, so
+/// the verdict is the same either way; the streamed path is not a weaker gate.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-#[allow(clippy::too_many_arguments)]
-async fn publish_into(
-    st: &DriveState,
-    headers: &HeaderMap,
-    owner_key_id: &str,
-    cohort: Cohort,
-    room: &ScopeRoom,
-    bytes: &[u8],
-    media_type: &str,
-    filename: Option<&str>,
-    plane: Plane,
-) -> Result<(files::PublishedFile, bool), Response> {
-    // THE WRITE GATE (CIRISServer#642, CC 3.3.13 / CC 5.3.2.6): the node is the
-    // first consumer of these bytes, and every peer inherits what this row
-    // says they are. The declared type must be an RFC 6838 essence the leading
-    // bytes agree with, and the name is display-only (RFC 6266 §4.3) — no path,
-    // no control or bidi characters. Every write door comes through here.
-    let essence = match crate::media_gate::check_format(media_type, bytes) {
+fn write_gate(media_type: &str, head: &[u8], filename: Option<&str>) -> Result<Gated, Response> {
+    let essence = match crate::media_gate::check_format(media_type, head) {
         Ok(e) => e,
         Err(crate::media_gate::TypeRefusal::BadEssence(d)) => {
             return Err(refuse(
@@ -921,27 +1103,93 @@ async fn publish_into(
             }
         },
     };
-    let media_type = essence.as_str();
-    let filename = clean_name.as_deref();
+    Ok(Gated {
+        media_type: essence,
+        filename: clean_name,
+    })
+}
+
+/// A new file row in `room` from bytes in hand: [`write_gate`], then
+/// [`publish_gated`] over the slice.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_into(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    bytes: &[u8],
+    media_type: &str,
+    filename: Option<&str>,
+    plane: Plane,
+) -> Result<(files::PublishedFile, bool), Response> {
+    let gated = write_gate(media_type, bytes, filename)?;
+    publish_gated(
+        st,
+        headers,
+        owner_key_id,
+        cohort,
+        room,
+        &gated,
+        bytes.len() as u64,
+        bytes,
+        plane,
+    )
+    .await
+}
+
+/// A new file row in `room`: seal, author, cross — edge's one door
+/// (`files::publish_stream`; `files::publish` is edge's wrapper over it for a
+/// slice, CIRISEdge#744), with this server's reporting around it. The bytes
+/// come from `reader`, exactly `declared_len` of them; the gate has already
+/// run on their head.
+///
+/// A reader that yields any other count is edge's
+/// `FileError::DeclaredLengthMismatch` (`drive.declared_length_mismatch`) and
+/// a reader that fails is `FileError::Read`; neither leaves a manifest or a
+/// row, and edge evicts the chunks it had sealed (§6.7.4). A caller whose
+/// reader keeps a typed cause (the multipart body, a chunk walk) answers
+/// THAT cause when this fails — edge carries a reader's error only as prose.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_gated<R>(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    gated: &Gated,
+    declared_len: u64,
+    reader: R,
+    plane: Plane,
+) -> Result<(files::PublishedFile, bool), Response>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     ensure_owner_is_a_kem_target(st, owner_key_id).await;
     let addressed = addressed_or_warn(st, room, cohort);
     let capsule = author_capsule(st, headers, owner_key_id, plane).await?;
     let dir = st.engine.federation_directory();
     let content = store(&st.engine);
-    let published = files::publish(
+    let published = files::publish_stream(
         &*dir,
         &content,
         ciris_edge::replication::attestation_bind::Signers {
             node: &st.node_signer,
             actor: Some(capsule.edge_signer()),
         },
-        &FileWrite {
+        &FileStreamWrite {
             room,
-            bytes,
-            media_type,
-            filename,
+            declared_len,
+            media_type: &gated.media_type,
+            // The drive names a codec, if at all, in the media type's own
+            // parameters; edge's separate slot stays empty.
+            codec: None,
+            filename: gated.filename.as_deref(),
             asserted_at: chrono::Utc::now(),
         },
+        reader,
     )
     .await
     .map_err(|e| file_error(&e, room))?;
@@ -966,6 +1214,65 @@ async fn publish_into(
         );
     }
     Ok((published, addressed))
+}
+
+/// An upload's bytes → a new row: whole bytes through [`publish_into`], a
+/// streamed file part through the gate on its PEEKED head and then
+/// [`publish_gated`] straight off the request body.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+#[allow(clippy::too_many_arguments)]
+async fn publish_upload(
+    st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    cohort: Cohort,
+    room: &ScopeRoom,
+    bytes: UploadBytes,
+    media_type: &str,
+    filename: Option<&str>,
+) -> Result<(files::PublishedFile, bool), Response> {
+    match bytes {
+        UploadBytes::Whole(b) => {
+            publish_into(
+                st,
+                headers,
+                owner_key_id,
+                cohort,
+                room,
+                &b,
+                media_type,
+                filename,
+                Plane::Drive,
+            )
+            .await
+        }
+        UploadBytes::Streamed { mut body, declared } => {
+            // PEEK, THEN CHAIN: the gate reads the first 64 KiB where they
+            // sit in the multipart reader's own buffer; they are not consumed,
+            // so the seal below reads the file from its first byte.
+            let gated = match body.peek(crate::media_gate::FORMAT_HEAD_BYTES).await {
+                Ok(head) => write_gate(media_type, head, filename)?,
+                Err(f) => return Err(multipart_refusal(&f)),
+            };
+            let out = publish_gated(
+                st,
+                headers,
+                owner_key_id,
+                cohort,
+                room,
+                &gated,
+                declared,
+                &mut *body,
+                Plane::Drive,
+            )
+            .await;
+            match (out, body.failure()) {
+                // The body's own cause beats edge's `Read` prose.
+                (Err(_), Some(f)) => Err(multipart_refusal(f)),
+                (out, _) => out,
+            }
+        }
+    }
 }
 
 fn write_response(
@@ -1054,6 +1361,47 @@ async fn find_file(
         match page.resume {
             Some(c) => after = Some(c),
             None => {
+                // A WITHDRAWN row is not in the listing (edge v32 / persist
+                // v49 list only live rows — CIRISEdge#669), so "not listed"
+                // no longer means "never here". Read the row itself: a file
+                // row at this room's scope that a `withdraws` retired is
+                // answered as withdrawn (410 at the callers), exactly as when
+                // the listing still carried it. Anything else stays
+                // `not_in_room`, so the fallback reveals nothing a listing
+                // would not.
+                let dir = st.engine.federation_directory();
+                if let Ok(Some(row)) = dir.get_attestation(attestation_id).await {
+                    if let Some(file) = files::belongs_to(room, &row) {
+                        // Edge's lifecycle decides WHICH retirement (CIRISEdge#693):
+                        // a `withdraws` is still re-derived here; a `supersedes`
+                        // (a rename, edge v33.1 `files::rename`) or a `recants`
+                        // from the row's own attester retires it as well.
+                        let retired = match withdrawn_by(st, attestation_id)
+                            .await
+                            .map_err(listing_failed)?
+                        {
+                            Some(w) => Some(w),
+                            None => lifecycle_in_room(st, owner, room, attestation_id)
+                                .await
+                                .map_err(listing_failed)?
+                                .filter(|l| {
+                                    matches!(
+                                        l,
+                                        files::FileLifecycle::Superseded
+                                            | files::FileLifecycle::Recanted
+                                    )
+                                })
+                                .and(retired_by(st, &row).await),
+                        };
+                        if let Some(w) = retired {
+                            return Ok(Found {
+                                file,
+                                row,
+                                withdrawn_by: Some(w),
+                            });
+                        }
+                    }
+                }
                 return Err(match plane {
                     Plane::Drive => refuse(
                         StatusCode::NOT_FOUND,
@@ -1065,16 +1413,109 @@ async fn find_file(
                         "notes.not_found",
                         format!("{attestation_id} is not one of your notes"),
                     ),
-                })
+                });
             }
         }
     }
 }
 
+/// Edge's lifecycle for one row of `room`, as its `All` listing names it
+/// (`IncludeWithdrawn` would leave out superseded and recanted rows). `None` when the caller's listing does not carry the row at all.
+async fn lifecycle_in_room(
+    st: &DriveState,
+    caller: &str,
+    room: &ScopeRoom,
+    attestation_id: &str,
+) -> Result<Option<files::FileLifecycle>, String> {
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::All,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        if let Some(f) = page
+            .files
+            .into_iter()
+            .find(|f| f.attestation_id == attestation_id)
+        {
+            return Ok(Some(f.lifecycle));
+        }
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => return Ok(None),
+        }
+    }
+}
+
+/// The RETIRED file rows of `room` this caller may see (CIRISEdge#693, edge
+/// v33): edge's own listing at `IncludeWithdrawn`, which names each row's
+/// lifecycle by persist's hide rule. A `Withdrawn` row is kept only when a
+/// `withdraws` really retired it (persist re-derives its authority).
+async fn withdrawn_in_room(
+    st: &DriveState,
+    room: &ScopeRoom,
+    caller: &str,
+) -> Result<Vec<files::FileRow>, String> {
+    let mut out = Vec::new();
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::IncludeWithdrawn,
+        )
+        .await
+        .map_err(|e| format!("list withdrawn in {room}: {e:#}"))?;
+        for f in page.files {
+            if f.lifecycle == files::FileLifecycle::Withdrawn
+                && withdrawn_by(st, &f.attestation_id).await?.is_some()
+            {
+                out.push(f);
+            }
+        }
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// The composer that retired `row` without a `withdraws` — the `supersedes`
+/// or `recants` from its own attester that edge's lifecycle named
+/// (`FileLifecycle::Superseded` / `Recanted`). Its id, for the 410's detail.
+async fn retired_by(st: &DriveState, row: &Attestation) -> Option<String> {
+    use ciris_persist::federation::types::attestation_type::{RECANTS, SUPERSEDES};
+    st.engine
+        .federation_directory()
+        .list_attestations_referencing(&row.attestation_id)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|c| {
+            (c.attestation_type == SUPERSEDES || c.attestation_type == RECANTS)
+                && c.attesting_key_id == row.attesting_key_id
+        })
+        .map(|c| c.attestation_id)
+}
+
 /// **Has a `withdraws` retired this row?** The id of the one that did.
 ///
 /// Re-derives each retraction's authority NOW with persist's own
-/// `check_withdraws_admission`, never trusting the stored rule — the same
+/// `check_withdraws_admission_as_admitted`, never trusting the stored rule —
+/// at the delegation depth the row was ADMITTED under (persist v50, #690):
+/// the write-form check now uses CC 4.1.1's 5-hop default, and re-deriving a
+/// row admitted through a longer chain with it would bring a withdrawn file
+/// back to life, the retroactive change persist ruled out. The same
 /// discipline `blob_tombstone::binding_state` applies at the bytes plane, one
 /// row instead of every row binding a sha. (Persist's per-row fold,
 /// `retiring_composer`, is private; this is its withdraws arm, and the only
@@ -1091,7 +1532,9 @@ async fn withdrawn_by(st: &DriveState, attestation_id: &str) -> Result<Option<St
         if g.attestation_type != WITHDRAWS {
             continue;
         }
-        match ciris_persist::federation::admission::check_withdraws_admission(&*dir, &g).await {
+        match ciris_persist::federation::admission::check_withdraws_admission_as_admitted(&*dir, &g)
+            .await
+        {
             Ok(Some(_)) => return Ok(Some(g.attestation_id)),
             Ok(None) | Err(ciris_persist::federation::Error::WithdrawsNotAdmitted { .. }) => {}
             Err(e) => return Err(format!("re-derive {}: {e:#}", g.attestation_id)),
@@ -1104,8 +1547,11 @@ async fn withdrawn_by(st: &DriveState, attestation_id: &str) -> Result<Option<St
 /// row's attester, and this node can sign a rule-1 `withdraws` for exactly the
 /// rows its own key attested.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
-fn require_author(st: &DriveState, row: &Attestation) -> Result<(), Response> {
-    if row.attesting_key_id == st.node_signer.key_id {
+fn require_author(st: &DriveState, owner_key_id: &str, row: &Attestation) -> Result<(), Response> {
+    // Two authors a file can have (CIRISEdge#675, edge v33 `files::file_author`):
+    // the PERSON — any of their devices holds the pen — or, for a row written
+    // before a pen was in hand, this node.
+    if row.attesting_key_id == owner_key_id || row.attesting_key_id == st.node_signer.key_id {
         return Ok(());
     }
     Err(refuse(
@@ -1148,6 +1594,9 @@ struct Withdrawal {
 /// claims). A rename's bytes stay bound by the new row, so they are kept.
 async fn withdraw_rows(
     st: &DriveState,
+    headers: &HeaderMap,
+    owner_key_id: &str,
+    plane: Plane,
     listed: &Attestation,
     file: &files::FileRow,
     reason: &str,
@@ -1174,23 +1623,41 @@ async fn withdraw_rows(
         else {
             break;
         };
-        if prior.attesting_key_id != st.node_signer.key_id {
+        if prior.attesting_key_id != st.node_signer.key_id && prior.attesting_key_id != owner_key_id
+        {
             break;
         }
         chain.push(prior.clone());
         cur = prior;
     }
     let now = chrono::Utc::now();
+    // The PERSON's pen, when a row in the chain is theirs (CIRISEdge#675): a
+    // `withdraws` is signed by the row's own attester (persist rule 1).
+    let pen = if chain.iter().any(|r| r.attesting_key_id == owner_key_id) {
+        Some(
+            author_capsule(st, headers, owner_key_id, plane)
+                .await
+                .map_err(|_| {
+                    format!(
+                        "the person's signer is unavailable to withdraw {}",
+                        listed.attestation_id
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let mut withdrawn = Vec::new();
     for row in &chain {
         if withdrawn_by(st, &row.attestation_id).await?.is_some() {
             continue;
         }
+        let signer: &ciris_edge::identity::LocalSigner = match &pen {
+            Some(p) if row.attesting_key_id == owner_key_id => p.edge_signer(),
+            _ => &st.node_signer,
+        };
         let w = ciris_edge::replication::attestation_bind::withdraws_attestation(
-            row,
-            reason,
-            now,
-            &st.node_signer,
+            row, reason, now, signer,
         )
         .await
         .map_err(|e| format!("build withdraws for {}: {e}", row.attestation_id))?;
@@ -1234,104 +1701,6 @@ fn withdraw_failed(detail: String) -> Response {
         "drive.withdraw_failed",
         detail,
     )
-}
-
-/// **A rename: a new row over the SAME bytes.**
-///
-/// No re-seal and no re-upload: the new row cites the old pointer. That is only
-/// possible because the seal's associated data is `(author, asserted_at,
-/// field)` read off the ROW (`group_content::aad_for_open`), so the new row
-/// carries the old row's author and instant verbatim — the claim's instant,
-/// exactly as a widening carries it (persist v40.0.0) — and the bytes open
-/// under it. Everything else is `files::publish`'s row shape: the file
-/// dimension, the pointer under `content`, the room's cohort target, the sha
-/// cited in `evidence_refs`, authored at `self` / local tier for the crossing
-/// to place.
-///
-/// Built here because edge's file door takes BYTES, not a pointer (upstream
-/// ask: a `files::republish(pointer, ..)`); the row shape above is edge's, and
-/// `rename_keeps_the_blob_and_the_bytes_open` in `tests/drive_crud.rs` is what
-/// fails if the two drift.
-async fn rename_row(
-    author: &ciris_edge::identity::LocalSigner,
-    room: &ScopeRoom,
-    old: &files::FileRow,
-    filename: &str,
-    replaces: &str,
-) -> Result<Attestation, String> {
-    use ciris_edge::replication::attestation_bind::{
-        bind_attestation_envelope, render_signed_instant, AttestationColumns,
-    };
-    use ciris_persist::federation::types::{attestation_tier, cohort_scope};
-    use sha2::{Digest as _, Sha256};
-
-    let author_key_id = author.key_id.as_str();
-    let asserted_at = old.asserted_at;
-    let mut envelope = serde_json::json!({
-        (ciris_persist::federation::envelope::paths::DIMENSION): files::FILE_DIMENSION,
-        (ciris_edge::chat::FIELD_CONTENT): old.pointer,
-        (files::FIELD_FILENAME): filename,
-        (FIELD_REPLACES): replaces,
-        "evidence_refs": [old.pointer.content_sha256],
-    });
-    if let Some(field) = room.cohort_target_field() {
-        envelope[field] = serde_json::json!(room.content_group_id());
-    }
-    let attestation_id = {
-        let mut h = Sha256::new();
-        h.update(files::FILE_DIMENSION.as_bytes());
-        h.update(b"\0rename\0");
-        h.update(room.table_group_id().as_bytes());
-        h.update(author_key_id.as_bytes());
-        h.update(render_signed_instant(asserted_at).as_bytes());
-        h.update(
-            ciris_persist::prelude::ceg_produce_canonicalize(&envelope)
-                .map_err(|e| format!("canonicalize: {e}"))?,
-        );
-        format!("file-{}", &hex::encode(h.finalize())[..32])
-    };
-    let subjects = vec![author_key_id.to_owned()];
-    bind_attestation_envelope(
-        &mut envelope,
-        asserted_at,
-        &AttestationColumns {
-            attestation_id: &attestation_id,
-            attesting_key_id: author_key_id,
-            attestation_type: "scores",
-            attested_key_id: author_key_id,
-            subject_key_ids: &subjects,
-            cohort_scope: cohort_scope::SELF,
-            weight: None,
-        },
-    );
-    let canonical = ciris_persist::prelude::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize: {e}"))?;
-    let digest = Sha256::digest(&canonical);
-    let (sig_classical, sig_pqc) =
-        ciris_edge::identity::sign_bound_hybrid(author, &canonical, files::FILE_DIMENSION).await?;
-    Ok(Attestation {
-        attestation_id,
-        attesting_key_id: author_key_id.to_owned(),
-        attested_key_id: author_key_id.to_owned(),
-        attestation_type: "scores".to_owned(),
-        weight: None,
-        asserted_at,
-        expires_at: None,
-        attestation_envelope: envelope,
-        original_content_hash: hex::encode(digest),
-        scrub_signature_classical: sig_classical,
-        scrub_signature_pqc: sig_pqc,
-        scrub_key_id: author_key_id.to_owned(),
-        scrub_timestamp: asserted_at,
-        pqc_completed_at: None,
-        persist_row_hash: String::new(),
-        subject_key_ids: subjects,
-        withdraws_admission_rule: None,
-        cohort_scope: cohort_scope::SELF.to_owned(),
-        tier: attestation_tier::LOCAL.to_owned(),
-        promoted_at: None,
-        additional_scrubs: Vec::new(),
-    })
 }
 
 // ─── Byte state: typed, never parsed out of a Debug string ─────────────────
@@ -1442,6 +1811,28 @@ async fn probe(st: &DriveState, file: &files::FileRow, viewer: &str) -> ByteStat
         .read_blob_range_as(&sha, viewer, past_the_end, past_the_end, aad.as_deref())
         .await
     {
+        // A chunk-DAG pull adopts the MANIFEST first, as an inline envelope at
+        // the file's address, and flips it to `chunk_dag` only when every chunk
+        // is held (persist `promote_adopted_manifest_to_dag`, CIRISPersist#947).
+        // Mid-pull the range probe therefore answers with the MANIFEST's length
+        // — a few hundred bytes for a 256 MiB file — and reporting that as
+        // `here` sent a reader to a raw read that 416'd (found by the native
+        // `bigfile-quick` run on edge v38, 2026-10-01). The pointer declares the
+        // plaintext size (CIRISEdge#638): bytes of any other length are not this
+        // file yet, so they read `not_fetched` — "still arriving" — never `here`.
+        Err(BlobError::RangeNotSatisfiable { size, .. })
+            if file.pointer.size.is_some_and(|declared| declared != size) =>
+        {
+            ByteState::Absent {
+                state: "not_fetched",
+                detail: format!(
+                    "{} (the pull is in progress: {size} of {} bytes' worth is held — the \
+                     chunk DAG's manifest arrives before its chunks)",
+                    state_detail("not_fetched"),
+                    file.pointer.size.unwrap_or(0)
+                ),
+            }
+        }
         Err(BlobError::RangeNotSatisfiable { size, .. }) => ByteState::Here { size: Some(size) },
         Ok(_) => ByteState::Here { size: None },
         Err(e) => blob_state(&e),
@@ -1480,19 +1871,42 @@ fn too_large_for_whole_read(size: u64) -> Response {
         StatusCode::PAYLOAD_TOO_LARGE,
         "drive.too_large_for_whole_read",
         format!(
-            "this file is {size} bytes, above the {WHOLE_READ_CAP}-byte whole-read cap — read \
-             it with `?raw=1` and an HTTP `Range` header"
+            "this file is {size} bytes, above the {WHOLE_READ_CAP}-byte whole-read cap, and \
+             this read answers it as one JSON value — read it with `?raw=1`, which streams it \
+             (and serves any HTTP `Range`)"
         ),
     )
 }
 
+/// What a whole read found: the bytes, or — past every state check — a file
+/// too big to hold, which a STREAMING caller serves instead of refusing.
+enum WholeRead {
+    Bytes(Vec<u8>, Option<u64>),
+    /// Above [`WHOLE_READ_CAP`]: the file's size. The row is live and the
+    /// bytes are here and open for this viewer (the probe said so); only the
+    /// holding is refused.
+    AboveCap(u64),
+}
+
 /// The whole plaintext, after the state and size checks a whole read owes.
+/// A file above the cap is `drive.too_large_for_whole_read` — the caller
+/// that can stream asks [`read_whole`] instead.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
 async fn open_whole(
     st: &DriveState,
     found: &Found,
     viewer: &str,
 ) -> Result<(Vec<u8>, Option<u64>), Response> {
+    match read_whole(st, found, viewer).await? {
+        WholeRead::Bytes(b, size) => Ok((b, size)),
+        WholeRead::AboveCap(n) => Err(too_large_for_whole_read(n)),
+    }
+}
+
+/// [`open_whole`] without the last refusal: above the cap it answers
+/// [`WholeRead::AboveCap`] so `?raw=1` and `move` can stream.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn read_whole(st: &DriveState, found: &Found, viewer: &str) -> Result<WholeRead, Response> {
     if let Some(w) = &found.withdrawn_by {
         return Err(row_withdrawn_refusal(w));
     }
@@ -1501,15 +1915,42 @@ async fn open_whole(
         ByteState::Absent { state, detail } => return Err(refuse_state(state, detail)),
     };
     if let Some(n) = size.filter(|n| *n > WHOLE_READ_CAP as u64) {
-        return Err(too_large_for_whole_read(n));
+        return Ok(WholeRead::AboveCap(n));
     }
     let content = store(&st.engine);
     match found.file.open(&content, viewer).await {
-        Ok(b) => Ok((b, size)),
-        Err(reason) => match unopened(&reason) {
+        // THE BYTES MUST BE THE FILE (CIRISServer#697 selffiles byte probe,
+        // 2026-09-29): a second device that pulled a chunk-DAG file held its
+        // MANIFEST under the pointer's sha and served it as the file — 518
+        // bytes of `{"chunk_tier":…` for a 1 MiB video, status 200. The
+        // pointer declares the plaintext size (CIRISEdge#638), so a body of
+        // another length is row and bytes disagreeing, refused by name, never
+        // handed over as content.
+        Ok(b) if found.file.pointer.size.is_some_and(|n| n != b.len() as u64) => Err(refuse_state(
+            "seal_mismatch",
+            format!(
+                "{}: the row declares {} bytes and the bytes here are {} — a pulled chunk-DAG \
+                 stored as its manifest reads exactly like this (CIRISEdge#717)",
+                state_detail("seal_mismatch"),
+                found.file.pointer.size.unwrap_or(0),
+                b.len()
+            ),
+        )),
+        Ok(b) => Ok(WholeRead::Bytes(b, size)),
+        // edge v36 (CIRISEdge#737): `FileRow::open` answers `FileError`. The
+        // unopened reasons keep their byte-state words; the whole-read cap is
+        // edge's own check, reached here only when the pointer declared no size
+        // for the gate above to read.
+        Err(files::FileError::Unopened(reason)) => match unopened(&reason) {
             ByteState::Absent { state, detail } => Err(refuse_state(state, detail)),
             ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
         },
+        Err(files::FileError::AboveWholeReadCap { bytes, .. }) => Ok(WholeRead::AboveCap(bytes)),
+        Err(e) => Err(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "drive.unopened",
+            format!("open the file's bytes: {e}"),
+        )),
     }
 }
 
@@ -1538,6 +1979,62 @@ fn envelope_of(row: &Attestation) -> serde_json::Value {
     })
 }
 
+/// The row an edge rename replaced, when `file` is one (edge v33.1
+/// `files::rename`). Edge's renamed row does not name its prior; the prior's
+/// `supersedes` names the replacement (`replacement_attestation_id`). The
+/// prior is a SUPERSEDED row of the same room, author and blob, so it is found
+/// in edge's lifecycle listing, and the link read off its composer. A
+/// read-time walk, used by the metadata read only — not per listed row.
+async fn renamed_from(
+    st: &DriveState,
+    caller: &str,
+    room: &ScopeRoom,
+    file: &files::FileRow,
+) -> Option<String> {
+    use ciris_persist::federation::types::attestation_type::SUPERSEDES;
+    let dir = st.engine.federation_directory();
+    let mut after = None;
+    loop {
+        let page = files::in_room_with(
+            &st.engine,
+            room,
+            caller,
+            usize::MAX,
+            after,
+            ciris_persist::ceg::LifecycleView::All,
+        )
+        .await
+        .ok()?;
+        for prior in page.files.iter().filter(|f| {
+            f.lifecycle == files::FileLifecycle::Superseded
+                && f.attestation_id != file.attestation_id
+                && f.attesting_key_id == file.attesting_key_id
+                && f.pointer.content_sha256 == file.pointer.content_sha256
+        }) {
+            let Ok(composers) = dir
+                .list_attestations_referencing(&prior.attestation_id)
+                .await
+            else {
+                continue;
+            };
+            if composers.iter().any(|c| {
+                c.attestation_type == SUPERSEDES
+                    && c.attesting_key_id == prior.attesting_key_id
+                    && c.attestation_envelope
+                        .get("replacement_attestation_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(file.attestation_id.as_str())
+            }) {
+                return Some(prior.attestation_id.clone());
+            }
+        }
+        match page.resume {
+            Some(c) => after = Some(c),
+            None => return None,
+        }
+    }
+}
+
 fn replaces_of(row: &Attestation) -> Option<String> {
     row.attestation_envelope
         .get(FIELD_REPLACES)
@@ -1551,7 +2048,10 @@ fn replaces_of(row: &Attestation) -> Option<String> {
 async fn write_file(
     State(st): State<DriveState>,
     headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    // The RAW body: the multipart form streams it (0.5.218), so no extractor
+    // may buffer it first. Both forms' ceilings are enforced in
+    // `parse_upload`.
+    body: Body,
 ) -> Response {
     let owner = match drive_author(&st, &headers).await {
         Ok(o) => o,
@@ -1574,7 +2074,7 @@ async fn write_file(
     {
         return resp;
     }
-    let up = match parse_upload(&headers, body) {
+    let up = match parse_upload(&headers, body).await {
         Ok(u) => u,
         Err(e) => return e,
     };
@@ -1600,16 +2100,15 @@ async fn write_file(
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    match publish_into(
+    match publish_upload(
         &st,
         &headers,
         &owner.key_id,
         cohort,
         &room,
-        &up.bytes,
+        up.bytes,
         &media_type,
         up.filename.as_deref(),
-        Plane::Drive,
     )
     .await
     {
@@ -1757,6 +2256,33 @@ async fn read_drive(
                         row,
                     )
                 }));
+                // The live listing does not carry withdrawn rows, so a history
+                // view asks edge's lifecycle listing for them (CIRISEdge#693).
+                if include_withdrawn {
+                    match withdrawn_in_room(&st, room, &owner.key_id).await {
+                        Ok(extra) => {
+                            for f in extra {
+                                if !rows
+                                    .iter()
+                                    .any(|(_, _, r)| r.attestation_id == f.attestation_id)
+                                {
+                                    rows.push((
+                                        room.row_scope_token().to_owned(),
+                                        room.content_group_id().to_owned(),
+                                        f,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return refuse(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "drive.listing_failed",
+                                format!("list {room}: {e}"),
+                            )
+                        }
+                    }
+                }
                 if let Some(c) = page.resume {
                     resume = Some(DriveCursor {
                         room: room_key(room),
@@ -1785,6 +2311,20 @@ async fn read_drive(
         }
     };
     let dir = st.engine.federation_directory();
+    // The person's devices, ONCE per page (the per-row custody summary below).
+    // A roster that cannot be read leaves `custody: null` on every row rather
+    // than failing a listing whose job is the files.
+    let devices = match crate::file_custody::owner_devices(&st.engine, &owner.key_id).await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "drive: the device roster could not be read — rows list with `custody: null`"
+            );
+            None
+        }
+    };
+    let content = store(&st.engine);
     let mut out = Vec::with_capacity(rows.len());
     for (cohort, room_id, file) in rows {
         let withdrawn = match withdrawn_by(&st, &file.attestation_id).await {
@@ -1822,6 +2362,14 @@ async fn read_drive(
             .await
             .ok()
             .flatten();
+        let described = describe(&st, &file, &viewer).await;
+        let custody = match (&devices, withdrawn.is_some()) {
+            (Some(d), false) => Some(crate::file_custody::compact(
+                d,
+                &crate::file_custody::receipts_of(&file, &content).await,
+            )),
+            _ => None,
+        };
         out.push(DriveEntry {
             // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
             // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
@@ -1832,8 +2380,9 @@ async fn read_drive(
             attestation_id: file.attestation_id.clone(),
             author_key_id: file.attesting_key_id.clone(),
             asserted_at: file.asserted_at.to_rfc3339(),
-            filename: file.filename.clone(),
-            media_type: file.media_type.clone(),
+            filename: described.filename,
+            media_type: described.media_type,
+            description: described.how.to_owned(),
             bytes,
             detail,
             size,
@@ -1843,6 +2392,7 @@ async fn read_drive(
                 .as_ref()
                 .map(envelope_of)
                 .unwrap_or(serde_json::Value::Null),
+            custody,
         });
     }
     // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
@@ -1926,6 +2476,7 @@ async fn file_meta(
     // the substrate records no holder there and the count is not a count of
     // devices. Said as such (`holder_claims_recorded: false`) rather than a
     // bare 0 a client would render as "nobody has it".
+    let described = describe(&st, &found.file, &viewer).await;
     let recorded =
         room.row_scope_token() == ciris_persist::federation::types::cohort_scope::COMMUNITY;
     let devices_holding = match (recorded, sha_of(&found.file)) {
@@ -1940,8 +2491,9 @@ async fn file_meta(
             "attestation_id": found.file.attestation_id,
             "cohort": room.row_scope_token(),
             "room_id": room.content_group_id(),
-            "filename": found.file.filename,
-            "media_type": found.file.media_type,
+            "filename": described.filename,
+            "media_type": described.media_type,
+            "description": described.how,
             "author_key_id": found.file.attesting_key_id,
             "asserted_at": found.file.asserted_at.to_rfc3339(),
             "size": size,
@@ -1959,10 +2511,188 @@ async fn file_meta(
             "tier": format!("{:?}", found.file.pointer.tier),
             "withdrawn": found.withdrawn_by.is_some(),
             "withdrawn_by": found.withdrawn_by,
-            "replaces": replaces_of(&found.row),
+            "replaces": match replaces_of(&found.row) {
+                Some(r) => Some(r),
+                None => renamed_from(&st, &owner.key_id, &room, &found.file).await,
+            },
             "devices_holding": devices_holding,
             "holder_claims_recorded": recorded,
             "envelope": envelope_of(&found.row),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/files/{attestation_id}/custody` — **which of my devices this file
+/// is on, out of how many** (`FSD/FILE_CUSTODY.md`; the source walk is in
+/// [`crate::file_custody`]'s module doc).
+///
+/// THE SAME DOORS AS THE BYTES, IN THE SAME ORDER. The owner session
+/// (`drive.owner_session_required`), the cohort named and membership-checked
+/// (`room_from_query`), the row found through edge's gated reader
+/// (`find_file`), a withdrawn row answered 410 exactly as a read is — and then
+/// persist's custody door, asked as the drive's viewer key, which runs
+/// `read_any_for_viewer`'s tier gate: a viewer who cannot open the bytes gets
+/// the byte read's refusal (`drive.not_granted`, `drive.evicted`, …)
+/// through the same `refuse_state`, and learns nothing about who else can.
+/// A custody view is not a side door to the access list.
+///
+/// A device that holds the ROW but not yet the bytes gets a 200, not the byte
+/// read's 409 (the maintainer's ruling on #704: "no copy here is a receipt
+/// (node responsive, no copy)"): the view is authorized by the row, and this
+/// device's own entry is `holds: "none"` with `checked_at`. Persist's custody
+/// reads the blob's head row, which such a device does not have, so `access`,
+/// `size_bytes` and the announced holders are `null`/empty there and a `why`
+/// says so; the device that wrote the file is the complete answer — it is
+/// also the device that admits every receipt.
+async fn file_custody(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Path(attestation_id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> Response {
+    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
+        return drive_no_session();
+    };
+    let (_, room) = match room_from_query(&st, &owner.key_id, &q).await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let found = match find_file(&st, &owner.key_id, &room, &attestation_id, Plane::Drive).await {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    if let Some(w) = &found.withdrawn_by {
+        return row_withdrawn_refusal(w);
+    }
+    let viewer = match viewer_key(&st).await {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.no_node_key",
+                format!("resolve this node's key: {e}"),
+            )
+        }
+    };
+    let content = store(&st.engine);
+    // AUTHORIZED BY THE ROW (the maintainer's ruling on #704: "no copy here is
+    // a receipt (node responsive, no copy)"). Everything above — the session,
+    // the cohort's membership, edge's gated reader, the withdrawn row — is
+    // what lets this caller see the ROW, and that is the gate. Persist's
+    // custody door then answers from the blob's head row, which a device that
+    // has not pulled does not have: its `NotFetched` is not a refusal here but
+    // this device's own custody fact — it answered, and it holds no copy —
+    // reported as `holds: "none"` with the time it answered. Every OTHER
+    // refusal of that door (`not_granted` — this device's key holds no grant —
+    // an eviction, a seal fault) stays the byte read's refusal, by the same
+    // `refuse_state`.
+    let custody = match found.file.custody(&content, &viewer).await {
+        Ok(c) => Some(c),
+        Err(reason) if reason.kind() == "not_fetched" => None,
+        Err(reason) => {
+            return match unopened(&reason) {
+                ByteState::Absent { state, detail } => refuse_state(state, detail),
+                ByteState::Here { .. } => refuse_state("unopened", reason.to_string()),
+            }
+        }
+    };
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    let devices = match crate::file_custody::owner_devices(&st.engine, &owner.key_id).await {
+        Ok(d) => d,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "drive.store_unavailable",
+                format!("read your devices: {e}"),
+            )
+        }
+    };
+    let receipts = crate::file_custody::receipts_of(&found.file, &content).await;
+    // The AUTHOR DEVICE is the stream's producer — the node whose store holds
+    // the published root every receipt is admitted against. An inline file has
+    // no stream; its author device is the row's attester.
+    let author_device = ciris_edge::receipts::StreamSthClaim::from_row(&found.row)
+        .map(|c| c.producer_key_id)
+        .unwrap_or_else(|| found.file.attesting_key_id.clone());
+    let this_device_is_author = devices
+        .iter()
+        .any(|d| d.this_device && d.keys.contains(&author_device))
+        || author_device == st.node_signer.key_id;
+    let access = custody
+        .as_ref()
+        .map(crate::file_custody::access_device_keys);
+    let held_here = custody.as_ref().is_some_and(|c| c.held_here);
+    let half = crate::file_custody::device_half(
+        &devices,
+        access.as_ref(),
+        held_here,
+        &receipts,
+        this_device_is_author,
+        &checked_at,
+    );
+    // Without a copy here the tier comes from the ROW (the pointer names the
+    // tier the bytes were sealed at), and so does CC 5.2's observability: a
+    // self/family blob is never announced, whoever asks.
+    let (tier, size_bytes, at_rest, copies_known, copies_observable, announced) = match &custody {
+        Some(c) => (
+            c.tier.clone(),
+            Some(c.size_bytes),
+            c.sha256_hex.clone(),
+            c.copies_known,
+            c.copies_observable,
+            serde_json::to_value(&c.announced_holders).unwrap_or_default(),
+        ),
+        None => {
+            use ciris_persist::federation::types::cohort_scope::CryptoTier;
+            let tier = match found.file.pointer.tier {
+                CryptoTier::Plaintext => "plaintext",
+                CryptoTier::InvisibleEncrypted => "invisible_encrypted",
+                CryptoTier::CommunityDek => "community_dek",
+            };
+            (
+                tier.to_owned(),
+                None,
+                found.file.pointer.content_sha256.clone(),
+                0,
+                tier != "invisible_encrypted",
+                serde_json::json!([]),
+            )
+        }
+    };
+    let mut why = crate::file_custody::substrate_why(copies_observable, &tier);
+    why.extend(half.why);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": found.file.attestation_id,
+            "cohort": room.row_scope_token(),
+            "room_id": room.content_group_id(),
+            "tier": tier,
+            // The stored length, from persist's custody; `null` when this
+            // device holds no copy (the row does not carry it).
+            "size_bytes": size_bytes,
+            "at_rest_sha256": at_rest,
+            "author_device": author_device,
+            "this_device_is_author": this_device_is_author,
+            "devices_total": half.devices.len(),
+            "devices": half.devices,
+            "held_here": held_here,
+            // A device with no copy is never counted as one.
+            "copies_known": copies_known,
+            "copies_observable": copies_observable,
+            "announced_holders": announced,
+            // `null` when this device holds no copy: who can open the blob is
+            // answered by persist from the blob's head row, which is not here.
+            "access": custody.as_ref().map(|c| &c.access),
+            "checked_at": checked_at,
+            // Every file is receiptable since edge v38.0.0 / persist v52 (an
+            // inline file has a one-leaf log, CIRISPersist#953): both fields
+            // stay on the wire for the client that reads them, constant.
+            "receipts_supported": true,
+            "receipts_unsupported_reason": serde_json::Value::Null,
+            "receipts_from_other_keys": half.other_receipts,
+            "why": why,
         })),
     )
         .into_response()
@@ -1980,9 +2710,15 @@ enum RangeAsk {
 
 /// RFC 9110 §14.1.2, one range. A multi-range or malformed header is IGNORED
 /// (the whole representation is served), which the RFC permits; a range past
-/// the end is 416. A satisfiable range longer than [`WHOLE_READ_CAP`] is
-/// SHORTENED to it — a 206's `Content-Range` names what was actually sent, and
-/// every range client continues from there.
+/// the end is 416; an end past the file is clamped to it (RFC 9110 §14.1.2 —
+/// the HTTP door clamps, edge's `open_range` does not, so the clamp is HERE
+/// and edge is only ever asked for bytes that exist).
+///
+/// No cap on a range's LENGTH since 0.5.218. Before it, a satisfiable range
+/// longer than [`WHOLE_READ_CAP`] was shortened to it, because the range was
+/// read into memory in one call. It is now served in [`streaming::RANGE_WINDOW`]
+/// windows (edge's `FileRow::open_range`, CIRISEdge#737), so `bytes=0-` on a
+/// 2 GiB file is 2 GiB in 1 MiB steps, never 2 GiB held.
 fn parse_range(h: Option<&str>, total: u64) -> RangeAsk {
     let Some(spec) = h.and_then(|v| v.trim().strip_prefix("bytes=")) else {
         return RangeAsk::Whole;
@@ -2020,8 +2756,7 @@ fn parse_range(h: Option<&str>, total: u64) -> RangeAsk {
         }
         (s, e.min(total - 1))
     };
-    let cap = WHOLE_READ_CAP as u64;
-    RangeAsk::Part(start, end.min(start.saturating_add(cap - 1)))
+    RangeAsk::Part(start, end)
 }
 
 /// `Content-Disposition: attachment` with the file's name — an ASCII fallback
@@ -2049,6 +2784,33 @@ fn content_disposition(filename: Option<&str>) -> HeaderValue {
 
 /// `GET /v1/files/{attestation_id}` — the bytes, or the reason they are not
 /// here. JSON by default; `?raw=1` answers the bytes themselves, with `Range`.
+///
+/// # What streams and what does not (0.5.218)
+///
+/// * **JSON** (no `raw`): whole, always — the bytes are one base64 value.
+///   Above [`WHOLE_READ_CAP`] it is `413 drive.too_large_for_whole_read`,
+///   pointing at `?raw=1`.
+/// * **`?raw=1`, no `Range`, at or below the cap**: whole, as before, with
+///   RFC 9530 `Repr-Digest` computed over the bytes in hand.
+/// * **`?raw=1`, no `Range`, above the cap**: STREAMED from edge's
+///   `FileRow::chunks()` (one ≤ 1 MiB chunk in hand, [`streaming::IN_FLIGHT`]
+///   queued), `Content-Length` from the probe. **No `Repr-Digest`**: the
+///   header precedes the body, and the digest of a streamed body is known
+///   only after its last byte. Computing it first would mean decrypting the
+///   whole file twice or holding it — the exact cost streaming exists to
+///   avoid — and a header that promised a digest the node had not computed
+///   would be worse than none. The plaintext digest a client verifies
+///   against is `content_digest` on the JSON read or `/meta`, where it can be
+///   computed (at or below the cap); above it a client hashes what it
+///   receives against the row's own claim when edge's file row carries one
+///   (CIRISEdge#638).
+/// * **`?raw=1` with `Range`**: any satisfiable single range, of any length,
+///   through `FileRow::open_range` in [`streaming::RANGE_WINDOW`] windows —
+///   never a `Repr-Digest` (a 206 is not the representation).
+///
+/// A streamed body's FIRST item is awaited before the status line, so a
+/// refusal the probe could not foresee is still a status; a failure after it
+/// tears the body (see `drive/streaming.rs`).
 async fn read_file(
     State(st): State<DriveState>,
     headers: HeaderMap,
@@ -2076,14 +2838,15 @@ async fn read_file(
             )
         }
     };
+    let described = describe(&st, &found.file, &viewer).await;
     if !truthy(q.raw.as_deref()) {
         return match open_whole(&st, &found, &viewer).await {
             Ok((bytes, _)) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "attestation_id": found.file.attestation_id,
-                    "media_type": found.file.media_type,
-                    "filename": found.file.filename,
+                    "media_type": described.media_type,
+                    "filename": described.filename,
                     "size": bytes.len(),
                     "content_digest": plaintext_digest(&bytes),
                     "content_digest_alg": "sha-256",
@@ -2102,8 +2865,7 @@ async fn read_file(
         ByteState::Here { size } => size,
         ByteState::Absent { state, detail } => return refuse_state(state, detail),
     };
-    let media = found
-        .file
+    let media = described
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
@@ -2115,7 +2877,7 @@ async fn read_file(
     );
     h.insert(
         header::CONTENT_DISPOSITION,
-        content_disposition(found.file.filename.as_deref()),
+        content_disposition(described.filename.as_deref()),
     );
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(
@@ -2130,12 +2892,30 @@ async fn read_file(
         (Some(_), None) => RangeAsk::Whole,
     };
     match ask {
-        RangeAsk::Whole => match open_whole(&st, &found, &viewer).await {
-            Ok((bytes, _)) => {
+        RangeAsk::Whole => match read_whole(&st, &found, &viewer).await {
+            Ok(WholeRead::Bytes(bytes, _)) => {
                 if let Some(v) = repr_digest(&bytes) {
                     h.insert(header::HeaderName::from_static("repr-digest"), v);
                 }
                 (StatusCode::OK, h, bytes).into_response()
+            }
+            // Above the cap: the whole file, streamed. See the doc above for
+            // why there is no `Repr-Digest` here.
+            Ok(WholeRead::AboveCap(total)) => {
+                let mut rx = streaming::spawn_chunks(
+                    Arc::clone(&st.engine),
+                    found.file.clone(),
+                    viewer.clone(),
+                );
+                let first = match streaming::first_item(&mut rx).await {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => return read_refusal(&e),
+                    None => Vec::new(),
+                };
+                if let Ok(v) = HeaderValue::from_str(&total.to_string()) {
+                    h.insert(header::CONTENT_LENGTH, v);
+                }
+                (StatusCode::OK, h, streaming::body(first, rx, Some(total))).into_response()
             }
             Err(e) => e,
         },
@@ -2152,31 +2932,64 @@ async fn read_file(
             resp
         }
         RangeAsk::Part(start, end) => {
-            let Some(sha) = sha_of(&found.file) else {
-                return refuse_state("malformed_row", state_detail("malformed_row").to_owned());
+            // Edge's range door (CIRISEdge#737) in windows: the row's own
+            // binding and AAD, only the covering chunks opened, no length cap.
+            let mut rx = streaming::spawn_range(
+                Arc::clone(&st.engine),
+                found.file.clone(),
+                viewer.clone(),
+                start,
+                end,
+            );
+            let first = match streaming::first_item(&mut rx).await {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => return read_refusal(&e),
+                None => Vec::new(),
             };
-            let aad = aad_for(&found.file);
-            match st
-                .engine
-                .read_blob_range_as(&sha, &viewer, start, end, aad.as_deref())
-                .await
+            let len = end - start + 1;
+            if let Ok(v) =
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{}", size.unwrap_or(0)))
             {
-                Ok(bytes) => {
-                    let sent_end = start + (bytes.len() as u64).saturating_sub(1);
-                    if let Ok(v) = HeaderValue::from_str(&format!(
-                        "bytes {start}-{sent_end}/{}",
-                        size.unwrap_or(0)
-                    )) {
-                        h.insert(header::CONTENT_RANGE, v);
-                    }
-                    (StatusCode::PARTIAL_CONTENT, h, bytes).into_response()
-                }
-                Err(e) => match blob_state(&e) {
-                    ByteState::Absent { state, detail } => refuse_state(state, detail),
-                    ByteState::Here { .. } => unreachable!("blob_state always answers Absent"),
-                },
+                h.insert(header::CONTENT_RANGE, v);
             }
+            if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
+                h.insert(header::CONTENT_LENGTH, v);
+            }
+            (
+                StatusCode::PARTIAL_CONTENT,
+                h,
+                streaming::body(first, rx, Some(len)),
+            )
+                .into_response()
         }
+    }
+}
+
+/// An edge read refusal on a raw read, before the status line: the byte-state
+/// words for an unopened file, 416 for a range edge found outside it.
+fn read_refusal(e: &files::FileError) -> Response {
+    match e {
+        files::FileError::Unopened(reason) => match unopened(reason) {
+            ByteState::Absent { state, detail } => refuse_state(state, detail),
+            ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
+        },
+        files::FileError::RangeNotSatisfiable { size, .. } => {
+            let total = size.unwrap_or(0);
+            let mut resp = refuse(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "drive.range_not_satisfiable",
+                format!("the requested range is outside this {total}-byte file"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                resp.headers_mut().insert(header::CONTENT_RANGE, v);
+            }
+            resp
+        }
+        other => refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "drive.unopened",
+            format!("open the file's bytes: {other}"),
+        ),
     }
 }
 
@@ -2188,7 +3001,8 @@ async fn replace_file(
     headers: HeaderMap,
     Path(attestation_id): Path<String>,
     Query(q): Query<FileQuery>,
-    body: Result<Bytes, BytesRejection>,
+    // Raw, as `write_file`'s: the multipart form streams.
+    body: Body,
 ) -> Response {
     let owner = match drive_author(&st, &headers).await {
         Ok(o) => o,
@@ -2208,40 +3022,51 @@ async fn replace_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    let up = match parse_upload(&headers, body) {
+    let up = match parse_upload(&headers, body).await {
         Ok(u) => u,
         Err(e) => return e,
     };
-    // Unnamed members keep the old file's: a replace changes the BYTES.
+    // Unnamed members keep the old file's: a replace changes the BYTES. The
+    // old name and type are read through the descriptor (CIRISEdge#698).
+    let old = describe_here(&st, &found.file).await;
     let media_type = up
         .media_type
         .clone()
-        .or_else(|| found.file.media_type.clone())
+        .or_else(|| old.media_type.clone())
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let filename = up.filename.clone().or_else(|| found.file.filename.clone());
-    let (published, addressed) = match publish_into(
+    let filename = up.filename.clone().or_else(|| old.filename.clone());
+    let (published, addressed) = match publish_upload(
         &st,
         &headers,
         &owner.key_id,
         cohort,
         &room,
-        &up.bytes,
+        up.bytes,
         &media_type,
         filename.as_deref(),
-        Plane::Drive,
     )
     .await
     {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let w = match withdraw_rows(&st, &found.row, &found.file, "replaced by its author").await {
+    let w = match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Drive,
+        &found.row,
+        &found.file,
+        "replaced by its author",
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => return withdraw_failed(e),
     };
@@ -2319,70 +3144,41 @@ async fn rename_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    let row = match rename_row(
-        &st.node_signer,
+    // EDGE'S RENAME (v33.1.0, CIRISEdge#702): a new row over the same bytes,
+    // the name re-sealed for it, authored by the old row's own signer and
+    // crossed like a publish; only once it crossed, a `supersedes` retires
+    // the old row. The owner's pen signs a person-authored row.
+    let capsule = match author_capsule(&st, &headers, &owner.key_id, Plane::Drive).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    let content = store(&st.engine);
+    let renamed = match files::rename(
+        &*dir,
+        &content,
+        ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(capsule.edge_signer()),
+        },
         &room,
         &found.file,
-        filename,
+        Some(filename),
         &attestation_id,
     )
     .await
     {
         Ok(r) => r,
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "drive.publish_failed",
-                format!("build the renamed row: {e}"),
-            )
-        }
-    };
-    let dir = st.engine.federation_directory();
-    if let Err(e) = dir
-        .put_attestation_authored(ciris_persist::federation::SignedAttestation {
-            attestation: row.clone(),
-        })
-        .await
-    {
-        return refuse(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "drive.publish_failed",
-            format!("author the renamed row: {e:#}"),
-        );
-    }
-    let crossing = match ciris_edge::replication::attestation_bind::share(
-        &*dir,
-        &row,
-        room.widen_to(),
-        ciris_edge::replication::attestation_bind::CrossingBasis::ProducerAuthority,
-        ciris_edge::replication::attestation_bind::Signers {
-            node: &st.node_signer,
-            actor: None,
-        },
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return refuse(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "drive.publish_failed",
-                format!("cross the renamed row into {room}: {e}"),
-            )
-        }
+        Err(e) => return file_error(&e, &room),
     };
     crate::compose::kick_replication("file renamed");
-    let new_id = placed_or(&crossing.shared, &row.attestation_id).to_owned();
-    let w = match withdraw_rows(&st, &found.row, &found.file, "renamed by its author").await {
-        Ok(w) => w,
-        Err(e) => return withdraw_failed(e),
-    };
+    let new_id = placed_or(&renamed.shared, &renamed.row.attestation_id).to_owned();
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -2392,11 +3188,10 @@ async fn rename_file(
             "content_sha256": found.file.pointer.content_sha256,
             "cohort": room.row_scope_token(),
             "room": room.to_string(),
-            "crossed": !matches!(
-                crossing.shared,
-                ciris_edge::replication::attestation_bind::Shared::AwaitingActor { .. }
-            ),
-            "withdrawn": w.withdrawn,
+            "crossed": renamed.crossed,
+            // The prior row is SUPERSEDED (edge's rename), not withdrawn: the
+            // bytes are the same bytes. Retired only once the new row crossed.
+            "superseded": renamed.crossed,
         })),
     )
         .into_response()
@@ -2429,13 +3224,23 @@ async fn withdraw_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     if let Some(w) = &found.withdrawn_by {
         return row_withdrawn_refusal(w);
     }
-    match withdraw_rows(&st, &found.row, &found.file, "withdrawn by its author").await {
+    match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Drive,
+        &found.row,
+        &found.file,
+        "withdrawn by its author",
+    )
+    .await
+    {
         Ok(w) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -2522,7 +3327,7 @@ async fn move_file(
         Ok(f) => f,
         Err(e) => return e,
     };
-    if let Err(e) = require_author(&st, &found.row) {
+    if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }
     let viewer = match viewer_key(&st).await {
@@ -2538,35 +3343,85 @@ async fn move_file(
     // A RESEAL, not a re-pointer: the target room's tier and group decide the
     // seal (a community DEK is not a self wrap), so the bytes are opened here
     // and sealed again there.
-    let (bytes, _) = match open_whole(&st, &found, &viewer).await {
-        Ok(b) => b,
-        Err(e) => return e,
-    };
-    let media_type = found
-        .file
+    //
+    // ABOVE THE WHOLE-READ CAP (0.5.218): the reseal STREAMS — the source's
+    // `FileRow::chunks()` walk is the reader for the target's
+    // `files::publish_stream`, so a 2 GiB move holds a chunk on each side,
+    // never the file. The declared length is the probe's size (a chunk DAG's
+    // pointer declares it, or its manifest does); the gate reads the walk's
+    // first 64 KiB without consuming them, as it does on a streamed upload. A
+    // walk that fails mid-file fails the publish (edge: `FileError::Read`,
+    // nothing sealed, no row) and answers the walk's own refusal.
+    let old = describe(&st, &found.file, &viewer).await;
+    let media_type = old
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let (published, addressed) = match publish_into(
-        &st,
-        &headers,
-        &owner.key_id,
-        target_cohort,
-        &target,
-        &bytes,
-        &media_type,
-        found.file.filename.as_deref(),
-        Plane::Drive,
-    )
-    .await
-    {
+    let published = match read_whole(&st, &found, &viewer).await {
+        Err(e) => return e,
+        Ok(WholeRead::Bytes(bytes, _)) => {
+            publish_into(
+                &st,
+                &headers,
+                &owner.key_id,
+                target_cohort,
+                &target,
+                &bytes,
+                &media_type,
+                old.filename.as_deref(),
+                Plane::Drive,
+            )
+            .await
+        }
+        Ok(WholeRead::AboveCap(total)) => {
+            let mut walk = streaming::ChunkReader::new(streaming::spawn_chunks(
+                Arc::clone(&st.engine),
+                found.file.clone(),
+                viewer.clone(),
+            ));
+            let gated = match walk.peek(crate::media_gate::FORMAT_HEAD_BYTES).await {
+                Ok(head) => match write_gate(&media_type, head, old.filename.as_deref()) {
+                    Ok(g) => g,
+                    Err(e) => return e,
+                },
+                Err(e) => return read_refusal(&e),
+            };
+            let out = publish_gated(
+                &st,
+                &headers,
+                &owner.key_id,
+                target_cohort,
+                &target,
+                &gated,
+                total,
+                &mut walk,
+                Plane::Drive,
+            )
+            .await;
+            match (out, walk.failure()) {
+                (Err(_), Some(e)) => Err(read_refusal(e)),
+                (out, _) => out,
+            }
+        }
+    };
+    let (published, addressed) = match published {
         Ok(p) => p,
         Err(e) => return e,
     };
     let withdrawn = if req.keep_source {
         Vec::new()
     } else {
-        match withdraw_rows(&st, &found.row, &found.file, "moved by its author").await {
+        match withdraw_rows(
+            &st,
+            &headers,
+            &owner.key_id,
+            Plane::Drive,
+            &found.row,
+            &found.file,
+            "moved by its author",
+        )
+        .await
+        {
             Ok(w) => w.withdrawn,
             Err(e) => return withdraw_failed(e),
         }
@@ -2590,7 +3445,24 @@ fn file_error(e: &files::FileError, room: &ScopeRoom) -> Response {
         // Unreachable from `files::publish` since CIRISEdge#633 (it seals above
         // the 1 MiB envelope bound as a chunk DAG). Kept, under the same id as
         // this node's own cap, for a store that implements only `seal`.
-        F::TooLargeForInline { size, .. } => too_large(*size),
+        F::TooLargeForInline { size, .. } => too_large(*size as u64),
+        // CIRISEdge#744: the upload's body was not the length its `size` said.
+        // Nothing was sealed and there is no row; the remedy is to resend
+        // with the right count, so it is the CLIENT's 400, never a 500.
+        F::DeclaredLengthMismatch { declared, read } => refuse_with(
+            StatusCode::BAD_REQUEST,
+            "drive.declared_length_mismatch",
+            format!(
+                "the form declared `size` = {declared} bytes and the file part carried {} — \
+                 nothing was written; resend with `size` equal to the file's exact byte count",
+                if read > declared {
+                    format!("more than that (stopped at {read})")
+                } else {
+                    read.to_string()
+                }
+            ),
+            serde_json::json!({ "declared": declared, "read": read }),
+        ),
         F::ReadableByNobody { .. } => refuse(
             StatusCode::CONFLICT,
             "drive.readable_by_nobody",
@@ -2670,11 +3542,17 @@ pub struct Note {
 /// media type alone is not enough — `POST /v1/files` can put a named `.txt` in
 /// the same room, and a notes list that swallowed it would report somebody's
 /// uploaded file as something they had written.
-fn is_note(file: &files::FileRow) -> bool {
-    file.media_type
-        .as_deref()
-        .is_some_and(|m| m.starts_with("text/plain"))
-        && file.filename.is_none()
+///
+/// Read through the DESCRIPTOR (CIRISEdge#698): a sealed row's clear members
+/// are `None`, so testing them would call every sealed upload a note. A row
+/// whose descriptor did not open here is not known to be a note and is not
+/// listed as one.
+fn is_note(d: &Described) -> bool {
+    d.how != "sealed"
+        && d.media_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("text/plain"))
+        && d.filename.is_none()
 }
 
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
@@ -2683,7 +3561,7 @@ fn require_note_body(body: &str) -> Result<(), Response> {
         return Err(refuse(
             StatusCode::BAD_REQUEST,
             "notes.empty",
-            "a note with no body is not a note".into(),
+            "A note with nothing in it isn't a note.".into(),
         ));
     }
     Ok(())
@@ -2777,14 +3655,14 @@ async fn find_own_note(
     let room = ciris_edge::self_room::room(owner_key_id);
     let found = find_file(st, owner_key_id, &room, attestation_id, Plane::Notes).await?;
     // A withdrawn note, or a file that is not a note, is not one of your notes.
-    if !is_note(&found.file) || found.withdrawn_by.is_some() {
+    if !is_note(&describe_here(st, &found.file).await) || found.withdrawn_by.is_some() {
         return Err(refuse(
             StatusCode::NOT_FOUND,
             "notes.not_found",
             format!("{attestation_id} is not one of your notes"),
         ));
     }
-    require_author(st, &found.row)?;
+    require_author(st, owner_key_id, &found.row)?;
     Ok(found)
 }
 
@@ -2821,7 +3699,17 @@ async fn update_note(
         Ok(p) => p,
         Err(e) => return e,
     };
-    let w = match withdraw_rows(&st, &found.row, &found.file, "edited by its author").await {
+    let w = match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Notes,
+        &found.row,
+        &found.file,
+        "edited by its author",
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => return withdraw_failed(e),
     };
@@ -2859,7 +3747,17 @@ async fn withdraw_note(
         Ok(f) => f,
         Err(e) => return e,
     };
-    match withdraw_rows(&st, &found.row, &found.file, "withdrawn by its author").await {
+    match withdraw_rows(
+        &st,
+        &headers,
+        &owner.key_id,
+        Plane::Notes,
+        &found.row,
+        &found.file,
+        "withdrawn by its author",
+    )
+    .await
+    {
         Ok(w) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -2919,7 +3817,7 @@ async fn read_notes(
             if out.len() >= limit {
                 break 'rooms;
             }
-            if !is_note(&row) {
+            if !is_note(&describe(&st, &row, &viewer).await) {
                 continue;
             }
             match withdrawn_by(&st, &row.attestation_id).await {
@@ -2946,10 +3844,13 @@ async fn read_notes(
                         "the bytes opened but are not UTF-8 text".to_owned(),
                     ),
                 },
-                Err(reason) => match unopened(&reason) {
+                Err(files::FileError::Unopened(reason)) => match unopened(&reason) {
                     ByteState::Absent { state, detail } => (None, state.to_owned(), detail),
                     ByteState::Here { .. } => unreachable!("unopened always answers Absent"),
                 },
+                // A note is text; one above the 64 MiB whole-read cap, or any
+                // other edge refusal, is reported as unreadable with the reason.
+                Err(e) => (None, "unreadable".to_owned(), e.to_string()),
             };
             out.push(Note {
                 attestation_id: row.attestation_id.clone(),
@@ -2995,26 +3896,29 @@ pub fn router(
         user_seed_dir,
         scope_lifecycle,
     };
-    // THE UPLOAD ROUTES ONLY carry the raised body limit. axum's 2 MB default
+    // THE UPLOAD ROUTES ONLY carry a raised body limit. axum's 2 MB default
     // stands everywhere else; before 0.5.216 it stood HERE too, so the largest
     // file anyone could upload was ~1.5 MB of base64 while the comment on the
     // form said edge capped at 1 MiB — two stale numbers, neither the real one.
-    let upload_limit = DefaultBodyLimit::max(UPLOAD_BODY_LIMIT);
+    //
+    // Since 0.5.218 the upload handlers take the RAW body (the multipart form
+    // streams it to the seal) and enforce their two ceilings themselves —
+    // [`UPLOAD_BODY_LIMIT`] for JSON, [`STREAMED_UPLOAD_BODY_LIMIT`] for
+    // multipart — in `parse_upload`, so no `DefaultBodyLimit` layer is needed
+    // (axum's limit applies only to the buffering extractors).
     use axum::routing::{get, post, put};
     Router::new()
-        .route("/v1/files", post(write_file).layer(upload_limit))
+        .route("/v1/files", post(write_file))
         .route("/v1/drive", get(read_drive))
         // Public: a node's render policy is what its clients need BEFORE they
         // hold a session, and it discloses nothing about anyone (#643).
         .route("/v1/media/policy", get(media_policy))
         .route(
             "/v1/files/{attestation_id}",
-            get(read_file)
-                .put(replace_file)
-                .delete(withdraw_file)
-                .layer(upload_limit),
+            get(read_file).put(replace_file).delete(withdraw_file),
         )
         .route("/v1/files/{attestation_id}/meta", get(file_meta))
+        .route("/v1/files/{attestation_id}/custody", get(file_custody))
         .route("/v1/files/{attestation_id}/rename", post(rename_file))
         .route("/v1/files/{attestation_id}/move", post(move_file))
         .route("/v1/notes", get(read_notes).post(write_note))
@@ -3036,6 +3940,10 @@ mod tests {
         assert!(b64.len() <= 4 * 1024);
         assert!(UPLOAD_BODY_LIMIT > WHOLE_READ_CAP.div_ceil(3) * 4);
         assert_eq!(WHOLE_READ_CAP, 64 * 1024 * 1024);
+        // The streamed form: edge's ~2.5 GiB, well above the whole-read cap,
+        // and its body limit leaves room for the form around the file.
+        const { assert!(STREAMED_FILE_CEILING > WHOLE_READ_CAP as u64 * 32) };
+        const { assert!(STREAMED_UPLOAD_BODY_LIMIT > STREAMED_FILE_CEILING) };
     }
 
     #[test]
@@ -3056,6 +3964,13 @@ mod tests {
         assert!(matches!(
             parse_range(Some("bytes=8-100"), 10),
             RangeAsk::Part(8, 9)
+        ));
+        // No length cap (0.5.218): a range longer than the whole-read cap is
+        // served whole, in windows.
+        let big = 3 * WHOLE_READ_CAP as u64;
+        assert!(matches!(
+            parse_range(Some("bytes=0-"), big),
+            RangeAsk::Part(0, e) if e == big - 1
         ));
         assert!(matches!(
             parse_range(Some("bytes=10-"), 10),
@@ -3078,31 +3993,6 @@ mod tests {
             parse_range(Some("items=0-1"), 10),
             RangeAsk::Whole
         ));
-    }
-
-    #[test]
-    fn multipart_reads_the_file_part_and_the_fields() {
-        let body = b"--XyZ\r\nContent-Disposition: form-data; name=\"cohort\"\r\n\r\nself\r\n\
---XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"boat.jpg\"\r\n\
-Content-Type: image/jpeg\r\n\r\n\x00\x01\r\n\x02\r\n--XyZ--\r\n";
-        assert_eq!(
-            multipart::boundary("multipart/form-data; boundary=XyZ").as_deref(),
-            Some("XyZ")
-        );
-        assert_eq!(
-            multipart::boundary("multipart/form-data; boundary=\"XyZ\"").as_deref(),
-            Some("XyZ")
-        );
-        let parts = multipart::parse(body, "XyZ").expect("parse");
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].name, "cohort");
-        assert_eq!(parts[0].data, b"self");
-        assert_eq!(parts[1].name, "file");
-        assert_eq!(parts[1].filename.as_deref(), Some("boat.jpg"));
-        assert_eq!(parts[1].content_type.as_deref(), Some("image/jpeg"));
-        // CRLF INSIDE the bytes survives: only CRLF + delimiter ends a part.
-        assert_eq!(parts[1].data, b"\x00\x01\r\n\x02");
-        assert!(multipart::parse(b"no boundary here", "XyZ").is_err());
     }
 
     #[test]

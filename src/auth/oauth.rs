@@ -1787,14 +1787,16 @@ async fn oauth_login(
             }
         }
     };
-    // issue #846 redirect-uri validation: only relative or https allowed.
+    // Where the browser goes after sign-in — carrying the one-use `ciris_code`.
+    // PARSED, never string-matched (CIRISServer#672): a same-origin path or an
+    // exact loopback host, and nothing else.
     let redirect_uri = q.redirect_uri.unwrap_or_else(|| "/".to_string());
-    if !is_safe_redirect(&redirect_uri) {
+    if let Some(why) = redirect_refusal(&redirect_uri) {
         return browser_refusal(
             &headers,
             StatusCode::BAD_REQUEST,
             "auth.oauth.unsafe_redirect",
-            "unsafe redirect_uri",
+            &format!("unsafe redirect_uri: {why}"),
             "That link can't be followed",
             None,
         );
@@ -1845,21 +1847,68 @@ async fn oauth_login(
     axum::response::Redirect::temporary(&url).into_response()
 }
 
-/// issue #846: relative paths always OK; absolute must be https (loopback over
-/// http is allowed for local dev).
+/// Why a post-login `redirect_uri` is refused, or `None` when it is safe to
+/// send the browser — and the one-use `ciris_code` it carries — there.
+///
+/// **Parsed, never string-matched (CIRISServer#672).** The check this replaced
+/// took any `/`-prefixed string (so `//evil.host`, which a browser resolves to
+/// `https://evil.host`), ANY `https://` host, and a loopback PREFIX (so
+/// `http://localhost.evil.host`). Each handed a login credential to a host the
+/// caller chose.
+///
+/// Two shapes are accepted, and nothing else:
+///
+/// * **a same-origin path** — starts with `/`, is not protocol-relative (`//`),
+///   and parses as a bare path-and-query with no scheme or authority;
+/// * **an exact loopback host** — `http`/`https` whose parsed HOST is
+///   `localhost`, `127.0.0.1` or `[::1]` (any port), with no userinfo: the
+///   desktop app's local listener.
+///
+/// A backslash is refused anywhere: browsers read `\` as `/` in a URL, so
+/// `/\evil.host` is `//evil.host` by another spelling. Whitespace and control
+/// characters are refused for the same reason — a browser strips some of them
+/// before it resolves the URL, and the check must see what the browser sees.
+fn redirect_refusal(uri: &str) -> Option<&'static str> {
+    if uri.contains('\\') {
+        return Some("a backslash is read as a slash by browsers");
+    }
+    if uri.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("whitespace or control characters are not allowed");
+    }
+    if let Some(rest) = uri.strip_prefix('/') {
+        if rest.starts_with('/') {
+            return Some("a protocol-relative URL leaves this origin");
+        }
+        return match uri.parse::<axum::http::Uri>() {
+            Ok(u) if u.scheme().is_none() && u.authority().is_none() => None,
+            _ => Some("not a plain same-origin path"),
+        };
+    }
+    let Ok(u) = uri.parse::<axum::http::Uri>() else {
+        return Some("not a parseable URI");
+    };
+    match u.scheme_str() {
+        Some("http" | "https") => {}
+        _ => return Some("only a same-origin path or a loopback http(s) URL is allowed"),
+    }
+    let Some(authority) = u.authority() else {
+        return Some("an absolute URL must name a host");
+    };
+    if authority.as_str().contains('@') {
+        return Some("userinfo is not allowed in a redirect");
+    }
+    let host = authority.host();
+    if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]" {
+        None
+    } else {
+        Some("the host is not this origin or loopback")
+    }
+}
+
+/// [`redirect_refusal`] as a predicate (the unit tests read it this way).
+#[cfg(test)]
 fn is_safe_redirect(uri: &str) -> bool {
-    if uri.starts_with('/') {
-        return true;
-    }
-    if let Some(rest) = uri.strip_prefix("https://") {
-        return !rest.is_empty();
-    }
-    if let Some(rest) = uri.strip_prefix("http://") {
-        return rest.starts_with("127.0.0.1")
-            || rest.starts_with("localhost")
-            || rest.starts_with("[::1]");
-    }
-    false
+    redirect_refusal(uri).is_none()
 }
 
 // ─── GET /v1/auth/oauth/{provider}/callback ─────────────────────────────────
@@ -3148,11 +3197,62 @@ mod tests {
 
     #[test]
     fn redirect_validation_fails_closed() {
+        assert!(is_safe_redirect("/"));
         assert!(is_safe_redirect("/dashboard"));
-        assert!(is_safe_redirect("https://app.ciris.ai/cb"));
+        assert!(is_safe_redirect("/dashboard?tab=a&b=%2F%2F"));
         assert!(is_safe_redirect("http://127.0.0.1:3000/cb"));
+        assert!(is_safe_redirect("http://localhost:4243/cb"));
+        assert!(is_safe_redirect("http://LOCALHOST/cb"));
+        assert!(is_safe_redirect("https://127.0.0.1/cb"));
+        assert!(is_safe_redirect("http://[::1]:8080/cb"));
         assert!(!is_safe_redirect("http://evil.example.com"));
         assert!(!is_safe_redirect("javascript:alert(1)"));
+        assert!(!is_safe_redirect(""));
+    }
+
+    // One test per bypass CIRISServer#672 named, so a regression names itself.
+
+    #[test]
+    fn redirect_refuses_protocol_relative() {
+        assert!(!is_safe_redirect("//evil.host"));
+        assert!(!is_safe_redirect("//evil.host/cb?x=1"));
+    }
+
+    #[test]
+    fn redirect_refuses_any_https_host() {
+        assert!(!is_safe_redirect("https://evil.host"));
+        assert!(!is_safe_redirect("https://evil.host/cb"));
+        assert!(!is_safe_redirect("https://app.ciris.ai/cb"));
+    }
+
+    #[test]
+    fn redirect_refuses_localhost_as_a_prefix() {
+        assert!(!is_safe_redirect("http://localhost.evil.host"));
+        assert!(!is_safe_redirect("http://localhost.evil.host:4243/cb"));
+    }
+
+    #[test]
+    fn redirect_refuses_loopback_ip_as_a_prefix() {
+        assert!(!is_safe_redirect("http://127.0.0.1.evil.host"));
+        assert!(!is_safe_redirect("http://127.0.0.1.evil.host/cb"));
+    }
+
+    #[test]
+    fn redirect_refuses_backslash_path() {
+        assert!(!is_safe_redirect("/\\evil.host"));
+        assert!(!is_safe_redirect("/\\/evil.host"));
+    }
+
+    #[test]
+    fn redirect_refuses_userinfo_that_hides_the_host() {
+        assert!(!is_safe_redirect("http://localhost@evil.host/cb"));
+        assert!(!is_safe_redirect("http://127.0.0.1:80@evil.host/"));
+    }
+
+    #[test]
+    fn redirect_refuses_whitespace_smuggling() {
+        assert!(!is_safe_redirect("/\t/evil.host"));
+        assert!(!is_safe_redirect(" //evil.host"));
     }
 
     /// Google is usable the moment the node boots — no operator step first.

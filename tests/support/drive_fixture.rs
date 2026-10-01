@@ -341,3 +341,61 @@ pub async fn status_json(resp: reqwest::Response) -> (u16, serde_json::Value) {
     let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
     (status, json)
 }
+
+/// A seeded key's hybrid signature over `canonical`, as a roster co-signature
+/// (`seed_key`'s deterministic Ed25519 / ML-DSA-65 halves).
+#[allow(dead_code)]
+pub async fn seeded_cosignature(
+    key_id: &str,
+    ed_seed: u8,
+    pqc_seed: u8,
+    canonical: &[u8],
+) -> ciris_persist::federation::types::RosterCosignature {
+    use ed25519_dalek::Signer as _;
+    let ed = SigningKey::from_bytes(&[ed_seed; 32]);
+    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[pqc_seed; 32], format!("{key_id}-pqc"))
+        .expect("ML-DSA-65 seed");
+    let ed_sig = ed.sign(canonical).to_bytes();
+    let mut bound = Vec::with_capacity(canonical.len() + ed_sig.len());
+    bound.extend_from_slice(canonical);
+    bound.extend_from_slice(&ed_sig);
+    let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign");
+    ciris_persist::federation::types::RosterCosignature {
+        authority_key_id: key_id.to_owned(),
+        scrub_signature_classical: BASE64.encode(ed_sig),
+        scrub_signature_pqc: Some(BASE64.encode(pqc_sig)),
+    }
+}
+
+/// A `Community` record authored by this NODE (signing for its owner) and
+/// CO-SIGNED by every other listed member's seeded key — persist v52
+/// (CIRISPersist#955, Q1) seats a founding member only if they signed the
+/// founding record, so a fixture that founds a room WITH others must carry
+/// each of their signatures. `cosigners` are `(key_id, ed_seed, pqc_seed)`
+/// exactly as `seed_key` registered them.
+#[allow(dead_code)]
+pub async fn put_community_cosigned(
+    engine: &Engine,
+    community: ciris_persist::federation::types::Community,
+    cosigners: &[(&str, u8, u8)],
+) -> Result<(), ciris_persist::federation::Error> {
+    let canonical =
+        ceg_produce_canonicalize(&community.signing_envelope()).expect("canonicalize community");
+    let sig = engine.sign_hybrid(&canonical).await.expect("node signs");
+    let mut cosignatures = Vec::new();
+    for (k, ed, pqc) in cosigners {
+        cosignatures.push(seeded_cosignature(k, *ed, *pqc, &canonical).await);
+    }
+    engine
+        .federation_directory()
+        .put_community(ciris_persist::federation::types::SignedCommunity {
+            community,
+            authority_key_id: engine.local_derived_key_id().await.expect("node id"),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
+            cosignatures,
+            lineage: Vec::new(),
+        })
+        .await
+}

@@ -291,11 +291,28 @@ async fn a_device_is_relabelled_and_only_its_owner_reads_the_label() {
     let o = find(&v, &phone).expect("the phone is listed");
     assert_eq!(o["label"], "Pixel 9", "the newest label wins: {v}");
     assert_eq!(o["revoked"], false);
-    // Unauthenticated: the roster is public binding metadata, the label is not.
+    // Unauthenticated: the phone is not an announced node, so it is not public
+    // at all (CIRISServer#655).
     let (st, v) = alice.call("GET", &list, None, None).await;
     assert_eq!(st.as_u16(), 200, "{v}");
+    assert!(find(&v, &phone).is_none(), "{v}");
+    // This (announced) node IS public — and its label is not: the name a person
+    // gave a device is never public, whatever the device.
+    let node = provision_node_occurrence(&alice).await;
+    let (st, v) = alice
+        .as_owner(
+            "POST",
+            "/v1/self/occurrence/label",
+            Some(json!({ "occurrence_key_id": node, "label": "Home server" })),
+        )
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    let (_, v) = alice.as_owner("GET", &list, None).await;
+    assert_eq!(find(&v, &node).expect("listed")["label"], "Home server");
+    let (_, v) = alice.call("GET", &list, None, None).await;
+    let o = find(&v, &node).expect("the announced node is public");
     assert!(
-        find(&v, &phone).expect("listed")["label"].is_null(),
+        o["label"].is_null(),
         "no label without the owner's session: {v}"
     );
 }
@@ -326,7 +343,7 @@ async fn the_occurrence_list_shows_revoked_devices_on_request() {
         .expect("revoke the lost phone");
 
     let base = format!("/v1/self/occurrences?identity_key_id={}", alice.key());
-    let (_, v) = alice.call("GET", &base, None, None).await;
+    let (_, v) = alice.as_owner("GET", &base, None).await;
     assert!(find(&v, &kept).is_some(), "{v}");
     assert!(
         find(&v, &lost).is_none(),
@@ -334,8 +351,338 @@ async fn the_occurrence_list_shows_revoked_devices_on_request() {
     );
 
     let (_, v) = alice
-        .call("GET", &format!("{base}&include_revoked=true"), None, None)
+        .as_owner("GET", &format!("{base}&include_revoked=true"), None)
         .await;
     assert_eq!(find(&v, &kept).expect("kept")["revoked"], false, "{v}");
     assert_eq!(find(&v, &lost).expect("lost")["revoked"], true, "{v}");
+}
+
+// ─── Who may read the roster (CIRISServer#655) ──────────────────────────────
+//
+// The maintainer's ruling (2026-09-25): the roster is public — people must be
+// contactable — but not EXPOSED. Announce is PER NODE (each node's wizard asks),
+// and the public roster is exactly the devices the person chose to announce,
+// that people can contact them through. A stranger sees only occurrences that
+// ARE announced nodes; an owner with none announced is indistinguishable from
+// an identity nobody has heard of. The owner's own session sees everything.
+
+/// Widen `p`'s owner-binding on THIS node to federation — what `POST
+/// /v1/federation/announce` does, with the owner's own pen.
+async fn announce(p: &Person) {
+    ciris_server::auth::ownership::promote_owner_binding_to_federation(
+        &p.engine,
+        &p.owner.signer().await,
+        &p.node_key_id,
+    )
+    .await
+    .expect("promote the owner-binding to federation");
+}
+
+/// This node's own occurrence of `p`'s self (its content occurrence, which
+/// edge provisions under the engine key). Returns the occurrence key — THIS
+/// node's key.
+async fn provision_node_occurrence(p: &Person) -> String {
+    let (occ, _how) = ciris_server::backend::provision_engine_occurrence(&p.engine, p.key())
+        .await
+        .expect("provision the node's content occurrence");
+    assert_eq!(
+        occ, p.node_key_id,
+        "precondition: the occurrence IS this node"
+    );
+    occ
+}
+
+/// A second machine `p` owns that `p` did NOT announce: a registered node key,
+/// a SELF-scoped owner-binding, and an occurrence of `p`'s self under it.
+async fn unannounced_second_node(p: &Person, tag: u8) -> String {
+    let key_id = format!("quiet-node-{tag}");
+    let pqc =
+        MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
+            .expect("ML-DSA seed");
+    let signer = LocalSigner::from_parts(
+        SigningKey::from_bytes(&[tag; 32]),
+        key_id.clone(),
+        Some(Arc::new(pqc) as Arc<dyn ciris_keyring::PqcSigner>),
+        Some(format!("{key_id}-pqc")),
+    );
+    ciris_server::attest::register_key(
+        &p.engine,
+        ciris_server::attest::KeySigner::Local(&signer),
+        &key_id,
+        identity_type::NODE,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register the quiet node");
+    owned_node::bind_self_scoped(&p.engine, &p.owner.signer().await, &key_id).await;
+    p.engine
+        .federation_directory()
+        .put_identity_occurrence_local(IdentityOccurrence {
+            identity_key_id: p.key().to_owned(),
+            occurrence_key_id: key_id.clone(),
+            device_class: "server".to_owned(),
+            hardware_attestation: None,
+            asserted_at: chrono::Utc::now(),
+            valid_until: None,
+            encryption_pubkeys: None,
+            transport_binding: None,
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("bind the quiet node as an occurrence");
+    assert!(owned(p).await.contains(&key_id), "precondition: owned");
+    key_id
+}
+
+fn listed(v: &serde_json::Value) -> Vec<String> {
+    v["occurrences"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| o["occurrence_key_id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn an_unannounced_roster_is_the_owners_alone() {
+    let alice = Person::new_unannounced("occ-priv").await;
+    let phone = device(&alice, 0xA0).await;
+    let node_occ = provision_node_occurrence(&alice).await;
+    let path = format!("/v1/self/occurrences?identity_key_id={}", alice.key());
+
+    // The owner sees everything, labelled as the owner's view.
+    let (st, v) = alice.as_owner("GET", &path, None).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["audience"], "owner", "{v}");
+    let mine = listed(&v);
+    assert!(mine.contains(&phone) && mine.contains(&node_occ), "{v}");
+
+    // No session, a stranger's session: nothing — not even this node, because
+    // Alice did not announce it.
+    let (st, anon) = alice.call("GET", &path, None, None).await;
+    assert_eq!(st.as_u16(), 200, "{anon}");
+    assert!(listed(&anon).is_empty(), "{anon}");
+    let guest = alice.stranger_session().await;
+    let (_, v) = alice.call("GET", &path, Some(&guest), None).await;
+    assert!(listed(&v).is_empty(), "{v}");
+    let (_, v) = alice
+        .call("GET", &format!("{path}&include_revoked=true"), None, None)
+        .await;
+    assert!(listed(&v).is_empty(), "include_revoked widens nothing: {v}");
+
+    // THE SAME ANSWER as for an identity nobody has heard of — the read does
+    // not reveal that Alice exists.
+    let (st, unknown) = alice
+        .call(
+            "GET",
+            "/v1/self/occurrences?identity_key_id=nobody-v1-aaaaaaaaaa",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(st.as_u16(), 200, "{unknown}");
+    let strip = |mut v: serde_json::Value| {
+        v.as_object_mut().expect("object").remove("identity_key_id");
+        v
+    };
+    assert_eq!(strip(anon), strip(unknown));
+
+    // Announcing THIS node makes exactly this node public.
+    announce(&alice).await;
+    let (_, v) = alice.call("GET", &path, None, None).await;
+    assert_eq!(listed(&v), vec![node_occ], "{v}");
+}
+
+/// The mixed case: node A announced, node B not. A stranger sees A's
+/// occurrence and never B's — nor the phone, which is no node at all.
+#[tokio::test]
+async fn only_the_announced_nodes_are_public() {
+    let alice = Person::new("occ-mixed").await; // node A: announced
+    let phone = device(&alice, 0xA4).await;
+    let node_a = provision_node_occurrence(&alice).await;
+    let node_b = unannounced_second_node(&alice, 0xB6).await;
+    let path = format!("/v1/self/occurrences?identity_key_id={}", alice.key());
+
+    let (st, v) = alice.call("GET", &path, None, None).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["audience"], "public", "{v}");
+    assert_eq!(
+        listed(&v),
+        vec![node_a.clone()],
+        "only the announced node: {v}"
+    );
+    let (_, v) = alice
+        .call("GET", &format!("{path}&include_revoked=true"), None, None)
+        .await;
+    assert_eq!(listed(&v), vec![node_a.clone()], "{v}");
+
+    // The owner still sees all three.
+    let (_, v) = alice.as_owner("GET", &path, None).await;
+    let mine = listed(&v);
+    for k in [&phone, &node_a, &node_b] {
+        assert!(mine.contains(k), "{k} missing from the owner's view: {v}");
+    }
+}
+
+// ─── 0.5.218: release is an EVICTION (CSD-037) ──────────────────────────────
+
+/// The content-KEM occurrence a claimed machine provisions for its owner,
+/// under its node key, with real enc keys (so it is a wrap recipient).
+async fn node_occurrence(p: &Person, node_key_id: &str, tag: u8) {
+    p.engine
+        .federation_directory()
+        .put_identity_occurrence_local(IdentityOccurrence {
+            identity_key_id: p.key().to_owned(),
+            occurrence_key_id: node_key_id.to_owned(),
+            device_class: "server".to_owned(),
+            hardware_attestation: None,
+            asserted_at: chrono::Utc::now(),
+            valid_until: None,
+            encryption_pubkeys: Some(
+                ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
+            ),
+            transport_binding: None,
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("the node's content occurrence");
+}
+
+async fn active_occurrences(p: &Person) -> Vec<String> {
+    p.engine
+        .federation_directory()
+        .list_identity_occurrences_active(p.key())
+        .await
+        .expect("active occurrences")
+        .into_iter()
+        .map(|o| o.occurrence_key_id)
+        .collect()
+}
+
+/// **(ii) A release revokes the released node's occurrence** — signed, on the
+/// surface replication re-publishes — as well as withdrawing its binding.
+/// Before 0.5.218 the binding went and the occurrence stayed, so the machine
+/// kept being wrapped every new self file.
+#[tokio::test]
+async fn releasing_a_node_also_revokes_its_occurrence_signed() {
+    let alice = Person::new("rel-occ").await;
+    let n2 = second_node(&alice, 0xE8).await;
+    node_occurrence(&alice, &n2, 0xE9).await;
+    assert!(
+        active_occurrences(&alice).await.contains(&n2),
+        "precondition"
+    );
+
+    let (st, v) = alice
+        .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["released"], true);
+    assert_eq!(v["withdrawn"].as_array().map(Vec::len), Some(1), "{v}");
+    let revoked = v["occurrences_revoked"]
+        .as_array()
+        .expect("occurrences_revoked");
+    assert_eq!(revoked.len(), 1, "{v}");
+    assert_eq!(revoked[0]["occurrence_key_id"], n2.as_str());
+    assert_eq!(revoked[0]["attesting_key_id"], alice.key());
+    assert!(v["failed"].as_array().is_some_and(Vec::is_empty), "{v}");
+    assert!(
+        v["history"]
+            .as_str()
+            .is_some_and(|h| h.contains("Already-shared history stays readable")),
+        "{v}"
+    );
+    assert!(!active_occurrences(&alice).await.contains(&n2));
+    let signed = alice
+        .engine
+        .federation_directory()
+        .list_signed_identity_occurrence_revocations_for(alice.key())
+        .await
+        .expect("signed revocations");
+    assert!(
+        signed
+            .iter()
+            .any(|r| r.identity_occurrence_revocation.occurrence_key_id == n2
+                && r.attesting_key_id == alice.key()),
+        "the node's revocation is SIGNED (replicable), by the owner: {signed:?}"
+    );
+}
+
+/// **(iii) After an eviction, a new self file carries no wrap to the evicted
+/// device — and an OLD one still does** (the honesty half, CC 3.3.6.1: no DEK
+/// rotation, no re-encryption of what was already shared).
+#[tokio::test]
+async fn after_eviction_new_self_files_are_not_wrapped_to_the_evicted_device() {
+    let alice = Person::new("rel-wrap").await;
+    let here = provision_node_occurrence(&alice).await;
+    let n2 = second_node(&alice, 0xEC).await;
+    node_occurrence(&alice, &n2, 0xED).await;
+
+    let before = alice
+        .engine
+        .put_blob_scoped(
+            "self",
+            Some(alice.key()),
+            b"before the theft",
+            Some("text/plain"),
+            None,
+        )
+        .await
+        .expect("a self file before the eviction");
+    assert!(
+        before.granted.contains(&n2) && before.granted.contains(&here),
+        "precondition: both devices are wrapped: {:?}",
+        before.granted
+    );
+
+    let (st, v) = alice
+        .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+
+    let after = alice
+        .engine
+        .put_blob_scoped(
+            "self",
+            Some(alice.key()),
+            b"after the theft",
+            Some("text/plain"),
+            None,
+        )
+        .await
+        .expect("a self file after the eviction");
+    assert!(
+        !after.granted.contains(&n2) && !after.excluded.contains(&n2),
+        "a NEW self file names no wrap to the evicted device: {:?} / {:?}",
+        after.granted,
+        after.excluded
+    );
+    assert!(
+        after.granted.contains(&here),
+        "the remaining device is: {:?}",
+        after.granted
+    );
+    use ciris_persist::federation::blobs::BlobStorage as _;
+    let backend = alice.engine.sqlite_backend().expect("sqlite");
+    let new_recipients = backend
+        .list_at_rest_grant_recipients(&after.at_rest_sha256)
+        .await
+        .expect("grant recipients");
+    assert!(
+        !new_recipients.contains(&n2),
+        "no key_grant to the evicted occurrence on the new file: {new_recipients:?}"
+    );
+    // What eviction does NOT do, pinned so nobody claims otherwise: the grant
+    // on the file shared BEFORE stays.
+    let old_recipients = backend
+        .list_at_rest_grant_recipients(&before.at_rest_sha256)
+        .await
+        .expect("grant recipients");
+    assert!(
+        old_recipients.contains(&n2),
+        "already-shared history stays readable by the evicted device (no DEK rotation): \
+         {old_recipients:?}"
+    );
 }

@@ -1,0 +1,19 @@
+# bigfile.yaml's quick form: 256 MiB, no resume rung. Same ceilings apply
+# (drive UPLOAD_BODY_LIMIT today; edge v34.4.0 DAG pull; #737 range reader).
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: room, kind: self, person: one}
+    - {rel: bigfile, person: one, device: D1, size: 268435456, wait: 1800}
+  actor: {person: one, device: D2}
+  negatives:
+    - {check: no_wider_self_rows, person: one}

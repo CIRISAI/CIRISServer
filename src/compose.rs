@@ -297,7 +297,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         instance_id = %crate::node_identity::instance_id(),
         "resolved node federation key_id from the engine signer (one identity; FSD-003, #315)"
     );
-
     // ── ONE IDENTITY, HYBRID, OR WE DO NOT BOOT (CIRISServer#380) ─────────────
     // See `crate::identity_gate` for why this is a boot error rather than a
     // warning, and why the comparison is on public-key bytes rather than key_ids.
@@ -398,6 +397,28 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
+    // before any route or loop can touch a room, and registered under the key
+    // id every room reads it by (the chat and self-room drives look it up by
+    // the chat signer's key id). Durable under persist's hardware-rooted key
+    // when the host can seal it; ephemeral, and saying so, when it cannot.
+    //
+    // AFTER the wire identity resolves (Codex, #689): on an actor/node split the
+    // chat signer is the ACTOR, and a host that registered its store under the
+    // wire NODE must be found there, not opened over by a second store.
+    let mls_posture = crate::mls_state::open_for_node(
+        &engine,
+        &chat_node_signer.key_id,
+        &node_resolution.node_key_id,
+        &cfg.data_dir.join("mls-state.kv"),
+    )
+    .await;
+    // Released when this serve returns, cleanly or from a failed boot (Codex,
+    // #689): the embedded restart flow can serve another identity in-process.
+    let _mls_registration = crate::mls_state::Registration::new(&[
+        &chat_node_signer.key_id,
+        &node_resolution.node_key_id,
+    ]);
     // The serve path performs its OWN split, so it must record the actor too —
     // `set_actor_identity` was only ever called by `provision_node_identity` (the
     // embedded path), leaving a node that split HERE reporting `actor_key_id: null`
@@ -1181,6 +1202,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             }
         }
     };
+    // THE PAIR-ROOM DRIVER (edge v38 / persist v52, CIRISPersist#955): the chat
+    // router and its driver share ONE room state, so a read and a tick never
+    // key a room twice. A person asks for a chat once and waits — the driver
+    // completes the two-step join and the MLS handshake with nobody reading
+    // (`contacts_chat::PairRoomDriver`). Supervised like the session claims.
+    let (pair_rooms_sd_tx, pair_rooms_sd_rx) = watch::channel(false);
+    let (chat_router, pair_room_driver) = crate::contacts_chat::router_with_driver(
+        Arc::clone(&engine),
+        Arc::clone(&chat_node_signer),
+        crate::user_seed_dir(&cfg),
+        // The live transport, so the contact ladder can run its `discover`
+        // rung — "is there somewhere to send" — through edge's own `RouteLens`
+        // instead of this module deciding what reachable means.
+        edge.reticulum_transport(),
+        // CIRISEdge#499 — the host drives the scope-address plane it armed: a
+        // keyed room is installed, advanced on every epoch, sealed on the
+        // cadence loop below.
+        edge.scope_lifecycle().cloned(),
+    );
+    let pair_rooms_join = pair_room_driver.spawn(pair_rooms_sd_rx);
     let read = {
         let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
@@ -1308,6 +1349,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             format!("http://127.0.0.1:{}", cfg.read_api_addr().port()),
                             // Hybrid-verify policy for the local upgrade-owner apply.
                             strict,
+                            // The record every claimed target admits, so the
+                            // device that claimed it is known there (#678).
+                            Some(self_key_record_json.clone()),
                         )
                         .layer(axum::middleware::from_fn(
                             crate::auth::loopback::require_loopback,
@@ -1587,20 +1631,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // grant, a chat is a two-member `Community` under a derived
                     // id, and a message is a `chat:message:v1` attestation at
                     // `cohort_scope: community`. See `crate::contacts_chat`.
-                    .merge(crate::contacts_chat::router(
-                        Arc::clone(&engine),
-                        Arc::clone(&chat_node_signer),
-                        crate::user_seed_dir(&cfg),
-                        // The live transport, so the contact ladder can run its
-                        // `discover` rung — "is there somewhere to send" — through
-                        // edge's own `RouteLens` instead of this module deciding
-                        // what reachable means.
-                        edge.reticulum_transport(),
-                        // CIRISEdge#499 — the host drives the scope-address
-                        // plane it armed: a keyed room is installed, advanced
-                        // on every epoch, sealed on the cadence loop below.
-                        edge.scope_lifecycle().cloned(),
-                    ))
+                    // (built above with its pair-room driver)
+                    .merge(chat_router)
                     // FILES, THE DRIVE AND NOTES (CIRISServer#622/#615): one
                     // door for a file at any cohort, the drive that lists what
                     // this identity can reach with `row held, bytes absent` as
@@ -1623,11 +1655,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         crate::user_seed_dir(&cfg),
                     ))
+                    // THE INVITE INBOX (0.5.218, CIRISPersist#955,
+                    // FSD/MEMBERSHIP_INVITES.md): the invitee's half of
+                    // consent-to-join — `GET /v1/self/invites`, and accept /
+                    // decline signed with the owner's own pen. The group's
+                    // half lives on the family and community routes.
+                    .merge(crate::membership_invites::router(
+                        Arc::clone(&engine),
+                        crate::user_seed_dir(&cfg),
+                    ))
                     // THE OWNER'S DEVICES (FSD §2): release a node, relabel a key.
                     .merge(crate::self_devices::router(
                         Arc::clone(&engine),
                         crate::user_seed_dir(&cfg),
                     ))
+                    // WHICH DEVICE IS ANSWERING (CC 3.1.3.1, FSD/SESSION_CLAIMS.md):
+                    // `GET /v1/self/sessions` — every exchange of the person's a
+                    // device holds, and which one, for "answering on <device>".
+                    .merge(crate::session_claims::router(Arc::clone(&engine)))
                     // THE AGENT-COMPAT FEDERATION EDGE SURFACE (CIRISServer#261):
                     // GET /v1/federation/identity + /metrics, POST
                     // /v1/federation/content/{content_id}, and the SSE bridge
@@ -1934,6 +1979,37 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
 
     let (self_room_sd_tx, mut self_room_sd_rx) = watch::channel(false);
 
+    // RE-ADDRESS EVERY PERSISTED ROOM, ONCE (CIRISEdge#676 §5): after the
+    // transport and the scope lifecycle are armed, before the first round. A
+    // room this node held before a restart is listening again on its derived
+    // address without waiting for a local operation to revisit it (#623).
+    // Nothing to do on an ephemeral store; logged either way.
+    if let (Some(lifecycle), crate::mls_state::Posture::Durable { .. }) =
+        (edge.scope_lifecycle(), &mls_posture)
+    {
+        let store = crate::mls_state::store_for(&chat_node_signer.key_id);
+        let groups =
+            ciris_edge::mls::CohortGroups::new(store.clone(), chat_node_signer.key_id.clone());
+        let dir = engine.federation_directory();
+        let lens = ciris_edge::contact::PersistLens::new(&*dir);
+        let report =
+            ciris_edge::mls::readdress_persisted_rooms(&store, &groups, lifecycle, &lens, None)
+                .await;
+        tracing::info!(
+            installed = report.installed.len(),
+            skipped = report.skipped.len(),
+            rooms = ?report
+                .installed
+                .iter()
+                .map(|ciris_edge::mls::InstalledRoom { room, epoch, members }| {
+                    format!("{room}@{epoch}x{members}")
+                })
+                .collect::<Vec<_>>(),
+            skipped_why = ?report.skipped,
+            "MLS state: persisted rooms re-addressed at boot (CIRISEdge#676)"
+        );
+    }
+
     // THE SELF ROOM'S DRIVER (CIRISEdge#646 / CIRISServer#622). Nobody creates
     // a self room by asking: it must appear the moment an identity owns a
     // second device. Edge owns the rule (`self_room::decide`); this owns the
@@ -2008,6 +2084,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         | crate::self_room_drive::SelfRoomTick::NotInRoster
                         | crate::self_room_drive::SelfRoomTick::NoOwner
                         | crate::self_room_drive::SelfRoomTick::PublishedKeyPackage
+                        | crate::self_room_drive::SelfRoomTick::NotHandledHere { .. }
                 );
                 if !quiet || last.as_ref() != Some(&tick) {
                     match &tick {
@@ -2027,6 +2104,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             tracing::info!("self room drive stopped");
         })
     };
+
+    // ONE DEVICE HANDLES EACH EXCHANGE (CC 3.1.3.1, CIRISPersist#782). The
+    // gate at each ACT site claims on demand while the person is here; this
+    // loop keeps a held claim renewed while they stay and lets it lapse when
+    // they go, so their other device can take the exchange. SUPERVISED like
+    // the self-room drive, whose Add/Remove it gates: an unsupervised renewer
+    // would keep claiming for a torn-down engine across an embedded restart.
+    let (session_claims_sd_tx, session_claims_sd_rx) = watch::channel(false);
+    let session_claims_join =
+        crate::session_claims::spawn(Arc::clone(&engine), session_claims_sd_rx);
 
     crate::compose_status::phase("retention_loop");
     let (retention_sd_tx, retention_sd_rx) = watch::channel(false);
@@ -2140,6 +2227,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the edge is gone would install destinations nothing can answer for.
     let _ = self_room_sd_tx.send(true);
     stop_step("self room drive", self_room_join).await;
+    let _ = session_claims_sd_tx.send(true);
+    stop_step("session claims", session_claims_join).await;
+    let _ = pair_rooms_sd_tx.send(true);
+    stop_step("pair-room driver", pair_rooms_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.
@@ -3572,6 +3663,9 @@ fn is_ignored_announce(message: &str) -> bool {
 }
 
 pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()> {
+    // Both boot paths (compose, and the agent-embedded delivery controller)
+    // pass through here, so the backend learns its own key on both.
+    arm_backend_node_key(engine).await?;
     // THE WIRE IDENTITY, not the engine's signer (CIRISEdge#541 review).
     //
     // The de-admission self is a TRANSPORT-plane fact: the refusal predicate
@@ -3615,6 +3709,59 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
                  silently does nothing (CIRISPersist#543)"
             );
             anyhow::bail!("AV-77 arm failed: set_self_key_id({key_id}) read back as {other:?}")
+        }
+    }
+}
+
+/// **Tell the backend which key is THIS node** (edge v38.1.0, CIRISEdge#768 /
+/// #774; persist #607 / #916 / CIRISPersist#966).
+///
+/// persist's node-relative doors read the backend's `node_key_id`: the #916
+/// member-device RE-WRAP compares an epoch's minter against it (a room this
+/// node minted is re-wrapped to a member's device that arrives late), and the
+/// #607 "does THIS NODE trust that root" gates ask on its behalf. persist sets
+/// it only inside `Engine::register_self_federation_key`, which this server
+/// never calls — it registers its key through `attest::register_key` — so on
+/// every server node the field was unset, the re-wrap skipped every epoch this
+/// node minted ("no node key set on this backend … (#916)"), and a member
+/// device that reached this node after a room's epoch was minted read the
+/// room `NotGranted` for good: edge's #768 bug, on the server's side of it.
+/// Edge's own fix (#774) sets it in `PersistGroupContentStore::from_shared_hybrid`;
+/// the server builds its stores with `PersistGroupContentStore::new` over the
+/// compose engine, which sets nothing, so the server sets it here, once, at
+/// boot.
+///
+/// WHICH KEY: the engine's own signer (`local_derived_key_id`) — the MINTER
+/// the re-wrap compares, as edge's fix uses — not the wire identity the AV-77
+/// gate arms (on a split node those differ; the epoch is minted by the
+/// engine's signer). Read back through the directory, like the AV-77 arm: a
+/// node key that did not stick is refused at boot rather than shipped silent.
+async fn arm_backend_node_key(engine: &Arc<Engine>) -> Result<()> {
+    let key_id = engine
+        .local_derived_key_id()
+        .await
+        .context("resolve the engine's derived key id for the backend's node key")?;
+    if let Some(b) = engine.sqlite_backend() {
+        b.set_node_key_id(key_id.clone());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(b) = engine.postgres_backend() {
+        b.set_node_key_id(key_id.clone());
+    }
+    match engine.federation_directory().node_key_id() {
+        Some(live) if live == key_id => {
+            tracing::info!(
+                node_key_id = %key_id,
+                "backend node key SET (CIRISEdge#768 / persist #916): epochs this node \
+                 minted are re-wrapped to a member's device that arrives late"
+            );
+            Ok(())
+        }
+        other => {
+            anyhow::bail!(
+                "backend node key did not stick: set {key_id}, read back {other:?} — the #916 \
+                 re-wrap would skip every epoch this node minted"
+            )
         }
     }
 }
@@ -3999,90 +4146,197 @@ async fn setup_peer_replication(
     started
 }
 
-/// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
-/// admitted peer `key_id`s. FOUR coordinators per peer:
-///   - [`EnvelopeKind::Attestation`] — capacity:* / trace out, health:liveness in.
-///   - [`EnvelopeKind::Key`] (#144, CIRISEdge#257) — the KERI publish-own key plane
-///     (verification + transport identity).
-///   - [`EnvelopeKind::IdentityOccurrence`] (CIRISEdge#305) — the KEX plane: the
-///     occurrence carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
-///     that `resolve_peer_kex_pubkeys` reads. Without this coordinator the plane is
-///     never exchanged, so a peer's enc keys never reach the directory → sealing to it
-///     resolves `None` → 0 content delivery.
-///   - [`EnvelopeKind::TransportDestination`] (CIRISEdge#406) — the PQ transport-
-///     attribution plane: the occurrence says how to SEAL, this SIGNED route says how
-///     to REACH + carries the ML-DSA-65 sig the #393 item-2 gate requires. Publish-own
-///     via the same `self_provider`. Without this coordinator the signed TD is published
-///     locally (`publish_self_transport_destination`) but never transferred, so a peer's
-///     item-2 gate reads "no hybrid-verified TransportDestination" → inbound frames
-///     drop unattributed (the item-2 dead end).
+/// The wire kinds this node runs an anti-entropy coordinator for, per admitted
+/// peer, in registration order (CIRISServer#646).
 ///
-/// Pure (no I/O) so both the compose boot path and the agent-embedded delivery
-/// controller share ONE assembly, and it is unit-testable without an engine.
+/// Until 0.5.218 this was SIX of persist v48's seventeen kinds, and the missing
+/// structural planes included rows the server itself writes on every roster
+/// change — a household (`Family`), a member leaving it
+/// (`FamilyMembershipRevocation`), a community growing
+/// (`CommunityMembershipWidening`), a device released
+/// (`IdentityOccurrenceRevocation`), a key revoked (`Revocation`). Each was
+/// admitted locally, `kick_replication` fired (§1 rule 7 of
+/// FSD/ROSTER_AND_DRIVE_CRUD.md), and the kick found no coordinator for the
+/// kind: the row stayed on the node that wrote it.
+///
+/// Every kind here is `Transferability::StructuralPlane` in persist's
+/// `consent_transferability` except `Attestation` (the one `Consentable`
+/// plane), so none of them needs a consent-object change: naming a structural
+/// kind in a grant's `payload.kinds` is REFUSED by persist. See
+/// [`NOT_REPLICATED_KINDS`] for the kinds deliberately left out and why, and
+/// `every_envelope_kind_is_routed_or_excluded_by_name` for the gate that keeps
+/// the two lists a partition of `EnvelopeKind::ALL`.
+///
+/// LOAD (the 2-vCPU canonical with 20+ peers): twelve kinds is twelve
+/// coordinators per peer, all on edge's ONE scheduler cadence (30 s,
+/// `SchedulerConfig::cadence`). Edge v31.0.0 has no per-kind cadence and no
+/// kick-only coordinator — a coordinator is scheduled or it does not exist,
+/// and the only cadence lever is mesh-config relief, which lengthens EVERY
+/// kind at once (CIRISEdge#440). So the six rarely-written planes added here
+/// cost a round each per tick even when empty. An empty round is a Summary of
+/// an indexed empty listing and one round-trip; the one non-trivial listing is
+/// `Revocation`, which edge fans out per cohort member (bridge
+/// `list_revocations`, one permit per member read). Correctness wins until edge
+/// offers a per-kind cadence or kick-only rounds; the operator's relief stays
+/// the brake.
+pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] = {
+    use ciris_edge::replication::EnvelopeKind as K;
+    [
+        // capacity:* / trace out, health:liveness in — the one Consentable
+        // plane. `key_grant:*` sets ride THIS plane (see `KeyGrant` in the
+        // exclusions).
+        K::Attestation,
+        // #144 / CIRISEdge#257 — the KERI publish-own key plane (verification
+        // + transport identity).
+        K::Key,
+        // CIRISEdge#305 — the KEX plane: the occurrence carries the
+        // content-tier `encryption_pubkeys` (x25519 + ML-KEM-768) that
+        // `resolve_peer_kex_pubkeys` reads. Without it a peer's enc keys never
+        // reach the directory, sealing to it resolves `None`: 0 content delivery.
+        K::IdentityOccurrence,
+        // CIRISEdge#406 — the PQ transport-attribution plane: paired with the
+        // publish-own `self_provider`, this offers THIS node's own SIGNED
+        // transport-dest (put via `publish_self_transport_destination`) so a
+        // peer's #393 item-2 attribution gate is satisfiable. Without a round
+        // for this kind the signed TD is published locally but never
+        // transferred (the item-2 dead end).
+        K::TransportDestination,
+        // THE COMMUNITY PLANE — the roster. A `cohort_scope: community` row is
+        // readable only by members, and the receiving node decides membership
+        // from ITS roster. Without this round the far side has no community to
+        // be a member OF, and one-sided initiation cannot work at all.
+        K::Community,
+        // Its REMOVAL primitive, wired with it deliberately: the roster is
+        // append-only, effective membership is `admitted AND NOT revoked`, so
+        // admissions without revocations replicate a roster that can only GROW
+        // — a removed member keeps passing `require_member` on the far side.
+        K::CommunityMembershipRevocation,
+        // ── CIRISServer#646 (0.5.218) — planes the server wrote and never
+        //    routed. Appended so the six above keep their order. ──
+        //
+        // persist v48 (#860): the roster's APPEND plane, the revocation's
+        // mirror. Adding a member to a room writes one (`communities.rs`,
+        // `put_community_membership_widening`); without this round a member
+        // added after first contact exists only on the node that added them,
+        // and the fold diverges per node (the `CommunityRosterFork` class the
+        // plane replaced).
+        K::CommunityMembershipWidening,
+        // The household roster (`family_api.rs` → `put_family`). Without it a
+        // household created on one device never reaches another, so a
+        // `cohort_scope: family` row sealed there has no family to be a member
+        // of anywhere else (CIRISServer#647's rung).
+        K::Family,
+        // A household member removed / leaving / a family dissolved
+        // (`family_api.rs` → `put_family_membership_revocation`). Same argument
+        // as `CommunityMembershipRevocation`: without it a removed member stays
+        // a member on every peer.
+        K::FamilyMembershipRevocation,
+        // A device released from the owner's self (`auth/occurrence.rs` →
+        // `put_identity_occurrence_revocation`). Without it a released device
+        // is still one of the owner's occurrences on every OTHER device, and
+        // keeps being sent the owner's `self` rows.
+        // (0.5.218, CSD-037: the plane carries SIGNED rows only, and until
+        // `self_devices::evict_device` no server path wrote one — release
+        // revoked nothing and `occurrence/revoke` used the unsigned local
+        // door. The producer is now the owner-signed eviction.)
+        K::IdentityOccurrenceRevocation,
+        // Key-level revocation (`admin_ops.rs` `put_revocation_for`). A
+        // revocation that stays on the node that wrote it protects nobody:
+        // every peer keeps admitting the revoked key's new rows. Edge serves it
+        // at `Projection::Global`.
+        K::Revocation,
+        // A signed H3 rough-only location claim (`location.rs`
+        // `mint_location_proof`). A GEOGRAPHIC community admits a member on
+        // `member_in_geographic_constraint`, which reads the proof from the
+        // EVALUATING node's directory, so the proof must reach every node that
+        // holds the room. Edge advertises it at `cohort` only.
+        K::LocationProof,
+        // ── persist v49.0.0 / edge v32 (0.5.218) — kinds 18 and 19. ──
+        //
+        // #910: the HOUSEHOLD roster's append plane, the family twin of
+        // `CommunityMembershipWidening`. A member added after a family was
+        // created now travels as its own signed row; without this round the
+        // grown roster exists only on the node that added them, and a device
+        // of that member never sees the household (the devices ladder's
+        // `family_on_b` rung, and the reason it was XFAIL on #910).
+        K::FamilyMembershipWidening,
+        // #912: CC 2 `listed` — a member's OWN signed choice to appear in a
+        // room's enumerable roster. It is the member's row about themselves;
+        // without this round their choice stays on their node and every other
+        // member renders a roster that disagrees with it.
+        K::CommunityMembershipListing,
+    ]
+};
+
+/// The wire kinds this node deliberately runs NO coordinator for, each with its
+/// reason, so an exclusion is a decision someone can read and revisit rather
+/// than an omission (CIRISServer#646). `REPLICATED_KINDS ∪ NOT_REPLICATED_KINDS`
+/// must be exactly `EnvelopeKind::ALL`: a kind persist and edge append later is
+/// in NEITHER list, and `every_envelope_kind_is_routed_or_excluded_by_name`
+/// goes red until someone decides.
+///
+/// Read only by that gate: it is a decision RECORD, which is why it lives here
+/// beside the list it partitions rather than inside the test.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 5] = {
+    use ciris_edge::replication::EnvelopeKind as K;
+    [
+        (
+            K::KeyGrant,
+            "rides the Attestation plane: persist emits a key_grant set as an attestation \
+             row (`key_grant:epoch:v1` / `key_grant:content:v1`) and edge routes it by \
+             prefix to `apply_replicated_key_grant`. Edge's advertise arm for KeyGrant is \
+             an empty list ('listing it under its own kind would offer every row twice'), \
+             so a KeyGrant coordinator would run empty rounds forever",
+        ),
+        (
+            K::AccordQuorumEvidence,
+            "no producer in this server: nothing here calls `put_accord_proposal` (the \
+             accord's partials ride the Attestation plane as `accord:*` rows, under edge's \
+             accord relay gate), and the plane is cursor-served (`CursorPull`, never \
+             advertised), so a coordinator per peer would pull an empty cursor every tick. \
+             Route it when a host assembles accord evidence bundles",
+        ),
+        (
+            K::Organization,
+            "operational-data plane (CIRISRegistry): this server builds edge without \
+             `OperationalProviders`, so edge refuses every delivered row TERMINALLY \
+             ('operational-kind admission is opted out', CIRISEdge#544); a coordinator \
+             would pull rows only to refuse them, and the server writes none",
+        ),
+        (
+            K::OrgMembership,
+            "operational-data plane (CIRISRegistry): as Organization, no \
+             `OperationalProviders`, so every delivered row is refused terminally, and the \
+             server writes none",
+        ),
+        (
+            K::PartnerRecord,
+            "operational-data plane (CIRISRegistry): as Organization, no \
+             `OperationalProviders`, so every delivered row is refused terminally, and the \
+             server writes none",
+        ),
+    ]
+};
+
+/// Assemble the per-peer [`ReplicationPeer`] coordinator set from a set of
+/// admitted peer `key_id`s: one coordinator per `(peer, kind)` for every kind in
+/// [`REPLICATED_KINDS`], peer-major, in that list's order.
+///
+/// Pure (no I/O) so the compose boot path, the agent-embedded delivery
+/// controller and `replication_reconcile`'s hot-add share ONE assembly, and it
+/// is unit-testable without an engine.
 pub(crate) fn build_replication_peers(
     desired: &[String],
 ) -> Vec<ciris_edge::replication::ReplicationPeer> {
-    use ciris_edge::replication::{EnvelopeKind, ReplicationPeer};
+    use ciris_edge::replication::ReplicationPeer;
     desired
         .iter()
         .flat_map(|p| {
-            [
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Attestation,
-                },
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Key,
-                },
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::IdentityOccurrence,
-                },
-                // CIRISEdge#406 — the TransportDestination plane: paired with the
-                // publish-own `self_provider`, this offers THIS node's own SIGNED
-                // transport-dest (put via `publish_self_transport_destination`) so a
-                // peer receives it and its #393 item-2 PQ attribution gate is
-                // satisfiable. Without a round for this kind the signed TD is
-                // published locally but never transferred (the item-2 dead end).
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::TransportDestination,
-                },
-                // THE COMMUNITY PLANE — the roster, and its removals.
-                //
-                // A `cohort_scope: community` row is only readable by members,
-                // and membership is decided by the ROSTER: the receiving node
-                // runs the same §4.3 predicate we do, resolving the caller's
-                // communities from `federation_communities`. Without a round for
-                // this kind the roster never crosses, so the far side has no
-                // community to be a member OF — every message it receives is
-                // scoped to a cohort it cannot see, and one-sided initiation
-                // (the common case: one person opens the chat) cannot work at
-                // all. The room existed on exactly one node.
-                //
-                // Structural plane, so this needs no consent-object change:
-                // `consent_transferability(Community)` is `StructuralPlane`, not
-                // `Consentable` — naming it in a grant's `payload.kinds` is
-                // REFUSED. It rides beside Key / IdentityOccurrence /
-                // TransportDestination, which are structural for the same reason.
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::Community,
-                },
-                // Its REMOVAL primitive, wired with it deliberately. The roster
-                // is append-only; effective membership is
-                // `admitted AND NOT revoked`, and `active_community_members`
-                // composes the two. Shipping the admissions without the
-                // revocations would replicate a roster that can only ever GROW
-                // on the far side — a removed member would keep passing
-                // `require_member` there forever, which is the failure the
-                // forward-secrecy primitive exists to prevent.
-                ReplicationPeer {
-                    peer_key_id: p.clone(),
-                    kind: EnvelopeKind::CommunityMembershipRevocation,
-                },
-            ]
+            REPLICATED_KINDS.iter().map(move |kind| ReplicationPeer {
+                peer_key_id: p.clone(),
+                kind: *kind,
+            })
         })
         .collect()
 }
@@ -4206,6 +4460,10 @@ pub(crate) fn kick_replication(reason: &'static str) -> bool {
         );
         return false;
     };
+    // CC 5.4.6 — whatever this kick carries may have moved the announced relay
+    // (an announce, a release, a claim). A nudge is a coalesced `Notify`: free
+    // on a node that is not a relay, one recompute on one that is.
+    crate::announced_relay::nudge();
     handle.spawn(async move {
         // ADMIT THE OWNER FIRST, HERE, so no caller has to remember. A round
         // publishes a self-plane row only if its attester is in the publish-own
@@ -4430,6 +4688,16 @@ pub(crate) async fn start_replication_runtime(
             //
             // `owed` outlives one iteration on purpose — see the kick below.
             let mut owed = false;
+            // CC 5.4.6 (CIRISServer#655) — the announced relay rides THIS loop:
+            // it is the one that keeps the self-publish set current, and the
+            // relay's answer is `own ∪ relayed`, so the two are refreshed by one
+            // hand. The role check (`infra:serve` from a root we trust) runs on
+            // the relay's own period; a nudge from `kick_replication` wakes the
+            // loop early and recomputes the sets only on a node that relays
+            // (see `announced_relay::refresh`).
+            let mut relay_due = tokio::time::Instant::now();
+            let mut relay_owed = false;
+            let mut nudged = false;
             loop {
                 // THE SET CHANGED ⇒ CARRY THE ROWS. Adding the owner without a
                 // kick left the rows it unlocks (owner-binding, occurrences)
@@ -4462,8 +4730,51 @@ pub(crate) async fn start_replication_runtime(
                 // polls every second instead — a bounded, startup-only window
                 // that ends on the first dispatch, since `owed` can only be set
                 // by a set that GAINED the owner and that happens once.
-                let wait = if owed { 1 } else { 30 };
-                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                // THE ANNOUNCED RELAY. A changed set is rows that just became
+                // publishable (or stopped being), so it carries a kick exactly
+                // as the owner's admission does — and the same debt rule: a
+                // kick that found no runtime yet is still owed.
+                let periodic = tokio::time::Instant::now() >= relay_due;
+                // THE MEMBERSHIP SWEEP (persist v52 / edge v38, CIRISPersist#955)
+                // rides the relay's period: a runtime built before the claim
+                // has no `membership_widener`, so an acceptance of this owner's
+                // invitation would be stored and never seated. The sweep is the
+                // widener's own call, on the owner binding's authority.
+                if periodic {
+                    if let Some(held) = SELF_PUBLISH.get() {
+                        let node = held.own_key_ids.first().cloned().unwrap_or_default();
+                        let _ = crate::membership_invites::widen_own_accepted_proposals(
+                            &held.engine,
+                            crate::node_key::wire_identity().unwrap_or(&node),
+                        )
+                        .await;
+                    }
+                }
+                if periodic || nudged {
+                    if let Some(held) = SELF_PUBLISH.get() {
+                        if crate::announced_relay::refresh(
+                            &held.engine,
+                            &held.own_key_ids,
+                            periodic,
+                        )
+                        .await
+                        {
+                            relay_owed = true;
+                        }
+                    }
+                    if periodic {
+                        relay_due =
+                            tokio::time::Instant::now() + crate::announced_relay::RELAY_REFRESH;
+                    }
+                }
+                if relay_owed && kick_replication("announced relay set changed") {
+                    relay_owed = false;
+                }
+                let wait = if owed || relay_owed { 1 } else { 30 };
+                nudged = crate::announced_relay::wait_for_nudge(std::time::Duration::from_secs(
+                    wait,
+                ))
+                .await;
             }
         }
     });
@@ -4491,6 +4802,61 @@ pub(crate) async fn start_replication_runtime(
     // chunk source refuse and the backend evict (CIRISEdge#614).
     let (pull_sink, revocations) =
         crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
+    // ── THE MEMBERSHIP WIDENER (edge v38.0.0 / persist v52.0.0, CIRISPersist#955) ──
+    //
+    // Nobody joins a family or community without their own signed acceptance
+    // (CIRISConstitution#133). The flow is three rows: the inviter's
+    // `membership:proposal:v1`, the invitee's `membership:acceptance:v1`, and
+    // the ROSTER WIDENING that seats them — and the widening is the only one of
+    // the three that changes who is in the group. Edge's bridge performs it on
+    // arrival of an acceptance of a proposal one of the widener's identities
+    // issued, so the inviter's person takes no second action. Left `None` (the
+    // default), acceptances are STORED and nothing is ever widened by this node:
+    // every invite accepted on the invitee's device would sit "accepted" here
+    // forever. That is exactly the host-hooks-left-unset class (an optional
+    // edge hook the server never set disabled chat bodies for six releases), so
+    // it is set here, and the reason it can still be `None` is written down.
+    //
+    // WHOSE KEY. The widening must carry the founder's PERSON signature: the
+    // roster's consensus counts raw SEAT keys, and a seat is the person's
+    // fed-ID, never a device acting for it (an acceptance may be device-signed;
+    // a widening may not). So the signer is the owner's fed-ID pen, opened on
+    // the owner binding's authority (`for_owned_node` — a loop's authority is
+    // the binding, not a session bearer, which a boot-time hook never has).
+    //
+    // WHEN IT IS `None`. An UNCLAIMED node at boot has no owner and no pen;
+    // the runtime is composed once per process (`RUNTIME`), and edge takes the
+    // widener by value, so a node claimed AFTER the runtime started has no
+    // widener until its next restart. The invite routes cover that window
+    // (`membership_invites::widen_held_acceptances`): listing a group's
+    // invites as a member re-attempts the widening for every accepted,
+    // unseated invitee with the caller's own pen — idempotent, and the same
+    // edge call (`membership::widen_on_acceptance`), not a second copy of it.
+    // A quorum group's widening needs M-of-N and is never auto-widened by a
+    // single pen (persist refuses it); see `FSD/MEMBERSHIP_INVITES.md` §3.1.
+    let membership_widener =
+        match crate::owner_signer_capsule::for_owned_node(engine, wire).await {
+            Ok(capsule) => {
+                tracing::info!(
+                    owner = %capsule.key_id(),
+                    "membership widener installed: an acceptance of a proposal this node's \
+                     owner issued is widened on arrival, signed by the owner's person key \
+                     (CIRISPersist#955)"
+                );
+                Some(ciris_edge::membership::MembershipWidener::new(vec![
+                    Arc::clone(capsule.edge_signer()),
+                ]))
+            }
+            Err(e) => {
+                tracing::info!(
+                    reason = %e,
+                    "membership widener NOT installed (no owner pen at runtime start) — \
+                     acceptances are stored and widened when a member lists the group's \
+                     invites; a restart after the claim installs it"
+                );
+                None
+            }
+        };
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
@@ -4517,6 +4883,37 @@ pub(crate) async fn start_replication_runtime(
             pull_sink,
             revocations,
         }),
+        // CIRISEdge#678 / CC 5.4.6 (CIRISServer#655) — the per-kind `SelfOwn`
+        // publish set. Installed on EVERY node and inert on all but a relay:
+        // until `announced_relay::refresh` finds this node holding
+        // `infra:serve` from a root it trusts, the closure answers `None` for
+        // every plane and edge keeps each on the self-publish set — the
+        // single-provider behaviour, byte for byte. On a relay it answers the
+        // Key and IdentityOccurrence planes with `own ∪ announced devices (∪
+        // their owners, Key only)`, reading the SAME live set the
+        // `self_provider` above reads, so an owner admitted after the claim is
+        // in the union without a rebuild. Routes (`TransportDestination`) are
+        // never relayed. The closure does no I/O; see `announced_relay`.
+        kind_publish_selector: Some(crate::announced_relay::selector(Arc::clone(
+            &self_publish_keys,
+        ))),
+        // persist v52 / edge v38 (CIRISPersist#955) — see the block above.
+        membership_widener,
+        // Every OTHER field edge v38.0.0 added to a host-set surface, named so
+        // the next adopt diffs against a list rather than a memory:
+        // `ReplicationRuntimeConfig::membership_widener` (set, above) is the
+        // only new runtime field; `SealedContentWiring` is unchanged; and
+        // `PullConfig::dag_adopt_batch_chunks` (CIRISEdge#765, the batched DAG
+        // adopt) keeps edge's default of 16 through `..PullConfig::default()`
+        // in `backend::spawn_puller_with` — the default is the measured one
+        // (CIRISPersist#957's flat per-chunk adopt time at 2 GiB).
+        //
+        // edge v38.1.0: NO new host-set field. The pending-KeyGrant emitter
+        // (CIRISEdge#775) is runtime-owned — spawned per sealed-content engine,
+        // so it runs because `sealed_content` is set above — and its wake and
+        // release-kick plumbing (`with_key_grant_wake`, `install_release_kick`)
+        // is wired by the runtime itself. The one host fact #768 needed, the
+        // backend's own node key, is set at boot (`arm_backend_node_key`).
         ..ReplicationRuntimeConfig::default()
     };
     let runtime = ReplicationRuntime::start(

@@ -752,28 +752,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # `drive.not_fetched` / `drive.not_granted` matter most: they are emitted
     # in NORMAL use (a file whose bytes are on another device), not only on
     # error, so they are the two a reader meets first.
-    "drive.author_signer_unavailable",
     "drive.bad_base64",
-    "drive.community_id_required",
-    "drive.family_id_required",
-    "drive.listing_failed",
-    "drive.no_node_key",
-    "drive.not_fetched",
-    "drive.not_granted",
-    "drive.not_a_member",
-    "drive.not_in_room",
-    "drive.owner_session_required",
-    "drive.publish_failed",
-    "drive.readable_by_nobody",
-    "drive.store_unavailable",
-    "drive.too_large",
-    "drive.unknown_cohort",
-    "drive.unopened",
-    "notes.author_signer_unavailable",
-    "notes.empty",
-    "notes.listing_failed",
-    "notes.no_node_key",
-    "notes.owner_session_required",
     # THE COMMUNITY PLANE (CIRISServer#594 / 0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md`
     # §4) — the same case as the drive plane above: a new surface whose refusals
     # land before the `ciris-client` bundle that carries them. The ids and their
@@ -781,22 +760,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # delegate_may_not_author` and `community.delegation_denied` are emitted
     # through `contacts_chat::require_verb`, which this guard does not scrape,
     # exactly like their `chat.*` twins — so they are not listed here.)
-    "community.already_member",
-    "community.author_signer_unavailable",
-    "community.bad_consensus_protocol",
-    "community.bad_tier",
-    "community.change_stale",
-    "community.last_founder",
-    "community.malformed_body",
-    "community.name_empty",
-    "community.not_a_contact",
-    "community.not_a_member",
-    "community.not_authorized",
-    "community.not_found",
-    "community.pair_room_fixed",
-    "community.quorum_pending",
-    "community.store_unavailable",
-    "community.write_failed",
     # THE DRIVE CRUD SURFACE (0.5.216, `FSD/ROSTER_AND_DRIVE_CRUD.md` §5) — the
     # same plane, the same queue: the ids the FSD names for replace / rename /
     # withdraw / move / range / notes edit, requested of the client beside the
@@ -821,6 +784,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "drive.too_large_for_whole_read",
     "drive.withdraw_failed",
     "drive.withdrawn",
+    # THE STREAMED UPLOAD (0.5.218, edge v36.1.0 `files::publish_stream`): a
+    # multipart body whose file part disagrees with its declared `size`, and a
+    # form field sent after the file part (the file streams to the seal, so
+    # every field must precede it). Queued for the client bundle beside the
+    # drive CRUD ids (CIRISClient#78).
+    "drive.declared_length_mismatch",
+    "drive.field_after_file",
     "notes.delegate_may_not_author",
     "notes.not_found",
     # THE HOUSEHOLD AND SELF-DEVICE PLANES (CIRISServer#627 / 0.5.216,
@@ -829,33 +799,100 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # release carrying their keys. The FSD lists the ids with their English so
     # the client can request them in one batch; these come off this list, and
     # the pyproject floor goes up, when a bundle carries them.
-    "family.already_member",
-    "family.author_signer_unavailable",
-    "family.bad_change",
-    "family.bad_consensus_protocol",
-    "family.bad_request",
-    "family.bad_role",
-    "family.delegate_may_not_author",
-    "family.last_founder",
-    "family.name_empty",
-    "family.not_a_member",
-    "family.not_authorized",
-    "family.not_found",
-    "family.owner_session_required",
-    "family.quorum_pending",
-    "family.readd_unsupported",
-    "family.store_unavailable",
-    "family.unknown_member_key",
-    "self.author_signer_unavailable",
-    "self.bad_request",
-    "self.delegate_may_not_author",
-    "self.label_empty",
-    "self.not_your_device",
-    "self.not_your_node",
-    "self.owner_session_required",
-    "self.release_incomplete",
-    "self.release_self_requires_force",
-    "self.store_unavailable",
+    # ANNOUNCE ANOTHER DEVICE (0.5.218, CIRISServer#678): the per-node announce
+    # made from the device holding the pen. Queued for the client bundle beside
+    # the self-device ids (CIRISClient#78).
+    "self.announce_not_your_node",
+    "self.announce_refused",
+    # EVICTING A DEVICE (0.5.218, CSD-037): release and occurrence/revoke became
+    # ONE signed act, and a part of it that did not complete is named by this
+    # id. CONSENT TO JOIN (0.5.218, the maintainer's ruling of 2026-09-30,
+    # CIRISConstitution#133 / CIRISPersist#955): every roster-growing door of
+    # the family and community surfaces refuses with ONE shared id until the
+    # invite flow ships. Both queued for the client bundle with their English
+    # (CIRISClient#78).
+    "self.evict_incomplete",
+    # (`membership.consent_required` retired at persist v52 / edge v38: the
+    # interim door it named opened as the invite flow below.)
+    # CONSENT TO JOIN, BUILT (0.5.218 at persist v52.0.0 / edge v38.0.0,
+    # CIRISPersist#955, `FSD/MEMBERSHIP_INVITES.md`): the invite flow's
+    # refusals — persist's eight consent rules each named by one id, the
+    # invitee's inbox gate, and the invitation's own lifecycle
+    # (`src/membership_invites.rs`, one function per id). Same queue as the
+    # planes above, requested of the client with their English (CIRISClient#78).
+    "membership.acceptance_mismatch",
+    "membership.already_answered",
+    "membership.awaiting_acceptance",
+    "membership.bad_expiry",
+    "membership.declined",
+    "membership.delegate_may_not_answer",
+    "membership.founding_member_unsigned",
+    "membership.invite_closed",
+    "membership.invite_expired",
+    "membership.invite_not_found",
+    "membership.invite_not_here_yet",
+    "membership.not_the_invitee",
+    "membership.not_the_proposer",
+    "membership.owner_session_required",
+    "membership.refused",
+    "membership.signer_unavailable",
+    "membership.store_unavailable",
+    "membership.supersede_cannot_add",
+    # ONE DEVICE HANDLES EACH EXCHANGE (0.5.218, CC 3.1.3.1,
+    # FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions` says which of the
+    # person's devices is answering — two states and one refusal, queued for
+    # the client bundle beside the self-device ids (CIRISClient#78).
+    "self.sessions_unavailable",
+    "session.state.handled_elsewhere",
+    "session.state.handled_here",
+    # THE CLAIM, NAMED (0.5.218, CIRISServer#678 client review: "refusals come
+    # back as prose"): claim-remote on the approving device, and setup/root on
+    # the device being claimed. Same queue (CIRISClient#78).
+    "claim.bad_request",
+    "claim.binding_unsigned",
+    "claim.cohort_invalid",
+    "claim.no_identity",
+    "claim.no_route",
+    "claim.node_code_invalid",
+    "claim.password_not_forwarded",
+    "claim.signer_unavailable",
+    "claim.target_refused",
+    "claim.target_unreachable",
+    "auth.claim.already_claimed",
+    "auth.claim.body_invalid",
+    "auth.claim.cohort_invalid",
+    "auth.claim.cohort_missing",
+    "auth.claim.no_pending_session",
+    "auth.claim.node_code_invalid",
+    "auth.claim.node_code_missing",
+    "auth.claim.owner_binding_missing",
+    "auth.claim.owner_binding_rejected",
+    "auth.claim.store_unavailable",
+    "auth.claim.wrong_node",
+    # WHERE EACH FILE IS (0.5.218, `FSD/FILE_CUSTODY.md`): the custody view's
+    # partial-answer reasons — NOT refusals; each rides a 200 in `why[]` and
+    # says what the view cannot know (an inline file's missing receipt, CC 5.2's
+    # uncountable self/family copies, a receipt that proves delivery only).
+    # Same queue as the planes above (CIRISClient#78); the English is in the FSD.
+    # (`custody.inline_no_receipt` and `custody.receipt_time_unknown` retired at
+    # edge v38.0.0 / persist v52: every file is receiptable and a receipt says
+    # when — CIRISPersist#953; no longer emitted, so no longer debt.)
+    "custody.copies_unobservable_by_design",
+    "custody.receipt_is_delivery_not_holding",
+    "custody.receipts_admitted_on_author_device",
+    "custody.receipt_signer_not_your_device",
+    "custody.receipts_unreadable",
+    "custody.commons_readable_by_holders",
+    # The maintainer's ruling on #704 ("no copy here is a receipt"): a device
+    # with the row and no bytes answers `holds: none` for itself; the other
+    # devices' "no copy" reports wait on persist's within-cohort custody
+    # acknowledgements (CIRISConstitution#130).
+    "custody.no_copy_reports_pending",
+    "custody.no_copy_here",
+    # THE CONTACT FLOW (0.5.218) — same queue as the planes above, requested of
+    # the client with their English (CIRISClient#78): the person's contact code
+    # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
+    # custody this host cannot honour (#639).
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

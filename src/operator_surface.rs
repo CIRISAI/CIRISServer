@@ -220,7 +220,8 @@ impl WithholdClass {
         }
     }
 
-    /// Classify one of edge's withhold reasons. **Exhaustive by construction.**
+    /// Classify one of edge's withhold reasons. Every variant at the pinned edge
+    /// tag is named; an unknown one from a newer edge reads as a Fault.
     #[must_use]
     pub const fn of(reason: WithholdReason) -> Self {
         match reason {
@@ -262,6 +263,20 @@ impl WithholdClass {
             // not in the record's own roster. Refusing is the feature.
             | WithholdReason::BlobArrivalScopeInsufficient
             | WithholdReason::BlobArrivalGroupMismatch
+            // edge v34.2.0 (CIRISEdge#718, CC 5.4.6 / CIRISConstitution#132) —
+            // a scoped body forwarded over the identity-plane link carries an
+            // in-link discriminator; one naming no derived address this node
+            // holds, or one present on a body that arrived ON a derived
+            // address, is the scope gate reaching a verdict. Refusing is the
+            // feature, beside the two arrival-scope arms above.
+            | WithholdReason::BlobDiscriminatorUnheld
+            | WithholdReason::BlobDiscriminatorOnDerivedAddress
+            // edge v37.0.0 (CIRISEdge#717) — a chunk fetch named a DAG the
+            // requester IS entitled to and a chunk that is not one of that
+            // DAG's chunks here: a request for content the scope gate never
+            // judged (another room's chunk named under this room's file).
+            // Refusing is the feature, the same verdict as the scope arms.
+            | WithholdReason::ChunkNotInNamedDag
             | WithholdReason::HoldingScopePeerNotInRoster
             // #169 LXMF — operator posture and advertised limits. Not a
             // propagation node; not holding mail for that destination; a
@@ -281,7 +296,13 @@ impl WithholdClass {
             | WithholdReason::LxmfPeerSyncUnsupported
             | WithholdReason::LxmfFrameOversized
             | WithholdReason::LxmfMailboxFull
-            | WithholdReason::LxmfRetentionExpired => Self::Policy,
+            | WithholdReason::LxmfRetentionExpired
+            // edge v34.0.0 (CIRISEdge#682) — identity rows follow the node's
+            // announce state: an unannounced device's identity-plane rows are
+            // served to its owner's own nodes and to whoever holds a code,
+            // never LISTED. The peer is outside the audience the owner chose
+            // (the per-node announce ruling, CIRISServer#655) — a verdict.
+            | WithholdReason::IdentityRowNodeNotAnnounced => Self::Policy,
             // Fail-closed on a failed read, or a missing local wiring input.
             WithholdReason::LocalIdentityMissing
             | WithholdReason::SendSetUnresolved
@@ -318,7 +339,12 @@ impl WithholdClass {
             // The requester's identity did not resolve, so there is no
             // destination to scope a mailbox to. Fail-closed and Red: the node
             // withheld without being able to establish who was asking.
-            | WithholdReason::LxmfRequesterUnidentified => Self::Fault,
+            | WithholdReason::LxmfRequesterUnidentified
+            // edge v34.0.0 (CIRISEdge#682) — the announce state could not be
+            // READ (`owner_of` ambiguous, or a directory fault); fail-closed to
+            // the node itself. A read that could not be made, beside the other
+            // unresolved reads: the operator is sent to the directory.
+            | WithholdReason::IdentityRowAnnounceUnresolved => Self::Fault,
             // Local state that cannot be put on the wire at all.
             WithholdReason::EnvelopeUnfetchable
             | WithholdReason::RowNotSerializable
@@ -353,6 +379,13 @@ impl WithholdClass {
             | WithholdReason::HoldingScopePublicGroup
             // The bytes do not decode as the wire this endpoint speaks.
             | WithholdReason::LxmfWireUnparseable => Self::Integrity,
+            // edge v37.0.0 made `WithholdReason` `#[non_exhaustive]`: a newer
+            // edge may name a refusal this server has not classified yet. It is
+            // read as a FAULT (Red) — never folded quietly into Policy — so an
+            // unclassified withhold is the loudest thing on the surface until
+            // an arm above names it. Every variant edge ships at the pinned tag
+            // is named above; this arm is reached only across a version skew.
+            _ => Self::Fault,
         }
     }
 

@@ -1,0 +1,23 @@
+# CSD-094 — approve a new device: the POST-STATE (the client's reading, CIRISClient#134): the owner
+# carried onto the second device, both claimed, one self room, a file written on the first opens on
+# the second. CSD-093 (the approval-code flow itself) gets its own declaration once CIRISServer#678
+# answers which address the code carries. The file relation is where CIRISEdge#716/#717 sit.
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}   # the phone dials the first device directly
+    - {id: X,  dials: [C],     accepts: R, announced: false}
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+    - {id: eve, owns: [X],      accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: room, kind: self, person: one}
+    - {rel: file, person: one, device: D1, size: 4096, name: small.bin}
+  actor: {person: one, device: D2}
+  negatives:
+    - {check: holds_no_row, node: X, dimension: "file:v1", person: one}

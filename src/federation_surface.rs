@@ -301,6 +301,40 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
         .collect();
+    // CIRISEdge#646 — where each blob pull found its holders, by `scope:source`
+    // (`self:author_nodes`, `community:claim_index`, …). For a `self` or `family`
+    // pull the source MUST be `*:author_nodes`: a `self:claim_index` key is the
+    // source rule regressing (a self blob emits no holder claim, CC 5.2). The
+    // selffiles ladder reads this key (CIRISServer#626); it was in edge's
+    // snapshot and the PyO3 dict, and on no HTTP surface.
+    let blob_pull_sources: serde_json::Map<_, _> = bundle
+        .blob_pull_sources
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
+
+    // edge v34.3.0 — three more receive-side ledgers the snapshot carries and
+    // this route did not fold (found by edge's own run of the selffiles
+    // declaration on v34.3.0). Each is `reason → count`; a non-zero count is
+    // a frame, a pull or a first contact that was REFUSED, and this is the
+    // only place an operator reads why without the log.
+    //   transport_inbound_drops — CIRISEdge#728: the Reticulum receive-side
+    //     choke point, by tag (`identity_frame_on_scoped_link` = a peer that
+    //     still selects links by peer alone, pre-#728).
+    //   blob_pull_refusals — CIRISEdge#717: a pull that fetched and refused
+    //     to STORE (`size_mismatch`, `stream_pointer_needs_dag_pull`); each
+    //     is a file that is not on this device.
+    //   first_contact_outcomes — CIRISEdge#683: the opaque-plane
+    //     first-contact door by label (`first_contact_admitted`, refusals).
+    let fold =
+        |m: &std::collections::HashMap<String, u64>| -> serde_json::Map<String, serde_json::Value> {
+            m.iter()
+                .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+                .collect()
+        };
+    let transport_inbound_drops = fold(&bundle.transport_inbound_drops);
+    let blob_pull_refusals = fold(&bundle.blob_pull_refusals);
+    let first_contact_outcomes = fold(&bundle.first_contact_outcomes);
 
     (
         StatusCode::OK,
@@ -324,8 +358,16 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "replication_duplicate_total": duplicates,
                 "replication_round_outcomes_total": round_outcomes,
                 "replication_round_routing": round_routing,
+                // edge v34.1.0+ (CIRISEdge#716/#722): frames that skipped the
+                // Channel-first path because they exceed its fragment cap and
+                // went Resource-first. Top-level on the snapshot; folded here.
+                "channel_first_skipped_over_cap": bundle.channel_first_skipped_over_cap,
                 "bootstrap_door_outcomes": bootstrap_door,
                 "blob_route_refusals": blob_route_refusals,
+                "blob_pull_sources": blob_pull_sources,
+                "blob_pull_refusals": blob_pull_refusals,
+                "transport_inbound_drops": transport_inbound_drops,
+                "first_contact_outcomes": first_contact_outcomes,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),
                 "receive_standing": crate::operator_surface::receive_standing(Some(&bundle)).as_str(),
                 "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),

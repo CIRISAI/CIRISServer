@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: "scenario to run: traceflow | genesis_seed | chat (see harness/mesh-repro/scenarios/)"
+        description: "scenario to run: traceflow | traceflow_prod | chat | selffiles | devices | genesis_seed (see harness/mesh-repro/scenarios/)"
         type: string
         default: traceflow
       window:
@@ -54,6 +54,10 @@ on:
       - "src/graph_config.rs"
       - "src/attest.rs"
       - "src/node_key.rs"
+      # The selffiles ladder's subject (CIRISServer#622): the drive's write and
+      # read doors, and the self-room driver that makes a second device OPEN.
+      - "src/drive.rs"
+      - "src/self_room_drive.rs"
       - "harness/mesh-repro/**"
       - ".github/workflows/mesh-harness.yml"
 
@@ -88,7 +92,10 @@ jobs:
         # Advisory-admitted, genesis-imported agent — the topology every production agent
         # runs and the blessed ladders never had. Its SUCCESS_STAGE is `served` until
         # CIRISEdge#659 lands; `arrive` is measured and expected red until then.
-        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat","traceflow_prod"]') }}
+        # selffiles (CIRISServer#622) is ONE person on TWO devices — the only shape
+        # a self room exists for — and its `opened_on_b` has been REQUIRED since
+        # 0.5.216; a REQUIRED rung that never runs in CI proves nothing on its own.
+        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat","traceflow_prod","selffiles"]') }}
     runs-on: ubuntu-latest
     # 0.5.166 raised this from 45: this ladder builds a test-anchor wheel, and
     # `lto = "thin"` + `codegen-units = 1` (CIRISServer#378) roughly doubles the
@@ -217,13 +224,29 @@ jobs:
             # topology is standalone, not an overlay (CIRISServer#455).
             chat)
               echo 'files=-f docker-compose.chat.yml' >> "$GITHUB_OUTPUT"
-              echo 'services=canonical node-a node-b'  >> "$GITHUB_OUTPUT" ;;
+              echo 'services=canonical node-a node-b'  >> "$GITHUB_OUTPUT"
+              echo 'profiles='                         >> "$GITHUB_OUTPUT" ;;
+            # ONE person, TWO devices: the chat topology's node-a plus node-c,
+            # which lives behind the `scale` compose profile. The profile has to
+            # reach the logs and teardown steps too — a compose command without
+            # it does not see node-c, and the teardown would leave it running.
+            selffiles)
+              echo 'files=-f docker-compose.chat.yml' >> "$GITHUB_OUTPUT"
+              echo 'services=canonical node-a node-c'  >> "$GITHUB_OUTPUT"
+              echo 'profiles=scale'                    >> "$GITHUB_OUTPUT" ;;
+            # Dispatch-only: the chat ladder plus a second device and a household.
+            devices)
+              echo 'files=-f docker-compose.chat.yml' >> "$GITHUB_OUTPUT"
+              echo 'services=canonical node-a node-b node-c' >> "$GITHUB_OUTPUT"
+              echo 'profiles=scale'                    >> "$GITHUB_OUTPUT" ;;
             genesis_seed)
               echo 'files=-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis.yml' >> "$GITHUB_OUTPUT"
-              echo 'services=canonical agent' >> "$GITHUB_OUTPUT" ;;
+              echo 'services=canonical agent' >> "$GITHUB_OUTPUT"
+              echo 'profiles=' >> "$GITHUB_OUTPUT" ;;
             *)
               echo 'files=-f docker-compose.yml -f docker-compose.traceflow.yml' >> "$GITHUB_OUTPUT"
-              echo 'services=canonical agent' >> "$GITHUB_OUTPUT" ;;
+              echo 'services=canonical agent' >> "$GITHUB_OUTPUT"
+              echo 'profiles=' >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Run the stage ladder
@@ -231,6 +254,10 @@ jobs:
         env:
           DOCKER_BUILDKIT: "0"
           SKIP_BUILD: "1"          # reuse the wheel built above
+          # Leave the stack up. The scenario tears it down on exit otherwise,
+          # so the log step below read nothing and every failed ladder uploaded
+          # empty node logs; the teardown step at the end of this job owns it.
+          KEEP: "1"
         working-directory: harness/mesh-repro
         run: |
           ./run_scenario.sh "${{ matrix.scenario }}" \
@@ -239,27 +266,35 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         working-directory: harness/mesh-repro
+        env:
+          COMPOSE_PROFILES: ${{ steps.topo.outputs.profiles }}
         run: |
+          # The WHOLE log per node. A 400-line tail kept only the last minutes
+          # of a 15-minute ladder, and the handshake that failed happened in the
+          # first one. Compressed: the logs are DEBUG and run to megabytes.
           for svc in ${{ steps.topo.outputs.services }}; do
             echo "════════ $svc ════════"
             docker compose -p "ciris-${{ matrix.scenario }}" \
               ${{ steps.topo.outputs.files }} \
-              logs "$svc" 2>/dev/null | tail -400 || true
+              logs --no-color "$svc" 2>/dev/null || true
           done > harness-logs.txt
           tail -120 harness-logs.txt
+          gzip -k harness-logs.txt
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mesh-harness-${{ matrix.scenario }}-logs
-          path: harness/mesh-repro/harness-logs.txt
+          path: harness/mesh-repro/harness-logs.txt.gz
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Tear down
         if: always()
         working-directory: harness/mesh-repro
+        env:
+          COMPOSE_PROFILES: ${{ steps.topo.outputs.profiles }}
         run: |
           docker compose -p "ciris-${{ matrix.scenario }}" \
             ${{ steps.topo.outputs.files }} \

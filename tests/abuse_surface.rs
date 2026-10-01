@@ -258,7 +258,7 @@ async fn a_self_asserted_witness_can_forge_age_assurance_about_a_third_party_tod
         "forged-age-assurance",
         attestation_type::SCORES,
         "abuse-victim",
-        scores_envelope("age_assurance:level:adult:v1", "abuse-victim", 1.0),
+        scores_envelope("age_assurance:provider:adult:v1", "abuse-victim", 1.0),
         Utc::now(),
     )
     .await;
@@ -283,7 +283,7 @@ async fn a_self_asserted_witness_can_forge_age_assurance_about_a_third_party_tod
                 && r.attestation_envelope
                     .get("dimension")
                     .and_then(serde_json::Value::as_str)
-                    == Some("age_assurance:level:adult:v1")),
+                    == Some("age_assurance:provider:adult:v1")),
         "the forged age-assurance row reads back as a witness-attested level"
     );
 }
@@ -701,7 +701,7 @@ async fn a_two_key_sybil_still_inflates_its_own_capacity() {
         attestation_type::SCORES,
         "sybil-scorer",
         serde_json::json!({
-            "dimension": "consent:state:granted:analyze:v1",
+            "dimension": "consent:state:granted:v1",
             "score": 1.0,
             "confidence": 1.0,
             "epistemic_mode": "direct",

@@ -27,6 +27,10 @@
 //!      Auth: a SURVIVING active occurrence (or the root). For a *stolen* device
 //!      you MUST sign with a different surviving key — never the compromised one
 //!      (CEG §11.7.4). A *voluntary* self-revoke (signer == revoked) is allowed.
+//!      **Moved in 0.5.218** to [`crate::self_devices`] (CSD-037): the owner's
+//!      session authorises it, the owner's pen signs it through persist's
+//!      SIGNED, replicating door, and it is the same act as a node release
+//!      (`self_devices::evict_device`). This router no longer serves it.
 //!   3. `GET /v1/self/occurrences?identity_key_id=…` — LIST the active
 //!      occurrences of a self (for the client identity page's device list).
 //!      Read-only; unauthenticated by design (an occurrence roster is public
@@ -44,7 +48,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::types::{IdentityOccurrence, IdentityOccurrenceRevocation};
+use ciris_persist::federation::types::IdentityOccurrence;
 use ciris_persist::federation::{EncryptionPubkeys, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
@@ -407,132 +411,18 @@ async fn add_occurrence(
         .into_response()
 }
 
-// ─── POST /v1/self/occurrence/revoke (REVOKE) ────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct RevokeOccurrenceRequest {
-    /// The root identity the occurrence speaks for.
-    identity_key_id: String,
-    /// The occurrence (device) to remove from the self.
-    occurrence_key_id: String,
-    /// Optional operator/ceremony annotation (e.g. "laptop lost 2026-06-23").
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct RevokeOccurrenceResponse {
-    identity_key_id: String,
-    /// The occurrence that was revoked. After this it fails `signer_acts_for`.
-    occurrence_key_id: String,
-    /// The surviving key that authorized the revocation (the request signer; the
-    /// recorded `witness_set` single-vouch, §11.7.4).
-    revoked_by: String,
-    /// RFC-3339 effective time (== now; the active-state filter is
-    /// `effective_at <= now`, so the revocation is effective immediately).
-    effective_at: String,
-}
-
-async fn revoke_occurrence(
-    State(st): State<OccurrenceState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    // (1) Verify the request hybrid signature.
-    let caller = match verify::verify_request(&st.engine, &headers, &body, st.policy).await {
-        Ok(c) => c,
-        Err(VerifyError::MissingHeader(h)) => {
-            return err(StatusCode::UNAUTHORIZED, format!("missing {h}"))
-        }
-        Err(VerifyError::NoDirectory) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "no federation directory")
-        }
-        Err(VerifyError::SignatureInvalid(e)) => {
-            return err(
-                StatusCode::UNAUTHORIZED,
-                format!("signature verification failed: {e}"),
-            )
-        }
-    };
-
-    // (2) Parse.
-    let req: RevokeOccurrenceRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request body: {e}")),
-    };
-
-    // (3) Admission: a SURVIVING active occurrence (or the root) authorizes the
-    // removal (§11.7.4 single-vouch — "the revoking occurrence OR the identity").
-    // For a STOLEN device you MUST sign with a different surviving key, never the
-    // compromised one — that is exactly why a backup occurrence is enrolled. A
-    // VOLUNTARY self-revoke (signer == revoked) is permitted (a device leaving on
-    // its own); the producer-side helper (verify::sign_occurrence_revocation) does
-    // not forbid it, and the surviving-key requirement is a flow property of the
-    // stolen-device case, not a server invariant we can enforce (the server cannot
-    // know the key is compromised). We DO require the signer to currently act for
-    // the self, so a revoked / unrelated key cannot revoke another's device.
-    if !verify::signer_acts_for(&st.engine, &caller.key_id, &req.identity_key_id).await {
-        return err(
-            StatusCode::FORBIDDEN,
-            "signer is neither the identity key nor an active occurrence of it — \
-             revoke a device by signing with a surviving key you still control",
-        );
-    }
-
-    // (4) Record the append-only revocation. persist's *_active reads compose it,
-    // so after this the revoked key fails signer_acts_for. The witness_set carries
-    // the single vouch [revoker] (§11.7.4); persist computes persist_row_hash.
-    let now = chrono::Utc::now();
-    let revocation = IdentityOccurrenceRevocation {
-        identity_key_id: req.identity_key_id.clone(),
-        occurrence_key_id: req.occurrence_key_id.clone(),
-        revoked_at: now,
-        effective_at: now,
-        reason: req.reason,
-        witness_set: vec![caller.key_id.clone()],
-        persist_row_hash: String::new(),
-    };
-    // persist v16.0.0 (CIRISPersist#421) closed the gap 0.5.100 deliberately refused
-    // to ship: the wire revocation was UNSIGNED, so any consented peer could kill any
-    // identity's sealability (a permanent-DoS forgery). v16 splits the primitive:
-    //   * put_identity_occurrence_revocation      — signed gate ({attesting_key_id,
-    //     signed_envelope, signature} + signer_acts_for §11.7.4 single-vouch-for-self).
-    //     This is the REPLICATED path.
-    //   * put_identity_occurrence_revocation_local — trusted-local, signature columns
-    //     NULL, EXCLUDED from the signed replication read, never reachable from the
-    //     replication apply. "Engine-internal writes on behalf of the local user where
-    //     the revocation is locally produced — NOT peer-received."
-    // THIS endpoint is precisely the latter: an owner-authenticated, locally-produced
-    // revocation over HTTP. So it takes the _local path — which is byte-for-byte the
-    // behaviour we already had (revocation carriage was never wired, #227 S2), minus
-    // the forgery surface. We do NOT synthesise a signature here: we hold no mandate to
-    // sign as an arbitrary `identity_key_id`, and faking one would re-open the very DoS
-    // the gate closes. Wiring the SIGNED, replicating revocation (now finally possible,
-    // with list_signed_identity_occurrence_revocations_for as its byte-exact re-read) is
-    // tracked separately as the #227 S2 carriage work.
-    if let Err(e) = st
-        .engine
-        .federation_directory()
-        .put_identity_occurrence_revocation_local(revocation)
-        .await
-    {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("put_identity_occurrence_revocation: {e}"),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(RevokeOccurrenceResponse {
-            identity_key_id: req.identity_key_id,
-            occurrence_key_id: req.occurrence_key_id,
-            revoked_by: caller.key_id,
-            effective_at: now.to_rfc3339(),
-        }),
-    )
-        .into_response()
-}
+// ─── POST /v1/self/occurrence/revoke — MOVED (0.5.218) ───────────────────────
+//
+// The revoke lived here until 0.5.218, authorised by a request hybrid-signed by a
+// surviving device key and written through persist's trusted-LOCAL door
+// (`put_identity_occurrence_revocation_local`): unsigned, EXCLUDED from the signed
+// replication read, so the revocation never left the node that wrote it (the
+// #227 S2 carriage gap), and unreachable from the app, which authenticates with a
+// bearer and got 401 on every call (CSD-037). It is now
+// `crate::self_devices::revoke_occurrence`, which authorises the OWNER's session,
+// signs the revocation with the owner's pen through persist's SIGNED door, and
+// shares one implementation with node release (`self_devices::evict_device`).
+// `tests/occurrence.rs` gates that the local door has no caller in `src/`.
 
 // ─── GET /v1/self/occurrences (LIST) ─────────────────────────────────────────
 
@@ -562,8 +452,9 @@ struct OccurrenceView {
     /// ever `true` under `include_revoked=true`.
     revoked: bool,
     /// The owner's display label for this device (`POST /v1/self/occurrence/label`).
-    /// Returned ONLY to the identity's own owner session: the roster itself is
-    /// public binding metadata, the name a person gave their phone is not.
+    /// Returned ONLY to the identity's own owner session. The roster is public
+    /// only for the nodes the owner announced (CIRISServer#655); the name a
+    /// person gave their phone is never public.
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
 }
@@ -571,6 +462,11 @@ struct OccurrenceView {
 #[derive(Debug, Serialize)]
 struct ListOccurrencesResponse {
     identity_key_id: String,
+    /// `owner` — the identity's own session read every row, labels included.
+    /// `public` — everyone else: only the occurrences that are nodes the owner
+    /// ANNOUNCED (CIRISServer#655). An owner with no announced node and an
+    /// unknown identity get the identical `public` empty answer.
+    audience: &'static str,
     /// The currently-ACTIVE occurrences (admitted, not revoked) — the device list
     /// — followed, under `include_revoked=true`, by the revoked ones.
     occurrences: Vec<OccurrenceView>,
@@ -592,28 +488,116 @@ fn occurrence_view(
     }
 }
 
+/// Who a roster read is served to (CIRISServer#655, the maintainer's ruling of
+/// 2026-09-25 under the lightnet/darknet split — CC 5.4.6).
+enum RosterAudience {
+    /// The identity's own owner session on this node: every row, with labels.
+    Owner,
+    /// Anyone else. They see the occurrences that ARE announced nodes — the
+    /// devices the person chose to announce, that people can contact them
+    /// through — and nothing else. With no announced node that is the empty
+    /// answer an unknown identity gets, so the read does not reveal that the
+    /// person exists.
+    Public,
+}
+
+impl RosterAudience {
+    fn token(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// The occurrence keys a stranger may see for `owner`: their ANNOUNCED nodes
+/// (federation-scope owner-bindings — announce is per node), each widened to
+/// every key of THIS node when it is this node, because a split install binds
+/// the node key while its content occurrence is the actor's (the same fold
+/// `peer::own_keys_of_this_node` exists for).
+async fn public_occurrence_keys(
+    engine: &Engine,
+    owner: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let announced = crate::auth::ownership::announced_nodes_of(engine, owner).await?;
+    let mut keys: std::collections::HashSet<String> = announced.iter().cloned().collect();
+    if let Ok(engine_key) = engine.local_derived_key_id().await {
+        let own = crate::peer::own_keys_of_this_node(&engine_key);
+        if own.iter().any(|k| keys.contains(k)) {
+            keys.extend(own);
+        }
+    }
+    Ok(keys)
+}
+
 async fn list_occurrences(
     State(st): State<OccurrenceState>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
     let directory = st.engine.federation_directory();
+    // WHO IS ASKING decides WHAT they see. The roster is public — people must be
+    // contactable — but not EXPOSED: a stranger sees only the devices the person
+    // chose to announce. Everything else is the owner's.
+    let audience = match crate::family_api::owner_caller(&st.engine, &headers, true).await {
+        Ok(c) if c.owner_key_id == q.identity_key_id => RosterAudience::Owner,
+        _ => RosterAudience::Public,
+    };
+    let empty = || {
+        (
+            StatusCode::OK,
+            Json(ListOccurrencesResponse {
+                identity_key_id: q.identity_key_id.clone(),
+                audience: RosterAudience::Public.token(),
+                occurrences: Vec::new(),
+            }),
+        )
+            .into_response()
+    };
+    let public_ids: Option<std::collections::HashSet<String>> = match audience {
+        RosterAudience::Owner => None,
+        RosterAudience::Public => {
+            match public_occurrence_keys(&st.engine, &q.identity_key_id).await {
+                Ok(keys) if keys.is_empty() => return empty(),
+                Ok(keys) => Some(keys),
+                // Fail CLOSED, and silently to the caller: an error answer would
+                // differ from the unknown-identity one.
+                Err(e) => {
+                    tracing::warn!(
+                        identity = %q.identity_key_id,
+                        error = %e,
+                        "occurrence roster: could not read which nodes the owner announced — \
+                         serving the empty public answer"
+                    );
+                    return empty();
+                }
+            }
+        }
+    };
+    let visible = |o: &IdentityOccurrence| {
+        public_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&o.occurrence_key_id))
+    };
     let active = match directory
         .list_identity_occurrences_active(&q.identity_key_id)
         .await
     {
         Ok(occs) => occs,
         Err(e) => {
+            if public_ids.is_some() {
+                return empty();
+            }
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("list_identity_occurrences_active: {e}"),
-            )
+            );
         }
     };
     // Labels are the OWNER's, and only the owner reads them.
-    let labels = match crate::family_api::owner_caller(&st.engine, &headers, true).await {
-        Ok(c) if c.owner_key_id == q.identity_key_id => {
-            crate::self_devices::labels_for(&st.engine, &c.owner_key_id).await
+    let labels = match audience {
+        RosterAudience::Owner => {
+            crate::self_devices::labels_for(&st.engine, &q.identity_key_id).await
         }
         _ => std::collections::HashMap::new(),
     };
@@ -621,6 +605,7 @@ async fn list_occurrences(
         active.iter().map(|o| o.occurrence_key_id.clone()).collect();
     let mut occurrences: Vec<OccurrenceView> = active
         .into_iter()
+        .filter(|o| visible(o))
         .map(|o| occurrence_view(o, false, &labels))
         .collect();
     if q.include_revoked {
@@ -630,16 +615,20 @@ async fn list_occurrences(
         {
             Ok(all) => all,
             Err(e) => {
+                if public_ids.is_some() {
+                    return empty();
+                }
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("list_identity_occurrences_for: {e}"),
-                )
+                );
             }
         };
         let mut seen = std::collections::HashSet::new();
         occurrences.extend(
             all.into_iter()
                 .filter(|o| !active_ids.contains(&o.occurrence_key_id))
+                .filter(|o| visible(o))
                 .filter(|o| seen.insert(o.occurrence_key_id.clone()))
                 .map(|o| occurrence_view(o, true, &labels)),
         );
@@ -648,6 +637,7 @@ async fn list_occurrences(
         StatusCode::OK,
         Json(ListOccurrencesResponse {
             identity_key_id: q.identity_key_id,
+            audience: audience.token(),
             occurrences,
         }),
     )
@@ -661,10 +651,6 @@ async fn list_occurrences(
 pub fn router(engine: Arc<Engine>, policy: HybridPolicy) -> Router {
     Router::new()
         .route("/v1/self/occurrence", axum::routing::post(add_occurrence))
-        .route(
-            "/v1/self/occurrence/revoke",
-            axum::routing::post(revoke_occurrence),
-        )
         .route("/v1/self/occurrences", axum::routing::get(list_occurrences))
         .with_state(OccurrenceState { engine, policy })
 }

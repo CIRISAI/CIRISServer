@@ -166,7 +166,12 @@ fn gate_custody_floor_admits_hardware_and_refuses_software() {
     );
 
     policy
-        .check("release-gate-holder", Some(&external_se_evidence(now)), now)
+        .check(
+            "release-gate-holder",
+            None,
+            Some(&external_se_evidence(now)),
+            now,
+        )
         .expect(
             "🚫 RELEASE GATE [trust-root-baked] — DO NOT TAG.\n\
              Unsafe to ship: correctly-shaped FIPS hardware custody evidence is REFUSED, so\n\
@@ -189,7 +194,7 @@ fn gate_custody_floor_admits_hardware_and_refuses_software() {
     ] {
         assert!(
             policy
-                .check("release-gate-holder", evidence.as_ref(), now)
+                .check("release-gate-holder", None, evidence.as_ref(), now)
                 .is_err(),
             "\n\
              🚫 RELEASE GATE [trust-root-baked] — DO NOT TAG.\n\

@@ -1,0 +1,20 @@
+# CSD-092 — share my contact code: bob's code names his ANNOUNCED device; alice adds him by it.
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C],    accepts: R, announced: true}
+    - {id: B, dials: [C, A], accepts: R, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: R}
+    - {id: bob,   owns: [B], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: reachable, node: A, person: bob, min: 1}
+    - {rel: contact, from: alice, to: bob, via: code, nodes: all}   # GET /v1/self/contact-code on B (0.5.218, #673)
+    - {rel: reachable, node: B, person: alice, min: 1}
+    - {rel: contact, from: bob, to: alice, via: owner}
+    - {rel: room, id: pair, kind: pair, members: [alice, bob], keyed: true}
+  actor: {person: alice, device: A}

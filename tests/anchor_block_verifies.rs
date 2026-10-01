@@ -24,11 +24,19 @@
 //! This is not a generator. It runs persist's real `root_binding` — the walk the
 //! canonical runs when the agent announces — against a directory seeded exactly
 //! as a harness node seeds one, and asserts the terminus CONFIRMS. When it fails
-//! it prints persist's `detail`, which names the link and quotes verify. The
-//! block itself is minted by the substrate's generator (CIRISPersist#805 asks
-//! persist to ship it); until then CIRISEdge's `tests/anchor_block_generate.rs`
-//! mints the identical bytes ONLY while it pins the same persist + verify as
-//! this repo — Ed25519 is deterministic, so compare `SCRUB` to know.
+//! it prints persist's `detail`, which names the link and quotes verify.
+//!
+//! The block itself is minted by PERSIST (v47.4.0+, CIRISPersist#805;
+//! CIRISServer#637): from a CIRISPersist checkout at the tag Cargo.lock pins,
+//!
+//! ```text
+//! cargo run --example mint_test_anchor --features test-anchor
+//! ```
+//!
+//! prints all six values for the shared harness seed plus a
+//! `CIRIS_TEST_TRUST_ROOT_MINTED_BY` line naming the pair; paste all seven.
+//! CIRISEdge's old `tests/anchor_block_generate.rs` is deleted. Ed25519 is
+//! deterministic, so compare `SCRUB` to know whether a block is this pair's.
 #![cfg(feature = "test-anchor")]
 
 use std::collections::BTreeMap;
@@ -109,8 +117,9 @@ async fn the_compose_anchor_block_roots_under_this_repos_pins() {
             "the compose anchor block does NOT root under this repo's pins: {} — {rejection:?}\n\
              The scrub in harness/mesh-repro/docker-compose.yml was minted against a \
              different persist/verify pair. Re-mint it against the pins in Cargo.lock \
-             (see this file's header for where the generator lives) and paste all six \
-             values; the anchor pubkeys and SEED will not change, the two SCRUB values will.",
+             (from a CIRISPersist checkout at the pinned tag: `cargo run --example \
+             mint_test_anchor --features test-anchor`) and paste all seven lines; the \
+             anchor pubkeys and SEED will not change, the two SCRUB values will.",
             rejection.kind()
         ),
     }

@@ -42,7 +42,21 @@ HINT_arrive="the agent shipped but the canonical admitted no trace rows. Read th
 # and the reconciler's. Same facts, production's words.
 stage_consent()  { harness_log_count agent "emitted directed replication-consent grant"; }
 stage_converge() { harness_log_count agent "converged to [1-9][0-9]* consent peers"; }
-stage_ship()     { harness_log_count agent '"replication_envelopes_served_total":[1-9]'; }
+# SHIP, read on BOTH sides. The agent's counter alone read 0 on every run since
+# this ladder was written, with `arrive=15` beside it: edge's
+# `envelopes_sent_total` does not count the proactive push (#927) that now
+# carries the traces, so the rung measured a door the rows no longer use. The
+# old verdict's success short-circuit skipped REQUIRED stages, which hid it; it
+# surfaced the moment that was fixed (selffiles negatives, 0.5.218). The
+# RECEIVER's line names the sender, the plane and the count, so it is the
+# direct evidence; the counter stays so a future edge that counts pushes still
+# reads here.
+stage_ship() {
+  local sent recv
+  sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]')"
+  recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris-agent[^"]*" envelopes=[1-9]')"
+  echo $(( ${sent:-0} + ${recv:-0} ))
+}
 
 # ── the production-shape assertions, before any rung is read ────────────────
 harness_scenario_prepare() {

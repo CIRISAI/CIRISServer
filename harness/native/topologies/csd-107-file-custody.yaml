@@ -1,0 +1,24 @@
+# CSD-107 — where each file is (the file-custody view, FSD/FILE_CUSTODY.md): ONE person on TWO
+# devices, a 24 MiB self file (a chunk DAG, so it carries delivery receipts — CC 5.3.3.6) written on
+# the first and opened on the second, then the author device's `GET /v1/files/{id}/custody` must
+# name the second device `received` and count both devices. The client's CSD drives the custody
+# screen from the actor's (D1's) point of view. An inline (<= 1 MiB) file has no receipt at this
+# pin (CIRISPersist#953) and would fail the custody relation by name.
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}   # the second device dials the author: one-hop bodies
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: room, kind: self, person: one}
+    - {rel: file, person: one, device: D1, size: 25165824, name: custody-24MiB.bin}
+    - {rel: custody, person: one, device: D1, file: last}
+  actor: {person: one, device: D1}
+  negatives:
+    - {check: no_wider_self_rows, person: one}

@@ -76,6 +76,11 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 
+/// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
+/// Key and IdentityOccurrence rows of every announced device and its owner,
+/// through edge's per-kind `SelfOwn` publish selector (CIRISEdge#678).
+pub mod announced_relay;
+
 /// The v39 tier crossing (`enter_mesh` + `widen_audience`) composed in one
 /// place, replacing `attestation_promote`.
 pub mod attestation_crossing;
@@ -128,7 +133,9 @@ mod compose;
 /// The read gate is persist's own §4.3 predicate (`CallerScope::admits`), so a
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
+pub mod mls_state;
 pub mod owner_signer_capsule;
+mod roster_rows;
 
 /// **The self-occurrence envelope builder, exposed for tests** (CIRISServer#454).
 ///
@@ -315,12 +322,29 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+pub mod membership_invites;
+pub mod pair_intents;
+
+/// Rendering an error with its whole cause chain, for the one line an operator
+/// reads (CIRISServer#586).
+pub mod error_chain;
+/// Where each file is — the custody view (`FSD/FILE_CUSTODY.md`): the person's
+/// devices against persist's custody and edge's delivery receipts.
+pub mod file_custody;
 pub mod media_gate;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a
 /// device key.
 pub mod self_devices;
+/// Old self files open on a device claimed later: the re-wrap trigger
+/// (CIRISServer#678).
+pub mod self_rewrap;
 pub mod self_room_drive;
+/// **One device handles each exchange** (CC 3.1.3.1, CIRISPersist#782): the
+/// session-claim gate every autonomous act for the person passes, the
+/// attendance that decides where a claim is taken, the renewal loop, and
+/// `GET /v1/self/sessions` (`FSD/SESSION_CLAIMS.md`).
+pub mod session_claims;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);
@@ -1351,6 +1375,25 @@ mod python {
     static _KEEP_VERIFY_FFI: extern "C" fn() -> usize =
         ciris_verify_ffi::ciris_verify_ffi_link_anchor;
 
+    /// An error as a Python exception **with its whole cause chain**
+    /// (CIRISServer#586).
+    ///
+    /// `e.to_string()` renders only the OUTERMOST context and silently drops
+    /// every `source()` beneath it. So a boot that failed deep in the substrate
+    /// reached an operator as the one line we happened to wrap it in —
+    /// `build shared persist Engine (hybrid hardware signer)`, which names a
+    /// requirement and not one fact about what was missing. The cause WAS
+    /// produced; we threw it away at the FFI boundary, and the node crash-looped
+    /// sixteen times without ever saying why.
+    ///
+    /// Every PyO3 boundary that surfaces a Rust error goes through here:
+    /// [`crate::error_chain::render`] walks the chain outermost-first and says
+    /// each distinct fact once. Takes anything convertible to `anyhow::Error`, so
+    /// a plain `std::error::Error` keeps its `source()` chain too.
+    fn py_err(e: impl Into<anyhow::Error>) -> pyo3::PyErr {
+        pyo3::exceptions::PyRuntimeError::new_err(crate::error_chain::render(&e.into()))
+    }
+
     /// Plain block_on for the CLI-shaped entries (`import-traces`, `config`,
     /// console serve) — always fresh processes with no ambient runtime, and
     /// their futures need not be `Send` (import_traces holds a `dyn io::Read`
@@ -1360,10 +1403,8 @@ mod python {
         // embedded agent/fold topology, on exactly the small hosts the floor exists
         // for. `Runtime::new()` here would have given them two workers while the
         // fix reported success.
-        let rt = crate::node_runtime::build("ciris-node")
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        rt.block_on(fut)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        let rt = crate::node_runtime::build("ciris-node").map_err(py_err)?;
+        rt.block_on(fut).map_err(py_err)
     }
 
     fn rt_block_on_reentrant<F>(fut: F) -> PyResult<()>
@@ -1387,8 +1428,7 @@ mod python {
         let run = || -> PyResult<()> {
             // FLOORED for the same reason as `rt_block_on` — this is the reentrant
             // serve path, same hosts, same two-worker exposure.
-            let rt = crate::node_runtime::build("ciris-node")
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            let rt = crate::node_runtime::build("ciris-node").map_err(py_err)?;
             // ── RUNTIME-TOPOLOGY PROBE (#315 field diagnosis) ────────────────
             // Prove the SERVE runtime's time driver independently of any task
             // spawned onto it: if this heartbeat logs, timers work HERE; a
@@ -1408,8 +1448,7 @@ mod python {
                     "serve runtime timer heartbeat OK — time driver delivering"
                 );
             });
-            rt.block_on(fut)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            rt.block_on(fut).map_err(py_err)
         };
         if tokio::runtime::Handle::try_current().is_err() {
             tracing::info!(
@@ -1540,8 +1579,8 @@ mod python {
             // — without this it fell through to run_default() and ignored
             // --home/--key-id, minting the bare "ciris-server" label (CIRISServer#27).
             _ => {
-                let (home, key_id, diagnostics) = crate::parse_serve_flags(first, args)
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let (home, key_id, diagnostics) =
+                    crate::parse_serve_flags(first, args).map_err(py_err)?;
                 rt_block_on(crate::run(home, key_id, diagnostics))
             }
         }
@@ -1603,7 +1642,12 @@ mod python {
             })?;
 
         let (out, modified, ner_ran, digest, applied) = crate::scrub::scrub_envelope_json(&as_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("egress_scrub: {e}")))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "egress_scrub: {}",
+                    crate::error_chain::render(&anyhow::Error::new(e))
+                ))
+            })?;
 
         let obj = json_mod.call_method1("loads", (out,))?;
         Ok((obj.unbind(), modified, ner_ran, digest, applied))
@@ -1652,8 +1696,7 @@ mod python {
         // Read the Python adapter's static config under the GIL.
         let adapter = crate::py_adapter::build(py, adapter)?;
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
-        let mut cfg = crate::config::ServerConfig::from_home(home, key_id)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut cfg = crate::config::ServerConfig::from_home(home, key_id).map_err(py_err)?;
         // The embedded fold has no CLI; the environment is its switch
         // (`CIRIS_DIAGNOSTICS=1`, CIRISServer#549/#550).
         cfg.diagnostics = crate::diag::arm(false);
@@ -1818,7 +1861,7 @@ mod python {
             } else {
                 work()
             };
-            out.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            out.map_err(py_err)
         })
     }
 
@@ -1864,9 +1907,8 @@ mod python {
                 .block_on(crate::sign_object::sign_object_bytes(
                     &engine, &bytes, &label,
                 ))
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            serde_json::to_string(&doc)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                .map_err(py_err)?;
+            serde_json::to_string(&doc).map_err(py_err)
         })
     }
 
@@ -1904,7 +1946,7 @@ mod python {
             rt.block_on(crate::sign_object::verify_object_bytes(
                 &engine, &bytes, &doc,
             ))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(py_err)
         })
     }
 
@@ -1949,7 +1991,7 @@ mod python {
             rt.block_on(crate::location::mint_location_proof(
                 &engine, latitude, longitude, resolution,
             ))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(py_err)
         })
     }
 
@@ -2061,7 +2103,7 @@ mod python {
                 &attestation_prefixes,
                 analyze,
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(py_err)
         })
     }
 
@@ -2085,7 +2127,7 @@ mod python {
         // its own runtime and the spawned scheduler tasks run detached afterwards.
         let count = py.detach(|| {
             crate::federation_delivery::start_and_hold(cadence_seconds, announce_logger)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                .map_err(py_err)
         })?;
         Ok(count as u64)
     }
@@ -2107,7 +2149,7 @@ mod python {
     ) -> PyResult<u64> {
         let count = py.detach(|| {
             crate::federation_delivery::reprime_and_hold(cadence_seconds, announce_logger)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                .map_err(py_err)
         })?;
         Ok(count as u64)
     }
@@ -2235,10 +2277,7 @@ mod python {
             now,
             sla_seconds,
         };
-        py.detach(move || {
-            crate::operator_surface::node_state_json(&opts)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-        })
+        py.detach(move || crate::operator_surface::node_state_json(&opts).map_err(py_err))
     }
 
     /// **CIRISConstitution#46 — read the RESOLVED `analyze` stance** (CIRISServer#331
@@ -2276,7 +2315,7 @@ mod python {
                 &attester_key_id,
                 subject_key_id.as_deref(),
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(py_err)
         })
     }
 

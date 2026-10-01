@@ -196,6 +196,13 @@ namespace-property tables are needed.**
 Any repo drifting its half of the contract → the other repos' builds fail.
 Two-surface drift becomes structurally impossible across the whole triple.
 
+**Reconciled for 0.5.218 (persist v49.0.0 / edge v32.1.0).** Kinds 18 `FamilyMembershipWidening`
+(#910) and 19 `CommunityMembershipListing` (#912) were appended. Both are replicated by this server
+(`compose::REPLICATED_KINDS`, 14 of 19), and both serve in the same class as
+`CommunityMembershipWidening`. The replication-policy, serve/advertise, consent-grammar and
+envelope-vocabulary pins moved to the substrate's own published values after review; the one
+envelope key added is `listed`.
+
 ### 4.3 The non-registry closures (typed gates, same philosophy)
 
 - **edge (E3):** `SourceKeyId` newtype constructible only from a peer entry

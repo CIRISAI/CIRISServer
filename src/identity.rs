@@ -1036,6 +1036,55 @@ pub enum DeviceCustody {
     Software,
 }
 
+/// **Can this host seal a device key in HARDWARE right now?** (CIRISServer#639)
+///
+/// `Ok(diagnostics)` when the platform storage the keyring would hand a
+/// [`DeviceCustody::PlatformSealed`] mint is hardware-backed; `Err(why)` when it
+/// is not — no TPM plugin loaded (a clean `pip install ciris-server` ships none;
+/// the plugin rides the `ciris-verify` package), no device, or a Secure Enclave
+/// the process is not entitled to.
+///
+/// It exists because the mint cannot say so itself: `SealedEd25519Signer::
+/// open_or_create` degrades to ENCRYPTED SOFTWARE storage where there is no
+/// hardware, and a request that asked for `tpm` answered 200 with a software
+/// key at rest beside its unwrap key. The associate route asks this FIRST, and
+/// refuses before anything is opened, minted or bound.
+///
+/// The probe opens the same `create_platform_storage` the seal would, in a
+/// throwaway directory it removes afterwards. On a TPM that seals one random
+/// master under a throwaway alias; no identity key is minted, stored or bound.
+/// `is_hardware_available()` is NOT the answer: on Linux it reports a TPM
+/// device node, which is exactly the host #639 was filed from — device present,
+/// plugin absent, storage software.
+///
+/// # Errors
+/// A sentence naming why sealed storage is unavailable.
+pub fn hardware_sealed_storage_probe() -> std::result::Result<String, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NTH: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ciris-seal-probe-{}-{}",
+        std::process::id(),
+        NTH.fetch_add(1, Ordering::Relaxed)
+    ));
+    let out = match ciris_keyring::create_platform_storage("ciris-seal-probe", &dir) {
+        Ok(storage) if storage.is_hardware_backed() => Ok(storage.diagnostics()),
+        Ok(storage) => Err(format!(
+            "the platform storage available to this process is not hardware-backed ({}). \
+             On Linux, TPM custody needs the ciris-tpm-plugin library (set CIRIS_TPM_PLUGIN, \
+             or install the ciris-verify package, which ships it)",
+            storage.diagnostics()
+        )),
+        Err(e) => Err(format!("platform storage could not be opened: {e}")),
+    };
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(dir = %dir.display(), error = %e, "sealed-storage probe: could not remove its throwaway directory");
+        }
+    }
+    out
+}
+
 /// [`mint_local_device_occurrence`] with an explicit custody for the classical
 /// half.
 ///

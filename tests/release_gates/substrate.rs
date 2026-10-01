@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v16.1.0";
-pub const TARGET_PERSIST: &str = "v48.0.0";
-pub const TARGET_EDGE: &str = "v31.0.0";
+pub const TARGET_VERIFY: &str = "v18.0.0";
+pub const TARGET_PERSIST: &str = "v52.0.1";
+pub const TARGET_EDGE: &str = "v38.1.0";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -227,7 +227,13 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   blob doors, which now carry the stored length; the v45 ingest door
     //   refuses a size-less claim, so the fleet pins together (there are no
     //   production blobs older than this). `e7135559…` → `4d7054a6…`.
-    const ADOPTED: &str = "4d7054a6e05306e7b37d30ab2d25c43625a4f382021f39191f55a2c1f833589b";
+    // 0.5.218 (persist v49.0.0): one key ADDED, `paths::LISTED` ("listed", the
+    //   #912 listing plane); none removed or renamed. `4d7054a6…` → `a6a84cc9…`.
+    // 0.5.218 (persist v51.0.0): four keys ADDED, the rc6 trust-root attach
+    //   inputs (#937/#938: attach_window_secs, witness_cadence_secs,
+    //   witness_quorum, attached_head_digest); none removed or renamed, and the
+    //   server writes none of them. `a6a84cc9…` → `c9558c98…`.
+    const ADOPTED: &str = "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

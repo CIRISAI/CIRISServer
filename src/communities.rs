@@ -57,6 +57,44 @@
 //! The route is built anyway; `tests/community_crud.rs` pins the gap as an
 //! ignored red test named for #907.
 //!
+//! **Corrected 0.5.218 (persist v49.0.0).** Both sections above describe the
+//! pins before v49. #908 landed: every replicated widening and revocation is
+//! judged at persist's door by the room's own `consensus_protocol` over the
+//! row's co-signatures (`crate::roster_rows` gathers them), so a peer-authored
+//! row no longer rides on the signature alone. #907 landed: the caller
+//! admission folds the widening plane, so a widened member reads the room's
+//! messages — `a_widened_member_reads_the_rooms_messages_cirispersist_907`
+//! runs, un-ignored.
+//!
+//! # Consent to join (0.5.218)
+//!
+//! Nobody joins a room without their own acceptance (the maintainer's ruling
+//! of 2026-09-30; CIRISConstitution#133, `FSD/MEMBERSHIP_INVITES.md`). A
+//! contact grant is THIS node's consent toward them, not theirs to join. Until
+//! persist can carry a proposal and record the acceptance (CIRISPersist#955,
+//! v52), `POST /v1/communities/{id}/members`, the quorum flow's envelope /
+//! cosign / assemble on an `add`, and a create naming anyone but the founder
+//! answer 409 `membership.consent_required` (`refuse_if_joining`,
+//! `crate::family_api::membership_consent_required` (removed at persist v52)). Pair rooms keep their
+//! own consent — the contact grant each side authors — and are untouched.
+//!
+//! **At persist v52.0.0 / edge v38.0.0 the door opens as the invite flow**
+//! (`crate::membership_invites`, `FSD/MEMBERSHIP_INVITES.md` §3): `POST
+//! …/invites` (and `POST …/members`, its alias, answering 202 `{state:
+//! "invited", proposal_id}`) writes a `membership:proposal:v1` signed by one
+//! inviter — a founder under `founder_only`, any member otherwise; the invitee
+//! accepts with their own pen on their own node; persist admits the WIDENING
+//! that seats them only on that acceptance (`check_growth_accepted`). Under
+//! `founder_only` the founder's single-signature widening is written by edge's
+//! bridge on the acceptance's arrival (`membership_widener`) or when a member
+//! lists the invites; under any other protocol the group seats them with the
+//! existing `add` (direct or envelope → cosign → assemble), which persist now
+//! refuses by name until the acceptance is held. `refuse_if_joining` and the
+//! interim 409 are gone; a create naming others is refused
+//! `membership.founding_member_unsigned` (persist Q1). The PAIR room no longer
+//! keeps "its own consent" either: since edge v38 it is founded by its opener
+//! alone and the other person joins by accepting (`contacts_chat::start_chat`).
+//!
 //! This file deliberately allows `clippy::result_large_err`: its helpers
 //! return the finished refusal `Response` as their error, the same shape the
 //! rest of the chat surface uses, so a refusal is decided exactly once.
@@ -87,6 +125,7 @@ use crate::contacts_chat::{
     ChatState, Owner,
 };
 use crate::owner_signer_capsule::OwnerSignerCapsule;
+use crate::roster_rows::{cosignatures_for, thresholds, ChangeSignature, RowSignature};
 
 /// The `policy_blob` member that carries a room's audience tier — persist's
 /// own documented home for the `cohort_scope` membership label
@@ -486,10 +525,11 @@ async fn load_room_as_member(
 /// millisecond as a removal would be written and silently lose. The revocation
 /// door refuses a future-dated instant, so this waits for the clock rather
 /// than stepping past it.
-async fn next_event_instant(
+/// The instant of the room's latest roster event, if any.
+async fn latest_event_instant(
     dir: &dyn FederationDirectory,
     room: &str,
-) -> Result<chrono::DateTime<chrono::Utc>, String> {
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
     let widenings = dir
         .list_community_membership_widenings_for(room)
         .await
@@ -498,11 +538,18 @@ async fn next_event_instant(
         .list_community_membership_revocations_for(room)
         .await
         .map_err(|e| format!("list revocations: {e:#}"))?;
-    let latest = widenings
+    Ok(widenings
         .iter()
         .map(|w| w.effective_at)
         .chain(revocations.iter().map(|r| r.effective_at))
-        .max();
+        .max())
+}
+
+async fn next_event_instant(
+    dir: &dyn FederationDirectory,
+    room: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let latest = latest_event_instant(dir, room).await?;
     for _ in 0..20 {
         let now = to_ms(chrono::Utc::now());
         match latest {
@@ -629,21 +676,25 @@ async fn build_change(
     st: &ChatState,
     room: &Room,
     op: &ChangeOp,
+    at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<serde_json::Value, Response> {
+    // The instant the change's rows carry. Pinned here, once, because every
+    // signer signs the rows and a row's signed bytes include it (persist v49).
+    let at = match at {
+        Some(t) => t,
+        None => next_event_instant(st.engine.federation_directory().as_ref(), room.id())
+            .await
+            .map_err(write_failed)?,
+    };
     let new_roster = roster_after(room, op);
     let new_ids: Vec<String> = new_roster.iter().map(|(k, _)| k.clone()).collect();
-    // A quorum room's `quorum:M/N` names its roster size, and verify refuses a
-    // payload whose N is not the new member count — so a change that moves the
-    // count takes persist's strict-majority default for the new N. Anything
-    // else carries the room's own protocol through unchanged.
-    let protocol = match Protocol::parse(&room.record.consensus_protocol) {
-        Some(Protocol::Quorum { n, .. })
-            if n != new_ids.len() && !matches!(op, ChangeOp::Dissolve) =>
-        {
-            None
-        }
-        _ => Some(room.record.consensus_protocol.clone()),
-    };
+    // The room's own protocol, carried through unchanged. `quorum:M/N` reads M
+    // as ABSOLUTE and N as documentary (CC 4.4.3.4.2.1; persist v49.0.0's
+    // evaluator ignores N), so adding a member to a 2-of-3 room leaves it a
+    // "two signatures" room. Before v49 verify refused an N that did not match
+    // the roster, and the server rewrote the protocol to a strict majority of
+    // the new size — a rule change no member decided.
+    let protocol = Some(room.record.consensus_protocol.clone());
     let mut env = st
         .engine
         .federation_directory()
@@ -669,6 +720,7 @@ async fn build_change(
                 "tier": room.tier.as_str(),
                 "prior_roster": roster_json(&prior),
                 "new_roster": roster_json(&new_roster),
+                "row_at": at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             }),
         );
     }
@@ -680,21 +732,144 @@ fn signing_bytes(env: &serde_json::Value) -> Result<Vec<u8>, Response> {
         .map_err(|e| write_failed(format!("canonicalize the change envelope: {e}")))
 }
 
-/// The caller's own cosignature over the envelope — bound hybrid (ML-DSA-65
-/// over `bytes ‖ ed25519_sig`), the shape verify's threshold primitive counts.
+/// A row a change writes, before anyone signs it.
+enum PlannedRow {
+    Widening {
+        member: String,
+        role: Option<String>,
+    },
+    Revocation {
+        member: String,
+        reason: &'static str,
+    },
+}
+
+/// The rows `op` writes, in the order `apply_change` writes them. Pure over
+/// the room and the op, so every signer derives the same list.
+fn planned_rows(room: &Room, op: &ChangeOp) -> Vec<PlannedRow> {
+    match op {
+        ChangeOp::Add { key_id, role } => vec![PlannedRow::Widening {
+            member: key_id.clone(),
+            role: role.clone(),
+        }],
+        ChangeOp::Role { key_id, role } => vec![PlannedRow::Widening {
+            member: key_id.clone(),
+            role: normalize_role(Some(role)),
+        }],
+        ChangeOp::Remove { key_id } => vec![PlannedRow::Revocation {
+            member: key_id.clone(),
+            reason: "removed",
+        }],
+        ChangeOp::Dissolve => room
+            .roster
+            .iter()
+            .map(|m| PlannedRow::Revocation {
+                member: m.key_id.clone(),
+                reason: "dissolved",
+            })
+            .collect(),
+    }
+}
+
+/// The instant a change's rows carry, pinned in the envelope when it is built
+/// (`community_change.row_at`) so every signer signs the same bytes.
+fn row_at(env: &serde_json::Value) -> Result<chrono::DateTime<chrono::Utc>, Response> {
+    env.get("community_change")
+        .and_then(|c| c.get("row_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .ok_or_else(|| malformed("change_envelope.community_change.row_at is missing"))
+}
+
+/// Sign every planned row with `signer`, through edge's own row builders — the
+/// same builders `put_widening` / `put_revocation` write with, so a
+/// co-signature is over exactly the bytes the door checks. The signer is not
+/// part of the signed envelope, which is what lets a second signer's scrub be
+/// a co-signature on the first signer's row.
+async fn sign_rows(
+    dir: &dyn FederationDirectory,
+    room: &str,
+    rows: &[PlannedRow],
+    at: chrono::DateTime<chrono::Utc>,
+    signer: &ciris_edge::identity::LocalSigner,
+) -> Result<Vec<RowSignature>, String> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row {
+            PlannedRow::Widening { member, role } => {
+                let (_, spec) = ciris_edge::community_roster::community_membership_widening(
+                    dir,
+                    room,
+                    member,
+                    role.as_deref(),
+                    at,
+                    signer,
+                )
+                .await?;
+                out.push(RowSignature {
+                    kind: "widening".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id: spec.authority_key_id,
+                    scrub_signature_classical: spec.scrub_signature_classical,
+                    scrub_signature_pqc: spec.scrub_signature_pqc,
+                });
+            }
+            PlannedRow::Revocation { member, reason } => {
+                let signed = ciris_edge::community_roster::community_membership_revocation(
+                    room,
+                    member,
+                    at,
+                    Some(reason),
+                    &[],
+                    signer,
+                )
+                .await?;
+                out.push(RowSignature {
+                    kind: "revocation".to_owned(),
+                    member_key_id: member.clone(),
+                    authority_key_id: signed.authority_key_id,
+                    scrub_signature_classical: signed.scrub_signature_classical,
+                    scrub_signature_pqc: signed.scrub_signature_pqc,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The caller's own signature on a change — bound hybrid (ML-DSA-65 over
+/// `bytes ‖ ed25519_sig`) over the envelope, the shape verify's threshold
+/// primitive counts — and over every row the change writes.
 async fn sign_change(
+    st: &ChatState,
+    room: &Room,
+    op: &ChangeOp,
     pen: &OwnerSignerCapsule,
     env: &serde_json::Value,
-) -> Result<ThresholdSignature, Response> {
+) -> Result<ChangeSignature, Response> {
     let bytes = signing_bytes(env)?;
     let (ed, pqc) =
         ciris_edge::identity::sign_bound_hybrid(pen.edge_signer(), &bytes, "community change")
             .await
             .map_err(write_failed)?;
-    Ok(ThresholdSignature {
-        member_id: pen.key_id().to_owned(),
-        ed25519_signature_base64: ed,
-        mldsa65_signature_base64: pqc,
+    let at = row_at(env)?;
+    let row_signatures = sign_rows(
+        st.engine.federation_directory().as_ref(),
+        room.id(),
+        &planned_rows(room, op),
+        at,
+        pen.edge_signer(),
+    )
+    .await
+    .map_err(write_failed)?;
+    Ok(ChangeSignature {
+        threshold: ThresholdSignature {
+            member_id: pen.key_id().to_owned(),
+            ed25519_signature_base64: ed,
+            mldsa65_signature_base64: pqc,
+        },
+        row_signatures,
     })
 }
 
@@ -716,7 +891,18 @@ async fn check_envelope_current(
     if env.get("family_key_id").and_then(serde_json::Value::as_str) != Some(room.id()) {
         return Err(change_stale("it names a different room"));
     }
-    let expected = build_change(st, room, &op).await?;
+    let at = row_at(env)?;
+    // A roster event written after this change was built moves the room; the
+    // change's rows, dated before it, would land out of order.
+    let latest = latest_event_instant(st.engine.federation_directory().as_ref(), room.id())
+        .await
+        .map_err(store_unavailable)?;
+    if latest.is_some_and(|l| l >= at) {
+        return Err(change_stale(
+            "a roster event landed after this change was built",
+        ));
+    }
+    let expected = build_change(st, room, &op, Some(at)).await?;
     if &expected != env {
         return Err(change_stale("the rebuilt envelope differs"));
     }
@@ -797,14 +983,8 @@ async fn tally(
             let n = strict_majority(everyone.len());
             (everyone.clone(), n)
         }
-        Protocol::Quorum { m, n } => {
-            let required = if n == everyone.len() {
-                m
-            } else {
-                strict_majority(everyone.len())
-            };
-            (everyone.clone(), required)
-        }
+        // M absolute (CC 4.4.3.4.2.1), exactly as persist's evaluator counts.
+        Protocol::Quorum { m, .. } => (everyone.clone(), m),
     };
     let mut members: Vec<ThresholdMember> = Vec::with_capacity(eligible.len());
     for k in &eligible {
@@ -856,7 +1036,8 @@ async fn put_widening(
     role: Option<&str>,
     at: chrono::DateTime<chrono::Utc>,
     pen: &OwnerSignerCapsule,
-) -> Result<(), String> {
+    cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
+) -> Result<(), Response> {
     let (member, spec) = ciris_edge::community_roster::community_membership_widening(
         dir,
         room,
@@ -865,7 +1046,8 @@ async fn put_widening(
         at,
         pen.edge_signer(),
     )
-    .await?;
+    .await
+    .map_err(write_failed)?;
     dir.put_community_membership_widening(SignedCommunityMembershipWidening {
         community_membership_widening: CommunityMembershipWidening {
             community_key_id: room.to_owned(),
@@ -878,9 +1060,15 @@ async fn put_widening(
         authority_key_id: spec.authority_key_id,
         scrub_signature_classical: spec.scrub_signature_classical,
         scrub_signature_pqc: spec.scrub_signature_pqc,
+        cosignatures,
     })
     .await
-    .map_err(|e| format!("put_community_membership_widening: {e:#}"))
+    // persist v52 (CIRISPersist#955): a growth without the joiner's live
+    // acceptance is refused BY RULE — named `membership.*`, not a 500.
+    .map_err(|e| {
+        crate::membership_invites::persist_refusal(&e)
+            .unwrap_or_else(|| write_failed(format!("put_community_membership_widening: {e:#}")))
+    })
 }
 
 /// Write one revocation through persist's door (rotates the room's DEK in the
@@ -895,8 +1083,9 @@ async fn put_revocation(
     at: chrono::DateTime<chrono::Utc>,
     reason: &str,
     pen: &OwnerSignerCapsule,
+    cosignatures: Vec<ciris_persist::federation::types::RosterCosignature>,
 ) -> Result<(), String> {
-    let signed = ciris_edge::community_roster::community_membership_revocation(
+    let mut signed = ciris_edge::community_roster::community_membership_revocation(
         room,
         member_key_id,
         at,
@@ -905,74 +1094,10 @@ async fn put_revocation(
         pen.edge_signer(),
     )
     .await?;
+    signed.cosignatures = cosignatures;
     dir.put_community_membership_revocation(signed)
         .await
         .map_err(|e| format!("put_community_membership_revocation: {e:#}"))
-}
-
-/// A `quorum:M/N` room's change goes through persist's own quorum door FIRST:
-/// `supersede_{community,affiliations}_with_quorum` runs
-/// `verify_membership_quorum` over the envelope and the cosignatures and
-/// re-baselines the record to the new roster and protocol. Without the
-/// re-baseline the record's `quorum:M/N` would keep naming the OLD size, and
-/// verify refuses a prior envelope whose N is not its member count — the
-/// room's second size-changing change could never be authorized.
-async fn quorum_rebaseline(
-    st: &ChatState,
-    room: &Room,
-    op: &ChangeOp,
-    env: &serde_json::Value,
-    signatures: &[ThresholdSignature],
-    pen: &OwnerSignerCapsule,
-) -> Result<(), Response> {
-    let protocol = env
-        .get("consensus_protocol")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(&room.record.consensus_protocol)
-        .to_owned();
-    let now = to_ms(chrono::Utc::now());
-    let members: Vec<(String, Option<String>)> = roster_after(room, op);
-    let joined: BTreeMap<&str, chrono::DateTime<chrono::Utc>> = room
-        .roster
-        .iter()
-        .map(|m| (m.key_id.as_str(), m.joined_at))
-        .collect();
-    let new_record = Community {
-        community_key_id: room.record.community_key_id.clone(),
-        community_name: room.record.community_name.clone(),
-        members: members
-            .iter()
-            .map(|(k, r)| CommunityMember {
-                key_id: k.clone(),
-                joined_at: joined.get(k.as_str()).copied().unwrap_or(now),
-                role: r.clone(),
-            })
-            .collect(),
-        founded_at: room.record.founded_at,
-        consensus_protocol: protocol.clone(),
-        policy_blob: room.record.policy_blob.clone(),
-        persist_row_hash: String::new(),
-    };
-    let signed = ciris_edge::chat::signed_community(new_record, pen.edge_signer())
-        .await
-        .map_err(write_failed)?;
-    let dir = st.engine.federation_directory();
-    let out = match room.tier {
-        Tier::Community => {
-            dir.supersede_community_with_quorum(signed, env.clone(), signatures.to_vec())
-                .await
-        }
-        Tier::Affiliations => {
-            dir.supersede_affiliations_with_quorum(signed, env.clone(), signatures.to_vec())
-                .await
-        }
-    };
-    out.map(|_| ()).map_err(|e| {
-        not_authorized(
-            &room.record.consensus_protocol,
-            format!("persist's verify_membership_quorum refused the change: {e:#}"),
-        )
-    })
 }
 
 /// Apply an AUTHORIZED change, signed by the caller's pen. Returns the room's
@@ -982,25 +1107,32 @@ async fn apply_change(
     room: &Room,
     op: &ChangeOp,
     env: &serde_json::Value,
-    signatures: &[ThresholdSignature],
+    signatures: &[ChangeSignature],
     pen: &OwnerSignerCapsule,
 ) -> Result<Vec<CommunityMember>, Response> {
-    if matches!(
-        Protocol::parse(&room.record.consensus_protocol),
-        Some(Protocol::Quorum { .. })
-    ) && !matches!(op, ChangeOp::Dissolve)
-    {
-        quorum_rebaseline(st, room, op, env, signatures, pen).await?;
-    }
+    // No record re-baseline (persist v49.0.0): the rows below carry the
+    // change, judged at the door by the room's protocol over their own
+    // co-signatures, and the room's rule does not move when its size does.
     let dir = st.engine.federation_directory();
-    let at = next_event_instant(dir.as_ref(), room.id())
-        .await
-        .map_err(write_failed)?;
+    // The rows carry the instant the envelope pinned: the co-signatures below
+    // are over rows dated exactly then (persist v49.0.0).
+    let at = row_at(env)?;
+    // The primary row's author is the EDGE signer's id (the id edge's row
+    // builders stamp), which is the one a co-signer must differ from.
+    let primary = pen.edge_signer().key_id.clone();
+    let cosigs = |kind: &str, member: &str| cosignatures_for(signatures, &primary, kind, member);
     match op {
         ChangeOp::Add { key_id, role } => {
-            put_widening(dir.as_ref(), room.id(), key_id, role.as_deref(), at, pen)
-                .await
-                .map_err(write_failed)?;
+            put_widening(
+                dir.as_ref(),
+                room.id(),
+                key_id,
+                role.as_deref(),
+                at,
+                pen,
+                cosigs("widening", key_id),
+            )
+            .await?;
         }
         ChangeOp::Role { key_id, role } => {
             put_widening(
@@ -1010,14 +1142,46 @@ async fn apply_change(
                 normalize_role(Some(role)).as_deref(),
                 at,
                 pen,
+                cosigs("widening", key_id),
+            )
+            .await?;
+        }
+        ChangeOp::Remove { key_id } => {
+            put_revocation(
+                dir.as_ref(),
+                room.id(),
+                key_id,
+                at,
+                "removed",
+                pen,
+                cosigs("revocation", key_id),
             )
             .await
             .map_err(write_failed)?;
         }
-        ChangeOp::Remove { key_id } => {
-            put_revocation(dir.as_ref(), room.id(), key_id, at, "removed", pen)
+        // A multi-signature room's dissolve: every revocation at the pinned
+        // instant, each carrying the other signers' co-signatures, because
+        // that is the row they signed. The prior roster at that instant still
+        // names every signer, so each one's signature counts toward every row.
+        ChangeOp::Dissolve
+            if room
+                .roster
+                .iter()
+                .any(|m| !cosigs("revocation", &m.key_id).is_empty()) =>
+        {
+            for m in &room.roster {
+                put_revocation(
+                    dir.as_ref(),
+                    room.id(),
+                    &m.key_id,
+                    at,
+                    "dissolved",
+                    pen,
+                    cosigs("revocation", &m.key_id),
+                )
                 .await
                 .map_err(write_failed)?;
+            }
         }
         ChangeOp::Dissolve => {
             // Everyone else first, the signer last: every revocation is
@@ -1039,7 +1203,7 @@ async fn apply_change(
                         .await
                         .map_err(write_failed)?
                 };
-                put_revocation(dir.as_ref(), room.id(), k, at, "dissolved", pen)
+                put_revocation(dir.as_ref(), room.id(), k, at, "dissolved", pen, Vec::new())
                     .await
                     .map_err(write_failed)?;
             }
@@ -1144,16 +1308,16 @@ async fn direct_change(
         Ok(p) => p,
         Err(r) => return r,
     };
-    let env = match build_change(st, &room, &op).await {
+    let env = match build_change(st, &room, &op, None).await {
         Ok(e) => e,
         Err(r) => return r,
     };
-    let mine = match sign_change(&pen, &env).await {
+    let mine = match sign_change(st, &room, &op, &pen, &env).await {
         Ok(s) => s,
         Err(r) => return r,
     };
     let sigs = vec![mine];
-    let t = match tally(st, &room, &op, &env, &sigs).await {
+    let t = match tally(st, &room, &op, &env, &thresholds(&sigs)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1177,7 +1341,7 @@ async fn direct_change(
     }
 }
 
-fn quorum_pending(t: &Tally, env: &serde_json::Value, sigs: &[ThresholdSignature]) -> Response {
+fn quorum_pending(t: &Tally, env: &serde_json::Value, sigs: &[ChangeSignature]) -> Response {
     use base64::Engine as _;
     let bytes = ciris_verify_core::jcs::canonicalize(env).unwrap_or_default();
     refuse_with(
@@ -1264,6 +1428,19 @@ async fn create_community(
         if m != owner.key_id && !members.iter().any(|x| x == m) {
             members.push(m.to_owned());
         }
+    }
+    // CONSENT TO JOIN (CIRISConstitution#133; the same ruling covers founding
+    // members, `FSD/MEMBERSHIP_INVITES.md` §4): the founding record admits the
+    // founder alone. A room founded with others named is REFUSED, not trimmed —
+    // a silently smaller room would read as success to the caller who named
+    // them. A founder-only room is created as before.
+    if !members.is_empty() {
+        return crate::membership_invites::founding_member_unsigned(format!(
+            "POST /v1/communities: {} would be founding members without signing the founding \
+             record (membership_founding_member_unsigned) — found the room alone, then \
+             POST /v1/communities/{{id}}/invites for each",
+            members.join(", ")
+        ));
     }
     let protocol = req
         .consensus_protocol
@@ -1513,15 +1690,39 @@ async fn read_community(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AddMemberRequest {
+/// `POST /v1/communities/{id}/members` — widen the roster by one. Since
+/// persist v52 the widening follows the joiner's acceptance, so this invites.
+async fn add_member(
+    st: State<ChatState>,
+    headers: HeaderMap,
+    community_id: Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    // An ALIAS for `…/invites` since persist v52 (`FSD/MEMBERSHIP_INVITES.md`
+    // §3): a contact grant is OUR consent toward them, not theirs to join, so
+    // the route invites and answers 202 `{state: "invited", proposal_id}`.
+    invite(st, headers, community_id, body).await
+}
+
+#[derive(Deserialize)]
+struct InviteRequest {
     key_id: String,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    expires_in_days: Option<i64>,
 }
 
-/// `POST /v1/communities/{id}/members` — widen the roster by one.
-async fn add_member(
+/// `POST /v1/communities/{id}/invites` — invite `key_id` into the room.
+///
+/// One inviter: a founder under `founder_only` (persist refuses any other
+/// proposer there; repeated here so the refusal is the room's own
+/// `community.not_authorized`), any active member otherwise. A contact grant
+/// is NOT required: an invitation reaches a stranger's nodes under first
+/// contact (CIRISEdge#756, CC rc6 3.1.3.2 — readable "without that node
+/// holding the group's roster"), and the invitee's acceptance is their own.
+/// A pair room's roster is its identity: its invitation is `POST /v1/chat`.
+async fn invite(
     State(st): State<ChatState>,
     headers: HeaderMap,
     Path(community_id): Path<String>,
@@ -1535,20 +1736,181 @@ async fn add_member(
         Ok(r) => r,
         Err(r) => return r,
     };
-    let req: AddMemberRequest = match serde_json::from_slice(&body) {
+    if room.is_pair() {
+        return pair_room_fixed(room.id());
+    }
+    let req: InviteRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return malformed(format!(
-                "expected {{\"key_id\": \"…\", \"role\"?: \"…\"}}: {e}"
+                "expected {{\"key_id\": \"…\", \"role\"?: \"…\", \"expires_in_days\"?: n}}: {e}"
             ))
         }
     };
-    let op = ChangeOp::Add {
-        key_id: req.key_id,
-        role: req.role,
+    let key_id = req.key_id.trim().to_owned();
+    if key_id.is_empty() {
+        return malformed("key_id must be a non-empty federation key id");
     }
-    .normalized();
-    direct_change(&st, &headers, &owner, room, op).await
+    if room.member(&key_id).is_some() {
+        return already_member(&key_id);
+    }
+    let protocol = room.record.consensus_protocol.clone();
+    if Protocol::parse(&protocol) == Some(Protocol::FounderOnly) && !room.is_founder(&owner.key_id)
+    {
+        return not_authorized(
+            &protocol,
+            "under founder_only only a founder invites (CIRISPersist#955)",
+        );
+    }
+    let role = normalize_role(req.role.as_deref());
+    let expires_at = match crate::membership_invites::expiry(req.expires_in_days) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let pen = match pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    match ciris_edge::membership::propose(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Community,
+        room.id(),
+        &key_id,
+        role.as_deref(),
+        expires_at,
+        pen.edge_signer(),
+    )
+    .await
+    {
+        Ok(proposal) => {
+            tracing::info!(
+                room = %room.id(), invitee = %key_id, proposal = %proposal.attestation_id,
+                "communities: invitation sent — the invitee joins only on their own acceptance"
+            );
+            crate::compose::kick_replication("community invitation sent");
+            crate::membership_invites::invited(
+                ciris_edge::membership::GroupScope::Community,
+                room.id(),
+                &proposal,
+                &key_id,
+                role.as_deref(),
+            )
+        }
+        Err(e) => crate::membership_invites::refused(&e),
+    }
+}
+
+/// `GET /v1/communities/{id}/invites` — every invitation into the room, with
+/// its state. Members only; a delegate granted `chat_read` may read. As for a
+/// household, listing is when a `founder_only` room's accepted invitees are
+/// seated if the bridge has not yet done it (the caller's own founder pen).
+async fn list_invites(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path(community_id): Path<String>,
+) -> Response {
+    let owner = match read_preamble(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let mut room = match load_room_as_member(&st, &owner, &community_id).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    let scope = ciris_edge::membership::GroupScope::Community;
+    let active = |r: &Room| -> std::collections::HashSet<String> {
+        r.roster.iter().map(|m| m.key_id.clone()).collect()
+    };
+    let mut invites = match crate::membership_invites::group_invites(
+        dir.as_ref(),
+        scope,
+        room.id(),
+        &active(&room),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return store_unavailable(e),
+    };
+    let accepted = invites
+        .iter()
+        .any(|(v, _)| v.state == crate::membership_invites::STATE_ACCEPTED);
+    let mut seated = Vec::new();
+    if accepted
+        && Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+        && room.is_founder(&owner.key_id)
+        && require_verb(
+            &owner,
+            CapabilityVerb::ChatAuthor,
+            "community.delegate_may_not_author",
+        )
+        .is_none()
+    {
+        if let Ok(pen) = pen(&st, &headers, &owner).await {
+            let widener =
+                ciris_edge::membership::MembershipWidener::new(vec![std::sync::Arc::clone(
+                    pen.edge_signer(),
+                )]);
+            seated =
+                crate::membership_invites::widen_held_acceptances(dir.as_ref(), &invites, &widener)
+                    .await;
+        }
+    }
+    if !seated.is_empty() {
+        room = match load_room_as_member(&st, &owner, &community_id).await {
+            Ok(r) => r,
+            Err(r) => return r,
+        };
+        invites = match crate::membership_invites::group_invites(
+            dir.as_ref(),
+            scope,
+            room.id(),
+            &active(&room),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return store_unavailable(e),
+        };
+    }
+    Json(serde_json::json!({
+        "community_id": room.id(),
+        "invites": invites.into_iter().map(|(v, _)| v).collect::<Vec<_>>(),
+        "seated_now": seated,
+    }))
+    .into_response()
+}
+
+/// `DELETE /v1/communities/{id}/invites/{proposal_id}` — the proposer
+/// withdraws a pending invitation.
+async fn withdraw_invite(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, proposal_id)): Path<(String, String)>,
+) -> Response {
+    let owner = match write_preamble(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let room = match load_room_as_member(&st, &owner, &community_id).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let pen = match pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let dir = st.engine.federation_directory();
+    crate::membership_invites::withdraw(
+        dir.as_ref(),
+        ciris_edge::membership::GroupScope::Community,
+        room.id(),
+        &proposal_id,
+        &pen,
+    )
+    .await
 }
 
 /// `DELETE /v1/communities/{id}/members/{key_id}` — remove a member. Naming
@@ -1645,7 +2007,17 @@ async fn leave_room(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: Ro
         Ok(t) => t,
         Err(e) => return write_failed(e),
     };
-    if let Err(e) = put_revocation(dir.as_ref(), room.id(), &owner.key_id, at, "left", &pen).await {
+    if let Err(e) = put_revocation(
+        dir.as_ref(),
+        room.id(),
+        &owner.key_id,
+        at,
+        "left",
+        &pen,
+        Vec::new(),
+    )
+    .await
+    {
         return write_failed(e);
     }
     crate::compose::kick_replication("community member left");
@@ -1715,19 +2087,23 @@ async fn change_envelope(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
+    // CONSENT TO JOIN: M of N members cannot stand in for the joiner — and
+    // need not: the `add` widening this change writes is admitted by persist
+    // only on the joiner's own live acceptance (`membership.awaiting_acceptance`
+    // otherwise, at assemble).
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let env = match build_change(&st, &room, &op).await {
+    let env = match build_change(&st, &room, &op, None).await {
         Ok(e) => e,
         Err(r) => return r,
     };
-    let mine = match sign_change(&pen, &env).await {
+    let mine = match sign_change(&st, &room, &op, &pen, &env).await {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let t = match tally(&st, &room, &op, &env, std::slice::from_ref(&mine)).await {
+    let t = match tally(&st, &room, &op, &env, std::slice::from_ref(&mine.threshold)).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1783,11 +2159,13 @@ async fn change_cosign(
         Ok(op) => op,
         Err(r) => return r,
     };
+    // CONSENT TO JOIN: co-signing an `add` is the group's decision; the
+    // joiner's consent is persist's check at the widening's door.
     let pen = match pen(&st, &headers, &owner).await {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let sig = match sign_change(&pen, &req.change_envelope).await {
+    let sig = match sign_change(&st, &room, &op, &pen, &req.change_envelope).await {
         Ok(s) => s,
         Err(r) => return r,
     };
@@ -1806,7 +2184,7 @@ async fn change_cosign(
 struct AssembleRequest {
     change_envelope: serde_json::Value,
     #[serde(default)]
-    signatures: Vec<ThresholdSignature>,
+    signatures: Vec<ChangeSignature>,
 }
 
 /// `POST /v1/communities/{id}/changes/assemble` `{change_envelope,
@@ -1841,7 +2219,17 @@ async fn change_assemble(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
-    let t = match tally(&st, &room, &op, &req.change_envelope, &req.signatures).await {
+    // CONSENT TO JOIN: however many members signed, persist admits the
+    // widening only on the joiner's acceptance (`put_widening` names it).
+    let t = match tally(
+        &st,
+        &room,
+        &op,
+        &req.change_envelope,
+        &thresholds(&req.signatures),
+    )
+    .await
+    {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1882,6 +2270,14 @@ pub(crate) fn routes() -> Router<ChatState> {
             get(read_community).delete(dissolve_community),
         )
         .route("/v1/communities/{community_id}/members", post(add_member))
+        .route(
+            "/v1/communities/{community_id}/invites",
+            get(list_invites).post(invite),
+        )
+        .route(
+            "/v1/communities/{community_id}/invites/{proposal_id}",
+            delete(withdraw_invite),
+        )
         .route(
             "/v1/communities/{community_id}/members/{key_id}",
             delete(remove_member),

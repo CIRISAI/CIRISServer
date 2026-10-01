@@ -34,8 +34,8 @@
 //! With a fixed spacing, two loops tick together only if
 //! `(i − j) × SLOT_SPACING` is a multiple of `gcd(period_i, period_j)`. Every
 //! cadence here defaults to a multiple of 30 s, so that gcd is at least 30 s
-//! while `(i − j) × SLOT_SPACING` is at most 15 s — the separation is never
-//! less than [`SLOT_SPACING`], at any of them.
+//! while `(i − j) × SLOT_SPACING` is at most 25 s (eleven loops at 2.5 s) —
+//! the separation is never less than [`SLOT_SPACING`], at any of them.
 //!
 //! An operator who sets a cadence that shares no useful factor with the others
 //! (7 s, say) can still produce occasional coincidences. That is a much smaller
@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 10] = [
+pub const LOOPS: [&str; 12] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -100,6 +100,17 @@ pub const LOOPS: [&str; 10] = [
     // (CIRISEdge#646). Its own phase so it does not tick with scope_seal,
     // which it calls into.
     "self_room",
+    // CC 3.1.3.1 / CIRISPersist#782 — renews the session claims this device
+    // holds while its person is on it, and lets them lapse when they leave
+    // (`crate::session_claims`). Its own slot so the renewal's handler reads
+    // never land on the self room's tick, whose Add/Remove it gates.
+    "session_claims",
+    // edge v38 / persist v52 (CIRISPersist#955) — the pair-room driver: a
+    // person asks for a chat ONCE and waits, so the two-step join (the
+    // joiner's acceptance, the creator's widening) and the MLS handshake (the
+    // joiner's KeyPackage, the creator's Welcome) are advanced here, not only
+    // on a read (`contacts_chat::PairRoomDriver`).
+    "pair_rooms",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.
@@ -111,10 +122,19 @@ fn epoch() -> Instant {
 /// The gap between consecutive loop slots.
 ///
 /// Wide enough to clear the 1-2 s bursts CIRISServer#575 measured, and narrow
-/// enough that all of [`LOOPS`] fits well inside the shortest cadence the node
-/// runs (`5 × 3 s = 15 s` against 30 s) — the margin is what keeps the
-/// separation argument in the module docs true.
-pub const SLOT_SPACING: Duration = Duration::from_secs(3);
+/// enough that all of [`LOOPS`] fits inside the shortest cadence the node runs
+/// (30 s) — the margin is what keeps the separation argument in the module
+/// docs true.
+///
+/// 3 s → 2.5 s for 0.5.218, when `session_claims` became the ELEVENTH loop: at
+/// 3 s the last slot sits at `10 × 3 s = 30 s`, which wraps to 0 on a 30 s
+/// cadence and lands exactly on `config_reconcile` every tick — #575 again, by
+/// arithmetic. At 2.5 s the widest slot is 25 s, every pair is still at least
+/// 2.5 s apart (above the 1-2 s burst width), and there is room for one more
+/// loop before the spacing has to be revisited. Growing the list past twelve
+/// needs a narrower spacing or a longer shortest cadence; the
+/// `every_slot_fits_inside_the_shortest_cadence` test says which.
+pub const SLOT_SPACING: Duration = Duration::from_millis(2500);
 
 /// This loop's offset into its period: slot `i` of [`LOOPS`] sits at
 /// `i ×` [`SLOT_SPACING`], wrapped into the period.
@@ -320,13 +340,14 @@ mod tests {
     /// The node's real default cadences. Every one is a multiple of 30 s,
     /// which is the premise the separation argument rests on — if a default
     /// changes to something coprime, this list changing is the reminder.
-    const DEFAULT_PERIODS: [(&str, u64); 6] = [
+    const DEFAULT_PERIODS: [(&str, u64); 7] = [
         ("config_reconcile", 30),
         ("replication_reconcile", 30),
         ("scorer", 60),
         ("retention", 3600),
         ("federation_delivery", 30),
         ("mesh_config_effect", 60),
+        ("session_claims", 30),
     ];
 
     /// The test that would have caught the fraction-based allocation: walk a
@@ -339,18 +360,22 @@ mod tests {
     #[test]
     fn no_two_loops_ever_tick_together_at_the_default_periods() {
         const DAY: u64 = 24 * 60 * 60;
+        // In MILLISECONDS: the spacing is 2.5 s since 0.5.218, and a walk in
+        // whole seconds would truncate 2.5 s gaps to 2 and pass a 2 s floor
+        // that the real schedule never promised.
         let ticks = |name: &str, period: u64| -> Vec<u64> {
-            let phase = phase_for(name, Duration::from_secs(period)).as_secs();
+            let phase = u64::try_from(phase_for(name, Duration::from_secs(period)).as_millis())
+                .expect("phase fits");
             (0..)
-                .map(|n| phase + n * period)
-                .take_while(|t| *t <= DAY)
+                .map(|n| phase + n * period * 1000)
+                .take_while(|t| *t <= DAY * 1000)
                 .collect()
         };
         let all: Vec<(&str, Vec<u64>)> = DEFAULT_PERIODS
             .iter()
             .map(|(n, p)| (*n, ticks(n, *p)))
             .collect();
-        let floor = SLOT_SPACING.as_secs();
+        let floor = u64::try_from(SLOT_SPACING.as_millis()).expect("spacing fits");
         for (i, (a, ta)) in all.iter().enumerate() {
             for (b, tb) in all.iter().skip(i + 1) {
                 let mut closest = u64::MAX;
@@ -363,8 +388,8 @@ mod tests {
                 }
                 assert!(
                     closest >= floor,
-                    "{a} and {b} come within {closest}s of each other over a day; the slot \
-                     spacing is {floor}s"
+                    "{a} and {b} come within {closest}ms of each other over a day; the slot \
+                     spacing is {floor}ms"
                 );
             }
         }

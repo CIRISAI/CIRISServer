@@ -12,6 +12,27 @@
 //! | `POST /v1/chat/{id}/messages` | a `chat:message:v1` `scores` attestation | `attestation_upsert_local` + `attestation_promote(community)` |
 //! | `GET /v1/chat/{id}/messages` | the same rows, read back | `active_community_members` + `list_attestations_by` |
 //!
+//! **`POST /v1/chat` at edge v38.0.0 / persist v52.0.0** (CIRISPersist#955):
+//! the 2-member record above is gone — a founding record seats only its
+//! signers. The route now opens the room as edge does (`chat::open_pair_room`:
+//! founded by the caller alone, the peer PROPOSED as `founder`), or, when the
+//! peer opened it first and their invitation is held here, ACCEPTS it
+//! (`chat::accept_pair_proposal`); the opener's node widens on the
+//! acceptance. The answer gains `state` (`open` / `invited` / `accepted` /
+//! `awaiting_invitation`) and `proposal_id`; `member_key_ids` is the active
+//! roster. Residual, as edge names it for its harness: two people opening the
+//! SAME pair before either's record reaches the other author two different
+//! records under one id (a `Conflict` on replication); edge's harness avoids it
+//! by letting only `PairRole::Creator` open, and a person-driven route cannot
+//! wait for the other side, so it is named here rather than prevented.
+//! **Corrected the same cut, from the native chat ladder:** the residual was
+//! not rare — both people open the chat at once as a matter of course, and
+//! the two records then withheld each other (CIRISEdge#758's group-record
+//! gate). So the route follows edge's rule after all: only the creator founds;
+//! the joiner answers `awaiting_invitation` until the creator's invitation is
+//! held, then accepts it — the request kept on disk (`crate::pair_intents`),
+//! so a restart in between does not forget it.
+//!
 //! # Why a contact IS a replication-consent grant
 //!
 //! The client's `ContactsScreen` already renders `GET /v1/federation/peers`
@@ -717,6 +738,7 @@ fn transcript_pending(
         status_attestation_id: None,
         body: Some(note.to_string()),
         unopened_reason: None,
+        unopened_detail: None,
         content_type: DEFAULT_CONTENT_TYPE,
         asserted_at: chrono::Utc::now().to_rfc3339(),
         author: String::new(),
@@ -850,12 +872,38 @@ async fn room_key(
     use ciris_edge::mls::cohort_group::{
         key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
     };
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let room = pair_community_key_id(me, peer);
     let dir = st.engine.federation_directory();
     let mut rooms = st.rooms.lock().await;
+    // ONE store per node, durable when the host can seal it (CIRISServer#630).
+    // A room this process has not held yet may have been persisted before a
+    // restart: reload it rather than create or join a second group.
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, &room).await? {
+            // A CREATOR'S HANDSHAKE THAT NEVER FINISHED (Codex, #689). `create`
+            // and `add_member` persist before the Welcome is placed; a crash in
+            // that window reloads a group the joiner was never welcomed into,
+            // and the keyed path would report Ready forever. With no Welcome of
+            // ours in the room nobody can have joined, so the persisted group is
+            // dropped and the ordinary create-and-welcome runs again below.
+            let unfinished = matches!(PairRole::of(me, peer), PairRole::Creator)
+                && chat::welcome_from(&*dir, me, &room).await?.is_none();
+            if unfinished {
+                tracing::warn!(
+                    room = %room,
+                    "chat: reloaded pair room has no Welcome of ours — the handshake was \
+                     interrupted; recreating it"
+                );
+                crate::mls_state::forget(&store, &room).await?;
+            } else {
+                tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+                rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
+            }
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(&room) {
         // Idempotent: a keyed room whose epoch has not moved costs one table
@@ -886,10 +934,7 @@ async fn room_key(
     // outlives a restart is a separate concern (the group can be rebuilt from the
     // handshake rows, which are durable CEG); what must NOT happen is two rooms
     // sharing one store.
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
+    let store = store.clone();
 
     match PairRole::of(me, peer) {
         PairRole::Creator => {
@@ -950,6 +995,9 @@ async fn room_key(
         PairRole::Joiner => {
             let material = match rooms.remove(&room) {
                 Some(RoomState::AwaitingWelcome(m)) => m,
+                // A KeyPackage published before a restart: its material was
+                // stashed, and the Welcome sealed to it can still be joined.
+                _ if let Some(m) = crate::mls_state::restore_pending(&store, &room).await? => m,
                 _ => {
                     // Publish our half once, then wait for the Welcome.
                     let (material, kp) = mint_cohort_key_material(me)
@@ -959,7 +1007,10 @@ async fn room_key(
                     let row =
                         chat::key_package_attestation(author, peer, &kp_bytes, chrono::Utc::now())
                             .await?;
-                    share_in_room(
+                    // Stash BEFORE the KeyPackage is out (Codex, #689); withdraw
+                    // the stash if publication fails.
+                    crate::mls_state::stash_pending(&store, &room, &material).await?;
+                    if let Err(e) = share_in_room(
                         &*dir,
                         row,
                         &room,
@@ -968,7 +1019,11 @@ async fn room_key(
                             actor: Some(author),
                         },
                     )
-                    .await?;
+                    .await
+                    {
+                        crate::mls_state::clear_pending(&store, &room).await;
+                        return Err(e);
+                    }
                     material
                 }
             };
@@ -997,9 +1052,19 @@ async fn room_key(
                 rooms.insert(room, RoomState::AwaitingWelcome(material));
                 return Ok(RoomHandshake::JoinRequested);
             };
-            let group = CohortGroup::join(store, &room, material, &welcome, 16)
-                .await
-                .map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let joined = CohortGroup::join(
+                store.clone(),
+                &room,
+                material,
+                &welcome,
+                crate::mls_state::RETAINED_EPOCHS,
+            )
+            .await;
+            // Spent either way (Codex, #689): a failed join must not restore the
+            // same material against the same Welcome forever; the next call
+            // mints and publishes a fresh KeyPackage.
+            crate::mls_state::clear_pending(&store, &room).await;
+            let group = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
             rooms.insert(room, RoomState::Keyed(group));
@@ -1052,8 +1117,7 @@ pub(crate) async fn room_key_room(
 ) -> Result<RoomHandshake, String> {
     use ciris_edge::chat;
     use ciris_edge::mls::cohort_group::{key_package_to_bytes, mint_cohort_key_material};
-    use ciris_edge::mls::{CohortGroup, ScopeStateProvider};
-    use ciris_persist::encrypted_kv::XChaChaKvStore;
+    use ciris_edge::mls::CohortGroup;
 
     let dir = st.engine.federation_directory();
     let roster = dir
@@ -1064,6 +1128,15 @@ pub(crate) async fn room_key_room(
         room_creator(&roster).ok_or_else(|| format!("room {room} has no active member"))?;
     let scope_room = ciris_edge::scope_room::ScopeRoom::community(room);
     let mut rooms = st.rooms.lock().await;
+    // One durable store per node; reload a group persisted before a restart
+    // (CIRISServer#630).
+    let store = crate::mls_state::store_for(&st.node_signer.key_id);
+    if !matches!(rooms.get(room), Some(RoomState::Keyed(_))) {
+        if let Some(group) = crate::mls_state::load(&store, room).await? {
+            tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
+            rooms.insert(room.to_owned(), RoomState::Keyed(Arc::new(group)));
+        }
+    }
 
     if let Some(RoomState::Keyed(group)) = rooms.get(room) {
         let group = Arc::clone(group);
@@ -1073,7 +1146,7 @@ pub(crate) async fn room_key_room(
                 reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
             }
         } else {
-            apply_creator_commits(&dir, room, &creator, &group).await;
+            apply_creator_commits(st, room, &scope_room, &creator, &group, author).await;
         }
         ensure_room_addresses(st, room, &group).await;
         return Ok(RoomHandshake::Ready);
@@ -1081,13 +1154,9 @@ pub(crate) async fn room_key_room(
     let Some(author) = author else {
         return Ok(RoomHandshake::NoAuthorSigner);
     };
-    let store = ScopeStateProvider::new(Arc::new(
-        XChaChaKvStore::open_in_memory(room.as_bytes())
-            .map_err(|e| format!("open the room's MLS store: {e}"))?,
-    ));
     if me == creator {
         let group = Arc::new(
-            CohortGroup::create(store, room, me, 16)
+            CohortGroup::create(store.clone(), room, me, crate::mls_state::RETAINED_EPOCHS)
                 .await
                 .map_err(|e| format!("CohortGroup::create: {e}"))?,
         );
@@ -1098,6 +1167,7 @@ pub(crate) async fn room_key_room(
     }
     let material = match rooms.remove(room) {
         Some(RoomState::AwaitingWelcome(m)) => m,
+        _ if let Some(m) = crate::mls_state::restore_pending(&store, room).await? => m,
         _ => {
             let (material, kp) = mint_cohort_key_material(me)
                 .map_err(|e| format!("mint_cohort_key_material: {e}"))?;
@@ -1109,7 +1179,9 @@ pub(crate) async fn room_key_room(
                 chrono::Utc::now(),
             )
             .await?;
-            share_in(
+            // Stash BEFORE the KeyPackage is out (Codex, #689).
+            crate::mls_state::stash_pending(&store, room, &material).await?;
+            if let Err(e) = share_in(
                 &*dir,
                 row,
                 &scope_room,
@@ -1118,7 +1190,11 @@ pub(crate) async fn room_key_room(
                     actor: Some(author),
                 },
             )
-            .await?;
+            .await
+            {
+                crate::mls_state::clear_pending(&store, room).await;
+                return Err(e);
+            }
             material
         }
     };
@@ -1135,15 +1211,155 @@ pub(crate) async fn room_key_room(
         rooms.insert(room.to_owned(), RoomState::AwaitingWelcome(material));
         return Ok(RoomHandshake::JoinRequested);
     };
-    let group = Arc::new(
-        CohortGroup::join(store, room, material, &welcome, 16)
-            .await
-            .map_err(|e| format!("CohortGroup::join: {e}"))?,
-    );
-    apply_creator_commits(&dir, room, &creator, &group).await;
+    let joined = CohortGroup::join(
+        store.clone(),
+        room,
+        material,
+        &welcome,
+        crate::mls_state::RETAINED_EPOCHS,
+    )
+    .await;
+    // Spent either way (Codex, #689).
+    crate::mls_state::clear_pending(&store, room).await;
+    let group = Arc::new(joined.map_err(|e| format!("CohortGroup::join: {e}"))?);
+    apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
     Ok(RoomHandshake::Ready)
+}
+
+// ─── Commits applied locally whose rows did not reach the room ──────────────
+//
+// `add_member` / `remove_member` advance the local group AND persist it before
+// the Commit row is placed. If placing fails, continuing from that epoch
+// publishes a later Commit the members cannot apply, because they never saw
+// the one before it (Codex, #689). So an unplaced Commit is kept, in order, and
+// placed again FIRST on the next pass; no new Commit is made until it lands.
+//
+// IN MEMORY ONLY, deliberately. A crash between edge persisting the epoch and
+// this queue is a window only the substrate can close (edge persists inside
+// `add_member` / `remove_member`, before the Commit reaches the host); the ask
+// is CIRISEdge#697, an outbox kept with the snapshot. When it lands, this
+// queue is deleted in favour of it.
+
+fn unplaced_commits() -> &'static std::sync::Mutex<HashMap<String, Vec<Attestation>>> {
+    static U: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Attestation>>>> =
+        std::sync::OnceLock::new();
+    U.get_or_init(Default::default)
+}
+
+fn unplaced_key(node: &str, room: &str) -> String {
+    format!("{node}\u{1f}{room}")
+}
+
+fn keep_unplaced(node: &str, room: &str, row: Attestation) {
+    if let Ok(mut u) = unplaced_commits().lock() {
+        u.entry(unplaced_key(node, room)).or_default().push(row);
+    }
+}
+
+/// Place `row` (a Commit); if it does not land, keep it for the next pass.
+async fn place_commit(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    row: Attestation,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let dir = st.engine.federation_directory();
+    let signers = ciris_edge::replication::attestation_bind::Signers {
+        node: &st.node_signer,
+        actor: Some(author),
+    };
+    if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+        keep_unplaced(&st.node_signer.key_id, room, row);
+        return Err(format!("{e} (the Commit is kept and placed again first)"));
+    }
+    Ok(())
+}
+
+/// Place every Commit an earlier pass could not, oldest first. `Err` while any
+/// is still unplaced: the caller makes no new Commit on top of it.
+async fn place_unplaced(
+    st: &ChatState,
+    room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
+    author: &ciris_edge::identity::LocalSigner,
+) -> Result<(), String> {
+    let key = unplaced_key(&st.node_signer.key_id, room);
+    let rows = match unplaced_commits().lock() {
+        Ok(mut u) => u.remove(&key).unwrap_or_default(),
+        Err(_) => return Ok(()),
+    };
+    let dir = st.engine.federation_directory();
+    let mut rows = rows.into_iter();
+    while let Some(row) = rows.next() {
+        let signers = ciris_edge::replication::attestation_bind::Signers {
+            node: &st.node_signer,
+            actor: Some(author),
+        };
+        if let Err(e) = share_in(&*dir, row.clone(), scope_room, signers).await {
+            if let Ok(mut u) = unplaced_commits().lock() {
+                let slot = u.entry(key).or_default();
+                let later = std::mem::take(slot);
+                slot.push(row);
+                slot.extend(rows);
+                slot.extend(later);
+            }
+            return Err(format!(
+                "an earlier Commit in {room} is still unplaced: {e}"
+            ));
+        }
+        tracing::info!(room = %room, "chat: a Commit an earlier pass could not place is placed now");
+    }
+    Ok(())
+}
+
+/// Whether `member` holds a Welcome for its CURRENT add, from any of `from`
+/// (Codex, #689). Existence is not enough: a device removed and re-added keeps
+/// its old Welcome row, and a crash after the new add but before its Welcome
+/// would read as welcomed. A Welcome counts only if it was placed at or after
+/// the member's persisted add instant (`member_added_at`, the add's claim).
+///
+/// STOPGAP: edge's `welcome_for` returns no row instant and keeps its recipient
+/// field private, so this reads the rows itself with that field's literal.
+/// Delete it when edge returns the instant (CIRISEdge#696).
+pub(crate) async fn welcomed_for_current_add(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    from: &[String],
+    room: &str,
+    member: &str,
+    group: &ciris_edge::mls::CohortGroup,
+) -> Result<bool, String> {
+    const STOPGAP_FIELD_MLS_FOR: &str = "mls_for_key_id";
+    let Some(added) = group.member_added_at(member).await else {
+        // No add instant (a group persisted before joins were kept): the old
+        // reading, any Welcome at all.
+        for f in from {
+            if ciris_edge::chat::welcome_for(dir, f, room, member)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    };
+    let added_ms = added.timestamp_millis();
+    Ok(ciris_edge::chat::rows_in_room(dir, from, room)
+        .await?
+        .iter()
+        .any(|a| {
+            let env = &a.attestation_envelope;
+            env.get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                == Some(ciris_edge::chat::WELCOME_DIMENSION)
+                && env
+                    .get(STOPGAP_FIELD_MLS_FOR)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(member)
+                && a.asserted_at.timestamp_millis() >= added_ms
+        }))
 }
 
 /// The creator's half of an N-member room: make the MLS group's members equal
@@ -1166,6 +1382,36 @@ async fn reconcile_room_group(
         node: &st.node_signer,
         actor: Some(author),
     };
+    // Nothing new on top of a Commit the members have not seen.
+    place_unplaced(st, room, scope_room, author).await?;
+    // A MEMBER IN THE TREE THAT WAS NEVER WELCOMED (Codex, #689). The group
+    // persists at `add_member`, before its Welcome is placed; a crash in that
+    // window reloads a tree naming a member who holds nothing to join with, and
+    // the add loop below skips members already in the tree. The creator's own
+    // Welcome rows are local, so the gap is visible here: remove the member
+    // (the Commit reaches everyone who did join), and the loop re-adds them
+    // with a fresh Welcome in this same pass.
+    for m in group.member_key_ids().await {
+        if m == author.key_id {
+            continue;
+        }
+        if welcomed_for_current_add(&*dir, std::slice::from_ref(&author.key_id), room, &m, group)
+            .await?
+        {
+            continue;
+        }
+        let commit = group
+            .remove_member(&m)
+            .await
+            .map_err(|e| format!("remove_member({m}) to re-welcome: {e}"))?;
+        let row = chat::commit_attestation_in(author, room, &commit).await?;
+        place_commit(st, room, scope_room, row, author).await?;
+        tracing::warn!(
+            room = %room, member = %m,
+            "chat: N-member room — a member in the tree had no Welcome (an add interrupted \
+             before its Welcome was placed); removed so it is re-added with a fresh one"
+        );
+    }
     let in_group: std::collections::BTreeSet<String> =
         group.member_key_ids().await.into_iter().collect();
     for member in roster {
@@ -1194,9 +1440,14 @@ async fn reconcile_room_group(
             chrono::Utc::now(),
         )
         .await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
-        let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        let commit_row = chat::commit_attestation_in(author, room, &commit).await?;
+        if let Err(e) = share_in(&*dir, row, scope_room, signers()).await {
+            // The add is in the local group already: its Commit must still
+            // reach the members, and the repair pass then re-welcomes.
+            keep_unplaced(&st.node_signer.key_id, room, commit_row);
+            return Err(e);
+        }
+        place_commit(st, room, scope_room, commit_row, author).await?;
         tracing::info!(
             room = %room,
             member = %member.key_id,
@@ -1215,7 +1466,7 @@ async fn reconcile_room_group(
             .await
             .map_err(|e| format!("remove_member({gone}): {e}"))?;
         let row = chat::commit_attestation_in(author, room, &commit).await?;
-        share_in(&*dir, row, scope_room, signers()).await?;
+        place_commit(st, room, scope_room, row, author).await?;
         tracing::info!(
             room = %room,
             member = %gone,
@@ -1230,20 +1481,53 @@ async fn reconcile_room_group(
 /// the room. Best-effort and idempotent (edge reads already-applied rows as
 /// `other`); a contest this node cannot resolve is logged, never fatal — the
 /// room's content does not depend on it.
+///
+/// **Re-proposals are carried** (CIRISServer#602). When the creator's commit
+/// wins a contest against one of this node's own, edge rolls this node back,
+/// applies the winner and RE-ISSUES the lost commits against the winner's line
+/// (`AppliedCommits::reproposed`, `must_use`: "MUST be emitted as rows and
+/// shared"). Dropping them left the re-proposals existing nowhere but here —
+/// this node one epoch ahead of every peer, on a line nobody else can follow.
+/// Each is carried exactly as edge's own driver does it: a
+/// `commit_attestation_in` row authored by this node's author (the claim's
+/// committer), placed in the room with [`share_in`].
 async fn apply_creator_commits(
-    dir: &Arc<dyn ciris_persist::federation::FederationDirectory>,
+    st: &ChatState,
     room: &str,
+    scope_room: &ciris_edge::scope_room::ScopeRoom,
     creator: &str,
     group: &ciris_edge::mls::CohortGroup,
+    author: Option<&ciris_edge::identity::LocalSigner>,
 ) {
-    match ciris_edge::chat::apply_room_commits(group, &**dir, creator, room).await {
-        Ok(out) => tracing::debug!(
-            room = %room,
-            applied = out.applied,
-            discarded = out.discarded,
-            other = out.other,
-            "chat: N-member room — creator commits applied"
-        ),
+    let dir = st.engine.federation_directory();
+    match ciris_edge::chat::apply_room_commits(group, &*dir, creator, room).await {
+        Ok(out) => {
+            let reproposed = out.reproposed.len();
+            let d: &dyn ciris_persist::federation::FederationDirectory = &*dir;
+            let node: &ciris_edge::identity::LocalSigner = &st.node_signer;
+            let carried = carry_reproposals(room, author, out.reproposed, move |row| {
+                share_in(
+                    d,
+                    row,
+                    scope_room,
+                    ciris_edge::replication::attestation_bind::Signers {
+                        node,
+                        actor: author,
+                    },
+                )
+            })
+            .await;
+            tracing::debug!(
+                room = %room,
+                applied = out.applied,
+                discarded = out.discarded,
+                other = out.other,
+                reproposed,
+                carried = carried.placed.len(),
+                "chat: N-member room — creator commits applied"
+            );
+            carried.log(room);
+        }
         Err(e) => tracing::warn!(
             room = %room,
             creator = %creator,
@@ -1252,6 +1536,89 @@ async fn apply_creator_commits(
              addressing lags until the next commit resolves it"
         ),
     }
+}
+
+/// What [`carry_reproposals`] did — every re-proposal is accounted for in
+/// exactly one of these, never collapsed into a count that hides the loss.
+#[derive(Debug, Default)]
+pub(crate) struct CarriedReproposals {
+    /// Row ids placed in the room, in re-proposal order.
+    pub(crate) placed: Vec<String>,
+    /// `epoch: error` for each re-proposal whose row could not be built or
+    /// placed.
+    pub(crate) failed: Vec<String>,
+    /// Re-proposals dropped because this node had no author signer to carry
+    /// them as (the row's author MUST be the claim's committer).
+    pub(crate) no_author: usize,
+    /// Re-proposals that carried a Welcome. The commit row is placed; the
+    /// Welcome is NOT — `CohortCommit` does not name its joiner, and a joiner
+    /// reads its Welcome from the room's CREATOR only (`welcome_for`), which
+    /// this node is not. The creator's next reconcile re-adds anyone missing.
+    pub(crate) welcome_not_carried: usize,
+}
+
+impl CarriedReproposals {
+    fn log(&self, room: &str) {
+        if self.failed.is_empty() && self.no_author == 0 && self.welcome_not_carried == 0 {
+            if !self.placed.is_empty() {
+                tracing::info!(
+                    room = %room,
+                    placed = self.placed.len(),
+                    "chat: N-member room — this node lost a commit contest; its re-proposals \
+                     were carried as rows against the winner's line (CIRISEdge#604)"
+                );
+            }
+            return;
+        }
+        tracing::warn!(
+            room = %room,
+            placed = self.placed.len(),
+            failed = ?self.failed,
+            no_author = self.no_author,
+            welcome_not_carried = self.welcome_not_carried,
+            "chat: N-member room — a re-proposal after a lost commit contest was NOT fully \
+             carried; this node's epoch runs ahead of its peers on a line only it holds \
+             until a later commit resolves it (CIRISServer#602)"
+        );
+    }
+}
+
+/// **Carry a lost contest's re-proposals as rows** (CIRISServer#602) — each a
+/// [`ciris_edge::chat::commit_attestation_in`] row authored by `author`, handed
+/// to `place` (production: [`share_in`] into the room). Edge's contract for
+/// `AppliedCommits::reproposed`, done the way edge's own driver does it.
+async fn carry_reproposals<F, Fut>(
+    room: &str,
+    author: Option<&ciris_edge::identity::LocalSigner>,
+    reproposed: Vec<ciris_edge::mls::CohortCommit>,
+    mut place: F,
+) -> CarriedReproposals
+where
+    F: FnMut(Attestation) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut out = CarriedReproposals::default();
+    if reproposed.is_empty() {
+        return out;
+    }
+    let Some(author) = author else {
+        out.no_author = reproposed.len();
+        return out;
+    };
+    for commit in &reproposed {
+        if commit.welcome().is_some() {
+            out.welcome_not_carried += 1;
+        }
+        let placed = match ciris_edge::chat::commit_attestation_in(author, room, commit).await {
+            Ok(row) => place(row).await,
+            Err(e) => Err(e),
+        };
+        match placed {
+            Ok(id) => out.placed.push(id),
+            Err(e) => out.failed.push(format!("epoch {}: {e}", commit.epoch())),
+        }
+    }
+    out
 }
 
 /// CIRISEdge#499 — install (or advance) this room in the scope-address table.
@@ -2188,6 +2555,305 @@ async fn add_contact(
         .into_response()
 }
 
+// ─── Withdrawing consent (CIRISServer#657) ──────────────────────────────────
+//
+// CC 1.5: consent that cannot be withdrawn is not consent. A contact IS a live
+// `consent:replication` grant, and until 0.5.218 nothing in this repo could
+// withdraw one — the read side already folded `withdraws`, and no route wrote
+// it. Two doors, one mechanism:
+//
+//   * `DELETE /v1/contacts/{key_id}` — un-contact a PERSON: every live grant
+//     this node's owner authored for them (their person key, and each node they
+//     are bound to, which is where #472 aims a routable grant).
+//   * `POST /v1/federation/peering/revoke {attestation_id}` — withdraw ONE grant
+//     by id, whatever peer it names (the manage-consent card's Revoke).
+//
+// The `withdraws` is AUTHORED BY THE OWNER, with the owner's own pen through the
+// capsule — never the node's key. Consent is the human's act (CIRISServer#599),
+// so its withdrawal is too; and a grant is withdrawn only by its author, so a
+// grant the MACHINE authored (the provisional pre-claim row the owner migration
+// re-signs) is not one the owner can withdraw here, and is refused by name
+// rather than withdrawn by the node on the owner's behalf.
+
+/// Sign and store the owner's `withdraws` of each grant. Returns one
+/// `{grant, withdraws, cohort_scope}` per grant, in order.
+async fn withdraw_owner_grants(
+    st: &ChatState,
+    capsule: &crate::owner_signer_capsule::OwnerSignerCapsule,
+    grants: &[ciris_persist::federation::types::Attestation],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut out = Vec::with_capacity(grants.len());
+    for g in grants {
+        // At the GRANT's own audience, so every node that holds the grant can
+        // hold its withdrawal. Attested TO the peer the grant names but with no
+        // subject: the owner is the grant's producer, not a subject revoking
+        // someone else's claim (`attest::Spec::attested_to`).
+        let spec = crate::attest::Spec::new(
+            ciris_persist::federation::types::attestation_type::WITHDRAWS,
+            g.cohort_scope.clone(),
+            ciris_persist::federation::withdraws_attestation_envelope(
+                &g.attestation_id,
+                &g.attestation_type,
+            ),
+        )
+        .attested_to(&g.attested_key_id);
+        let id = crate::self_devices::emit_as_owner(&st.engine, capsule, spec)
+            .await
+            .map_err(|e| format!("withdraws({}): {e}", g.attestation_id))?;
+        out.push(serde_json::json!({
+            "grant": g.attestation_id,
+            "withdraws": id,
+            "cohort_scope": g.cohort_scope,
+        }));
+    }
+    Ok(out)
+}
+
+/// A grant the NODE authored is not the owner's to withdraw, and the node will
+/// not withdraw consent as itself. One sentence for both doors.
+fn machine_authored_refusal(grants: Vec<String>) -> Response {
+    crate::auth::refusal::refuse_with(
+        StatusCode::CONFLICT,
+        "consent.grant_not_owner_authored",
+        "This node wrote that consent before you signed it, so it isn't yours to withdraw here, and the node will not withdraw consent on your behalf. It is still active.",
+        serde_json::json!({ "grants": grants }),
+    )
+}
+
+/// The owner's pen for a withdrawal, or the refusal saying why not.
+async fn withdrawal_pen(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+) -> Result<crate::owner_signer_capsule::OwnerSignerCapsule, Response> {
+    crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer_of(headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    .map_err(|e| match e {
+        crate::owner_signer_capsule::CapsuleRefusal::Delegated => refuse(
+            StatusCode::FORBIDDEN,
+            "consent.delegate_may_not_withdraw",
+            "A delegated session can't withdraw the owner's consent. The withdrawal is signed with the owner's own key.",
+        ),
+        other => refuse(
+            StatusCode::FORBIDDEN,
+            "consent.author_signer_unavailable",
+            format!(
+                "withdrawing consent is signed by the person who gave it, and this node \
+                 cannot wield that identity right now: {other}"
+            ),
+        ),
+    })
+}
+
+/// `DELETE /v1/contacts/{key_id}` — un-contact a person.
+async fn remove_contact(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    axum::extract::Path(key_id): axum::extract::Path<String>,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    // The same verb that ADDS a contact: a gate is only as narrow as its
+    // widest route, and withdrawing is the other half of the same object.
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::Peer,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
+    let key_id = key_id.trim().to_owned();
+    // Every subject a grant FOR this person may name: the person, and the nodes
+    // they are bound to (#472 aims a routable grant at the node).
+    let mut subjects = match crate::peer::bound_nodes_of(&st.engine, &key_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "contacts.store_unavailable",
+                format!("resolve {key_id}'s nodes: {e:#}"),
+            )
+        }
+    };
+    subjects.push(key_id.clone());
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let mut seen = std::collections::HashSet::new();
+    let naming: Vec<_> = grants
+        .into_iter()
+        .filter(|g| g.subject_key_ids.iter().any(|s| subjects.contains(s)))
+        .filter(|g| seen.insert(g.attestation_id.clone()))
+        .collect();
+    if naming.is_empty() {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "contacts.not_a_contact",
+            format!("{key_id} is not a contact here — no live consent grant names them"),
+        );
+    }
+    let (mine, machine): (Vec<_>, Vec<_>) = naming
+        .into_iter()
+        .partition(|g| g.attesting_key_id == owner.key_id);
+    if mine.is_empty() {
+        return machine_authored_refusal(
+            machine.iter().map(|g| g.attestation_id.clone()).collect(),
+        );
+    }
+    let capsule = match withdrawal_pen(&st, &headers, &owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let withdrawn = match withdraw_owner_grants(&st, &capsule, &mine).await {
+        Ok(w) => w,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "consent.withdraw_failed",
+                format!("the withdrawal could not be stored: {e}"),
+            )
+        }
+    };
+    // THE WITNESS, read back rather than assumed: persist's own fold.
+    let still: Vec<String> =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g
+                .into_iter()
+                .filter(|g| g.subject_key_ids.iter().any(|s| subjects.contains(s)))
+                .map(|g| g.attestation_id)
+                .collect(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    format!("re-read the consent peer set: {e:#}"),
+                )
+            }
+        };
+    tracing::info!(
+        owner = %owner.key_id,
+        contact = %key_id,
+        withdrawn = withdrawn.len(),
+        remaining = still.len(),
+        "contacts: the owner withdrew their consent to a contact (CIRISServer#657)"
+    );
+    let _ = crate::compose::kick_replication("contacts:remove");
+    Json(serde_json::json!({
+        "key_id": key_id,
+        "withdrawn": withdrawn,
+        // Grants still live for this person after the withdrawal: machine-
+        // authored provisional rows the owner cannot withdraw here. Empty means
+        // the person is no longer a contact.
+        "remaining_grants": still,
+        "contact": !still.is_empty(),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeGrantRequest {
+    /// The `consent:replication` grant to withdraw (`consent_attestation_id` on
+    /// a contact, `attestation_id` on a peering).
+    attestation_id: String,
+}
+
+/// `POST /v1/federation/peering/revoke` — withdraw one replication grant.
+async fn revoke_grant(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::Peer,
+        "consent.delegation_denied",
+    ) {
+        return resp;
+    }
+    let req: RevokeGrantRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "consent.malformed_body",
+                format!("expected {{\"attestation_id\": \"…\"}}: {e}"),
+            )
+        }
+    };
+    let id = req.attestation_id.trim().to_owned();
+    // A LIVE grant for this node — the same fold the contacts list and the
+    // replication send-set read. A withdrawn grant, a grant for another machine,
+    // or an id that is not a grant at all are one answer: nothing here to revoke.
+    let grants =
+        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "consent.store_unavailable",
+                    format!("consent peer set: {e:#}"),
+                )
+            }
+        };
+    let Some(grant) = grants.into_iter().find(|g| g.attestation_id == id) else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "consent.grant_not_live",
+            format!("{id} is not a live replication grant for this node"),
+        );
+    };
+    if grant.attesting_key_id != owner.key_id {
+        return machine_authored_refusal(vec![grant.attestation_id]);
+    }
+    let capsule = match withdrawal_pen(&st, &headers, &owner).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let withdrawn = match withdraw_owner_grants(&st, &capsule, std::slice::from_ref(&grant)).await {
+        Ok(w) => w,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "consent.withdraw_failed",
+                format!("the withdrawal could not be stored: {e}"),
+            )
+        }
+    };
+    tracing::info!(
+        owner = %owner.key_id,
+        grant = %id,
+        peers = ?grant.subject_key_ids,
+        "consent: the owner withdrew a replication grant (CIRISServer#657)"
+    );
+    let _ = crate::compose::kick_replication("consent:revoke");
+    Json(serde_json::json!({
+        "attestation_id": id,
+        "peer_key_ids": grant.subject_key_ids,
+        "withdraws": withdrawn[0]["withdraws"],
+        "cohort_scope": grant.cohort_scope,
+    }))
+    .into_response()
+}
+
 // ─── POST /v1/chat ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -2359,75 +3025,130 @@ async fn start_chat(
         }
     }
 
+    // ── THE PAIR ROOM BY CONSENT (edge v38.0.0 / persist v52.0.0) ───────────
+    //
+    // Until 0.5.218 this route authored a TWO-founder `Community` record with
+    // both people on it, and "the pair room keeps its own consent — the contact
+    // grant each side authors". persist v52 (CIRISPersist#955, Q1) admits a
+    // founding record only for the members who SIGNED it, so that record is now
+    // refused `membership_founding_member_unsigned` at the door — and the
+    // ruling behind it says why that is right: a contact grant is OUR consent
+    // toward them, not theirs to share a room with us. So the room is opened the
+    // way edge's own harness opens it (`chat::open_pair_room`): the OPENER founds
+    // it alone as `founder`, and PROPOSES the other person at role `founder`; the
+    // other person's node holds the proposal (it reaches strangers under first
+    // contact, CIRISEdge#756), and when THEY call this route their node ACCEPTS
+    // it (`chat::accept_pair_proposal`); the opener's node then widens the roster
+    // on the acceptance's arrival (`ReplicationRuntimeConfig::membership_widener`)
+    // — or here, on the opener's next call, with the opener's own pen. The END
+    // STATE is the pre-v52 one: two founders, `unanimous`, each an authority
+    // root (CC 4.5.4).
+    //
+    // Who signs what: the RECORD and the PROPOSAL are the node signer acting
+    // for its owner (the record's bytes stay a function of (opener, peer,
+    // founded_at), as before); the ACCEPTANCE is the node acting for its owner
+    // too — persist admits a device's reply for its person (`signer_acts_for`),
+    // and this call IS the person's act; the WIDENING is the opener's PERSON key
+    // (the roster counts seat keys), which is why it needs their pen.
     let community_id = pair_community_key_id(&owner.key_id, &key_id);
-    let mut expected_members = vec![owner.key_id.clone(), key_id.clone()];
-    expected_members.sort();
+    let mut pair_members = vec![owner.key_id.clone(), key_id.clone()];
+    pair_members.sort();
     // Before the branch: an existing room needs this as much as a new one.
     ensure_owner_content_occurrence(&st, &owner.key_id).await;
-    match directory.lookup_community(&community_id).await {
-        Ok(Some(existing)) => {
-            // THE ROSTER IS PART OF THE IDENTITY. The pair id is derivable by
-            // anyone, so a peer can pre-replicate a community under it carrying
-            // the pair PLUS an extra member — and a front door that accepts any
-            // row at the derived id would open that room, with every subsequent
-            // community-scoped message readable by the stowaway. Same sorted-
-            // member equality the insert-race arm applies: a room at this id
-            // that is not EXACTLY this pair is a conflict, not a chat.
-            //
-            // THE FOLD, NOT THE RECORD (persist v48, CIRISPersist#860). A
-            // stowaway no longer needs a record with three names on it: the
-            // record is never rewritten to grow, and a widening row naming a
-            // third member rides its own plane. Comparing `existing.members`
-            // would have passed a pair record with a widened third party and
-            // opened the room with them in it.
-            let mut existing_members: Vec<String> =
-                match active_roster(&*directory, &existing).await {
-                    Ok(r) => r.into_iter().map(|m| m.key_id).collect(),
-                    Err(e) => {
-                        return refuse(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "chat.store_unavailable",
-                            format!("active roster: {e}"),
-                        )
-                    }
-                };
-            existing_members.sort();
-            if existing_members != expected_members {
+
+    // 1. The other person already opened it and invited us: accepting IS
+    //    opening the chat from this side.
+    let pending =
+        match ciris_edge::chat::pair_proposal_for(&*directory, &owner.key_id, &key_id).await {
+            Ok(p) => p,
+            Err(e) => {
                 return refuse(
-                    StatusCode::CONFLICT,
-                    "chat.community_shape_conflict",
-                    format!(
-                        "a community already exists under the derived pair id but its                          roster is not this pair ({} member(s), expected 2) — refusing                          to open it as this chat",
-                        existing_members.len()
-                    ),
-                );
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("pair_proposal_for: {e}"),
+                )
             }
-            return (
-                StatusCode::OK,
-                Json(StartChatResponse {
-                    community_id: existing.community_key_id,
-                    community_name: existing.community_name,
-                    member_key_ids: existing_members,
-                    cohort_scope: cohort_scope::COMMUNITY,
-                    freshly_created: false,
-                }),
+        };
+    // THE PERSON'S ACT, KEPT (`crate::pair_intents`): written BEFORE anything
+    // depends on it — the joiner's `awaiting_invitation` below promises that
+    // the creator's invitation will be accepted when it lands, even across a
+    // restart, so an intent that could not be stored refuses here instead.
+    if let Err(e) = crate::pair_intents::record(&st.user_seed_dir, &community_id, &key_id) {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chat.store_unavailable",
+            format!("record the pair-room request: {e}"),
+        );
+    }
+    // Only an invitation FROM this contact's person is accepted here: the
+    // derived id names the pair, but anyone can propose into an id.
+    let pending = match pending {
+        Some(p) => {
+            let proposer = ciris_persist::federation::admission::admission_identity_for_writer(
+                &*directory,
+                &p.proposal.attesting_key_id,
             )
-                .into_response();
+            .await
+            .unwrap_or_default();
+            (proposer == key_id).then_some(p)
         }
-        Ok(None) => {}
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chat.store_unavailable",
-                format!("lookup_community: {e}"),
-            )
+        None => None,
+    };
+    if let Some(pending) = pending {
+        if let Err(e) = ciris_edge::chat::accept_pair_proposal(
+            &*directory,
+            &pending.proposal.attestation_id,
+            &st.node_signer,
+        )
+        .await
+        {
+            return crate::membership_invites::refused(&e);
         }
+        crate::compose::kick_replication("pair room invitation accepted");
+        tracing::info!(
+            room = %community_id, peer = %key_id,
+            "chat: accepted the pair room's invitation — the opener's node seats us"
+        );
+        return pair_room_response(
+            &st,
+            &community_id,
+            &pair_members,
+            false,
+            PAIR_STATE_ACCEPTED,
+            Some(pending.proposal.attestation_id),
+        )
+        .await;
     }
 
-    // `founded_at` is DERIVED, not read from a clock: the later `valid_from` of
-    // the two member key records. A community cannot predate its members, and a
-    // derived instant is the same on both nodes — a `Utc::now()` here would make
-    // the two ends author rows that differ in a signed field.
+    // 2. ONLY THE CREATOR FOUNDS. Two people opening the same pair at once
+    //    each founded their OWN record under the one derived id, each proposing
+    //    the other — two records, two invitations, and each node's
+    //    group-record gate then withheld its record AND its invitation from the
+    //    peer (the peer is a member of neither copy). Measured on the v38 chat
+    //    ladder: both rooms `member_count: 1`, both inboxes empty, the room
+    //    never keyed. `PairRole` is a function of the two fed-IDs (the
+    //    lexicographically smaller is the creator), so exactly one side ever
+    //    founds — edge's own harness rule for the same reason. The joiner, with
+    //    no invitation held yet, says so and founds nothing; its next call
+    //    accepts the creator's invitation once it arrives (step 1).
+    if ciris_edge::chat::PairRole::of(&owner.key_id, &key_id) == ciris_edge::chat::PairRole::Joiner
+    {
+        return pair_room_response(
+            &st,
+            &community_id,
+            &pair_members,
+            false,
+            PAIR_STATE_AWAITING_INVITATION,
+            None,
+        )
+        .await;
+    }
+
+    // 3. Open it (or re-open it) as the creator: found alone, propose the peer.
+    //    `founded_at` is DERIVED, not read from a clock: the later `valid_from`
+    //    of the two member key records — a community cannot predate its
+    //    members, and a re-open re-derives the same instant, so the idempotent
+    //    re-put is byte-identical.
     let mut founded_at = None;
     for member in [&owner.key_id, &key_id] {
         match directory.lookup_public_key(member).await {
@@ -2460,120 +3181,299 @@ async fn start_chat(
             "could not resolve either member's key record",
         );
     };
-
-    let member_key_ids = expected_members;
-    // ── THE ROOM RECORD IS EDGE'S (CIRISServer#524) ─────────────────────────
-    //
-    // This built the `Community` by hand, and the roster it produced differed
-    // from edge's in the one way that matters: both members carried
-    // `role: None`. Edge names both people `founder` outright, and says why —
-    // CC 4.5.4 / §11.11, no unmoderated federated space: "persist refuses to
-    // federate any content keyed on a community that has no live named
-    // moderator, and a named moderator exists iff the community has a
-    // steward-bound AUTHORITY root". A pair room is two equals, so the record
-    // makes each an authority root BY CONSTRUCTION rather than by the accident
-    // of a protocol setting.
-    //
-    // `community_name` was a second copy too — a sorted `"{a} <-> {b}"`, the
-    // same string edge formats — and it sits INSIDE `Community::signing_envelope`,
-    // so a drift there would have been two different signed records under one id.
-    //
-    // Edge's own note: "Everything that opens a pair room — the mesh harness,
-    // the tests, a consumer — builds it here, so the roster shape cannot drift
-    // between them." We were the consumer that drifted.
-    let signed = match ciris_edge::chat::signed_pair_community(
+    // THE ROSTER IS PART OF THE IDENTITY. The pair id is derivable by anyone,
+    // so a peer can pre-replicate a community under it carrying a third
+    // member — and a front door that opened any row at the derived id would
+    // open that room with a stowaway in it. The FOLD (never the record) must
+    // name no one outside the pair; since v52 a pending room names only its
+    // opener, which is a subset, not a conflict.
+    let held = match directory.lookup_community(&community_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("lookup_community: {e}"),
+            )
+        }
+    };
+    if let Some(existing) = &held {
+        let roster: Vec<String> = match active_roster(&*directory, existing).await {
+            Ok(r) => r.into_iter().map(|m| m.key_id).collect(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("active roster: {e}"),
+                )
+            }
+        };
+        if roster.iter().any(|k| !pair_members.contains(k)) {
+            return refuse(
+                StatusCode::CONFLICT,
+                "chat.community_shape_conflict",
+                format!(
+                    "a community already exists under the derived pair id but its roster is \
+                     not this pair ({} member(s), expected at most 2) — refusing to open it \
+                     as this chat",
+                    roster.len()
+                ),
+            );
+        }
+        // The other person founded it and their invitation has not reached
+        // this node yet: there is nothing to accept and nothing to found.
+        if !roster.iter().any(|k| k == &owner.key_id) && roster.iter().any(|k| k == &key_id) {
+            return pair_room_response(
+                &st,
+                &community_id,
+                &pair_members,
+                false,
+                PAIR_STATE_AWAITING_INVITATION,
+                None,
+            )
+            .await;
+        }
+    }
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::days(crate::membership_invites::DEFAULT_INVITE_DAYS);
+    let opened = match ciris_edge::chat::open_pair_room(
+        &*directory,
         &owner.key_id,
         &key_id,
         founded_at,
+        expires_at,
         &st.node_signer,
     )
     .await
     {
-        Ok(c) => c,
+        Ok(o) => o,
         Err(e) => {
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "chat.store_unavailable",
-                format!("signed_pair_community: {e}"),
+                "chat.community_create_failed",
+                format!("open_pair_room: {e}"),
             )
         }
     };
-    // Signed by edge over `Community::signing_envelope()` — the JCS field-set
-    // gate verifies exactly those bytes, which is why the record is never
-    // hand-rolled on either side of the room.
-    // The name the record actually carries — read off the signed room rather
-    // than re-derived, so the response cannot describe a room differently from
-    // the bytes that were stored.
-    let community_name = signed.community.community_name.clone();
-    if let Err(e) = st.engine.federation_directory().put_community(signed).await {
-        // A LOST RACE IS A SUCCESS SOMEONE ELSE ALREADY HAD. Two concurrent
-        // POSTs (double-tap, client retry, two devices) can both observe
-        // `lookup_community` returning None above; one insert wins and the
-        // other lands here on the primary-key conflict.
-        //
-        // persist v38.2.0 NARROWED when this arm fires: an IDENTICAL re-put is
-        // now an Ok no-op at the door (first-accepted authority signature
-        // preserved), so the ordinary race never errors at all. What still
-        // reaches here is the typed Conflict for DIFFERING content under the
-        // id — a roster-fork signal — plus any backend that predates the
-        // verdict semantics. The roster-equality re-read below is exactly the
-        // fork discriminator: matching roster → idempotent success;
-        // differing → the 500 carries the substrate's own Conflict message. The room the loser
-        // asked for EXISTS — reporting 500 would break the route's advertised
-        // idempotency exactly on the inputs where idempotency matters. So on
-        // failure, re-read the derived id: if the room is there with the same
-        // convergent identity, this call is the second arrival, not an error.
-        // A re-read that finds nothing (or a different shape) is a REAL
-        // failure and keeps the 500 with the original error.
-        if let Ok(Some(existing)) = directory.lookup_community(&community_id).await {
-            // The fold, for the same reason as the lookup arm above.
-            let mut existing_members: Vec<String> = active_roster(&*directory, &existing)
+    if opened.founded {
+        // The ROSTER is a row too — and so is the invitation. `share_in_room`
+        // kicks for every chat row that goes through it, but the record and
+        // the proposal are written straight to the directory here, so without
+        // this they would wait for a cadence tick while the KeyPackage sent
+        // milliseconds later did not.
+        crate::compose::kick_replication("chat room founded and peer invited");
+    }
+
+    // 4. The peer accepted and this node has not seated them yet (the bridge's
+    //    widener seats them on arrival; this covers a node whose runtime
+    //    started before its claim): the opener's own pen widens, now.
+    let state = match &opened.proposal {
+        None => PAIR_STATE_OPEN,
+        Some(proposal) => {
+            let invitee_accepted = directory
+                .list_attestations_for(&key_id)
+                .await
+                .map(|rows| {
+                    rows.into_iter().find(|r| {
+                        ciris_edge::membership::dimension_of(r)
+                            == Some(ciris_edge::membership::ACCEPTANCE_DIMENSION)
+                            && r.attestation_envelope
+                                .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
+                                .and_then(serde_json::Value::as_str)
+                                == Some(proposal.attestation_id.as_str())
+                    })
+                })
+                .unwrap_or(None);
+            match invitee_accepted {
+                Some(acceptance) => {
+                    match crate::owner_signer_capsule::acquire(
+                        &st.engine,
+                        bearer_of(&headers),
+                        &owner.key_id,
+                        st.user_seed_dir.clone(),
+                    )
+                    .await
+                    {
+                        Ok(pen) => {
+                            let widener =
+                                ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(
+                                    pen.edge_signer(),
+                                )]);
+                            match ciris_edge::membership::widen_on_acceptance(
+                                &*directory,
+                                &acceptance,
+                                &widener,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    crate::compose::kick_replication("pair room peer seated");
+                                    PAIR_STATE_OPEN
+                                }
+                                Err(e) => return crate::membership_invites::refused(&e),
+                            }
+                        }
+                        // A delegate cannot open the pen: the bridge seats them.
+                        Err(_) => PAIR_STATE_ACCEPTED,
+                    }
+                }
+                None => PAIR_STATE_INVITED,
+            }
+        }
+    };
+    pair_room_response(
+        &st,
+        &community_id,
+        &pair_members,
+        opened.founded,
+        state,
+        opened.proposal.map(|p| p.attestation_id),
+    )
+    .await
+}
+
+/// **Advance a pair room's two-step join on a read** — the joiner accepts a
+/// held invitation it asked for; the creator seats a held acceptance with the
+/// person's own pen. Both are the same edge calls `POST /v1/chat` makes; this
+/// runs them when the person is LOOKING at the room, so the join completes as
+/// soon as the other side's row arrives instead of on the next sweep. Every
+/// failure is logged and left for the next read: a read never fails on it.
+async fn advance_pair_join(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: &str) {
+    let directory = st.engine.federation_directory();
+    // The joiner's half: accept ONLY an invitation that matches an intent the
+    // person recorded with their own `POST /v1/chat` (`crate::pair_intents`).
+    let _ = crate::pair_intents::advance(
+        &*directory,
+        &st.user_seed_dir,
+        &owner.key_id,
+        &st.node_signer,
+    )
+    .await;
+    let Ok(Some(record)) = directory.lookup_community(room).await else {
+        return;
+    };
+    // A founder BY THE FOLD (an active `founder` seat), never the record.
+    let founder = active_roster(&*directory, &record).await.is_ok_and(|r| {
+        r.iter().any(|m| {
+            m.key_id == owner.key_id
+                && m.role.as_deref()
+                    == Some(ciris_persist::federation::admission::MEMBER_ROLE_FOUNDER)
+        })
+    });
+    if !founder {
+        return;
+    }
+    let Ok(pen) = crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer_of(headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    else {
+        return;
+    };
+    let invites = match crate::membership_invites::group_invites(
+        &*directory,
+        ciris_edge::membership::GroupScope::Community,
+        room,
+        &active_roster(&*directory, &record)
+            .await
+            .map(|r| r.into_iter().map(|m| m.key_id).collect())
+            .unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let widener =
+        ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
+    let _ =
+        crate::membership_invites::widen_held_acceptances(&*directory, &invites, &widener).await;
+}
+
+/// The pair room is open: both people are active founders.
+const PAIR_STATE_OPEN: &str = "open";
+/// This side opened it and invited the other person; they have not accepted.
+const PAIR_STATE_INVITED: &str = "invited";
+/// The invitation is accepted; the opener's node has not seated the joiner yet
+/// (on the joiner's side: always, until the widening replicates back).
+const PAIR_STATE_ACCEPTED: &str = "accepted";
+/// The other person opened the room, and their invitation has not reached this
+/// node yet. Nothing to accept; call again when it arrives.
+const PAIR_STATE_AWAITING_INVITATION: &str = "awaiting_invitation";
+
+/// `POST /v1/chat`'s answer: the room as the FOLD sees it now, plus where the
+/// two-step join stands (`state`, and the invitation's id when there is one).
+/// 200 in every state — the route has always been idempotent, and a client
+/// tells the states apart by `state` (and by `member_key_ids`, which lists
+/// only the active members).
+async fn pair_room_response(
+    st: &ChatState,
+    community_id: &str,
+    pair_members: &[String],
+    freshly_created: bool,
+    state: &'static str,
+    proposal_id: Option<String>,
+) -> Response {
+    let directory = st.engine.federation_directory();
+    let (name, mut members) = match directory.lookup_community(community_id).await {
+        Ok(Some(c)) => {
+            let roster: Vec<String> = active_roster(&*directory, &c)
                 .await
                 .map(|r| r.into_iter().map(|m| m.key_id).collect())
                 .unwrap_or_default();
-            existing_members.sort();
-            if existing_members == member_key_ids {
-                return (
-                    StatusCode::OK,
-                    Json(StartChatResponse {
-                        community_id: existing.community_key_id,
-                        community_name: existing.community_name,
-                        member_key_ids: existing_members,
-                        cohort_scope: cohort_scope::COMMUNITY,
-                        freshly_created: false,
-                    }),
-                )
-                    .into_response();
-            }
+            (c.community_name, roster)
         }
-        return refuse(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chat.community_create_failed",
-            format!("put_community: {e}"),
-        );
+        // The joiner's side before the record has replicated: the name is the
+        // sorted pair, the same string edge signs into the record.
+        _ => (pair_members.join(" <-> "), Vec::new()),
+    };
+    members.sort();
+    let mut body = serde_json::to_value(StartChatResponse {
+        community_id: community_id.to_owned(),
+        community_name: name,
+        member_key_ids: members,
+        cohort_scope: cohort_scope::COMMUNITY,
+        freshly_created,
+    })
+    .unwrap_or_default();
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("state".into(), serde_json::json!(state));
+        obj.insert("proposal_id".into(), serde_json::json!(proposal_id));
     }
-    // The ROSTER is a row too. `share_in_room` kicks for every chat row that
-    // goes through it (KeyPackage, Welcome, message), but the `Community`
-    // record is written straight to the directory here and returns — so
-    // without this the invitation itself was the one row in the conversation
-    // that waited for a cadence tick, while the KeyPackage sent milliseconds
-    // later did not. Fresh create only: the idempotent second arrival above
-    // returns early, so a client retry does not re-round.
-    crate::compose::kick_replication("chat room roster created");
-    (
-        StatusCode::OK,
-        Json(StartChatResponse {
-            community_id: community_id.clone(),
-            community_name,
-            member_key_ids,
-            cohort_scope: cohort_scope::COMMUNITY,
-            freshly_created: true,
-        }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 // ─── The message row ────────────────────────────────────────────────────────
+
+/// Every word a transcript row's `unopened_reason` can carry (CIRISServer#602):
+/// edge's `UnopenedReason::kind()` labels, verbatim. The four the drive also
+/// reports (`not_fetched`, `not_granted`, `evicted`, `seal_mismatch`) are the
+/// SAME words there for the same facts (`drive::BYTE_STATES`); a test pins that
+/// every edge arm lands in this list, so an arm edge adds cannot reach a client
+/// as a word nobody documented.
+pub const UNOPENED_REASONS: &[&str] = &[
+    "not_fetched",
+    "not_granted",
+    "evicted",
+    "seal_mismatch",
+    "malformed_row",
+    "not_text",
+    "substrate",
+];
+
+/// A row still pointing at unfetched blob-store content after the read: edge's
+/// own word for "not held here yet".
+const UNOPENED_POINTER: &str = "not_fetched";
+
+/// Edge's typed reason → `(token, detail)`: the token from `kind()` (the arm's
+/// stable label), the detail the substrate's own sentence. Never the `Display`
+/// rendering, which is the two glued together for a log line.
+fn unopened_token(reason: &ciris_edge::chat::UnopenedReason) -> (&'static str, String) {
+    (reason.kind(), reason.detail().to_owned())
+}
 
 /// One chat message, projected for the client with its CEG identity intact.
 ///
@@ -2604,11 +3504,18 @@ struct ChatMessage {
     /// collapsing them onto `""` would render a locked row as an empty bubble.
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-    /// Why the body did not open, from edge (`Body::Unopened`): a row sealed at
-    /// an epoch this member no longer holds, a ciphertext lifted from another
-    /// room, or a row carrying no seal at all.
+    /// Why the body did not open, as a TOKEN: one of [`UNOPENED_REASONS`],
+    /// straight from edge's `UnopenedReason::kind()` (CIRISServer#602) — the
+    /// same words the drive uses for the same facts. It was edge's `Display`
+    /// text (`"not_fetched: <sentence>"`), so a client had to parse a sentence
+    /// to branch, and a reword upstream would silently move a row between
+    /// states. Branch on this; show [`Self::unopened_detail`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    unopened_reason: Option<String>,
+    unopened_reason: Option<&'static str>,
+    /// The substrate's own sentence for [`Self::unopened_reason`] — for a human
+    /// or a log, never for branching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unopened_detail: Option<String>,
     /// Always [`DEFAULT_CONTENT_TYPE`]. Edge's `ChatMessage` does not model a
     /// content type because the sealed community tier carries text and nothing
     /// else — `chat_message_attestation` takes a `&str` body — and `send_message`
@@ -3296,7 +4203,7 @@ async fn collect_messages(
         )
         .await;
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
-        let (body, unopened_reason) = match opened.body {
+        let (body, unopened_reason, unopened_detail) = match opened.body {
             ciris_edge::chat::Body::Text(text) => {
                 // The timeline's arrival mark: the FIRST time this node reads
                 // this row with its body open. Once per row per process — a
@@ -3311,9 +4218,12 @@ async fn collect_messages(
                          is readable here from now on"
                     );
                 }
-                (Some(text), None)
+                (Some(text), None, None)
             }
-            ciris_edge::chat::Body::Unopened { reason } => (None, Some(reason.to_string())),
+            ciris_edge::chat::Body::Unopened { reason } => {
+                let (token, detail) = unopened_token(&reason);
+                (None, Some(token), Some(detail))
+            }
             // Still a pointer AFTER `resolve_content` — so the fetch did not
             // happen or did not succeed. The commonest cause is no active
             // occurrence for this viewer; saying so beats a blank message.
@@ -3328,8 +4238,12 @@ async fn collect_messages(
             // (CIRISServer#587). Guessing at that inside an urgent unbrick
             // release is how the next incident starts; the honest state is
             // cheap and the row is never silently dropped.
+            // The token is edge's own word for "not held here yet"
+            // (`UnopenedReason::NotFetched`), so a client branches one way on
+            // both shapes of the same fact.
             ciris_edge::chat::Body::Pointer(_) => (
                 None,
+                Some(UNOPENED_POINTER),
                 Some(
                     "content is in the room's blob store and was not fetched by this read"
                         .to_owned(),
@@ -3354,6 +4268,7 @@ async fn collect_messages(
             status_attestation_id,
             body,
             unopened_reason,
+            unopened_detail,
             content_type: DEFAULT_CONTENT_TYPE,
             asserted_at: opened.asserted_at.to_rfc3339(),
             // WHOSE WORDS — edge's, off the row's own attester. It is no longer
@@ -3396,14 +4311,12 @@ async fn collect_messages(
     // and the operator goes to the puller, not the roster.
     let unopened = out.iter().filter(|m| m.body.is_none()).count();
     if out.is_empty() || unopened > 0 {
-        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        // The token IS the kind now — no sentence to split (CIRISServer#602).
+        let mut reasons: std::collections::BTreeMap<&'static str, usize> = Default::default();
         for m in out.iter().filter(|m| m.body.is_none()) {
-            let r = m
-                .unopened_reason
-                .as_deref()
-                .map(|r| r.split(':').next().unwrap_or(r).trim().to_owned())
-                .unwrap_or_else(|| "unknown".to_owned());
-            *reasons.entry(r).or_insert(0) += 1;
+            *reasons
+                .entry(m.unopened_reason.unwrap_or("unknown"))
+                .or_insert(0) += 1;
         }
         let reading = if members.is_empty() {
             "members=0: the community row never replicated here, so nothing is anchored \
@@ -3493,6 +4406,25 @@ async fn other_member(
             .find(|k| *k != owner.key_id)
         {
             Some(peer) => Ok(peer),
+            // edge v38 / persist v52: a pair room between its two steps — the
+            // opener founded it alone and the other person has not been seated
+            // yet. The other person is named by the INVITATION, so the room
+            // reads as "waiting on the peer", not as a malformed room.
+            None if community_id.starts_with(ciris_edge::chat::PAIR_COMMUNITY_PREFIX) => {
+                crate::membership_invites::pending_pair_invitee(
+                    &*directory,
+                    community_id,
+                    &owner.key_id,
+                )
+                .await
+                .ok_or_else(|| {
+                    refuse(
+                        StatusCode::CONFLICT,
+                        "chat.not_a_pair_room",
+                        NOT_A_PAIR_ROOM,
+                    )
+                })
+            }
             None => Err(refuse(
                 StatusCode::CONFLICT,
                 "chat.not_a_pair_room",
@@ -3582,6 +4514,11 @@ async fn list_messages(
         "chat.delegation_denied",
     ) {
         return resp;
+    }
+    // edge v38: a pair room joins in two steps; reading it advances whichever
+    // step this side holds (the joiner's acceptance, the creator's widening).
+    if community_id.starts_with(PAIR_COMMUNITY_PREFIX) {
+        advance_pair_join(&st, &headers, &owner, &community_id).await;
     }
     if let Err(r) = require_member(&st, &owner, &community_id).await {
         return r;
@@ -3771,6 +4708,19 @@ pub fn router(
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
     scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 ) -> Router {
+    router_with_driver(engine, node_signer, user_seed_dir, routes, scope_lifecycle).0
+}
+
+/// [`router`], plus the [`PairRoomDriver`] over the SAME room state — the
+/// MLS groups the routes hold are the ones the driver advances, so a read
+/// and a tick never key one room twice.
+pub fn router_with_driver(
+    engine: Arc<Engine>,
+    node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    user_seed_dir: std::path::PathBuf,
+    routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
+) -> (Router, PairRoomDriver) {
     let state = ChatState {
         engine,
         user_seed_dir,
@@ -3779,10 +4729,22 @@ pub fn router(
         routes,
         scope_lifecycle,
     };
-    Router::new()
+    let router = Router::new()
         .route(
             "/v1/contacts",
             axum::routing::get(list_contacts).post(add_contact),
+        )
+        .route(
+            "/v1/contacts/{key_id}",
+            axum::routing::delete(remove_contact),
+        )
+        // CIRISServer#657 — withdraw one consent:replication grant by id. Here,
+        // not in `federation_admin`, because a withdrawal is signed with the
+        // OWNER's pen and this router holds the owner-seed location the capsule
+        // needs; `federation_admin` authors nothing as the owner.
+        .route(
+            "/v1/federation/peering/revoke",
+            axum::routing::post(revoke_grant),
         )
         .route("/v1/chat", axum::routing::post(start_chat))
         .route(
@@ -3792,7 +4754,8 @@ pub fn router(
         // CIRISServer#594 — N-member rooms and affiliations: the same state,
         // the same owner gate, the same signer.
         .merge(crate::communities::routes())
-        .with_state(state)
+        .with_state(state.clone());
+    (router, PairRoomDriver(state))
 }
 
 #[cfg(test)]
@@ -3830,4 +4793,379 @@ mod tests {
     // the same sorted pair, and it rides inside `Community::signing_envelope`,
     // so the property this used to assert is pinned where the string is built
     // rather than beside a copy of it.
+
+    // ─── CIRISServer#602 — re-proposals are carried, reasons are tokens ─────
+
+    fn edge_signer(key_id: &str, seed: u8) -> ciris_edge::identity::LocalSigner {
+        ciris_edge::identity::LocalSigner::new(
+            key_id,
+            Arc::new(
+                ciris_keyring::Ed25519SoftwareSigner::from_bytes(&[seed; 32], key_id)
+                    .expect("ed25519 seed"),
+            ),
+            Some(Arc::new(
+                ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+                    &[seed ^ 0x55; 32],
+                    format!("{key_id}-pqc"),
+                )
+                .expect("ml-dsa seed"),
+            )),
+        )
+    }
+
+    fn mls_store(tag: &str) -> ciris_edge::mls::ScopeStateProvider {
+        ciris_edge::mls::ScopeStateProvider::new(Arc::new(
+            ciris_persist::encrypted_kv::XChaChaKvStore::open_in_memory(tag.as_bytes())
+                .expect("in-memory MLS store"),
+        ))
+    }
+
+    /// Two members, A (creator) and B, both commit against one epoch and A's
+    /// claim is earlier. B hears A: edge rolls B back, applies A's commit and
+    /// re-proposes B's rotate. Returns both groups, B's lost original, and
+    /// B's re-proposals — the `reproposed` edge marks `must_use`.
+    async fn lost_contest(
+        room: &str,
+    ) -> (
+        ciris_edge::mls::CohortGroup,
+        ciris_edge::mls::CohortGroup,
+        ciris_edge::mls::CohortCommit,
+        Vec<ciris_edge::mls::CohortCommit>,
+    ) {
+        use ciris_edge::mls::cohort_group::mint_cohort_key_material;
+        use ciris_edge::mls::{ClaimedApplyOutcome, CohortGroup};
+        let t0 = chrono::Utc::now();
+        let a = CohortGroup::create(mls_store("a"), room, "node-a", 16)
+            .await
+            .expect("create");
+        let (mb, kpb) = mint_cohort_key_material("node-b").expect("mint B");
+        let add_b = a.add_member("node-b", kpb).await.expect("add B");
+        let b = CohortGroup::join(
+            mls_store("b"),
+            room,
+            mb,
+            add_b.welcome().expect("an Add carries a Welcome"),
+            16,
+        )
+        .await
+        .expect("join");
+        let ca = a
+            .rotate_at(t0 + chrono::Duration::seconds(10))
+            .await
+            .expect("A rotates");
+        let cb = b
+            .rotate_at(t0 + chrono::Duration::seconds(20))
+            .await
+            .expect("B rotates");
+        let outcome = b
+            .apply_remote_commit_claimed(ca.commit(), Some(ca.claim().clone()))
+            .await
+            .expect("B applies A's earlier commit");
+        let ClaimedApplyOutcome::Superseded { reproposed, .. } = outcome else {
+            panic!("the earlier claim must win and B must roll back: {outcome:?}");
+        };
+        (a, b, cb, reproposed)
+    }
+
+    /// THE PROPERTY #602 needed: a lost contest's re-proposal leaves this node
+    /// as a row authored by the committer, bound to the claim the peer
+    /// contests — and a peer that applies it converges with this node.
+    #[tokio::test]
+    async fn a_reproposal_is_carried_as_a_commit_row_the_winner_can_apply() {
+        use ciris_edge::mls::{ClaimedApplyOutcome, CommitClaim};
+        let room = "room-602-carried";
+        let (a, b, cb_lost, reproposed) = lost_contest(room).await;
+        assert_eq!(reproposed.len(), 1, "B's rotate is re-proposed, not lost");
+        let expected_epoch = reproposed[0].epoch();
+        let commit_bytes = reproposed[0].commit().to_vec();
+
+        let author = edge_signer("node-b", 0xB0);
+        let mut sink: Vec<Attestation> = Vec::new();
+        let carried = carry_reproposals(room, Some(&author), reproposed, |row| {
+            let id = row.attestation_id.clone();
+            sink.push(row);
+            std::future::ready(Ok::<_, String>(id))
+        })
+        .await;
+        assert_eq!(carried.placed.len(), 1, "{carried:?}");
+        assert!(carried.failed.is_empty(), "{carried:?}");
+        assert_eq!(carried.no_author, 0);
+        assert_eq!(sink.len(), 1, "the row reached the placement door");
+        let row = &sink[0];
+        assert_eq!(carried.placed[0], row.attestation_id);
+        assert_eq!(
+            row.attesting_key_id, "node-b",
+            "the row's author IS the claim's committer (edge refuses otherwise)"
+        );
+
+        // A hears B's lost original (discarded), then B's re-proposal AS CARRIED
+        // BY THE ROW: the claim is rebuilt from the row exactly as edge's
+        // `commits_from` rebuilds it on a receiver.
+        let lost = a
+            .apply_remote_commit_claimed(cb_lost.commit(), Some(cb_lost.claim().clone()))
+            .await
+            .expect("A contests B's original");
+        assert!(
+            matches!(lost, ClaimedApplyOutcome::Discarded { .. }),
+            "B's original loses on A: {lost:?}"
+        );
+        let from_row = CommitClaim::new(row.asserted_at, row.attesting_key_id.clone());
+        let applied = a
+            .apply_remote_commit_claimed(&commit_bytes, Some(from_row))
+            .await
+            .expect("A applies the carried re-proposal");
+        assert!(
+            matches!(applied, ClaimedApplyOutcome::Applied(_)),
+            "the re-proposal applies on the winner: {applied:?}"
+        );
+        assert_eq!(a.epoch().await, expected_epoch);
+        assert_eq!(b.epoch().await, expected_epoch);
+        assert_eq!(
+            a.destination_secret().await.expect("A secret").as_bytes(),
+            b.destination_secret().await.expect("B secret").as_bytes(),
+            "both members converge on one line once the re-proposal is carried"
+        );
+    }
+
+    /// Without an author the re-proposal cannot be carried (the row's author
+    /// MUST be the committer) — and that is counted, not silently dropped.
+    #[tokio::test]
+    async fn a_reproposal_without_an_author_is_counted_not_dropped() {
+        let (_, _, _, reproposed) = lost_contest("room-602-no-author").await;
+        let n = reproposed.len();
+        assert!(n > 0);
+        let mut calls = 0usize;
+        let carried = carry_reproposals("room-602-no-author", None, reproposed, |_row| {
+            calls += 1;
+            std::future::ready(Ok::<_, String>(String::new()))
+        })
+        .await;
+        assert_eq!(carried.no_author, n);
+        assert!(carried.placed.is_empty());
+        assert_eq!(calls, 0, "nothing reaches the placement door unsigned");
+    }
+
+    /// A placement refusal names the epoch and the error — a caller that only
+    /// saw "carried" could not know B's line never left this node.
+    #[tokio::test]
+    async fn a_placement_failure_is_named() {
+        let room = "room-602-refused";
+        let (_, _, _, reproposed) = lost_contest(room).await;
+        let epoch = reproposed[0].epoch();
+        let author = edge_signer("node-b", 0xB0);
+        let carried = carry_reproposals(room, Some(&author), reproposed, |_row| {
+            std::future::ready(Err::<String, _>("put refused".to_owned()))
+        })
+        .await;
+        assert!(carried.placed.is_empty());
+        assert_eq!(carried.failed, vec![format!("epoch {epoch}: put refused")]);
+    }
+
+    /// Nothing to carry is not an event.
+    #[tokio::test]
+    async fn no_reproposals_places_nothing() {
+        let author = edge_signer("node-b", 0xB0);
+        let carried = carry_reproposals("r", Some(&author), Vec::new(), |_row| {
+            std::future::ready(Ok::<_, String>(String::new()))
+        })
+        .await;
+        assert!(carried.placed.is_empty() && carried.failed.is_empty());
+        assert_eq!((carried.no_author, carried.welcome_not_carried), (0, 0));
+    }
+
+    /// The transcript's `unopened_reason` is edge's `kind()` token for EVERY
+    /// arm — never the `Display` sentence — and every token is documented in
+    /// [`UNOPENED_REASONS`]. The drive-shared four are the drive's words.
+    #[test]
+    fn every_unopened_arm_is_a_documented_token_not_a_sentence() {
+        use ciris_edge::chat::UnopenedReason as R;
+        let d = || "the substrate's sentence: with a colon".to_owned();
+        let arms = [
+            R::NotFetched { detail: d() },
+            R::NotGranted { detail: d() },
+            R::Evicted { detail: d() },
+            R::SealMismatch { detail: d() },
+            R::MalformedRow { detail: d() },
+            R::NotText { detail: d() },
+            R::Substrate { detail: d() },
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for arm in &arms {
+            let (token, detail) = unopened_token(arm);
+            assert_eq!(token, arm.kind());
+            assert!(
+                UNOPENED_REASONS.contains(&token),
+                "`{token}` reaches clients but is not in UNOPENED_REASONS"
+            );
+            assert!(
+                !token.contains(':') && !token.contains(' '),
+                "a token, not a sentence: {token}"
+            );
+            assert_eq!(detail, d(), "the detail is the substrate's own sentence");
+            seen.insert(token);
+        }
+        assert_eq!(
+            seen.len(),
+            UNOPENED_REASONS.len(),
+            "every documented token is reachable, and no two arms share one"
+        );
+        assert!(UNOPENED_REASONS.contains(&UNOPENED_POINTER));
+        for shared in ["not_fetched", "not_granted", "evicted", "seal_mismatch"] {
+            assert!(
+                crate::drive::BYTE_STATES.contains(&shared),
+                "`{shared}` means the same fact on the drive and must be the same word"
+            );
+        }
+    }
+}
+
+// ─── The pair-room driver (edge v38 / persist v52) ──────────────────────────
+
+/// **A pair room converges with nobody reading it.**
+///
+/// A person asks for a chat ONCE (`POST /v1/chat`) and waits. Since edge v38
+/// the room needs four acts across two nodes before a message can be sealed:
+/// the joiner ACCEPTS the creator's invitation (only one matching an intent
+/// the person recorded — [`crate::pair_intents`]), the creator WIDENS the
+/// roster on that acceptance, the joiner publishes its MLS KeyPackage, and the
+/// creator answers with the Welcome. Every one of them ran only inside a
+/// request (a read or a send of the room). The Docker chat ladder showed the
+/// consequence: node-b called `POST /v1/chat` once and never read the room
+/// again, so its KeyPackage was never published, node-a's room stayed
+/// `AwaitingPeer`, and node-a's send was refused 503 (the native harness hid
+/// it by polling both sides). This driver runs the same calls on its own
+/// `loop_cadence` slot (`pair_rooms`) — [`pair_intents::advance`], edge's
+/// `widen_on_acceptance` via [`crate::membership_invites::widen_held_acceptances`],
+/// and [`room_key`] with the person's pen — for every pair room this node's
+/// person asked for or is seated in. Authority: the owner BINDING
+/// (`owner_signer_capsule::for_owned_node_in`), as for every loop that signs
+/// for the person; an unclaimed node drives nothing.
+///
+/// [`pair_intents::advance`]: crate::pair_intents::advance
+#[derive(Clone)]
+pub struct PairRoomDriver(ChatState);
+
+/// The driver's period: the node's common 30 s (`loop_cadence`'s premise).
+pub const PAIR_ROOM_DRIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl PairRoomDriver {
+    /// One pass. Returns `(room, state)` for every seated pair room it keyed or
+    /// tried to (`state` is [`RoomHandshake`]'s word).
+    pub async fn drive_once(&self) -> Vec<(String, String)> {
+        drive_pair_rooms(&self.0).await
+    }
+
+    /// The loop, until `shutdown` flips.
+    pub fn spawn(
+        self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut schedule =
+                crate::loop_cadence::Cadence::new("pair_rooms", PAIR_ROOM_DRIVE_EVERY);
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    () = schedule.tick() => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() { break; }
+                        continue;
+                    }
+                }
+                let _ = self.drive_once().await;
+            }
+            tracing::info!("pair-room driver stopped");
+        })
+    }
+}
+
+async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
+    let Ok(node) = crate::family_api::this_node_key(&st.engine).await else {
+        return Vec::new();
+    };
+    let Ok(pen) =
+        crate::owner_signer_capsule::for_owned_node_in(&st.engine, &node, st.user_seed_dir.clone())
+            .await
+    else {
+        return Vec::new();
+    };
+    let me = pen.key_id().to_owned();
+    let dir = st.engine.federation_directory();
+    // 1. The joiner's acceptance of a requested room's invitation.
+    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, &st.node_signer).await;
+    // 2. Every pair room this person is in: the record's members, plus the
+    //    widening plane (a joiner is seated by a widening — the record never
+    //    grows, persist Q2).
+    let mut rooms: std::collections::BTreeSet<String> = dir
+        .list_communities_for_member(&me)
+        .await
+        .map(|v| v.into_iter().map(|c| c.community_key_id).collect())
+        .unwrap_or_default();
+    let mut cursor = None;
+    loop {
+        let Ok(page) = dir
+            .list_signed_community_membership_widenings_since(cursor.clone(), 500)
+            .await
+        else {
+            break;
+        };
+        for w in &page {
+            let row = &w.widening.community_membership_widening;
+            if row.member_key_id == me {
+                rooms.insert(row.community_key_id.clone());
+            }
+        }
+        if page.len() < 500 {
+            break;
+        }
+        cursor = page.last().map(|p| p.resume_pair());
+    }
+    let widener =
+        ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
+    let mut out = Vec::new();
+    for room in rooms
+        .into_iter()
+        .filter(|r| r.starts_with(PAIR_COMMUNITY_PREFIX))
+    {
+        let Ok(Some(record)) = dir.lookup_community(&room).await else {
+            continue;
+        };
+        let Ok(roster) = active_roster(&*dir, &record).await else {
+            continue;
+        };
+        let keys: std::collections::HashSet<String> =
+            roster.iter().map(|m| m.key_id.clone()).collect();
+        if !keys.contains(&me) {
+            continue;
+        }
+        // 3. The creator's widening on a held acceptance.
+        if keys.len() < 2 {
+            if let Ok(invites) = crate::membership_invites::group_invites(
+                &*dir,
+                ciris_edge::membership::GroupScope::Community,
+                &room,
+                &keys,
+            )
+            .await
+            {
+                let _ =
+                    crate::membership_invites::widen_held_acceptances(&*dir, &invites, &widener)
+                        .await;
+            }
+            continue;
+        }
+        // 4. The MLS handshake, as a read with the person's pen drives it.
+        let Some(peer) = keys.iter().find(|k| **k != me).cloned() else {
+            continue;
+        };
+        match room_key(st, &me, &peer, Some(pen.edge_signer())).await {
+            Ok(state) => out.push((room, format!("{state:?}"))),
+            Err(e) => {
+                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced")
+            }
+        }
+    }
+    out
 }
