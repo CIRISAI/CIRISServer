@@ -1202,6 +1202,26 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             }
         }
     };
+    // THE PAIR-ROOM DRIVER (edge v38 / persist v52, CIRISPersist#955): the chat
+    // router and its driver share ONE room state, so a read and a tick never
+    // key a room twice. A person asks for a chat once and waits — the driver
+    // completes the two-step join and the MLS handshake with nobody reading
+    // (`contacts_chat::PairRoomDriver`). Supervised like the session claims.
+    let (pair_rooms_sd_tx, pair_rooms_sd_rx) = watch::channel(false);
+    let (chat_router, pair_room_driver) = crate::contacts_chat::router_with_driver(
+        Arc::clone(&engine),
+        Arc::clone(&chat_node_signer),
+        crate::user_seed_dir(&cfg),
+        // The live transport, so the contact ladder can run its `discover`
+        // rung — "is there somewhere to send" — through edge's own `RouteLens`
+        // instead of this module deciding what reachable means.
+        edge.reticulum_transport(),
+        // CIRISEdge#499 — the host drives the scope-address plane it armed: a
+        // keyed room is installed, advanced on every epoch, sealed on the
+        // cadence loop below.
+        edge.scope_lifecycle().cloned(),
+    );
+    let pair_rooms_join = pair_room_driver.spawn(pair_rooms_sd_rx);
     let read = {
         let read = LensCore::read_api_with_extra_at_fidelity(
             Arc::clone(&engine),
@@ -1611,20 +1631,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // grant, a chat is a two-member `Community` under a derived
                     // id, and a message is a `chat:message:v1` attestation at
                     // `cohort_scope: community`. See `crate::contacts_chat`.
-                    .merge(crate::contacts_chat::router(
-                        Arc::clone(&engine),
-                        Arc::clone(&chat_node_signer),
-                        crate::user_seed_dir(&cfg),
-                        // The live transport, so the contact ladder can run its
-                        // `discover` rung — "is there somewhere to send" — through
-                        // edge's own `RouteLens` instead of this module deciding
-                        // what reachable means.
-                        edge.reticulum_transport(),
-                        // CIRISEdge#499 — the host drives the scope-address
-                        // plane it armed: a keyed room is installed, advanced
-                        // on every epoch, sealed on the cadence loop below.
-                        edge.scope_lifecycle().cloned(),
-                    ))
+                    // (built above with its pair-room driver)
+                    .merge(chat_router)
                     // FILES, THE DRIVE AND NOTES (CIRISServer#622/#615): one
                     // door for a file at any cohort, the drive that lists what
                     // this identity can reach with `row held, bytes absent` as
@@ -2221,6 +2229,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     stop_step("self room drive", self_room_join).await;
     let _ = session_claims_sd_tx.send(true);
     stop_step("session claims", session_claims_join).await;
+    let _ = pair_rooms_sd_tx.send(true);
+    stop_step("pair-room driver", pair_rooms_join).await;
     // Tear down the retention loop (CIRISServer#348). Before the config
     // reconciler: the loop selects on the config watch, and dropping the sender
     // first would race its shutdown branch against a `changed()` error break.

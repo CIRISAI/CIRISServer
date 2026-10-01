@@ -4708,6 +4708,19 @@ pub fn router(
     routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
     scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
 ) -> Router {
+    router_with_driver(engine, node_signer, user_seed_dir, routes, scope_lifecycle).0
+}
+
+/// [`router`], plus the [`PairRoomDriver`] over the SAME room state — the
+/// MLS groups the routes hold are the ones the driver advances, so a read
+/// and a tick never key one room twice.
+pub fn router_with_driver(
+    engine: Arc<Engine>,
+    node_signer: Arc<ciris_edge::identity::LocalSigner>,
+    user_seed_dir: std::path::PathBuf,
+    routes: Option<Arc<ciris_edge::transport::reticulum::ReticulumTransport>>,
+    scope_lifecycle: Option<Arc<ciris_edge::scope_lifecycle::ScopeLifecycle>>,
+) -> (Router, PairRoomDriver) {
     let state = ChatState {
         engine,
         user_seed_dir,
@@ -4716,7 +4729,7 @@ pub fn router(
         routes,
         scope_lifecycle,
     };
-    Router::new()
+    let router = Router::new()
         .route(
             "/v1/contacts",
             axum::routing::get(list_contacts).post(add_contact),
@@ -4741,7 +4754,8 @@ pub fn router(
         // CIRISServer#594 — N-member rooms and affiliations: the same state,
         // the same owner gate, the same signer.
         .merge(crate::communities::routes())
-        .with_state(state)
+        .with_state(state.clone());
+    (router, PairRoomDriver(state))
 }
 
 #[cfg(test)]
@@ -5003,4 +5017,155 @@ mod tests {
             );
         }
     }
+}
+
+// ─── The pair-room driver (edge v38 / persist v52) ──────────────────────────
+
+/// **A pair room converges with nobody reading it.**
+///
+/// A person asks for a chat ONCE (`POST /v1/chat`) and waits. Since edge v38
+/// the room needs four acts across two nodes before a message can be sealed:
+/// the joiner ACCEPTS the creator's invitation (only one matching an intent
+/// the person recorded — [`crate::pair_intents`]), the creator WIDENS the
+/// roster on that acceptance, the joiner publishes its MLS KeyPackage, and the
+/// creator answers with the Welcome. Every one of them ran only inside a
+/// request (a read or a send of the room). The Docker chat ladder showed the
+/// consequence: node-b called `POST /v1/chat` once and never read the room
+/// again, so its KeyPackage was never published, node-a's room stayed
+/// `AwaitingPeer`, and node-a's send was refused 503 (the native harness hid
+/// it by polling both sides). This driver runs the same calls on its own
+/// `loop_cadence` slot (`pair_rooms`) — [`pair_intents::advance`], edge's
+/// `widen_on_acceptance` via [`crate::membership_invites::widen_held_acceptances`],
+/// and [`room_key`] with the person's pen — for every pair room this node's
+/// person asked for or is seated in. Authority: the owner BINDING
+/// (`owner_signer_capsule::for_owned_node_in`), as for every loop that signs
+/// for the person; an unclaimed node drives nothing.
+///
+/// [`pair_intents::advance`]: crate::pair_intents::advance
+#[derive(Clone)]
+pub struct PairRoomDriver(ChatState);
+
+/// The driver's period: the node's common 30 s (`loop_cadence`'s premise).
+pub const PAIR_ROOM_DRIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl PairRoomDriver {
+    /// One pass. Returns `(room, state)` for every seated pair room it keyed or
+    /// tried to (`state` is [`RoomHandshake`]'s word).
+    pub async fn drive_once(&self) -> Vec<(String, String)> {
+        drive_pair_rooms(&self.0).await
+    }
+
+    /// The loop, until `shutdown` flips.
+    pub fn spawn(
+        self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut schedule =
+                crate::loop_cadence::Cadence::new("pair_rooms", PAIR_ROOM_DRIVE_EVERY);
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    () = schedule.tick() => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() { break; }
+                        continue;
+                    }
+                }
+                let _ = self.drive_once().await;
+            }
+            tracing::info!("pair-room driver stopped");
+        })
+    }
+}
+
+async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
+    let Ok(node) = crate::family_api::this_node_key(&st.engine).await else {
+        return Vec::new();
+    };
+    let Ok(pen) =
+        crate::owner_signer_capsule::for_owned_node_in(&st.engine, &node, st.user_seed_dir.clone())
+            .await
+    else {
+        return Vec::new();
+    };
+    let me = pen.key_id().to_owned();
+    let dir = st.engine.federation_directory();
+    // 1. The joiner's acceptance of a requested room's invitation.
+    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, &st.node_signer).await;
+    // 2. Every pair room this person is in: the record's members, plus the
+    //    widening plane (a joiner is seated by a widening — the record never
+    //    grows, persist Q2).
+    let mut rooms: std::collections::BTreeSet<String> = dir
+        .list_communities_for_member(&me)
+        .await
+        .map(|v| v.into_iter().map(|c| c.community_key_id).collect())
+        .unwrap_or_default();
+    let mut cursor = None;
+    loop {
+        let Ok(page) = dir
+            .list_signed_community_membership_widenings_since(cursor.clone(), 500)
+            .await
+        else {
+            break;
+        };
+        for w in &page {
+            let row = &w.widening.community_membership_widening;
+            if row.member_key_id == me {
+                rooms.insert(row.community_key_id.clone());
+            }
+        }
+        if page.len() < 500 {
+            break;
+        }
+        cursor = page.last().map(|p| p.resume_pair());
+    }
+    let widener =
+        ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
+    let mut out = Vec::new();
+    for room in rooms
+        .into_iter()
+        .filter(|r| r.starts_with(PAIR_COMMUNITY_PREFIX))
+    {
+        let Ok(Some(record)) = dir.lookup_community(&room).await else {
+            continue;
+        };
+        let Ok(roster) = active_roster(&*dir, &record).await else {
+            continue;
+        };
+        let keys: std::collections::HashSet<String> =
+            roster.iter().map(|m| m.key_id.clone()).collect();
+        if !keys.contains(&me) {
+            continue;
+        }
+        // 3. The creator's widening on a held acceptance.
+        if keys.len() < 2 {
+            if let Ok(invites) = crate::membership_invites::group_invites(
+                &*dir,
+                ciris_edge::membership::GroupScope::Community,
+                &room,
+                &keys,
+            )
+            .await
+            {
+                let _ =
+                    crate::membership_invites::widen_held_acceptances(&*dir, &invites, &widener)
+                        .await;
+            }
+            continue;
+        }
+        // 4. The MLS handshake, as a read with the person's pen drives it.
+        let Some(peer) = keys.iter().find(|k| **k != me).cloned() else {
+            continue;
+        };
+        match room_key(st, &me, &peer, Some(pen.edge_signer())).await {
+            Ok(state) => out.push((room, format!("{state:?}"))),
+            Err(e) => {
+                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced")
+            }
+        }
+    }
+    out
 }

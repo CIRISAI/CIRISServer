@@ -131,41 +131,53 @@ CHAT — two people, each on their own node, one pair room, one message (CSD-091
     cid_a = a.open_pair(b.owner_key_id)
     cid_b = b.open_pair(a.owner_key_id)
     step("room_opened", same_room=cid_a == cid_b, room=cid_a)
+    # THE JOINER ASKS ONCE AND NEVER READS THE ROOM AGAIN (the Docker chat
+    # ladder's shape, and production's: a person asks for a chat and waits).
+    # `PairRole` gives the smaller fed-ID the creator's role. Only the CREATOR
+    # is polled for keying: it reads `ready` only once the joiner's KeyPackage
+    # arrived, which on the joiner's node is the pair-room driver's work, not
+    # a read's. Polling both sides used to drive the joiner on every poll and
+    # hid exactly that (v38 adopt, 2026-10-01).
+    creator, joiner = (a, b) if a.owner_key_id < b.owner_key_id else (b, a)
+    cid_c, cid_j = (cid_a, cid_b) if creator is a else (cid_b, cid_a)
 
     def keyed() -> Any:
-        ra, rb = a.room(cid_a), b.room(cid_b)
-        return (ra["ready"] and rb["ready"]) and (ra, rb)
+        rc = creator.room(cid_c)
+        return rc["ready"] and rc
 
     try:
-        wait_for("the pair room to key on both sides", keyed, args.ready_wait, every=3)
-        step("room_keyed")
+        wait_for("the pair room to key on the creator with the joiner never reading", keyed,
+                 args.ready_wait, every=3)
+        step("room_keyed", creator=creator.name, joiner_reads="once (POST /v1/chat)")
     except MeshError:
-        ra, rb = a.room(cid_a), b.room(cid_b)
+        rc = creator.room(cid_c)
         step.fail("room_NOT_keyed",
-                  "the MLS handshake did not complete: the joiner's KeyPackage or the creator's "
-                  "Welcome never reached the other node (CIRISServer#698's claim)",
-                  [a, b], _HANDSHAKE, alice_state=ra["state"], bob_state=rb["state"])
+                  "the MLS handshake did not complete with the joiner never reading: the "
+                  "joiner's acceptance, the creator's widening, the joiner's KeyPackage or the "
+                  "creator's Welcome never happened (the pair-room driver's four acts)",
+                  [a, b], _HANDSHAKE, creator_state=rc["state"])
         raise
-    text = f"hello from bob {int(time.time())}"
-    att = b.say(cid_b, text)
-    step("sent", attestation_id=att)
+    text = f"hello from {creator.name} {int(time.time())}"
+    att = creator.say(cid_c, text)
+    step("sent", attestation_id=att, by=creator.name)
 
     def arrived() -> bool:
         return any(m.get("attestation_id") == att and m.get("body") == text
-                   for m in a.room(cid_a)["messages"])
+                   for m in joiner.room(cid_j)["messages"])
 
     try:
-        wait_for("bob's message on alice's node", arrived, args.arrive_wait, every=2)
+        wait_for(f"{creator.name}'s message on {joiner.name}'s node", arrived, args.arrive_wait,
+                 every=2)
     except MeshError:
-        ra = a.room(cid_a)
-        mine = [m for m in ra["messages"] if m.get("attestation_id") == att]
+        rj = joiner.room(cid_j)
+        mine = [m for m in rj["messages"] if m.get("attestation_id") == att]
         step.fail("body_NOT_arrived",
-                  "the row may be here but its BODY did not open on alice: the recipient pulls "
-                  "the body from a holder over the room's DERIVED address, which only a direct "
-                  "neighbour can reach (CC 5.4.6); a `no route to peer … has_path=false` line "
-                  "below is that, `outcome=Stored` means it DID arrive and the transcript is "
-                  "the problem",
-                  [a, b], _BODY, row_on_alice=mine[:1], transcript_len=len(ra["messages"]))
+                  "the row may be here but its BODY did not open on the joiner: the recipient "
+                  "pulls the body from a holder over the room's DERIVED address, which only a "
+                  "direct neighbour can reach (CC 5.4.6); a `no route to peer … has_path=false` "
+                  "line below is that, `outcome=Stored` means it DID arrive and the transcript "
+                  "is the problem",
+                  [a, b], _BODY, row_on_joiner=mine[:1], transcript_len=len(rj["messages"]))
         raise
     step("arrived", proves="CSD-091: the peer's message, by attestation id, with its body, on the other person's node")
     values = {"PEER_URL": b.url, "PEER_KEY_ID": b.owner_key_id, "PEER_NODE_KEY_ID": b.node_key_id,

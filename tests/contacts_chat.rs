@@ -3719,3 +3719,162 @@ async fn a_joiner_who_asks_first_is_seated_across_a_restart_and_nothing_else_is_
         "a seated room's intent is removed"
     );
 }
+
+/// [`serve`], keeping the router's [`contacts_chat::PairRoomDriver`].
+async fn serve_with_driver(
+    engine: Arc<Engine>,
+    seed_dir: PathBuf,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    contacts_chat::PairRoomDriver,
+) {
+    let signer = node_edge_signer(&engine).await;
+    let (app, driver) = contacts_chat::router_with_driver(engine, signer, seed_dir, None, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle, driver)
+}
+
+/// **A joiner who asks ONCE converges with nobody reading the room** (the
+/// Docker chat ladder: node-b called `POST /v1/chat` once and never read the
+/// room, so its KeyPackage was never published and node-a's send was 503).
+///
+/// The owner (joiner against Aaron) makes exactly one request — `POST
+/// /v1/chat` — and never another. Every later step on the owner's node is the
+/// pair-room driver's own pass (`drive_once`, the body of its `pair_rooms`
+/// loop): it accepts Aaron's invitation when it lands (and not Abel's, which
+/// the person never asked for); once Aaron's node has seated the owner, the
+/// next pass publishes the owner's MLS KeyPackage into the room — the row the
+/// creator's Welcome answers — and the request is removed from disk.
+#[tokio::test]
+async fn a_joiner_who_asks_once_converges_with_nobody_reading_the_room() {
+    let (engine, base, owner, owner_id, handle) = fixture().await;
+    handle.abort();
+    let (base2, _h, driver) =
+        serve_with_driver(Arc::clone(&engine), owner_id.seed_dir.clone()).await;
+    let _ = base;
+    let base = base2;
+    let client = reqwest::Client::new();
+    seed_user_key(&engine, AARON_KEY_ID, 0xE0, 0xE1).await;
+    seed_user_key(&engine, ABEL_KEY_ID, 0xE2, 0xE3).await;
+    for k in [AARON_KEY_ID, ABEL_KEY_ID] {
+        let resp = client
+            .post(format!("{base}/v1/contacts"))
+            .bearer_auth(&owner)
+            .json(&serde_json::json!({ "key_id": k }))
+            .send()
+            .await
+            .expect("POST /v1/contacts");
+        assert_eq!(resp.status(), 200);
+    }
+    let pair = pair_community_key_id(&owner_id.key_id, AARON_KEY_ID);
+    let abel_pair = pair_community_key_id(&owner_id.key_id, ABEL_KEY_ID);
+
+    // THE ONLY REQUEST the joiner ever makes.
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": AARON_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat");
+    let v: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(v["state"], "awaiting_invitation", "{v}");
+
+    // The creators' rooms land here, as replication carries them.
+    let dir = engine.federation_directory();
+    let aaron = edge_signer_for(AARON_KEY_ID, 0xE0, 0xE1);
+    let abel = edge_signer_for(ABEL_KEY_ID, 0xE2, 0xE3);
+    let now = chrono::Utc::now();
+    let opened = ciris_edge::chat::open_pair_room(
+        dir.as_ref(),
+        AARON_KEY_ID,
+        &owner_id.key_id,
+        now,
+        now + chrono::Duration::days(1),
+        &aaron,
+    )
+    .await
+    .expect("Aaron opens");
+    let proposal = opened.proposal.expect("an invitation").attestation_id;
+    ciris_edge::chat::open_pair_room(
+        dir.as_ref(),
+        ABEL_KEY_ID,
+        &owner_id.key_id,
+        now,
+        now + chrono::Duration::days(1),
+        &abel,
+    )
+    .await
+    .expect("Abel opens");
+
+    // Pass 1: the driver accepts the requested invitation, and only it.
+    driver.drive_once().await;
+    let pending: Vec<String> =
+        ciris_edge::membership::pending_proposals_for(dir.as_ref(), &owner_id.key_id)
+            .await
+            .expect("inbox")
+            .into_iter()
+            .map(|p| p.group_key_id)
+            .collect();
+    assert!(
+        !pending.contains(&pair),
+        "accepted with no read: {pending:?}"
+    );
+    assert!(
+        pending.contains(&abel_pair),
+        "never auto-accepted: {pending:?}"
+    );
+
+    // Aaron's node seats the owner on the acceptance.
+    let acceptance = dir
+        .list_attestations_for(&owner_id.key_id)
+        .await
+        .expect("replies")
+        .into_iter()
+        .find(|r| {
+            ciris_edge::membership::dimension_of(r)
+                == Some(ciris_edge::membership::ACCEPTANCE_DIMENSION)
+                && r.attestation_envelope
+                    .get("references_attestation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(proposal.as_str())
+        })
+        .expect("the acceptance");
+    ciris_edge::membership::widen_on_acceptance(
+        dir.as_ref(),
+        &acceptance,
+        &ciris_edge::membership::MembershipWidener::new(vec![Arc::new(aaron)]),
+    )
+    .await
+    .expect("Aaron widens");
+
+    // Pass 2: seated, the joiner's KeyPackage goes out — still with no read.
+    assert!(
+        ciris_edge::chat::key_package_from(dir.as_ref(), &owner_id.key_id, &pair)
+            .await
+            .expect("read")
+            .is_none(),
+        "precondition: no KeyPackage before the driver runs"
+    );
+    let driven = driver.drive_once().await;
+    assert!(
+        ciris_edge::chat::key_package_from(dir.as_ref(), &owner_id.key_id, &pair)
+            .await
+            .expect("read")
+            .is_some(),
+        "the joiner's KeyPackage is published by the driver, not by a read: {driven:?}"
+    );
+    assert!(
+        intents_on_disk(&owner_id.seed_dir)
+            .iter()
+            .all(|i| i["pair_id"] != serde_json::json!(pair)),
+        "the seated room's request is removed"
+    );
+}

@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 11] = [
+pub const LOOPS: [&str; 12] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -105,6 +105,12 @@ pub const LOOPS: [&str; 11] = [
     // (`crate::session_claims`). Its own slot so the renewal's handler reads
     // never land on the self room's tick, whose Add/Remove it gates.
     "session_claims",
+    // edge v38 / persist v52 (CIRISPersist#955) — the pair-room driver: a
+    // person asks for a chat ONCE and waits, so the two-step join (the
+    // joiner's acceptance, the creator's widening) and the MLS handshake (the
+    // joiner's KeyPackage, the creator's Welcome) are advanced here, not only
+    // on a read (`contacts_chat::PairRoomDriver`).
+    "pair_rooms",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.
