@@ -535,12 +535,13 @@ pub async fn spawn_blob_puller(
     Option<ciris_edge::blob_swarm::PullSink>,
     Option<ciris_edge::replication::RevocationWiring>,
 ) {
+    let commons = commons_hold(engine, local_key_id).await;
     #[cfg(target_os = "linux")]
     if let Some(pg) = engine.postgres_backend() {
-        return spawn_puller_with(engine, edge, Arc::clone(pg), local_key_id);
+        return spawn_puller_with(engine, edge, Arc::clone(pg), local_key_id, commons);
     }
     if let Some(sq) = engine.sqlite_backend() {
-        return spawn_puller_with(engine, edge, Arc::clone(sq), local_key_id);
+        return spawn_puller_with(engine, edge, Arc::clone(sq), local_key_id, commons);
     }
     tracing::warn!(
         "blob puller NOT spawned — this Engine has no read-capable backend; blobs will not \
@@ -549,11 +550,105 @@ pub async fn spawn_blob_puller(
     (None, None)
 }
 
+/// What this node holds from the commons, and from which holders.
+///
+/// Edge's store gate has three axes and this is two of them: axis 1 for
+/// commons content is an allowlist of holders ("which authority blesses a CI
+/// key is a Registry/Server question, and edge consumes the roster"), and
+/// axis 3 is the operator's own consent to hold the class at all.
+pub(crate) struct CommonsHold {
+    /// Whether commons content is held and announced, or declined.
+    disposition: ciris_edge::blob_swarm::store_gate::ConsentDisposition,
+    /// The holders a commons blob may be pulled from. Empty refuses all.
+    holders: Vec<String>,
+}
+
+impl CommonsHold {
+    /// Does this node hold commons content at all?
+    pub(crate) fn holds(&self) -> bool {
+        self.disposition == ciris_edge::blob_swarm::store_gate::ConsentDisposition::Announce
+    }
+
+    /// The holders it will pull commons content from.
+    pub(crate) fn holders(&self) -> &[String] {
+        &self.holders
+    }
+}
+
+/// Env override naming extra commons holders, comma-separated key ids. For an
+/// operator who has been given a roster this node's directory does not hold
+/// yet; it adds to the directory-derived set and never replaces it.
+const COMMONS_HOLDERS_ENV: &str = "CIRIS_BLOB_COMMONS_HOLDERS";
+
+/// A node the accord conferred the registry slice on holds build manifests,
+/// which are commons blobs. Every other node declines the commons, as before.
+///
+/// The conferral is the consent. An operator does not opt a node into holding
+/// manifests with a flag any more than they opt it into serving the registry
+/// surface: both follow from holding `infra:attest` from a root the node
+/// accepts, and both stop when that stops being true (at the next boot, since
+/// the puller's policy is fixed when it is spawned).
+///
+/// The holders are the canonical servers in this node's directory, plus
+/// [`COMMONS_HOLDERS_ENV`]. That set is read ONCE, here. A canonical added
+/// after boot is not a holder until restart, because edge v38's puller takes
+/// the roster by value.
+pub(crate) async fn commons_hold(engine: &Arc<Engine>, local_key_id: &str) -> CommonsHold {
+    use ciris_edge::blob_swarm::store_gate::ConsentDisposition;
+
+    let declined = CommonsHold {
+        disposition: ConsentDisposition::Decline,
+        holders: Vec::new(),
+    };
+    match crate::compose::registry_slice_conferred(engine, local_key_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return declined,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "commons blobs DECLINED — the registry-slice walk could not be evaluated, \
+                 and an undetermined conferral is not a conferral"
+            );
+            return declined;
+        }
+    }
+    let mut holders: Vec<String> = match engine.list_canonical_servers().await {
+        Ok(rows) => rows.into_iter().map(|r| r.key_id).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "commons holders: the canonical roster could not be read");
+            Vec::new()
+        }
+    };
+    if let Ok(extra) = std::env::var(COMMONS_HOLDERS_ENV) {
+        holders.extend(
+            extra
+                .split(',')
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    holders.retain(|k| k != local_key_id);
+    holders.sort();
+    holders.dedup();
+    tracing::info!(
+        local_key_id,
+        holders = ?holders,
+        "commons blobs HELD — this node is conferred the registry slice, so it holds and \
+         announces build manifests pulled from these holders"
+    );
+    CommonsHold {
+        disposition: ConsentDisposition::Announce,
+        holders,
+    }
+}
+
 fn spawn_puller_with<B>(
     engine: &Arc<Engine>,
     edge: Arc<ciris_edge::Edge>,
     backend: Arc<B>,
     local_key_id: &str,
+    commons: CommonsHold,
 ) -> (
     Option<ciris_edge::blob_swarm::PullSink>,
     Option<ciris_edge::replication::RevocationWiring>,
@@ -575,12 +670,14 @@ where
     // node — the canonical's first boot on 0.5.211 logged "blob puller NOT
     // spawned — no shared Edge handle yet" (CIRISServer#604). The gate
     // `tests/blob_puller_uses_compose_edge.rs` scrapes this fn for the lookup.
+    let commons_held = commons.holds();
     let config = PullConfig {
+        commons_allowlist: commons.holders().to_vec(),
         consent: OperatorStoreConsent {
             own: ConsentDisposition::Announce,
             family: ConsentDisposition::Announce,
             community: ConsentDisposition::Announce,
-            commons: ConsentDisposition::Decline,
+            commons: commons.disposition,
         },
         ..PullConfig::default()
     };
@@ -605,8 +702,10 @@ where
     let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = Arc::<Engine>::clone(engine);
     tracing::info!(
         local_key_id,
-        "blob puller spawned — community/family/own content is held and announced, the \
-         commons declined; revocation register armed (edge v25.0.0)"
+        commons_held,
+        "blob puller spawned — community/family/own content is held and announced; the \
+         commons is held only by a node conferred the registry slice; revocation register \
+         armed (edge v25.0.0)"
     );
     (
         Some(sink),

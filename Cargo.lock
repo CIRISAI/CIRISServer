@@ -1169,7 +1169,7 @@ dependencies = [
 [[package]]
 name = "ciris-registry-core"
 version = "4.0.0"
-source = "git+https://github.com/CIRISAI/CIRISRegistry?tag=v4.0.0#693212113519164e36746548380b437ac5ded665"
+source = "git+https://github.com/CIRISAI/CIRISRegistry?rev=322ce7e#322ce7e85f1494debff289ce23d092910eba334a"
 dependencies = [
  "anyhow",
  "async-trait",

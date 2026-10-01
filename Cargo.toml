@@ -124,10 +124,12 @@ h3o = "0.7"
 # and persist's `postgres` backend, and registry's CI fails if any of the three
 # returns to the no-default graph. What is left is `fold::router(engine,
 # node_key_id)` over the shared Engine (FSD-004 §5 in that repo).
-# Pinned to v4.0.0, which sits on THIS repo's exact triple (persist v52.0.1 /
+# Pinned by REV to CIRISRegistry#143 (`fold_builds`, the CEG-native /v1/builds
+# surface) until that merges and is tagged; it moves to the tag then. The rev is
+# v4.0.0 plus that one module, and sits on THIS repo's exact triple (persist v52.0.1 /
 # edge v38.1.0 / verify v18.0.0), so it adds no second substrate rev. It moves
 # only in a co-bump with the triple below.
-ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", tag = "v4.0.0", default-features = false }
+ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", rev = "322ce7e", default-features = false }
 ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (workspace member); CIRISLensCore repo retired
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 
@@ -394,6 +396,14 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v52.0.
 name = "qa_runner"
 required-features = ["test-anchor"]
 
+# The harness's stand-in for a CI pipeline: mints a pipeline key, has the
+# SOFTWARE test root bless it for `infra:attest`, and signs a build-manifest
+# Contribution (`harness/mesh-repro/scenarios/manifest.sh`). It signs with the
+# test root's seed, so it is fenced behind `test-anchor` like the root itself.
+[[example]]
+name = "harness_ci_pipeline"
+required-features = ["test-anchor"]
+
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
 name = "pqc_av_streaming"
@@ -532,5 +542,3 @@ debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
-
-

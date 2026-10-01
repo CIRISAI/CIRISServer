@@ -92,7 +92,11 @@ impl Default for Slices {
     fn default() -> Self {
         Slices {
             lens: true,
-            registry: false,
+            // An operator opt-out, never the authorization: `compose_registry`
+            // withholds the slice from a node the accord has not conferred it
+            // on (FSD/REGISTRY_SLICE_ROLE_GATE.md). Defaulting this to false
+            // made the conferral unreachable on every node.
+            registry: true,
             node: false,
         }
     }

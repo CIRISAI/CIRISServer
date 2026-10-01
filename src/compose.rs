@@ -905,7 +905,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // node holds no accord-conferred infra:attest. Config can decline; it can
     // never confer. (FSD/REGISTRY_SLICE_ROLE_GATE.md)
     if cfg.slices.registry {
-        compose_registry(&edge, &engine, &cfg).await?;
+        compose_registry(&engine, &node_resolution.node_key_id).await?;
     }
     if cfg.slices.node {
         compose_node(&edge, &engine, &cfg).await?;
@@ -5627,10 +5627,10 @@ pub(crate) async fn registry_slice_conferred(
 /// function a non-panicking body would panic at boot on exactly the nodes that
 /// ARE blessed (canonical-1 holds all four charter verbs). The surfaces land in
 /// phases 2-4 inside the conferred branch.
-async fn compose_registry(_edge: &Edge, engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<()> {
-    let Some(grant) = registry_slice_conferred(engine, &cfg.key_id).await? else {
+async fn compose_registry(engine: &Arc<Engine>, node_key_id: &str) -> Result<()> {
+    let Some(grant) = registry_slice_conferred(engine, node_key_id).await? else {
         tracing::info!(
-            node = %cfg.key_id,
+            node = %node_key_id,
             scope = ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
             "registry slice WITHHELD — this node holds no accord-conferred infra:attest \
              grant from a trust root it accepts. This is a normal steady state for an \
@@ -5641,13 +5641,12 @@ async fn compose_registry(_edge: &Edge, engine: &Arc<Engine>, cfg: &ServerConfig
     };
 
     tracing::info!(
-        node = %cfg.key_id,
+        node = %node_key_id,
         root = %grant.root_key_id,
         scope = ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
-        "registry slice CONFERRED by the trust root — the authority surface is not yet \
-         composed (Server 0.6 phases 2-4: the persist-native rewrite of builds / verify / \
-         revocation / integrity / transparency). Serving nothing yet, and saying so rather \
-         than pretending"
+        "registry slice CONFERRED by the trust root — this node holds build manifests \
+         (commons blobs from the canonical roster) and serves /v1/builds. Still to come \
+         (Server 0.6): verify / revocation / integrity / transparency"
     );
     Ok(())
 }
@@ -5730,6 +5729,26 @@ mod registry_slice_gate_tests {
             .await
             .expect("walk evaluates");
         assert!(conferred.is_none(), "no conferral exists for any key here");
+    }
+
+    /// Holding build manifests follows from the conferral and from nothing
+    /// else. An unblessed node declines the commons exactly as it did before
+    /// the registry slice existed, and an operator-supplied holder roster does
+    /// not change that: a roster says whom to pull FROM, never that this node
+    /// may hold.
+    #[tokio::test]
+    async fn an_unconferred_node_declines_the_commons_whatever_roster_it_is_handed() {
+        let engine = engine_with_no_conferral().await;
+        let hold = crate::backend::commons_hold(&engine, "unblessed-node").await;
+        assert!(
+            !hold.holds(),
+            "an unconferred node must not hold commons blobs"
+        );
+        assert!(
+            hold.holders().is_empty(),
+            "an unconferred node names no commons holders, so axis 1 of edge's store gate \
+             refuses every commons blob as well"
+        );
     }
 }
 
