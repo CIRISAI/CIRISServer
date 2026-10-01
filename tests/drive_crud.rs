@@ -1031,22 +1031,42 @@ async fn an_upload_above_the_cap_is_too_large() {
     )
     .await;
     assert_eq!((s, reason(&v)), (413, "drive.too_large"), "{v}");
-    // Other routes keep axum's default: a 3 MB rename body is refused.
-    // axum's default limit reads the body until the limit, so this one SENDS
-    // it — through the same raw request, writing and reading concurrently, so
-    // a writer the server stops reading cannot hide the answer.
+    // Other routes keep axum's default (2 MiB): a rename body ONE BYTE over it
+    // is refused. axum's default limit has no declared-length check — it
+    // counts bytes as it reads — so this half must SEND the body. It sends
+    // exactly limit + 1 and not megabytes more, on purpose: the node stops
+    // reading at the byte that crosses the limit, and bytes it never read make
+    // its close a RESET, which on Windows discards the response the client has
+    // not read yet (status 0 on main's matrix, 2026-10-01, with a 3 MB body —
+    // the same platform fact as the upload half above, from the other side).
+    // With one byte over, the crossing byte is the last byte: nothing is left
+    // unread, the close is clean, and the answer arrives everywhere.
+    const AXUM_DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
     let (s, _) = raw_post(
         &fx.base,
         &fx.owner,
         "/v1/files/x/rename",
-        3 * 1024 * 1024,
+        AXUM_DEFAULT_BODY_LIMIT + 1,
         true,
     )
     .await;
     assert!(
         s == 400 || s == 413,
-        "the raised limit is the upload routes' only — a 3 MB rename must be refused, got {s}"
+        "the raised limit is the upload routes' only — a rename body one byte over axum's \
+         default must be refused, got {s}"
     );
+    // And the limit is really the default, not something smaller: a body AT
+    // the limit is read whole (and then refused for what it says, not its size).
+    let (s, _) = raw_post(
+        &fx.base,
+        &fx.owner,
+        "/v1/files/x/rename",
+        AXUM_DEFAULT_BODY_LIMIT,
+        true,
+    )
+    .await;
+    assert_ne!(s, 413, "a body AT axum's default limit is not too large");
+    assert_ne!(s, 0, "the node answered");
 }
 
 /// POST `path` declaring `content_length`, sending that many bytes only when
