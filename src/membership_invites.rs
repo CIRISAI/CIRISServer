@@ -400,7 +400,11 @@ async fn replies_to(
         .await
         .map_err(|e| format!("list_attestations_for({invitee}): {e:#}"))?
     {
-        if envelope_str(&r, "references_attestation_id") != Some(proposal_id) {
+        if envelope_str(
+            &r,
+            ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID,
+        ) != Some(proposal_id)
+        {
             continue;
         }
         match dimension_of(&r) {

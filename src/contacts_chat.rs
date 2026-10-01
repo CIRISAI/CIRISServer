@@ -3222,7 +3222,7 @@ async fn start_chat(
                         ciris_edge::membership::dimension_of(r)
                             == Some(ciris_edge::membership::ACCEPTANCE_DIMENSION)
                             && r.attestation_envelope
-                                .get("references_attestation_id")
+                                .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
                                 .and_then(serde_json::Value::as_str)
                                 == Some(proposal.attestation_id.as_str())
                     })
