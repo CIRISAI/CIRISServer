@@ -1811,6 +1811,28 @@ async fn probe(st: &DriveState, file: &files::FileRow, viewer: &str) -> ByteStat
         .read_blob_range_as(&sha, viewer, past_the_end, past_the_end, aad.as_deref())
         .await
     {
+        // A chunk-DAG pull adopts the MANIFEST first, as an inline envelope at
+        // the file's address, and flips it to `chunk_dag` only when every chunk
+        // is held (persist `promote_adopted_manifest_to_dag`, CIRISPersist#947).
+        // Mid-pull the range probe therefore answers with the MANIFEST's length
+        // — a few hundred bytes for a 256 MiB file — and reporting that as
+        // `here` sent a reader to a raw read that 416'd (found by the native
+        // `bigfile-quick` run on edge v38, 2026-10-01). The pointer declares the
+        // plaintext size (CIRISEdge#638): bytes of any other length are not this
+        // file yet, so they read `not_fetched` — "still arriving" — never `here`.
+        Err(BlobError::RangeNotSatisfiable { size, .. })
+            if file.pointer.size.is_some_and(|declared| declared != size) =>
+        {
+            ByteState::Absent {
+                state: "not_fetched",
+                detail: format!(
+                    "{} (the pull is in progress: {size} of {} bytes' worth is held — the \
+                     chunk DAG's manifest arrives before its chunks)",
+                    state_detail("not_fetched"),
+                    file.pointer.size.unwrap_or(0)
+                ),
+            }
+        }
         Err(BlobError::RangeNotSatisfiable { size, .. }) => ByteState::Here { size: Some(size) },
         Ok(_) => ByteState::Here { size: None },
         Err(e) => blob_state(&e),
