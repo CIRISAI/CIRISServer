@@ -413,6 +413,10 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
         .sign_hybrid(&canonical)
         .await
         .expect("sign community");
+    let founder_sig = engine
+        .sign_hybrid(&canonical)
+        .await
+        .expect("the founder (this node) co-signs");
     engine
         .federation_directory()
         .put_community(SignedCommunity {
@@ -421,7 +425,13 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
             scrub_signature_classical: BASE64.encode(&sig.classical.signature),
             scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
             supersede_proof: None,
-            cosignatures: Vec::new(),
+            // persist v52 Q1 (CIRISPersist#955): the founding member co-signs
+            // — here the founder is this node's own key, so the engine signs.
+            cosignatures: vec![ciris_persist::federation::types::RosterCosignature {
+                authority_key_id: founder.to_string(),
+                scrub_signature_classical: BASE64.encode(&founder_sig.classical.signature),
+                scrub_signature_pqc: Some(BASE64.encode(&founder_sig.pqc.signature)),
+            }],
             lineage: Vec::new(),
         })
         .await
