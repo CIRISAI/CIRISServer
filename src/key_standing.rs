@@ -249,7 +249,19 @@ impl HeldRevocations {
     ) -> KeyStatementFold {
         const NONE: &[Revocation] = &[];
         let rows = self.by_key.get(key_id).map_or(NONE, Vec::as_slice);
-        fold_key_statement_standing(key_id, rows, statement_at, now)
+        // persist v52 (CIRISPersist#784) keys every revocation reader on the
+        // SUBJECT — the SHA-256 of the raw Ed25519 key — not on a label, and the
+        // fold now takes that digest. The rows here came from
+        // `revocations_for(key_id)`, which resolves the held key's digest and
+        // answers only rows naming it, so every row in this slice carries the
+        // same `revoked_key_sha256_ed25519_raw`, and that IS the subject. Read
+        // it off the row rather than re-deriving it from a public-key lookup:
+        // one source (persist's resolution) instead of two that could disagree.
+        // No rows ⇒ nothing can cover the statement, whatever the subject.
+        let subject = rows
+            .first()
+            .map_or("", |r| r.revoked_key_sha256_ed25519_raw.as_str());
+        fold_key_statement_standing(key_id, subject, rows, statement_at, now)
     }
 
     /// The standing of the statement `att` makes, dated by its SIGNED envelope
@@ -300,7 +312,11 @@ mod tests {
     fn rev(id: &str, key: &str, effective_at: &str, bound: Option<&str>) -> Revocation {
         Revocation {
             revocation_id: id.into(),
-            revoked_key_id: key.into(),
+            revoked_key_id: Some(key.into()),
+            // The fold matches on the subject digest; any stable per-key
+            // string stands in for the SHA-256 here (the fold compares, it
+            // does not re-derive).
+            revoked_key_sha256_ed25519_raw: format!("digest-of-{key}"),
             revoking_key_id: "authority".into(),
             reason: None,
             revoked_at: ts(effective_at),

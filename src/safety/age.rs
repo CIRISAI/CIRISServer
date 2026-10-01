@@ -68,7 +68,7 @@ use ciris_persist::prelude::LocalSigner;
 pub const AGE_ASSURANCE_DIMENSION_PREFIX: &str = "age_assurance:";
 
 /// The NON-reserved dimension prefix for a SUBJECT's SELF-DECLARED age band
-/// (`age_self_declared:{band}`). Subject-signed; distinct from the witness-
+/// (`age_self_declared:band:{band}`). Subject-signed; distinct from the witness-
 /// reserved provider prefix above (a self-declaration is not a provider
 /// attestation). This is the onboarding "state your age range" rung.
 pub const AGE_SELF_DECLARED_DIMENSION_PREFIX: &str = "age_self_declared:";
@@ -195,8 +195,15 @@ pub fn age_dimension(level: AssuranceLevel, band: AgeBand) -> String {
     // Every `scores` dimension MUST carry a `:vN` version segment (persist
     // `require_version_segment`, CEG §13.1).
     match level {
+        // The registered family is `age_self_declared:band:{band}:{version}`
+        // (CC namespace registry, strict since persist v50): the literal `band`
+        // segment is part of it. `age_self_declared:{band}:v1`, what this wrote
+        // before, is refused as an unregistered family.
         AssuranceLevel::SelfDeclared => {
-            format!("{AGE_SELF_DECLARED_DIMENSION_PREFIX}{}:v1", band.as_str())
+            format!(
+                "{AGE_SELF_DECLARED_DIMENSION_PREFIX}band:{}:v1",
+                band.as_str()
+            )
         }
         AssuranceLevel::Provider | AssuranceLevel::Government => format!(
             "{AGE_ASSURANCE_DIMENSION_PREFIX}{}:{}:v1",
@@ -215,7 +222,10 @@ fn parse_age_dimension(dimension: &str) -> Option<AgeAssurance> {
         .filter(|(_, v)| v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty())
         .map(|(head, _)| head)
         .unwrap_or(dimension);
-    if let Some(band_tok) = core.strip_prefix(AGE_SELF_DECLARED_DIMENSION_PREFIX) {
+    if let Some(rest) = core.strip_prefix(AGE_SELF_DECLARED_DIMENSION_PREFIX) {
+        // `band:{band}` since persist v50; a bare `{band}` on rows written
+        // before it, which a node may still hold and must still read.
+        let band_tok = rest.strip_prefix("band:").unwrap_or(rest);
         return Some(AgeAssurance {
             level: AssuranceLevel::SelfDeclared,
             band: AgeBand::from_token(band_tok)?,
@@ -578,10 +588,13 @@ mod tests {
     fn dimension_roundtrips() {
         // Self-declared uses the non-reserved prefix (subject-signed), versioned.
         let d = age_dimension(AssuranceLevel::SelfDeclared, AgeBand::Adult);
-        assert_eq!(d, "age_self_declared:adult:v1");
+        assert_eq!(d, "age_self_declared:band:adult:v1");
         let a = parse_age_dimension(&d).expect("parse self");
         assert_eq!(a.band, AgeBand::Adult);
         assert_eq!(a.level, AssuranceLevel::SelfDeclared);
+        // A row written before the registered spelling still reads.
+        let legacy = parse_age_dimension("age_self_declared:adult:v1").expect("parse legacy");
+        assert_eq!(legacy.band, AgeBand::Adult);
         // Provider uses the witness-reserved `age_assurance:` prefix, versioned.
         let p = age_dimension(AssuranceLevel::Provider, AgeBand::Adult);
         assert_eq!(p, "age_assurance:provider:adult:v1");

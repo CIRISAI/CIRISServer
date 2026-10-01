@@ -116,9 +116,17 @@ fn the_publish_own_poll_carries_a_gain_and_retries_a_lost_kick() {
              reports it dispatched",
         ),
         (
-            "let wait = if owed { 1 } else { 30 };",
+            // 0.5.218 (CIRISServer#701): the announced-relay set shares this
+            // loop and carries its own debt under the same rule, so the prompt
+            // retry covers either debt.
+            "let wait = if owed || relay_owed { 1 } else { 30 };",
             "an owed kick must be retried PROMPTLY — sleeping the full cadence before the \
              retry leaves exactly the delay this exists to remove",
+        ),
+        (
+            "if relay_owed && kick_replication(",
+            "the announced-relay debt is paid by an actual kick, cleared only when it \
+             reports it dispatched — the same rule as the owner's",
         ),
     ] {
         assert!(

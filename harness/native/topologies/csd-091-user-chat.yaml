@@ -1,0 +1,27 @@
+# CSD-091 — user chat: two people, each on their own node, one pair room, one message.
+# FSD/TOPOLOGY.md. Everything a released node exposes; the synthetic root above it.
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C],    accepts: R, announced: true}
+    - {id: B, dials: [C, A], accepts: R, announced: true}   # direct neighbour of A: bodies are one-hop (CC 5.4.6)
+    - {id: X, dials: [C],    accepts: R, announced: false}  # the outsider
+  persons:
+    - {id: alice, owns: [A], accepts: R}
+    - {id: bob,   owns: [B], accepts: R}
+    - {id: eve,   owns: [X], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: rooted_with, between: [alice, bob], require: false}   # observed: the room keys without it today
+    - {rel: reachable, node: A, person: bob, min: 1}               # CIRISServer#699
+    - {rel: reachable, node: B, person: alice, min: 1}
+    - {rel: contact, from: alice, to: bob, via: owner}
+    - {rel: contact, from: bob, to: alice, via: owner}
+    - {rel: room, id: pair, kind: pair, members: [alice, bob], keyed: true}
+    - {rel: message, from: bob, to: alice, room: pair, text: "hello from bob"}
+  actor: {person: alice, device: A}
+  negatives:
+    - {check: cannot_list_room, person: eve, room: pair}

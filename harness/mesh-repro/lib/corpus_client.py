@@ -121,6 +121,42 @@ def read(token: str, d: Path) -> None:
                       "corrupt": corrupt, "waiting": waiting}))
 
 
+def probe(token: str, d: Path, names: list[str]) -> None:
+    """For each named file: read it raw HERE and compare with the original
+    (``<dir>/<name>``, copied in by the ladder's diagnosis), byte by byte.
+    Tells a truncation (a prefix of the original) from a mid-file change
+    (``first_diff`` inside both, ``bytes_differing`` counted)."""
+    manifest = {r["name"]: r for r in json.loads((d / "manifest.json").read_text(encoding="utf-8"))}
+    written = {w["name"]: w for w in json.loads((d / "written.json").read_text(encoding="utf-8"))}
+    for name in names:
+        w = written.get(name) or {}
+        out = {"name": name, "expected_size": manifest.get(name, {}).get("size")}
+        if not w.get("attestation_id"):
+            out["error"] = "not written"
+            print(json.dumps(out))
+            continue
+        q = urllib.parse.quote(w["attestation_id"], safe="")
+        status, raw = _call(token, "GET", f"/v1/files/{q}?cohort=self&raw=1")
+        out.update({"status": status, "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "match": hashlib.sha256(raw).hexdigest() == manifest.get(name, {}).get("sha256")})
+        orig_path = d / name
+        if status == 200 and orig_path.exists():
+            orig = orig_path.read_bytes()
+            n = min(len(raw), len(orig))
+            first = next((i for i in range(n) if raw[i] != orig[i]), None)
+            out["first_diff"] = first if first is not None else (n if len(raw) != len(orig) else None)
+            out["bytes_differing"] = sum(1 for i in range(n) if raw[i] != orig[i])
+            out["is_prefix_of_original"] = first is None and len(raw) < len(orig)
+            if first is not None:
+                out["got_at_diff"] = raw[first:first + 16].hex()
+                out["want_at_diff"] = orig[first:first + 16].hex()
+        print(json.dumps(out))
+
+
 if __name__ == "__main__":
     verb, token, directory = sys.argv[1], sys.argv[2], Path(sys.argv[3])
-    {"write": write, "read": read}[verb](token, directory)
+    if verb == "probe":
+        probe(token, directory, sys.argv[4].split(","))
+    else:
+        {"write": write, "read": read}[verb](token, directory)

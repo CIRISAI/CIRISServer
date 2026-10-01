@@ -659,6 +659,32 @@ async fn build_bed(client: &reqwest::Client) -> Result<Bed, String> {
             "community_id {community_id} is not the derived pair id — fixture drift"
         ));
     }
+    // edge v38 / persist v52 (CIRISPersist#955): the room is founded by the
+    // owner ALONE and the contact is PROPOSED. The bench plays the contact
+    // accepting with their own key; the owner's second call seats them.
+    let proposal_id = json["proposal_id"]
+        .as_str()
+        .ok_or_else(|| format!("POST /v1/chat carried no invitation: {json}"))?
+        .to_string();
+    ciris_edge::membership::reply(
+        engine.federation_directory().as_ref(),
+        &proposal_id,
+        true,
+        contact_edge_signer().await.as_ref(),
+    )
+    .await
+    .map_err(|e| format!("the contact accepts the pair room's invitation: {e}"))?;
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": CONTACT_KEY_ID }))
+        .send()
+        .await
+        .map_err(|e| format!("POST /v1/chat (seat the contact): {e}"))?;
+    let seated: serde_json::Value = resp.json().await.map_err(|e| format!("chat json: {e}"))?;
+    if seated["state"] != "open" {
+        return Err(format!("the contact was not seated: {seated}"));
+    }
 
     // The handshake, before any phase measures a send.
     key_the_room(&engine, &owner_id.key_id, &community_id).await;

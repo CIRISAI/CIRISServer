@@ -1018,6 +1018,7 @@ async fn genesis_assemble(
             founded_at: now,
             consensus_protocol: ACCORD_CONSENSUS_PROTOCOL.to_string(),
             consensus_protocol_entrenched: true,
+            dissolved_at: None,
             persist_row_hash: String::new(),
         };
         if let Err(e) = crate::family::create_family(&st.engine, family).await {
@@ -2234,6 +2235,7 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
                 .get("consensus_protocol_entrenched")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            dissolved_at: None,
             persist_row_hash: String::new(),
         },
         // ── STALE-BY-PIN, and left empty deliberately (CIRISServer#319 item 1) ──
@@ -2262,6 +2264,7 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
         scrub_signature_pqc: None,
         // persist stamps the quorum proof on `supersede_family_with_quorum` (v49.0.0).
         supersede_proof: None,
+        cosignatures: Vec::new(),
     })
 }
 

@@ -112,8 +112,15 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// `paths::LISTED` (`"listed"`, the #912 listing plane); nothing removed or
 /// renamed, and every key this server spells through `paths::*` is unchanged.
 /// `4d7054a6…` → `a6a84cc9…`, persist's own pin.
+///
+/// Re-pinned for 0.5.218 on persist v51.0.0, reviewed: FOUR keys added, all
+/// CC 3.2 rc6 trust-root attach inputs (CIRISPersist#937/#938):
+/// `attach_window_secs`, `witness_cadence_secs`, `witness_quorum` on the
+/// charter and `attached_head_digest` on the acceptance edge. Nothing removed
+/// or renamed; this server writes none of the four. `a6a84cc9…` →
+/// `c9558c98…`, equal to persist's published `ENVELOPE_VOCABULARY_SHA256`.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "a6a84cc9d5f4d6bd6295cfc78b42bce35145d2bb9ff14391bfe32ab027116a6a";
+    "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 

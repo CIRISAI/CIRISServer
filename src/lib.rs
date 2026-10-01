@@ -76,6 +76,11 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 
+/// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
+/// Key and IdentityOccurrence rows of every announced device and its owner,
+/// through edge's per-kind `SelfOwn` publish selector (CIRISEdge#678).
+pub mod announced_relay;
+
 /// The v39 tier crossing (`enter_mesh` + `widen_audience`) composed in one
 /// place, replacing `attestation_promote`.
 pub mod attestation_crossing;
@@ -317,10 +322,15 @@ pub mod key_standing;
 /// Public so the integration test (`tests/peer_replication.rs`) can drive the
 /// admission + consent-emit logic directly.
 pub mod location;
+pub mod membership_invites;
+pub mod pair_intents;
 
 /// Rendering an error with its whole cause chain, for the one line an operator
 /// reads (CIRISServer#586).
 pub mod error_chain;
+/// Where each file is — the custody view (`FSD/FILE_CUSTODY.md`): the person's
+/// devices against persist's custody and edge's delivery receipts.
+pub mod file_custody;
 pub mod media_gate;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a
@@ -330,6 +340,11 @@ pub mod self_devices;
 /// (CIRISServer#678).
 pub mod self_rewrap;
 pub mod self_room_drive;
+/// **One device handles each exchange** (CC 3.1.3.1, CIRISPersist#782): the
+/// session-claim gate every autonomous act for the person passes, the
+/// attendance that decides where a claim is taken, the renewal loop, and
+/// `GET /v1/self/sessions` (`FSD/SESSION_CLAIMS.md`).
+pub mod session_claims;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);

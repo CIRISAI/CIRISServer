@@ -45,6 +45,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     (
         "src/family_api.rs",
         "leave_inner",
+        "loaded.family",
+        "RECORD SHAPE, not membership (persist v52 #956): is the leaver ON the record, so the self-leave amendment has a seat to remove? A member seated by a widening is not — the record never grows (persist Q2) — and their revocation alone is the leave",
+    ),
+    (
+        "src/family_api.rs",
+        "leave_inner",
         "next",
         "RECORD CONSTRUCTION: the rewritten roster assigned to the record being signed",
     ),

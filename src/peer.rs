@@ -2357,12 +2357,15 @@ mod default_prefix_gate {
     fn default_covers_everything_edges_default_does() {
         let ours = default_attestation_prefixes();
         for prefix in ciris_edge::replication::attestation_bind::DEFAULT_CONSENT_PREFIXES {
-            // A dimension inside `prefix`'s namespace and no other's — `covers`
-            // is `starts_with`, so this passes only if our set carries `prefix`
-            // itself or something strictly shorter that still opens the plane.
-            let probe = format!("{prefix}probe:v1");
+            // The PREFIX half of persist's `covers`, which is byte-exact: our set
+            // carries `prefix` itself or something strictly shorter. Not a probe
+            // through `covers` — since persist v50 (#924) `covers` also requires
+            // the dimension to be a registered family member, and an invented
+            // `{prefix}probe:v1` is not one (it failed on `capacity:`, whose
+            // family has closed leaves). The grammar half is persist's, and says
+            // nothing about which prefixes this node grants.
             assert!(
-                ciris_persist::federation::consent_grammar::covers(&ours, &probe),
+                ours.iter().any(|p| prefix.starts_with(p.as_str())),
                 "our default grant does not cover edge's `{prefix}` namespace. \
                  persist's `resolve_row_placement` — the single predicate for both \
                  passes of `promote_consented_backlog` — returns None for a dimension \

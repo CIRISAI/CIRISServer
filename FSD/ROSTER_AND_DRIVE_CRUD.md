@@ -51,6 +51,14 @@ policy, its refusals, its witness.
 7. **Every write kicks replication** (`compose::kick_replication`) so the change crosses on a round-trip.
 8. **Every list route carries the row's envelope** (subject, attester, cohort_scope, dimension,
    consent:scope — CSD-006, #616) and a `resume` cursor.
+9. **Nobody joins without their own consent** (0.5.218; the maintainer's ruling of 2026-09-30,
+   CIRISConstitution#133, `FSD/MEMBERSHIP_INVITES.md`). Until persist can carry a proposal to the joiner
+   and record their acceptance (CIRISPersist#955, v52), every roster-growing door answers 409
+   `membership.consent_required`: `POST …/members` on a family or a room, a quorum envelope / cosign /
+   assemble whose proposed roster adds anyone, and a create whose founding roster names anyone but the
+   founder. Remove, role, leave and dissolve are unaffected; re-adding someone already active keeps
+   `*.already_member`; pair rooms keep the contact grant each side authors. This supersedes the "Add
+   member" rows of §3 and §4 below, which record what 0.5.216–0.5.217 shipped.
 
 ### 1.1 Which planes cross (known gap closed in 0.5.218, CIRISServer#646)
 
@@ -71,6 +79,17 @@ so edge refuses every delivered row terminally). A gate
 from `EnvelopeKind::ALL` minus that exclusion list, so a kind appended upstream goes red until someone
 decides.
 
+**Correction (0.5.218, the device-eviction audit).** Routing `IdentityOccurrenceRevocation` did not by
+itself make "a released device" cross. No server path wrote a revocation the plane could carry: `release`
+withdrew the owner-binding and revoked NO occurrence, and `POST /v1/self/occurrence/revoke` wrote through
+persist's trusted-LOCAL door (`put_identity_occurrence_revocation_local`), whose rows are unsigned and
+EXCLUDED from the signed replication read by construction. So the plane was routed and empty: every other
+device of the owner kept wrapping new self files to the evicted one. The gap closed only when both routes
+became one signed act, `self_devices::evict_device` (§2.2): the owner-signed `withdraws` of the
+owner-binding(s) AND a revocation through persist's SIGNED door (`put_identity_occurrence_revocation`,
+signed by the owner's pen), then a replication kick. `tests/occurrence.rs` gates that the local door has
+no caller in `src/`.
+
 **Load.** Twelve kinds is twelve coordinators per peer on edge's single 30 s scheduler cadence. Edge v31
 has no per-kind cadence and no kick-only coordinator (`SchedulerConfig::cadence` is global; mesh-config
 relief lengthens every kind at once), so the six rarely written planes cost one round each per tick even
@@ -85,7 +104,7 @@ upstream is a per-kind cadence or kick-only rounds for rarely written kinds.
 | List owned nodes | `GET /v1/setup/owned-nodes` (exists, loopback) | loopback | unchanged |
 | List device keys | `GET /v1/self/occurrences` (exists) | public binding metadata | add `revoked: bool` + `include_revoked=true` query |
 | Add a device key | `POST /v1/self/occurrence` (exists) | signed by the primary | unchanged |
-| Revoke a device key | `POST /v1/self/occurrence/revoke` (exists) | signed by a SURVIVING occurrence | unchanged |
+| Revoke a device key | `POST /v1/self/occurrence/revoke` (exists) | signed by a SURVIVING occurrence | unchanged — **0.5.218: now the owner's session, signed server-side by the owner's pen, one act with release (§2.2)** |
 | Relabel a device | `POST /v1/self/occurrence/label` `{occurrence_key_id, label}` **new** | owner session | a `supersedes` of the occurrence row with the new label; label is display-only |
 | **Release a node** | `POST /v1/self/nodes/{node_key_id}/release` **new** | owner session; the owner of `node_key_id` must be the caller | withdraws the owner-binding (`delegates_to(user → node)`) with a signed `withdraws`; the node drops out of `nodes_owned_by`, the self room removes it on the next drive tick, the node reverts to Clause D fail-closed. Refuses the node you are talking to unless `force_self: true` |
 | Self room bytes on a 2nd device | background driver | node-signed handshake | adopt `key_package_attestation_in` / `welcome_attestation_in` / `welcome_for` (#656); selffiles `opened_on_b` becomes REQUIRED |
@@ -122,6 +141,40 @@ New ids: `self.not_your_node`, `self.release_self_requires_force`, `self.label_e
   them): `self.owner_session_required`, `self.delegate_may_not_author`, `self.store_unavailable`,
   `self.author_signer_unavailable`, `self.bad_request`, `self.not_your_device`,
   `self.release_incomplete`.
+
+### 2.2 Evicting a device is ONE act (0.5.218, CSD-037 — the stolen-device path)
+
+Until 0.5.218 two unconnected routes each did half, and neither half was enough. `release` withdrew the
+owner-binding (the self room drops the node on its next tick) but left the node's content-KEM identity
+occurrence live, and persist wraps every new self file to `list_identity_occurrences_active(owner)`, so
+the released machine kept receiving the key to each new file. `occurrence/revoke` wanted a request
+hybrid-signed by a surviving device key — the app sends a bearer, so every call answered 401 — and wrote
+through the trusted-local door (unsigned, never replicated, §1.1) without touching the owner-binding.
+
+Both routes now converge on `self_devices::evict_device`:
+
+1. withdraw every live owner-binding the owner holds on the device's node(s) (owner-signed `withdraws`);
+2. revoke the device's occurrence(s) through persist's SIGNED `put_identity_occurrence_revocation`,
+   signed by the owner's pen (the identity the occurrence belongs to), so the
+   `IdentityOccurrenceRevocation` plane carries it;
+3. kick replication; 4. read both halves back from persist (`nodes_owned_by`,
+   `list_identity_occurrences_active`).
+
+`release` revokes the node's occurrence(s) of the owner (its node key; for THIS node every key it is);
+`occurrence/revoke` withdraws the owner-binding when the occurrence IS one of the owner's nodes. Both are
+authorised by the owner's session (`self.owner_session_required` 401/403, `self.delegate_may_not_author`),
+refuse another person's key as `self.not_your_node` / `self.not_your_device`, and need `force_self` for the
+node being talked to. The answer names every part done and every part that failed, by part and target
+(`self.evict_incomplete` 500 when any part other than the binding witness failed; `self.release_incomplete`
+keeps its meaning).
+
+**What eviction does not do, stated in every answer (`history`) — CSD-037, CC 3.3.6.1:** already-shared
+history stays readable by the evicted device. No DEK is rotated and nothing is re-encrypted; only NEW
+content (new self files wrap to active occurrences only) and NEW self-room epochs are withheld.
+
+What `release` cannot find: another machine's ACTOR-key occurrence when that machine is a pre-fix split
+install (nothing in the directory links a remote node key to its actor key). Revoking that occurrence by
+its own key reaches it.
 
 ## 3. Family (household)
 
@@ -254,7 +307,7 @@ rewritten to grow. Pair rooms (`POST /v1/chat`) stay as they are and are listed 
 | Create | `POST /v1/communities` `{name, members?: [key_id], tier?: community\|affiliations, consensus_protocol?}` | owner session; caller is founder; each initial member must be a contact whose grant covers `chat:` (same rule as pair rooms) |
 | List mine | `GET /v1/communities` (pair rooms included, `kind: pair\|room`) | owner session; fold |
 | Read | `GET /v1/communities/{id}` → record + effective roster + roles + appointed moderators | member only; `community.not_found` for non-members |
-| Add member (widen) | `POST /v1/communities/{id}/members` `{key_id, role?}` | protocol satisfied (founder, or an appointed roster-duty holder via `delegates_to`); target must be a contact; **blocked on CIRISPersist#907** for the added member's reads, gated by a RED-EXPECTED rung until it lands |
+| Add member (widen) | `POST /v1/communities/{id}/members` `{key_id, role?}` | protocol satisfied (founder, or an appointed roster-duty holder via `delegates_to`); target must be a contact; **blocked on CIRISPersist#907** for the added member's reads, gated by a RED-EXPECTED rung until it lands. **0.5.218:** #907 landed in persist v49 (the admission folds the widening plane; `tests/community_crud.rs` runs the read un-ignored) — and the route itself is CLOSED, 409 `membership.consent_required`, until the joiner can consent (§1 rule 9, CIRISPersist#955) |
 | Remove member | `DELETE /v1/communities/{id}/members/{key_id}` | protocol satisfied |
 | Leave | `POST /v1/communities/{id}/leave` | self only; last founder rule as for families |
 | Change role / appoint moderator | `POST /v1/communities/{id}/members/{key_id}/role` `{role}`; moderators keep using duty conferral | protocol satisfied |
@@ -272,6 +325,8 @@ New ids: `community.not_found`, `community.not_authorized`, `community.not_a_con
 **Security note.** Persist's replicated widening/revocation doors verify the signature, not the signer's
 standing in the room (CIRISPersist#908). The server's routes enforce the protocol for rows it authors; rows
 a peer authors are admitted by persist alone until #908 lands. Stated in the release notes.
+**Corrected 0.5.218:** #908 landed in persist v49.0.0 — every replicated roster row is judged at persist's
+door by the room's own `consensus_protocol` over the row's co-signatures (`src/roster_rows.rs`).
 
 ### 4.1 As built (`src/communities.rs`, 0.5.216) — decisions and gaps at these pins
 
@@ -405,6 +460,11 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
    split). The owner's `self` gate admits them only because `move_owner_binding_to_node_key` adds the
    node-key binding without withdrawing the actor's; a change that retires the actor binding would
    hide a split node's files from its own drive.
+9. **Where each file is (0.5.218).** `GET /v1/files/{id}/custody` answers which of the person's
+   devices hold a file, out of how many (persist's custody view + edge's delivery receipts), and
+   each `GET /v1/drive` row carries `custody: {devices_total, received_on}`. Point 7's
+   `devices_holding` stays as it was. Sources, gaps and the later copy-to / remove-from design:
+   `FSD/FILE_CUSTODY.md`.
 
 ## 6. Witnesses
 
@@ -414,7 +474,9 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
 - A source-scraping gate: no raw `.members` read for a membership decision in `src/`.
 - Ladders: selffiles `opened_on_b` REQUIRED; chat ladder gains `family`, `family_file_on_b`, `room3`
   (a three-member room), `widened_reads` (RED-EXPECTED until CIRISPersist#907), `withdrawn` (a withdrawn
-  file reads 410 on the other node).
+  file reads 410 on the other node). **0.5.218:** #907 landed in persist v49 — the in-process
+  `a_widened_member_reads_the_rooms_messages_cirispersist_907` runs un-ignored, its member widened by a
+  test-only fixture because the add route is closed on consent (§1 rule 9).
 - openapi.json lists every route here; the localization guard covers every new id.
 - 0.5.218: `selffiles` runs in the mesh-harness CI matrix (#622) and its `file` / `opened_on_b` rungs
   fail by name on a self pull regression (#626: `NoHolders`, `NoMeaning(GroupWithoutId)`, a
@@ -423,7 +485,12 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
   dispatch-only `devices` scenario (the chat ladder plus a second device and a household) adds
   `second_device`, `c_peered`, `c_lists_room` (its success stage), `c_opens_history` (RED-EXPECTED: no
   content-key rewrap to a new occurrence of an existing member) and the #647 family rungs (RED-EXPECTED
-  on CIRISPersist#910).
+  on CIRISPersist#910). **Corrected 0.5.218:** persist v49 fixed #910 (and #907, #908); the `family` rung
+  now asserts that the add of B is REFUSED `membership.consent_required`, and `family_on_b` /
+  `family_file_listed_on_b` / `family_file_opened_on_b` are RED-EXPECTED on consent to join
+  (CIRISPersist#955) — no door may put B on the roster until B accepts. The in-process suites build their
+  multi-member rosters through clearly named `test_only_*` fixtures that write the rows through persist,
+  never through a production bypass.
 
 ## 7. Deliberately later
 

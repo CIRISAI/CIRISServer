@@ -42,10 +42,10 @@ SEAL_OVERHEAD = 36
 #: DESCRIBED and turn red the moment one passes, so a fixed defect cannot stay
 #: marked. Never add a row here to make a run green: add it only with an issue
 #: that names the cause.
-KNOWN_DEFECTS = {
-    "inline_band": "CIRISEdge#687: files::publish picks inline by plaintext size and persist caps "
-                   "the sealed size, so 1,048,541-1,048,576 bytes can never publish",
-}
+# Empty since edge v33.0.0: `inline_band` (CIRISEdge#687 — inline chosen by
+# plaintext size while persist capped the SEALED size, so 1,048,541-1,048,576
+# bytes could never publish) now uploads, and the drive test named it.
+KNOWN_DEFECTS: dict = {}
 
 
 def _payload(seed: str, n: int) -> bytes:

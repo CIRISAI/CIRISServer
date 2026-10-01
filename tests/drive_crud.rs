@@ -21,7 +21,12 @@
 //! * rename keeps the blob (same sha, bytes still open) and retires the old id;
 //! * replace publishes new bytes and retires the old id;
 //! * move reseals at the target room and withdraws the source (or keeps it);
-//! * notes: edit and delete through the same machinery.
+//! * notes: edit and delete through the same machinery;
+//! * the streamed drive (0.5.218) — a multipart upload with `size` streamed
+//!   into `files::publish_stream` above the old 64 MiB cap and read back by a
+//!   streamed `?raw=1` and uncapped `Range`, SHA-256-equal; a body that is not
+//!   its `size` is `drive.declared_length_mismatch` with no row; the write gate
+//!   and the field-before-file order hold on the streamed path.
 
 use std::sync::Arc;
 
@@ -44,7 +49,6 @@ struct Fx {
     base: String,
     owner: String,
     owner_id: OwnerIdentity,
-    node_key: String,
     client: reqwest::Client,
 }
 
@@ -62,7 +66,6 @@ async fn fixture() -> Fx {
         base,
         owner,
         owner_id,
-        node_key,
         client: reqwest::Client::new(),
     }
 }
@@ -149,22 +152,28 @@ impl Fx {
             .expect("base64")
     }
 
-    /// A community the OWNER founded (and so a member of), plus `others`.
-    async fn owners_community(&self, name: &str, others: &[&str]) -> String {
+    /// A community the OWNER founded (and so a member of), plus `others` —
+    /// each `(key_id, ed_seed, pqc_seed)` as `seed_key` registered it, because
+    /// since persist v52 every founding member co-signs the record.
+    async fn owners_community(&self, name: &str, others: &[(&str, u8, u8)]) -> String {
         let id = format!("community-{name}-{}", std::process::id());
         let now = chrono::Utc::now();
-        self.engine
-            .put_community_self_signed(Community {
+        let keys: Vec<&str> = others.iter().map(|(k, _, _)| *k).collect();
+        put_community_cosigned(
+            &self.engine,
+            Community {
                 community_key_id: id.clone(),
                 community_name: name.to_owned(),
-                members: founded_by(&self.owner_id.key_id, others, now),
+                members: founded_by(&self.owner_id.key_id, &keys, now),
                 founded_at: now,
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
-            })
-            .await
-            .expect("author the owner's community");
+            },
+            others,
+        )
+        .await
+        .expect("author the owner's community");
         id
     }
 
@@ -174,8 +183,11 @@ impl Fx {
         seed_key(&self.engine, "dave-drive", 0xD0, 0xD1, identity_type::USER).await;
         let id = format!("community-strangers-{}", std::process::id());
         let now = chrono::Utc::now();
-        self.engine
-            .put_community_self_signed(Community {
+        // Both strangers co-sign their founding record (persist v52 Q1); the
+        // node's signature as authority vouches for nothing it is not in.
+        put_community_cosigned(
+            &self.engine,
+            Community {
                 community_key_id: id.clone(),
                 community_name: "strangers".to_owned(),
                 members: ["carol-drive", "dave-drive"]
@@ -190,9 +202,11 @@ impl Fx {
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
-            })
-            .await
-            .expect("author the strangers' community");
+            },
+            &[("carol-drive", 0xC0, 0xC1), ("dave-drive", 0xD0, 0xD1)],
+        )
+        .await
+        .expect("author the strangers' community");
         id
     }
 }
@@ -308,7 +322,10 @@ async fn uploads_list_meta_and_read_round_trip() {
     assert_eq!(e_small["withdrawn"], false);
     let env = &e_small["envelope"];
     assert_eq!(env["attestation_id"], small_id.as_str());
-    assert_eq!(env["attesting_key_id"], fx.node_key.as_str());
+    // The PERSON authors a file (CIRISEdge#675, edge v33 `files::file_author`):
+    // the row is signed by the owner's key, which every one of their devices
+    // holds, not by the node that happened to write it.
+    assert_eq!(env["attesting_key_id"], fx.owner_id.key_id.as_str());
     assert_eq!(env["cohort_scope"], "self");
     assert_eq!(env["dimension"], "file:v1");
     assert!(env["subject_key_ids"].is_array(), "{env}");
@@ -910,7 +927,7 @@ async fn a_non_author_cannot_change_a_file() {
     // through edge's own file door with her own key.
     let erin = "erin-drive";
     seed_key(&fx.engine, erin, 0xE0, 0xE1, identity_type::USER).await;
-    let community = fx.owners_community("shared", &[erin]).await;
+    let community = fx.owners_community("shared", &[(erin, 0xE0, 0xE1)]).await;
     // The owner's content occurrence on this node — what the room's DEK is
     // wrapped to, so erin's file is readable by somebody.
     ciris_server::backend::provision_engine_occurrence(&fx.engine, &fx.owner_id.key_id)
@@ -933,6 +950,7 @@ async fn a_non_author_cannot_change_a_file() {
             room: &room,
             bytes: b"erin's words",
             media_type: "text/plain",
+            codec: None,
             filename: Some("erin.txt"),
             asserted_at: chrono::Utc::now(),
         },
@@ -1025,9 +1043,10 @@ async fn an_upload_above_the_cap_is_too_large() {
     assert_eq!(s, 400, "the raised limit is the upload routes' only");
 }
 
-/// A file above the whole-read cap (only reachable from a peer — this node's
-/// own upload cap is the same number) is `413 drive.too_large_for_whole_read`
-/// on the JSON read, and still served by `Range`.
+/// A file above the whole-read cap — sealed straight through edge's door, as
+/// a peer's file arrives — is `413 drive.too_large_for_whole_read` on the JSON
+/// read ONLY (it base64s one value); `?raw=1` streams it whole (0.5.218, edge's
+/// `FileRow::chunks()`), and `Range` serves any slice.
 #[tokio::test]
 async fn a_file_above_the_whole_read_cap_is_read_by_range() {
     let fx = fixture().await;
@@ -1054,6 +1073,7 @@ async fn a_file_above_the_whole_read_cap_is_read_by_range() {
             room: &owner_room,
             bytes: &big,
             media_type: "video/mp4",
+            codec: None,
             filename: Some("long.mp4"),
             asserted_at: chrono::Utc::now(),
         },
@@ -1067,12 +1087,31 @@ async fn a_file_above_the_whole_read_cap_is_read_by_range() {
         (413, "drive.too_large_for_whole_read"),
         "{v}"
     );
-    let (s, v) = fx.get(&format!("/v1/files/{id}?raw=1")).await;
+    // RAW, no Range: streamed whole since 0.5.218 — the size up front, no
+    // `Repr-Digest` (unknowable before the last byte without holding it).
+    let mut resp = fx
+        .client
+        .get(format!("{}/v1/files/{id}?raw=1", fx.base))
+        .bearer_auth(&fx.owner)
+        .send()
+        .await
+        .expect("raw GET");
+    assert_eq!(resp.status(), 200);
     assert_eq!(
-        (s, reason(&v)),
-        (413, "drive.too_large_for_whole_read"),
-        "{v}"
+        resp.headers()["content-length"],
+        big.len().to_string().as_str()
     );
+    assert!(
+        resp.headers().get("repr-digest").is_none(),
+        "a streamed body carries no Repr-Digest"
+    );
+    let (mut n, mut all_sevens) = (0usize, true);
+    while let Some(piece) = resp.chunk().await.expect("body chunk") {
+        n += piece.len();
+        all_sevens &= piece.iter().all(|b| *b == 7);
+    }
+    assert_eq!(n, big.len());
+    assert!(all_sevens, "the streamed bytes are the file's");
     let resp = fx
         .client
         .get(format!("{}/v1/files/{id}?raw=1", fx.base))
@@ -1520,4 +1559,509 @@ async fn every_supported_type_round_trips_byte_identical() {
         manifest.len(),
         failures.join("\n  ")
     );
+}
+
+// ─── The streamed upload and the streamed read (0.5.218) ───────────────────
+//
+// `POST /v1/files` as multipart with a `size` field streams the file part into
+// edge's `files::publish_stream` (CIRISEdge#744); `?raw=1` above the whole-read
+// cap streams it back through `FileRow::chunks()`, and `Range` reads any
+// slice through `FileRow::open_range` windows (CIRISEdge#737). These tests
+// never hold the file: the upload body is GENERATED as it is sent, and every
+// read is hashed as it arrives.
+
+/// The generated file's byte at `i` — deterministic and non-repeating over
+/// any window a chunk boundary could hide in, so a misplaced slice is caught.
+fn gen_byte(i: u64) -> u8 {
+    (i.wrapping_mul(31).wrapping_add(i / 251) % 256) as u8
+}
+
+fn gen_fill(buf: &mut [u8], offset: u64) {
+    for (k, b) in buf.iter_mut().enumerate() {
+        *b = gen_byte(offset + k as u64);
+    }
+}
+
+/// SHA-256 of the generated bytes `[offset, offset + len)`, a MiB at a time.
+fn gen_sha(offset: u64, len: u64) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut at = 0u64;
+    while at < len {
+        let n = (len - at).min(buf.len() as u64) as usize;
+        gen_fill(&mut buf[..n], offset + at);
+        h.update(&buf[..n]);
+        at += n as u64;
+    }
+    hex::encode(h.finalize())
+}
+
+/// A second `drive::router` over the fixture's engine, driven in-process —
+/// reqwest here is built without its `stream` feature, so a request body
+/// that is GENERATED as it is sent goes through `tower::ServiceExt::oneshot`
+/// with an `axum::body::Body::from_stream`. Same engine, same owner pen,
+/// same signer: the listener the reads go to sees every row this writes.
+async fn upload_router(fx: &Fx) -> axum::Router {
+    ciris_server::drive::router(
+        Arc::clone(&fx.engine),
+        node_edge_signer(&fx.engine).await,
+        fx.owner_id.seed_dir.clone(),
+        None,
+    )
+}
+
+/// What the streamed form sends as its file part.
+enum FilePart {
+    /// `len` generated bytes.
+    Generated(u64),
+    /// These bytes.
+    Literal(Vec<u8>),
+}
+
+/// `POST /v1/files` as a STREAMED multipart body: `fields` first, then the
+/// file part (`media`), then optionally a `trailing` field after it. The file
+/// bytes are produced a MiB at a time as the router reads them.
+async fn stream_upload(
+    app: &axum::Router,
+    owner: &str,
+    fields: &[(&str, String)],
+    media: &str,
+    file: FilePart,
+    trailing: Option<(&str, &str)>,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt as _;
+    let boundary = "streamed-7f3a-boundary";
+    let mut head = Vec::new();
+    for (k, v) in fields {
+        head.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    head.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"big.bin\"\r\nContent-Type: {media}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    let mut tail = Vec::new();
+    if let Some((k, v)) = trailing {
+        tail.extend_from_slice(
+            format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}")
+                .as_bytes(),
+        );
+    }
+    tail.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    // (head, generated offset, generated total, literal, tail) — one frame
+    // per poll, a MiB of file at most.
+    struct Gen {
+        head: Option<Vec<u8>>,
+        at: u64,
+        total: u64,
+        literal: Option<Vec<u8>>,
+        tail: Option<Vec<u8>>,
+    }
+    let (total, literal) = match file {
+        FilePart::Generated(n) => (n, None),
+        FilePart::Literal(b) => (0, Some(b)),
+    };
+    let gen = Gen {
+        head: Some(head),
+        at: 0,
+        total,
+        literal,
+        tail: Some(tail),
+    };
+    let frames = futures_util::stream::unfold(gen, |mut g| async move {
+        let frame = if let Some(h) = g.head.take() {
+            h
+        } else if let Some(l) = g.literal.take() {
+            l
+        } else if g.at < g.total {
+            let n = (g.total - g.at).min(1 << 20) as usize;
+            let mut buf = vec![0u8; n];
+            gen_fill(&mut buf, g.at);
+            g.at += n as u64;
+            buf
+        } else {
+            g.tail.take()?
+        };
+        Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(frame)), g))
+    });
+    let req = axum::http::Request::post("/v1/files")
+        .header("authorization", format!("Bearer {owner}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from_stream(frames))
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status().as_u16();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("response body");
+    let v = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&body).into()));
+    (status, v)
+}
+
+/// A raw read, hashed as it arrives: (status, sha256 hex, bytes, headers).
+async fn raw_digest(
+    fx: &Fx,
+    id: &str,
+    range: Option<&str>,
+) -> (u16, String, u64, reqwest::header::HeaderMap) {
+    use sha2::{Digest as _, Sha256};
+    let mut req = fx
+        .client
+        .get(format!("{}/v1/files/{id}?cohort=self&raw=1", fx.base))
+        .bearer_auth(&fx.owner);
+    if let Some(r) = range {
+        req = req.header("range", r);
+    }
+    let mut resp = req.send().await.expect("raw GET");
+    let (status, headers) = (resp.status().as_u16(), resp.headers().clone());
+    let (mut h, mut n) = (Sha256::new(), 0u64);
+    while let Some(piece) = resp.chunk().await.expect("body chunk") {
+        h.update(&piece);
+        n += piece.len() as u64;
+    }
+    (status, hex::encode(h.finalize()), n, headers)
+}
+
+/// This process's peak resident set, from `/proc/self/status` (`VmHWM`).
+fn peak_rss_kib() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    s.lines()
+        .find(|l| l.starts_with("VmHWM:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// (a) + (c) — a file ABOVE the pre-0.5.218 64 MiB cap, uploaded as a
+/// streamed multipart body (`size` before `file`), read back whole with
+/// `?raw=1` (streamed from `FileRow::chunks()`) and by `Range` — across a
+/// 256 KiB chunk boundary, and a range LONGER than the old 64 MiB range cap —
+/// every read SHA-256-equal to what was generated.
+#[tokio::test]
+async fn a_streamed_upload_above_the_old_cap_reads_back_streamed() {
+    let fx = fixture().await;
+    let app = upload_router(&fx).await;
+    let len: u64 = 80 * 1024 * 1024 + 12_345;
+    assert!(len > ciris_server::drive::WHOLE_READ_CAP as u64);
+    let rss_before = peak_rss_kib();
+    let (s, v) = stream_upload(
+        &app,
+        &fx.owner,
+        &[("cohort", "self".into()), ("size", len.to_string())],
+        "application/octet-stream",
+        FilePart::Generated(len),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "an 80 MiB streamed upload must be admitted: {v}");
+    assert_eq!(v["crossed"], true, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+
+    let (s, meta) = fx.get(&format!("/v1/files/{id}/meta?cohort=self")).await;
+    assert_eq!(s, 200, "{meta}");
+    assert_eq!(meta["size"], len, "{meta}");
+    assert_eq!(meta["chunked"], true, "{meta}");
+
+    // WHOLE, streamed.
+    let (s, sha, n, h) = raw_digest(&fx, &id, None).await;
+    assert_eq!(s, 200);
+    assert_eq!(n, len);
+    assert_eq!(h["content-length"], len.to_string().as_str());
+    assert!(
+        h.get("repr-digest").is_none(),
+        "no Repr-Digest when streamed"
+    );
+    assert_eq!(
+        sha,
+        gen_sha(0, len),
+        "the streamed read is the uploaded file"
+    );
+
+    // (c) RANGE across a 256 KiB chunk boundary (262144).
+    let (s, sha, n, h) = raw_digest(&fx, &id, Some("bytes=262100-262200")).await;
+    assert_eq!(s, 206);
+    assert_eq!(n, 101);
+    assert_eq!(
+        h["content-range"],
+        format!("bytes 262100-262200/{len}").as_str()
+    );
+    assert_eq!(sha, gen_sha(262_100, 101));
+
+    // A range LONGER than the 64 MiB whole-read cap, unaligned at both ends:
+    // served whole, in windows — no shortening.
+    let (start, rlen) = (1_000_003u64, 65 * 1024 * 1024 + 7);
+    let (s, sha, n, h) = raw_digest(
+        &fx,
+        &id,
+        Some(&format!("bytes={start}-{}", start + rlen - 1)),
+    )
+    .await;
+    assert_eq!(s, 206);
+    assert_eq!(n, rlen, "the whole range, not a capped prefix");
+    assert_eq!(h["content-length"], rlen.to_string().as_str());
+    assert_eq!(sha, gen_sha(start, rlen));
+
+    // The JSON read stays whole — and so refuses above the cap by name.
+    let (s, v) = fx.get(&format!("/v1/files/{id}?cohort=self")).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (413, "drive.too_large_for_whole_read"),
+        "{v}"
+    );
+    if let (Some(before), Some(after)) = (rss_before, peak_rss_kib()) {
+        eprintln!(
+            "streamed 80 MiB up and 3 reads down: peak RSS {before} KiB -> {after} KiB \
+             (the in-memory sqlite holds the sealed file itself)"
+        );
+    }
+}
+
+/// (b) — a body SHORTER (or longer) than its declared `size` is edge's
+/// `DeclaredLengthMismatch`: `400 drive.declared_length_mismatch`, and NO row
+/// — at the chunk-DAG size and at the inline size.
+#[tokio::test]
+async fn a_body_that_disagrees_with_its_size_is_refused_and_writes_nothing() {
+    let fx = fixture().await;
+    let app = upload_router(&fx).await;
+    let count = |v: &serde_json::Value| v["entries"].as_array().map_or(0, Vec::len);
+    let (_, before) = fx.get("/v1/drive?cohort=self").await;
+
+    for (declared, sent) in [
+        (3 * 1024 * 1024u64, 3 * 1024 * 1024 - 10),   // DAG, short
+        (3 * 1024 * 1024, 3 * 1024 * 1024 + 300_000), // DAG, long
+        (1000, 990),                                  // inline, short
+        (1000, 1010),                                 // inline, long
+    ] {
+        let (s, v) = stream_upload(
+            &app,
+            &fx.owner,
+            &[("cohort", "self".into()), ("size", declared.to_string())],
+            "application/octet-stream",
+            FilePart::Generated(sent),
+            None,
+        )
+        .await;
+        assert_eq!(
+            (s, reason(&v)),
+            (400, "drive.declared_length_mismatch"),
+            "declared {declared}, sent {sent}: {v}"
+        );
+        assert_eq!(v["declared"], declared, "{v}");
+    }
+    let (_, after) = fx.get("/v1/drive?cohort=self").await;
+    assert_eq!(count(&after), count(&before), "no row: {after}");
+}
+
+/// (d) — the write gate runs on the streamed path, from the PEEKED head: a
+/// JPEG declared as PNG is `415 drive.format_mismatch` before a byte is
+/// sealed. And the form's order is enforced: a field after the file is
+/// `400 drive.field_after_file`, again with no row.
+#[tokio::test]
+async fn the_streamed_path_keeps_the_write_gate_and_the_form_order() {
+    let fx = fixture().await;
+    let app = upload_router(&fx).await;
+    let count = |v: &serde_json::Value| v["entries"].as_array().map_or(0, Vec::len);
+    let (_, before) = fx.get("/v1/drive?cohort=self").await;
+
+    // A JPEG's magic, then 2 MiB (a chunk-DAG size, so the lie would have
+    // been sealed chunk by chunk had the gate not run first).
+    let mut jpeg = vec![
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00,
+    ];
+    jpeg.resize(2 * 1024 * 1024, 0x42);
+    let (s, v) = stream_upload(
+        &app,
+        &fx.owner,
+        &[("cohort", "self".into()), ("size", jpeg.len().to_string())],
+        "image/png",
+        FilePart::Literal(jpeg.clone()),
+        None,
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (415, "drive.format_mismatch"), "{v}");
+    assert_eq!(v["declared"], "image/png", "{v}");
+    assert_eq!(v["sniffed"], "image/jpeg", "{v}");
+
+    // Declared honestly it lands — the gate is the only thing that refused.
+    let (s, v) = stream_upload(
+        &app,
+        &fx.owner,
+        &[
+            ("cohort", "self".into()),
+            ("media_type", "image/jpeg".into()),
+            ("size", jpeg.len().to_string()),
+        ],
+        "application/octet-stream",
+        FilePart::Literal(jpeg.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let (_, landed) = fx.get("/v1/drive?cohort=self").await;
+    assert_eq!(count(&landed), count(&before) + 1, "{landed}");
+
+    // A field AFTER the file: refused, and still exactly one new row.
+    let (s, v) = stream_upload(
+        &app,
+        &fx.owner,
+        &[("cohort", "self".into()), ("size", "1000".into())],
+        "application/octet-stream",
+        FilePart::Generated(1000),
+        Some(("filename", "late.bin")),
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (400, "drive.field_after_file"), "{v}");
+    let (_, after) = fx.get("/v1/drive?cohort=self").await;
+    assert_eq!(count(&after), count(&landed), "no row: {after}");
+
+    // Above edge's single-file ceiling: refused by `size` alone, 413.
+    let (s, v) = stream_upload(
+        &app,
+        &fx.owner,
+        &[
+            ("cohort", "self".into()),
+            (
+                "size",
+                (ciris_server::drive::STREAMED_FILE_CEILING + 1).to_string(),
+            ),
+        ],
+        "application/octet-stream",
+        FilePart::Generated(10),
+        None,
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (413, "drive.too_large"), "{v}");
+}
+
+// ─── A family file's chunks are served under the FAMILY ────────────────────
+
+/// edge v38.0.0 (CIRISEdge#736) found it on its own lane and the server had
+/// the same bug: a family file is authored at `self` and crossed by a two-row
+/// widening, so on its AUTHOR's node persist's binding index returns the
+/// author's `self` row, and the server's old first-row-wins walk scoped every
+/// family chunk `self` — each member's fetch, arriving on a `family` address,
+/// was withheld `blob_serve_arrival_scope_insufficient`. `chunk_scope` now
+/// asks edge's `BlobMeaning::serve_scope`, which answers from the widening.
+///
+/// Pinned on the real drive: the owner founds a household (alone — persist v52
+/// seats only the founding record's signers), uploads a file into it, and the
+/// node's own chunk source scopes the blob as that family, not as `self`.
+#[tokio::test]
+async fn a_family_files_chunks_are_served_under_the_family() {
+    use ciris_edge::blob_swarm::{BlobChunkSource, ContentScope};
+    use ciris_edge::cohort_scope::CohortScope;
+    use ciris_persist::federation::types::{Family, FamilyMember, SignedFamily};
+    use ciris_persist::prelude::ceg_produce_canonicalize;
+
+    let fx = fixture().await;
+    let at =
+        ciris_persist::federation::admission::truncate_to_substrate_resolution(chrono::Utc::now());
+    let family_id = format!("family:v1:{}", uuid::Uuid::new_v4().simple());
+    let family = Family {
+        family_key_id: family_id.clone(),
+        family_name: "household".to_owned(),
+        members: vec![FamilyMember {
+            key_id: fx.owner_id.key_id.clone(),
+            joined_at: at,
+            role: Some("founder".to_owned()),
+        }],
+        founded_at: at,
+        consensus_protocol: "founder_only".to_owned(),
+        consensus_protocol_entrenched: false,
+        dissolved_at: None,
+        persist_row_hash: String::new(),
+    };
+    let canonical =
+        ceg_produce_canonicalize(&family.signing_envelope()).expect("canonicalize family");
+    let sig = fx
+        .owner_id
+        .signer()
+        .await
+        .sign_hybrid(&canonical)
+        .await
+        .expect("the owner signs the founding record");
+    fx.engine
+        .federation_directory()
+        .put_family(SignedFamily {
+            family,
+            authority_key_id: fx.owner_id.key_id.clone(),
+            scrub_signature_classical: BASE64.encode(&sig.classical.signature),
+            scrub_signature_pqc: Some(BASE64.encode(&sig.pqc.signature)),
+            supersede_proof: None,
+            cosignatures: Vec::new(),
+        })
+        .await
+        .expect("the founder's household");
+
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "family",
+                "room_id": family_id,
+                "bytes_base64": BASE64.encode(b"the family's shopping list"),
+                "media_type": "text/plain",
+                "filename": "list.txt",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "family upload: {v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let (s, meta) = fx
+        .get(&format!(
+            "/v1/files/{id}/meta?cohort=family&room_id={family_id}"
+        ))
+        .await;
+    assert_eq!(s, 200, "{meta}");
+    let sha: [u8; 32] = hex::decode(meta["content_sha256"].as_str().expect("sha"))
+        .expect("hex")
+        .try_into()
+        .expect("32 bytes");
+
+    // The premise, measured: the binding index's first projecting row — what
+    // the deleted walk answered from — is the author's `self` row here.
+    let rows = fx
+        .engine
+        .federation_directory()
+        .attestations_binding_content(&hex::encode(sha))
+        .await
+        .expect("binding index");
+    let old_answer = rows
+        .iter()
+        .find_map(|r| ciris_edge::blob_swarm::BlobMeaning::project(r, &sha).ok())
+        .map(|m| m.scope().clone());
+    assert!(
+        matches!(
+            old_answer,
+            Some(ContentScope::Group {
+                scope: CohortScope::SelfOnly,
+                ..
+            })
+        ),
+        "the first-row walk would have scoped this family file `self` (the bug): {old_answer:?}"
+    );
+
+    let source = ciris_server::backend::ServerBlobChunkSource::new(&fx.engine);
+    match source.chunk_scope(sha).await {
+        Some(ContentScope::Group {
+            scope: CohortScope::Family,
+            group_id,
+        }) => assert_eq!(group_id, family_id, "served under THIS family"),
+        other => panic!(
+            "a family file's chunks must be served under the family (edge's \
+             BlobMeaning::serve_scope prefers the widening), got {other:?}"
+        ),
+    }
 }

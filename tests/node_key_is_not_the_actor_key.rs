@@ -234,31 +234,31 @@ async fn a_node_only_key_is_usable_as_the_node_identity() {
     assert!(v.usable_as_node());
 }
 
-/// **The loophole, demonstrated at the substrate.** `{node,agent}` registers
-/// happily — persist accepts the row — and it is precisely the composition that
-/// makes the agency gate stop constraining the key. The classifier must call it
-/// `Fused` and must NOT call it usable.
+/// **The loophole, closed at the substrate.** Through persist v49 a
+/// `{node,agent}` key registered happily — the composition that makes the
+/// agency gate stop constraining the key — and this test pinned that the
+/// server's classifier still called it `Fused` and never usable. Since persist
+/// v50 the registration door refuses it by name (CC 3.4.7.3 Clause A), so the
+/// row cannot be written here any more. The classifier keeps its `Fused` arm
+/// for rows a pre-v50 directory already holds.
 #[tokio::test]
-async fn a_fused_node_agent_key_registers_and_must_still_be_refused() {
+async fn a_fused_node_agent_key_is_refused_at_registration() {
     const FUSED: &str = "fused-node-agent";
     let engine = engine_for(FUSED).await;
-    register(&engine, &signer_for(FUSED), FUSED, "node,agent").await;
-
+    let refused = try_register(&engine, &signer_for(FUSED), FUSED, "node,agent").await;
+    let err = refused.expect_err(
+        "persist admitted a `{node,agent}` key — the Clause A door is gone, and the \
+         server's classifier is again the only thing refusing it",
+    );
+    assert!(
+        err.to_string().contains("Clause A"),
+        "refused, but not by the Clause A rule: {err}"
+    );
     let v = classify(engine.federation_directory().as_ref(), FUSED)
         .await
         .expect("classify");
-    assert!(
-        matches!(v, IdentityVerdict::Fused { .. }),
-        "expected Fused, got {v:?} — a `{{node,agent}}` key is not merely an actor and \
-         not merely substrate; it is the CC 3.4.7.3 Clause A violation, and collapsing \
-         it into either neighbour loses the reason the clause exists"
-    );
-    assert!(
-        !v.usable_as_node(),
-        "a fused key must never be adopted as the node identity — persist's agency gate \
-         constrains only a NODE-ONLY recipient, so operating as this key would leave \
-         'infrastructure must not have agency' nominally true and actually unenforced"
-    );
+    assert_eq!(v, IdentityVerdict::Unregistered, "nothing was written");
+    assert!(!v.usable_as_node());
 }
 
 /// An unregistered key is not an actor and not substrate — it is unknown, and

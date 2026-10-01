@@ -1,0 +1,30 @@
+# The selffiles ladder as a topology (harness/mesh-repro/scenarios/selffiles.sh, 12 rungs):
+# ONE person on TWO devices, a second person peered as a contact (the believable outsider),
+# the device roster, a note, the transfer corpus, and the two negatives. Runs in minutes instead of 45.
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}   # the phone dials the first device: one-hop bodies
+    - {id: X,  dials: [C, D1], accepts: R, announced: true}   # the contact's node
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+    - {id: two, owns: [X],      accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: peered, between: [D1, X]}                          # a contact, not a device
+    - {rel: reachable, node: D1, person: two, min: 1}
+    - {rel: contact, from: one, to: two, via: owner}
+    - {rel: room, kind: self, person: one}
+    - {rel: roster, person: one, visible_from: [X], visible_from_complete: true}   # CSD-037 + CC 5.4.6: X lists EVERY announced device (the canonical relays D2)
+    - {rel: note, person: one, device: D1}
+    - {rel: session, person: one, device: D1}                 # CC 3.1.3.1: one device handles each exchange
+    - {rel: corpus, person: one, device: D1, require: false}   # recorded per file; the negatives still run
+    - {rel: custody, person: one, file: large}                 # FSD/FILE_CUSTODY.md: D1's custody names D2 received
+  actor: {person: one, device: D2}
+  negatives:
+    - {check: no_wider_self_rows, person: one}
+    - {check: holds_no_row, node: X, dimension: "file:v1", person: one}

@@ -382,7 +382,12 @@ async fn old_self_files_are_rewrapped_for_the_new_device_by_the_pen_holder() {
     );
     assert!(!recipients(Arc::clone(&first)).await.contains(&occurrence));
 
-    // THE PEN OPENS HERE (what compose registers at boot): the re-wrap runs.
+    // THE PEN OPENS HERE (what compose registers at boot): the re-wrap runs —
+    // on the device the person is ON (0.5.218, CC 3.1.3.1): the re-wrap for a
+    // new device is an exchange one device handles, claimed where the owner's
+    // session is. The drive requests above already made this process attended
+    // (`resolve_bearer`); said explicitly so the precondition is on the page.
+    ciris_server::session_claims::Attendance::global().note_presence();
     ciris_server::node_key::set_user_seed_dir(owner.seed_dir.clone(), owner.alias.clone());
     let report = ciris_server::self_rewrap::rewrap_for_new_devices(&first, &first_key).await;
     assert!(!report.no_pen_here, "{report:?}");
