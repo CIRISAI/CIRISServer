@@ -812,7 +812,32 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # invite flow ships. Both queued for the client bundle with their English
     # (CIRISClient#78).
     "self.evict_incomplete",
-    "membership.consent_required",
+    # (`membership.consent_required` retired at persist v52 / edge v38: the
+    # interim door it named opened as the invite flow below.)
+    # CONSENT TO JOIN, BUILT (0.5.218 at persist v52.0.0 / edge v38.0.0,
+    # CIRISPersist#955, `FSD/MEMBERSHIP_INVITES.md`): the invite flow's
+    # refusals — persist's eight consent rules each named by one id, the
+    # invitee's inbox gate, and the invitation's own lifecycle
+    # (`src/membership_invites.rs`, one function per id). Same queue as the
+    # planes above, requested of the client with their English (CIRISClient#78).
+    "membership.acceptance_mismatch",
+    "membership.already_answered",
+    "membership.awaiting_acceptance",
+    "membership.bad_expiry",
+    "membership.declined",
+    "membership.delegate_may_not_answer",
+    "membership.founding_member_unsigned",
+    "membership.invite_closed",
+    "membership.invite_expired",
+    "membership.invite_not_found",
+    "membership.invite_not_here_yet",
+    "membership.not_the_invitee",
+    "membership.not_the_proposer",
+    "membership.owner_session_required",
+    "membership.refused",
+    "membership.signer_unavailable",
+    "membership.store_unavailable",
+    "membership.supersede_cannot_add",
     # ONE DEVICE HANDLES EACH EXCHANGE (0.5.218, CC 3.1.3.1,
     # FSD/SESSION_CLAIMS.md §5): `GET /v1/self/sessions` says which of the
     # person's devices is answering — two states and one refusal, queued for

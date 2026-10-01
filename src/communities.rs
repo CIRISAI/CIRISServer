@@ -75,7 +75,7 @@
 //! v52), `POST /v1/communities/{id}/members`, the quorum flow's envelope /
 //! cosign / assemble on an `add`, and a create naming anyone but the founder
 //! answer 409 `membership.consent_required` (`refuse_if_joining`,
-//! [`crate::family_api::membership_consent_required`]). Pair rooms keep their
+//! `crate::family_api::membership_consent_required` (removed at persist v52)). Pair rooms keep their
 //! own consent — the contact grant each side authors — and are untouched.
 //!
 //! **At persist v52.0.0 / edge v38.0.0 the door opens as the invite flow**

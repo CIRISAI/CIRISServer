@@ -125,3 +125,86 @@ founder; everyone else named in it joins by proposal → acceptance.
   dissolve is a quorum-verified terminal amendment. The ignored test
   `a_quorum_dissolve_replicates_as_an_amendment` (CIRISServer#700) is un-ignored
   at v52.
+
+## 7. As built — persist v52.0.0 / edge v38.0.0 (0.5.218)
+
+The interim 409 is gone; the flow of §2 is live. What shipped, and where it
+differs from the design above:
+
+### 7.1 Routes
+
+| Route | Who | Answers |
+|---|---|---|
+| `POST /v1/{families,communities}/{id}/invites` `{key_id, role?, expires_in_days?}` | a founder under `founder_only`; any active member otherwise | 202 `{state: "invited", proposal_id, group_kind, group_id, invitee_key_id, role, expires_at}` |
+| `POST /v1/{families,communities}/{id}/members` | same | the alias above, same 202 |
+| `GET /v1/{families,communities}/{id}/invites` | members (a delegate may read) | `{invites: [{proposal_id, invitee_key_id, role, proposer_key_id, proposed_at, expires_at, state, reply_id}], seated_now: [...]}` — `state` ∈ `pending` / `accepted` / `joined` / `declined` / `expired` / `withdrawn` |
+| `DELETE /v1/{families,communities}/{id}/invites/{proposal_id}` | the proposer | 200 `{state: "withdrawn", withdrawal_id}` (a `withdraws` of the proposal) |
+| `GET /v1/self/invites` | the invitee (a delegate may read) | every live, unanswered, unwithdrawn proposal naming them (edge `membership::pending_proposals_for`), families, rooms and pair rooms |
+| `POST /v1/self/invites/{proposal_id}/accept` / `…/decline` | the invitee's own session | 200 `{state: "accepted" \| "declined", reply_id, awaiting}` |
+
+Rows are edge's (`membership::{propose, reply, widen_on_acceptance}`, built on
+persist's own builders); the server keeps no copy of the admission rule.
+`expires_in_days` is 1..=30 (default 14; persist bounds a proposal at 30 days).
+A contact grant is NOT required to invite: an invitation reaches a stranger's
+nodes under first contact (CIRISEdge#756). The invitee must be a registered key
+for a family (the widening names it).
+
+### 7.2 Who seats the member
+
+- **`founder_only`** — the founder's single-signature widening. Written by
+  edge's replication bridge when the acceptance arrives
+  (`ReplicationRuntimeConfig::membership_widener`, set in `compose` to the
+  owner's PERSON pen, because the roster counts seat keys), or by the server
+  when a founder lists `…/invites` (covers a node claimed after its runtime
+  started, which has no widener until restart). A household's existing
+  content is re-wrapped to a member the LIST seats (`rekey_family_member_add`);
+  one the bridge seats is not re-wrapped by the server — a gap (§7.5).
+- **Any other protocol** — "accepted, awaiting the group" (persist FSD §4): the
+  `add` of `…/changes/{envelope,cosign,assemble}`, now written as a co-signed
+  WIDENING (persist Q2: a supersede never adds). Without the joiner's
+  acceptance persist refuses it at assemble, `membership.awaiting_acceptance`,
+  however many members signed. A family's record never grows; its stored
+  `quorum:M/N` is not rescaled by an add.
+
+### 7.3 Founding, leave, dissolve
+
+- A create naming anyone but the founder is `membership.founding_member_unsigned`
+  (409) — the server has no founding-cosign flow (persist Q1).
+- **Quorum family leave** (CIRISPersist#956): `supersede_family_with_quorum`
+  with the record minus the leaver, the envelope from
+  `build_membership_change_envelope(remaining)`, signed by the leaver alone; the
+  protocol is NOT rescaled ("nothing else may change"). It replicates. A member
+  seated by a widening is not on the record; their revocation alone is the leave.
+- **Quorum family dissolve** (#956): the change envelope pins `dissolved_at`;
+  assemble writes the terminal amendment (every seat unchanged, `dissolved_at`
+  set) through `supersede_family_with_quorum`. No removal rows. It replicates
+  (`a_quorum_dissolve_replicates_as_an_amendment`, un-ignored). A
+  `founder_only` dissolve is unchanged (revocations + the local supersede).
+
+### 7.4 Pair rooms
+
+`POST /v1/chat` no longer writes a two-founder record (persist refuses it):
+the opener founds alone and proposes the peer as `founder`
+(`chat::open_pair_room`); the peer's own `POST /v1/chat` accepts
+(`chat::accept_pair_proposal`); the opener's node widens (bridge, or the
+opener's next call with their pen). The answer gains `state` (`open` /
+`invited` / `accepted` / `awaiting_invitation`) and `proposal_id`. A pair
+room's invitation also appears in `GET /v1/self/invites`.
+
+### 7.5 Reason ids (all 409 unless noted)
+
+persist's rules, one each: `membership.awaiting_acceptance`,
+`membership.invite_not_here_yet` (both retryable), `membership.declined`,
+`membership.invite_expired` (410), `membership.acceptance_mismatch` (403),
+`membership.already_answered`, `membership.founding_member_unsigned`,
+`membership.supersede_cannot_add`; and `membership.refused` (any other refusal
+of a membership row). The flow's own: `membership.invite_not_found` (404),
+`membership.not_the_invitee` (403), `membership.not_the_proposer` (403),
+`membership.invite_closed`, `membership.bad_expiry` (400),
+`membership.owner_session_required` (401/403),
+`membership.delegate_may_not_answer` (403), `membership.signer_unavailable`
+(403), `membership.store_unavailable` (503). Queued for the client bundle
+(`KNOWN_UNLOCALIZED`, CIRISClient#78).
+
+Gaps named, not built: the bridge-seated member's content re-wrap (above); a
+founding-cosign flow; the CSD for the inbox screens (CSD-100..103).

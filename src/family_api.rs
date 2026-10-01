@@ -40,7 +40,7 @@
 //!    409 `membership.consent_required`: `POST …/members`, a quorum envelope /
 //!    cosign / assemble whose proposed roster adds anyone, and a create whose
 //!    founding roster names anyone but the founder
-//!    ([`membership_consent_required`]). Remove, role, leave and dissolve are
+//!    (`membership_consent_required`, removed at persist v52). Remove, role, leave and dissolve are
 //!    unaffected, and re-adding someone already active keeps
 //!    `family.already_member`.
 //!
