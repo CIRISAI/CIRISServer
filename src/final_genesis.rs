@@ -370,6 +370,13 @@ struct SignRequest {
     mldsa_usb_path: String,
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
+    /// TEST-ANCHOR ONLY — the DRY RUN: sign as a software test-anchor holder
+    /// from its Ed25519 seed (base64), instead of a YubiKey + USB. Compiled
+    /// out of production builds, and refused at runtime unless
+    /// `CIRIS_TESTING_MODE=true` (the same fence every test-anchor door uses).
+    #[cfg(feature = "test-anchor")]
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
 }
 
 /// `POST /v1/accord/final-genesis/sign` — sign everything this holder owes now.
@@ -384,7 +391,99 @@ async fn sign(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             )
         }
     };
+    #[cfg(feature = "test-anchor")]
+    if req.test_holder_seed_b64.is_some() {
+        return sign_software(st, req);
+    }
     sign_impl(st, req).await
+}
+
+/// The dry run's signer: a software test-anchor holder, the same identity
+/// persist's own minter signs with (`Identity::from_seeds` over the Ed25519
+/// seed and its derived ML-DSA-65 seed).
+#[cfg(feature = "test-anchor")]
+fn sign_software(st: FinalGenesisState, req: SignRequest) -> Response {
+    use base64::Engine as _;
+    use ciris_persist::federation::accord_test_support::Identity;
+    use ciris_persist::federation::genesis::ceremony::Partial;
+    use ciris_persist::federation::genesis::test_anchor_mldsa_seed;
+
+    if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "final_genesis.no_hardware_signer",
+            "a software holder seed is accepted only with CIRIS_TESTING_MODE=true (the dry run)",
+        );
+    }
+    let seed: [u8; 32] = match req
+        .test_holder_seed_b64
+        .as_deref()
+        .and_then(|s| {
+            base64::engine::general_purpose::STANDARD
+                .decode(s.trim())
+                .ok()
+        })
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+    {
+        Some(s) => s,
+        None => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.bad_request",
+                "test_holder_seed_b64 must be base64 of exactly 32 bytes",
+            )
+        }
+    };
+    let holder = req.key_id.trim().to_string();
+    let identity = match Identity::from_seeds(&holder, &seed, &test_anchor_mldsa_seed(&seed)) {
+        Ok(i) => i,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.signer_unavailable",
+                format!("{e}"),
+            )
+        }
+    };
+    let mut state = match load(&st.home) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let items = match state.next_items() {
+        Ok(items) => items,
+        Err(e) => return ceremony_refusal(&e),
+    };
+    let mut signed = Vec::new();
+    for item in items
+        .into_iter()
+        .filter(|i| i.waits_on.is_empty() && i.owed.iter().any(|h| h == &holder))
+    {
+        let (classical, pqc) = identity.sign_bytes(&item.bytes);
+        if let Err(e) = state.add_partial(Partial {
+            item: item.id.clone(),
+            holder_key_id: holder.clone(),
+            signature_classical: classical,
+            signature_pqc: pqc,
+        }) {
+            let _ = store(&st.home, &state);
+            return ceremony_refusal(&e);
+        }
+        signed.push(item.id);
+    }
+    if signed.is_empty() {
+        return refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.nothing_to_sign",
+            format!("{holder} owes nothing signable right now"),
+        );
+    }
+    if let Err(r) = store(&st.home, &state) {
+        return r;
+    }
+    match state.status() {
+        Ok(owed) => Json(serde_json::json!({ "signed": signed, "owed": owed })).into_response(),
+        Err(e) => ceremony_refusal(&e),
+    }
 }
 
 #[cfg(not(feature = "pkcs11"))]
