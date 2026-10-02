@@ -204,3 +204,15 @@ build.
   spares A2/B2/C2 already exist and are each holder's own second key — commit
   A2 as A1's recovery key, B2 as B1's, C2 as C1's. That also answers §5 Q1
   (successors) without minting anything new.
+- **Persist slice R (plan, 2026-10-02):** charter `recovery_commitments:
+  {holder_key_id: hex}`; every standing holder exactly one; no commitment for
+  an off-roster key; a recovery key may not be a roster signing key. Recovery
+  door: `supersedes(old holder key -> new signing key)` signed by R, no
+  quorum, own seat only, emits a new roster version carrying a FRESH
+  commitment for the new key; R spent after one use. Roster change = strict
+  majority of the standing roster; `steward_signatures` dropped.
+  **Server objection (sent to persist and CC):** the commitment must bind the
+  recovery key's public material (both hybrid halves), not only its id —
+  the spares are unregistered, so an id-only commitment is satisfied by
+  whoever registers that id first. Ceremony input per holder is therefore
+  `{key_id, ed25519, ml_dsa_65}` of the recovery key.
