@@ -235,6 +235,9 @@ pub const BYTE_STATES: &[&str] = &[
     BYTE_STATE_HERE,
     "not_fetched",
     "not_granted",
+    // persist v53 (#969): the bytes are here but this device's per-epoch key
+    // has not arrived yet. A state to wait through, never a denial.
+    "awaiting_key",
     "withdrawn",
     "evicted",
     "seal_mismatch",
@@ -1719,6 +1722,7 @@ fn state_detail(state: &str) -> &'static str {
     match state {
         "not_fetched" => "on another device — the row is here, its bytes have not been pulled yet",
         "not_granted" => "this device's key does not open it — it holds no grant for these bytes",
+        "awaiting_key" => "the bytes are here, but this device's key for them has not arrived yet — it follows on its own; ask again shortly",
         "withdrawn" => "withdrawn by its author — the bytes are no longer served anywhere",
         "evicted" => "these bytes were swept from this node and cannot be read here again",
         "seal_mismatch" => "the bytes did not open under this row — the row and the bytes disagree",
@@ -1732,6 +1736,7 @@ fn blob_state(e: &BlobError) -> ByteState {
     let state = match e {
         BlobError::NotHeld { .. } => "not_fetched",
         BlobError::NotGranted { .. } | BlobError::NotPartyTo { .. } => "not_granted",
+        BlobError::ChunkKeyNotYetGranted { .. } => "awaiting_key",
         BlobError::Withdrawn { .. } => "withdrawn",
         BlobError::Evicted { .. } => "evicted",
         BlobError::SealDidNotOpen { .. } => "seal_mismatch",
@@ -1757,7 +1762,7 @@ fn unopened(reason: &ciris_edge::chat::UnopenedReason) -> ByteState {
     ByteState::Absent {
         state,
         detail: match state {
-            "not_fetched" | "not_granted" | "evicted" | "seal_mismatch" => {
+            "not_fetched" | "not_granted" | "awaiting_key" | "evicted" | "seal_mismatch" => {
                 state_detail(state).to_owned()
             }
             _ => format!("{}: {reason}", state_detail(state)),
@@ -1848,6 +1853,8 @@ fn refuse_state(state: &str, detail: String) -> Response {
         // and the bytes legitimately are not. 409 says "ask again".
         "not_fetched" => refuse(StatusCode::CONFLICT, "drive.not_fetched", detail),
         "not_granted" => refuse(StatusCode::FORBIDDEN, "drive.not_granted", detail),
+        // Like `not_fetched`: legitimately not yet. 409 says "ask again".
+        "awaiting_key" => refuse(StatusCode::CONFLICT, "drive.awaiting_key", detail),
         "withdrawn" => refuse(StatusCode::GONE, "drive.withdrawn", detail),
         "evicted" => refuse(StatusCode::GONE, "drive.evicted", detail),
         "seal_mismatch" => refuse(

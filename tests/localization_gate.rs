@@ -752,7 +752,16 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// the `accord.duty.*`, `mesh_config.refusal.*`, `trust_root.*`,
     /// `operator.store.*` and two single ids still on the debt list. The floor
     /// in pyproject.toml rose to 0.5.226 with it.
-    const MAX_UNCOVERED: usize = 19;
+    ///
+    /// 19 -> 20 for 0.5.220: `drive.awaiting_key` (persist v53 #969, edge
+    /// #797 — a self/family file whose bytes arrived before this device's
+    /// per-epoch key: 409, ask again). Same reason, same list; queued for
+    /// the client bundle.
+    ///
+    /// 20 -> 34 for 0.5.220: the final-genesis ceremony routes'
+    /// 14 `final_genesis.*` refusals (`src/final_genesis.rs`), for the
+    /// client's 3-of-3 re-mint screens. Same reason, same list.
+    const MAX_UNCOVERED: usize = 34;
 
     let en = load_en();
     let ids = scraped_server_ids();

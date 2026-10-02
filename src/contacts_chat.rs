@@ -3457,7 +3457,9 @@ async fn pair_room_response(
 pub const UNOPENED_REASONS: &[&str] = &[
     "not_fetched",
     "not_granted",
+    "awaiting_key",
     "evicted",
+    "withdrawn",
     "seal_mismatch",
     "malformed_row",
     "not_text",
@@ -4983,7 +4985,9 @@ mod tests {
         let arms = [
             R::NotFetched { detail: d() },
             R::NotGranted { detail: d() },
+            R::AwaitingKey { detail: d() },
             R::Evicted { detail: d() },
+            R::Withdrawn { detail: d() },
             R::SealMismatch { detail: d() },
             R::MalformedRow { detail: d() },
             R::NotText { detail: d() },
