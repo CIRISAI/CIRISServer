@@ -190,3 +190,17 @@ build.
   the ceremony if we can"). Holders A1/B1/C1 are the signing founders;
   canonical-1/-2/-3 are seated as non-signing members (CC P3:670-722,
   P3:192; nodes have no agency).
+- **Steward backstop removed (maintainer; CC 4.2.6 on `rc7` fe459cf,
+  CIRISConstitution#139):** firing stays floor-1 over the live set; an accord
+  roster change (add/remove/swap) needs `yes` from a strict majority of the
+  STANDING roster within W (2 of 3 today), no steward co-sign; H7 restore and
+  contest removed (`ciris.accord_contest.v1`, `ciris.accord_restore.v1`
+  retired). **New genesis-fixed field:** the charter carries each holder's
+  pre-committed RECOVERY-key commitment; a holder who loses a signing key
+  rotates by a self-`supersedes` under that recovery key. Server: the
+  `/v1/accord/*` tally applies the standing-majority threshold. Verify:
+  CIRISVerify#302.
+- **Open (maintainer):** which keys are the recovery keys. Proposal: the
+  spares A2/B2/C2 already exist and are each holder's own second key — commit
+  A2 as A1's recovery key, B2 as B1's, C2 as C1's. That also answers §5 Q1
+  (successors) without minting anything new.
