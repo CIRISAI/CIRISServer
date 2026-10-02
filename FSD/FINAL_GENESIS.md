@@ -229,3 +229,12 @@ build.
   charter member `recovery_commitments: {holder_key_id: commitment}` REQUIRED
   on the accord's charter; doors recompute from the presenting record's
   pubkeys. Relayed to persist.
+- **Maintainer's rulings, 2026-10-02 (late):** the recovery keys are the
+  spares — A2 recovers A1, B2 recovers B1, C2 recovers C1 — recorded off each
+  spare's hardware through `POST /v1/accord/final-genesis/recovery-key`; the
+  successor set is the same three spares (the plan's default). The ceremony
+  proceeds with canonical-1 only; canonical-2/-3 (fresh mints) come from the
+  maintainer and the registry session.
+- **Built and green (prestage/persist-v53):** the routes (`recovery-key`,
+  `plan`, `sign`, `finish`, status), the in-process dry run with three software
+  holders, and the 410 on the retired 2-of-3 routes.
