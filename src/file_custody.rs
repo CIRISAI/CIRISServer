@@ -18,7 +18,7 @@
 //!    list alone (`GET /v1/self/occurrences`) was NOT used as the roster: it
 //!    carries the person's login anchor and, on an agent split, the ACTOR key
 //!    beside the node, so it would count one machine twice; it is read only to
-//!    subtract revocations. Labels come from `self:device_label:v1`, the rows
+//!    subtract revocations. Labels come from `device:label:v1`, the rows
 //!    `POST /v1/self/occurrence/label` writes, through
 //!    [`crate::self_devices::labels_for`].
 //! 2. **Custody** — edge's `FileRow::custody` → persist's

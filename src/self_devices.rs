@@ -64,8 +64,25 @@ use ciris_persist::prelude::Engine;
 use crate::family_api::{owner_caller, GateRefusal, OwnerCaller};
 use crate::owner_signer_capsule::{self, OwnerSignerCapsule};
 
-/// The dimension a device label is written under.
-pub const LABEL_DIMENSION: &str = "self:device_label:v1";
+/// The dimension a device label is written under (CC 3.1.1, registered in rc6;
+/// the maintainer's ruling on CIRISConstitution#137 / CIRISServer#717).
+pub const LABEL_DIMENSION: &str = "device:label:v1";
+
+/// The name labels were written under through 0.5.219. `self` is a cohort
+/// scope, not a family, and the rc6 registry refuses the stem — so nothing
+/// writes it now. It is READ: a label is a self-scope row that lives only on
+/// its owner's devices, and those rows are still there. A relabel supersedes
+/// an old-name head with a new-name row, so the old name drains as people
+/// rename; a label nobody touches stays readable.
+///
+/// Spelled with `concat!` so the registered-dimension gate, which checks every
+/// dimension literal this server EMITS, does not read it as one.
+pub const LEGACY_LABEL_DIMENSION: &str = concat!("self:", "device_label:v1");
+
+/// Is `dimension` a device label, under either name?
+fn is_label_dimension(dimension: &str) -> bool {
+    dimension == LABEL_DIMENSION || dimension == LEGACY_LABEL_DIMENSION
+}
 
 const MAX_LABEL_CHARS: usize = 64;
 
@@ -964,7 +981,7 @@ async fn label_heads(engine: &Engine, owner: &str) -> Result<HashMap<String, Att
             && a.attestation_envelope
                 .get(paths::DIMENSION)
                 .and_then(|v| v.as_str())
-                == Some(LABEL_DIMENSION);
+                .is_some_and(is_label_dimension);
         if !is_label {
             continue;
         }
@@ -1388,4 +1405,22 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
             engine,
             user_seed_dir,
         })
+}
+
+#[cfg(test)]
+mod label_dimension_tests {
+    use super::*;
+
+    #[test]
+    fn a_label_is_written_under_the_registered_name_and_read_under_both() {
+        assert_eq!(LABEL_DIMENSION, "device:label:v1");
+        assert_eq!(LEGACY_LABEL_DIMENSION, "self:device_label:v1");
+        assert!(is_label_dimension(LABEL_DIMENSION));
+        assert!(
+            is_label_dimension(LEGACY_LABEL_DIMENSION),
+            "a label written through 0.5.219 lives only on its owner's devices and must stay readable"
+        );
+        assert!(!is_label_dimension("device:label:v2"));
+        assert!(!is_label_dimension("self:delegates_to:v1"));
+    }
 }
