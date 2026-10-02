@@ -116,12 +116,20 @@ use std::time::Duration;
 
 use ciris_edge::replication::bridge::KindPublishSelector;
 use ciris_edge::replication::EnvelopeKind;
+use ciris_persist::federation::types::identity_type;
 use ciris_persist::prelude::Engine;
 
 /// How often the relay set is recomputed when nothing nudges it. Announce is
 /// rare and every local change nudges; this bounds only the lag of an announce
 /// made on another node and carried here by replication.
 pub const RELAY_REFRESH: Duration = Duration::from_secs(60);
+
+/// The shortest gap between two NUDGE-driven recomputes. A nudge fires on every
+/// `kick_replication`, and a busy canonical kicks many times a second; without
+/// this floor a relay recomputed back to back (production, 2026-10-02). A
+/// nudge inside the floor is dropped: the next nudge after it, or the periodic
+/// [`RELAY_REFRESH`] pass, carries the change.
+pub const NUDGE_FLOOR: Duration = Duration::from_secs(15);
 
 /// Page size for the occurrence enumeration. The same default the bridge's
 /// since-cursor sweeps use.
@@ -191,6 +199,14 @@ type Snapshot = Arc<RwLock<Option<Arc<RelaySets>>>>;
 struct RelayState {
     snapshot: Snapshot,
     wake: tokio::sync::Notify,
+    /// When the last recompute STARTED (periodic or nudged).
+    last_pass: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// May a nudge recompute now? True when no pass has run, or the last one
+/// started at least [`NUDGE_FLOOR`] before `now`.
+fn nudge_may_recompute(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= NUDGE_FLOOR)
 }
 
 static STATE: OnceLock<RelayState> = OnceLock::new();
@@ -199,6 +215,7 @@ fn state() -> &'static RelayState {
     STATE.get_or_init(|| RelayState {
         snapshot: Arc::new(RwLock::new(None)),
         wake: tokio::sync::Notify::new(),
+        last_pass: std::sync::Mutex::new(None),
     })
 }
 
@@ -320,6 +337,18 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
     let mut nodes: BTreeSet<String> = BTreeSet::new();
     let mut owners: BTreeSet<String> = BTreeSet::new();
     for identity in identities {
+        // ONLY A PERSON ANNOUNCES. An owner-binding is user → node, so an
+        // identity whose key is not `user`-typed owns nothing to relay. This
+        // gate is the pass's cost: `announced_nodes_of` reads every row the
+        // identity ever AUTHORED, and agents author by far the most rows. On
+        // the production canonical (2026-10-02) ~400 agent identities made each
+        // pass take 8–86 s and pinned a core reading the store at ~600 MB/s.
+        // A read failure or an unknown key is skipped, never guessed: a key
+        // with no record here has no roster row here to relay either.
+        match dir.lookup_public_key(&identity).await {
+            Ok(Some(rec)) if rec.identity_type == identity_type::USER => {}
+            _ => continue,
+        }
         let announced = crate::auth::ownership::announced_nodes_of(engine, &identity).await?;
         if announced.is_empty() {
             continue;
@@ -356,6 +385,15 @@ pub async fn refresh(engine: &Engine, own_key_ids: &[String], recheck_role: bool
         return false;
     }
     let started = std::time::Instant::now();
+    {
+        let Ok(mut last) = state().last_pass.lock() else {
+            return false;
+        };
+        if !recheck_role && !nudge_may_recompute(*last, started) {
+            return false;
+        }
+        *last = Some(started);
+    }
     let serves = if recheck_role {
         serves_infrastructure(engine, own_key_ids).await
     } else {
@@ -434,6 +472,18 @@ mod tests {
             announced_nodes: s(&["d2"]),
             owners: s(&["one"]),
         }
+    }
+
+    #[test]
+    fn a_nudge_inside_the_floor_does_not_recompute() {
+        let t0 = std::time::Instant::now();
+        assert!(nudge_may_recompute(None, t0), "the first pass always runs");
+        assert!(!nudge_may_recompute(Some(t0), t0 + Duration::from_secs(1)));
+        assert!(!nudge_may_recompute(
+            Some(t0),
+            t0 + NUDGE_FLOOR - Duration::from_millis(1)
+        ));
+        assert!(nudge_may_recompute(Some(t0), t0 + NUDGE_FLOOR));
     }
 
     #[test]
