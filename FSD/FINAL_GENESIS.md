@@ -162,3 +162,15 @@ build.
 - **With the maintainer, not blocking a mint with witnessed mode off:**
   whether `ciris-canonical` needs its own charter; the us/eu/apac steward
   backstop in CC 4.2.6 (live quorum; entrenched).
+- **Persist v53 (952f6a7a), 2026-10-02:** a charter re-scrub did NOT produce a
+  new record version (gap, READ by persist); fixed in v53: the record's
+  signing envelope gains `prev_head_digest` and `charter_digest`, the charter
+  in force is the one the head record names, and every roster-affecting row
+  needs a new version. Both genesis records go inside `bundle.attestations`;
+  the boot leg reads the birth from the bundle (no separate asset). The
+  assembler requires the family's quorum on the grant; persist is checking
+  that admission does too.
+- **Instants:** stamped once at propose from the ceremony host's clock and
+  passed into persist's builder (never read inside it), so a session across
+  several requests stays byte-stable; the propose route refuses to stamp on a
+  host whose clock is not NTP-synced. No ceremony window at the 300 s door.
