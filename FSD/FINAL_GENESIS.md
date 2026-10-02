@@ -222,3 +222,10 @@ build.
   pubkey_ed25519, pubkey_ml_dsa_65}`; T3 commitment = sha256 of the JCS array
   sorted by key_id; per-holder recovery commitment = same over one element;
   both doors check the presenting record's pubkeys. Awaiting CC's spelling.
+- **Commitment bytes (CC `rc7` 5e89627, T3 / 4.2.6 / 2.1):** element = JCS
+  `{key_id, pubkey_ed25519_base64, pubkey_ml_dsa_65_base64}` as stored on the
+  key record; commitment = lowercase-hex SHA-256 of the JCS array sorted by
+  `key_id` (UTF-8 bytes); T3 over the successor set, 4.2.6 over one element;
+  charter member `recovery_commitments: {holder_key_id: commitment}` REQUIRED
+  on the accord's charter; doors recompute from the presenting record's
+  pubkeys. Relayed to persist.
