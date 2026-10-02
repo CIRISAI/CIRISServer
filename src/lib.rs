@@ -993,19 +993,239 @@ struct SyncDailyMakeWriter {
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SyncDailyMakeWriter {
     type Writer = Box<dyn std::io::Write>;
     fn make_writer(&'a self) -> Self::Writer {
-        let dated = self.dir.join(format!(
-            "ciris-server.log.{}",
-            chrono::Utc::now().format("%Y-%m-%d")
-        ));
-        match std::fs::OpenOptions::new()
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        log_retention::prune_once_per_day(&self.dir, &today);
+        let dated = self.dir.join(format!("ciris-server.log.{today}"));
+        match log_retention::open_within_day_cap(&dated) {
+            Some(f) => Box::new(f),
+            // Never panic the fmt layer: an unwritable event (or one past the
+            // day's cap) degrades to /dev/null (the init-time probe +
+            // first_write_ok already report an unwritable sink).
+            None => Box::new(std::io::sink()),
+        }
+    }
+}
+
+/// **The node's own log files are bounded** (the production canonical,
+/// 2026-10-02). The daily writer never pruned: 94 dated files back to
+/// 2026-07-02, and when edge's span leak made every line ~700 KB, one day's
+/// file reached 10.1 GB and the host's disk went from 67 % to 81 % in a day.
+/// Three bounds, each enough on its own to stop a repeat:
+///
+/// - a **per-day cap** ([`DAY_CAP_BYTES`]): once today's file reaches it, the
+///   rest of the day's lines are dropped, after ONE marker line saying so (the
+///   console sink still carries them);
+/// - **age** ([`KEEP_DAYS`] dated files);
+/// - **total** ([`TOTAL_CAP_BYTES`] across the dated files, oldest first).
+///
+/// Pruning runs at most once per UTC day, on the first line of the day, and
+/// only ever touches `ciris-server.log.YYYY-MM-DD` files (never `.boot`, never
+/// today's file). Each bound can be overridden by environment
+/// (`CIRIS_LOG_KEEP_DAYS`, `CIRIS_LOG_TOTAL_CAP_MB`, `CIRIS_LOG_DAY_CAP_MB`).
+pub(crate) mod log_retention {
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    /// Dated files kept.
+    pub const KEEP_DAYS: usize = 14;
+    /// Total bytes across dated files.
+    pub const TOTAL_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    /// Bytes one day's file may reach before its lines are dropped.
+    pub const DAY_CAP_BYTES: u64 = 512 * 1024 * 1024;
+
+    const PREFIX: &str = "ciris-server.log.";
+    const CAP_MARKER: &str = "ciris-server: today's log file reached its size cap; further \
+                              lines today are DROPPED from this file (stdout still carries them). \
+                              Raise CIRIS_LOG_DAY_CAP_MB to keep more.\n";
+
+    fn env_or(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+    }
+
+    fn day_cap() -> u64 {
+        env_or("CIRIS_LOG_DAY_CAP_MB", DAY_CAP_BYTES / (1024 * 1024)) * 1024 * 1024
+    }
+
+    /// Open today's file for append, or `None` once it is past the day's cap.
+    /// The line that first crosses the cap is replaced by [`CAP_MARKER`].
+    pub(crate) fn open_within_day_cap(path: &Path) -> Option<std::fs::File> {
+        use std::io::Write as _;
+        let cap = day_cap();
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dated)
+            .open(path)
+            .ok()?;
+        if len < cap {
+            return Some(f);
+        }
+        if len < cap + CAP_MARKER.len() as u64 {
+            // Exactly once per day: the marker pushes the file past this band.
+            let _ = f.write_all(CAP_MARKER.as_bytes());
+        }
+        None
+    }
+
+    static LAST_PRUNED: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Prune `dir` at most once per UTC `today`.
+    pub(crate) fn prune_once_per_day(dir: &Path, today: &str) {
         {
-            Ok(f) => Box::new(f),
-            // Never panic the fmt layer: an unwritable event degrades to /dev/null
-            // (the init-time probe + first_write_ok already report the condition).
-            Err(_) => Box::new(std::io::sink()),
+            let Ok(mut last) = LAST_PRUNED.lock() else {
+                return;
+            };
+            if last.as_deref() == Some(today) {
+                return;
+            }
+            *last = Some(today.to_owned());
+        }
+        let keep = env_or("CIRIS_LOG_KEEP_DAYS", KEEP_DAYS as u64) as usize;
+        let total = env_or("CIRIS_LOG_TOTAL_CAP_MB", TOTAL_CAP_BYTES / (1024 * 1024)) * 1024 * 1024;
+        prune(dir, today, keep, total);
+    }
+
+    /// The dated files in `dir` other than `today`'s, oldest first, with sizes.
+    fn dated_files(dir: &Path, today: &str) -> Vec<(String, std::path::PathBuf, u64)> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut v: Vec<_> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let date = name.strip_prefix(PREFIX)?.to_owned();
+                let is_date = date.len() == 10
+                    && chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok();
+                if !is_date || date.as_str() == today {
+                    return None;
+                }
+                let len = e.metadata().ok()?.len();
+                Some((date, e.path(), len))
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// Delete dated files beyond `keep` (oldest first), then oldest files until
+    /// the remaining dated files fit `total`. Today's file is never deleted.
+    pub(crate) fn prune(dir: &Path, today: &str, keep: usize, total: u64) -> Vec<String> {
+        let mut files = dated_files(dir, today);
+        let mut removed = Vec::new();
+        // `keep` counts today's file too.
+        let keep_past = keep.saturating_sub(1);
+        while files.len() > keep_past {
+            let (date, path, _) = files.remove(0);
+            if std::fs::remove_file(&path).is_ok() {
+                removed.push(date);
+            }
+        }
+        let mut sum: u64 = files.iter().map(|f| f.2).sum();
+        while sum > total && !files.is_empty() {
+            let (date, path, len) = files.remove(0);
+            if std::fs::remove_file(&path).is_ok() {
+                removed.push(date);
+            }
+            sum = sum.saturating_sub(len);
+        }
+        if !removed.is_empty() {
+            eprintln!(
+                "ciris-server: log retention removed {} file(s): {}",
+                removed.len(),
+                removed.join(", ")
+            );
+        }
+        removed
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn scratch(tag: &str) -> std::path::PathBuf {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let d = std::env::temp_dir().join(format!(
+                "ciris-logret-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn touch(dir: &Path, name: &str, len: usize) {
+            std::fs::write(dir.join(name), vec![b'x'; len]).unwrap();
+        }
+
+        fn names(dir: &Path) -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        }
+
+        #[test]
+        fn age_keeps_the_newest_days_and_never_touches_today_or_others() {
+            let d = scratch("age");
+            for day in 1..=5 {
+                touch(&d, &format!("ciris-server.log.2026-10-0{day}"), 10);
+            }
+            touch(&d, "ciris-server.log.boot", 10);
+            touch(&d, "ciris-server.log.not-a-date", 10);
+            let removed = prune(&d, "2026-10-05", 3, u64::MAX);
+            assert_eq!(removed, vec!["2026-10-01", "2026-10-02"]);
+            assert_eq!(
+                names(&d),
+                vec![
+                    "ciris-server.log.2026-10-03",
+                    "ciris-server.log.2026-10-04",
+                    "ciris-server.log.2026-10-05",
+                    "ciris-server.log.boot",
+                    "ciris-server.log.not-a-date",
+                ]
+            );
+        }
+
+        #[test]
+        fn total_drops_oldest_first_but_never_today() {
+            let d = scratch("total");
+            touch(&d, "ciris-server.log.2026-10-01", 600);
+            touch(&d, "ciris-server.log.2026-10-02", 300);
+            touch(&d, "ciris-server.log.2026-10-03", 300);
+            touch(&d, "ciris-server.log.2026-10-04", 5000);
+            let removed = prune(&d, "2026-10-04", 100, 700);
+            assert_eq!(removed, vec!["2026-10-01"]);
+            assert!(
+                d.join("ciris-server.log.2026-10-04").exists(),
+                "today is never deleted"
+            );
+        }
+
+        #[test]
+        fn a_day_past_its_cap_writes_one_marker_then_nothing() {
+            let d = scratch("cap");
+            let f = d.join("ciris-server.log.2026-10-02");
+            std::env::set_var("CIRIS_LOG_DAY_CAP_MB", "1");
+            touch(&d, "ciris-server.log.2026-10-02", 1024 * 1024);
+            assert!(open_within_day_cap(&f).is_none(), "at the cap: no writer");
+            let after_marker = std::fs::metadata(&f).unwrap().len();
+            assert_eq!(after_marker, 1024 * 1024 + CAP_MARKER.len() as u64);
+            assert!(open_within_day_cap(&f).is_none());
+            assert_eq!(
+                std::fs::metadata(&f).unwrap().len(),
+                after_marker,
+                "the marker is written once"
+            );
+            std::env::remove_var("CIRIS_LOG_DAY_CAP_MB");
+            let g = d.join("ciris-server.log.2026-10-03");
+            assert!(open_within_day_cap(&g).is_some(), "a fresh day writes");
         }
     }
 }
