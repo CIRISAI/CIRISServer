@@ -70,6 +70,11 @@ const READ_ONLY_LEGACY: &[(&str, &str)] = &[
         "need:shelter:v1",
         "field_conformance's polarity table: a classifier input, never a row",
     ),
+    (
+        "self:device_label:v1",
+        "the device label's pre-rc6 name (#717): self_devices.rs READS it for labels written \
+         through 0.5.219 and its unit test pins the spelling; nothing writes it",
+    ),
 ];
 
 fn walk(dir: &Path, found: &mut Vec<(String, String)>) {
