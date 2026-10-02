@@ -156,7 +156,10 @@ struct PlanRequest {
     /// The canonicals the bundle seats. Every one must be a FRESH, unique key
     /// (`FSD/FINAL_GENESIS.md` §6: never a key two hosts hold).
     serve_nodes: Vec<ServeNodeSpec>,
-    /// CC 3.2 T3 — the successor set, as key material.
+    /// CC 3.2 T3 — the successor set, as key material. Omitted: the recovery
+    /// keys (the maintainer, 2026-10-02: the successor set is the three
+    /// spares, A2/B2/C2 — the same keys each holder recovers with).
+    #[serde(default)]
     successor_keys: Vec<CommittedKey>,
     /// CC 4.2.6 — holder key id → that holder's recovery key. Omitted: the
     /// keys recorded through `POST /recovery-key` (read off each spare).
@@ -299,17 +302,22 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             Err(r) => return r,
         }
     }
+    let recovery_keys = if req.recovery_keys.is_empty() {
+        load_recovery(&st.home)
+    } else {
+        req.recovery_keys
+    };
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
         consensus_protocol: ciris_verify_core::accord_genesis::ACCORD_CONSENSUS_PROTOCOL.to_owned(),
         holders: ciris_persist::federation::genesis::effective_accord_holder_records().to_vec(),
         serve_nodes,
-        successor_keys: req.successor_keys,
-        recovery_keys: if req.recovery_keys.is_empty() {
-            load_recovery(&st.home)
+        successor_keys: if req.successor_keys.is_empty() {
+            recovery_keys.values().cloned().collect()
         } else {
-            req.recovery_keys
+            req.successor_keys
         },
+        recovery_keys,
         scope: GENESIS_SCOPE.iter().map(|s| (*s).to_string()).collect(),
         community: CommunityInput {
             community_key_id: COMMUNITY_KEY_ID.to_owned(),

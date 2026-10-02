@@ -117,9 +117,10 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         &app,
         "POST",
         "/v1/accord/final-genesis/plan",
+        // No successor set named either: it defaults to the recovery keys
+        // (the maintainer: the successor set is the three spares).
         serde_json::json!({
             "serve_nodes": inputs.serve_nodes,
-            "successor_keys": inputs.successor_keys,
             "clock_checked": true,
         }),
     )
@@ -225,6 +226,36 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
     assert!(
         atts.iter().any(|a| a.get("community").is_some()),
         "the ciris-canonical birth is in the bundle"
+    );
+    // The charter's successor set IS the recovery keys (the three spares).
+    let charter = atts
+        .iter()
+        .filter_map(|a| a.get("attestation"))
+        .find(|a| a["attestation_id"] == "genesis-charter")
+        .expect("the charter row");
+    let mut successors: Vec<String> = charter["attestation_envelope"]["successor_key_ids"]
+        .as_array()
+        .expect("successor_key_ids")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    successors.sort();
+    let mut spares: Vec<String> = inputs
+        .recovery_keys
+        .values()
+        .map(|k| k.key_id.clone())
+        .collect();
+    spares.sort();
+    assert_eq!(
+        successors, spares,
+        "the successor set defaults to the recovery keys"
+    );
+    assert_eq!(
+        charter["attestation_envelope"]["recovery_commitments"]
+            .as_object()
+            .map(|o| o.len()),
+        Some(3),
+        "one recovery commitment per holder"
     );
     ciris_persist::federation::genesis::install_test_ceremony_outputs_json(&bundle_json)
         .expect("the bundle installs as the baked genesis");
