@@ -830,6 +830,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # per-epoch key; the drive answers 409 `drive.awaiting_key` ("ask again"),
     # never a denial. Queued for the client bundle with its English.
     "drive.awaiting_key",
+    # The retired 2-of-3 re-mint routes answer 410 with this id and the path of
+    # the final genesis (0.5.220). Queued for the client bundle.
+    "accord.genesis_superseded",
     # THE FINAL GENESIS (0.5.220, FSD/FINAL_GENESIS.md): the ceremony routes'
     # refusals, for the client's 3-of-3 re-mint screens (to come, CSD-067 §3).
     # Queued for the client bundle with their English.
@@ -838,6 +841,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "final_genesis.clock_not_synchronized",
     "final_genesis.clock_unverified",
     "final_genesis.no_hardware_signer",
+    "final_genesis.not_testing_mode",
     "final_genesis.no_serve_nodes",
     "final_genesis.nothing_to_sign",
     "final_genesis.not_planned",

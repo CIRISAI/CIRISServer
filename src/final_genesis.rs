@@ -411,7 +411,7 @@ fn sign_software(st: FinalGenesisState, req: SignRequest) -> Response {
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         return refuse(
             StatusCode::FORBIDDEN,
-            "final_genesis.no_hardware_signer",
+            "final_genesis.not_testing_mode",
             "a software holder seed is accepted only with CIRIS_TESTING_MODE=true (the dry run)",
         );
     }
@@ -621,6 +621,19 @@ async fn finish(State(st): State<FinalGenesisState>) -> Response {
         },
     }))
     .into_response()
+}
+
+/// `POST /v1/accord/genesis/{propose,cosign}` — the retired 2-of-3 re-mint.
+/// On persist v53 its charter lacks the per-holder recovery commitments and
+/// the genesis records, so it could only ever be refused; it answers 410 and
+/// names the one genesis.
+pub(crate) async fn remint_superseded() -> Response {
+    refuse(
+        StatusCode::GONE,
+        "accord.genesis_superseded",
+        "the 2-of-3 propose/cosign re-mint is retired; the genesis is one ceremony signed by \
+         all three holders at /v1/accord/final-genesis (plan, sign, finish)",
+    )
 }
 
 /// The routes, loopback-only (merged into the accord router's loopback half).

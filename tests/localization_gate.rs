@@ -761,7 +761,14 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 20 -> 34 for 0.5.220: the final-genesis ceremony routes'
     /// 14 `final_genesis.*` refusals (`src/final_genesis.rs`), for the
     /// client's 3-of-3 re-mint screens. Same reason, same list.
-    const MAX_UNCOVERED: usize = 34;
+    ///
+    /// 34 -> 35 for 0.5.220: `accord.genesis_superseded`, the 410 the retired
+    /// 2-of-3 re-mint routes answer (the final genesis replaces them).
+    ///
+    /// 35 -> 36 for 0.5.220: `final_genesis.not_testing_mode`, the dry run's
+    /// software signer refused outside testing mode (split from
+    /// `no_hardware_signer`, which says something else).
+    const MAX_UNCOVERED: usize = 36;
 
     let en = load_en();
     let ids = scraped_server_ids();
