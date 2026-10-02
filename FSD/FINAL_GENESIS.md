@@ -174,3 +174,18 @@ build.
   passed into persist's builder (never read inside it), so a session across
   several requests stays byte-stable; the propose route refuses to stamp on a
   host whose clock is not NTP-synced. No ceremony window at the 300 s door.
+- **Canonicals (maintainer, relayed by the registry session 2026-10-02):**
+  canonical-2 and canonical-3 go INTO this genesis on fresh, unique Server
+  mints (`--key-id ciris-canonical-2/-3`), never the shared registry seed
+  `75c29fcc...`; the server replaces the standalone registry. Each canonical:
+  roles `[infra:serve, infra:attest]` (+ store/transport as the charter
+  confers), a matching quorum-scrubbed `trust:confers:v1` grant, and a signed
+  transport hint. The bundle's `serve_nodes` and grants become three; the
+  ceremony needs all three key records before the dry run on real inputs.
+  Supersedes §5 Q2's "canonical-1 only".
+- **CI pipeline keys** are co-scrubbed in the same sitting (same relay).
+  Supersedes §5 Q3.
+- **Open:** the relay says the community names all three CANONICALS as
+  founders; CC (P3:670-722, P3:192) makes the holders the founders and the
+  nodes non-signing members, and nodes have no agency. Designed as
+  holders = founders, canonicals = members, pending the maintainer.
