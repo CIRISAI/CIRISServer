@@ -67,7 +67,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use ciris_persist::federation::envelope::paths;
 use ciris_persist::prelude::Engine;
 
 /// PKCS#11 / PIV knobs for opening the holder's already-provisioned YubiKey. All
@@ -2417,16 +2416,10 @@ async fn write_node_trust_edge(
         return Ok(String::new());
     }
 
-    let id = format!("trust-edge:{node_key_id}:{root}");
-    let envelope = serde_json::json!({
-        (paths::REFERENCES_ATTESTATION_ID): id,
-        // The node trusts the root for exactly what a root is for. Attenuation
-        // does the rest: the node can never exercise more than the charter holds.
-        "scope": [
-            ciris_persist::federation::trust_root::INFRA_ATTEST_SCOPE,
-            ciris_persist::federation::trust_root::INFRA_SERVE_SCOPE,
-        ],
-    });
+    // The ONE acceptance envelope (labelled, head-naming; persist v53).
+    let envelope = crate::mesh_genesis::acceptance_envelope(engine, &node_key_id, &root)
+        .await
+        .map_err(|e| e.to_string())?;
     // `emit_attestation_self` is the identity-authoritative primitive: it
     // canonicalizes, hybrid-signs with the ENGINE's own signer, and stamps
     // `attesting_key_id == scrub_key_id == <the signer's DERIVED key_id>` —

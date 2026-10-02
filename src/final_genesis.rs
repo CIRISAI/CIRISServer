@@ -27,6 +27,10 @@
 //! ceremony resumes with byte-identical items. Every route is loopback-only
 //! (it is merged into the accord router's loopback half).
 
+// The helpers return a ready refusal (`Response`) as their error so each route
+// can `?`/`return` it as-is; boxing it buys nothing on a loopback ceremony.
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

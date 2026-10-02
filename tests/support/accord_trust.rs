@@ -66,6 +66,7 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
         attestation_type::DELEGATES_TO,
         serde_json::json!({
             "dimension": TRUST_CHARTER_DIMENSION,
+            "dimension": ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
             "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
             "pre_rotation_commitment": commitment,
         }),
@@ -94,7 +95,10 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
         &[node],
         "humanity-accord",
         attestation_type::DELEGATES_TO,
-        serde_json::json!({ "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE] }),
+        serde_json::json!({
+            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
+            "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
+        }),
     )
     .await;
 }

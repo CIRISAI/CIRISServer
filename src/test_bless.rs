@@ -574,6 +574,10 @@ async fn perform_trust_root_ceremony(
                 paths::PRE_ROTATION_COMMITMENT.to_string(),
                 serde_json::json!(commitment),
             );
+        // persist v53 (CC 3.2 T4a "bundle only"): a charter written outside a
+        // pinned bundle is a charter only with its job label.
+        envelope[paths::DIMENSION] =
+            serde_json::json!(ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION);
         put_root_signed_attestation(
             engine,
             test_root,
@@ -619,8 +623,14 @@ async fn perform_trust_root_ceremony(
     // ── (2) The trust edge: delegates_to(self → root). Node-attested ⇒ signed by
     //         THIS node's engine key via emit_attestation_self (attester ==
     //         local_derived_key_id() == the walk's `user`). ────────────────────
-    if !has_trust_edge(engine, &self_key_id, &root_key_id).await? {
-        let envelope = delegates_to_envelope(&root_key_id, &charter_scopes, false);
+    if !crate::mesh_genesis::holds_labelled_acceptance(engine, &self_key_id, &root_key_id)
+        .await
+        .map_err(|e| anyhow!("ceremony: {e}"))?
+    {
+        // The ONE labelled acceptance envelope (a key root: no head).
+        let envelope = crate::mesh_genesis::acceptance_envelope(engine, &self_key_id, &root_key_id)
+            .await
+            .map_err(|e| anyhow!("ceremony: {e}"))?;
         let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
             attestation_type::DELEGATES_TO,
             ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
@@ -654,7 +664,9 @@ async fn perform_trust_root_ceremony(
     //         ONLY, cohort=federation so it REPLICATES to the sending peer. ─────
     if bless_canonical && !has_capability_grant(engine, &root_key_id, &self_key_id).await? {
         let grant_scopes = vec![INFRA_SERVE_SCOPE.to_string()];
-        let envelope = delegates_to_envelope(&self_key_id, &grant_scopes, false);
+        let mut envelope = delegates_to_envelope(&self_key_id, &grant_scopes, false);
+        envelope[paths::DIMENSION] =
+            serde_json::json!(ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION);
         put_root_signed_attestation(
             engine,
             test_root,
@@ -821,27 +833,6 @@ async fn has_accord_heartbeat(engine: &std::sync::Arc<Engine>, root_key_id: &str
                 .and_then(|v| v.as_str())
                 == Some(ACCORD_HEARTBEAT_DIMENSION)
     }))
-}
-
-/// Idempotency: does this node's own trust edge `delegates_to(self → root)`
-/// already exist? (Authored BY self ⇒ `list_attestations_by(self)`.)
-async fn has_trust_edge(
-    engine: &std::sync::Arc<Engine>,
-    self_key_id: &str,
-    root_key_id: &str,
-) -> Result<bool> {
-    // The reader's own predicate (persist `trusted_roots_of`: live,
-    // FEDERATION-tier, not claiming another trust job) — never a looser scan.
-    // A `self`-scoped row satisfied the old any-scope check and masked the
-    // federation edge the Rooted walk needs (CIRISServer#632, 2026-09-24).
-    let roots = ciris_persist::federation::trust_root::trusted_roots_of(
-        engine.federation_directory().as_ref(),
-        self_key_id,
-        chrono::Utc::now(),
-    )
-    .await
-    .map_err(|e| anyhow!("ceremony has_trust_edge: trusted_roots_of({self_key_id}): {e}"))?;
-    Ok(roots.iter().any(|r| r == root_key_id))
 }
 
 /// Idempotency: does a serve-capability grant `delegates_to(root → subject,

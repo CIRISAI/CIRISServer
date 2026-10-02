@@ -275,6 +275,7 @@ async fn signed_charter(
     let commitment =
         pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment computes");
     let envelope = serde_json::json!({
+        "dimension": ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
         "references_attestation_id": id,
         "scope": scope,
         CHARTER_PRE_ROTATION_FIELD: commitment,
@@ -300,7 +301,16 @@ async fn signed_delegates_to(
     scope: serde_json::Value,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Attestation {
+    // persist v53 (CC 3.2 T4a): a new `delegates_to` is a grant or an
+    // acceptance only with its job label. These fixtures name their rows
+    // `qa-grant-*` (root → node) or `qa-*-edge*` (user → root).
+    let job = if id.contains("grant") {
+        ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION
+    } else {
+        ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION
+    };
     let envelope = serde_json::json!({
+        "dimension": job,
         "references_attestation_id": id,
         "scope": scope,
     });
@@ -881,6 +891,7 @@ async fn qa_expired_trust_edge_is_dead() {
         ROOT,
         attestation_type::DELEGATES_TO,
         serde_json::json!({
+            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
             "references_attestation_id": "qa-trust-edge-expired",
             "scope": [INFRA_ATTEST, INFRA_SERVE],
         }),
