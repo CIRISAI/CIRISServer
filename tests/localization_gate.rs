@@ -768,7 +768,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 35 -> 36 for 0.5.220: `final_genesis.not_testing_mode`, the dry run's
     /// software signer refused outside testing mode (split from
     /// `no_hardware_signer`, which says something else).
-    const MAX_UNCOVERED: usize = 36;
+    ///
+    /// 36 -> 39 for 0.5.220: the recovery-key step's
+    /// `final_genesis.{not_a_holder, recovery_key_is_a_holder, recovery_key_shared}`
+    /// (the maintainer: A2 recovers A1, B2 B1, C2 C1).
+    const MAX_UNCOVERED: usize = 39;
 
     let en = load_en();
     let ids = scraped_server_ids();

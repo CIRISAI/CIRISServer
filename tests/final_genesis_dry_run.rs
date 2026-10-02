@@ -104,6 +104,15 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
 
     // (2) Plan: the serve node as a FULL record (it is not in this directory),
     // the successor set and every holder's recovery key, from persist's inputs.
+    // The recovery keys as `POST /recovery-key` records them (read off each
+    // spare's hardware in the real ceremony; written directly here), and a plan
+    // that names none — it must take the recorded ones.
+    std::fs::create_dir_all(home.join("final-genesis")).unwrap();
+    std::fs::write(
+        home.join("final-genesis").join("recovery-keys.json"),
+        serde_json::to_string(&inputs.recovery_keys).unwrap(),
+    )
+    .unwrap();
     let (s, planned) = call(
         &app,
         "POST",
@@ -111,7 +120,6 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         serde_json::json!({
             "serve_nodes": inputs.serve_nodes,
             "successor_keys": inputs.successor_keys,
-            "recovery_keys": inputs.recovery_keys,
             "clock_checked": true,
         }),
     )

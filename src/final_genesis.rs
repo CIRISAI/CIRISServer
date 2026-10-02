@@ -76,6 +76,17 @@ fn state_path(home: &std::path::Path) -> std::path::PathBuf {
 fn bundle_path(home: &std::path::Path) -> std::path::PathBuf {
     dir(home).join("canonical_seed.json")
 }
+fn recovery_path(home: &std::path::Path) -> std::path::PathBuf {
+    dir(home).join("recovery-keys.json")
+}
+
+/// The recovery keys recorded so far (holder key id → committed key).
+fn load_recovery(home: &std::path::Path) -> BTreeMap<String, CommittedKey> {
+    std::fs::read_to_string(recovery_path(home))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
 
 fn refuse(code: StatusCode, reason: &str, detail: impl Into<String>) -> Response {
     (
@@ -147,7 +158,9 @@ struct PlanRequest {
     serve_nodes: Vec<ServeNodeSpec>,
     /// CC 3.2 T3 — the successor set, as key material.
     successor_keys: Vec<CommittedKey>,
-    /// CC 4.2.6 — holder key id → that holder's recovery key.
+    /// CC 4.2.6 — holder key id → that holder's recovery key. Omitted: the
+    /// keys recorded through `POST /recovery-key` (read off each spare).
+    #[serde(default)]
     recovery_keys: BTreeMap<String, CommittedKey>,
     /// The operator confirms this host's clock is synchronized. Required where
     /// the server cannot read the sync state itself; refused if it can and the
@@ -292,7 +305,11 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
         holders: ciris_persist::federation::genesis::effective_accord_holder_records().to_vec(),
         serve_nodes,
         successor_keys: req.successor_keys,
-        recovery_keys: req.recovery_keys,
+        recovery_keys: if req.recovery_keys.is_empty() {
+            load_recovery(&st.home)
+        } else {
+            req.recovery_keys
+        },
         scope: GENESIS_SCOPE.iter().map(|s| (*s).to_string()).collect(),
         community: CommunityInput {
             community_key_id: COMMUNITY_KEY_ID.to_owned(),
@@ -325,6 +342,132 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
          genesis records and the authorization)"
     );
     status_body(&state).into_response()
+}
+
+// ─── recovery keys ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(feature = "pkcs11"), allow(dead_code))]
+struct RecoveryKeyRequest {
+    /// The seated holder this recovery key belongs to (A1, B1, C1).
+    holder_key_id: String,
+    /// The spare's seal alias (A2, B2, C2) — what its YubiKey + USB open.
+    recovery_key_id: String,
+    mldsa_usb_path: String,
+    #[serde(default)]
+    pkcs11: crate::accord_provision::ProvisionPkcs11,
+}
+
+/// `POST /v1/accord/final-genesis/recovery-key` — read a holder's SPARE key
+/// off its YubiKey + USB and record its public halves as that holder's
+/// recovery key (CC 4.2.6; the maintainer: A2 recovers A1, B2 B1, C2 C1).
+/// Nothing is signed: the charter commits to the key material, so only the
+/// public keys are needed, and reading them from the hardware means nobody
+/// copies key material by hand.
+async fn record_recovery_key(
+    State(st): State<FinalGenesisState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: RecoveryKeyRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.bad_request",
+                e.to_string(),
+            )
+        }
+    };
+    record_recovery_key_impl(st, req).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn record_recovery_key_impl(_st: FinalGenesisState, _req: RecoveryKeyRequest) -> Response {
+    refuse(
+        StatusCode::NOT_IMPLEMENTED,
+        "final_genesis.no_hardware_signer",
+        "signing needs the `pkcs11` feature (the holder's YubiKey + USB ML-DSA signer)",
+    )
+}
+
+#[cfg(feature = "pkcs11")]
+async fn record_recovery_key_impl(st: FinalGenesisState, req: RecoveryKeyRequest) -> Response {
+    use base64::Engine as _;
+    let holder = req.holder_key_id.trim().to_string();
+    let spare = req.recovery_key_id.trim().to_string();
+    let roster = ciris_persist::federation::genesis::effective_accord_holder_records();
+    if !roster.iter().any(|h| h.record.key_id == holder) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.not_a_holder",
+            format!("{holder} is not a seated accord holder"),
+        );
+    }
+    if roster.iter().any(|h| h.record.key_id == spare) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.recovery_key_is_a_holder",
+            format!("{spare} is a seated holder's signing key; a recovery key must be a spare"),
+        );
+    }
+    let (ed, pqc) = match crate::accord_provision::open_holder_signers(
+        &spare,
+        req.mldsa_usb_path.trim(),
+        &req.pkcs11,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err((code, msg)) => return refuse(code, "final_genesis.signer_unavailable", msg),
+    };
+    let (ed_pub, pqc_pub) = match (ed.public_key().await, pqc.public_key().await) {
+        (Ok(e), Ok(p)) => (e, p),
+        (Err(e), _) | (_, Err(e)) => {
+            return refuse(
+                StatusCode::BAD_GATEWAY,
+                "final_genesis.signer_unavailable",
+                format!("read {spare}'s public keys: {e}"),
+            )
+        }
+    };
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let key = CommittedKey {
+        key_id: spare.clone(),
+        pubkey_ed25519_base64: b64.encode(ed_pub),
+        pubkey_ml_dsa_65_base64: b64.encode(pqc_pub),
+    };
+    let mut all = load_recovery(&st.home);
+    if all
+        .iter()
+        .any(|(h, k)| h != &holder && k.key_id == key.key_id)
+    {
+        return refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.recovery_key_shared",
+            format!("{spare} is already recorded as another holder's recovery key"),
+        );
+    }
+    all.insert(holder.clone(), key.clone());
+    let d = dir(&st.home);
+    if let Err(e) = std::fs::create_dir_all(&d).and_then(|()| {
+        std::fs::write(
+            recovery_path(&st.home),
+            serde_json::to_string_pretty(&all).unwrap_or_default(),
+        )
+    }) {
+        return refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "final_genesis.store_failed",
+            format!("record the recovery key: {e}"),
+        );
+    }
+    tracing::warn!(holder = %holder, recovery_key = %spare, "FINAL GENESIS: recovery key recorded");
+    Json(serde_json::json!({
+        "holder_key_id": holder,
+        "recovery_key": key,
+        "recorded": all.keys().collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 // ─── status ─────────────────────────────────────────────────────────────────
@@ -640,6 +783,10 @@ pub(crate) async fn remint_superseded() -> Response {
 pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
     Router::new()
         .route("/v1/accord/final-genesis", axum::routing::get(status))
+        .route(
+            "/v1/accord/final-genesis/recovery-key",
+            axum::routing::post(record_recovery_key),
+        )
         .route("/v1/accord/final-genesis/plan", axum::routing::post(plan))
         .route("/v1/accord/final-genesis/sign", axum::routing::post(sign))
         .route(

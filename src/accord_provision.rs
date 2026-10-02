@@ -1259,12 +1259,36 @@ pub(crate) async fn open_holder_identity(
     usb_path: &str,
     pkcs11: &ProvisionPkcs11,
 ) -> Result<ciris_verify_core::self_at_login::HardwareRootedIdentity, (StatusCode, String)> {
+    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
+    let (yubikey_ed, mldsa) = open_holder_signers(key_id, usb_path, pkcs11).await?;
+    HardwareRootedIdentity::new(key_id.to_string(), yubikey_ed, mldsa).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("build hardware-rooted identity: {e}"),
+        )
+    })
+}
+
+/// The holder's two hardware signers — the YubiKey's Ed25519 key and the
+/// USB-wrapped ML-DSA-65 key it unwraps — before they are composed into an
+/// identity. The final genesis reads a spare key's PUBLIC halves through this
+/// (its recovery key, CC 4.2.6) without signing anything.
+pub(crate) async fn open_holder_signers(
+    key_id: &str,
+    usb_path: &str,
+    pkcs11: &ProvisionPkcs11,
+) -> Result<
+    (
+        std::sync::Arc<dyn ciris_keyring::HardwareSigner>,
+        std::sync::Arc<dyn ciris_keyring::PqcSigner>,
+    ),
+    (StatusCode, String),
+> {
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use ciris_keyring::usb_wrapped_mldsa65::UsbWrappedMlDsa65Signer;
     use ciris_keyring::PqcSigner;
-    use ciris_verify_core::self_at_login::HardwareRootedIdentity;
 
     use crate::identity::{default_ykcs11_module, Pkcs11Options, DEFAULT_PIV_SLOT};
 
@@ -1341,17 +1365,7 @@ pub(crate) async fn open_holder_identity(
                 ))
             }
         };
-    HardwareRootedIdentity::new(
-        key_id.to_string(),
-        yubikey_ed.clone(),
-        Arc::new(mldsa) as Arc<dyn PqcSigner>,
-    )
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("build hardware-rooted identity: {e}"),
-        )
-    })
+    Ok((yubikey_ed, Arc::new(mldsa) as Arc<dyn PqcSigner>))
 }
 
 #[cfg(feature = "pkcs11")]
