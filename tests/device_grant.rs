@@ -45,7 +45,19 @@ const SCOPE: &str = "owner:act-on-behalf";
 fn ciris_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("ciris-devgrant-{}", std::process::id()));
+        // TWO LEVELS under the per-process root, on purpose. The server keeps a
+        // home's sealed keys in the seed dir's SIBLING (`<seed>/../keys`,
+        // `identity::home_keys_dir`), so a seed dir directly under the temp dir
+        // put this binary's keys in `<TEMP>/keys` — one directory shared with
+        // every other process on the machine. On Windows a concurrent writer
+        // there fails verify's writability probe with "Access is denied", which
+        // turned main red on 2026-10-02 (`approve_time_constraints_narrow_the_
+        // minted_bearer`, windows-latest). Nested, the keys land in
+        // `ciris-devgrant-<pid>/identity/keys`, private to this process.
+        let dir = std::env::temp_dir()
+            .join(format!("ciris-devgrant-{}", std::process::id()))
+            .join("identity")
+            .join("user");
         std::fs::create_dir_all(&dir).expect("create CIRIS_HOME");
         std::env::set_var("CIRIS_HOME", &dir);
         dir
