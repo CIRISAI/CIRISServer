@@ -332,9 +332,6 @@ pub mod error_chain;
 /// devices against persist's custody and edge's delivery receipts.
 pub mod file_custody;
 pub mod media_gate;
-/// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
-/// from its owner (a signed `withdraws` of the owner-binding) and relabel a
-/// device key.
 pub mod self_devices;
 /// Old self files open on a device claimed later: the re-wrap trigger
 /// (CIRISServer#678).
@@ -345,6 +342,10 @@ pub mod self_room_drive;
 /// attendance that decides where a claim is taken, the renewal loop, and
 /// `GET /v1/self/sessions` (`FSD/SESSION_CLAIMS.md`).
 pub mod session_claims;
+/// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
+/// from its owner (a signed `withdraws` of the owner-binding) and relabel a
+/// device key.
+pub mod span_leak_guard;
 
 /// **The capacity READ surface** — `GET /v1/my-data/capacity`. The scorer
 /// emitted `capacity:*` attestations that nothing served back (CIRISServer#580);
@@ -1091,6 +1092,9 @@ fn install_or_reattach_tracing(
         // nameable; the EnvFilter above it still gates ALL layers globally.
         .with(reload_layer)
         .with(filter)
+        // One span is never opened: edge's scheduler holds its guard across an
+        // await and the chain it leaks took the canonical down (see the module).
+        .with(crate::span_leak_guard::layer())
         .with(dedup_layer)
         .with(fmt::layer()) // stdout/console
         // CIRISServer#264 — MUST NOT panic when a subscriber is already set:
