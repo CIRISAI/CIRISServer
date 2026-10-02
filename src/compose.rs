@@ -4549,6 +4549,14 @@ pub(crate) async fn start_replication_runtime(
     // concurrent first calls (the loser awaits the winner instead of spawning a
     // second scheduler that leaks when its Arc drops). DRY: the atomic idiom
     // already exists; re-deriving it is how copies drift.
+    // A SEALED TRACE ROUNDS NOW (CIRISServer#719). lens-core seals and persists
+    // the agent's trace and stops there; without this the trace waited for the
+    // next 30 s cadence tick (6–33 s seal-to-stored on the 0.5.219 canonical).
+    // Installed once, before the runtime exists: until it does the kick reports
+    // `false` and the cadence carries the trace, exactly as before.
+    ciris_lens_core::capture::client::set_on_sealed(|_trace_id| {
+        let _ = kick_replication("trace sealed");
+    });
     if let Some(existing) = RUNTIME.get() {
         tracing::info!(
             "replication runtime already composed — returning the held runtime (single \

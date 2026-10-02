@@ -267,6 +267,22 @@ async fn sovereign_rlib_end_to_end() {
         "THOUGHT_START must yield Opened, got: {out:?}",
     );
 
+    // The host's after-seal hook (CIRISServer#719): the server installs a
+    // replication kick here so a sealed trace rounds now, not at the next
+    // cadence tick. It must fire once per seal, with the trace id, and not on
+    // the opening event.
+    static SEALED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    assert!(
+        ciris_lens_core::capture::client::set_on_sealed(|id| {
+            SEALED.lock().unwrap().push(id.to_owned());
+        }),
+        "the hook is unset until a host installs it"
+    );
+    assert!(
+        SEALED.lock().unwrap().is_empty(),
+        "THOUGHT_START seals nothing"
+    );
+
     // Step 2: ACTION_RESULT → SealedAndPersisted
     let out = client
         .capture_event(inbound(
@@ -285,6 +301,11 @@ async fn sovereign_rlib_end_to_end() {
     assert_eq!(
         trace_id, "thought-sovereign-1",
         "trace_id must match thought_id"
+    );
+    assert_eq!(
+        *SEALED.lock().unwrap(),
+        vec![trace_id.clone()],
+        "the after-seal hook fired once, naming the sealed trace"
     );
     assert!(
         summary.trace_events_inserted > 0,
