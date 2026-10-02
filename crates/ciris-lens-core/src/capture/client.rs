@@ -72,6 +72,22 @@ use ciris_keyring::HardwareSigner;
 use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::Scrubber;
 
+/// What the HOST runs after a trace is sealed and persisted (CIRISServer#719).
+///
+/// Persisting a sealed trace makes it publishable, but nothing here pushes it:
+/// edge replicates it from the CEG state on its next anti-entropy round. On the
+/// production canonical that put seal-to-stored anywhere in one 30 s cadence
+/// (6–33 s measured on 0.5.219). The host — the server — sets this to kick a
+/// coalesced round, the same kick it fires after a claim, a consent grant or a
+/// chat row. Unset (a bare lens-core consumer), the cadence carries the trace.
+static ON_SEALED: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Install the host's after-seal hook. First call wins; returns whether this
+/// call installed it.
+pub fn set_on_sealed(hook: fn(&str)) -> bool {
+    ON_SEALED.set(hook).is_ok()
+}
+
 use super::batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
 use super::consent::{ConsentConfig, ConsentError, ConsentResolution};
 use super::correlation::CorrelationMetadata;
@@ -734,6 +750,12 @@ impl CaptureClient {
                 // persist, and edge replicates it to the canonical from the CEG
                 // state (consent + trust graph). The trace flows by the consent
                 // attestation, not by an outbound copy from this path.
+                // ...but the HOST may ask edge to round NOW instead of at the
+                // next cadence tick (CIRISServer#719). Still no copy is pushed:
+                // the round carries whatever the CEG state says it may.
+                if let Some(hook) = ON_SEALED.get() {
+                    hook(&trace_id);
+                }
 
                 Ok(CaptureEventOutcome::SealedAndPersisted {
                     trace_id,
