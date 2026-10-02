@@ -744,7 +744,15 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// (`src/membership_invites.rs`, one function per id: persist's eight
     /// consent rules, the inbox gate, the invitation's lifecycle). Same
     /// reason, same list, same client issue (CIRISClient#78). 156 − 3 + 18.
-    const MAX_UNCOVERED: usize = 171;
+    ///
+    /// 171 -> 19 for 0.5.219: `ciris-client` 0.5.226 carries every id the
+    /// queues above named (CIRISClient#78 and #65: the drive, community,
+    /// household, self-device, claim, session, custody, contact and
+    /// membership planes). Measured against 0.5.226's bundle; the 19 left are
+    /// the `accord.duty.*`, `mesh_config.refusal.*`, `trust_root.*`,
+    /// `operator.store.*` and two single ids still on the debt list. The floor
+    /// in pyproject.toml rose to 0.5.226 with it.
+    const MAX_UNCOVERED: usize = 19;
 
     let en = load_en();
     let ids = scraped_server_ids();
