@@ -161,4 +161,4 @@ build.
   does not copy the minter.
 - **With the maintainer, not blocking a mint with witnessed mode off:**
   whether `ciris-canonical` needs its own charter; the us/eu/apac steward
-  backstop in CC 4.2.4 (entrenched).
+  backstop in CC 4.2.6 (live quorum; entrenched).
