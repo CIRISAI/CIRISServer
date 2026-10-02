@@ -137,3 +137,28 @@ build.
    not a re-mint) after registry re-keys each host.
 3. **Pipeline (CI) keys** in the same sitting: optional and amendable later
    (P4:74); the co-scrub path is the one registry's build door accepts.
+
+## 6. Settled (2026-10-02)
+
+- **§4 A — B-1 is the text.** CC branch `rc7` (b578b59), T6: the head is the
+  signed family/community record at a version (digest = row hash;
+  `prev_head_digest` empty at genesis; `charter_digest` = the charter in force).
+  The separate `ciris.lineage_head.v1` object is removed. CC 2.1
+  `attached_head_digest` = the digest of the record version attached on. Every
+  roster-affecting row, including a charter re-scrub, produces a new version
+  (asked of persist to confirm for v53).
+- **§4 B — the bundle carries the births.** T5: the bundle is the only genesis
+  artifact. The `humanity-accord` family record and the `ciris-canonical`
+  birth record are members of `bundle.attestations`, pinned by
+  `bundle_fingerprint`. A community seeded from an asset the bundle does not
+  pin has no anchor.
+- **Grant signers** (CC 3.4.7): a keyless family confers as it charters —
+  `delegates_to(member → subject)`, `trust:confers:v1`, scrubbed to the
+  family's quorum. A1's scrub alone is no grant.
+- **Three authorizations** are fine (CC's example now reads "A1, B1, ...").
+- **Assembler:** persist owns it (`assemble_ceremony(partials) -> bundle`,
+  builder emitting each signable item); the server calls it from Rust and
+  does not copy the minter.
+- **With the maintainer, not blocking a mint with witnessed mode off:**
+  whether `ciris-canonical` needs its own charter; the us/eu/apac steward
+  backstop in CC 4.2.4 (entrenched).
