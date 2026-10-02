@@ -216,3 +216,9 @@ build.
   the spares are unregistered, so an id-only commitment is satisfied by
   whoever registers that id first. Ceremony input per holder is therefore
   `{key_id, ed25519, ml_dsa_65}` of the recovery key.
+- **Key-binding fix (persist, READ at 952f6a7a):** the hole was also in T3 —
+  `pre_rotation_commitment` hashed only sorted key_id strings and the recovery
+  check tested only id membership. v53: each element is JCS `{key_id,
+  pubkey_ed25519, pubkey_ml_dsa_65}`; T3 commitment = sha256 of the JCS array
+  sorted by key_id; per-holder recovery commitment = same over one element;
+  both doors check the presenting record's pubkeys. Awaiting CC's spelling.
