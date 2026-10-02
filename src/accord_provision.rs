@@ -3770,7 +3770,12 @@ pub fn build(
             "/v1/accord/yubikey-status",
             axum::routing::get(yubikey_status),
         )
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // The final genesis (FSD/FINAL_GENESIS.md): persist's assembler, driven here.
+        .merge(crate::final_genesis::router(
+            state.engine.clone(),
+            state.home.clone(),
+        ));
     let gossip = Router::new()
         .route(
             "/v1/accord/canonical/gossip-partial",
