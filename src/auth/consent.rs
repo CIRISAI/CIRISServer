@@ -114,7 +114,10 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         attestation_id: None,
         attesting_key_id: req.consenting_key_id,
         attested_key_id: None,
-        attestation_type: "consent".to_string(),
+        // CC 2.4 (CIRISConstitution#137, CIRISServer#713): the row-type slot is
+        // closed at the five primitives plus two carriers. A consent is a CLAIM
+        // — it rides `scores`, and the dimension says it is a consent.
+        attestation_type: ciris_persist::federation::types::attestation_type::SCORES.to_string(),
         weight: None,
         expires_at: None,
         attestation_envelope,
