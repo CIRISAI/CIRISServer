@@ -53,7 +53,7 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
     // threshold. That is the whole of CIRISPersist#557 — no single seat may
     // declare itself the mesh's root. A one-scrub charter leaves
     // `root_self_declares = false`, which is what this test first hit.
-    let successors = vec![
+    let successors = [
         "humanity-accord-succ-a".to_string(),
         "humanity-accord-succ-b".to_string(),
     ];
