@@ -952,7 +952,9 @@ pub async fn anchor_agent_to_owner(
             identity_signer: Some(std::sync::Arc::new(login_signer)),
             app: SelfAtLoginOccurrence {
                 occurrence_key_id: node_key.clone(),
-                device_class: device_class::SERVER.to_owned(),
+                // The host's real class (persist v53 S1): a person's phone or
+                // laptop must stay in the audience for their own content.
+                device_class: crate::backend::host_device_class().to_owned(),
                 hardware_attestation: None,
                 encryption_pubkeys: enc.clone(),
                 transport_destinations: Vec::new(),

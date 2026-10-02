@@ -140,6 +140,39 @@ pub async fn get_trace_summary(
     ))
 }
 
+/// **What kind of device this node is** (persist v53 S1, CC 3.3.7): replication
+/// of a person's SELF and FAMILY content follows each occurrence's
+/// `device_class`, and a server-class node (`server`, `embedded`, `service`,
+/// `agent`) no longer receives it. Every owned node was provisioned as
+/// `server` until 0.5.220 — a person's phone and laptop included, since the
+/// client apps embed this server — so under S1 they would have lost their own
+/// notes and self files.
+///
+/// Resolution, first match wins:
+/// 1. `CIRIS_DEVICE_CLASS`, when it names a class in persist's vocabulary (the
+///    desktop launcher sets `laptop`; an operator may set anything valid);
+/// 2. an Android or iOS build: `phone` (the mobile apps embed the node);
+/// 3. otherwise `server` (a headless install, the canonical).
+#[must_use]
+pub fn host_device_class() -> &'static str {
+    use ciris_persist::federation::types::device_class;
+    if let Ok(v) = std::env::var("CIRIS_DEVICE_CLASS") {
+        let v = v.trim().to_ascii_lowercase();
+        if let Some(known) = device_class::ALL.iter().find(|c| **c == v) {
+            return known;
+        }
+        tracing::warn!(
+            value = %v,
+            "CIRIS_DEVICE_CLASS names no device class ({:?}) — ignored",
+            device_class::ALL
+        );
+    }
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return device_class::PHONE;
+    }
+    device_class::SERVER
+}
+
 /// This node's content-KEM occurrence for `owner_key_id`, provisioned through
 /// edge's `provision_engine_occurrence` — which needs
 /// `FederationDirectory + BlobStorage` (the content-KEM identity lives on the
@@ -227,7 +260,6 @@ where
         + ciris_persist::federation::blobs::BlobStorage,
 {
     use ciris_edge::content_occurrence::{provision_engine_occurrence, Provisioned};
-    use ciris_persist::federation::types::device_class::SERVER;
     // WHICH KEY IS THE OCCURRENCE? On an actor/node split compose mints a node
     // key, MOVES the owner-binding onto it and makes it the wire identity,
     // while edge's `provision_engine_occurrence` derives the occurrence from
@@ -266,7 +298,7 @@ where
                 backend,
                 owner_key_id,
                 w,
-                SERVER,
+                host_device_class(),
                 enc,
             )
             .await?;
@@ -277,7 +309,9 @@ where
             );
             (w.clone(), outcome)
         }
-        _ => provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?,
+        _ => {
+            provision_engine_occurrence(engine, backend, owner_key_id, host_device_class()).await?
+        }
     };
     match outcome {
         Provisioned::Created => Ok((me, "created")),
@@ -305,7 +339,7 @@ where
                     ciris_persist::federation::types::IdentityOccurrence {
                         identity_key_id: owner_key_id.to_owned(),
                         occurrence_key_id: me.clone(),
-                        device_class: SERVER.to_owned(),
+                        device_class: host_device_class().to_owned(),
                         hardware_attestation: None,
                         asserted_at: chrono::Utc::now(),
                         valid_until: None,
@@ -317,7 +351,8 @@ where
                 .await
                 .map_err(|e| format!("overwrite the drifted 0.5.207 occurrence {me}: {e}"))?;
             let (me2, again) =
-                provision_engine_occurrence(engine, backend, owner_key_id, SERVER).await?;
+                provision_engine_occurrence(engine, backend, owner_key_id, host_device_class())
+                    .await?;
             tracing::info!(
                 identity = %owner_key_id,
                 occurrence = %me2,
@@ -651,4 +686,32 @@ pub async fn content_kem_pubkeys(
         x25519_base64: kem.x25519_pubkey_b64,
         ml_kem_768_base64: kem.ml_kem_768_pubkey_b64,
     }))
+}
+
+#[cfg(test)]
+mod host_device_class_tests {
+    use super::host_device_class;
+
+    /// One test, not three: it sets a process-wide variable.
+    #[test]
+    fn the_override_wins_when_valid_and_the_build_decides_otherwise() {
+        std::env::set_var("CIRIS_DEVICE_CLASS", "laptop");
+        assert_eq!(
+            host_device_class(),
+            "laptop",
+            "the desktop launcher's value"
+        );
+        std::env::set_var("CIRIS_DEVICE_CLASS", " Phone ");
+        assert_eq!(host_device_class(), "phone", "trimmed and case-folded");
+        std::env::set_var("CIRIS_DEVICE_CLASS", "toaster");
+        let fallback = host_device_class();
+        std::env::remove_var("CIRIS_DEVICE_CLASS");
+        assert_eq!(fallback, host_device_class(), "an unknown class is ignored");
+        let expected = if cfg!(any(target_os = "android", target_os = "ios")) {
+            "phone"
+        } else {
+            "server"
+        };
+        assert_eq!(host_device_class(), expected, "unset: the build decides");
+    }
 }
