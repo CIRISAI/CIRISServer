@@ -57,7 +57,8 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
         "humanity-accord-succ-a".to_string(),
         "humanity-accord-succ-b".to_string(),
     ];
-    let commitment = pre_rotation_commitment(&successors).expect("pre-rotation commitment");
+    let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
+    let commitment = pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment");
     put_signed_by_many(
         e,
         &[&hs[0], &hs[1]],
@@ -209,4 +210,16 @@ pub async fn register_key_as_user(e: &Engine, key_id: &str) {
         })
         .await
         .expect("register the subject identity");
+}
+
+/// A placeholder successor as committed key material (persist v53, CC 3.2 T3:
+/// a commitment binds `{key_id, both pubkeys}`). Fixture successors never sign,
+/// so any well-formed material serves.
+#[allow(dead_code)]
+fn committed(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+    ciris_persist::federation::trust_root::CommittedKey {
+        key_id: id.to_string(),
+        pubkey_ed25519_base64: format!("{id}-ed25519"),
+        pubkey_ml_dsa_65_base64: format!("{id}-ml-dsa-65"),
+    }
 }

@@ -355,14 +355,21 @@ pub fn fingerprint(bundle: &GenesisBundle) -> Result<String, GenesisError> {
 /// compromised, only a key named here can rotate the charter, and persist binds
 /// the successor set's hash to this commitment. Callers pass the OTHER seated
 /// holders — never a hard-coded pair.
-pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, GenesisError> {
+///
+/// persist v53 (CC 3.2 T3, rc7): the commitment binds each successor's KEY
+/// MATERIAL (`{key_id, both pubkeys}`), not its id, so callers pass the
+/// successors' records.
+pub fn charter_envelope(
+    successors: &[ciris_persist::federation::trust_root::CommittedKey],
+) -> Result<serde_json::Value, GenesisError> {
     let commitment = pre_rotation_commitment(successors)
         .map_err(|e| GenesisError::CharterInvalid(format!("pre-rotation commitment: {e}")))?;
+    let ids: Vec<&str> = successors.iter().map(|k| k.key_id.as_str()).collect();
     Ok(serde_json::json!({
         (paths::REFERENCES_ATTESTATION_ID): CHARTER_ATTESTATION_ID,
         "scope": CHARTER_SCOPES,
         CHARTER_PRE_ROTATION_FIELD: commitment,
-        "successor_key_ids": successors,
+        "successor_key_ids": ids,
     }))
 }
 
@@ -718,6 +725,7 @@ pub fn produce_genesis(
         holders,
         serve_nodes,
         attestations,
+        roster_records: Vec::new(),
         authorizations,
         produced_at: now_rfc3339.to_string(),
     };
@@ -1779,6 +1787,7 @@ mod tests {
             holders,
             serve_nodes: Vec::new(),
             attestations: Vec::new(),
+            roster_records: Vec::new(),
             authorizations: Vec::new(),
             produced_at: "2026-07-21T00:00:00Z".into(),
         };
@@ -1987,6 +1996,15 @@ mod v2_tests {
         scores_att(LIFECYCLE_ATTESTATION_ID, "A1", "A1", lifecycle_envelope())
     }
 
+    /// A successor as committed key material (v53 commitments bind keys, not ids).
+    fn ck(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+        ciris_persist::federation::trust_root::CommittedKey {
+            key_id: id.to_string(),
+            pubkey_ed25519_base64: format!("{id}-ed"),
+            pubkey_ml_dsa_65_base64: format!("{id}-mldsa"),
+        }
+    }
+
     fn bundle_with(attestations: Vec<SignedAttestation>) -> GenesisBundle {
         GenesisBundle {
             version: GENESIS_VERSION,
@@ -1995,6 +2013,7 @@ mod v2_tests {
             holders: vec![holder("A1"), holder("B1"), holder("C1")],
             serve_nodes: vec![serve_node("canon-1", "A1")],
             attestations,
+            roster_records: Vec::new(),
             authorizations: Vec::new(),
             produced_at: "2026-07-22T00:00:00Z".to_string(),
         }
@@ -2005,7 +2024,7 @@ mod v2_tests {
             CHARTER_ATTESTATION_ID,
             "A1",
             "A1",
-            charter_envelope(&["B1".to_string(), "C1".to_string()]).unwrap(),
+            charter_envelope(&[ck("B1"), ck("C1")]).unwrap(),
         )
     }
 
@@ -2051,7 +2070,7 @@ mod v2_tests {
     /// The RC3 root minimum: a root that can vouch but never serve is inert.
     #[test]
     fn a_vouch_only_charter_is_refused() {
-        let mut env = charter_envelope(&["B1".to_string()]).unwrap();
+        let mut env = charter_envelope(&[ck("B1")]).unwrap();
         env["scope"] = serde_json::json!([INFRA_ATTEST_SCOPE]);
         let vouch = att(CHARTER_ATTESTATION_ID, "A1", "A1", env);
         match verify_bundle_structure(&bundle_with(vec![vouch, good_grant()])) {
@@ -2079,7 +2098,7 @@ mod v2_tests {
             CHARTER_ATTESTATION_ID,
             "Z9",
             "Z9",
-            charter_envelope(&["B1".to_string()]).unwrap(),
+            charter_envelope(&[ck("B1")]).unwrap(),
         );
         match verify_bundle_structure(&bundle_with(vec![outsider, good_grant()])) {
             Err(GenesisError::CharterInvalid(d)) => assert!(d.contains("Z9"), "got: {d}"),

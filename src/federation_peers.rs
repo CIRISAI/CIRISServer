@@ -1044,7 +1044,10 @@ async fn test_genesis_bundle(State(st): State<PeersState>) -> Response {
     use ciris_persist::federation::types::attestation_type;
     // A 1-of-1 roster has no other holder to name as successor; the commitment
     // is to the root itself, which is well-formed and is what test_bless commits.
-    let successors = vec![root_key_id.clone()];
+    let successors = match crate::test_bless::test_root_committed_key() {
+        Ok(k) => vec![k],
+        Err(e) => return err(StatusCode::SERVICE_UNAVAILABLE, &format!("test root: {e}")),
+    };
     let charter_env = match crate::mesh_genesis::charter_envelope(&successors) {
         Ok(e) => e,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),

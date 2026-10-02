@@ -291,8 +291,10 @@ pub async fn authorize_slash(engine: &Engine, revoking_key_id: &str) {
     // key that vanishes when it rotates.
     let charter_id = uuid_like(&format!("{root}/charter"));
     let successors = vec![format!("{root}-succ-a"), format!("{root}-succ-b")];
-    let commitment = ciris_persist::federation::trust_root::pre_rotation_commitment(&successors)
-        .expect("pre-rotation commitment");
+    let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
+    let commitment =
+        ciris_persist::federation::trust_root::pre_rotation_commitment(&committed_successors)
+            .expect("pre-rotation commitment");
     put_signed(
         engine,
         &root_id,
@@ -476,4 +478,16 @@ pub async fn revoke(
         .put_revocation(SignedRevocation { revocation: row })
         .await
         .expect("put_revocation (the bound must be admitted by check_revocation_bound)");
+}
+
+/// A placeholder successor as committed key material (persist v53, CC 3.2 T3:
+/// a commitment binds `{key_id, both pubkeys}`). Fixture successors never sign,
+/// so any well-formed material serves.
+#[allow(dead_code)]
+fn committed(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+    ciris_persist::federation::trust_root::CommittedKey {
+        key_id: id.to_string(),
+        pubkey_ed25519_base64: format!("{id}-ed25519"),
+        pubkey_ml_dsa_65_base64: format!("{id}-ml-dsa-65"),
+    }
 }

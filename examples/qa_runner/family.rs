@@ -109,6 +109,8 @@ pub async fn run(report: &mut Report) {
         consensus_protocol_entrenched: false,
         dissolved_at: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     match family::create_family(&engine, fam).await {
         Ok(()) => {

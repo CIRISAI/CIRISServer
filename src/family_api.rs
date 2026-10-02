@@ -951,6 +951,8 @@ async fn create_family(State(st): State<FamilyState>, headers: HeaderMap, body: 
         consensus_protocol_entrenched: false,
         dissolved_at: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     let signed = match sign_family(&capsule, family).await {
         Ok(s) => s,

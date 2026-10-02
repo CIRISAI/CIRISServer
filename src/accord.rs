@@ -1020,6 +1020,8 @@ async fn genesis_assemble(
             consensus_protocol_entrenched: true,
             dissolved_at: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         };
         if let Err(e) = crate::family::create_family(&st.engine, family).await {
             return err(
@@ -2237,6 +2239,8 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
                 .unwrap_or(true),
             dissolved_at: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         },
         // ── STALE-BY-PIN, and left empty deliberately (CIRISServer#319 item 1) ──
         //

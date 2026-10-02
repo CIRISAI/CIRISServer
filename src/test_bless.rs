@@ -28,9 +28,42 @@ use crate::config::ServerConfig;
 /// whole root comes from ONE env. Shared by the boot self-bless below and the
 /// harness `test-admit-peer` bless-then-register endpoint.
 pub(crate) fn mint_test_root() -> Result<ciris_verify_core::self_at_login::HybridSigningIdentity> {
-    use ciris_crypto::{ClassicalSigner as _, Ed25519Signer, MlDsa65Signer};
-    use ciris_verify_core::self_at_login::HybridSigningIdentity;
+    use ciris_crypto::{Ed25519Signer, MlDsa65Signer};
 
+    let (ed_seed, ml_seed) = test_root_seeds()?;
+    let ed = Ed25519Signer::from_seed(&ed_seed).map_err(|e| anyhow!("test-root ed25519: {e}"))?;
+    let mldsa =
+        MlDsa65Signer::from_seed(&ml_seed).map_err(|e| anyhow!("test-root ml-dsa-65: {e}"))?;
+    mint_test_root_from(ed, mldsa)
+}
+
+/// The test root as COMMITTED KEY MATERIAL (persist v53, CC 3.2 T3: a charter's
+/// pre-rotation commitment binds `{key_id, both pubkeys}`, not an id). The
+/// harness root commits to itself: it never runs the recovery ceremony.
+pub(crate) fn test_root_committed_key(
+) -> Result<ciris_persist::federation::trust_root::CommittedKey> {
+    use ciris_crypto::{ClassicalSigner as _, Ed25519Signer, MlDsa65Signer, PqcSigner as _};
+    let (ed_seed, ml_seed) = test_root_seeds()?;
+    let ed = Ed25519Signer::from_seed(&ed_seed).map_err(|e| anyhow!("test-root ed25519: {e}"))?;
+    let mldsa =
+        MlDsa65Signer::from_seed(&ml_seed).map_err(|e| anyhow!("test-root ml-dsa-65: {e}"))?;
+    Ok(ciris_persist::federation::trust_root::CommittedKey {
+        key_id: "test-accord-holder-0".to_string(),
+        pubkey_ed25519_base64: B64.encode(
+            ed.public_key()
+                .map_err(|e| anyhow!("test-root pubkey: {e}"))?,
+        ),
+        pubkey_ml_dsa_65_base64: B64.encode(
+            mldsa
+                .public_key()
+                .map_err(|e| anyhow!("test-root ml-dsa pubkey: {e}"))?,
+        ),
+    })
+}
+
+/// The test root's two seeds, from ONE env (the ML-DSA seed domain-separated
+/// from the Ed25519 seed).
+fn test_root_seeds() -> Result<([u8; 32], [u8; 32])> {
     let seed_b64 = std::env::var("CIRIS_TEST_TRUST_ROOT_SEED")
         .map_err(|_| anyhow!("CIRIS_TEST_TRUST_ROOT_SEED is unset"))?;
     let ed_seed: [u8; 32] = B64
@@ -45,9 +78,15 @@ pub(crate) fn mint_test_root() -> Result<ciris_verify_core::self_at_login::Hybri
         h.update(ed_seed);
         h.finalize().into()
     };
-    let ed = Ed25519Signer::from_seed(&ed_seed).map_err(|e| anyhow!("test-root ed25519: {e}"))?;
-    let mldsa =
-        MlDsa65Signer::from_seed(&ml_seed).map_err(|e| anyhow!("test-root ml-dsa-65: {e}"))?;
+    Ok((ed_seed, ml_seed))
+}
+
+fn mint_test_root_from(
+    ed: ciris_crypto::Ed25519Signer,
+    mldsa: ciris_crypto::MlDsa65Signer,
+) -> Result<ciris_verify_core::self_at_login::HybridSigningIdentity> {
+    use ciris_crypto::ClassicalSigner as _;
+    use ciris_verify_core::self_at_login::HybridSigningIdentity;
     let root_pub_b64 = B64.encode(
         ed.public_key()
             .map_err(|e| anyhow!("test-root pubkey: {e}"))?,
@@ -524,7 +563,7 @@ async fn perform_trust_root_ceremony(
         // `charter_has_recovery`; a real ceremony hashes the actual pre-generated
         // successor keyset here. Built via the pinned persist constructor (no
         // hand-rolled JCS).
-        let successor = format!("{root_key_id}-successor-v1");
+        let successor = test_root_committed_key()?;
         let commitment = pre_rotation_commitment(std::slice::from_ref(&successor))
             .map_err(|e| anyhow!("ceremony: pre_rotation_commitment: {e}"))?;
         let mut envelope = delegates_to_envelope(&root_key_id, &charter_scopes, false);

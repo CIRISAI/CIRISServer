@@ -626,6 +626,8 @@ impl Person {
             consensus_protocol_entrenched: false,
             dissolved_at: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         };
         let canonical =
             ceg_produce_canonicalize(&family.signing_envelope()).expect("canonicalize family");

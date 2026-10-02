@@ -509,7 +509,13 @@ async fn finish(State(st): State<FinalGenesisState>) -> Response {
         "complete": true,
         "bundle_path": path.display().to_string(),
         "bundle_sha256": fingerprint,
-        "verified": serde_json::to_value(&done.verified).unwrap_or(serde_json::Value::Null),
+        "verified": {
+            "quorum_verified": done.verified.quorum_verified,
+            "serve_nodes": done.verified.serve_nodes,
+            "attestations": done.verified.attestations,
+            "community_key_id": done.verified.community_key_id,
+            "founders": done.verified.founders,
+        },
     }))
     .into_response()
 }

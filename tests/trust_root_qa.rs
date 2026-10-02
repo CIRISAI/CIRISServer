@@ -271,7 +271,9 @@ async fn signed_charter(
     scope: serde_json::Value,
     successors: &[String],
 ) -> Attestation {
-    let commitment = pre_rotation_commitment(successors).expect("pre-rotation commitment computes");
+    let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
+    let commitment =
+        pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment computes");
     let envelope = serde_json::json!({
         "references_attestation_id": id,
         "scope": scope,
@@ -592,8 +594,8 @@ async fn qa_mints_and_produces_a_portable_genesis() {
             ROOT,
             attestation_type::DELEGATES_TO,
             ciris_server::mesh_genesis::charter_envelope(&[
-                HOLDER_IDS[1].to_string(),
-                HOLDER_IDS[2].to_string(),
+                committed(HOLDER_IDS[1]),
+                committed(HOLDER_IDS[2]),
             ])
             .expect("charter envelope"),
             chrono::Utc::now(),
@@ -969,8 +971,8 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
             ROOT,
             attestation_type::DELEGATES_TO,
             ciris_server::mesh_genesis::charter_envelope(&[
-                HOLDER_IDS[1].to_string(),
-                HOLDER_IDS[2].to_string(),
+                committed(HOLDER_IDS[1]),
+                committed(HOLDER_IDS[2]),
             ])
             .expect("charter envelope"),
             chrono::Utc::now(),
@@ -1070,4 +1072,16 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         .expect("capability walk")
         .expect("leg B resolves for the re-blessed canonical");
     assert_eq!(grant.root_key_id, ROOT);
+}
+
+/// A placeholder successor as committed key material (persist v53, CC 3.2 T3:
+/// a commitment binds `{key_id, both pubkeys}`). Fixture successors never sign,
+/// so any well-formed material serves.
+#[allow(dead_code)]
+fn committed(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+    ciris_persist::federation::trust_root::CommittedKey {
+        key_id: id.to_string(),
+        pubkey_ed25519_base64: format!("{id}-ed25519"),
+        pubkey_ml_dsa_65_base64: format!("{id}-ml-dsa-65"),
+    }
 }

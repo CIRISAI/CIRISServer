@@ -2640,11 +2640,22 @@ async fn propose_genesis_impl(st: ProvisionState, req: ProposeGenesisRequest) ->
     // The pre-rotation successor set = the OTHER seated holders. Never a fixed
     // pair: if the charter key is compromised, exactly these keys may rotate it,
     // and persist binds this set's hash into the commitment.
-    let successors: Vec<String> = holders
+    // persist v53 (CC 3.2 T3): the commitment binds the successors' KEY
+    // MATERIAL, so they are carried as records, not ids.
+    let successors: Vec<ciris_persist::federation::trust_root::CommittedKey> = match holders
         .iter()
-        .map(|h| h.record.key_id.clone())
-        .filter(|k| k != &root)
-        .collect();
+        .filter(|h| h.record.key_id != root)
+        .map(|h| ciris_persist::federation::trust_root::CommittedKey::from_record(&h.record))
+        .collect::<Result<_, _>>()
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("a successor holder cannot be committed to: {e}"),
+            )
+        }
+    };
     if successors.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,

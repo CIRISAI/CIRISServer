@@ -490,6 +490,8 @@ async fn put_community(engine: &Engine, community_id: &str, members: &[(&str, &s
         consensus_protocol: "founder_only".to_string(),
         policy_blob: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     // persist v21.0.0 (#502 E4) — `put_community` now runs
     // `verify_community_admission`: a hybrid signature over
