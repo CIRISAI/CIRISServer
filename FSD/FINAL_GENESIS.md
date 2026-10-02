@@ -185,7 +185,8 @@ build.
   Supersedes §5 Q2's "canonical-1 only".
 - **CI pipeline keys** are co-scrubbed in the same sitting (same relay).
   Supersedes §5 Q3.
-- **Open:** the relay says the community names all three CANONICALS as
-  founders; CC (P3:670-722, P3:192) makes the holders the founders and the
-  nodes non-signing members, and nodes have no agency. Designed as
-  holders = founders, canonicals = members, pending the maintainer.
+- **Founders (settled):** the relay's "founders" was the registry session's
+  wording, not the maintainer's ("unique keys for 2 and 3, baked in as part of
+  the ceremony if we can"). Holders A1/B1/C1 are the signing founders;
+  canonical-1/-2/-3 are seated as non-signing members (CC P3:670-722,
+  P3:192; nodes have no agency).
