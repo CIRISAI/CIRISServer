@@ -10,7 +10,7 @@
 //! So: every string literal in `src/` shaped like a full versioned dimension
 //! (`a:b…:vN`) goes through persist's ONE matcher, and none may come back with
 //! a REFUSAL. "No registered family" alone is not a refusal: an unreserved stem
-//! (`self:device_label:v1`) is admitted under its producer as steward. What the
+//! (`device:label:v1` before rc6 registered it) is admitted under its producer as steward. What the
 //! door refuses is a malformed dimension, or one on a stem persist RESERVES but
 //! the registry does not register (`age_self_declared:`). Comments are skipped.
 //! A dimension assembled with `format!` is not seen here; its builder's own
