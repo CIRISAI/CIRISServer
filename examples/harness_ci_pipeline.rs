@@ -179,6 +179,7 @@ async fn submission(
         binary_hash: hex::encode(Sha256::digest(format!("artifact:{version}").as_bytes())),
         binary_version: version.to_string(),
         manifest_hash: hex::encode(Sha256::digest(&manifest)),
+        manifest_size: manifest.len() as u64,
     };
     let body = serde_json::json!({
         "contribution": contribution(pipeline, &facts).await?,
