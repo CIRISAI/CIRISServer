@@ -1,0 +1,23 @@
+# `manifest` scenario overlay. Layer over docker-compose.chat.yml:
+#   -f docker-compose.chat.yml -f docker-compose.manifest.yml
+#
+# Three nodes, two roles:
+#
+#   canonical  registry A. Blessed `canonical,node` with infra:serve +
+#              infra:attest by the SW test root, exactly as the chat topology
+#              has it. Stands in for a production registry region.
+#   node-a     registry B. The chat topology runs it unblessed; here it is
+#              blessed the same way as registry A, so the mesh has TWO nodes
+#              conferred the registry slice. Stands in for the other region.
+#   node-b     a bystander. Unblessed, peered with registry A. It is here so
+#              that "a registry node holds the manifest" is a statement about
+#              registry nodes and not about every node.
+services:
+  node-a:
+    command: ["sh", "/opt/harness/registry_boot.sh"]
+    environment:
+      CIRIS_TEST_BLESS_CANONICAL: "true"
+      CIRIS_TEST_CANONICAL_DIAL: "172.29.77.11:4242"
+      CIRIS_REGISTRY_PEER_RECORD: "http://172.29.77.10:4243/v1/federation/test-blessed-self-record"
+    volumes:
+      - ./registry_boot.sh:/opt/harness/registry_boot.sh:ro

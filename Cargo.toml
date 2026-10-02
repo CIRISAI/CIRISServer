@@ -119,11 +119,17 @@ pkcs11 = ["ciris-keyring/pkcs11"]
 # as a signed row persist refuses.
 h3o = "0.7"
 # The composed cores (authority + observation; node folds in at Server 1.0).
-# ciris-registry-core — re-added at Server 0.5, co-bumped to the 6.6/edge-3.2 floor
-# (CIRISRegistry#76). Held OUT of the 0.1 graph: registry-core@main still pins the
-# OLD floor (persist 5.5.5 / edge 2.2.2 / verify 5.1.3) and would drag a second
-# persist+edge rev into the build. The compose_registry() scaffold stays in
-# src/compose.rs; this dep returns once registry co-bumps.
+# ciris-registry-core — the authority slice (CIRISRegistry#62 / #537). Composed
+# WITHOUT default features: the `standalone` feature is what carries sqlx, tonic
+# and persist's `postgres` backend, and registry's CI fails if any of the three
+# returns to the no-default graph. What is left is `fold::router(engine,
+# node_key_id)` over the shared Engine (FSD-004 §5 in that repo).
+# Pinned by REV to CIRISRegistry#143 (`fold_builds`, the CEG-native /v1/builds
+# surface) until that merges and is tagged; it moves to the tag then. The rev is
+# v4.0.0 plus that one module, and sits on THIS repo's exact triple (persist v52.0.1 /
+# edge v38.1.0 / verify v18.0.0), so it adds no second substrate rev. It moves
+# only in a co-bump with the triple below.
+ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", rev = "18a138c", default-features = false }
 ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (workspace member); CIRISLensCore repo retired
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 
@@ -390,6 +396,14 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v52.0.
 name = "qa_runner"
 required-features = ["test-anchor"]
 
+# The harness's stand-in for a CI pipeline: mints a pipeline key, has the
+# SOFTWARE test root bless it for `infra:attest`, and signs a build-manifest
+# Contribution (`harness/mesh-repro/scenarios/manifest.sh`). It signs with the
+# test root's seed, so it is fenced behind `test-anchor` like the root itself.
+[[example]]
+name = "harness_ci_pipeline"
+required-features = ["test-anchor"]
+
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
 name = "pqc_av_streaming"
@@ -528,5 +542,3 @@ debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
-
-
