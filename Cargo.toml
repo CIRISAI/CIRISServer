@@ -129,7 +129,7 @@ h3o = "0.7"
 # v4.0.0 plus that one module, and sits on THIS repo's exact triple (persist v52.0.1 /
 # edge v38.1.0 / verify v18.0.0), so it adds no second substrate rev. It moves
 # only in a co-bump with the triple below.
-ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", rev = "28de8c7", default-features = false }
+ciris-registry-core = { git = "https://github.com/CIRISAI/CIRISRegistry", rev = "18a138c", default-features = false }
 ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (workspace member); CIRISLensCore repo retired
 # ciris-node-core   — folds in at Server 1.0 / agent 2.9.10 (a substrate gen behind: persist 4.10).
 

@@ -7,10 +7,12 @@
 //! test root standing in for the accord's hardware holders — which is the only
 //! thing about it that is not the production shape.
 //!
-//! It writes two `POST /v1/builds` bodies into `<out>`:
+//! It writes three `POST /v1/builds` bodies into `<out>`:
 //!
 //! - `blessed.json` — a pipeline the test root granted
-//!   `delegates_to(root → pipeline, infra:attest)`;
+//!   `delegates_to(root → pipeline, infra:attest)`, with no role on its record;
+//! - `ceremony.json` — a pipeline whose key record the test root scrub-signed
+//!   with `roles: ["infra:attest"]` and no grant, the CI-key ceremony's shape;
 //! - `unblessed.json` — a second pipeline with a real key, a valid signature
 //!   over a manifest that matches, and a record nobody blessed.
 //!
@@ -155,6 +157,55 @@ async fn grant(
     })
 }
 
+/// A pipeline this process does not hold the keys of: a Contribution minted
+/// elsewhere (CIRISVerify's `ciris-build-sign sign --emit-contribution`), its
+/// manifest bytes, and the pipeline's two PUBLIC keys. The test root blesses
+/// those public keys the ceremony way; nothing here can sign as the pipeline.
+///
+/// `dir` holds `contribution.json` (a `SignedCegObject` whose `body` is the
+/// signed Contribution, or the Contribution itself), `manifest.bin`,
+/// `ed25519.pub` and `mldsa65.pub` (raw bytes).
+async fn external_submission(
+    root: &HybridSigningIdentity,
+    dir: &std::path::Path,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let read = |name: &str| {
+        std::fs::read(dir.join(name)).with_context(|| format!("read {}", dir.join(name).display()))
+    };
+    let object: serde_json::Value =
+        serde_json::from_slice(&read("contribution.json")?).context("contribution.json")?;
+    let contribution = object.get("body").cloned().unwrap_or(object);
+    let envelope = contribution
+        .get("signed_envelope")
+        .ok_or_else(|| anyhow!("contribution.json carries no signed_envelope"))?;
+    let key_id = envelope["row"]["attesting_key_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the Contribution's row names no attesting_key_id"))?
+        .to_string();
+    let record = produce_scrubbed_key_record(
+        root,
+        ScrubTarget {
+            key_id: key_id.clone(),
+            pubkey_ed25519_base64: B64.encode(read("ed25519.pub")?),
+            pubkey_ml_dsa_65_base64: B64.encode(read("mldsa65.pub")?),
+            identity_type: "node".to_string(),
+            roles: vec!["infra:attest".to_string()],
+        },
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow!("scrub-sign {key_id}: {e}"))?;
+    let body = serde_json::json!({
+        "contribution": contribution,
+        "manifest_base64": B64.encode(read("manifest.bin")?),
+        "pipeline_record": record,
+    });
+    let facts = serde_json::json!({ "pipeline_key_id": key_id, "facts": envelope["build"] });
+    Ok((body, facts))
+}
+
 fn manifest_for(version: &str, label: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "version": version,
@@ -205,13 +256,22 @@ async fn main() -> Result<()> {
 
     let blessed = HybridSigningIdentity::generate(format!("harness-ci-blessed-{suffix}"))
         .map_err(|e| anyhow!("mint blessed pipeline: {e}"))?;
-    // The record is scrub-signed by the root so the pipeline's announces root;
-    // the GRANT is what blesses it. A role on the record alone does not: the
-    // capability walk reads a co-scrubbed record as "this key is a root".
-    let blessed_record = key_record(&root, &blessed, &["infra:attest"]).await?;
+    // The GRANT shape: a record carrying no role, and a delegation from the
+    // root. The capability walk confers on this and on nothing in the record.
+    let blessed_record = key_record(&root, &blessed, &[]).await?;
     let blessed_grant = grant(&root, &blessed).await?;
     let (blessed_body, blessed_facts) =
         submission(&blessed, blessed_record, Some(blessed_grant), &version).await?;
+
+    // The CEREMONY shape: the root co-scrubs infra:attest onto the pipeline's
+    // key record and writes no grant. This is what the accord's CI-key
+    // ceremony produces, so it is the shape a production pipeline arrives in.
+    let ceremony = HybridSigningIdentity::generate(format!("harness-ci-ceremony-{suffix}"))
+        .map_err(|e| anyhow!("mint ceremony pipeline: {e}"))?;
+    let ceremony_record = key_record(&root, &ceremony, &["infra:attest"]).await?;
+    let ceremony_version = format!("{version}-ceremony");
+    let (ceremony_body, ceremony_facts) =
+        submission(&ceremony, ceremony_record, None, &ceremony_version).await?;
 
     let unblessed = HybridSigningIdentity::generate(format!("harness-ci-unblessed-{suffix}"))
         .map_err(|e| anyhow!("mint unblessed pipeline: {e}"))?;
@@ -227,11 +287,31 @@ async fn main() -> Result<()> {
     };
     write("blessed.json", &blessed_body)?;
     write("unblessed.json", &unblessed_body)?;
+    write("ceremony.json", &ceremony_body)?;
+    // Optional: a Contribution from another producer, blessed here by its
+    // public keys alone (CIRIS_HARNESS_EXTERNAL_PIPELINE=<dir>).
+    let external = match std::env::var("CIRIS_HARNESS_EXTERNAL_PIPELINE") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let (body, facts) =
+                external_submission(&root, std::path::Path::new(dir.trim())).await?;
+            write("external.json", &body)?;
+            println!(
+                "pipeline {} (external producer, blessed by role) signed {} manifest {}",
+                facts["pipeline_key_id"].as_str().unwrap_or("?"),
+                facts["facts"]["binary_version"].as_str().unwrap_or("?"),
+                facts["facts"]["manifest_hash"].as_str().unwrap_or("?"),
+            );
+            Some(facts)
+        }
+        _ => None,
+    };
     write(
         "facts.json",
         &serde_json::json!({
             "blessed": { "pipeline_key_id": blessed.key_id(), "facts": blessed_facts },
             "unblessed": { "pipeline_key_id": unblessed.key_id(), "facts": unblessed_facts },
+            "ceremony": { "pipeline_key_id": ceremony.key_id(), "facts": ceremony_facts },
+            "external": external,
         }),
     )?;
     println!(

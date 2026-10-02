@@ -29,6 +29,11 @@
 #                 refused `pipeline_not_blessed`. A valid signature is not
 #                 authorization.
 #   admitted      the blessed pipeline's Contribution is admitted by registry A.
+#                 This one holds a delegation GRANT and no role on its record.
+#   ceremony_admitted  a second pipeline, blessed the way the accord's CI-key
+#                 ceremony blesses one (infra:attest co-scrubbed onto its key
+#                 record, no grant), is admitted with standing `accord_role`.
+#   ceremony_on_b registry B serves that build too, bytes included.
 #   served_on_a   registry A serves the build, holding the manifest bytes.
 #   row_on_b      registry B serves the build: the Contribution replicated and
 #                 registry B re-verified it against its OWN directory and its
@@ -47,7 +52,21 @@ SCENARIO_NAME="manifest"
 COMPOSE_FILES="-f docker-compose.chat.yml -f docker-compose.manifest.yml"
 PROJECT="${PROJECT:-ciris-manifest}"
 SUCCESS_STAGE="blob_on_b"
-STAGES=(rooted conferred holds_commons peered owners_accept refused admitted served_on_a row_on_b blob_on_b unblessed_is_nowhere)
+STAGES=(rooted conferred holds_commons peered owners_accept refused admitted ceremony_admitted served_on_a row_on_b blob_on_b ceremony_on_b unblessed_is_nowhere)
+REQUIRED_ceremony_admitted=1
+REQUIRED_ceremony_on_b=1
+
+# OPTIONAL: a Contribution minted by another producer, e.g. CIRISVerify's
+# `ciris-build-sign sign --emit-contribution`. Point MAN_EXTERNAL_PIPELINE at a
+# directory holding contribution.json, manifest.bin, ed25519.pub and
+# mldsa65.pub. The test root blesses the PUBLIC keys the ceremony way; the
+# harness never signs as that pipeline. Two rungs join the ladder when set.
+MAN_EXTERNAL_PIPELINE="${MAN_EXTERNAL_PIPELINE:-}"
+if [ -n "$MAN_EXTERNAL_PIPELINE" ]; then
+  STAGES+=(external_admitted external_on_b)
+  REQUIRED_external_admitted=1
+  REQUIRED_external_on_b=1
+fi
 REQUIRED_refused=1
 REQUIRED_row_on_b=1
 REQUIRED_blob_on_b=1
@@ -244,6 +263,7 @@ print(json.dumps({"peer_key_id": r["record"]["key_id"], "peer_key_record": r,
     ( cd ../.. && cargo build --release --features test-anchor,python --example harness_ci_pipeline 2>&1 | tail -2 )
   fi
   if ! CIRIS_TEST_TRUST_ROOT_SEED="$seed" CIRIS_TEST_TRUST_ROOT="$anchor" \
+       CIRIS_HARNESS_EXTERNAL_PIPELINE="${MAN_EXTERNAL_PIPELINE:-}" \
        "$bin" "$MAN_STATE/ci" "$MAN_VERSION" >"$MAN_STATE/ci.out" 2>&1; then
     echo "  ✗ the pipeline stand-in failed: $(tail -3 "$MAN_STATE/ci.out")"
     return 0
@@ -252,7 +272,8 @@ print(json.dumps({"peer_key_id": r["record"]["key_id"], "peer_key_record": r,
   python3 -c '
 import json,sys
 f=json.load(open(sys.argv[1]))
-for who in ("blessed","unblessed"):
+for who in ("blessed","unblessed","ceremony","external"):
+    if not f.get(who): continue
     print("MAN_%s_VERSION=%s" % (who.upper(), f[who]["facts"]["binary_version"]))
     print("MAN_%s_SHA=%s" % (who.upper(), f[who]["facts"]["manifest_hash"]))
     print("MAN_%s_PIPELINE=%s" % (who.upper(), f[who]["pipeline_key_id"]))' \
@@ -265,6 +286,14 @@ for who in ("blessed","unblessed"):
   echo "── manifest: the unblessed pipeline publishes to $MAN_A ──"
   _man_api "$MAN_A" POST /v1/builds "$MAN_STATE/ci/unblessed.json" >"$MAN_STATE/submit-unblessed.json" || true
   echo "  $(head -c 300 "$MAN_STATE/submit-unblessed.json")"
+  echo "── manifest: the ceremony-blessed pipeline (accord role, no grant) publishes to $MAN_A ──"
+  _man_api "$MAN_A" POST /v1/builds "$MAN_STATE/ci/ceremony.json" >"$MAN_STATE/submit-ceremony.json" || true
+  echo "  $(head -c 300 "$MAN_STATE/submit-ceremony.json")"
+  if [ -s "$MAN_STATE/ci/external.json" ]; then
+    echo "── manifest: the EXTERNAL producer's Contribution is published to $MAN_A ──"
+    _man_api "$MAN_A" POST /v1/builds "$MAN_STATE/ci/external.json" >"$MAN_STATE/submit-external.json" || true
+    echo "  $(head -c 300 "$MAN_STATE/submit-external.json")"
+  fi
   echo "── manifest: the blessed pipeline publishes to $MAN_A ──"
   _man_api "$MAN_A" POST /v1/builds "$MAN_STATE/ci/blessed.json" >"$MAN_STATE/submit-blessed.json" || true
   echo "  $(head -c 300 "$MAN_STATE/submit-blessed.json")"
@@ -355,6 +384,54 @@ stage_admitted() {
 HINT_admitted="registry A refused the BLESSED pipeline. The refusal token says which check: unknown_pipeline = persist's role-admission gate refused the pipeline's key record; pipeline_not_blessed = the record was stored and the capability walk does not see infra:attest from a root this node accepts; substrate_error = persist refused the row or the blob."
 EXIT_admitted=35
 DIAG_admitted() { head -c 500 "$MAN_STATE/submit-blessed.json" 2>/dev/null; echo; }
+
+# ── 6b ──────────────────────────────────────────────────────────────────────
+# The production shape. The door must admit it AND say which authority did.
+stage_ceremony_admitted() {
+  [ -s "$MAN_STATE/submit-ceremony.json" ] || { echo 0; return; }
+  if [ "$(_man_field status <"$MAN_STATE/submit-ceremony.json")" = "201" ] \
+     && [ "$(_man_field body.standing <"$MAN_STATE/submit-ceremony.json")" = "accord_role" ]; then echo 1; else echo 0; fi
+}
+HINT_ceremony_admitted="registry A refused a pipeline blessed the way the accord's CI-key ceremony blesses one (infra:attest co-scrubbed onto the key record, no grant), or admitted it under some other standing. unknown_pipeline = persist's infra:attest admission gate refused the record; pipeline_not_blessed = the record is stored and is_infra_attest_effective reads false, which means the role did not land in the row's roles."
+EXIT_ceremony_admitted=41
+DIAG_ceremony_admitted() { head -c 500 "$MAN_STATE/submit-ceremony.json" 2>/dev/null; echo; }
+
+# Registry B serves the ceremony-blessed build with its bytes. Here the standing
+# is not a row that has to replicate: it rides the pipeline's own key record.
+stage_ceremony_on_b() {
+  _man_load
+  [ -n "${MAN_CEREMONY_VERSION:-}" ] || { echo 0; return; }
+  local out
+  out="$(_man_api "$MAN_B" GET "/v1/builds/${MAN_CEREMONY_VERSION}")"
+  if [ "$(printf '%s' "$out" | _man_field status)" = "200" ] \
+     && [ "$(printf '%s' "$out" | _man_field body.manifest_held)" = "true" ] \
+     && [ "$(printf '%s' "$out" | _man_field body.standing.standing)" = "accord_role" ]; then echo 1; else echo 0; fi
+}
+HINT_ceremony_on_b="registry B does not serve the ceremony-blessed build with its bytes under accord_role standing. The Contribution and the pipeline's key record both have to cross, and registry B's own is_infra_attest_effective has to read the role off the record it received."
+EXIT_ceremony_on_b=42
+
+stage_external_admitted() {
+  [ -s "$MAN_STATE/submit-external.json" ] || { echo 0; return; }
+  if [ "$(_man_field status <"$MAN_STATE/submit-external.json")" = "201" ]; then echo 1; else echo 0; fi
+}
+HINT_external_admitted="registry A refused the external producer's Contribution. The refusal token is the finding: it names the first thing that producer and this door disagree on."
+EXIT_external_admitted=43
+DIAG_external_admitted() { head -c 600 "$MAN_STATE/submit-external.json" 2>/dev/null; echo; }
+
+stage_external_on_b() {
+  _man_load
+  [ -n "${MAN_EXTERNAL_SHA:-}" ] || { echo 0; return; }
+  local got
+  got="$(compose exec -T "$MAN_B" python -c '
+import hashlib, sys, urllib.request
+try:
+    print(hashlib.sha256(urllib.request.urlopen("http://127.0.0.1:4243/v1/builds/manifest/" + sys.argv[1], timeout=30).read()).hexdigest())
+except Exception:
+    print("")' "$MAN_EXTERNAL_SHA" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$got" = "$MAN_EXTERNAL_SHA" ]; then echo 1; else echo 0; fi
+}
+HINT_external_on_b="registry B does not serve the external producer's manifest bytes. Same causes as ceremony_on_b."
+EXIT_external_on_b=44
 
 # A node's answer for the blessed build. Echoes "<status> <manifest_held>".
 _man_build_on() {
