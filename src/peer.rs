@@ -35,6 +35,48 @@ use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
 use crate::config::PeerB;
 
+/// The row type `emit_analyze_consent` wrote before CC 2.4 closed the row-type
+/// slot (CIRISConstitution#137, CIRISServer#713). Nothing writes it now.
+pub const LEGACY_CONSENT_ROW_TYPE: &str = "consent";
+
+/// Does `author`'s analyze grant toward `attester` exist ONLY under the legacy
+/// row type? Then the stance resolves Granted here, but a peer whose persist
+/// admits only the closed row-type list refuses the row, and the consent never
+/// reaches the node that scores. Re-authoring it under `scores` is the heal:
+/// the old row stays as history, the new one replicates.
+///
+/// A read failure answers `false` — the caller then keeps today's behaviour
+/// (no second row) rather than writing one per boot against a store it cannot
+/// read.
+async fn only_legacy_typed_grant(engine: &Engine, author: &str, attester: &str) -> bool {
+    use ciris_persist::federation::consent::consent_dimension;
+    let granted = format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX);
+    let Ok(rows) = engine
+        .federation_directory()
+        .list_attestations_by(author)
+        .await
+    else {
+        return false;
+    };
+    let (mut legacy, mut primitive) = (false, false);
+    for a in rows {
+        let is_grant = a.attested_key_id == attester
+            && a.attestation_envelope
+                .get(paths::DIMENSION)
+                .and_then(|v| v.as_str())
+                == Some(granted.as_str());
+        if !is_grant {
+            continue;
+        }
+        if a.attestation_type == LEGACY_CONSENT_ROW_TYPE {
+            legacy = true;
+        } else if a.attestation_type == attestation_type::SCORES {
+            primitive = true;
+        }
+    }
+    legacy && !primitive
+}
+
 /// **CIRISConstitution#46 — the production producer for the `analyze` grant.**
 ///
 /// v22 refuses a `capacity:*` claim about subject S from attester P unless a live
@@ -100,7 +142,8 @@ pub async fn emit_analyze_consent(
             )
             .await?,
         ConsentState::Granted
-    ) {
+    ) && !only_legacy_typed_grant(engine, subject_key_id, attester_key_id).await
+    {
         return Ok(None);
     }
 
@@ -117,7 +160,7 @@ pub async fn emit_analyze_consent(
             let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
                 .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
             let mut input = EmitAttestationInput::with_envelope(
-                "consent",
+                attestation_type::SCORES,
                 core,
                 // See (1): read on the scoring node, so it MUST replicate.
                 cohort_scope::FEDERATION,
@@ -126,7 +169,11 @@ pub async fn emit_analyze_consent(
             engine.emit_attestation_self(input).await?
         }
         Some(signer) => {
-            let mut spec = crate::attest::Spec::new("consent", cohort_scope::FEDERATION, envelope);
+            let mut spec = crate::attest::Spec::new(
+                attestation_type::SCORES,
+                cohort_scope::FEDERATION,
+                envelope,
+            );
             // (3): `subject_key_ids` stays EMPTY; the attested key is the peer.
             spec.attested_key_id = Some(attester_key_id.to_string());
             let row = crate::attest::Emit::stamp(subject_key_id, spec)

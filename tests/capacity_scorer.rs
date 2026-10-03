@@ -83,7 +83,8 @@ async fn grant_analyze_consent(
             attestation_id: None,
             attesting_key_id: subject.to_string(),
             attested_key_id: Some(attester.to_string()),
-            attestation_type: "consent".to_string(),
+            attestation_type: ciris_persist::federation::types::attestation_type::SCORES
+                .to_string(),
             weight: None,
             expires_at: None,
             attestation_envelope: core,

@@ -10,7 +10,7 @@
 //! So: every string literal in `src/` shaped like a full versioned dimension
 //! (`a:b…:vN`) goes through persist's ONE matcher, and none may come back with
 //! a REFUSAL. "No registered family" alone is not a refusal: an unreserved stem
-//! (`self:device_label:v1`) is admitted under its producer as steward. What the
+//! (`device:label:v1` before rc6 registered it) is admitted under its producer as steward. What the
 //! door refuses is a malformed dimension, or one on a stem persist RESERVES but
 //! the registry does not register (`age_self_declared:`). Comments are skipped.
 //! A dimension assembled with `format!` is not seen here; its builder's own
@@ -69,6 +69,11 @@ const READ_ONLY_LEGACY: &[(&str, &str)] = &[
     (
         "need:shelter:v1",
         "field_conformance's polarity table: a classifier input, never a row",
+    ),
+    (
+        "self:device_label:v1",
+        "the device label's pre-rc6 name (#717): self_devices.rs READS it for labels written \
+         through 0.5.219 and its unit test pins the spelling; nothing writes it",
     ),
 ];
 

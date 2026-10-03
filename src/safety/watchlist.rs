@@ -73,9 +73,11 @@ use ciris_persist::prelude::LocalSigner;
 /// vocabulary (FSD §10 #1).
 pub const WATCHLIST_DIMENSION_PREFIX: &str = "watchlist:";
 
-/// `attestation_type` for a watchlist enable/disable config row (the consent.rs
-/// recipe, specialized).
-pub const WATCHLIST_CONFIG_TYPE: &str = "watchlist_config";
+/// The row type a watchlist enable was written under BEFORE CC 2.4 closed the
+/// row-type slot (CIRISConstitution#137, CIRISServer#713). Nothing writes it
+/// now — an enable is a claim and rides `scores` — but a node that enabled a
+/// watchlist on an older build still holds the row, so the reader accepts both.
+pub const LEGACY_WATCHLIST_CONFIG_TYPE: &str = "watchlist_config";
 
 /// The `hard_case:*` reasons a watchlist enable / match emit so they are
 /// auditable, never silent (FSD §10 #3 upstream-ask to the CEG §7.8 reason set).
@@ -131,9 +133,11 @@ pub struct WatchlistEnable {
 }
 
 impl WatchlistEnable {
-    /// The full `watchlist:{id}` dimension this enable writes.
+    /// The full `watchlist:{id}:v1` dimension this enable writes. The version
+    /// segment is required of any claim (`scores`) dimension; under the old row
+    /// type the bare `watchlist:{id}` was never checked (CIRISServer#713).
     pub fn dimension(&self) -> String {
-        format!("{WATCHLIST_DIMENSION_PREFIX}{}", self.watchlist_id)
+        format!("{WATCHLIST_DIMENSION_PREFIX}{}:v1", self.watchlist_id)
     }
 }
 
@@ -194,7 +198,7 @@ pub async fn enable_watchlist(
         attestation_id: None,
         attesting_key_id: signer_key_id.to_owned(),
         attested_key_id: Some(enable.group_key_id.clone()),
-        attestation_type: WATCHLIST_CONFIG_TYPE.to_owned(),
+        attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
         attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
@@ -326,7 +330,16 @@ pub async fn watchlist_enables_for_group(
             withdrawn.insert(watchlist_id.to_owned());
             continue;
         }
-        if row.attestation_type != WATCHLIST_CONFIG_TYPE {
+        // An enable is recognised by its DIMENSION family (`watchlist:{id}`),
+        // never by a row type of its own (CC 2.4). The type only has to be the
+        // claim primitive, or the legacy literal an older build wrote.
+        let is_enable_type = row.attestation_type == attestation_type::SCORES
+            || row.attestation_type == LEGACY_WATCHLIST_CONFIG_TYPE;
+        let in_family = env
+            .get(paths::DIMENSION)
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.starts_with(WATCHLIST_DIMENSION_PREFIX));
+        if !is_enable_type || !in_family {
             continue;
         }
         if !env
@@ -528,7 +541,7 @@ mod tests {
             mode: WatchlistMode::Enforce,
             route_to_moderator: None,
         };
-        assert_eq!(e.dimension(), "watchlist:csam:ncmec");
+        assert_eq!(e.dimension(), "watchlist:csam:ncmec:v1");
     }
 
     #[test]
