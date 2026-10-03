@@ -527,6 +527,9 @@ class Mesh:
     def start_canonical(self) -> Node:
         n = self._node("canonical", {})
         n.env["CIRIS_TEST_BLESS_CANONICAL"] = "true"
+        # Infrastructure: a server-class node (persist v53 S1 keeps a person's
+        # self/family content off it).
+        n.env["CIRIS_DEVICE_CLASS"] = "server"
         n.env["CIRIS_TEST_CANONICAL_DIAL"] = n.transport
         n.configure(dial=[])
         n.start()
@@ -543,8 +546,12 @@ class Mesh:
         if self.canonical is None:
             self.start_canonical()
         assert self.canonical is not None
+        # A person's own device. Under persist v53 S1 only a personal class
+        # (laptop / phone) receives its owner's self and family content; the
+        # real apps declare it the same way (desktop launcher, client, agent).
         n = self._node(name, {"CIRIS_TEST_BLESS_CANONICAL": "false",
-                              "CIRIS_TEST_CANONICAL_DIAL": self.canonical.transport})
+                              "CIRIS_TEST_CANONICAL_DIAL": self.canonical.transport,
+                              "CIRIS_DEVICE_CLASS": "laptop"})
         n.configure(dial=[self.canonical.transport] + [d.transport for d in (dial or [])])
         self.nodes[name] = n
         if start:
