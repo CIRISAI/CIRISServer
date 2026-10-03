@@ -240,8 +240,15 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// `may_receive` / `may_receive_group_plane`, and key-grant sets reach a
 /// device only through the audience — so SELF/FAMILY content follows each
 /// occurrence's `device_class` (edge `prestage/persist-v53` ee3b320).
+///
+/// `e7b1ba86…` → `68c5298b…` (edge `prestage/persist-v53` a8d6847, persist
+/// 8fcbeb9e): edge no longer decides who a membership proposal, acceptance or
+/// decline is addressed to — persist's `may_receive` does; edge keeps only the
+/// first-contact transport carve, and every ceremony stage also reaches the
+/// group's membership-plane audience. A Rooted keyless `ciris-canonical` is
+/// served to every peer.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "e7b1ba86f0a5eeabcae5159eeb18237a540f0f17401e57b8b43cbc8f84420699";
+    "68c5298b4bb48bbf8ffdb7ef881b71386b3db6ba8c6026b8bb61ec454ebe3850";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {
