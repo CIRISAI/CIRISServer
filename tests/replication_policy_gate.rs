@@ -227,8 +227,14 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 ///
 /// `LocationProof` keeps `public` (split out of the old shared line, value
 /// unchanged). `b86a7042…` → `e3070d53…`, equal to edge's published constant.
+///
+/// `e3070d53…` → `e7b1ba86…` with persist v53 S1 (CC 3.3.7): the audience,
+/// group records and all five membership planes go through persist's
+/// `may_receive` / `may_receive_group_plane`, and key-grant sets reach a
+/// device only through the audience — so SELF/FAMILY content follows each
+/// occurrence's `device_class` (edge `prestage/persist-v53` ee3b320).
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "e3070d5327d6518b7ef50b0988f1af92790e2ea4efb9833cc4213a4127fc41b0";
+    "e7b1ba86f0a5eeabcae5159eeb18237a540f0f17401e57b8b43cbc8f84420699";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

@@ -316,6 +316,31 @@ where
     match outcome {
         Provisioned::Created => Ok((me, "created")),
         Provisioned::AlreadyCurrent => Ok((me, "already_current")),
+        // persist v53 S1 / edge #799: the occurrence named the wrong device
+        // class (every owned node was `server` until 0.5.220) and edge re-signed
+        // it with this host's real class.
+        Provisioned::Reclassed { from, to } => {
+            tracing::warn!(
+                occurrence = %me, %from, %to,
+                "content occurrence RE-CLASSED to this host's device class — self and \
+                 family content reach it again (persist v53 S1)"
+            );
+            Ok((me, "reclassed"))
+        }
+        // A SIGNED occurrence (the owner's pen issued it at the self_at_login
+        // fold) with the wrong class: edge cannot re-sign it. The row stands; the
+        // fold re-issues it with the real class wherever the owner's pen is
+        // present (`node_key::anchor_agent_to_owner`), else at the next claim or
+        // sign-in. Never an error — the node keeps working on the row it has.
+        Provisioned::ReclassNeedsSigner { from, to } => {
+            tracing::warn!(
+                occurrence = %me, %from, %to,
+                "content occurrence carries the wrong device class and is the owner's \
+                 signed row — re-issued by the self_at_login fold when the owner's pen is \
+                 present (persist v53 S1)"
+            );
+            Ok((me, "reclass_needs_signer"))
+        }
         // A node that provisioned under 0.5.207: the row under `me` carries the
         // SelfEncKeys pubkeys, and the helper refuses to overwrite a drifted
         // row — an operator decides which keys are authoritative. Here the
@@ -361,6 +386,12 @@ where
                  content-KEM identity (CIRISServer#596)"
             );
             Ok((me2, "migrated"))
+        }
+        // `Provisioned` is non_exhaustive: an outcome a later edge adds is
+        // reported by name, never mistaken for one of the above.
+        other => {
+            tracing::warn!(occurrence = %me, outcome = ?other, "content occurrence: unrecognised provisioning outcome");
+            Ok((me, "other"))
         }
     }
 }
