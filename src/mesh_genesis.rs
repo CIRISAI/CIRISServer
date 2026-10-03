@@ -449,6 +449,20 @@ pub fn charter_root_key_id(bundle: &GenesisBundle) -> Option<String> {
     charter_of(bundle).map(|c| c.attested_key_id.clone())
 }
 
+/// Does the bundle's charter carry its job label (`trust:charter:v1`)? Under
+/// persist v53 (CC 3.2 T4a "bundle only") an unlabelled `delegates_to` is a
+/// charter only inside the ONE pinned genesis bundle; a portable bundle whose
+/// charter is unlabelled installs as no charter at all.
+#[must_use]
+pub fn bundle_charter_is_labelled(bundle: &GenesisBundle) -> bool {
+    charter_of(bundle).is_some_and(|c| {
+        c.attestation_envelope
+            .get(paths::DIMENSION)
+            .and_then(|v| v.as_str())
+            == Some(ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION)
+    })
+}
+
 /// Parse `quorum:M/N` into M. Returns `None` when absent/unparseable — callers
 /// must treat that as "unknown", never as a default threshold.
 fn policy_m(consensus_protocol: &str) -> Option<usize> {

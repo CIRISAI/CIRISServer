@@ -775,7 +775,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 39 -> 40 for 0.5.220: `final_genesis.recovery_key_mismatch` (a spare
     /// read off its token that differs from the ceremony's record).
-    const MAX_UNCOVERED: usize = 40;
+    ///
+    /// 40 -> 41 for 0.5.220: `trust_root.bundle_unlabelled` (an old portable
+    /// bundle refused at import — on persist v53 it installs as no charter).
+    const MAX_UNCOVERED: usize = 41;
 
     let en = load_en();
     let ids = scraped_server_ids();
