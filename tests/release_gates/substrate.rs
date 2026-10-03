@@ -13,7 +13,7 @@ use crate::ladder::{
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
 pub const TARGET_VERIFY: &str = "v18.0.0";
-pub const TARGET_PERSIST: &str = "v52.0.2";
+pub const TARGET_PERSIST: &str = "v53.0.0";
 pub const TARGET_EDGE: &str = "v38.1.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
