@@ -76,6 +76,11 @@ pub fn read(seed_dir: &Path) -> Vec<PairIntent> {
     }
 }
 
+/// Serializes every read-modify-write of the intents file in this process: two
+/// concurrent `POST /v1/chat` calls each read the file, add their intent and
+/// write it back, and without this one of the two intents is lost.
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn write(seed_dir: &Path, intents: &[PairIntent]) -> Result<(), String> {
     let path = path_in(seed_dir);
     if intents.is_empty() {
@@ -86,7 +91,15 @@ fn write(seed_dir: &Path, intents: &[PairIntent]) -> Result<(), String> {
         };
     }
     let bytes = serde_json::to_vec(intents).map_err(|e| format!("encode pair intents: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
+    // A temp name per WRITE, not per file: two writers sharing one temp path
+    // race — the first rename moves it away and the second fails "cannot find
+    // the file" (seen on Windows CI, `concurrent_chat_creation_is_an_idempotent_success`).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, &path))
         .map_err(|e| format!("write pair intents at {}: {e}", path.display()))
@@ -96,6 +109,9 @@ fn write(seed_dir: &Path, intents: &[PairIntent]) -> Result<(), String> {
 /// `contact_person`. Idempotent (the FIRST `asked_at` is kept). An `Err`
 /// means the intent is not durable and the caller must not promise it.
 pub fn record(seed_dir: &Path, pair_id: &str, contact_person: &str) -> Result<(), String> {
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut intents = read(seed_dir);
     if intents
         .iter()
@@ -113,6 +129,9 @@ pub fn record(seed_dir: &Path, pair_id: &str, contact_person: &str) -> Result<()
 
 /// Drop every intent for `pair_id`.
 pub fn forget(seed_dir: &Path, pair_id: &str) -> Result<(), String> {
+    let _guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut intents = read(seed_dir);
     let before = intents.len();
     intents.retain(|i| i.pair_id != pair_id);
@@ -260,5 +279,45 @@ mod tests {
             !dir.join(PAIR_INTENTS_FILE).exists(),
             "no file once none remain"
         );
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    /// Many concurrent records into ONE file: every write lands (no shared
+    /// temp path to lose a rename) and no intent is dropped (the read-modify-
+    /// write is serialized).
+    #[test]
+    fn concurrent_records_neither_fail_nor_lose_an_intent() {
+        let dir = std::env::temp_dir().join(format!(
+            "ciris-pair-intents-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        const THREADS: usize = 32;
+        const EACH: usize = 25;
+        let threads: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let d = dir.clone();
+                std::thread::spawn(move || {
+                    for j in 0..EACH {
+                        record(&d, &format!("pair-{i}-{j}"), &format!("person-{i}"))?;
+                    }
+                    Ok::<(), String>(())
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().expect("every concurrent record lands");
+        }
+        assert_eq!(
+            read(&dir).len(),
+            THREADS * EACH,
+            "no intent lost to a concurrent write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
