@@ -19,6 +19,7 @@ topology:
     - {rel: room, kind: self, person: one}
     - {rel: file, person: one, device: D1, size: 25165824, name: custody-24MiB.bin}
     - {rel: custody, person: one, device: D1, file: last}
+    - {rel: withdraw, person: one, device: D1, file: last}
   actor: {person: one, device: D1}
   negatives:
     - {check: no_wider_self_rows, person: one}
