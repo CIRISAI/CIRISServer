@@ -772,7 +772,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 36 -> 39 for 0.5.220: the recovery-key step's
     /// `final_genesis.{not_a_holder, recovery_key_is_a_holder, recovery_key_shared}`
     /// (the maintainer: A2 recovers A1, B2 B1, C2 C1).
-    const MAX_UNCOVERED: usize = 39;
+    ///
+    /// 39 -> 40 for 0.5.220: `final_genesis.recovery_key_mismatch` (a spare
+    /// read off its token that differs from the ceremony's record).
+    const MAX_UNCOVERED: usize = 40;
 
     let en = load_en();
     let ids = scraped_server_ids();

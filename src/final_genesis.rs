@@ -80,6 +80,40 @@ fn recovery_path(home: &std::path::Path) -> std::path::PathBuf {
     dir(home).join("recovery-keys.json")
 }
 
+/// The six keys of the original accord ceremony (2026-07): the seated holders
+/// A1/B1/C1 and their vaulted spares A2/B2/C2, public halves only, copied from
+/// CIRISVerify's committed custody trail (`accord_ceremony_artifacts/holders`,
+/// #157, verified in CI against the Yubico attestation root). The holders are
+/// pinned equal to persist's baked roster by `tests/accord_ceremony_keys.rs`,
+/// which is what makes the spares beside them trustworthy.
+const ACCORD_CEREMONY_KEYS: &str = include_str!("../genesis/accord_ceremony_keys.json");
+
+/// Every ceremony key by id (A1, B1, C1, A2, B2, C2).
+pub fn accord_ceremony_keys() -> BTreeMap<String, CommittedKey> {
+    #[derive(Deserialize)]
+    struct File {
+        keys: BTreeMap<String, CommittedKey>,
+    }
+    serde_json::from_str::<File>(ACCORD_CEREMONY_KEYS)
+        .map(|f| f.keys)
+        .unwrap_or_default()
+}
+
+/// The maintainer's pairing (2026-10-02: "Yes those are the recovery keys"):
+/// each seated holder recovers with its own spare — A1 → A2, B1 → B2, C1 → C2.
+pub const RECOVERY_PAIRING: [(&str, &str); 3] = [("A1", "A2"), ("B1", "B2"), ("C1", "C2")];
+
+/// The recovery keys from the ceremony record, keyed by holder — for the
+/// holders actually on `roster` only (so a test-anchor roster gets none).
+fn recorded_ceremony_recovery_keys(roster: &[String]) -> BTreeMap<String, CommittedKey> {
+    let keys = accord_ceremony_keys();
+    RECOVERY_PAIRING
+        .iter()
+        .filter(|(holder, _)| roster.iter().any(|r| r == holder))
+        .filter_map(|(holder, spare)| keys.get(*spare).map(|k| ((*holder).to_string(), k.clone())))
+        .collect()
+}
+
 /// The recovery keys recorded so far (holder key id → committed key).
 fn load_recovery(home: &std::path::Path) -> BTreeMap<String, CommittedKey> {
     std::fs::read_to_string(recovery_path(home))
@@ -302,10 +336,23 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             Err(r) => return r,
         }
     }
-    let recovery_keys = if req.recovery_keys.is_empty() {
-        load_recovery(&st.home)
-    } else {
+    // Recovery keys, first source that has them: the request; the keys read off
+    // the spares on this node (`POST /recovery-key`); the original ceremony's
+    // record of the spares (A2/B2/C2), when the roster is the real A1/B1/C1.
+    let roster_ids: Vec<String> =
+        ciris_persist::federation::genesis::effective_accord_holder_records()
+            .iter()
+            .map(|h| h.record.key_id.clone())
+            .collect();
+    let recovery_keys = if !req.recovery_keys.is_empty() {
         req.recovery_keys
+    } else {
+        let read = load_recovery(&st.home);
+        if read.is_empty() {
+            recorded_ceremony_recovery_keys(&roster_ids)
+        } else {
+            read
+        }
     };
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
@@ -444,6 +491,20 @@ async fn record_recovery_key_impl(st: FinalGenesisState, req: RecoveryKeyRequest
         pubkey_ed25519_base64: b64.encode(ed_pub),
         pubkey_ml_dsa_65_base64: b64.encode(pqc_pub),
     };
+    // A spare the original ceremony recorded must be the SAME key: this route is
+    // then a check that the right YubiKey + USB is in hand, not a new source.
+    if let Some(recorded) = accord_ceremony_keys().get(&spare) {
+        if recorded != &key {
+            return refuse(
+                StatusCode::CONFLICT,
+                "final_genesis.recovery_key_mismatch",
+                format!(
+                    "the token opened as {spare} does not hold the key the accord ceremony \
+                     recorded for {spare} — wrong YubiKey or USB"
+                ),
+            );
+        }
+    }
     let mut all = load_recovery(&st.home);
     if all
         .iter()

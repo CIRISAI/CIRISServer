@@ -845,6 +845,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "final_genesis.not_a_holder",
     "final_genesis.recovery_key_is_a_holder",
     "final_genesis.recovery_key_shared",
+    "final_genesis.recovery_key_mismatch",
     "final_genesis.no_serve_nodes",
     "final_genesis.nothing_to_sign",
     "final_genesis.not_planned",
