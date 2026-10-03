@@ -782,7 +782,17 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           [src] + others, r"withdraw|custody_ack|tombstone",
                           layer="relations", rel="withdraw", cc="CC 2.3", reads=dict(last))
                 raise
+            # The bytes plane (edge `blob_serve_refusals["withdrawn"]`): recorded,
+            # not asserted — nothing in this topology asks a holder for a
+            # withdrawn file's chunks afterwards (the author holds its own copy and
+            # edge never re-pulls a withdrawn file).
+            serve_refusals = {}
+            for o in others:
+                st_m, m = o.api("GET", "/v1/federation/metrics")
+                data = (m or {}).get("data", {}) if isinstance(m, dict) else {}
+                serve_refusals[o.name] = (data.get("blob_serve_refusals") or {}).get("withdrawn", 0)
             step(f"withdraw:{which}", layer="relations", author=src.name, reads=dict(last),
+                 withdrawn_serve_refusals=serve_refusals,
                  proves="a withdrawn file reads 410 on every device that held it")
         elif k == "custody":
             # WHERE THE FILE IS (FSD/FILE_CUSTODY.md): `GET /v1/files/{id}/custody`

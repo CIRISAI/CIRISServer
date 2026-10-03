@@ -965,7 +965,7 @@ dependencies = [
 [[package]]
 name = "ciris-edge"
 version = "39.1.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?rev=354791468180d2280607034fbcb1f36b9a3fb976#354791468180d2280607034fbcb1f36b9a3fb976"
+source = "git+https://github.com/CIRISAI/CIRISEdge?rev=db8e98de5f99647c0c93d64548caaf293d4720fc#db8e98de5f99647c0c93d64548caaf293d4720fc"
 dependencies = [
  "async-trait",
  "axum",
