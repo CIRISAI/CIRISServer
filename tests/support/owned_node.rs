@@ -170,6 +170,12 @@ pub fn user_record(key_id: &str, ed_b64: &str, pqc_b64: &str) -> SignedKeyRecord
 
 /// An in-memory substrate keyed by a fresh hybrid node signer.
 async fn node_engine() -> Arc<Engine> {
+    // These fixtures model a PERSON'S OWN devices. Under persist v53 S1 a
+    // server-class node gets none of its owner's self/family content, and the
+    // server registers its host's real class (`backend::host_device_class`), so
+    // the test process declares itself a laptop, as the desktop launcher, the
+    // client and the agent now do for a person's machine.
+    std::env::set_var("CIRIS_DEVICE_CLASS", "laptop");
     static SEED: AtomicU8 = AtomicU8::new(0x10);
     let s = SEED.fetch_add(2, Ordering::Relaxed);
     let pqc = Arc::new(

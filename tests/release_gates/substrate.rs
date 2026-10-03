@@ -233,7 +233,10 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   inputs (#937/#938: attach_window_secs, witness_cadence_secs,
     //   witness_quorum, attached_head_digest); none removed or renamed, and the
     //   server writes none of them. `a6a84cc9…` → `c9558c98…`.
-    const ADOPTED: &str = "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
+    // 0.5.220 (persist v53, CC 4.2.6 rc7): one key ADDED, the accord charter's
+    //   `recovery_commitments`; none removed or renamed, and the server writes
+    //   it only through persist's ceremony assembler. `c9558c98…` → `8064aafe…`.
+    const ADOPTED: &str = "8064aafe07646acefad93f51fbf7e79cb8ac421bd49318c5aad50ded142295b1";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

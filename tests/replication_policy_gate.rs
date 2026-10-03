@@ -48,8 +48,15 @@
 /// were APPENDED with their policy tuples; no existing kind's admission or
 /// projection moved. The value is persist's own published
 /// `REPLICATION_POLICY_HASH`. `9d62d3a8…` → `5501d6b9…`.
+///
+/// Re-pinned for 0.5.220 (persist v53, CIRISEdge#761 / CIRISPersist#963 —
+/// S1), reviewed: every `KindPolicy` gains `audience` (`ServeAudience`, who a
+/// serving node may send the kind's rows to); SELF/FAMILY now follow each
+/// occurrence's `device_class` (the server registers its host's real class —
+/// `backend::host_device_class`). No kind added or removed. Persist's own
+/// published value. `5501d6b9…` → `1860451c…`.
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
-    "5501d6b9621e0af400ed89c0c803515b33c084676be5cd5182c3629277d9714a";
+    "1860451cf166879431dadf433422f6fdb43a911b5c889b0f55ca491262393869";
 
 /// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
