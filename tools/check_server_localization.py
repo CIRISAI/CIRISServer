@@ -837,6 +837,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # T4a): it would install as no charter. Queued for the client bundle.
     "trust_root.bundle_unlabelled",
     "trust_root.bundle_not_in_force",
+    "drive.device_class_not_personal",
     # THE FINAL GENESIS (0.5.220, FSD/FINAL_GENESIS.md): the ceremony routes'
     # refusals, for the client's 3-of-3 re-mint screens (to come, CSD-067 §3).
     # Queued for the client bundle with their English.

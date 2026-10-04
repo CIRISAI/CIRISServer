@@ -789,7 +789,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 43 -> 44 for 0.5.220: `trust_root.bundle_not_in_force` (the public
     /// bundle route on a node not entrenched on its bake, Codex on #726).
-    const MAX_UNCOVERED: usize = 44;
+    ///
+    /// 44 -> 45 for 0.5.221: `drive.device_class_not_personal` (a self/family
+    /// write on a node not registered as a personal device names the cause —
+    /// the client's matrix hit the bare key_grant error).
+    const MAX_UNCOVERED: usize = 45;
 
     let en = load_en();
     let ids = scraped_server_ids();
