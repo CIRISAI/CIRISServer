@@ -53,11 +53,12 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
     // threshold. That is the whole of CIRISPersist#557 — no single seat may
     // declare itself the mesh's root. A one-scrub charter leaves
     // `root_self_declares = false`, which is what this test first hit.
-    let successors = vec![
+    let successors = [
         "humanity-accord-succ-a".to_string(),
         "humanity-accord-succ-b".to_string(),
     ];
-    let commitment = pre_rotation_commitment(&successors).expect("pre-rotation commitment");
+    let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
+    let commitment = pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment");
     put_signed_by_many(
         e,
         &[&hs[0], &hs[1]],
@@ -65,6 +66,7 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
         attestation_type::DELEGATES_TO,
         serde_json::json!({
             "dimension": TRUST_CHARTER_DIMENSION,
+            "dimension": ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
             "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
             "pre_rotation_commitment": commitment,
         }),
@@ -93,7 +95,10 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
         &[node],
         "humanity-accord",
         attestation_type::DELEGATES_TO,
-        serde_json::json!({ "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE] }),
+        serde_json::json!({
+            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
+            "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
+        }),
     )
     .await;
 }
@@ -209,4 +214,16 @@ pub async fn register_key_as_user(e: &Engine, key_id: &str) {
         })
         .await
         .expect("register the subject identity");
+}
+
+/// A placeholder successor as committed key material (persist v53, CC 3.2 T3:
+/// a commitment binds `{key_id, both pubkeys}`). Fixture successors never sign,
+/// so any well-formed material serves.
+#[allow(dead_code)]
+fn committed(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+    ciris_persist::federation::trust_root::CommittedKey {
+        key_id: id.to_string(),
+        pubkey_ed25519_base64: format!("{id}-ed25519"),
+        pubkey_ml_dsa_65_base64: format!("{id}-ml-dsa-65"),
+    }
 }

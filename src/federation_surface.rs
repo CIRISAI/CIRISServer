@@ -324,6 +324,9 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     //   blob_pull_refusals — CIRISEdge#717: a pull that fetched and refused
     //     to STORE (`size_mismatch`, `stream_pointer_needs_dag_pull`); each
     //     is a file that is not on this device.
+    //   blob_serve_refusals — CIRISEdge#606 / the v53 retraction fix: a peer
+    //     asked THIS node for a blob's chunks and was refused (`withdrawn` = the
+    //     file's every reference was withdrawn, CC 2.3 at the bytes plane).
     //   first_contact_outcomes — CIRISEdge#683: the opaque-plane
     //     first-contact door by label (`first_contact_admitted`, refusals).
     let fold =
@@ -334,6 +337,7 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         };
     let transport_inbound_drops = fold(&bundle.transport_inbound_drops);
     let blob_pull_refusals = fold(&bundle.blob_pull_refusals);
+    let blob_serve_refusals = fold(&bundle.blob_serve_refusals);
     let first_contact_outcomes = fold(&bundle.first_contact_outcomes);
 
     (
@@ -366,6 +370,7 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "blob_route_refusals": blob_route_refusals,
                 "blob_pull_sources": blob_pull_sources,
                 "blob_pull_refusals": blob_pull_refusals,
+                "blob_serve_refusals": blob_serve_refusals,
                 "transport_inbound_drops": transport_inbound_drops,
                 "first_contact_outcomes": first_contact_outcomes,
                 "carriage_standing": crate::operator_surface::carriage_standing(Some(&bundle)).as_str(),

@@ -406,6 +406,8 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
         consensus_protocol: "founder_only".to_string(),
         policy_blob: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     let canonical =
         ceg_produce_canonicalize(&community.signing_envelope()).expect("canonicalize community");

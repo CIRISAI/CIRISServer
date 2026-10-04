@@ -28,6 +28,12 @@ pub const NODE_ALIAS: &str = "ciris-server";
 
 /// This node: in-memory substrate, HYBRID node signer (0xA1 / 0xA2).
 pub async fn node_engine() -> Arc<Engine> {
+    // These fixtures model a PERSON'S OWN devices. Under persist v53 S1 a
+    // server-class node gets none of its owner's self/family content, and the
+    // server registers its host's real class (`backend::host_device_class`), so
+    // the test process declares itself a laptop, as the desktop launcher, the
+    // client and the agent now do for a person's machine.
+    std::env::set_var("CIRIS_DEVICE_CLASS", "laptop");
     let pqc = Arc::new(
         MlDsa65SoftwareSigner::from_seed_bytes(&[0xA2; 32], format!("{NODE_ALIAS}-pqc"))
             .expect("node ML-DSA-65 seed"),

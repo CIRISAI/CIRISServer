@@ -48,8 +48,15 @@
 /// were APPENDED with their policy tuples; no existing kind's admission or
 /// projection moved. The value is persist's own published
 /// `REPLICATION_POLICY_HASH`. `9d62d3a8…` → `5501d6b9…`.
+///
+/// Re-pinned for 0.5.220 (persist v53, CIRISEdge#761 / CIRISPersist#963 —
+/// S1), reviewed: every `KindPolicy` gains `audience` (`ServeAudience`, who a
+/// serving node may send the kind's rows to); SELF/FAMILY now follow each
+/// occurrence's `device_class` (the server registers its host's real class —
+/// `backend::host_device_class`). No kind added or removed. Persist's own
+/// published value. `5501d6b9…` → `1860451c…`.
 const RATIFIED_REPLICATION_POLICY_HASH: &str =
-    "5501d6b9621e0af400ed89c0c803515b33c084676be5cd5182c3629277d9714a";
+    "1860451cf166879431dadf433422f6fdb43a911b5c889b0f55ca491262393869";
 
 /// edge v16.0.0 (`ciris_edge::replication::serve_policy`) — the serve/advertise
 /// (responder) policy hash. Witnesses the load-bearing E3 fact: `trace:*`
@@ -227,8 +234,21 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 ///
 /// `LocationProof` keeps `public` (split out of the old shared line, value
 /// unchanged). `b86a7042…` → `e3070d53…`, equal to edge's published constant.
+///
+/// `e3070d53…` → `e7b1ba86…` with persist v53 S1 (CC 3.3.7): the audience,
+/// group records and all five membership planes go through persist's
+/// `may_receive` / `may_receive_group_plane`, and key-grant sets reach a
+/// device only through the audience — so SELF/FAMILY content follows each
+/// occurrence's `device_class` (edge `prestage/persist-v53` ee3b320).
+///
+/// `e7b1ba86…` → `68c5298b…` (edge `prestage/persist-v53` a8d6847, persist
+/// 8fcbeb9e): edge no longer decides who a membership proposal, acceptance or
+/// decline is addressed to — persist's `may_receive` does; edge keeps only the
+/// first-contact transport carve, and every ceremony stage also reaches the
+/// group's membership-plane audience. A Rooted keyless `ciris-canonical` is
+/// served to every peer.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "e3070d5327d6518b7ef50b0988f1af92790e2ea4efb9833cc4213a4127fc41b0";
+    "68c5298b4bb48bbf8ffdb7ef881b71386b3db6ba8c6026b8bb61ec454ebe3850";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

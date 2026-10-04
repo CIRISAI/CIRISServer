@@ -325,7 +325,9 @@ async fn accept_shared_root(nodes: &[&Node], root: &str, serve_node_key_id: &str
         )
         .await
         .expect("root-side trust legs");
+        // persist v53 (CC 3.2 T4a): an acceptance is one only with its label.
         let trust_edge = serde_json::json!({
+            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
             "scope": [INFRA_ATTEST, INFRA_SERVE],
         });
         let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(trust_edge)

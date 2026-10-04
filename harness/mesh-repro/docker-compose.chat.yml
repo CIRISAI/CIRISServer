@@ -74,6 +74,9 @@ services:
     environment:
       CIRIS_TEST_BLESS_CANONICAL: "false"
       CIRIS_NODE_KEY_ID: "ciris-node-a"
+      # S1 (persist v53): a person device — a server-class node is given
+      # no self/family content, so it could not seal a self file.
+      CIRIS_DEVICE_CLASS: "laptop"
       CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242"]'
       RUST_LOG: "info,ciris_edge=debug"
     volumes:
@@ -114,6 +117,9 @@ services:
     environment:
       CIRIS_TEST_BLESS_CANONICAL: "false"
       CIRIS_NODE_KEY_ID: "ciris-node-b"
+      # S1 (persist v53): a person device — a server-class node is given
+      # no self/family content, so it could not seal a self file.
+      CIRIS_DEVICE_CLASS: "laptop"
       CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242", "172.29.77.11:4242"]'
       RUST_LOG: "info,ciris_edge=debug"
     volumes:
@@ -156,6 +162,9 @@ services:
     environment:
       CIRIS_TEST_BLESS_CANONICAL: "false"
       CIRIS_NODE_KEY_ID: "ciris-node-c"
+      # S1 (persist v53): a person device — a server-class node is given
+      # no self/family content, so it could not seal a self file.
+      CIRIS_DEVICE_CLASS: "laptop"
       CIRIS_NODE_BOOTSTRAP_PEERS: '["172.29.77.10:4242", "172.29.77.11:4242"]'
       RUST_LOG: "info,ciris_edge=debug"
     volumes:

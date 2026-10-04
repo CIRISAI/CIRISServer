@@ -69,8 +69,13 @@ const RATIFIED_VENDORED_MANIFEST_VERSION: &str = "0.3.0";
 // and 19 joined `kind_transferability` (both StructuralPlane, as their room
 // twins). Principles, restriction ops and audiences unchanged; persist's own
 // published `CONSENT_GRAMMAR_HASH`.
+//
+// Previous value 82305891… (v49.0.0 – v52.0.2). v53 (CIRISPersist#963, CC
+// 3.3.7): the optional payload member `cohorts` (an owner's per-node allow list
+// on a grant for one of their own nodes) joined the manifest. Optional — the
+// server writes none yet; nothing removed or renamed. `82305891…` → `4d473eac…`.
 const RATIFIED_CONSENT_GRAMMAR_HASH: &str =
-    "8230589131945c4b4db3c2e7ca2187e6c02543cd8f084b0f8862eb951d2c82ac";
+    "4d473eac6f2bfde1a78b01e9a2ac8442fc9adb5207c7adeb51d509215b79e843";
 
 // ─────────────────────────── persist: transform algebra ────────────────────
 
@@ -119,8 +124,14 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// charter and `attached_head_digest` on the acceptance edge. Nothing removed
 /// or renamed; this server writes none of the four. `a6a84cc9…` →
 /// `c9558c98…`, equal to persist's published `ENVELOPE_VOCABULARY_SHA256`.
+///
+/// Re-pinned for 0.5.220 on persist v53 (CC 4.2.6 rc7, CIRISConstitution#139),
+/// reviewed: ONE key added, the accord charter's `recovery_commitments` (who may
+/// rotate a holder's seat without a quorum). Nothing removed or renamed; the
+/// server writes it only through persist's ceremony assembler. `c9558c98…` →
+/// `8064aafe…`.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
+    "8064aafe07646acefad93f51fbf7e79cb8ac421bd49318c5aad50ded142295b1";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 

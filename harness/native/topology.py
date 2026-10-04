@@ -743,6 +743,57 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                           _BODY + r"|stalled mid-frame|seal_mismatch", layer="relations", rel="corpus", cc="CC 5.3.2.5")
                 if rel.get("require", True):
                     raise MeshError("corpus did not open byte-identical on every device")
+        elif k == "withdraw":
+            # A WITHDRAWN FILE IS GONE EVERYWHERE (CC 2.3): the author withdraws a
+            # file the person's other devices already hold, and every one of them
+            # must then read it 410 `withdrawn` — never the bytes. Caught a real
+            # leak on the v53 pin (edge #763's `custody:ack here` counted as a live
+            # binding, so a holder kept reading and serving a withdrawn file).
+            p = rel["person"]
+            devs = persons[p]["owns"]
+            which = rel.get("file", "last")
+            if which not in files_written:
+                raise MeshError(f"withdraw: no file {which!r} was written before this relation")
+            f = files_written[which]
+            cohort = rel.get("cohort", "self")
+            src = N[rel.get("device", f["device"])]
+            others = [N[o] for o in devs if o != src.name]
+            wait = float(rel.get("wait", 180))
+            for o in others:
+                wait_for(f"{o.name} to hold {which} before the withdrawal",
+                         lambda o=o: o.read_raw(f["id"], cohort)[0] == 200, wait, every=5)
+            st, got = src.api("DELETE", f"/v1/files/{f['id']}?cohort={cohort}")
+            if st != 200:
+                step.fail(f"withdraw_REFUSED:{which}", f"the author's withdrawal answered {st}", [src],
+                          r"withdraw", layer="relations", rel="withdraw", cc="CC 2.3", body=got)
+                raise MeshError("the author could not withdraw the file")
+            last: Dict[str, int] = {}
+
+            def gone_everywhere() -> bool:
+                for o in others:
+                    last[o.name] = o.read_raw(f["id"], cohort)[0]
+                return all(code == 410 for code in last.values())
+            try:
+                wait_for(f"every other device to read {which} as withdrawn", gone_everywhere, wait, every=5)
+            except MeshError:
+                step.fail(f"withdraw_LEAKED:{which}",
+                          "a device that held the file still reads it after its author withdrew it — the "
+                          "withdrawal did not reach it, or a binding on that device outlives the tombstone",
+                          [src] + others, r"withdraw|custody_ack|tombstone",
+                          layer="relations", rel="withdraw", cc="CC 2.3", reads=dict(last))
+                raise
+            # The bytes plane (edge `blob_serve_refusals["withdrawn"]`): recorded,
+            # not asserted — nothing in this topology asks a holder for a
+            # withdrawn file's chunks afterwards (the author holds its own copy and
+            # edge never re-pulls a withdrawn file).
+            serve_refusals = {}
+            for o in others:
+                st_m, m = o.api("GET", "/v1/federation/metrics")
+                data = (m or {}).get("data", {}) if isinstance(m, dict) else {}
+                serve_refusals[o.name] = (data.get("blob_serve_refusals") or {}).get("withdrawn", 0)
+            step(f"withdraw:{which}", layer="relations", author=src.name, reads=dict(last),
+                 withdrawn_serve_refusals=serve_refusals,
+                 proves="a withdrawn file reads 410 on every device that held it")
         elif k == "custody":
             # WHERE THE FILE IS (FSD/FILE_CUSTODY.md): `GET /v1/files/{id}/custody`
             # on the AUTHOR device must name every other device of the person as

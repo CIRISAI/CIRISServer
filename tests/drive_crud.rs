@@ -169,6 +169,8 @@ impl Fx {
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
+                prev_head_digest: String::new(),
+                charter_digest: String::new(),
             },
             others,
         )
@@ -202,6 +204,8 @@ impl Fx {
                 consensus_protocol: "founder_only".to_string(),
                 policy_blob: None,
                 persist_row_hash: String::new(),
+                prev_head_digest: String::new(),
+                charter_digest: String::new(),
             },
             &[("carol-drive", 0xC0, 0xC1), ("dave-drive", 0xD0, 0xD1)],
         )
@@ -2068,6 +2072,8 @@ async fn a_family_files_chunks_are_served_under_the_family() {
         consensus_protocol_entrenched: false,
         dissolved_at: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     let canonical =
         ceg_produce_canonicalize(&family.signing_envelope()).expect("canonicalize family");

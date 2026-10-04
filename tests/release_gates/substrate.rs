@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v18.0.0";
-pub const TARGET_PERSIST: &str = "v52.0.2";
-pub const TARGET_EDGE: &str = "v39.1.0";
+pub const TARGET_VERIFY: &str = "v19.0.0";
+pub const TARGET_PERSIST: &str = "v53.0.1";
+pub const TARGET_EDGE: &str = "v40.0.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -233,7 +233,10 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     //   inputs (#937/#938: attach_window_secs, witness_cadence_secs,
     //   witness_quorum, attached_head_digest); none removed or renamed, and the
     //   server writes none of them. `a6a84cc9…` → `c9558c98…`.
-    const ADOPTED: &str = "c9558c98bf871e97c2e73c428894e2dc642fcffec4de92da06ab5a9fa69ddca2";
+    // 0.5.220 (persist v53, CC 4.2.6 rc7): one key ADDED, the accord charter's
+    //   `recovery_commitments`; none removed or renamed, and the server writes
+    //   it only through persist's ceremony assembler. `c9558c98…` → `8064aafe…`.
+    const ADOPTED: &str = "8064aafe07646acefad93f51fbf7e79cb8ac421bd49318c5aad50ded142295b1";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

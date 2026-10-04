@@ -261,9 +261,12 @@ async fn the_author_device_names_the_device_that_received_the_file() {
     assert_eq!(v["devices_total"], 2, "{v}");
     assert_eq!(v["held_here"], true, "{v}");
     assert_eq!(v["this_device_is_author"], true, "{v}");
+    // persist v53 S2 (CC 6.1.5.3): every tier's copies are observable — a
+    // device files its own `custody:ack:v1` (here | none) — so self copies are
+    // countable now. Until 0.5.220 this was `false`, "uncountable by design".
     assert_eq!(
-        v["copies_observable"], false,
-        "self copies are uncountable by design: {v}"
+        v["copies_observable"], true,
+        "self copies are observable on persist v53: {v}"
     );
     let devices = v["devices"].as_array().expect("devices");
     let a = devices
@@ -293,12 +296,16 @@ async fn the_author_device_names_the_device_that_received_the_file() {
         .iter()
         .filter_map(|w| w["reason_id"].as_str())
         .collect();
-    for id in [
-        "custody.copies_unobservable_by_design",
-        "custody.receipt_is_delivery_not_holding",
-    ] {
-        assert!(why.contains(&id), "{id} in {why:?}");
-    }
+    assert!(
+        why.contains(&"custody.receipt_is_delivery_not_holding"),
+        "{why:?}"
+    );
+    // persist v53 S2: copies are observable at every tier, so the view no
+    // longer explains them away.
+    assert!(
+        !why.contains(&"custody.copies_unobservable_by_design"),
+        "{why:?}"
+    );
     assert!(
         v["receipts_from_other_keys"]
             .as_array()

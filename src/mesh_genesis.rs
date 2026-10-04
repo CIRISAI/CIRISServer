@@ -355,14 +355,26 @@ pub fn fingerprint(bundle: &GenesisBundle) -> Result<String, GenesisError> {
 /// compromised, only a key named here can rotate the charter, and persist binds
 /// the successor set's hash to this commitment. Callers pass the OTHER seated
 /// holders — never a hard-coded pair.
-pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, GenesisError> {
+///
+/// persist v53 (CC 3.2 T3, rc7): the commitment binds each successor's KEY
+/// MATERIAL (`{key_id, both pubkeys}`), not its id, so callers pass the
+/// successors' records.
+pub fn charter_envelope(
+    successors: &[ciris_persist::federation::trust_root::CommittedKey],
+) -> Result<serde_json::Value, GenesisError> {
     let commitment = pre_rotation_commitment(successors)
         .map_err(|e| GenesisError::CharterInvalid(format!("pre-rotation commitment: {e}")))?;
+    let ids: Vec<&str> = successors.iter().map(|k| k.key_id.as_str()).collect();
     Ok(serde_json::json!({
+        (paths::DIMENSION): ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
         (paths::REFERENCES_ATTESTATION_ID): CHARTER_ATTESTATION_ID,
         "scope": CHARTER_SCOPES,
         CHARTER_PRE_ROTATION_FIELD: commitment,
-        "successor_key_ids": successors,
+        "successor_key_ids": ids,
+        // No witness directory (FSD/FINAL_GENESIS.md, ruling A-2): witnessed
+        // mode is off. 0, never 1 (persist refuses a quorum of one).
+        "witness_quorum": 0,
+        "attach_window_secs": 604_800,
     }))
 }
 
@@ -376,6 +388,7 @@ pub fn charter_envelope(successors: &[String]) -> Result<serde_json::Value, Gene
 /// paying for.
 pub fn grant_envelope(serve_key_id: &str) -> serde_json::Value {
     serde_json::json!({
+        (paths::DIMENSION): ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION,
         (paths::REFERENCES_ATTESTATION_ID): format!("{GRANT_ATTESTATION_ID_PREFIX}:{serve_key_id}"),
         "scope": SERVE_NODE_SCOPES,
     })
@@ -434,6 +447,20 @@ fn lifecycle_of<'a>(bundle: &'a GenesisBundle, root: &str) -> Option<&'a Attesta
 /// degenerate case where they coincide.
 pub fn charter_root_key_id(bundle: &GenesisBundle) -> Option<String> {
     charter_of(bundle).map(|c| c.attested_key_id.clone())
+}
+
+/// Does the bundle's charter carry its job label (`trust:charter:v1`)? Under
+/// persist v53 (CC 3.2 T4a "bundle only") an unlabelled `delegates_to` is a
+/// charter only inside the ONE pinned genesis bundle; a portable bundle whose
+/// charter is unlabelled installs as no charter at all.
+#[must_use]
+pub fn bundle_charter_is_labelled(bundle: &GenesisBundle) -> bool {
+    charter_of(bundle).is_some_and(|c| {
+        c.attestation_envelope
+            .get(paths::DIMENSION)
+            .and_then(|v| v.as_str())
+            == Some(ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION)
+    })
 }
 
 /// Parse `quorum:M/N` into M. Returns `None` when absent/unparseable — callers
@@ -718,6 +745,7 @@ pub fn produce_genesis(
         holders,
         serve_nodes,
         attestations,
+        roster_records: Vec::new(),
         authorizations,
         produced_at: now_rfc3339.to_string(),
     };
@@ -809,19 +837,15 @@ pub async fn accept_trust_root(
     if node_key_id == root {
         return Ok(None);
     }
-    if node_trusts_root(engine, &node_key_id, &root).await? {
-        tracing::debug!(root, "trust root already accepted — no-op");
+    if holds_labelled_acceptance(engine, &node_key_id, &root).await? {
+        tracing::debug!(root, "trust root already accepted (labelled) — no-op");
         accept_trust_root_as_node_key(engine, &node_key_id, &root).await?;
         return Ok(Some(root));
     }
 
-    let id = format!("trust-edge:{node_key_id}:{root}");
-    let envelope = serde_json::json!({
-        (paths::REFERENCES_ATTESTATION_ID): id,
-        // Trust the root for exactly what a root is for. Attenuation does the
-        // rest: the node can never exercise more than the charter holds.
-        "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
-    });
+    // Trust the root for exactly what a root is for (infra:attest + infra:serve);
+    // attenuation does the rest.
+    let envelope = acceptance_envelope(engine, &node_key_id, &root).await?;
     let mut input = EmitAttestationInput::with_envelope(
         attestation_type::DELEGATES_TO,
         ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
@@ -830,10 +854,18 @@ pub async fn accept_trust_root(
         cohort_scope::FEDERATION,
     );
     input.attested_key_id = Some(root.clone());
-    engine
-        .emit_attestation_self(input)
-        .await
-        .map_err(|e| GenesisError::Directory(format!("write trust:accepts: {e}")))?;
+    if let Err(e) = engine.emit_attestation_self(input).await {
+        let e = e.to_string();
+        if is_head_not_yet_held(&e) {
+            tracing::warn!(
+                trust_root = %root,
+                "trust root NOT YET ACCEPTED — this node does not hold the root's head yet; \
+                 the acceptance is retried at the next boot or import"
+            );
+            return Ok(None);
+        }
+        return Err(GenesisError::Directory(format!("write trust:accepts: {e}")));
+    }
     tracing::info!(
         node_key_id = %node_key_id,
         trust_root = %root,
@@ -874,15 +906,11 @@ async fn accept_trust_root_as_node_key(
     if node_key_id == engine_key_id || node_key_id == root {
         return Ok(());
     }
-    if node_trusts_root(engine, &node_key_id, root).await? {
+    if holds_labelled_acceptance(engine, &node_key_id, root).await? {
         return Ok(());
     }
-    let id = format!("trust-edge:{node_key_id}:{root}");
-    let envelope = serde_json::json!({
-        (paths::REFERENCES_ATTESTATION_ID): id,
-        "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
-    });
-    let attestation_id = crate::attest::emit(
+    let envelope = acceptance_envelope(engine, &node_key_id, root).await?;
+    let attestation_id = match crate::attest::emit(
         engine,
         crate::attest::KeySigner::LocalAs(node_signer.as_ref(), &node_key_id),
         crate::attest::Spec::new(
@@ -893,7 +921,15 @@ async fn accept_trust_root_as_node_key(
         .attested_to(root),
     )
     .await
-    .map_err(|e| GenesisError::Directory(format!("write the node key's trust:accepts: {e}")))?;
+    {
+        Ok(id) => id,
+        Err(e) if is_head_not_yet_held(&format!("{e:#}")) => return Ok(()),
+        Err(e) => {
+            return Err(GenesisError::Directory(format!(
+                "write the node key's trust:accepts: {e:#}"
+            )))
+        }
+    };
     tracing::info!(
         node_key_id = %node_key_id,
         trust_root = %root,
@@ -986,16 +1022,12 @@ pub async fn accept_trust_roots_as_owner(
         if root == owner_key_id {
             continue;
         }
-        if node_trusts_root(engine, owner_key_id, &root).await? {
+        if holds_labelled_acceptance(engine, owner_key_id, &root).await? {
             tracing::debug!(owner = %owner_key_id, root = %root, "owner already accepts this root");
             continue;
         }
-        let id = format!("trust-edge:{owner_key_id}:{root}");
-        let envelope = serde_json::json!({
-            (paths::REFERENCES_ATTESTATION_ID): id,
-            "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
-        });
-        let attestation_id = crate::attest::emit(
+        let envelope = acceptance_envelope(engine, owner_key_id, &root).await?;
+        let attestation_id = match crate::attest::emit(
             engine,
             crate::attest::KeySigner::Local(owner_signer),
             crate::attest::Spec::new(
@@ -1006,7 +1038,15 @@ pub async fn accept_trust_roots_as_owner(
             .attested_to(&root),
         )
         .await
-        .map_err(|e| GenesisError::Directory(format!("write the owner's trust:accepts: {e}")))?;
+        {
+            Ok(id) => id,
+            Err(e) if is_head_not_yet_held(&format!("{e:#}")) => continue,
+            Err(e) => {
+                return Err(GenesisError::Directory(format!(
+                    "write the owner's trust:accepts: {e:#}"
+                )))
+            }
+        };
         tracing::info!(
             owner = %owner_key_id,
             trust_root = %root,
@@ -1370,6 +1410,63 @@ async fn live_acceptance_id(
 /// empty, and the canonical Rooted nobody while its boot log said "trust root
 /// entrenched". The idempotency predicate must be the reader's own predicate,
 /// or a row the walk ignores masks the row the walk needs.
+/// **The ONE acceptance-edge envelope** every writer emits (persist v53,
+/// CC 3.2 T4a "bundle only"): `dimension: trust:accepts:v1`, the scope a root
+/// is accepted for, and the `attached_head_digest` of the head this node
+/// attaches on (persist's `attach_head_for`; omitted for a key root). Since
+/// v53 a `delegates_to` toward a root WITHOUT the label confers no acceptance
+/// once it leaves the node that wrote it, so no writer builds its own.
+pub(crate) async fn acceptance_envelope(
+    engine: &ciris_persist::prelude::Engine,
+    author_key_id: &str,
+    root: &str,
+) -> Result<serde_json::Value, GenesisError> {
+    let mut envelope = engine
+        .trust_acceptance_envelope(root, &[INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE])
+        .await
+        .map_err(|e| GenesisError::Directory(format!("acceptance envelope for {root}: {e}")))?;
+    envelope[paths::REFERENCES_ATTESTATION_ID] =
+        serde_json::Value::String(format!("trust-edge:{author_key_id}:{root}"));
+    Ok(envelope)
+}
+
+/// Is a write of an acceptance edge refused only because the root's head is
+/// not held yet? That is "accept later" (the next boot or import retries),
+/// never a boot failure.
+pub(crate) fn is_head_not_yet_held(e: &str) -> bool {
+    e.contains("trust_root_head_unnamed") || e.contains("TrustRootHeadUnnamed")
+}
+
+/// Does `author` hold a LIVE, LABELLED acceptance of `root`? An edge written
+/// before v53 (unlabelled) is honoured on the node that held it at upgrade
+/// (persist V167) but read as no acceptance by a fresh peer it replicates to,
+/// so it is re-authored once in the labelled form. Liveness is persist's
+/// (`trusted_roots_of`); the label is read off the author's own rows.
+pub(crate) async fn holds_labelled_acceptance(
+    engine: &ciris_persist::prelude::Engine,
+    author_key_id: &str,
+    root: &str,
+) -> Result<bool, GenesisError> {
+    if !node_trusts_root(engine, author_key_id, root).await? {
+        return Ok(false);
+    }
+    let rows = engine
+        .federation_directory()
+        .list_attestations_by(author_key_id)
+        .await
+        .map_err(|e| {
+            GenesisError::Directory(format!("list_attestations_by({author_key_id}): {e}"))
+        })?;
+    Ok(rows.iter().any(|a| {
+        a.attestation_type == attestation_type::DELEGATES_TO
+            && a.attested_key_id == root
+            && a.attestation_envelope
+                .get(paths::DIMENSION)
+                .and_then(|v| v.as_str())
+                == Some(ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION)
+    }))
+}
+
 async fn node_trusts_root(
     engine: &ciris_persist::prelude::Engine,
     node_key_id: &str,
@@ -1779,6 +1876,7 @@ mod tests {
             holders,
             serve_nodes: Vec::new(),
             attestations: Vec::new(),
+            roster_records: Vec::new(),
             authorizations: Vec::new(),
             produced_at: "2026-07-21T00:00:00Z".into(),
         };
@@ -1987,6 +2085,15 @@ mod v2_tests {
         scores_att(LIFECYCLE_ATTESTATION_ID, "A1", "A1", lifecycle_envelope())
     }
 
+    /// A successor as committed key material (v53 commitments bind keys, not ids).
+    fn ck(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+        ciris_persist::federation::trust_root::CommittedKey {
+            key_id: id.to_string(),
+            pubkey_ed25519_base64: format!("{id}-ed"),
+            pubkey_ml_dsa_65_base64: format!("{id}-mldsa"),
+        }
+    }
+
     fn bundle_with(attestations: Vec<SignedAttestation>) -> GenesisBundle {
         GenesisBundle {
             version: GENESIS_VERSION,
@@ -1995,6 +2102,7 @@ mod v2_tests {
             holders: vec![holder("A1"), holder("B1"), holder("C1")],
             serve_nodes: vec![serve_node("canon-1", "A1")],
             attestations,
+            roster_records: Vec::new(),
             authorizations: Vec::new(),
             produced_at: "2026-07-22T00:00:00Z".to_string(),
         }
@@ -2005,7 +2113,7 @@ mod v2_tests {
             CHARTER_ATTESTATION_ID,
             "A1",
             "A1",
-            charter_envelope(&["B1".to_string(), "C1".to_string()]).unwrap(),
+            charter_envelope(&[ck("B1"), ck("C1")]).unwrap(),
         )
     }
 
@@ -2051,7 +2159,7 @@ mod v2_tests {
     /// The RC3 root minimum: a root that can vouch but never serve is inert.
     #[test]
     fn a_vouch_only_charter_is_refused() {
-        let mut env = charter_envelope(&["B1".to_string()]).unwrap();
+        let mut env = charter_envelope(&[ck("B1")]).unwrap();
         env["scope"] = serde_json::json!([INFRA_ATTEST_SCOPE]);
         let vouch = att(CHARTER_ATTESTATION_ID, "A1", "A1", env);
         match verify_bundle_structure(&bundle_with(vec![vouch, good_grant()])) {
@@ -2079,7 +2187,7 @@ mod v2_tests {
             CHARTER_ATTESTATION_ID,
             "Z9",
             "Z9",
-            charter_envelope(&["B1".to_string()]).unwrap(),
+            charter_envelope(&[ck("B1")]).unwrap(),
         );
         match verify_bundle_structure(&bundle_with(vec![outsider, good_grant()])) {
             Err(GenesisError::CharterInvalid(d)) => assert!(d.contains("Z9"), "got: {d}"),
