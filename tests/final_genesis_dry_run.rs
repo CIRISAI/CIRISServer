@@ -353,6 +353,69 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
             "the pre-plan fingerprint for {holder} is the charter's"
         );
     }
+    // (4b) A SECOND, fresh node imports the bundle over the import route:
+    // persist v53.1's door installs its genesis records, so the acceptance
+    // that names the root's head is written — `accepted: true`.
+    let importer = Arc::new(
+        Engine::with_signer(
+            Arc::new(LocalSigner::from_parts(
+                SigningKey::from_bytes(&[0x66; 32]),
+                "final-genesis-importer".to_string(),
+                Some(Arc::new(
+                    ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+                        &[0x67; 32],
+                        "final-genesis-importer-pqc".to_string(),
+                    )
+                    .expect("ML-DSA-65 seed"),
+                )),
+                Some("final-genesis-importer-pqc".to_string()),
+            )),
+            "sqlite::memory:",
+        )
+        .await
+        .expect("importer engine"),
+    );
+    let importer_key = importer.local_derived_key_id().await.unwrap();
+    ciris_server::attest::register_key(
+        &importer,
+        ciris_server::attest::KeySigner::Engine(&importer),
+        &importer_key,
+        ciris_persist::federation::types::identity_type::NODE,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("register the importer");
+    let import_app = ciris_server::trust_root_api::router(Arc::clone(&importer), importer_key);
+    let resp = import_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/trust-root/import")
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    40_001,
+                ))))
+                .body(Body::from(
+                    serde_json::json!({ "bundle": bundle }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let st = resp.status();
+    let imported: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap_or(serde_json::Value::Null);
+    assert_eq!(st, StatusCode::OK, "import: {imported}");
+    assert_eq!(
+        imported["accepted"], true,
+        "the imported root is accepted: {imported}"
+    );
+
     ciris_persist::federation::genesis::install_test_ceremony_outputs_json(&bundle_json)
         .expect("the bundle installs as the baked genesis");
 
