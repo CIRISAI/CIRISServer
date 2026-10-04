@@ -478,11 +478,22 @@ pub fn unlabelled_trust_row(bundle: &GenesisBundle) -> Option<String> {
                 .unwrap_or_else(|| "genesis-charter (absent)".to_owned()),
         );
     }
+    // A grant by what it IS — a `delegates_to` to one of the bundle's serve
+    // nodes — not by its id (Codex on #726: a verified bundle may name its
+    // grants otherwise).
+    let serve: std::collections::HashSet<&str> = bundle
+        .serve_nodes
+        .iter()
+        .map(|n| n.record.key_id.as_str())
+        .collect();
     bundle
         .attestations
         .iter()
         .map(|a| &a.attestation)
-        .filter(|a| a.attestation_id.starts_with("genesis-grant:"))
+        .filter(|a| {
+            a.attestation_type == attestation_type::DELEGATES_TO
+                && serve.contains(a.attested_key_id.as_str())
+        })
         .find(|a| {
             a.attestation_envelope
                 .get(paths::DIMENSION)

@@ -130,6 +130,25 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
             && r["commitment"].as_str().is_some_and(|c| !c.is_empty())),
         "{rk}"
     );
+    // A seated canonical must say where it is dialled; without a hint plan
+    // refuses it by name.
+    let (s, refused) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/plan",
+        serde_json::json!({ "serve_nodes": inputs.serve_nodes, "clock_checked": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["reason_id"], "final_genesis.serve_node_no_dial_hint",
+        "{refused}"
+    );
+    let mut serve_nodes = serde_json::to_value(&inputs.serve_nodes).unwrap();
+    for n in serve_nodes.as_array_mut().unwrap() {
+        n["registration_envelope"]["transport_hints"] =
+            serde_json::json!([{ "kind": "ip", "destination": "127.0.0.1:4242" }]);
+    }
     let (s, planned) = call(
         &app,
         "POST",
@@ -137,7 +156,7 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         // No successor set named either: it defaults to the recovery keys
         // (the maintainer: the successor set is the three spares).
         serde_json::json!({
-            "serve_nodes": inputs.serve_nodes,
+            "serve_nodes": serve_nodes,
             "clock_checked": true,
         }),
     )
@@ -151,7 +170,7 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         "POST",
         "/v1/accord/final-genesis/plan",
         serde_json::json!({
-            "serve_nodes": inputs.serve_nodes,
+            "serve_nodes": serve_nodes,
             "successor_keys": inputs.successor_keys,
             "recovery_keys": inputs.recovery_keys,
             "clock_checked": true,
@@ -228,10 +247,21 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
     let bundle_path = home.join("final-genesis").join("canonical_seed.json");
     let bundle_json = std::fs::read_to_string(&bundle_path).expect("the bundle is written");
     assert_eq!(
-        done["bundle"],
-        serde_json::from_str::<serde_json::Value>(&bundle_json).unwrap(),
-        "finish returns the bundle it wrote"
+        done["bundle_json"].as_str(),
+        Some(bundle_json.as_str()),
+        "finish returns the bundle it wrote, byte for byte"
     );
+    {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            done["bundle_sha256"].as_str().unwrap(),
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(bundle_json.as_bytes()))
+            ),
+            "the returned bytes are the fingerprinted bytes"
+        );
+    }
 
     // (5) The one artifact parses as a v3 bundle carrying both genesis records
     // and installs as a node's baked genesis.

@@ -366,7 +366,9 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
 
     # 2. The ceremony, over the routes.
     planned = c.must("POST", "/v1/accord/final-genesis/plan", {
-        "serve_nodes": [c.node_key_id],
+        # Where peers dial it — as the baked canonical carries it.
+        "serve_nodes": [{"key_id": c.node_key_id,
+                         "transport_hints": [{"kind": "ip", "destination": c.transport}]}],
         "recovery_keys": anchor["recovery_keys"],
         "clock_checked": True})
     step("planned", complete=planned.get("complete"), owed=planned.get("owed"))
@@ -389,6 +391,15 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
     mesh.base_env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
     c.env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
     c.stop()
+    # A FRESH directory under the same keys: the canonical's identity (what the
+    # bundle seats) is kept, its database is not. The ceremony host's first
+    # boot seeded a family under a DIFFERENT roster than the test holders, and
+    # an unrelated family is rightly never succeeded — in production the old
+    # and new family share A1/B1/C1 (persist's successor path); a freshly keyed
+    # canonical (canonical-2/-3) boots exactly like this.
+    for f in (c.home / "data").glob("ciris_engine.db*"):
+        f.unlink()
+    c.configure(dial=[])  # the listen address lives in the database's config:*
     c.start()
     step("canonical_rebooted_on_bundle",
          evidence=c.grep(r"booting on a ceremony-minted genesis bundle")[-1:])

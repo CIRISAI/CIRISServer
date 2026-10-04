@@ -256,6 +256,14 @@ fn store(home: &std::path::Path, state: &CeremonyState) -> Result<(), Response> 
 #[serde(untagged)]
 enum ServeNodeSpec {
     Id(String),
+    /// Its key id and the address peers dial it at — `transport_hints:
+    /// [{kind: "ip", destination: "host:4242"}]`, the shape the baked
+    /// canonical carries. A canonical the bundle seats without one is a
+    /// canonical no fresh node can find.
+    WithHints {
+        key_id: String,
+        transport_hints: Vec<serde_json::Value>,
+    },
     Full(ServeNodeInput),
 }
 
@@ -304,9 +312,13 @@ async fn serve_node_input(
     engine: &Engine,
     spec: ServeNodeSpec,
 ) -> Result<ServeNodeInput, Response> {
-    let key_id = match spec {
-        ServeNodeSpec::Full(input) => return Ok(input),
-        ServeNodeSpec::Id(k) => k,
+    let (key_id, hints) = match spec {
+        ServeNodeSpec::Full(input) => return require_dial_hint(input),
+        ServeNodeSpec::Id(k) => (k, None),
+        ServeNodeSpec::WithHints {
+            key_id,
+            transport_hints,
+        } => (key_id, Some(transport_hints)),
     };
     let rec = match engine
         .federation_directory()
@@ -347,7 +359,10 @@ async fn serve_node_input(
         envelope = serde_json::json!({});
     }
     envelope["roles"] = serde_json::json!(SERVE_NODE_ROLES);
-    Ok(ServeNodeInput {
+    if let Some(h) = hints {
+        envelope["transport_hints"] = serde_json::Value::Array(h);
+    }
+    require_dial_hint(ServeNodeInput {
         key_id,
         identity_type: "canonical,node".to_string(),
         pubkey_ed25519_base64: rec.pubkey_ed25519_base64.clone(),
@@ -356,6 +371,39 @@ async fn serve_node_input(
         registration_envelope: envelope,
         attestation_evidence: rec.attestation_evidence.clone(),
     })
+}
+
+/// A serve node the bundle seats must say where it is dialled: the baked
+/// canonical carries `transport_hints` in its registration envelope and every
+/// fresh node finds the canonical from it. A ceremony-minted record copied
+/// from a node's own directory row has none (found by the dry run: the
+/// people's nodes never treated the minted canonical as one).
+fn require_dial_hint(input: ServeNodeInput) -> Result<ServeNodeInput, Response> {
+    let has_hint = input
+        .registration_envelope
+        .get("transport_hints")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| {
+            a.iter().any(|h| {
+                h.get("destination")
+                    .and_then(|d| d.as_str())
+                    .is_some_and(|d| !d.trim().is_empty())
+            })
+        });
+    if has_hint {
+        Ok(input)
+    } else {
+        Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.serve_node_no_dial_hint",
+            format!(
+                "{} carries no transport hint — pass {{\"key_id\": \"{}\", \"transport_hints\": \
+                 [{{\"kind\": \"ip\", \"destination\": \"<host>:4242\"}}]}}; a canonical the \
+                 bundle seats without one is a canonical no fresh node can find",
+                input.key_id, input.key_id
+            ),
+        ))
+    }
 }
 
 /// `POST /v1/accord/final-genesis/plan` — stamp the ceremony once and store it.
@@ -912,10 +960,12 @@ async fn finish(State(st): State<FinalGenesisState>) -> Response {
         "complete": true,
         "bundle_path": path.display().to_string(),
         "bundle_sha256": fingerprint,
-        // The artifact itself, so a client that drove the ceremony can hand it
-        // on without reading this host's filesystem (Codex on #725).
-        "bundle": serde_json::from_str::<serde_json::Value>(&done.bundle_json)
-            .unwrap_or(serde_json::Value::Null),
+        // The artifact itself, VERBATIM — the exact bytes `bundle_sha256`
+        // covers and `bundle_path` holds — so a client that drove the ceremony
+        // can hand it on without this host's filesystem (Codex on #725) and an
+        // operator can check it against the fingerprint (a re-serialized Value
+        // reorders keys and would not hash to it; CIRISClient#154).
+        "bundle_json": done.bundle_json,
         "verified": {
             "quorum_verified": done.verified.quorum_verified,
             "serve_nodes": done.verified.serve_nodes,

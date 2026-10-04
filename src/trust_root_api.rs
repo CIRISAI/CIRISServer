@@ -353,6 +353,14 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
         // bundle's family/community heads are seeded only from the baked one)
         // defers. Reported as NOT accepted — `Ok` alone used to read as
         // accepted (Codex on #725).
+        // This node IS the charter's root (a solo 1-of-1 bundle): the charter's
+        // self-loop is the trust, and no acceptance is written (Codex on #726).
+        Ok(None)
+            if crate::mesh_genesis::charter_root_key_id(&bundle).as_deref()
+                == Some(st.node_key_id.as_str()) =>
+        {
+            true
+        }
         Ok(None) => {
             tracing::warn!(
                 "trust root INSTALLED but not ACCEPTED — this node does not hold the root's \
