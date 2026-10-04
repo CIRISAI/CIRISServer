@@ -33,7 +33,7 @@ async fn get_bundle(app: axum::Router) -> (StatusCode, serde_json::Value) {
 }
 
 #[tokio::test]
-async fn the_baked_bundle_is_served_in_the_registry_shape_once_its_root_is_trusted() {
+async fn the_bake_is_served_only_when_trusted_and_importable() {
     let pqc = Arc::new(
         ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
             &[0x63; 32],
@@ -80,18 +80,24 @@ async fn the_baked_bundle_is_served_in_the_registry_shape_once_its_root_is_trust
         .await
         .expect("accept the baked root");
 
-    let (status, body) = get_bundle(app()).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["bundle"], serde_json::to_value(baked).unwrap());
-    assert_eq!(
-        body["bundle_fingerprint"],
-        ciris_server::mesh_genesis::fingerprint(baked).unwrap()
-    );
-    assert_eq!(body["charter_root_key_id"], "humanity-accord");
-    assert_eq!(body["served_by"], serde_json::json!(node));
+    // Trusted now — but the July bake predates the trust-row labels, so no
+    // peer could import it, and it is not served. The final genesis's bake
+    // (labelled) serves; that half is exercised once persist bakes it.
     assert!(
-        body.get("community").is_some(),
-        "community is present (null on a pre-v3 bake)"
+        ciris_server::mesh_genesis::unlabelled_trust_row(baked).is_some(),
+        "premise: the July bake is unlabelled"
+    );
+    let (status, body) = get_bundle(app()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason_id"], "trust_root.bundle_not_in_force",
+        "{body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("predates the trust-row labels")),
+        "{body}"
     );
 }
 

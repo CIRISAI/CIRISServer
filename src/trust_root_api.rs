@@ -496,6 +496,13 @@ async fn delete_root(State(st): State<TrustRootState>, Path(root): Path<String>)
 /// authorizations cover the whole), so there is no wrapper signature; a reader
 /// verifies it with `POST /v1/trust-root/import`. `community` is the
 /// `ciris-canonical` birth the bundle carries, `null` on a bundle without one.
+///
+/// The contract is "the bake this node runs on": served only while the node
+/// is entrenched on its compiled bake (persist compares the stored legs to
+/// that artifact, so an imported root never makes it so), trusts its root,
+/// and the bake is importable (labelled). Anything else answers 409
+/// `trust_root.bundle_not_in_force` — an imported root is the importer's to
+/// hand on, not this route's.
 async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
     // Only the bundle this node RUNS ON. The compiled bake is that bundle only
     // while the posture is entrenched; a bake this node did not adopt (an older
@@ -534,6 +541,19 @@ async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
             format!(
                 "this node does not trust the root of the bundle it carries ({}), so it serves none",
                 root.as_deref().unwrap_or("no charter")
+            ),
+        );
+    }
+    // A bundle a peer could not import is not served: the July bake predates
+    // the trust-row labels and `POST /v1/trust-root/import` refuses it (Codex
+    // on #726). The final genesis's bake is labelled and serves.
+    if let Some(row) = crate::mesh_genesis::unlabelled_trust_row(bundle) {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "the bundle this node carries predates the trust-row labels ({row} carries none), \
+                 so no peer could import it; it is not served"
             ),
         );
     }
