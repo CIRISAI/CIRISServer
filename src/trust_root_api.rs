@@ -513,6 +513,30 @@ async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
         );
     }
     let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    // ...and only if this node actually TRUSTS that bundle's root — an
+    // entrenched posture after importing some other root must not advertise
+    // the compiled one (Codex on #726).
+    let root = crate::mesh_genesis::charter_root_key_id(bundle);
+    let trusted = match ciris_persist::federation::trust_root::trusted_roots_of(
+        st.engine.federation_directory().as_ref(),
+        &st.node_key_id,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(roots) => root.as_ref().is_some_and(|r| roots.contains(r)),
+        Err(_) => false,
+    };
+    if !trusted {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "this node does not trust the root of the bundle it carries ({}), so it serves none",
+                root.as_deref().unwrap_or("no charter")
+            ),
+        );
+    }
     let fingerprint = match crate::mesh_genesis::fingerprint(bundle) {
         Ok(f) => f,
         Err(e) => {
