@@ -67,6 +67,13 @@ struct FinalGenesisState {
     home: std::path::PathBuf,
 }
 
+/// One ceremony transaction at a time on this node: every route that reads
+/// the state (or recovery file), changes it and writes it back holds this for
+/// the whole read-modify-write. Two holders signing at once otherwise load the
+/// same state and the later write drops the earlier holder's verified
+/// partials (Codex on #725).
+static CEREMONY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn dir(home: &std::path::Path) -> std::path::PathBuf {
     home.join("final-genesis")
 }
@@ -102,6 +109,52 @@ pub fn accord_ceremony_keys() -> BTreeMap<String, CommittedKey> {
 /// The maintainer's pairing (2026-10-02: "Yes those are the recovery keys"):
 /// each seated holder recovers with its own spare — A1 → A2, B1 → B2, C1 → C2.
 pub const RECOVERY_PAIRING: [(&str, &str); 3] = [("A1", "A2"), ("B1", "B2"), ("C1", "C2")];
+
+/// The spare `holder` must recover with, when `holder` is one of the seated
+/// A1/B1/C1 (`None` for any other roster, e.g. a test anchor's).
+fn paired_spare(holder: &str) -> Option<&'static str> {
+    RECOVERY_PAIRING
+        .iter()
+        .find(|(h, _)| *h == holder)
+        .map(|(_, spare)| *spare)
+}
+
+/// The recovery keys a ceremony may commit: every holder of the seated roster
+/// with its OWN spare (A1 → A2, B1 → B2, C1 → C2), and no key named for two
+/// holders on any roster. Checked on what `/recovery-key` records and on what
+/// `plan` commits — from the request or merged from the record (Codex on
+/// #725/#726: B2 recorded for A1 was accepted, and the merge then committed B2
+/// for two holders).
+fn check_recovery_keys(keys: &BTreeMap<String, CommittedKey>) -> Result<(), Response> {
+    for (holder, key) in keys {
+        if let Some(spare) = paired_spare(holder) {
+            if key.key_id != spare {
+                return Err(refuse(
+                    StatusCode::BAD_REQUEST,
+                    "final_genesis.recovery_key_wrong_holder",
+                    format!(
+                        "{holder} recovers with {spare} (the accord pairing), not {}",
+                        key.key_id
+                    ),
+                ));
+            }
+        }
+        if let Some((other, _)) = keys
+            .iter()
+            .find(|(h, k)| *h != holder && k.key_id == key.key_id)
+        {
+            return Err(refuse(
+                StatusCode::CONFLICT,
+                "final_genesis.recovery_key_shared",
+                format!(
+                    "{} is named as the recovery key of both {holder} and {other}",
+                    key.key_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The recovery keys from the ceremony record, keyed by holder — for the
 /// holders actually on `roster` only (so a test-anchor roster gets none).
@@ -307,6 +360,7 @@ async fn serve_node_input(
 
 /// `POST /v1/accord/final-genesis/plan` — stamp the ceremony once and store it.
 async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
     let req: PlanRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -373,6 +427,9 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             .map(|(h, (k, _))| (h, k))
             .collect()
     };
+    if let Err(r) = check_recovery_keys(&recovery_keys) {
+        return r;
+    }
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
         consensus_protocol: ciris_verify_core::accord_genesis::ACCORD_CONSENSUS_PROTOCOL.to_owned(),
@@ -442,6 +499,7 @@ async fn record_recovery_key(
     State(st): State<FinalGenesisState>,
     body: axum::body::Bytes,
 ) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
     let req: RecoveryKeyRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -484,6 +542,17 @@ async fn record_recovery_key_impl(st: FinalGenesisState, req: RecoveryKeyRequest
             format!("{spare} is a seated holder's signing key; a recovery key must be a spare"),
         );
     }
+    // The pairing is checked before any hardware is opened.
+    if let Err(r) = check_recovery_keys(&BTreeMap::from([(
+        holder.clone(),
+        CommittedKey {
+            key_id: spare.clone(),
+            pubkey_ed25519_base64: String::new(),
+            pubkey_ml_dsa_65_base64: String::new(),
+        },
+    )])) {
+        return r;
+    }
     let (ed, pqc) = match crate::accord_provision::open_holder_signers(
         &spare,
         req.mldsa_usb_path.trim(),
@@ -525,17 +594,15 @@ async fn record_recovery_key_impl(st: FinalGenesisState, req: RecoveryKeyRequest
         }
     }
     let mut all = load_recovery(&st.home);
-    if all
-        .iter()
-        .any(|(h, k)| h != &holder && k.key_id == key.key_id)
-    {
-        return refuse(
-            StatusCode::CONFLICT,
-            "final_genesis.recovery_key_shared",
-            format!("{spare} is already recorded as another holder's recovery key"),
-        );
-    }
     all.insert(holder.clone(), key.clone());
+    // Checked over what plan will merge (the record under the token reads), so
+    // a spare already standing for another holder there is refused here.
+    let roster_ids: Vec<String> = roster.iter().map(|h| h.record.key_id.clone()).collect();
+    let mut merged: BTreeMap<String, CommittedKey> = recorded_ceremony_recovery_keys(&roster_ids);
+    merged.extend(all.clone());
+    if let Err(r) = check_recovery_keys(&merged) {
+        return r;
+    }
     let d = dir(&st.home);
     if let Err(e) = std::fs::create_dir_all(&d).and_then(|()| {
         std::fs::write(
@@ -612,6 +679,7 @@ struct SignRequest {
 
 /// `POST /v1/accord/final-genesis/sign` — sign everything this holder owes now.
 async fn sign(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
     let req: SignRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -811,6 +879,7 @@ async fn sign_impl(st: FinalGenesisState, req: SignRequest) -> Response {
 /// `POST /v1/accord/final-genesis/finish` — assemble, verify (the same doors a
 /// booting node runs), and write the bundle.
 async fn finish(State(st): State<FinalGenesisState>) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
     let state = match load(&st.home) {
         Ok(s) => s,
         Err(r) => return r,
@@ -843,6 +912,10 @@ async fn finish(State(st): State<FinalGenesisState>) -> Response {
         "complete": true,
         "bundle_path": path.display().to_string(),
         "bundle_sha256": fingerprint,
+        // The artifact itself, so a client that drove the ceremony can hand it
+        // on without reading this host's filesystem (Codex on #725).
+        "bundle": serde_json::from_str::<serde_json::Value>(&done.bundle_json)
+            .unwrap_or(serde_json::Value::Null),
         "verified": {
             "quorum_verified": done.verified.quorum_verified,
             "serve_nodes": done.verified.serve_nodes,
@@ -957,5 +1030,29 @@ mod tests {
         assert_eq!(keys["B1"].1, "record");
         assert_eq!(keys["C1"].0.key_id, record["C2"].key_id);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A seated holder recovers only with its own spare, and no spare stands
+    /// for two holders — what plan and `/recovery-key` both enforce.
+    #[test]
+    fn recovery_keys_follow_the_pairing_and_are_distinct() {
+        let record = accord_ceremony_keys();
+        let paired: BTreeMap<String, CommittedKey> = RECOVERY_PAIRING
+            .iter()
+            .map(|(h, s)| ((*h).to_string(), record[*s].clone()))
+            .collect();
+        assert!(check_recovery_keys(&paired).is_ok());
+
+        let mut wrong = paired.clone();
+        wrong.insert("A1".into(), record["B2"].clone());
+        let r = check_recovery_keys(&wrong).expect_err("B2 for A1 is refused");
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        // Off the seated roster there is no pairing, but a shared key is
+        // still refused.
+        let k = record["A2"].clone();
+        let shared = BTreeMap::from([("x".to_string(), k.clone()), ("y".to_string(), k)]);
+        let r = check_recovery_keys(&shared).expect_err("one key for two holders is refused");
+        assert_eq!(r.status(), StatusCode::CONFLICT);
     }
 }

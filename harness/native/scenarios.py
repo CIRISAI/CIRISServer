@@ -417,23 +417,39 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
         roots = n.trust_roots()
         verdict[n.name] = roots
         step(f"trust_roots:{n.name}", roots=roots)
+    # The verdict rests on what the GENESIS decides: every node holds the
+    # minted root as valid, and two people root through it (the chat ladder's
+    # pair). Person <-> OWNED canonical is reported, not judged: it converges
+    # unevenly on the old blessed root too (FINAL_GENESIS_BASELINE=1), so a red
+    # there is not evidence against the bundle (Codex on #726).
     ok = True
-    # The pair the chat ladder proves (two people), then each person with the
-    # OWNED canonical (what a person's agent needs for traces to land).
-    for x, y in ((a, b), (a, c), (b, c)):
-        try:
-            wait_for(f"{x.name} and {y.name} Rooted with each other",
-                     lambda: x.rooted_with(y) and y.rooted_with(x), args.rooted_wait or 120, every=3)
-            step(f"rooted:{x.name}<->{y.name}", proves="a valid root in common, from the minted bundle")
-        except MeshError:
+    for n in (c, a, b):
+        roots = (verdict.get(n.name) or {}).get("roots") or []
+        if not any((r.get("verdict") or {}).get("valid") for r in roots):
             ok = False
-            step.fail(f"NOT_rooted:{x.name}<->{y.name}",
-                      "no valid root in common on the minted bundle",
-                      [x, y], r"rooted_with|NO TRUST ROOT",
-                      x_sees_y=x.rooted_with(y), y_sees_x=y.rooted_with(x))
+            step.fail(f"root_NOT_valid:{n.name}", "the minted root is not valid on this node",
+                      [n], r"trust root|genesis|bundle|charter")
+    try:
+        wait_for("alice and bob Rooted with each other",
+                 lambda: a.rooted_with(b) and b.rooted_with(a), args.rooted_wait or 120, every=3)
+        step("rooted:alice<->bob", proves="two people root through the minted bundle")
+    except MeshError:
+        ok = False
+        step.fail("NOT_rooted:alice<->bob", "two people find no valid root in common on the minted bundle",
+                  [a, b], r"rooted_with|NO TRUST ROOT")
+    diagnostic: Record = {}
+    for n in (a, b):
+        try:
+            wait_for(f"{n.name} and the canonical Rooted", lambda: n.rooted_with(c) and c.rooted_with(n),
+                     60, every=3)
+            diagnostic[f"{n.name}<->canonical"] = "rooted"
+        except MeshError:
+            diagnostic[f"{n.name}<->canonical"] = {"person_sees": n.rooted_with(c),
+                                                   "canonical_sees": c.rooted_with(n)}
+    step("diagnostic:person<->owned_canonical", pairs=diagnostic)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
             "bundle_sha256": done.get("bundle_sha256"), "trust_roots": verdict,
-            "first_failure": step.first_failure}
+            "owned_canonical_pairs": diagnostic, "first_failure": step.first_failure}
 
 
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {

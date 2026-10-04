@@ -770,11 +770,14 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             last: Dict[str, int] = {}
 
             def gone_everywhere() -> bool:
-                for o in others:
+                # The withdrawing device too: a 200 DELETE that left the author
+                # reading its own bytes is the same leak (Codex on #725).
+                for o in [src] + others:
                     last[o.name] = o.read_raw(f["id"], cohort)[0]
                 return all(code == 410 for code in last.values())
             try:
-                wait_for(f"every other device to read {which} as withdrawn", gone_everywhere, wait, every=5)
+                wait_for(f"every device, the author's included, to read {which} as withdrawn",
+                         gone_everywhere, wait, every=5)
             except MeshError:
                 step.fail(f"withdraw_LEAKED:{which}",
                           "a device that held the file still reads it after its author withdrew it — the "

@@ -227,6 +227,11 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
     );
     let bundle_path = home.join("final-genesis").join("canonical_seed.json");
     let bundle_json = std::fs::read_to_string(&bundle_path).expect("the bundle is written");
+    assert_eq!(
+        done["bundle"],
+        serde_json::from_str::<serde_json::Value>(&bundle_json).unwrap(),
+        "finish returns the bundle it wrote"
+    );
 
     // (5) The one artifact parses as a v3 bundle carrying both genesis records
     // and installs as a node's baked genesis.
