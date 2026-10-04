@@ -90,9 +90,15 @@ fn read_entries(log_dir: &std::path::Path) -> Vec<Entry> {
         Ok(rd) => rd
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("ciris-server.log"))
+                // Live files only: an aged-out day is archived as `.gz`
+                // (and a `.gz.tmp` is an archive in flight), which this
+                // reader cannot read as text — and archives are never
+                // pruned, so reading them would grow every request's I/O.
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with("ciris-server.log")
+                        && !n.ends_with(".gz")
+                        && !n.ends_with(".gz.tmp")
+                })
             })
             .collect(),
         Err(_) => return Vec::new(),
@@ -184,6 +190,21 @@ mod tests {
         assert_eq!(e.service, "ciris_server::compose");
         assert_eq!(e.message, "node listening key=val");
         assert!(e.timestamp.starts_with("2026-06-27T"));
+    }
+
+    /// An archived day (`.gz`) and an archive in flight (`.gz.tmp`) are not
+    /// read as text: live files only.
+    #[test]
+    fn archives_are_not_read() {
+        let d = std::env::temp_dir().join(format!("ciris-telemetry-gz-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let line = "2026-10-04T12:00:00.000000Z  INFO ciris_server::x: live line\n";
+        std::fs::write(d.join("ciris-server.log.2026-10-04"), line).unwrap();
+        std::fs::write(d.join("ciris-server.log.2026-07-15.gz"), line).unwrap();
+        std::fs::write(d.join("ciris-server.log.2026-07-16.gz.tmp"), line).unwrap();
+        let entries = read_entries(&d);
+        assert_eq!(entries.len(), 1, "only the live file is read");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

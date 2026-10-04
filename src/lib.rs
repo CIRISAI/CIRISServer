@@ -1091,12 +1091,20 @@ pub(crate) mod log_retention {
         // archiving can mean compressing months of files (the canonical's
         // first 0.5.221 boot: July onward). Done inline, every log line on
         // the node would wait for it.
-        let (dir, today) = (dir.to_owned(), today.to_owned());
-        let _ = std::thread::Builder::new()
+        let (dir_owned, today_owned) = (dir.to_owned(), today.to_owned());
+        let spawned = std::thread::Builder::new()
             .name("log-retention".into())
             .spawn(move || {
-                prune(&dir, &today, keep, total);
+                prune(&dir_owned, &today_owned, keep, total);
             });
+        if spawned.is_err() {
+            // No worker (thread/resource limit): forget today's mark so a
+            // later event retries, rather than skipping retention all day
+            // exactly when the host is under pressure.
+            if let Ok(mut last) = LAST_PRUNED.lock() {
+                *last = None;
+            }
+        }
     }
 
     /// The dated files in `dir` other than `today`'s, oldest first, with sizes.
@@ -1133,26 +1141,46 @@ pub(crate) mod log_retention {
     /// dropping history is the operator's act. Today's file is never touched.
     /// Returns the dates archived.
     pub(crate) fn prune(dir: &Path, today: &str, keep: usize, total: u64) -> Vec<String> {
-        let mut files = dated_files(dir, today);
+        let files = dated_files(dir, today);
         let mut archived = Vec::new();
         let mut kept: Vec<String> = Vec::new();
+        // Live accounting: a file leaves it only when its archive LANDED. A
+        // file that could not be archived is still on disk, so it still counts
+        // and the pass moves on to the next oldest (Codex on #729).
+        let mut retired = vec![false; files.len()];
         // `keep` counts today's file too.
         let keep_past = keep.saturating_sub(1);
-        while files.len() > keep_past {
-            let (date, path, _) = files.remove(0);
-            match archive(&path) {
-                Ok(()) => archived.push(date),
+        let mut live = files.len();
+        let mut sum: u64 = files.iter().map(|f| f.2).sum();
+        for (i, (date, path, len)) in files.iter().enumerate() {
+            if live <= keep_past {
+                break;
+            }
+            match archive(path) {
+                Ok(()) => {
+                    archived.push(date.clone());
+                    retired[i] = true;
+                    live -= 1;
+                    sum = sum.saturating_sub(*len);
+                }
                 Err(e) => kept.push(format!("{date} ({e})")),
             }
         }
-        let mut sum: u64 = files.iter().map(|f| f.2).sum();
-        while sum > total && !files.is_empty() {
-            let (date, path, len) = files.remove(0);
-            match archive(&path) {
-                Ok(()) => archived.push(date),
+        for (i, (date, path, len)) in files.iter().enumerate() {
+            if sum <= total {
+                break;
+            }
+            if retired[i] {
+                continue;
+            }
+            match archive(path) {
+                Ok(()) => {
+                    archived.push(date.clone());
+                    retired[i] = true;
+                    sum = sum.saturating_sub(*len);
+                }
                 Err(e) => kept.push(format!("{date} ({e})")),
             }
-            sum = sum.saturating_sub(len);
         }
         if !archived.is_empty() {
             eprintln!(
@@ -1184,7 +1212,19 @@ pub(crate) mod log_retention {
         let gz = path.with_file_name(format!("{name}.gz"));
         let tmp = path.with_file_name(format!("{name}.gz.tmp"));
         let result = (|| -> Result<(), String> {
-            let original_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+            let original_len = meta.len();
+            // A file written in the last few minutes may still have an append
+            // in flight (a writer that opened yesterday's file just before the
+            // UTC rollover); leave it for the next pass.
+            if meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|age| age < std::time::Duration::from_secs(15 * 60))
+            {
+                return Err("written in the last 15 minutes; archived on a later pass".into());
+            }
             let mut src = std::fs::File::open(path).map_err(|e| e.to_string())?;
             let out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
             let mut enc = flate2::write::GzEncoder::new(out, flate2::Compression::default());
@@ -1210,7 +1250,45 @@ pub(crate) mod log_retention {
                     "verify: archive decodes to {decoded} bytes, the file has {original_len}"
                 ));
             }
-            std::fs::rename(&tmp, &gz).map_err(|e| e.to_string())?;
+            // The source must not have grown while it was copied: an append
+            // after the copy would be lost with the unlink.
+            let now_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            if now_len != original_len {
+                return Err(format!(
+                    "grew from {original_len} to {now_len} bytes while archiving; retried later"
+                ));
+            }
+            // Never REPLACE an archive (rename would, on Unix): link the new
+            // one under the first free name — `<name>.gz`, then `<name>.1.gz`,
+            // … — which fails instead of overwriting (Codex on #729).
+            let mut landed = None;
+            for n in 0..100u32 {
+                let dest = if n == 0 {
+                    gz.clone()
+                } else {
+                    path.with_file_name(format!("{name}.{n}.gz"))
+                };
+                match std::fs::hard_link(&tmp, &dest) {
+                    Ok(()) => {
+                        landed = Some(dest);
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            if landed.is_none() {
+                return Err("no free archive name".into());
+            }
+            let _ = std::fs::remove_file(&tmp);
+            // Make the new directory entry durable BEFORE the raw file's
+            // removal can be: on a crash, the archive is there or the raw file
+            // still is (Codex on #729).
+            if let Some(parent) = path.parent() {
+                if let Ok(d) = std::fs::File::open(parent) {
+                    let _ = d.sync_all();
+                }
+            }
             std::fs::remove_file(path).map_err(|e| format!("archived, but: {e}"))?;
             Ok(())
         })();
@@ -1235,8 +1313,20 @@ pub(crate) mod log_retention {
             d
         }
 
+        /// A file last written a day ago (retention leaves a file written in
+        /// the last 15 minutes alone).
         fn touch(dir: &Path, name: &str, len: usize) {
             std::fs::write(dir.join(name), vec![b'x'; len]).unwrap();
+            age(dir, name);
+        }
+
+        fn age(dir: &Path, name: &str) {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+                .unwrap();
         }
 
         fn names(dir: &Path) -> Vec<String> {
@@ -1297,6 +1387,7 @@ pub(crate) mod log_retention {
             let d = scratch("archive");
             let body: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_le_bytes()).collect();
             std::fs::write(d.join("ciris-server.log.2026-07-15"), &body).unwrap();
+            age(&d, "ciris-server.log.2026-07-15");
             touch(&d, "ciris-server.log.2026-10-04", 10);
             assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
             assert!(!d.join("ciris-server.log.2026-07-15").exists());
@@ -1312,20 +1403,50 @@ pub(crate) mod log_retention {
             assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
         }
 
-        /// An archive that cannot be written leaves the original in place.
+        /// An archive that cannot be written leaves the original in place, and
+        /// the failed file still counts, so the next oldest is tried.
         #[test]
-        fn a_failed_archive_keeps_the_original() {
+        fn a_failed_archive_keeps_the_original_and_still_counts() {
             let d = scratch("archive-fail");
             touch(&d, "ciris-server.log.2026-07-15", 100);
-            // A DIRECTORY where the archive must go: the rename cannot land.
-            std::fs::create_dir(d.join("ciris-server.log.2026-07-15.gz")).unwrap();
+            touch(&d, "ciris-server.log.2026-07-16", 100);
+            // A DIRECTORY where the temporary archive must be created.
+            std::fs::create_dir(d.join("ciris-server.log.2026-07-15.gz.tmp")).unwrap();
             touch(&d, "ciris-server.log.2026-10-04", 10);
-            assert!(prune(&d, "2026-10-04", 1, u64::MAX).is_empty());
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-16"]);
             assert!(
                 d.join("ciris-server.log.2026-07-15").exists(),
                 "kept as it was"
             );
-            assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
+            assert!(d.join("ciris-server.log.2026-07-16.gz").exists());
+        }
+
+        /// An existing archive is never replaced: the new one takes the next
+        /// free name.
+        #[test]
+        fn an_existing_archive_is_never_overwritten() {
+            let d = scratch("archive-exists");
+            touch(&d, "ciris-server.log.2026-07-15", 100);
+            std::fs::write(d.join("ciris-server.log.2026-07-15.gz"), b"operator's").unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
+            assert_eq!(
+                std::fs::read(d.join("ciris-server.log.2026-07-15.gz")).unwrap(),
+                b"operator's"
+            );
+            assert!(d.join("ciris-server.log.2026-07-15.1.gz").exists());
+            assert!(!d.join("ciris-server.log.2026-07-15").exists());
+        }
+
+        /// A file written in the last few minutes may have an append in flight
+        /// (the UTC rollover); it is left for a later pass.
+        #[test]
+        fn a_recently_written_file_waits() {
+            let d = scratch("recent");
+            std::fs::write(d.join("ciris-server.log.2026-10-03"), b"late append").unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert!(prune(&d, "2026-10-04", 1, u64::MAX).is_empty());
+            assert!(d.join("ciris-server.log.2026-10-03").exists());
         }
 
         #[test]
