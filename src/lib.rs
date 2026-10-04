@@ -1244,8 +1244,8 @@ pub(crate) mod log_retention {
     ///    owned file's length;
     /// 3. land it under the first FREE name (`<name>.gz`, `<name>.1.gz`, …) —
     ///    never replacing an archive — by hard link, or, where the filesystem
-    ///    has none (FAT/exFAT, some network mounts), an existence-checked
-    ///    rename (passes are serialized, so nothing else writes archives);
+    ///    has none (FAT/exFAT, some network mounts), a copy into a destination
+    ///    opened `create_new` (fails rather than replaces);
     /// 4. sync the directory (Unix) — a failure here is an archive failure;
     /// 5. only then remove the owned file.
     ///
@@ -1332,14 +1332,26 @@ pub(crate) mod log_retention {
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    // No hard links on this filesystem: an existence-checked
-                    // rename (passes are serialized).
-                    Err(_) if !dest.exists() => {
-                        std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-                        landed = Some(dest);
+                    // No hard links on this filesystem: COPY into a
+                    // destination opened `create_new`, which fails rather
+                    // than replace anything another process put there
+                    // (a check-then-rename would race; Codex on #729).
+                    Err(_) => {
+                        let mut d = match std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&dest)
+                        {
+                            Ok(d) => d,
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                            Err(e) => return Err(format!("create {}: {e}", dest.display())),
+                        };
+                        landed = Some(dest.clone());
+                        let mut t = std::fs::File::open(&tmp).map_err(|e| e.to_string())?;
+                        std::io::copy(&mut t, &mut d).map_err(|e| e.to_string())?;
+                        d.sync_all().map_err(|e| e.to_string())?;
                         break;
                     }
-                    Err(_) => continue,
                 }
             }
             if landed.is_none() {

@@ -98,6 +98,9 @@ fn read_entries(log_dir: &std::path::Path) -> Vec<Entry> {
                     n.starts_with("ciris-server.log")
                         && !n.ends_with(".gz")
                         && !n.ends_with(".gz.tmp")
+                        // A day being compressed right now (or left by an
+                        // interrupted pass) — possibly gigabytes.
+                        && !n.ends_with(".archiving")
                 })
             })
             .collect(),
@@ -202,6 +205,7 @@ mod tests {
         std::fs::write(d.join("ciris-server.log.2026-10-04"), line).unwrap();
         std::fs::write(d.join("ciris-server.log.2026-07-15.gz"), line).unwrap();
         std::fs::write(d.join("ciris-server.log.2026-07-16.gz.tmp"), line).unwrap();
+        std::fs::write(d.join("ciris-server.log.2026-07-17.archiving"), line).unwrap();
         let entries = read_entries(&d);
         assert_eq!(entries.len(), 1, "only the live file is read");
         let _ = std::fs::remove_dir_all(&d);
