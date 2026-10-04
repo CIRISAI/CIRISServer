@@ -1484,6 +1484,10 @@ async fn leave_inner(
                 mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
             }];
             let mut next = loaded.family.clone();
+            // CC 3.2 T6 (persist v53): a version names the head it succeeds;
+            // `charter_digest` rides the clone (the charter in force is unchanged).
+            next.prev_head_digest = loaded.family.persist_row_hash.clone();
+            next.persist_row_hash = String::new();
             next.members = remaining;
             let signed = match sign_family(&capsule, next).await {
                 Ok(s) => s,
@@ -1636,6 +1640,10 @@ async fn terminal_dissolve(
         }
     }
     let mut next = loaded.family.clone();
+    // CC 3.2 T6 (persist v53): a version names the head it succeeds;
+    // `charter_digest` rides the clone (the charter in force is unchanged).
+    next.prev_head_digest = loaded.family.persist_row_hash.clone();
+    next.persist_row_hash = String::new();
     next.members = Vec::new();
     let signed = match sign_family(capsule, next).await {
         Ok(s) => s,
@@ -1689,6 +1697,10 @@ async fn quorum_terminal_dissolve(
         );
     };
     let mut terminal = loaded.family.clone();
+    // CC 3.2 T6 (persist v53): a version names the head it succeeds;
+    // `charter_digest` rides the clone (the charter in force is unchanged).
+    terminal.prev_head_digest = loaded.family.persist_row_hash.clone();
+    terminal.persist_row_hash = String::new();
     terminal.dissolved_at = Some(at);
     let signed = match sign_family(capsule, terminal).await {
         Ok(s) => s,
@@ -2215,6 +2227,10 @@ async fn assemble(
         return bad_change("the envelope has no consensus_protocol".to_owned());
     };
     let mut next = loaded.family.clone();
+    // CC 3.2 T6 (persist v53): a version names the head it succeeds;
+    // `charter_digest` rides the clone (the charter in force is unchanged).
+    next.prev_head_digest = loaded.family.persist_row_hash.clone();
+    next.persist_row_hash = String::new();
     next.members = members;
     next.consensus_protocol = new_protocol.to_owned();
     let signed = match sign_family(&capsule, next).await {

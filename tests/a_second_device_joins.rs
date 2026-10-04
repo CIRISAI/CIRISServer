@@ -367,9 +367,14 @@ async fn old_self_files_are_rewrapped_for_the_new_device_by_the_pen_holder() {
             .await
             .expect("grant recipients")
     };
+    // persist v53 (I397b–d): admitting the second device's occurrence re-keys it
+    // for the owner's self content written BEFORE it existed. The guarantee this
+    // test exists for — an old self file opens on a device claimed later — is
+    // now kept by persist at admission; the server's re-wrap below remains the
+    // catch-up for devices admitted before v53, and must stay harmless here.
     assert!(
-        !recipients(Arc::clone(&first)).await.contains(&occurrence),
-        "precondition: the file was sealed before the second device existed"
+        recipients(Arc::clone(&first)).await.contains(&occurrence),
+        "the self file sealed before the second device existed is wrapped to it at admission"
     );
 
     // NO PEN HERE (yet): the pass names the pending device and does nothing.
@@ -380,7 +385,6 @@ async fn old_self_files_are_rewrapped_for_the_new_device_by_the_pen_holder() {
         report.no_pen_here && report.rewrapped.is_empty(),
         "{report:?}"
     );
-    assert!(!recipients(Arc::clone(&first)).await.contains(&occurrence));
 
     // THE PEN OPENS HERE (what compose registers at boot): the re-wrap runs —
     // on the device the person is ON (0.5.218, CC 3.1.3.1): the re-wrap for a
@@ -393,9 +397,9 @@ async fn old_self_files_are_rewrapped_for_the_new_device_by_the_pen_holder() {
     assert!(!report.no_pen_here, "{report:?}");
     assert_eq!(report.rewrapped.len(), 1, "{report:?}");
     assert_eq!(report.rewrapped[0].0, occurrence);
-    assert!(
-        report.rewrapped[0].1 >= 1,
-        "the old file was granted: {report:?}"
+    assert_eq!(
+        report.rewrapped[0].1, 0,
+        "nothing left to grant — persist re-keyed the device at admission: {report:?}"
     );
     assert!(
         recipients(Arc::clone(&first)).await.contains(&occurrence),
