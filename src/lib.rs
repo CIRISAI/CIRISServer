@@ -1109,7 +1109,10 @@ pub(crate) mod log_retention {
                 // (Codex on #729).
                 if prune_pass(&dir_owned, &today_owned, keep, total).deferred {
                     std::thread::sleep(RECENT_WINDOW + std::time::Duration::from_secs(60));
-                    prune(&dir_owned, &today_owned, keep, total);
+                    // The date NOW: a retry that crosses UTC midnight must not
+                    // treat the new day's live file as an old one (Codex on #729).
+                    let today_now = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    prune(&dir_owned, &today_now, keep, total);
                 }
             });
         if spawned.is_err() {
@@ -1290,6 +1293,13 @@ pub(crate) mod log_retention {
             // (2) compress + verify.
             let original_len = std::fs::metadata(&owned).map_err(|e| e.to_string())?.len();
             let mut src = std::fs::File::open(&owned).map_err(|e| e.to_string())?;
+            // A `.gz.tmp` already here is a crashed pass's (passes are
+            // serialized and a node owns its home): clear it, or this file
+            // could not be archived until tomorrow (Codex on #729). A
+            // non-file there (a directory) still fails the create below.
+            if std::fs::symlink_metadata(&tmp).is_ok_and(|m| m.is_file()) {
+                let _ = std::fs::remove_file(&tmp);
+            }
             let out = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1523,16 +1533,18 @@ pub(crate) mod log_retention {
             assert!(!d.join("ciris-server.log.2026-07-15").exists());
         }
 
-        /// A pass interrupted after taking ownership (`<date>.archiving`) is
-        /// finished by the next one.
+        /// A pass interrupted after taking ownership (`<date>.archiving`, and a
+        /// half-written `.gz.tmp`) is finished by the next one.
         #[test]
         fn an_interrupted_archive_is_picked_up() {
             let d = scratch("interrupted");
             touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
+            std::fs::write(d.join("ciris-server.log.2026-07-15.gz.tmp"), b"half").unwrap();
             touch(&d, "ciris-server.log.2026-10-04", 10);
             assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
             assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
+            assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
         }
 
         /// A file written in the last few minutes may have an append in flight
