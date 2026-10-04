@@ -1036,6 +1036,9 @@ pub(crate) mod log_retention {
     pub const DAY_CAP_BYTES: u64 = 512 * 1024 * 1024;
 
     const PREFIX: &str = "ciris-server.log.";
+    /// A dated file written more recently than this may still take an append.
+    const RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+    const RECENT: &str = "written in the last 15 minutes; archived on a later pass";
     const CAP_MARKER: &str = "ciris-server: today's log file reached its size cap; further \
                               lines today are DROPPED from this file (stdout still carries them). \
                               Raise CIRIS_LOG_DAY_CAP_MB to keep more.\n";
@@ -1095,7 +1098,14 @@ pub(crate) mod log_retention {
         let spawned = std::thread::Builder::new()
             .name("log-retention".into())
             .spawn(move || {
-                prune(&dir_owned, &today_owned, keep, total);
+                // A file left because it was written in the last 15 minutes
+                // (yesterday's, just after the UTC rollover) gets ONE retry
+                // once that window has passed, rather than waiting a day
+                // (Codex on #729).
+                if prune_pass(&dir_owned, &today_owned, keep, total).deferred {
+                    std::thread::sleep(RECENT_WINDOW + std::time::Duration::from_secs(60));
+                    prune(&dir_owned, &today_owned, keep, total);
+                }
             });
         if spawned.is_err() {
             // No worker (thread/resource limit): forget today's mark so a
@@ -1141,6 +1151,19 @@ pub(crate) mod log_retention {
     /// dropping history is the operator's act. Today's file is never touched.
     /// Returns the dates archived.
     pub(crate) fn prune(dir: &Path, today: &str, keep: usize, total: u64) -> Vec<String> {
+        prune_pass(dir, today, keep, total).archived
+    }
+
+    /// What one retention pass did.
+    pub(crate) struct PassReport {
+        /// Dates archived.
+        pub(crate) archived: Vec<String>,
+        /// Some file was left only because it was written too recently.
+        pub(crate) deferred: bool,
+    }
+
+    /// [`prune`], reporting whether a file was deferred for recency.
+    pub(crate) fn prune_pass(dir: &Path, today: &str, keep: usize, total: u64) -> PassReport {
         let files = dated_files(dir, today);
         let mut archived = Vec::new();
         let mut kept: Vec<String> = Vec::new();
@@ -1197,7 +1220,8 @@ pub(crate) mod log_retention {
                 kept.join(", ")
             );
         }
-        archived
+        let deferred = kept.iter().any(|k| k.contains(RECENT));
+        PassReport { archived, deferred }
     }
 
     /// Compress `path` to `<path>.gz` (via a `.gz.tmp` + rename), verify the
@@ -1221,9 +1245,9 @@ pub(crate) mod log_retention {
                 .modified()
                 .ok()
                 .and_then(|m| m.elapsed().ok())
-                .is_some_and(|age| age < std::time::Duration::from_secs(15 * 60))
+                .is_some_and(|age| age < RECENT_WINDOW)
             {
-                return Err("written in the last 15 minutes; archived on a later pass".into());
+                return Err(RECENT.into());
             }
             let mut src = std::fs::File::open(path).map_err(|e| e.to_string())?;
             let out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
@@ -1289,7 +1313,17 @@ pub(crate) mod log_retention {
                     let _ = d.sync_all();
                 }
             }
-            std::fs::remove_file(path).map_err(|e| format!("archived, but: {e}"))?;
+            if let Err(e) = std::fs::remove_file(path) {
+                // The raw file stays live, so the archive must not: a kept
+                // archive plus a still-counted raw file is how later passes
+                // pile up `.1.gz`, `.2.gz`, … duplicates (Codex on #729).
+                if let Some(dest) = &landed {
+                    let _ = std::fs::remove_file(dest);
+                }
+                return Err(format!(
+                    "could not remove the raw file ({e}); archive rolled back"
+                ));
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -1445,7 +1479,12 @@ pub(crate) mod log_retention {
             let d = scratch("recent");
             std::fs::write(d.join("ciris-server.log.2026-10-03"), b"late append").unwrap();
             touch(&d, "ciris-server.log.2026-10-04", 10);
-            assert!(prune(&d, "2026-10-04", 1, u64::MAX).is_empty());
+            let pass = prune_pass(&d, "2026-10-04", 1, u64::MAX);
+            assert!(pass.archived.is_empty());
+            assert!(
+                pass.deferred,
+                "reported, so the worker retries after the window"
+            );
             assert!(d.join("ciris-server.log.2026-10-03").exists());
         }
 
