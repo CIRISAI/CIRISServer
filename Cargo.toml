@@ -390,6 +390,11 @@ ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v53.0.
 name = "qa_runner"
 required-features = ["test-anchor"]
 
+# The final-genesis dry run's three-holder test anchor, for the native harness.
+[[example]]
+name = "test_ceremony_anchor"
+required-features = ["test-anchor"]
+
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
 name = "pqc_av_streaming"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -294,7 +295,149 @@ CORPUS — one person, two devices, the transfer corpus written on the first and
     return {"verdict": "PASS" if not bad else "FAIL", "steps": step.log, "results": results}
 
 
+# ── the final genesis, end to end (FSD/FINAL_GENESIS.md §3 "Dry run") ──────
+
+
+def _owned_canonical_baseline(mesh: Mesh, args: Any, step: "Steps") -> Record:
+    """The same three pairs on the harness's blessed synthetic root, with the
+    canonical CLAIMED as in production — separates a genesis defect from one
+    any owned canonical has (FINAL_GENESIS_BASELINE=1)."""
+    c = mesh.start_canonical()
+    c.claim("operator-person")
+    c.announce()
+    c.self_record()
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    a.claim("alice-person")
+    b.claim("bob-person")
+    for n in (a, b):
+        n.announce()
+        n.self_record()
+        n.peer_with(c)
+        c.peer_with(n)
+    a.peer_with(b)
+    b.peer_with(a)
+    step("baseline_booted_claimed_peered")
+    ok = True
+    for x, y in ((a, b), (a, c), (b, c)):
+        try:
+            wait_for(f"{x.name} and {y.name} Rooted", lambda: x.rooted_with(y) and y.rooted_with(x),
+                     args.rooted_wait or 120, every=3)
+            step(f"rooted:{x.name}<->{y.name}")
+        except MeshError:
+            ok = False
+            step(f"NOT_rooted:{x.name}<->{y.name}", x_sees_y=x.rooted_with(y), y_sees_x=y.rooted_with(x))
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "baseline": True}
+
+
+def final_genesis(mesh: Mesh, args: Any) -> Record:
+    """Mint the root through the ceremony ROUTES with three software holders,
+    then boot a fleet on that bundle as its baked genesis — production
+    admission, no locally minted trust rows anywhere."""
+    step = Steps("""
+FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GENESIS.md §3).
+  trust root: a THREE-holder test anchor (persist's software ceremony holders); every node runs
+              CIRIS_TEST_NO_CEREMONY=true, so it holds only what it was SEEDED or SENT.
+  mint:       on the canonical's own loopback routes — plan (serve node = the canonical's real
+              key), each holder signs twice, finish → ONE v3 bundle.
+  boot:       canonical + two person nodes restart/boot with that bundle installed as the baked
+              genesis (CIRIS_TEST_GENESIS_BUNDLE), peer over the production routes.
+  proves:     the bundle verifies at boot on every node, the root is valid, ciris-canonical is in
+              force with the canonical seated, and the people's nodes are Rooted with it.""")
+    if os.environ.get("FINAL_GENESIS_BASELINE") == "1":
+        return _owned_canonical_baseline(mesh, args, step)
+    anchor_bin = mesh.binary.parent / "examples" / "test_ceremony_anchor"
+    if not anchor_bin.is_file():
+        raise MeshError(f"no {anchor_bin}: cargo build --features test-anchor --example test_ceremony_anchor")
+    anchor = json.loads(subprocess.run([str(anchor_bin)], capture_output=True, text=True,
+                                       check=True).stdout)
+    mesh.base_env.update(anchor["env"])
+    mesh.base_env["CIRIS_TEST_NO_CEREMONY"] = "true"
+    step("anchor", holders=[h["key_id"] for h in anchor["holders"]])
+
+    # 1. The ceremony host: the canonical, booted on NO genesis of its own yet.
+    c = mesh._node("canonical", {"CIRIS_TEST_BLESS_CANONICAL": "false",
+                                 "CIRIS_DEVICE_CLASS": "server"})
+    c.configure(dial=[])
+    c.start()
+    mesh.canonical, mesh.nodes["canonical"] = c, c
+    c.self_record()
+    step("canonical_booted", key_id=c.node_key_id)
+
+    # 2. The ceremony, over the routes.
+    planned = c.must("POST", "/v1/accord/final-genesis/plan", {
+        "serve_nodes": [c.node_key_id],
+        "recovery_keys": anchor["recovery_keys"],
+        "clock_checked": True})
+    step("planned", complete=planned.get("complete"), owed=planned.get("owed"))
+    for rnd in (1, 2):
+        for h in anchor["holders"]:
+            got = c.must("POST", "/v1/accord/final-genesis/sign", {
+                "key_id": h["key_id"], "mldsa_usb_path": "/unused/software-holder",
+                "test_holder_seed_b64": h["seed_b64"]})
+            step(f"signed:round{rnd}:{h['key_id']}", signed=got.get("signed"),
+                 complete=got.get("complete"))
+    status = c.must("GET", "/v1/accord/final-genesis")
+    if not status.get("complete"):
+        raise MeshError(f"items still owed after two rounds: {status}")
+    done = c.must("POST", "/v1/accord/final-genesis/finish", {})
+    bundle_path = done["bundle_path"]
+    step("finished", proves="persist assembled the bundle and verify_ceremony_outputs passed",
+         bundle_sha256=done.get("bundle_sha256"), verified=done.get("verified"))
+
+    # 3. The fleet boots on it.
+    mesh.base_env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
+    c.env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
+    c.stop()
+    c.start()
+    step("canonical_rebooted_on_bundle",
+         evidence=c.grep(r"booting on a ceremony-minted genesis bundle")[-1:])
+    # The production canonical is OWNED (the operator's fedID) — an unowned
+    # node refuses federation peering.
+    c.claim("operator-person")
+    c.announce()
+    c.self_record()
+    step("canonical_claimed", owner=c.owner_key_id)
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    a.claim("alice-person")
+    b.claim("bob-person")
+    for n in (a, b):
+        n.announce()
+        n.self_record()
+        n.peer_with(c)
+        c.peer_with(n)
+    a.peer_with(b)
+    b.peer_with(a)
+    step("people_booted_claimed_peered")
+
+    # 4. What every node now holds.
+    verdict: Record = {}
+    for n in (c, a, b):
+        roots = n.trust_roots()
+        verdict[n.name] = roots
+        step(f"trust_roots:{n.name}", roots=roots)
+    ok = True
+    # The pair the chat ladder proves (two people), then each person with the
+    # OWNED canonical (what a person's agent needs for traces to land).
+    for x, y in ((a, b), (a, c), (b, c)):
+        try:
+            wait_for(f"{x.name} and {y.name} Rooted with each other",
+                     lambda: x.rooted_with(y) and y.rooted_with(x), args.rooted_wait or 120, every=3)
+            step(f"rooted:{x.name}<->{y.name}", proves="a valid root in common, from the minted bundle")
+        except MeshError:
+            ok = False
+            step.fail(f"NOT_rooted:{x.name}<->{y.name}",
+                      "no valid root in common on the minted bundle",
+                      [x, y], r"rooted_with|NO TRUST ROOT",
+                      x_sees_y=x.rooted_with(y), y_sees_x=y.rooted_with(x))
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
+            "bundle_sha256": done.get("bundle_sha256"), "trust_roots": verdict,
+            "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
+    "final_genesis": final_genesis,
     "chat": chat,
     "corpus": corpus,
 }

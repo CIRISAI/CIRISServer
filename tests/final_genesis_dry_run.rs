@@ -113,6 +113,23 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         serde_json::to_string(&inputs.recovery_keys).unwrap(),
     )
     .unwrap();
+    // What plan will commit, readable before planning (CIRISClient#154).
+    let (s, rk) = call(
+        &app,
+        "GET",
+        "/v1/accord/final-genesis/recovery-keys",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "recovery-keys: {rk}");
+    assert_eq!(rk["complete"], true, "{rk}");
+    let rows = rk["recovery_keys"].as_array().expect("rows");
+    assert_eq!(rows.len(), 3, "{rk}");
+    assert!(
+        rows.iter().all(|r| r["source"] == "hardware"
+            && r["commitment"].as_str().is_some_and(|c| !c.is_empty())),
+        "{rk}"
+    );
     let (s, planned) = call(
         &app,
         "POST",
@@ -257,6 +274,14 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         Some(3),
         "one recovery commitment per holder"
     );
+    // The commitments read before planning are the ones the charter carries.
+    for r in rows {
+        let holder = r["holder_key_id"].as_str().unwrap();
+        assert_eq!(
+            charter["attestation_envelope"]["recovery_commitments"][holder], r["commitment"],
+            "the pre-plan fingerprint for {holder} is the charter's"
+        );
+    }
     ciris_persist::federation::genesis::install_test_ceremony_outputs_json(&bundle_json)
         .expect("the bundle installs as the baked genesis");
 

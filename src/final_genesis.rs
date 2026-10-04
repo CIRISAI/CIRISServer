@@ -114,6 +114,27 @@ fn recorded_ceremony_recovery_keys(roster: &[String]) -> BTreeMap<String, Commit
         .collect()
 }
 
+/// The recovery keys plan uses when the request names none, per holder: the
+/// key read off that holder's spare (`POST /recovery-key`, source
+/// `"hardware"`) over the original ceremony's record (`"record"`). Merged per
+/// holder, so verifying one spare against its token and not the others still
+/// plans (CIRISClient#154: an all-or-nothing file broke a partial check). The
+/// hardware read is already refused unless it equals the record.
+fn effective_recovery_keys(
+    home: &std::path::Path,
+    roster: &[String],
+) -> BTreeMap<String, (CommittedKey, &'static str)> {
+    let mut keys: BTreeMap<String, (CommittedKey, &'static str)> =
+        recorded_ceremony_recovery_keys(roster)
+            .into_iter()
+            .map(|(h, k)| (h, (k, "record")))
+            .collect();
+    for (h, k) in load_recovery(home) {
+        keys.insert(h, (k, "hardware"));
+    }
+    keys
+}
+
 /// The recovery keys recorded so far (holder key id → committed key).
 fn load_recovery(home: &std::path::Path) -> BTreeMap<String, CommittedKey> {
     std::fs::read_to_string(recovery_path(home))
@@ -336,9 +357,9 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             Err(r) => return r,
         }
     }
-    // Recovery keys, first source that has them: the request; the keys read off
-    // the spares on this node (`POST /recovery-key`); the original ceremony's
-    // record of the spares (A2/B2/C2), when the roster is the real A1/B1/C1.
+    // Recovery keys: the request's; else, per holder, the key read off that
+    // holder's spare on this node (`POST /recovery-key`) over the original
+    // ceremony's record of the spares (A2/B2/C2), when the roster is A1/B1/C1.
     let roster_ids: Vec<String> =
         ciris_persist::federation::genesis::effective_accord_holder_records()
             .iter()
@@ -347,12 +368,10 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
     let recovery_keys = if !req.recovery_keys.is_empty() {
         req.recovery_keys
     } else {
-        let read = load_recovery(&st.home);
-        if read.is_empty() {
-            recorded_ceremony_recovery_keys(&roster_ids)
-        } else {
-            read
-        }
+        effective_recovery_keys(&st.home, &roster_ids)
+            .into_iter()
+            .map(|(h, (k, _))| (h, k))
+            .collect()
     };
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
@@ -848,6 +867,46 @@ pub(crate) async fn remint_superseded() -> Response {
     )
 }
 
+/// `GET /v1/accord/final-genesis/recovery-keys` — what plan will commit as
+/// each holder's recovery key, before anything is planned: the spare's key id,
+/// its `commitment` (persist's `recovery_commitment`, the exact value the
+/// charter carries — a fingerprint the operator can read back off the bundle)
+/// and its source (`record` = the original ceremony's record, `hardware` =
+/// read off the spare's token on this node). `complete` once every holder on
+/// the roster has one.
+async fn recovery_keys(State(st): State<FinalGenesisState>) -> Response {
+    let roster: Vec<String> = ciris_persist::federation::genesis::effective_accord_holder_records()
+        .iter()
+        .map(|h| h.record.key_id.clone())
+        .collect();
+    let keys = effective_recovery_keys(&st.home, &roster);
+    let mut rows = Vec::with_capacity(roster.len());
+    for holder in &roster {
+        let Some((k, source)) = keys.get(holder) else {
+            rows.push(serde_json::json!({ "holder_key_id": holder, "recovery_key_id": null }));
+            continue;
+        };
+        let commitment = match ciris_persist::federation::trust_root::recovery_commitment(k) {
+            Ok(c) => c,
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "final_genesis.store_failed",
+                    format!("recovery commitment for {holder}: {e}"),
+                )
+            }
+        };
+        rows.push(serde_json::json!({
+            "holder_key_id": holder,
+            "recovery_key_id": k.key_id,
+            "commitment": commitment,
+            "source": source,
+        }));
+    }
+    let complete = roster.iter().all(|h| keys.contains_key(h));
+    Json(serde_json::json!({ "complete": complete, "recovery_keys": rows })).into_response()
+}
+
 /// The routes, loopback-only (merged into the accord router's loopback half).
 pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
     Router::new()
@@ -856,6 +915,10 @@ pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
             "/v1/accord/final-genesis/recovery-key",
             axum::routing::post(record_recovery_key),
         )
+        .route(
+            "/v1/accord/final-genesis/recovery-keys",
+            axum::routing::get(recovery_keys),
+        )
         .route("/v1/accord/final-genesis/plan", axum::routing::post(plan))
         .route("/v1/accord/final-genesis/sign", axum::routing::post(sign))
         .route(
@@ -863,4 +926,36 @@ pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
             axum::routing::post(finish),
         )
         .with_state(FinalGenesisState { engine, home })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CIRISClient#154 — verifying ONE spare on its token must not drop the
+    /// other holders' recorded keys: plan merges per holder.
+    #[test]
+    fn a_partial_hardware_check_keeps_the_record_for_the_rest() {
+        let home = std::env::temp_dir().join(format!(
+            "ciris-fg-partial-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(dir(&home)).unwrap();
+        let record = accord_ceremony_keys();
+        let a2 = record.get("A2").expect("A2 on record").clone();
+        std::fs::write(
+            recovery_path(&home),
+            serde_json::to_string(&BTreeMap::from([("A1".to_string(), a2.clone())])).unwrap(),
+        )
+        .unwrap();
+        let roster = ["A1", "B1", "C1"].map(String::from);
+        let keys = effective_recovery_keys(&home, &roster);
+        assert_eq!(keys.len(), 3, "every holder keeps a recovery key: {keys:?}");
+        assert_eq!(keys["A1"], (a2, "hardware"));
+        assert_eq!(keys["B1"].0.key_id, record["B2"].key_id);
+        assert_eq!(keys["B1"].1, "record");
+        assert_eq!(keys["C1"].0.key_id, record["C2"].key_id);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
