@@ -1039,6 +1039,11 @@ pub(crate) mod log_retention {
     /// A dated file written more recently than this may still take an append.
     const RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
     const RECENT: &str = "written in the last 15 minutes; archived on a later pass";
+    /// The suffix a dated file carries while a pass owns it.
+    const ARCHIVING: &str = ".archiving";
+    /// One retention pass at a time: a pass still compressing at the UTC
+    /// rollover must not overlap the next day's (Codex on #729).
+    static PASS_LOCK: Mutex<()> = Mutex::new(());
     const CAP_MARKER: &str = "ciris-server: today's log file reached its size cap; further \
                               lines today are DROPPED from this file (stdout still carries them). \
                               Raise CIRIS_LOG_DAY_CAP_MB to keep more.\n";
@@ -1126,7 +1131,10 @@ pub(crate) mod log_retention {
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let date = name.strip_prefix(PREFIX)?.to_owned();
+                let rest = name.strip_prefix(PREFIX)?;
+                // A file a pass took ownership of but could not finish
+                // (`<date>.archiving`) is picked up again.
+                let date = rest.strip_suffix(ARCHIVING).unwrap_or(rest).to_owned();
                 let is_date = date.len() == 10
                     && chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_ok();
                 if !is_date || date.as_str() == today {
@@ -1164,6 +1172,7 @@ pub(crate) mod log_retention {
 
     /// [`prune`], reporting whether a file was deferred for recency.
     pub(crate) fn prune_pass(dir: &Path, today: &str, keep: usize, total: u64) -> PassReport {
+        let _one_pass = PASS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let files = dated_files(dir, today);
         let mut archived = Vec::new();
         let mut kept: Vec<String> = Vec::new();
@@ -1224,40 +1233,74 @@ pub(crate) mod log_retention {
         PassReport { archived, deferred }
     }
 
-    /// Compress `path` to `<path>.gz` (via a `.gz.tmp` + rename), verify the
-    /// archive decodes to the original length, then remove `path`. Any failure
-    /// leaves `path` in place and removes the partial archive.
+    /// Archive one dated file, never losing a byte of it:
+    ///
+    /// 1. take ownership: rename it to `<name>.archiving` (atomic). A writer
+    ///    that opens the dated path afterwards creates a NEW file there,
+    ///    archived on a later pass — so no append can land in the bytes being
+    ///    compressed (Codex on #729). Files written in the last 15 minutes are
+    ///    not taken at all (a per-event writer holds its handle for one line);
+    /// 2. compress to a temporary `.gz.tmp`, sync it, read it back to the
+    ///    owned file's length;
+    /// 3. land it under the first FREE name (`<name>.gz`, `<name>.1.gz`, …) —
+    ///    never replacing an archive — by hard link, or, where the filesystem
+    ///    has none (FAT/exFAT, some network mounts), an existence-checked
+    ///    rename (passes are serialized, so nothing else writes archives);
+    /// 4. sync the directory (Unix) — a failure here is an archive failure;
+    /// 5. only then remove the owned file.
+    ///
+    /// Any failure removes what this attempt wrote and gives the file back
+    /// under its dated name (or, if a new dated file appeared meanwhile, leaves
+    /// it as `<name>.archiving` for the next pass).
     pub(crate) fn archive(path: &Path) -> Result<(), String> {
         use std::io::{Read as _, Write as _};
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or("no file name")?;
-        let gz = path.with_file_name(format!("{name}.gz"));
-        let tmp = path.with_file_name(format!("{name}.gz.tmp"));
-        let result = (|| -> Result<(), String> {
-            let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-            let original_len = meta.len();
-            // A file written in the last few minutes may still have an append
-            // in flight (a writer that opened yesterday's file just before the
-            // UTC rollover); leave it for the next pass.
-            if meta
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .is_some_and(|age| age < RECENT_WINDOW)
-            {
-                return Err(RECENT.into());
+        // The dated name the archive is named after (an interrupted
+        // `.archiving` file keeps its date's name).
+        let base = name.strip_suffix(ARCHIVING).unwrap_or(&name).to_owned();
+        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age < RECENT_WINDOW)
+        {
+            return Err(RECENT.into());
+        }
+        // (1) ownership.
+        let owned = path.with_file_name(format!("{base}{ARCHIVING}"));
+        if path != owned {
+            if owned.exists() {
+                return Err(format!("{} is already being archived", owned.display()));
             }
-            let mut src = std::fs::File::open(path).map_err(|e| e.to_string())?;
-            let out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            std::fs::rename(path, &owned).map_err(|e| format!("take ownership: {e}"))?;
+        }
+        let dated = path.with_file_name(&base);
+        let give_back = || {
+            if !dated.exists() {
+                let _ = std::fs::rename(&owned, &dated);
+            }
+        };
+        let tmp = path.with_file_name(format!("{base}.gz.tmp"));
+        let mut landed: Option<std::path::PathBuf> = None;
+        let result = (|| -> Result<(), String> {
+            // (2) compress + verify.
+            let original_len = std::fs::metadata(&owned).map_err(|e| e.to_string())?.len();
+            let mut src = std::fs::File::open(&owned).map_err(|e| e.to_string())?;
+            let out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| format!("create {}: {e}", tmp.display()))?;
             let mut enc = flate2::write::GzEncoder::new(out, flate2::Compression::default());
             std::io::copy(&mut src, &mut enc).map_err(|e| e.to_string())?;
             let mut out = enc.finish().map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
             out.sync_all().map_err(|e| e.to_string())?;
             drop(out);
-            // Read it back before the original goes anywhere.
             let mut dec =
                 flate2::read::GzDecoder::new(std::fs::File::open(&tmp).map_err(|e| e.to_string())?);
             let mut sink = [0u8; 64 * 1024];
@@ -1269,28 +1312,19 @@ pub(crate) mod log_retention {
                 }
                 decoded += n as u64;
             }
-            if decoded != original_len {
+            let now_len = std::fs::metadata(&owned).map_err(|e| e.to_string())?.len();
+            if decoded != original_len || now_len != original_len {
                 return Err(format!(
-                    "verify: archive decodes to {decoded} bytes, the file has {original_len}"
+                    "verify: archive decodes to {decoded} bytes, the file had {original_len} \
+                     and now has {now_len}"
                 ));
             }
-            // The source must not have grown while it was copied: an append
-            // after the copy would be lost with the unlink.
-            let now_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
-            if now_len != original_len {
-                return Err(format!(
-                    "grew from {original_len} to {now_len} bytes while archiving; retried later"
-                ));
-            }
-            // Never REPLACE an archive (rename would, on Unix): link the new
-            // one under the first free name — `<name>.gz`, then `<name>.1.gz`,
-            // … — which fails instead of overwriting (Codex on #729).
-            let mut landed = None;
+            // (3) land under a free name, never replacing an archive.
             for n in 0..100u32 {
                 let dest = if n == 0 {
-                    gz.clone()
+                    path.with_file_name(format!("{base}.gz"))
                 } else {
-                    path.with_file_name(format!("{name}.{n}.gz"))
+                    path.with_file_name(format!("{base}.{n}.gz"))
                 };
                 match std::fs::hard_link(&tmp, &dest) {
                     Ok(()) => {
@@ -1298,36 +1332,41 @@ pub(crate) mod log_retention {
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => return Err(e.to_string()),
+                    // No hard links on this filesystem: an existence-checked
+                    // rename (passes are serialized).
+                    Err(_) if !dest.exists() => {
+                        std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+                        landed = Some(dest);
+                        break;
+                    }
+                    Err(_) => continue,
                 }
             }
             if landed.is_none() {
                 return Err("no free archive name".into());
             }
             let _ = std::fs::remove_file(&tmp);
-            // Make the new directory entry durable BEFORE the raw file's
-            // removal can be: on a crash, the archive is there or the raw file
-            // still is (Codex on #729).
+            // (4) the new entry is durable before the source's removal can be.
+            #[cfg(unix)]
             if let Some(parent) = path.parent() {
-                if let Ok(d) = std::fs::File::open(parent) {
-                    let _ = d.sync_all();
-                }
+                std::fs::File::open(parent)
+                    .and_then(|d| d.sync_all())
+                    .map_err(|e| format!("sync the log directory: {e}"))?;
             }
-            if let Err(e) = std::fs::remove_file(path) {
-                // The raw file stays live, so the archive must not: a kept
-                // archive plus a still-counted raw file is how later passes
-                // pile up `.1.gz`, `.2.gz`, … duplicates (Codex on #729).
-                if let Some(dest) = &landed {
-                    let _ = std::fs::remove_file(dest);
-                }
-                return Err(format!(
-                    "could not remove the raw file ({e}); archive rolled back"
-                ));
-            }
+            // (5) the owned source goes.
+            std::fs::remove_file(&owned)
+                .map_err(|e| format!("could not remove the raw file ({e})"))?;
             Ok(())
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
+            if let Some(dest) = &landed {
+                // The source stays live, so the archive must not: a kept
+                // archive beside a still-counted source is how duplicates
+                // pile up (Codex on #729).
+                let _ = std::fs::remove_file(dest);
+            }
+            give_back();
         }
         result
     }
@@ -1470,6 +1509,18 @@ pub(crate) mod log_retention {
             );
             assert!(d.join("ciris-server.log.2026-07-15.1.gz").exists());
             assert!(!d.join("ciris-server.log.2026-07-15").exists());
+        }
+
+        /// A pass interrupted after taking ownership (`<date>.archiving`) is
+        /// finished by the next one.
+        #[test]
+        fn an_interrupted_archive_is_picked_up() {
+            let d = scratch("interrupted");
+            touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
+            assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
+            assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
         }
 
         /// A file written in the last few minutes may have an append in flight
