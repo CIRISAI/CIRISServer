@@ -1020,6 +1020,8 @@ async fn genesis_assemble(
             consensus_protocol_entrenched: true,
             dissolved_at: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         };
         if let Err(e) = crate::family::create_family(&st.engine, family).await {
             return err(
@@ -2237,6 +2239,17 @@ fn signed_family_from_envelope(env: &serde_json::Value) -> Result<SignedFamily, 
                 .unwrap_or(true),
             dissolved_at: None,
             persist_row_hash: String::new(),
+            // CC 3.2 T6 (persist v53): the proposer names the head it succeeds.
+            prev_head_digest: env
+                .get("prev_head_digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            charter_digest: env
+                .get("charter_digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
         },
         // ── STALE-BY-PIN, and left empty deliberately (CIRISServer#319 item 1) ──
         //

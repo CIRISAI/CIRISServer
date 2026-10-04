@@ -312,6 +312,21 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
         );
     }
 
+    // A bundle minted before persist v53 carries an UNLABELLED charter. It
+    // still verifies, but outside the one pinned genesis it installs as no
+    // charter (CC 3.2 T4a), so the root would look imported and never be
+    // valid. Say so instead of reporting a success.
+    if !crate::mesh_genesis::bundle_charter_is_labelled(&bundle) {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "trust_root.bundle_unlabelled",
+            "this bundle was minted before the trust-root rows carried their job labels \
+             (trust:charter:v1); on this node it would install as no charter at all. Import \
+             a bundle from the final genesis (FSD/FINAL_GENESIS.md) instead. Nothing on this \
+             node changed.",
+        );
+    }
+
     let dir = st.engine.federation_directory();
     let installed =
         match crate::mesh_genesis::install_trust_root_records(dir.as_ref(), &bundle).await {

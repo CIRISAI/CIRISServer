@@ -495,7 +495,16 @@ async fn the_rewrap_runs_only_on_the_device_the_fold_names() {
         vec![(occurrence.clone(), None)],
         "{r:?}"
     );
-    assert!(r.rewrapped.is_empty() && !granted_to_b().await);
+    assert!(
+        r.rewrapped.is_empty(),
+        "the server re-wrap did not run here: {r:?}"
+    );
+    // persist v53 (I397b–d) re-keys a device the moment its occurrence is
+    // admitted, so B already holds the old file's key. The server's re-wrap
+    // stays as the catch-up for devices admitted BEFORE v53, which persist's
+    // walk never saw; what this test pins is that it runs only where the fold
+    // names this device.
+    assert!(granted_to_b().await, "persist re-keyed B at admission");
 
     // HANDLED ELSEWHERE: another device of the person holds a live claim on
     // this re-wrap (written there, carried here). A, attended, defers. The
@@ -521,7 +530,16 @@ async fn the_rewrap_runs_only_on_the_device_the_fold_names() {
         vec![(occurrence.clone(), Some(p.b_key.clone()))],
         "{r:?}"
     );
-    assert!(r.rewrapped.is_empty() && !granted_to_b().await);
+    assert!(
+        r.rewrapped.is_empty(),
+        "the server re-wrap did not run here: {r:?}"
+    );
+    // persist v53 (I397b–d) re-keys a device the moment its occurrence is
+    // admitted, so B already holds the old file's key. The server's re-wrap
+    // stays as the catch-up for devices admitted BEFORE v53, which persist's
+    // walk never saw; what this test pins is that it runs only where the fold
+    // names this device.
+    assert!(granted_to_b().await, "persist re-keyed B at admission");
     assert!(
         claims_by(&p.a, &p.a_key).await.is_empty(),
         "A did not contest B's live claim"

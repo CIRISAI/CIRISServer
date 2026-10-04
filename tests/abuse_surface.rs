@@ -216,7 +216,7 @@ async fn put(engine: &Engine, row: Attestation) -> Result<(), FedError> {
 //     the age-assurance plane.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// **PINS A HOLE.** persist v22.0.0 closed the self-asserted-authority hole
+/// **WAS A HOLE — CLOSED at persist v53.** persist v22.0.0 closed the self-asserted-authority hole
 /// (`check_privileged_identity_type_admission`) for the claims whose conferral
 /// root is the accord co-scrub. `witness` is deliberately excluded, on the
 /// stated ground that it is *"DESCRIPTIVE; every use site re-derives the
@@ -231,10 +231,10 @@ async fn put(engine: &Engine, row: Attestation) -> Result<(), FedError> {
 /// the exact rung CC 3.4.11 reserves to a witness precisely because a subject
 /// must not be able to reach it.
 ///
-/// If this test goes RED because the write is now refused, the hole is closed:
-/// delete the pin.
+/// persist v53 refuses the write with `ReservedPrefixEmitterMismatch`, so the
+/// pin is now a guard: the forgery must stay refused and must not read back.
 #[tokio::test]
-async fn a_self_asserted_witness_can_forge_age_assurance_about_a_third_party_today() {
+async fn a_self_asserted_witness_can_no_longer_forge_age_assurance_about_a_third_party() {
     let engine = node().await;
     register_self(&engine).await;
 
@@ -265,26 +265,22 @@ async fn a_self_asserted_witness_can_forge_age_assurance_about_a_third_party_tod
 
     let verdict = put(&engine, row).await;
     assert!(
-        verdict.is_ok(),
-        "PIN: a self-asserted witness lands an age-assurance LEVEL about a third party. If this \
-         is now refused the hole is CLOSED and this pin should be deleted. Got: {verdict:?}"
+        format!("{verdict:?}").contains("ReservedPrefixEmitterMismatch"),
+        "GUARD: a self-asserted witness must not land an age-assurance LEVEL about a third \
+         party (closed at persist v53). Got: {verdict:?}"
     );
 
-    // And the row is readable as what it claims to be — not quarantined, not
-    // flagged. This half is what makes it a forgery rather than noise.
+    // And nothing reads back as a witness-attested level.
     let rows = engine
         .federation_directory()
         .list_attestations_for("abuse-victim")
         .await
         .expect("read the victim's rows");
     assert!(
-        rows.iter()
-            .any(|r| r.attesting_key_id == "abuse-fake-witness"
-                && r.attestation_envelope
-                    .get("dimension")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("age_assurance:provider:adult:v1")),
-        "the forged age-assurance row reads back as a witness-attested level"
+        !rows
+            .iter()
+            .any(|r| r.attesting_key_id == "abuse-fake-witness"),
+        "the refused age-assurance row must not read back"
     );
 }
 

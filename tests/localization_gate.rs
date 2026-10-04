@@ -752,7 +752,33 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// the `accord.duty.*`, `mesh_config.refusal.*`, `trust_root.*`,
     /// `operator.store.*` and two single ids still on the debt list. The floor
     /// in pyproject.toml rose to 0.5.226 with it.
-    const MAX_UNCOVERED: usize = 19;
+    ///
+    /// 19 -> 20 for 0.5.220: `drive.awaiting_key` (persist v53 #969, edge
+    /// #797 — a self/family file whose bytes arrived before this device's
+    /// per-epoch key: 409, ask again). Same reason, same list; queued for
+    /// the client bundle.
+    ///
+    /// 20 -> 34 for 0.5.220: the final-genesis ceremony routes'
+    /// 14 `final_genesis.*` refusals (`src/final_genesis.rs`), for the
+    /// client's 3-of-3 re-mint screens. Same reason, same list.
+    ///
+    /// 34 -> 35 for 0.5.220: `accord.genesis_superseded`, the 410 the retired
+    /// 2-of-3 re-mint routes answer (the final genesis replaces them).
+    ///
+    /// 35 -> 36 for 0.5.220: `final_genesis.not_testing_mode`, the dry run's
+    /// software signer refused outside testing mode (split from
+    /// `no_hardware_signer`, which says something else).
+    ///
+    /// 36 -> 39 for 0.5.220: the recovery-key step's
+    /// `final_genesis.{not_a_holder, recovery_key_is_a_holder, recovery_key_shared}`
+    /// (the maintainer: A2 recovers A1, B2 B1, C2 C1).
+    ///
+    /// 39 -> 40 for 0.5.220: `final_genesis.recovery_key_mismatch` (a spare
+    /// read off its token that differs from the ceremony's record).
+    ///
+    /// 40 -> 41 for 0.5.220: `trust_root.bundle_unlabelled` (an old portable
+    /// bundle refused at import — on persist v53 it installs as no charter).
+    const MAX_UNCOVERED: usize = 41;
 
     let en = load_en();
     let ids = scraped_server_ids();

@@ -825,6 +825,39 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # the client with their English (CIRISClient#78): the person's contact code
     # (CIRISServer#673), withdrawing consent (#657), and an explicit TPM device
     # custody this host cannot honour (#639).
+    # THE KEY THAT FOLLOWS THE BYTES (0.5.220, persist v53 #969 / edge #797):
+    # a large self/family file's bytes can arrive before this device's
+    # per-epoch key; the drive answers 409 `drive.awaiting_key` ("ask again"),
+    # never a denial. Queued for the client bundle with its English.
+    "drive.awaiting_key",
+    # The retired 2-of-3 re-mint routes answer 410 with this id and the path of
+    # the final genesis (0.5.220). Queued for the client bundle.
+    "accord.genesis_superseded",
+    # An old, unlabelled portable bundle refused at import (persist v53, CC 3.2
+    # T4a): it would install as no charter. Queued for the client bundle.
+    "trust_root.bundle_unlabelled",
+    # THE FINAL GENESIS (0.5.220, FSD/FINAL_GENESIS.md): the ceremony routes'
+    # refusals, for the client's 3-of-3 re-mint screens (to come, CSD-067 §3).
+    # Queued for the client bundle with their English.
+    "final_genesis.already_planned",
+    "final_genesis.bad_request",
+    "final_genesis.clock_not_synchronized",
+    "final_genesis.clock_unverified",
+    "final_genesis.no_hardware_signer",
+    "final_genesis.not_testing_mode",
+    "final_genesis.not_a_holder",
+    "final_genesis.recovery_key_is_a_holder",
+    "final_genesis.recovery_key_shared",
+    "final_genesis.recovery_key_mismatch",
+    "final_genesis.no_serve_nodes",
+    "final_genesis.nothing_to_sign",
+    "final_genesis.not_planned",
+    "final_genesis.serve_node_no_pqc",
+    "final_genesis.serve_node_unknown",
+    "final_genesis.signer_unavailable",
+    "final_genesis.sign_failed",
+    "final_genesis.store_failed",
+    "final_genesis.store_unavailable",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

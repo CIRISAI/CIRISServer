@@ -420,7 +420,9 @@ async fn unannounced_second_node(p: &Person, tag: u8) -> String {
         .put_identity_occurrence_local(IdentityOccurrence {
             identity_key_id: p.key().to_owned(),
             occurrence_key_id: key_id.clone(),
-            device_class: "server".to_owned(),
+            // A person's own device (persist v53 S1: a server is not in its
+            // owner's self audience).
+            device_class: "laptop".to_owned(),
             hardware_attestation: None,
             asserted_at: chrono::Utc::now(),
             valid_until: None,
@@ -536,7 +538,9 @@ async fn node_occurrence(p: &Person, node_key_id: &str, tag: u8) {
         .put_identity_occurrence_local(IdentityOccurrence {
             identity_key_id: p.key().to_owned(),
             occurrence_key_id: node_key_id.to_owned(),
-            device_class: "server".to_owned(),
+            // A person's own device (persist v53 S1: a server is not in its
+            // owner's self audience).
+            device_class: "laptop".to_owned(),
             hardware_attestation: None,
             asserted_at: chrono::Utc::now(),
             valid_until: None,

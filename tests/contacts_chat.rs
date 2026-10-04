@@ -1704,6 +1704,8 @@ async fn strangers_community(engine: &Engine) -> (String, LocalSigner, String) {
             consensus_protocol: "unanimous".to_string(),
             policy_blob: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         },
         &[
             (a_key_id.as_str(), 0xC0, 0xC1),
@@ -3170,6 +3172,8 @@ async fn a_poisoned_roster_under_the_pair_id_is_refused() {
             consensus_protocol: "unanimous".to_string(),
             policy_blob: None,
             persist_row_hash: String::new(),
+            prev_head_digest: String::new(),
+            charter_digest: String::new(),
         },
         &[
             (CONTACT_KEY_ID, 0xB0, 0xB1),

@@ -284,6 +284,8 @@ async fn try_put_community(
         consensus_protocol: protocol.to_string(),
         policy_blob: None,
         persist_row_hash: String::new(),
+        prev_head_digest: String::new(),
+        charter_digest: String::new(),
     };
     let canonical =
         ceg_produce_canonicalize(&community.signing_envelope()).expect("canonicalize community");

@@ -917,7 +917,22 @@ pub async fn anchor_agent_to_owner(
         .steward_bindings_of(&agent_key)
         .await
         .map_err(|e| anyhow::anyhow!("steward_bindings_of({agent_key}): {e}"))?;
-    if stewards.iter().any(|s| s == &owner) {
+    // Already anchored — unless the node's occurrence carries the wrong device
+    // class (persist v53 S1). Every owned node was issued as `server` until
+    // 0.5.220; that row is the OWNER's signed row, so edge cannot re-class it
+    // (`Provisioned::ReclassNeedsSigner`). This fold is what re-issues it, with
+    // the host's real class, on the owner's pen.
+    let misclassed = match engine
+        .federation_directory()
+        .list_identity_occurrences_for(&owner)
+        .await
+    {
+        Ok(occs) => occs.iter().any(|o| {
+            o.occurrence_key_id == node_key && o.device_class != crate::backend::host_device_class()
+        }),
+        Err(_) => false,
+    };
+    if stewards.iter().any(|s| s == &owner) && !misclassed {
         return Ok(None);
     }
     let Some((seed_dir, default_alias)) = held_user_seed_dir() else {
@@ -952,7 +967,9 @@ pub async fn anchor_agent_to_owner(
             identity_signer: Some(std::sync::Arc::new(login_signer)),
             app: SelfAtLoginOccurrence {
                 occurrence_key_id: node_key.clone(),
-                device_class: device_class::SERVER.to_owned(),
+                // The host's real class (persist v53 S1): a person's phone or
+                // laptop must stay in the audience for their own content.
+                device_class: crate::backend::host_device_class().to_owned(),
                 hardware_attestation: None,
                 encryption_pubkeys: enc.clone(),
                 transport_destinations: Vec::new(),

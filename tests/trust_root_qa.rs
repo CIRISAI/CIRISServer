@@ -271,8 +271,11 @@ async fn signed_charter(
     scope: serde_json::Value,
     successors: &[String],
 ) -> Attestation {
-    let commitment = pre_rotation_commitment(successors).expect("pre-rotation commitment computes");
+    let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
+    let commitment =
+        pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment computes");
     let envelope = serde_json::json!({
+        "dimension": ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
         "references_attestation_id": id,
         "scope": scope,
         CHARTER_PRE_ROTATION_FIELD: commitment,
@@ -298,7 +301,16 @@ async fn signed_delegates_to(
     scope: serde_json::Value,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Attestation {
+    // persist v53 (CC 3.2 T4a): a new `delegates_to` is a grant or an
+    // acceptance only with its job label. These fixtures name their rows
+    // `qa-grant-*` (root → node) or `qa-*-edge*` (user → root).
+    let job = if id.contains("grant") {
+        ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION
+    } else {
+        ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION
+    };
     let envelope = serde_json::json!({
+        "dimension": job,
         "references_attestation_id": id,
         "scope": scope,
     });
@@ -592,8 +604,8 @@ async fn qa_mints_and_produces_a_portable_genesis() {
             ROOT,
             attestation_type::DELEGATES_TO,
             ciris_server::mesh_genesis::charter_envelope(&[
-                HOLDER_IDS[1].to_string(),
-                HOLDER_IDS[2].to_string(),
+                committed(HOLDER_IDS[1]),
+                committed(HOLDER_IDS[2]),
             ])
             .expect("charter envelope"),
             chrono::Utc::now(),
@@ -879,6 +891,7 @@ async fn qa_expired_trust_edge_is_dead() {
         ROOT,
         attestation_type::DELEGATES_TO,
         serde_json::json!({
+            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
             "references_attestation_id": "qa-trust-edge-expired",
             "scope": [INFRA_ATTEST, INFRA_SERVE],
         }),
@@ -969,8 +982,8 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
             ROOT,
             attestation_type::DELEGATES_TO,
             ciris_server::mesh_genesis::charter_envelope(&[
-                HOLDER_IDS[1].to_string(),
-                HOLDER_IDS[2].to_string(),
+                committed(HOLDER_IDS[1]),
+                committed(HOLDER_IDS[2]),
             ])
             .expect("charter envelope"),
             chrono::Utc::now(),
@@ -1070,4 +1083,16 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
         .expect("capability walk")
         .expect("leg B resolves for the re-blessed canonical");
     assert_eq!(grant.root_key_id, ROOT);
+}
+
+/// A placeholder successor as committed key material (persist v53, CC 3.2 T3:
+/// a commitment binds `{key_id, both pubkeys}`). Fixture successors never sign,
+/// so any well-formed material serves.
+#[allow(dead_code)]
+fn committed(id: &str) -> ciris_persist::federation::trust_root::CommittedKey {
+    ciris_persist::federation::trust_root::CommittedKey {
+        key_id: id.to_string(),
+        pubkey_ed25519_base64: format!("{id}-ed25519"),
+        pubkey_ml_dsa_65_base64: format!("{id}-ml-dsa-65"),
+    }
 }

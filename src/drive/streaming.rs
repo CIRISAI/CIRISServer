@@ -75,10 +75,13 @@ pub const GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 const GRANT_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn grant_pending(e: &FileError) -> bool {
-    matches!(
-        e,
-        FileError::Unopened(ciris_edge::chat::UnopenedReason::NotGranted { .. })
-    )
+    // `NotGranted` while a grant is still in flight, and edge's own pending
+    // state for a per-epoch key not yet granted (persist v53 #969).
+    matches!(e, FileError::Unopened(r) if r.is_pending())
+        || matches!(
+            e,
+            FileError::Unopened(ciris_edge::chat::UnopenedReason::NotGranted { .. })
+        )
 }
 
 /// The whole file, one chunk per item, through `FileRow::chunks()`. A chunk
