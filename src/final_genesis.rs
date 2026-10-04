@@ -379,17 +379,22 @@ async fn serve_node_input(
 /// from a node's own directory row has none (found by the dry run: the
 /// people's nodes never treated the minted canonical as one).
 fn require_dial_hint(input: ServeNodeInput) -> Result<ServeNodeInput, Response> {
-    let has_hint = input
+    // Judged by the dialer itself (`compose::ip_addrs_from_hints`, what a
+    // booting node bootstraps from): at least one `ip` hint whose destination
+    // parses as `ip:port`. A non-empty string is not an address (Codex on
+    // #726: `{"kind":"ip","destination":"not-an-address"}` passed).
+    let hints: Vec<(String, ciris_persist::federation::types::TransportHint)> = input
         .registration_envelope
         .get("transport_hints")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| {
-            a.iter().any(|h| {
-                h.get("destination")
-                    .and_then(|d| d.as_str())
-                    .is_some_and(|d| !d.trim().is_empty())
-            })
-        });
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| serde_json::from_value(h.clone()).ok())
+                .map(|h| (input.key_id.clone(), h))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_hint = !crate::compose::ip_addrs_from_hints(&hints).is_empty();
     if has_hint {
         Ok(input)
     } else {
@@ -397,7 +402,8 @@ fn require_dial_hint(input: ServeNodeInput) -> Result<ServeNodeInput, Response> 
             StatusCode::BAD_REQUEST,
             "final_genesis.serve_node_no_dial_hint",
             format!(
-                "{} carries no transport hint — pass {{\"key_id\": \"{}\", \"transport_hints\": \
+                "{} carries no dialable transport hint (an `ip` hint whose destination is \
+                 `ip:port`) — pass {{\"key_id\": \"{}\", \"transport_hints\": \
                  [{{\"kind\": \"ip\", \"destination\": \"<host>:4242\"}}]}}; a canonical the \
                  bundle seats without one is a canonical no fresh node can find",
                 input.key_id, input.key_id
@@ -998,6 +1004,9 @@ pub(crate) async fn remint_superseded() -> Response {
 /// read off the spare's token on this node). `complete` once every holder on
 /// the roster has one.
 async fn recovery_keys(State(st): State<FinalGenesisState>) -> Response {
+    // Read under the same lock `/recovery-key` writes under, so a poll never
+    // reads a half-written file as "nothing recorded" (Codex on #726).
+    let _ceremony = CEREMONY_LOCK.lock().await;
     let roster: Vec<String> = ciris_persist::federation::genesis::effective_accord_holder_records()
         .iter()
         .map(|h| h.record.key_id.clone())

@@ -458,9 +458,18 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
             diagnostic[f"{n.name}<->canonical"] = {"person_sees": n.rooted_with(c),
                                                    "canonical_sees": c.rooted_with(n)}
     step("diagnostic:person<->owned_canonical", pairs=diagnostic)
+    # FSD/FINAL_GENESIS.md §3's dry run also names two checks this scenario
+    # does NOT run; said in the report so a PASS is never read as covering
+    # them (Codex on #726).
+    not_covered = [
+        "a real YubiKey signing the serve record (hardware; software holders here)",
+        "a node more than 300 s behind the ceremony refusing the bundle and keeping its old root",
+    ]
+    step("not_covered", checks=not_covered)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
             "bundle_sha256": done.get("bundle_sha256"), "trust_roots": verdict,
-            "owned_canonical_pairs": diagnostic, "first_failure": step.first_failure}
+            "owned_canonical_pairs": diagnostic, "not_covered": not_covered,
+            "first_failure": step.first_failure}
 
 
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {

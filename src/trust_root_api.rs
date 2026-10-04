@@ -497,19 +497,30 @@ async fn delete_root(State(st): State<TrustRootState>, Path(root): Path<String>)
 /// verifies it with `POST /v1/trust-root/import`. `community` is the
 /// `ciris-canonical` birth the bundle carries, `null` on a bundle without one.
 async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
+    // Only the bundle this node RUNS ON. The compiled bake is that bundle only
+    // while the posture is entrenched; a bake this node did not adopt (an older
+    // root still in force, or none) must not be advertised as its root (Codex
+    // on #726).
+    let posture = st.engine.genesis_posture().await;
+    if !posture.entrenched() {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "this node is not entrenched on the bundle it carries, so it serves none: {}",
+                posture.banner().unwrap_or_default()
+            ),
+        );
+    }
     let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
     let fingerprint = match crate::mesh_genesis::fingerprint(bundle) {
         Ok(f) => f,
         Err(e) => {
-            return (
+            return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "trust_root.bad_bundle",
-                    "reason_id": "trust_root.bad_bundle",
-                    "detail": format!("fingerprint the baked bundle: {e}"),
-                })),
+                "trust_root.bad_bundle",
+                format!("fingerprint the baked bundle: {e}"),
             )
-                .into_response()
         }
     };
     Json(serde_json::json!({

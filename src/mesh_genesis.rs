@@ -481,6 +481,11 @@ pub fn unlabelled_trust_row(bundle: &GenesisBundle) -> Option<String> {
     // A grant by what it IS — a `delegates_to` to one of the bundle's serve
     // nodes — not by its id (Codex on #726: a verified bundle may name its
     // grants otherwise).
+    let holders: std::collections::HashSet<&str> = bundle
+        .holders
+        .iter()
+        .map(|h| h.record.key_id.as_str())
+        .collect();
     let serve: std::collections::HashSet<&str> = bundle
         .serve_nodes
         .iter()
@@ -490,9 +495,20 @@ pub fn unlabelled_trust_row(bundle: &GenesisBundle) -> Option<String> {
         .attestations
         .iter()
         .map(|a| &a.attestation)
+        // ...that confers serving, from a holder — the same identification
+        // `verify_bundle_structure` uses, so an auxiliary delegation to a serve
+        // node is not mistaken for its grant (Codex on #726).
         .filter(|a| {
             a.attestation_type == attestation_type::DELEGATES_TO
                 && serve.contains(a.attested_key_id.as_str())
+                && holders.contains(a.attesting_key_id.as_str())
+                && match a.attestation_envelope.get(paths::SCOPE) {
+                    Some(serde_json::Value::String(s)) => s == INFRA_SERVE_SCOPE,
+                    Some(serde_json::Value::Array(v)) => {
+                        v.iter().any(|x| x.as_str() == Some(INFRA_SERVE_SCOPE))
+                    }
+                    _ => false,
+                }
         })
         .find(|a| {
             a.attestation_envelope

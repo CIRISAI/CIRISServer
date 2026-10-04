@@ -144,6 +144,25 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         refused["reason_id"], "final_genesis.serve_node_no_dial_hint",
         "{refused}"
     );
+    // A hint the dialer cannot use is no hint: an `ip` destination must be
+    // `ip:port`.
+    let mut undialable = serde_json::to_value(&inputs.serve_nodes).unwrap();
+    for n in undialable.as_array_mut().unwrap() {
+        n["registration_envelope"]["transport_hints"] =
+            serde_json::json!([{ "kind": "ip", "destination": "not-an-address" }]);
+    }
+    let (s, refused) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/plan",
+        serde_json::json!({ "serve_nodes": undialable, "clock_checked": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["reason_id"], "final_genesis.serve_node_no_dial_hint",
+        "{refused}"
+    );
     let mut serve_nodes = serde_json::to_value(&inputs.serve_nodes).unwrap();
     for n in serve_nodes.as_array_mut().unwrap() {
         n["registration_envelope"]["transport_hints"] =
