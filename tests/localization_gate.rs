@@ -793,7 +793,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 44 -> 45 for 0.5.221: `drive.device_class_not_personal` (a self/family
     /// write on a node not registered as a personal device names the cause —
     /// the client's matrix hit the bare key_grant error).
-    const MAX_UNCOVERED: usize = 45;
+    ///
+    /// 45 -> 20 for 0.5.221: `ciris-client` 0.5.227 (CIRISClient#156) carries
+    /// the 25 ids this cut added — `final_genesis.*`, `accord.genesis_superseded`,
+    /// `trust_root.bundle_{unlabelled,not_in_force}`, `drive.awaiting_key`; the
+    /// floor in pyproject.toml rose to 0.5.227 with it. The 20 left are the 19
+    /// paid down to at 0.5.219 plus `drive.device_class_not_personal`.
+    const MAX_UNCOVERED: usize = 20;
 
     let en = load_en();
     let ids = scraped_server_ids();
