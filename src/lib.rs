@@ -1236,6 +1236,23 @@ pub(crate) mod log_retention {
         PassReport { archived, deferred }
     }
 
+    /// Does the gzip file at `p` decode to its end without error?
+    fn decodes_whole(p: &Path) -> bool {
+        use std::io::Read as _;
+        let Ok(f) = std::fs::File::open(p) else {
+            return false;
+        };
+        let mut dec = flate2::read::GzDecoder::new(f);
+        let mut sink = [0u8; 64 * 1024];
+        loop {
+            match dec.read(&mut sink) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    }
+
     /// Archive one dated file, never losing a byte of it:
     ///
     /// 1. take ownership: rename it to `<name>.archiving` (atomic). A writer
@@ -1329,6 +1346,26 @@ pub(crate) mod log_retention {
                      and now has {now_len}"
                 ));
             }
+            // A RESUMED attempt (the source was already `.archiving`): an
+            // archive under this date's names that does not decode whole is
+            // the crashed attempt's half-copied output (the no-hard-link
+            // landing writes the final name directly), never an operator's —
+            // remove it rather than leave a corrupt archive forever (Codex on
+            // #729).
+            if name.ends_with(ARCHIVING) {
+                for n in 0..100u32 {
+                    let dest = if n == 0 {
+                        path.with_file_name(format!("{base}.gz"))
+                    } else {
+                        path.with_file_name(format!("{base}.{n}.gz"))
+                    };
+                    if std::fs::symlink_metadata(&dest).is_ok_and(|m| m.is_file())
+                        && !decodes_whole(&dest)
+                    {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                }
+            }
             // (3) land under a free name, never replacing an archive.
             for n in 0..100u32 {
                 let dest = if n == 0 {
@@ -1375,9 +1412,15 @@ pub(crate) mod log_retention {
                     .and_then(|d| d.sync_all())
                     .map_err(|e| format!("sync the log directory: {e}"))?;
             }
-            // (5) the owned source goes.
+            // (5) the owned source goes — and that removal is made durable
+            // too, or a power loss could bring the source back beside its
+            // archive and the next pass would archive it again (Codex on #729).
             std::fs::remove_file(&owned)
                 .map_err(|e| format!("could not remove the raw file ({e})"))?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -1540,9 +1583,16 @@ pub(crate) mod log_retention {
             let d = scratch("interrupted");
             touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
             std::fs::write(d.join("ciris-server.log.2026-07-15.gz.tmp"), b"half").unwrap();
+            // ...and a half-copied archive under the final name (the no-hard-
+            // link landing): not gzip-whole, so it is the crash's, not history.
+            std::fs::write(d.join("ciris-server.log.2026-07-15.gz"), b"\x1f\x8b trunc").unwrap();
             touch(&d, "ciris-server.log.2026-10-04", 10);
             assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
-            assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
+            assert!(
+                decodes_whole(&d.join("ciris-server.log.2026-07-15.gz")),
+                "the valid archive took the name the crash left corrupt"
+            );
+            assert!(!d.join("ciris-server.log.2026-07-15.1.gz").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
         }
