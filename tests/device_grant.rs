@@ -130,6 +130,12 @@ async fn register_key(
 /// `key_id()` and emits under), with the REAL minted pubkeys so the federation-tier
 /// verify passes. Returns the derived federation key_id (the edge issuer / graph id).
 async fn setup_local_owner(engine: &Engine, owner_alias: &str, seed_dir: &Path) -> String {
+    // ONE mint at a time in this binary. Every test mints into the same keys
+    // dir, and verify's writability probe there is not safe against a
+    // concurrent writer on Windows ("Access is denied", windows-latest
+    // 2026-10-04, `ceg_native_approve_emits_…`).
+    static MINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_mint = MINT.lock().await;
     let minted = ciris_server::identity::mint_user_identity(
         UserIdentityBackend::Software,
         owner_alias,
