@@ -3478,12 +3478,47 @@ fn file_error(e: &files::FileError, room: &ScopeRoom) -> Response {
                  rather than sealing something no one can open"
             ),
         ),
+        // persist v53 S1: only a PERSONAL device (phone / laptop) is granted
+        // its owner's self and family content. A node that registered as
+        // anything else cannot seal into those rooms, and the substrate's
+        // error names a key_grant, never the cause (found by the client's
+        // matrix: a release binary started with no CIRIS_DEVICE_CLASS).
+        other if personal_room(room) && !personal_device_class() => {
+            let class = crate::backend::host_device_class();
+            refuse(
+                StatusCode::CONFLICT,
+                "drive.device_class_not_personal",
+                format!(
+                    "this node is registered as a `{class}` device, and only a person's own \
+                     device (phone or laptop) is given their self and family content — so it \
+                     cannot write into {room}. If this node is your own device, start it with \
+                     CIRIS_DEVICE_CLASS=laptop (the desktop launcher does). Detail: {other}"
+                ),
+            )
+        }
         other => refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "drive.publish_failed",
             format!("{other}"),
         ),
     }
+}
+
+/// A self or family room: the content S1 keeps on personal devices only.
+fn personal_room(room: &ScopeRoom) -> bool {
+    matches!(
+        room,
+        ScopeRoom::SelfCollective { .. } | ScopeRoom::Family { .. }
+    )
+}
+
+/// Is this node a personal device (phone / laptop) under S1?
+fn personal_device_class() -> bool {
+    use ciris_persist::federation::types::device_class;
+    matches!(
+        crate::backend::host_device_class(),
+        device_class::PHONE | device_class::LAPTOP
+    )
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
