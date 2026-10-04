@@ -1087,7 +1087,16 @@ pub(crate) mod log_retention {
         }
         let keep = env_or("CIRIS_LOG_KEEP_DAYS", KEEP_DAYS as u64) as usize;
         let total = env_or("CIRIS_LOG_TOTAL_CAP_MB", TOTAL_CAP_BYTES / (1024 * 1024)) * 1024 * 1024;
-        prune(dir, today, keep, total);
+        // OFF the write path: this is called from inside an event's write, and
+        // archiving can mean compressing months of files (the canonical's
+        // first 0.5.221 boot: July onward). Done inline, every log line on
+        // the node would wait for it.
+        let (dir, today) = (dir.to_owned(), today.to_owned());
+        let _ = std::thread::Builder::new()
+            .name("log-retention".into())
+            .spawn(move || {
+                prune(&dir, &today, keep, total);
+            });
     }
 
     /// The dated files in `dir` other than `today`'s, oldest first, with sizes.
@@ -1113,35 +1122,102 @@ pub(crate) mod log_retention {
         v
     }
 
-    /// Delete dated files beyond `keep` (oldest first), then oldest files until
-    /// the remaining dated files fit `total`. Today's file is never deleted.
+    /// Move dated files out of the live window: beyond `keep` (oldest first),
+    /// then oldest until the remaining live files fit `total`. A file leaving
+    /// the window is ARCHIVED — gzip-compressed to `<name>.gz` beside it — and
+    /// never deleted: 0.5.220 (#721) deleted them, so a node's first boot on it
+    /// erased every log older than 14 days (the canonical: July to mid-
+    /// September) with nothing kept. The raw file is removed only once its
+    /// archive is written, synced and read back to the same length; if that
+    /// fails (a full disk), the raw file stays. Archives are never pruned here:
+    /// dropping history is the operator's act. Today's file is never touched.
+    /// Returns the dates archived.
     pub(crate) fn prune(dir: &Path, today: &str, keep: usize, total: u64) -> Vec<String> {
         let mut files = dated_files(dir, today);
-        let mut removed = Vec::new();
+        let mut archived = Vec::new();
+        let mut kept: Vec<String> = Vec::new();
         // `keep` counts today's file too.
         let keep_past = keep.saturating_sub(1);
         while files.len() > keep_past {
             let (date, path, _) = files.remove(0);
-            if std::fs::remove_file(&path).is_ok() {
-                removed.push(date);
+            match archive(&path) {
+                Ok(()) => archived.push(date),
+                Err(e) => kept.push(format!("{date} ({e})")),
             }
         }
         let mut sum: u64 = files.iter().map(|f| f.2).sum();
         while sum > total && !files.is_empty() {
             let (date, path, len) = files.remove(0);
-            if std::fs::remove_file(&path).is_ok() {
-                removed.push(date);
+            match archive(&path) {
+                Ok(()) => archived.push(date),
+                Err(e) => kept.push(format!("{date} ({e})")),
             }
             sum = sum.saturating_sub(len);
         }
-        if !removed.is_empty() {
+        if !archived.is_empty() {
             eprintln!(
-                "ciris-server: log retention removed {} file(s): {}",
-                removed.len(),
-                removed.join(", ")
+                "ciris-server: log retention archived {} file(s) to .gz (nothing deleted): {}",
+                archived.len(),
+                archived.join(", ")
             );
         }
-        removed
+        if !kept.is_empty() {
+            eprintln!(
+                "ciris-server: log retention could NOT archive {} file(s); they are kept as they \
+                 are: {}",
+                kept.len(),
+                kept.join(", ")
+            );
+        }
+        archived
+    }
+
+    /// Compress `path` to `<path>.gz` (via a `.gz.tmp` + rename), verify the
+    /// archive decodes to the original length, then remove `path`. Any failure
+    /// leaves `path` in place and removes the partial archive.
+    pub(crate) fn archive(path: &Path) -> Result<(), String> {
+        use std::io::{Read as _, Write as _};
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or("no file name")?;
+        let gz = path.with_file_name(format!("{name}.gz"));
+        let tmp = path.with_file_name(format!("{name}.gz.tmp"));
+        let result = (|| -> Result<(), String> {
+            let original_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            let mut src = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            let mut enc = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+            std::io::copy(&mut src, &mut enc).map_err(|e| e.to_string())?;
+            let mut out = enc.finish().map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())?;
+            out.sync_all().map_err(|e| e.to_string())?;
+            drop(out);
+            // Read it back before the original goes anywhere.
+            let mut dec =
+                flate2::read::GzDecoder::new(std::fs::File::open(&tmp).map_err(|e| e.to_string())?);
+            let mut sink = [0u8; 64 * 1024];
+            let mut decoded: u64 = 0;
+            loop {
+                let n = dec.read(&mut sink).map_err(|e| format!("verify: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                decoded += n as u64;
+            }
+            if decoded != original_len {
+                return Err(format!(
+                    "verify: archive decodes to {decoded} bytes, the file has {original_len}"
+                ));
+            }
+            std::fs::rename(&tmp, &gz).map_err(|e| e.to_string())?;
+            std::fs::remove_file(path).map_err(|e| format!("archived, but: {e}"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     #[cfg(test)]
@@ -1181,11 +1257,13 @@ pub(crate) mod log_retention {
             }
             touch(&d, "ciris-server.log.boot", 10);
             touch(&d, "ciris-server.log.not-a-date", 10);
-            let removed = prune(&d, "2026-10-05", 3, u64::MAX);
-            assert_eq!(removed, vec!["2026-10-01", "2026-10-02"]);
+            let archived = prune(&d, "2026-10-05", 3, u64::MAX);
+            assert_eq!(archived, vec!["2026-10-01", "2026-10-02"]);
             assert_eq!(
                 names(&d),
                 vec![
+                    "ciris-server.log.2026-10-01.gz",
+                    "ciris-server.log.2026-10-02.gz",
                     "ciris-server.log.2026-10-03",
                     "ciris-server.log.2026-10-04",
                     "ciris-server.log.2026-10-05",
@@ -1202,12 +1280,52 @@ pub(crate) mod log_retention {
             touch(&d, "ciris-server.log.2026-10-02", 300);
             touch(&d, "ciris-server.log.2026-10-03", 300);
             touch(&d, "ciris-server.log.2026-10-04", 5000);
-            let removed = prune(&d, "2026-10-04", 100, 700);
-            assert_eq!(removed, vec!["2026-10-01"]);
+            let archived = prune(&d, "2026-10-04", 100, 700);
+            assert_eq!(archived, vec!["2026-10-01"]);
             assert!(
                 d.join("ciris-server.log.2026-10-04").exists(),
-                "today is never deleted"
+                "today is never touched"
             );
+            assert!(d.join("ciris-server.log.2026-10-01.gz").exists());
+        }
+
+        /// The 0.5.220 bug: a first boot on retention erased months of logs.
+        /// Every byte of an aged-out file survives, in its archive.
+        #[test]
+        fn an_aged_out_file_is_archived_byte_for_byte_never_deleted() {
+            use std::io::Read as _;
+            let d = scratch("archive");
+            let body: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_le_bytes()).collect();
+            std::fs::write(d.join("ciris-server.log.2026-07-15"), &body).unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
+            assert!(!d.join("ciris-server.log.2026-07-15").exists());
+            let mut back = Vec::new();
+            flate2::read::GzDecoder::new(
+                std::fs::File::open(d.join("ciris-server.log.2026-07-15.gz")).unwrap(),
+            )
+            .read_to_end(&mut back)
+            .unwrap();
+            assert_eq!(back, body, "the archive holds every byte");
+            // A second pass leaves the archive alone: archives are never pruned.
+            assert!(prune(&d, "2026-10-04", 1, 0).is_empty());
+            assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
+        }
+
+        /// An archive that cannot be written leaves the original in place.
+        #[test]
+        fn a_failed_archive_keeps_the_original() {
+            let d = scratch("archive-fail");
+            touch(&d, "ciris-server.log.2026-07-15", 100);
+            // A DIRECTORY where the archive must go: the rename cannot land.
+            std::fs::create_dir(d.join("ciris-server.log.2026-07-15.gz")).unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert!(prune(&d, "2026-10-04", 1, u64::MAX).is_empty());
+            assert!(
+                d.join("ciris-server.log.2026-07-15").exists(),
+                "kept as it was"
+            );
+            assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
         }
 
         #[test]
