@@ -808,6 +808,11 @@ async fn has_live_charter(engine: &std::sync::Arc<Engine>, root_key_id: &str) ->
             && a.attestation_envelope
                 .get(paths::PRE_ROTATION_COMMITMENT)
                 .is_some()
+            // persist v53: only a LABELLED charter counts outside the pinned
+            // bundle, so a test node upgraded from a release that minted the
+            // unlabelled one re-authors it once (Codex on #725).
+            && a.attestation_envelope.get(paths::DIMENSION).and_then(|v| v.as_str())
+                == Some(ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION)
     }))
 }
 
@@ -853,5 +858,10 @@ async fn has_capability_grant(
         a.attestation_type == attestation_type::DELEGATES_TO
             && a.attesting_key_id == root_key_id
             && envelope_scope_contains(&a.attestation_envelope, INFRA_SERVE_SCOPE)
+            // Same as the charter: an unlabelled grant is no grant on v53.
+            && a.attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(|v| v.as_str())
+                == Some(ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION)
     }))
 }

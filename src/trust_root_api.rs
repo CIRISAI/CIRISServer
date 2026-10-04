@@ -316,14 +316,16 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
     // still verifies, but outside the one pinned genesis it installs as no
     // charter (CC 3.2 T4a), so the root would look imported and never be
     // valid. Say so instead of reporting a success.
-    if !crate::mesh_genesis::bundle_charter_is_labelled(&bundle) {
+    if let Some(row) = crate::mesh_genesis::unlabelled_trust_row(&bundle) {
         return err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "trust_root.bundle_unlabelled",
-            "this bundle was minted before the trust-root rows carried their job labels \
-             (trust:charter:v1); on this node it would install as no charter at all. Import \
-             a bundle from the final genesis (FSD/FINAL_GENESIS.md) instead. Nothing on this \
-             node changed.",
+            format!(
+                "this bundle was minted before the trust-root rows carried their job labels \
+                 (trust:charter:v1 / trust:confers:v1 — {row} carries none); on this node it \
+                 would install as no charter or no grant. Import a bundle from the final \
+                 genesis (FSD/FINAL_GENESIS.md) instead. Nothing on this node changed."
+            ),
         );
     }
 
@@ -345,7 +347,27 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
     // TRUSTED, which is a real state an operator can retry from — reporting the
     // whole import as failed would send them re-importing what is already here.
     let accepted = match crate::mesh_genesis::accept_trust_root(&st.engine, &bundle).await {
-        Ok(_) => true,
+        Ok(Some(_)) => true,
+        // Nothing was accepted: the acceptance names the root's head, and a
+        // bundle whose genesis records this node does not hold yet (a v3
+        // bundle's family/community heads are seeded only from the baked one)
+        // defers. Reported as NOT accepted — `Ok` alone used to read as
+        // accepted (Codex on #725).
+        // This node IS the charter's root (a solo 1-of-1 bundle): the charter's
+        // self-loop is the trust, and no acceptance is written (Codex on #726).
+        Ok(None)
+            if crate::mesh_genesis::charter_root_key_id(&bundle).as_deref()
+                == Some(st.node_key_id.as_str()) =>
+        {
+            true
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "trust root INSTALLED but not ACCEPTED — this node does not hold the root's \
+                 head yet; the acceptance is retried at the next boot or import"
+            );
+            false
+        }
         Err(e) => {
             tracing::warn!(error = %e, "trust root INSTALLED but not ACCEPTED — records are known, this node's trust:accepts edge was not written");
             false
@@ -465,6 +487,105 @@ async fn delete_root(State(st): State<TrustRootState>, Path(root): Path<String>)
             format!("could not withdraw acceptance of {root}: {e}"),
         ),
     }
+}
+
+/// `GET /v1/trust-root/bundle` — the genesis bundle this node runs on, in the
+/// shape the registry serves (`FSD/FINAL_GENESIS.md` §3 item 8):
+/// `{bundle, community, bundle_fingerprint, charter_root_key_id, served_by}`.
+/// The bundle is its own proof (every row is holder-signed and the
+/// authorizations cover the whole), so there is no wrapper signature; a reader
+/// verifies it with `POST /v1/trust-root/import`. `community` is the
+/// `ciris-canonical` birth the bundle carries, `null` on a bundle without one.
+///
+/// The contract is "the bake this node runs on": served only while the node
+/// is entrenched on its compiled bake (persist compares the stored legs to
+/// that artifact, so an imported root never makes it so), trusts its root,
+/// and the bake is importable (labelled). Anything else answers 409
+/// `trust_root.bundle_not_in_force` — an imported root is the importer's to
+/// hand on, not this route's.
+async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
+    // Only the bundle this node RUNS ON. The compiled bake is that bundle only
+    // while the posture is entrenched; a bake this node did not adopt (an older
+    // root still in force, or none) must not be advertised as its root (Codex
+    // on #726).
+    let posture = st.engine.genesis_posture().await;
+    if !posture.entrenched() {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "this node is not entrenched on the bundle it carries, so it serves none: {}",
+                posture.banner().unwrap_or_default()
+            ),
+        );
+    }
+    let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    // ...and only if this node actually TRUSTS that bundle's root — an
+    // entrenched posture after importing some other root must not advertise
+    // the compiled one (Codex on #726).
+    let root = crate::mesh_genesis::charter_root_key_id(bundle);
+    let trusted = match ciris_persist::federation::trust_root::trusted_roots_of(
+        st.engine.federation_directory().as_ref(),
+        &st.node_key_id,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(roots) => root.as_ref().is_some_and(|r| roots.contains(r)),
+        Err(_) => false,
+    };
+    if !trusted {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "this node does not trust the root of the bundle it carries ({}), so it serves none",
+                root.as_deref().unwrap_or("no charter")
+            ),
+        );
+    }
+    // A bundle a peer could not import is not served: the July bake predates
+    // the trust-row labels and `POST /v1/trust-root/import` refuses it (Codex
+    // on #726). The final genesis's bake is labelled and serves.
+    if let Some(row) = crate::mesh_genesis::unlabelled_trust_row(bundle) {
+        return err(
+            StatusCode::CONFLICT,
+            "trust_root.bundle_not_in_force",
+            format!(
+                "the bundle this node carries predates the trust-row labels ({row} carries none), \
+                 so no peer could import it; it is not served"
+            ),
+        );
+    }
+    let fingerprint = match crate::mesh_genesis::fingerprint(bundle) {
+        Ok(f) => f,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "trust_root.bad_bundle",
+                format!("fingerprint the baked bundle: {e}"),
+            )
+        }
+    };
+    Json(serde_json::json!({
+        "bundle": bundle,
+        "community": bundle.community_record(crate::final_genesis::COMMUNITY_KEY_ID),
+        "bundle_fingerprint": fingerprint,
+        "charter_root_key_id": crate::mesh_genesis::charter_root_key_id(bundle),
+        "served_by": st.node_key_id,
+    }))
+    .into_response()
+}
+
+/// The PUBLIC trust-root read: the bundle (signed public rows, served to any
+/// peer or client — the registry serves the same shape).
+pub fn public_router(engine: Arc<Engine>, node_key_id: String) -> Router {
+    Router::new()
+        .route("/v1/trust-root/bundle", axum::routing::get(serve_bundle))
+        .with_state(TrustRootState {
+            engine,
+            node_key_id,
+        })
 }
 
 /// The trust-root router. Loopback-gated with the setup reads.

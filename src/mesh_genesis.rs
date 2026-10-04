@@ -463,6 +463,59 @@ pub fn bundle_charter_is_labelled(bundle: &GenesisBundle) -> bool {
     })
 }
 
+/// The first trust-job row of `bundle` that does not carry its job label, if
+/// any: the charter must read `trust:charter:v1` and every `genesis-grant:*`
+/// `trust:confers:v1` (CC 3.2 T4a). Outside the one pinned genesis an
+/// unlabelled grant installs as no grant, so a bundle with a labelled charter
+/// and legacy grants would import "successfully" and seat no canonical
+/// (Codex on #725). `None` = every trust row is labelled (and a charter
+/// exists).
+pub fn unlabelled_trust_row(bundle: &GenesisBundle) -> Option<String> {
+    if !bundle_charter_is_labelled(bundle) {
+        return Some(
+            charter_of(bundle)
+                .map(|c| c.attestation_id.clone())
+                .unwrap_or_else(|| "genesis-charter (absent)".to_owned()),
+        );
+    }
+    // A grant by what it IS — a `delegates_to` to one of the bundle's serve
+    // nodes — not by its id (Codex on #726: a verified bundle may name its
+    // grants otherwise).
+    // From the CHARTER SIGNER, exactly as `verify_bundle_structure` requires.
+    let charter_signer = charter_of(bundle).map(|c| c.attesting_key_id.clone());
+    let serve: std::collections::HashSet<&str> = bundle
+        .serve_nodes
+        .iter()
+        .map(|n| n.record.key_id.as_str())
+        .collect();
+    bundle
+        .attestations
+        .iter()
+        .map(|a| &a.attestation)
+        // ...that confers serving, from the charter signer — the same identification
+        // `verify_bundle_structure` uses, so an auxiliary delegation to a serve
+        // node is not mistaken for its grant (Codex on #726).
+        .filter(|a| {
+            a.attestation_type == attestation_type::DELEGATES_TO
+                && serve.contains(a.attested_key_id.as_str())
+                && Some(a.attesting_key_id.as_str()) == charter_signer.as_deref()
+                && match a.attestation_envelope.get(paths::SCOPE) {
+                    Some(serde_json::Value::String(s)) => s == INFRA_SERVE_SCOPE,
+                    Some(serde_json::Value::Array(v)) => {
+                        v.iter().any(|x| x.as_str() == Some(INFRA_SERVE_SCOPE))
+                    }
+                    _ => false,
+                }
+        })
+        .find(|a| {
+            a.attestation_envelope
+                .get(paths::DIMENSION)
+                .and_then(|v| v.as_str())
+                != Some(ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION)
+        })
+        .map(|a| a.attestation_id.clone())
+}
+
 /// Parse `quorum:M/N` into M. Returns `None` when absent/unparseable — callers
 /// must treat that as "unknown", never as a default threshold.
 fn policy_m(consensus_protocol: &str) -> Option<usize> {
@@ -1343,57 +1396,78 @@ pub async fn withdraw_trust_acceptance(
         .local_derived_key_id()
         .await
         .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
-    let Some(accepted_id) = live_acceptance_id(engine, &node_key_id, root).await? else {
+    // EVERY live acceptance: an upgraded node holds the legacy unlabelled edge
+    // AND the labelled one written beside it, and persist counts either, so
+    // withdrawing one left the root trusted (Codex on #725).
+    let accepted = live_acceptance_ids(engine, &node_key_id, root).await?;
+    if accepted.is_empty() {
         tracing::info!(
             root = %root,
             "no live trust:accepts edge for this root — nothing to withdraw (already un-trusted)"
         );
         return Ok(false);
-    };
-
-    let envelope = ciris_persist::federation::withdraws_attestation_envelope(
-        &accepted_id,
-        attestation_type::DELEGATES_TO,
-    );
-    let mut input = EmitAttestationInput::with_envelope(
-        attestation_type::DELEGATES_TO,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
-            .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
-        cohort_scope::FEDERATION,
-    );
-    input.attested_key_id = Some(root.to_string());
-    engine
-        .emit_attestation_self(input)
-        .await
-        .map_err(|e| GenesisError::Directory(format!("withdraw trust:accepts: {e}")))?;
+    }
+    for accepted_id in &accepted {
+        let envelope = ciris_persist::federation::withdraws_attestation_envelope(
+            accepted_id,
+            attestation_type::DELEGATES_TO,
+        );
+        // A `withdraws` row: persist retires a row only for a structural
+        // retraction (`withdraws` / `recants`, precedence::retired_ids). The
+        // withdrawal used to be written as a `delegates_to` carrying a
+        // `withdraws` envelope, which no fold reads as a retraction — so
+        // un-trusting a root never un-trusted it.
+        let mut input = EmitAttestationInput::with_envelope(
+            attestation_type::WITHDRAWS,
+            ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+                .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
+            cohort_scope::FEDERATION,
+        );
+        input.attested_key_id = Some(root.to_string());
+        engine
+            .emit_attestation_self(input)
+            .await
+            .map_err(|e| GenesisError::Directory(format!("withdraw trust:accepts: {e}")))?;
+    }
 
     tracing::warn!(
-        node_key_id = %node_key_id, trust_root = %root, withdrawn = %accepted_id,
+        node_key_id = %node_key_id, trust_root = %root, withdrawn = ?accepted,
         "TRUST ROOT UN-TRUSTED — acceptance withdrawn. The capability cascade now fails closed \
          on its own: serve gate withholds, agent capabilities gate off."
     );
     Ok(true)
 }
 
-/// The `attestation_id` of this node's LIVE acceptance of `root`, if any.
-async fn live_acceptance_id(
+/// The `attestation_id`s of this node's LIVE acceptances of `root`: its
+/// `delegates_to` rows naming the root that are not themselves withdrawals and
+/// that no withdrawal of its own references.
+async fn live_acceptance_ids(
     engine: &ciris_persist::prelude::Engine,
     node_key_id: &str,
     root: &str,
-) -> Result<Option<String>, GenesisError> {
+) -> Result<Vec<String>, GenesisError> {
     let rows = engine
         .federation_directory()
         .list_attestations_by(node_key_id)
         .await
         .map_err(|e| GenesisError::Directory(format!("read acceptances: {e}")))?;
+    // persist's ONE retraction fold, so "live" here is what `trusted_roots_of`
+    // means by it.
+    let refs: Vec<&ciris_persist::federation::types::Attestation> = rows.iter().collect();
+    let dead = ciris_persist::federation::precedence::retired_ids(&refs);
     Ok(rows
-        .into_iter()
-        .find(|a| {
+        .iter()
+        .filter(|a| {
             a.attested_key_id == root
                 && a.attestation_type
                     == ciris_persist::federation::types::attestation_type::DELEGATES_TO
+                // A pre-fix withdrawal (a `delegates_to` with a `withdraws`
+                // envelope) is not an acceptance.
+                && a.attestation_envelope.get("kind") != Some(&serde_json::json!("withdraws"))
+                && !dead.contains(&a.attestation_id)
         })
-        .map(|a| a.attestation_id))
+        .map(|a| a.attestation_id.clone())
+        .collect())
 }
 
 /// Has this node already accepted `root`? Idempotency for [`accept_trust_root`].

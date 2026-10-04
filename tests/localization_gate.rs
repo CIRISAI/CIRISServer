@@ -778,7 +778,18 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 40 -> 41 for 0.5.220: `trust_root.bundle_unlabelled` (an old portable
     /// bundle refused at import — on persist v53 it installs as no charter).
-    const MAX_UNCOVERED: usize = 41;
+    ///
+    /// 41 -> 42 for 0.5.220: `final_genesis.recovery_key_wrong_holder` (a
+    /// spare recorded or planned for the wrong holder, Codex on #725) — same
+    /// reason, same list, same client issue (CIRISClient#78).
+    ///
+    /// 42 -> 43 for 0.5.220: `final_genesis.serve_node_no_dial_hint` (a
+    /// canonical seated without the transport hint every fresh node dials it
+    /// by — found by the dry run).
+    ///
+    /// 43 -> 44 for 0.5.220: `trust_root.bundle_not_in_force` (the public
+    /// bundle route on a node not entrenched on its bake, Codex on #726).
+    const MAX_UNCOVERED: usize = 44;
 
     let en = load_en();
     let ids = scraped_server_ids();

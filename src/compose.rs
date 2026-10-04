@@ -639,6 +639,19 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         p if p.entrenched() => {
             tracing::info!("trust root entrenched — this node is rooted and serves normally");
         }
+        // persist v53 (CIRISPersist#973, FSD/FINAL_GENESIS.md §3 item 7): the
+        // bake this binary carries was not adopted, but the PREVIOUS root still
+        // stands. Not "no trust root" — that would send an operator to import a
+        // root the node already has (Codex on #725). persist words it.
+        p if p.held_root_in_force() => {
+            tracing::warn!(
+                posture = ?p,
+                "{}",
+                p.banner().unwrap_or_else(|| {
+                    "ROOT NOT ADOPTED — the previous root stays in force".to_string()
+                })
+            );
+        }
         p => {
             let detail = p
                 .banner()
@@ -1322,6 +1335,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // node's trust root is the operator's decision, made at the
                     // operator's own machine.
                     .merge(crate::trust_root_api::router(
+                        Arc::clone(&engine),
+                        node_code.key_id.clone(),
+                    ))
+                    // ...and the one PUBLIC trust-root read: the bundle this node
+                    // runs on (FSD/FINAL_GENESIS.md §3 item 8).
+                    .merge(crate::trust_root_api::public_router(
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
                     ))
@@ -3572,6 +3591,32 @@ async fn register_substrate_key(
     }
 }
 
+/// TEST-ANCHOR ONLY (`FSD/FINAL_GENESIS.md` §3 "Dry run") — boot on a bundle
+/// the ceremony routes minted, as if it were the baked genesis.
+/// `CIRIS_TEST_GENESIS_BUNDLE=<path to canonical_seed.json>` under
+/// `CIRIS_TESTING_MODE=true` hands it to persist's
+/// `install_test_ceremony_outputs_json` BEFORE the Engine exists, so the boot
+/// seed runs every production leg against it (persist honours it only while
+/// the test anchor is live). Compiled out of production builds.
+#[cfg(feature = "test-anchor")]
+fn install_test_genesis_bundle() -> Result<()> {
+    let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") else {
+        return Ok(());
+    };
+    if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+        anyhow::bail!("CIRIS_TEST_GENESIS_BUNDLE is set but CIRIS_TESTING_MODE is not true");
+    }
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("read CIRIS_TEST_GENESIS_BUNDLE {path}"))?;
+    ciris_persist::federation::genesis::install_test_ceremony_outputs_json(&json)
+        .map_err(|e| anyhow::anyhow!("install the test genesis bundle {path}: {e}"))?;
+    tracing::warn!(
+        path,
+        "TEST-ANCHOR: booting on a ceremony-minted genesis bundle in place of the baked one"
+    );
+    Ok(())
+}
+
 /// The one shared persist `Engine` (SQLite-backed; builds + migrates), keyed by
 /// the node's **hybrid hardware** federation signer.
 ///
@@ -3589,6 +3634,8 @@ async fn build_engine(
     // The PQC signer's KEYSTORE alias — must match `federation_pqc_signer`'s
     // `{keystore_alias}-pqc`, so it is the RAW label, NOT the derived key_id.
     let pqc_key_id = format!("{}-pqc", cfg.keystore_alias);
+    #[cfg(feature = "test-anchor")]
+    install_test_genesis_bundle()?;
     let engine =
         Engine::with_hardware_signer_hybrid(signer, Some(pqc), Some(pqc_key_id), &cfg.dsn())
             .await

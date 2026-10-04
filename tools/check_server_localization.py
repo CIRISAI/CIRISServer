@@ -836,6 +836,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # An old, unlabelled portable bundle refused at import (persist v53, CC 3.2
     # T4a): it would install as no charter. Queued for the client bundle.
     "trust_root.bundle_unlabelled",
+    "trust_root.bundle_not_in_force",
     # THE FINAL GENESIS (0.5.220, FSD/FINAL_GENESIS.md): the ceremony routes'
     # refusals, for the client's 3-of-3 re-mint screens (to come, CSD-067 §3).
     # Queued for the client bundle with their English.
@@ -848,6 +849,8 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "final_genesis.not_a_holder",
     "final_genesis.recovery_key_is_a_holder",
     "final_genesis.recovery_key_shared",
+    "final_genesis.recovery_key_wrong_holder",
+    "final_genesis.serve_node_no_dial_hint",
     "final_genesis.recovery_key_mismatch",
     "final_genesis.no_serve_nodes",
     "final_genesis.nothing_to_sign",

@@ -1334,6 +1334,29 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     "first-run claim: anchoring the agent to its owner FAILED (non-fatal) — the covering consent door retries"
                 ),
             }
+            // THE OWNER ACCEPTS THE ROOT AT CLAIM (CIRISServer#632 step 2). A
+            // peer's Rooted walk reads the OWNER's trust:accepts edge
+            // (CIRISEdge#659), which this path left to the next boot — so a
+            // freshly claimed node was Rooted by nobody until it restarted
+            // (measured on the final-genesis dry run, native harness). The
+            // claim-remote arms already accept here; same call as boot.
+            match crate::node_key::accept_roots_as_owner(&st.engine).await {
+                Ok(Some(newly)) if !newly.is_empty() => {
+                    tracing::info!(roots = ?newly, "first-run claim: the OWNER accepted the root(s)");
+                    crate::compose::kick_replication("owner accepted the root at claim");
+                }
+                Ok(Some(_)) => {
+                    tracing::info!("first-run claim: the owner's root acceptance already on record")
+                }
+                Ok(None) => tracing::info!(
+                    "first-run claim: no owner pen on this host — the owner's root acceptance is \
+                     written where the pen is"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "first-run claim: the owner's root acceptance FAILED (non-fatal) — retried at boot"
+                ),
+            }
             let claimed_by_other_device = match req.claimer_key_record.as_ref() {
                 Some(r) => !names_this_node(&st.engine, &st.node_key_id, &r.record.key_id).await,
                 None => false,
