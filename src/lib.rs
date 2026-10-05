@@ -1158,7 +1158,15 @@ pub(crate) mod log_retention {
                 Some((date, e.path(), len))
             })
             .collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
+        // Oldest date first; within a date, an interrupted `.archiving` file
+        // BEFORE a raw file of the same date — the raw one can only be taken
+        // once the `.archiving` name is free (Codex on #729).
+        v.sort_by(|a, b| {
+            let resumed = |p: &std::path::PathBuf| {
+                !p.to_string_lossy().ends_with(ARCHIVING) // false sorts first
+            };
+            a.0.cmp(&b.0).then(resumed(&a.1).cmp(&resumed(&b.1)))
+        });
         v
     }
 
@@ -1674,6 +1682,24 @@ pub(crate) mod log_retention {
             assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.gz.landing").exists());
+        }
+
+        /// An interrupted `.archiving` and a fresh raw file of the same date:
+        /// both are archived in one pass, whichever `read_dir` lists first.
+        #[test]
+        fn a_resumed_and_a_fresh_file_of_one_date_both_archive() {
+            let d = scratch("both");
+            touch(&d, "ciris-server.log.2026-07-15", 50);
+            touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(
+                prune(&d, "2026-10-04", 1, u64::MAX),
+                vec!["2026-07-15", "2026-07-15"]
+            );
+            assert!(!d.join("ciris-server.log.2026-07-15").exists());
+            assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
+            assert!(d.join("ciris-server.log.2026-07-15.gz").exists());
+            assert!(d.join("ciris-server.log.2026-07-15.1.gz").exists());
         }
 
         /// A broken archive with no landing marker is not ours (an operator's,
