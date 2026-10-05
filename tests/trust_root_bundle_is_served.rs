@@ -80,24 +80,25 @@ async fn the_bake_is_served_only_when_trusted_and_importable() {
         .await
         .expect("accept the baked root");
 
-    // Trusted now — but the July bake predates the trust-row labels, so no
-    // peer could import it, and it is not served. The final genesis's bake
-    // (labelled) serves; that half is exercised once persist bakes it.
+    // Trusted now, and the bake (persist v53.1.1: the final genesis) is
+    // labelled — it is served in the registry's shape, `community` included.
     assert!(
-        ciris_server::mesh_genesis::unlabelled_trust_row(baked).is_some(),
-        "premise: the July bake is unlabelled"
+        ciris_server::mesh_genesis::unlabelled_trust_row(baked).is_none(),
+        "premise: the final genesis's trust rows are labelled"
     );
     let (status, body) = get_bundle(app()).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["bundle"], serde_json::to_value(baked).unwrap());
     assert_eq!(
-        body["reason_id"], "trust_root.bundle_not_in_force",
-        "{body}"
+        body["bundle_fingerprint"],
+        ciris_server::mesh_genesis::fingerprint(baked).unwrap()
     );
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("predates the trust-row labels")),
-        "{body}"
+    assert_eq!(body["charter_root_key_id"], "humanity-accord");
+    assert_eq!(body["served_by"], serde_json::json!(node));
+    assert_eq!(
+        body["community"]["community"]["community_key_id"], "ciris-canonical",
+        "the ciris-canonical birth rides beside the bundle: {}",
+        body["community"]
     );
 }
 
@@ -105,8 +106,11 @@ async fn the_bake_is_served_only_when_trusted_and_importable() {
 /// every trust-job row must be labelled (Codex on CIRISServer#725).
 #[test]
 fn an_unlabelled_grant_is_named_even_beside_a_labelled_charter() {
-    let mut bundle = ciris_persist::federation::genesis::canonical_genesis_bundle().clone();
-    // Label the charter, leave the grants as baked (unlabelled).
+    // The July bundle (unlabelled throughout): label its charter only.
+    let mut bundle: ciris_server::mesh_genesis::GenesisBundle =
+        serde_json::from_str(include_str!("fixtures/genesis_2026-07-31_unlabelled.json"))
+            .expect("the July bundle parses");
+    // Label the charter, leave the grants as minted (unlabelled).
     for a in &mut bundle.attestations {
         if a.attestation.attestation_id == "genesis-charter" {
             a.attestation.attestation_envelope["dimension"] =
