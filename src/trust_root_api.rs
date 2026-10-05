@@ -330,7 +330,40 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
     }
 
     let dir = st.engine.federation_directory();
-    let installed =
+    // A version-3 bundle (the final genesis) carries the accord family's head
+    // and the ciris-canonical birth; persist v53.1.0's import door verifies it
+    // against THIS build's roster, bakes its serve nodes and delegation plane,
+    // and installs those records through boot's own seeding — so the
+    // acceptance below can name a head this node now holds. A bundle of
+    // another accord (other holders on the reserved ids) is refused there by
+    // name. Older bundles keep the records-only install.
+    let installed = if bundle.version >= 3 {
+        match st.engine.install_genesis_bundle_roster(&bundle).await {
+            Ok(report) => {
+                tracing::info!(
+                    records = ?report.records,
+                    "trust root import: the bundle's genesis records are installed (persist v53.1 door)"
+                );
+                true
+            }
+            Err(ciris_persist::federation::Error::GenesisBundleInvalid { .. }) => {
+                return err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "trust_root.bundle_refused",
+                    "this bundle does not verify against this node's accord roster (a ceremony \
+                     by other holders, or a tampered one) and was NOT installed. Nothing on this \
+                     node changed.",
+                )
+            }
+            Err(e) => {
+                return err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "trust_root.install_failed",
+                    format!("bundle verified but its records did not install: {e}"),
+                )
+            }
+        }
+    } else {
         match crate::mesh_genesis::install_trust_root_records(dir.as_ref(), &bundle).await {
             Ok(_) => true,
             Err(e) => {
@@ -340,7 +373,8 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
                     format!("bundle verified but its records did not install: {e}"),
                 )
             }
-        };
+        }
+    };
 
     // ACCEPT is a SECOND act, and its failure is not the first one's failure.
     // Records installed + acceptance failed leaves the root KNOWN but not

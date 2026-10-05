@@ -7,9 +7,10 @@
 //! imported and never be valid. The import route refuses it with
 //! `trust_root.bundle_unlabelled` and installs nothing.
 //!
-//! The specimen is the real one: persist's baked production bundle, minted at
-//! the 2026-07 ceremony with an unlabelled charter. Production roster only
-//! (a test-anchor build swaps the roster, and the bundle would not verify).
+//! The specimen is the real one: the 2026-07 ceremony's bundle (persist's bake
+//! through v53.0.x), unlabelled, kept as a fixture since persist v53.1.1 baked
+//! the final genesis in its place. Production roster only (a test-anchor build
+//! swaps the roster, and the bundle would not verify).
 #![cfg(not(feature = "test-anchor"))]
 
 use std::sync::Arc;
@@ -22,9 +23,10 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn the_baked_pre_v53_bundle_verifies_but_is_refused_as_unlabelled() {
-    let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
-    let ours: ciris_server::mesh_genesis::GenesisBundle =
-        serde_json::from_value(serde_json::to_value(bundle).unwrap()).unwrap();
+    let bundle: ciris_server::mesh_genesis::GenesisBundle =
+        serde_json::from_str(include_str!("fixtures/genesis_2026-07-31_unlabelled.json"))
+            .expect("the July bundle parses");
+    let ours = bundle.clone();
     assert!(
         ciris_server::mesh_genesis::verify_bundle(&ours).is_ok(),
         "premise: the old bundle's signatures verify"
@@ -60,7 +62,7 @@ async fn the_baked_pre_v53_bundle_verifies_but_is_refused_as_unlabelled() {
                     40_000,
                 ))))
                 .body(Body::from(
-                    serde_json::json!({ "bundle": serde_json::to_value(bundle).unwrap() })
+                    serde_json::json!({ "bundle": serde_json::to_value(&bundle).unwrap() })
                         .to_string(),
                 ))
                 .unwrap(),
