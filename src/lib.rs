@@ -1103,6 +1103,17 @@ pub(crate) mod log_retention {
         let spawned = std::thread::Builder::new()
             .name("log-retention".into())
             .spawn(move || {
+                // The date when the worker RUNS, not when it was spawned: a
+                // worker delayed past UTC midnight (a suspended laptop, host
+                // pressure) must not treat the new day's live file as old.
+                let today_owned = {
+                    let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    if now > today_owned {
+                        now
+                    } else {
+                        today_owned
+                    }
+                };
                 // A file left because it was written in the last 15 minutes
                 // (yesterday's, just after the UTC rollover) gets ONE retry
                 // once that window has passed, rather than waiting a day
@@ -1433,20 +1444,32 @@ pub(crate) mod log_retention {
                     // than replace anything another process put there
                     // (a check-then-rename would race; Codex on #729).
                     Err(_) => {
+                        if dest.exists() {
+                            continue;
+                        }
+                        // The marker FIRST (synced), then the archive: a crash
+                        // at any point after the archive name exists leaves it
+                        // recognisably ours on resume (Codex on #729).
+                        let marker = landing_marker(&dest);
+                        std::fs::File::create(&marker)
+                            .and_then(|m| m.sync_all())
+                            .map_err(|e| e.to_string())?;
                         let mut d = match std::fs::OpenOptions::new()
                             .write(true)
                             .create_new(true)
                             .open(&dest)
                         {
                             Ok(d) => d,
-                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                            Err(e) => return Err(format!("create {}: {e}", dest.display())),
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                let _ = std::fs::remove_file(&marker);
+                                continue;
+                            }
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&marker);
+                                return Err(format!("create {}: {e}", dest.display()));
+                            }
                         };
                         landed = Some(dest.clone());
-                        // Marks this name as a copy in progress, so a crash
-                        // mid-copy is recognisably OURS on resume.
-                        let marker = landing_marker(&dest);
-                        std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
                         let mut t = std::fs::File::open(&tmp).map_err(|e| e.to_string())?;
                         std::io::copy(&mut t, &mut d).map_err(|e| e.to_string())?;
                         d.sync_all().map_err(|e| e.to_string())?;
