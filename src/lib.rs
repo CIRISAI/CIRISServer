@@ -1236,7 +1236,37 @@ pub(crate) mod log_retention {
         PassReport { archived, deferred }
     }
 
+    /// The marker beside an archive while the no-hard-link landing copies
+    /// into it.
+    fn landing_marker(dest: &Path) -> std::path::PathBuf {
+        let mut n = dest.as_os_str().to_owned();
+        n.push(".landing");
+        std::path::PathBuf::from(n)
+    }
+
+    /// sha256 of everything `r` yields, hex.
+    fn sha256_of(r: &mut impl std::io::Read) -> Result<String, String> {
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        Ok(hex::encode(h.finalize()))
+    }
+
+    /// sha256 of the bytes the gzip file at `p` decodes to, if it decodes whole.
+    fn decoded_digest(p: &Path) -> Option<String> {
+        let f = std::fs::File::open(p).ok()?;
+        sha256_of(&mut flate2::read::GzDecoder::new(f)).ok()
+    }
+
     /// Does the gzip file at `p` decode to its end without error?
+    #[cfg(test)]
     fn decodes_whole(p: &Path) -> bool {
         use std::io::Read as _;
         let Ok(f) = std::fs::File::open(p) else {
@@ -1346,23 +1376,42 @@ pub(crate) mod log_retention {
                      and now has {now_len}"
                 ));
             }
-            // A RESUMED attempt (the source was already `.archiving`): an
-            // archive under this date's names that does not decode whole is
-            // the crashed attempt's half-copied output (the no-hard-link
-            // landing writes the final name directly), never an operator's —
-            // remove it rather than leave a corrupt archive forever (Codex on
-            // #729).
+            // A RESUMED attempt (the source was already `.archiving`):
+            //  - an archive whose `.landing` marker survives is THIS module's
+            //    half-copied output from a crash mid-landing (the marker is
+            //    written before such a copy starts and removed after it is
+            //    synced) — removed with its marker. Any other archive, however
+            //    broken, predates us or is the operator's: untouched;
+            //  - an archive whose decoded bytes are exactly the source's means
+            //    the crash came after landing, before the source went: reuse
+            //    it — remove the source — rather than land a duplicate (Codex
+            //    on #729).
             if name.ends_with(ARCHIVING) {
+                let source_digest =
+                    sha256_of(&mut std::fs::File::open(&owned).map_err(|e| e.to_string())?)?;
                 for n in 0..100u32 {
                     let dest = if n == 0 {
                         path.with_file_name(format!("{base}.gz"))
                     } else {
                         path.with_file_name(format!("{base}.{n}.gz"))
                     };
-                    if std::fs::symlink_metadata(&dest).is_ok_and(|m| m.is_file())
-                        && !decodes_whole(&dest)
-                    {
+                    let marker = landing_marker(&dest);
+                    if marker.exists() {
                         let _ = std::fs::remove_file(&dest);
+                        let _ = std::fs::remove_file(&marker);
+                        continue;
+                    }
+                    if std::fs::symlink_metadata(&dest).is_ok_and(|m| m.is_file())
+                        && decoded_digest(&dest).as_deref() == Some(source_digest.as_str())
+                    {
+                        let _ = std::fs::remove_file(&tmp);
+                        std::fs::remove_file(&owned)
+                            .map_err(|e| format!("could not remove the raw file ({e})"))?;
+                        #[cfg(unix)]
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+                        }
+                        return Ok(());
                     }
                 }
             }
@@ -1394,9 +1443,14 @@ pub(crate) mod log_retention {
                             Err(e) => return Err(format!("create {}: {e}", dest.display())),
                         };
                         landed = Some(dest.clone());
+                        // Marks this name as a copy in progress, so a crash
+                        // mid-copy is recognisably OURS on resume.
+                        let marker = landing_marker(&dest);
+                        std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
                         let mut t = std::fs::File::open(&tmp).map_err(|e| e.to_string())?;
                         std::io::copy(&mut t, &mut d).map_err(|e| e.to_string())?;
                         d.sync_all().map_err(|e| e.to_string())?;
+                        let _ = std::fs::remove_file(&marker);
                         break;
                     }
                 }
@@ -1583,9 +1637,10 @@ pub(crate) mod log_retention {
             let d = scratch("interrupted");
             touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
             std::fs::write(d.join("ciris-server.log.2026-07-15.gz.tmp"), b"half").unwrap();
-            // ...and a half-copied archive under the final name (the no-hard-
-            // link landing): not gzip-whole, so it is the crash's, not history.
+            // ...and a half-copied archive under the final name, still marked
+            // `.landing` (the no-hard-link landing crashed mid-copy): ours.
             std::fs::write(d.join("ciris-server.log.2026-07-15.gz"), b"\x1f\x8b trunc").unwrap();
+            std::fs::write(d.join("ciris-server.log.2026-07-15.gz.landing"), b"").unwrap();
             touch(&d, "ciris-server.log.2026-10-04", 10);
             assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
             assert!(
@@ -1595,6 +1650,49 @@ pub(crate) mod log_retention {
             assert!(!d.join("ciris-server.log.2026-07-15.1.gz").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
             assert!(!d.join("ciris-server.log.2026-07-15.gz.tmp").exists());
+            assert!(!d.join("ciris-server.log.2026-07-15.gz.landing").exists());
+        }
+
+        /// A broken archive with no landing marker is not ours (an operator's,
+        /// or older): a resumed attempt leaves it alone.
+        #[test]
+        fn a_resumed_attempt_never_touches_an_unmarked_archive() {
+            let d = scratch("unmarked");
+            touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
+            std::fs::write(
+                d.join("ciris-server.log.2026-07-15.gz"),
+                b"operator's partial",
+            )
+            .unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
+            assert_eq!(
+                std::fs::read(d.join("ciris-server.log.2026-07-15.gz")).unwrap(),
+                b"operator's partial"
+            );
+            assert!(d.join("ciris-server.log.2026-07-15.1.gz").exists());
+        }
+
+        /// A crash after the archive landed but before the source went: the
+        /// resumed attempt reuses the archive, no duplicate.
+        #[test]
+        fn a_resumed_attempt_reuses_a_complete_archive() {
+            use std::io::Write as _;
+            let d = scratch("reuse");
+            touch(&d, "ciris-server.log.2026-07-15.archiving", 100);
+            let mut enc = flate2::write::GzEncoder::new(
+                std::fs::File::create(d.join("ciris-server.log.2026-07-15.gz")).unwrap(),
+                flate2::Compression::default(),
+            );
+            enc.write_all(&[b'x'; 100]).unwrap();
+            enc.finish().unwrap();
+            touch(&d, "ciris-server.log.2026-10-04", 10);
+            assert_eq!(prune(&d, "2026-10-04", 1, u64::MAX), vec!["2026-07-15"]);
+            assert!(!d.join("ciris-server.log.2026-07-15.archiving").exists());
+            assert!(
+                !d.join("ciris-server.log.2026-07-15.1.gz").exists(),
+                "no duplicate"
+            );
         }
 
         /// A file written in the last few minutes may have an append in flight
