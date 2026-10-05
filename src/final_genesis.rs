@@ -311,9 +311,13 @@ fn clock_synchronized() -> Option<bool> {
 async fn serve_node_input(
     engine: &Engine,
     spec: ServeNodeSpec,
+    produced_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<ServeNodeInput, Response> {
     let (key_id, hints) = match spec {
-        ServeNodeSpec::Full(input) => return require_dial_hint(input),
+        ServeNodeSpec::Full(mut input) => {
+            stamp_valid_from(&mut input.registration_envelope, produced_at);
+            return require_dial_hint(input);
+        }
         ServeNodeSpec::Id(k) => (k, None),
         ServeNodeSpec::WithHints {
             key_id,
@@ -359,6 +363,7 @@ async fn serve_node_input(
         envelope = serde_json::json!({});
     }
     envelope["roles"] = serde_json::json!(SERVE_NODE_ROLES);
+    stamp_valid_from(&mut envelope, produced_at);
     if let Some(h) = hints {
         envelope["transport_hints"] = serde_json::Value::Array(h);
     }
@@ -371,6 +376,20 @@ async fn serve_node_input(
         registration_envelope: envelope,
         attestation_evidence: rec.attestation_evidence.clone(),
     })
+}
+
+/// A seated serve node's registration envelope carries the CEREMONY instant
+/// as its signed `valid_from`. persist replaces an already-anchored record
+/// only with a strictly newer signed instant, so a record passed through with
+/// its old `valid_from` (the 2026-10-04 final genesis carried 2026-07-31's)
+/// installs on fresh nodes but never on upgraded ones — the same key on two
+/// provenances (found by persist while baking).
+fn stamp_valid_from(envelope: &mut serde_json::Value, produced_at: chrono::DateTime<chrono::Utc>) {
+    if !envelope.is_object() {
+        *envelope = serde_json::json!({});
+    }
+    envelope["valid_from"] =
+        serde_json::Value::String(produced_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
 }
 
 /// A serve node the bundle seats must say where it is dialled: the baked
@@ -458,9 +477,12 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             "a genesis seats at least one canonical",
         );
     }
+    // Stamped ONCE: the serve records' signed `valid_from` and every row's
+    // instant come from it.
+    let produced_at = chrono::Utc::now();
     let mut serve_nodes = Vec::with_capacity(req.serve_nodes.len());
     for spec in req.serve_nodes {
-        match serve_node_input(&st.engine, spec).await {
+        match serve_node_input(&st.engine, spec, produced_at).await {
             Ok(n) => serve_nodes.push(n),
             Err(r) => return r,
         }
@@ -511,7 +533,7 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
                 "consensus_protocol_entrenched": true,
             }),
         },
-        produced_at: chrono::Utc::now(),
+        produced_at,
     };
     let state = match CeremonyState::plan(inputs) {
         Ok(s) => s,
