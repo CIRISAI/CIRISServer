@@ -799,7 +799,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `trust_root.bundle_{unlabelled,not_in_force}`, `drive.awaiting_key`; the
     /// floor in pyproject.toml rose to 0.5.227 with it. The 20 left are the 19
     /// paid down to at 0.5.219 plus `drive.device_class_not_personal`.
-    const MAX_UNCOVERED: usize = 20;
+    ///
+    /// 20 -> 19 for 0.5.222: `ciris-client` 0.5.228 carries
+    /// `drive.device_class_not_personal`; the floor rose to 0.5.228 with it.
+    const MAX_UNCOVERED: usize = 19;
 
     let en = load_en();
     let ids = scraped_server_ids();

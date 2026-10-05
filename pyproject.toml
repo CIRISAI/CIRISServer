@@ -81,6 +81,9 @@ requires-python = ">=3.10"
 # `chat.unsupported_content_type` — CIRISClient#36). 0.5.201 defines none of
 # them; below it a fresh install renders those states as raw ids. The
 # `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
+# FLOOR 0.5.228 (2026-10-05): the client carrying the ceremony UX fixes and
+# localizing every id 0.5.221 emits (incl. drive.device_class_not_personal),
+# tested 9/9 on five platforms against server v0.5.221.
 # FLOOR 0.5.227 (2026-10-04): the client carrying the final-genesis sheet and
 # every id 0.5.220 emits (CIRISClient#154/#156), tested 9/9 on five platforms
 # against server v0.5.220.
@@ -91,7 +94,7 @@ requires-python = ">=3.10"
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
 dependencies = [
-    "ciris-client>=0.5.227,<0.6",
+    "ciris-client>=0.5.228,<0.6",
 ]
 
 [project.urls]
