@@ -298,6 +298,23 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         atts.iter().any(|a| a.get("community").is_some()),
         "the ciris-canonical birth is in the bundle"
     );
+    // Each seated record's SIGNED valid_from is the ceremony instant, newer
+    // than any record a node already holds for that key — so an upgraded node
+    // takes the minted record, not just a fresh one (found by persist on the
+    // 2026-10-04 bundle, which carried the July record's instant).
+    for node in bundle["serve_nodes"].as_array().expect("serve_nodes") {
+        let signed = node["record"]["registration_envelope"]["valid_from"]
+            .as_str()
+            .expect("signed valid_from");
+        let signed = chrono::DateTime::parse_from_rfc3339(signed).unwrap();
+        assert_eq!(
+            signed.timestamp(),
+            chrono::DateTime::parse_from_rfc3339(bundle["produced_at"].as_str().unwrap())
+                .unwrap()
+                .timestamp(),
+            "the seated record's signed valid_from is the ceremony instant: {node}"
+        );
+    }
     // The charter's successor set IS the recovery keys (the three spares).
     let charter = atts
         .iter()
