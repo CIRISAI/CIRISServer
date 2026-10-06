@@ -1863,6 +1863,8 @@ fn install_or_reattach_tracing(
         .with(reload_layer)
         .with(filter)
         .with(dedup_layer)
+        // The open-span table the memory-burst sampler names (diag.rs).
+        .with(crate::diag::LiveSpans)
         .with(fmt::layer()) // stdout/console
         // CIRISServer#264 — MUST NOT panic when a subscriber is already set:
         // `.init()`'s panic crossed pyo3 as PanicException and killed

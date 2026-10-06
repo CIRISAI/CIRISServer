@@ -277,6 +277,107 @@ pub fn spawn_trimmer() {
     }
 }
 
+/// The open spans, by `target::name`, for [`spawn_burst_sampler`] to name what
+/// was running when memory jumped. Every layer of the stack opens spans for its
+/// units of work (edge's replication rounds, the server's loops, persist's
+/// calls), so the live set at the moment of a jump names the work that made it
+/// — without symbols (the wheel ships stripped) or a profiler (none on the
+/// canonical's host). Only spans the subscriber's filter enables are counted.
+#[derive(Default)]
+pub struct LiveSpans;
+
+static LIVE_SPANS: std::sync::Mutex<
+    Option<std::collections::HashMap<(&'static str, &'static str), i64>>,
+> = std::sync::Mutex::new(None);
+
+impl<S> tracing_subscriber::Layer<S> for LiveSpans
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let m = attrs.metadata();
+        if let Ok(mut g) = LIVE_SPANS.lock() {
+            *g.get_or_insert_with(Default::default)
+                .entry((m.target(), m.name()))
+                .or_default() += 1;
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let Some(span) = ctx.span(&id) else { return };
+        let m = span.metadata();
+        if let Ok(mut g) = LIVE_SPANS.lock() {
+            if let Some(map) = g.as_mut() {
+                if let Some(n) = map.get_mut(&(m.target(), m.name())) {
+                    *n -= 1;
+                    if *n <= 0 {
+                        map.remove(&(m.target(), m.name()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The open spans right now, most numerous first, as `target::name=count`.
+pub fn live_spans(limit: usize) -> Vec<String> {
+    let Ok(g) = LIVE_SPANS.lock() else {
+        return Vec::new();
+    };
+    let Some(map) = g.as_ref() else {
+        return Vec::new();
+    };
+    let mut v: Vec<_> = map.iter().map(|((t, n), c)| (*c, *t, *n)).collect();
+    v.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)).then(a.2.cmp(b.2)));
+    v.into_iter()
+        .take(limit)
+        .map(|(c, t, n)| format!("{t}::{n}={c}"))
+        .collect()
+}
+
+/// A rise in `RssAnon` within one sample that names itself.
+const BURST_KB: i64 = 128 * 1024;
+
+/// Sample `RssAnon` every second; when it rises by [`BURST_KB`] or more in one
+/// sample, WARN with the rise and the open spans. The 0.5.223 capped runs had
+/// bursts of +500 MB to +1.1 GB inside 10 s with no log line naming the work;
+/// a 30 s trim period is too coarse to catch one in flight. One /proc read a
+/// second; the span table is read only on a burst.
+pub fn spawn_burst_sampler() {
+    #[cfg(target_os = "linux")]
+    {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            let _ = std::thread::Builder::new()
+                .name("ciris-mem-burst".into())
+                .spawn(|| {
+                    let mut prev = rss_anon_kb();
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                        let now = rss_anon_kb();
+                        if let (Some(p), Some(n)) = (prev, now) {
+                            if n - p >= BURST_KB {
+                                tracing::warn!(
+                                    rss_anon_before_kb = p,
+                                    rss_anon_kb = n,
+                                    risen_kb = n - p,
+                                    live_spans = %live_spans(25).join(" "),
+                                    "allocator: memory burst — RssAnon rose in one second; open spans named"
+                                );
+                            }
+                        }
+                        prev = now;
+                    }
+                });
+        });
+    }
+}
+
 /// Arm diagnostics from the serve entry point: ON if the CLI flag was given or
 /// the environment asks, naming which; returns the resulting state so the
 /// caller can record it on `ServerConfig`. The ONE place the two switches meet,
@@ -286,6 +387,7 @@ pub fn spawn_trimmer() {
 pub fn arm(flag: bool) -> bool {
     tune_allocator();
     spawn_trimmer();
+    spawn_burst_sampler();
     if flag {
         enable(FLAG);
     } else if env_requests() {
@@ -488,6 +590,30 @@ pub fn router() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_burst_report_names_open_spans_and_forgets_closed_ones() {
+        use tracing_subscriber::prelude::*;
+        let sub = tracing_subscriber::registry().with(LiveSpans);
+        tracing::subscriber::with_default(sub, || {
+            let held = tracing::info_span!("probe_round_open");
+            let named = |s: &str| live_spans(500).iter().any(|l| l.contains(s));
+            {
+                let _brief = tracing::info_span!("probe_round_closed");
+                assert!(named("probe_round_closed"));
+            }
+            assert!(
+                named("probe_round_open"),
+                "a span alive across the read is named"
+            );
+            assert!(
+                !named("probe_round_closed"),
+                "a dropped span leaves the table"
+            );
+            drop(held);
+            assert!(!named("probe_round_open"));
+        });
+    }
 
     #[cfg(all(target_env = "gnu", target_os = "linux"))]
     #[test]
