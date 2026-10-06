@@ -118,7 +118,19 @@ pub fn phase(name: &'static str) {
         s.mark_thread_cpu = crate::diag::thread_cpu();
         s.mark_process_cpu = crate::diag::process_cpu();
     }
-    tracing::info!(phase = name, "compose phase");
+    // The memory at each phase start (0.5.222: a +700 MB peak somewhere in
+    // self_register_key → peering, found only by a capped external run).
+    // `VmHWM` is the kernel's peak-RSS high-water mark, so the phase that
+    // raises it between two lines is the phase that made the peak, even when
+    // the peak was freed before the next stamp. Cheap: one /proc read and one
+    // arena walk, ~24 times per boot.
+    tracing::info!(
+        phase = name,
+        rss_anon_kb = crate::diag::proc_status_kb("RssAnon"),
+        peak_rss_kb = crate::diag::proc_status_kb("VmHWM"),
+        heap_live_kb = crate::diag::heap_live_kb(),
+        "compose phase"
+    );
     if !s.watchdog_running {
         s.watchdog_running = true;
         spawn_watchdog();

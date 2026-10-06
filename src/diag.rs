@@ -150,12 +150,31 @@ pub const TRIM_INTERVAL_SECS: u64 = 30;
 /// Below this, a trim's release is debug-level; at or above it, info.
 const TRIM_LOG_FLOOR_KB: i64 = 64 * 1024;
 
-/// `RssAnon` in kB from `/proc/self/status` — the figure a memory cgroup charges.
-fn rss_anon_kb() -> Option<i64> {
+/// One `kB` field of `/proc/self/status` (`RssAnon`, `VmHWM`, …); `None` off
+/// Linux or when the kernel does not report it.
+pub fn proc_status_kb(field: &str) -> Option<i64> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
     s.lines()
-        .find_map(|l| l.strip_prefix("RssAnon:"))
+        .find_map(|l| l.strip_prefix(field)?.strip_prefix(':'))
         .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+}
+
+/// `RssAnon` in kB — the figure a memory cgroup charges.
+fn rss_anon_kb() -> Option<i64> {
+    proc_status_kb("RssAnon")
+}
+
+/// Live heap in kB (`mallinfo2().uordblks`); `None` where there is no glibc.
+pub fn heap_live_kb() -> Option<i64> {
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: see `memory_report` — reads glibc's own accounting.
+        Some((unsafe { libc::mallinfo2() }.uordblks / 1024) as i64)
+    }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        None
+    }
 }
 
 /// Trim now and say what it released. `why` names the caller (the period, the
@@ -164,6 +183,23 @@ fn rss_anon_kb() -> Option<i64> {
 pub fn trim_after(why: &'static str) {
     #[cfg(target_env = "gnu")]
     {
+        // A new process peak since the last trim, named by when it was seen:
+        // the 0.5.222 run had a +512 MB single step that no log line explained;
+        // this puts that step inside a ≤ TRIM_INTERVAL_SECS window to read the
+        // other logs against.
+        static LAST_PEAK_KB: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        if let Some(peak) = proc_status_kb("VmHWM") {
+            let last = LAST_PEAK_KB.swap(peak, Ordering::Relaxed);
+            if last > 0 && peak - last >= TRIM_LOG_FLOOR_KB {
+                tracing::warn!(
+                    why,
+                    peak_rss_kb = peak,
+                    previous_peak_rss_kb = last,
+                    risen_kb = peak - last,
+                    "allocator: process peak RSS rose since the last trim"
+                );
+            }
+        }
         let before = rss_anon_kb();
         let t0 = std::time::Instant::now();
         let released = trim();
@@ -460,6 +496,9 @@ mod tests {
         // returned None would log every trim as freeing nothing.
         let kb = rss_anon_kb().expect("RssAnon in /proc/self/status");
         assert!(kb > 0);
+        assert!(proc_status_kb("VmHWM").is_some_and(|hwm| hwm >= kb));
+        assert!(proc_status_kb("Rss").is_none(), "a prefix is not a field");
+        assert!(heap_live_kb().is_some());
         trim_after("test");
     }
 
