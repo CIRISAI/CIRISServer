@@ -37,6 +37,11 @@
 //!
 //! Read-only in the sense that matters: it reports, it does not trim. Deciding to
 //! release memory is a separate act from measuring it.
+//!
+//! The allocator POLICY that measurement led to lives here too, outside the
+//! switch: [`tune_allocator`] (the arena cap, #552) and [`spawn_trimmer`] /
+//! [`trim_after`] (return retained heap on a period and after the boot's and the
+//! scorer's peaks — the 0.5.222 capped run read 152 MB live under 1.04 GB held).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -126,6 +131,116 @@ pub fn tune_allocator() {
     }
 }
 
+/// The environment knob for the background trimmer's period, in seconds.
+/// `0` turns it off; unset means [`TRIM_INTERVAL_SECS`].
+pub const TRIM_ENV: &str = "CIRIS_MALLOC_TRIM_SECS";
+
+/// How often the trimmer hands retained heap back to the kernel.
+///
+/// The bridge's capped run of 0.5.222 against a copy of the canonical's data
+/// (2 GiB cgroup) read 152 MB live beside 1.04 GB free-but-retained
+/// (`fordblks`) before the OOM: transient peaks freed into a heap glibc never
+/// shrinks on its own, so every peak raised the floor the next one stood on. A
+/// `malloc_trim(0)` returns those pages (the top of the heap and, since glibc
+/// 2.8, whole free pages inside every arena). It cannot lower a peak; it stops
+/// peaks from stacking. 30 s keeps the floor near the live set while costing one
+/// arena walk per period, off every request path.
+pub const TRIM_INTERVAL_SECS: u64 = 30;
+
+/// Below this, a trim's release is debug-level; at or above it, info.
+const TRIM_LOG_FLOOR_KB: i64 = 64 * 1024;
+
+/// `RssAnon` in kB from `/proc/self/status` — the figure a memory cgroup charges.
+fn rss_anon_kb() -> Option<i64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    s.lines()
+        .find_map(|l| l.strip_prefix("RssAnon:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+}
+
+/// Trim now and say what it released. `why` names the caller (the period, the
+/// end of boot, a scorer pass) so a log reader can tie a release to the work
+/// that made the peak. A no-op where there is no glibc.
+pub fn trim_after(why: &'static str) {
+    #[cfg(target_env = "gnu")]
+    {
+        let before = rss_anon_kb();
+        let t0 = std::time::Instant::now();
+        let released = trim();
+        let after = rss_anon_kb();
+        let freed_kb = before.zip(after).map(|(b, a)| b - a);
+        if freed_kb.is_some_and(|k| k >= TRIM_LOG_FLOOR_KB) {
+            tracing::info!(
+                why,
+                rss_anon_before_kb = before,
+                rss_anon_after_kb = after,
+                freed_kb,
+                elapsed_us = t0.elapsed().as_micros() as u64,
+                "allocator: malloc_trim returned retained heap to the kernel"
+            );
+        } else {
+            tracing::debug!(
+                why,
+                ?released,
+                rss_anon_after_kb = after,
+                freed_kb,
+                elapsed_us = t0.elapsed().as_micros() as u64,
+                "allocator: malloc_trim"
+            );
+        }
+    }
+    #[cfg(not(target_env = "gnu"))]
+    let _ = why;
+}
+
+/// Start the background trimmer, once per process: a plain OS thread (no
+/// runtime needed, none starved) that calls [`trim_after`] every
+/// [`TRIM_INTERVAL_SECS`], or every `CIRIS_MALLOC_TRIM_SECS` (`0` = off).
+/// Independent of the diagnostics switch, like [`tune_allocator`]: it is the
+/// fix the instrument found, not an instrument.
+pub fn spawn_trimmer() {
+    #[cfg(target_env = "gnu")]
+    {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            let secs = match std::env::var(TRIM_ENV) {
+                Ok(v) => match v.trim().parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        tracing::warn!(
+                            value = %v,
+                            default_secs = TRIM_INTERVAL_SECS,
+                            "allocator: {TRIM_ENV} is not a whole number of seconds — using the default"
+                        );
+                        TRIM_INTERVAL_SECS
+                    }
+                },
+                Err(_) => TRIM_INTERVAL_SECS,
+            };
+            if secs == 0 {
+                tracing::info!("allocator: periodic malloc_trim OFF ({TRIM_ENV}=0)");
+                return;
+            }
+            let spawned = std::thread::Builder::new()
+                .name("ciris-malloc-trim".into())
+                .spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(secs));
+                    trim_after("period");
+                });
+            match spawned {
+                Ok(_) => tracing::info!(
+                    period_secs = secs,
+                    "allocator: periodic malloc_trim started"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "allocator: could not start the malloc_trim thread — retained heap will not be returned"
+                ),
+            }
+        });
+    }
+}
+
 /// Arm diagnostics from the serve entry point: ON if the CLI flag was given or
 /// the environment asks, naming which; returns the resulting state so the
 /// caller can record it on `ServerConfig`. The ONE place the two switches meet,
@@ -134,6 +249,7 @@ pub fn tune_allocator() {
 /// reason.
 pub fn arm(flag: bool) -> bool {
     tune_allocator();
+    spawn_trimmer();
     if flag {
         enable(FLAG);
     } else if env_requests() {
@@ -336,6 +452,16 @@ pub fn router() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_env = "gnu", target_os = "linux"))]
+    #[test]
+    fn the_trimmer_reads_the_figure_a_cgroup_charges() {
+        // The release log is only as good as this read: a parse that silently
+        // returned None would log every trim as freeing nothing.
+        let kb = rss_anon_kb().expect("RssAnon in /proc/self/status");
+        assert!(kb > 0);
+        trim_after("test");
+    }
 
     /// The report's whole purpose is the live-vs-held split, so the test
     /// asserts the two numbers are present and that the derived fraction
