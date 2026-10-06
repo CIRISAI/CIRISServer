@@ -286,9 +286,29 @@ pub fn spawn_trimmer() {
 #[derive(Default)]
 pub struct LiveSpans;
 
-static LIVE_SPANS: std::sync::Mutex<
-    Option<std::collections::HashMap<(&'static str, &'static str), i64>>,
-> = std::sync::Mutex::new(None);
+/// A span's key in the table, kept on the span so `on_close` decrements the
+/// same entry `on_new_span` raised.
+struct LiveKey(String);
+
+/// The span fields worth naming in a burst report: which round KIND and toward
+/// which PEER (edge's `anti_entropy_round` carries both). Five rounds open at
+/// every burst of the third capped run said nothing until it said which.
+const NAMED_FIELDS: &[&str] = &["kind", "peer"];
+
+#[derive(Default)]
+struct LabelVisitor(String);
+
+impl tracing::field::Visit for LabelVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if NAMED_FIELDS.contains(&field.name()) {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
+static LIVE_SPANS: std::sync::Mutex<Option<std::collections::HashMap<String, i64>>> =
+    std::sync::Mutex::new(None);
 
 impl<S> tracing_subscriber::Layer<S> for LiveSpans
 where
@@ -297,26 +317,35 @@ where
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
-        _id: &tracing::span::Id,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let m = attrs.metadata();
+        let mut label = LabelVisitor::default();
+        attrs.record(&mut label);
+        let key = format!("{}::{}{}", m.target(), m.name(), label.0);
         if let Ok(mut g) = LIVE_SPANS.lock() {
             *g.get_or_insert_with(Default::default)
-                .entry((m.target(), m.name()))
+                .entry(key.clone())
                 .or_default() += 1;
+        }
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(LiveKey(key));
         }
     }
 
     fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
-        let m = span.metadata();
+        let ext = span.extensions();
+        let Some(LiveKey(key)) = ext.get::<LiveKey>() else {
+            return;
+        };
         if let Ok(mut g) = LIVE_SPANS.lock() {
             if let Some(map) = g.as_mut() {
-                if let Some(n) = map.get_mut(&(m.target(), m.name())) {
+                if let Some(n) = map.get_mut(key) {
                     *n -= 1;
                     if *n <= 0 {
-                        map.remove(&(m.target(), m.name()));
+                        map.remove(key);
                     }
                 }
             }
@@ -324,7 +353,7 @@ where
     }
 }
 
-/// The open spans right now, most numerous first, as `target::name=count`.
+/// The open spans right now, most numerous first, as `target::name[ kind= peer=]=count`.
 pub fn live_spans(limit: usize) -> Vec<String> {
     let Ok(g) = LIVE_SPANS.lock() else {
         return Vec::new();
@@ -332,22 +361,28 @@ pub fn live_spans(limit: usize) -> Vec<String> {
     let Some(map) = g.as_ref() else {
         return Vec::new();
     };
-    let mut v: Vec<_> = map.iter().map(|((t, n), c)| (*c, *t, *n)).collect();
-    v.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)).then(a.2.cmp(b.2)));
+    let mut v: Vec<_> = map.iter().map(|(k, c)| (*c, k.as_str())).collect();
+    v.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
     v.into_iter()
         .take(limit)
-        .map(|(c, t, n)| format!("{t}::{n}={c}"))
+        .map(|(c, k)| format!("{k}={c}"))
         .collect()
 }
 
-/// A rise in `RssAnon` within one sample that names itself.
-const BURST_KB: i64 = 128 * 1024;
+/// A rise in `RssAnon` within one second that names itself.
+const BURST_KB: i64 = 64 * 1024;
+/// A rise over the last [`CLIMB_SECS`] seconds that names itself: the third
+/// capped run climbed 718 → 1,190 MB over five seconds with no single second
+/// past the one-second floor.
+const CLIMB_KB: i64 = 256 * 1024;
+const CLIMB_SECS: usize = 5;
 
-/// Sample `RssAnon` every second; when it rises by [`BURST_KB`] or more in one
-/// sample, WARN with the rise and the open spans. The 0.5.223 capped runs had
-/// bursts of +500 MB to +1.1 GB inside 10 s with no log line naming the work;
-/// a 30 s trim period is too coarse to catch one in flight. One /proc read a
-/// second; the span table is read only on a burst.
+/// Sample `RssAnon` every second; on a one-second rise of [`BURST_KB`] or a
+/// [`CLIMB_SECS`]-second rise of [`CLIMB_KB`], WARN with the rise and the open
+/// spans. The 0.5.223 capped runs had bursts of +500 MB to +1.1 GB inside 10 s
+/// with no log line naming the work; a 30 s trim period is too coarse to catch
+/// one in flight. One /proc read a second; the span table is read only on a
+/// burst.
 pub fn spawn_burst_sampler() {
     #[cfg(target_os = "linux")]
     {
@@ -356,22 +391,30 @@ pub fn spawn_burst_sampler() {
             let _ = std::thread::Builder::new()
                 .name("ciris-mem-burst".into())
                 .spawn(|| {
-                    let mut prev = rss_anon_kb();
+                    let mut recent: std::collections::VecDeque<i64> =
+                        std::collections::VecDeque::with_capacity(CLIMB_SECS + 1);
                     loop {
                         std::thread::sleep(Duration::from_secs(1));
-                        let now = rss_anon_kb();
-                        if let (Some(p), Some(n)) = (prev, now) {
-                            if n - p >= BURST_KB {
-                                tracing::warn!(
-                                    rss_anon_before_kb = p,
-                                    rss_anon_kb = n,
-                                    risen_kb = n - p,
-                                    live_spans = %live_spans(25).join(" "),
-                                    "allocator: memory burst — RssAnon rose in one second; open spans named"
-                                );
-                            }
+                        let Some(now) = rss_anon_kb() else { continue };
+                        let last = recent.back().copied();
+                        let oldest = recent.front().copied();
+                        let second = last.map(|p| now - p);
+                        let climb = oldest.map(|p| now - p);
+                        if second.is_some_and(|d| d >= BURST_KB)
+                            || climb.is_some_and(|d| d >= CLIMB_KB)
+                        {
+                            tracing::warn!(
+                                rss_anon_kb = now,
+                                risen_1s_kb = second,
+                                risen_5s_kb = climb,
+                                live_spans = %live_spans(25).join(" | "),
+                                "allocator: memory burst — RssAnon rising; open spans named"
+                            );
                         }
-                        prev = now;
+                        recent.push_back(now);
+                        if recent.len() > CLIMB_SECS {
+                            recent.pop_front();
+                        }
                     }
                 });
         });
@@ -596,7 +639,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
         let sub = tracing_subscriber::registry().with(LiveSpans);
         tracing::subscriber::with_default(sub, || {
-            let held = tracing::info_span!("probe_round_open");
+            let held = tracing::info_span!("probe_round_open", kind = "Attestation", peer = "p1");
             let named = |s: &str| live_spans(500).iter().any(|l| l.contains(s));
             {
                 let _brief = tracing::info_span!("probe_round_closed");
@@ -609,6 +652,11 @@ mod tests {
             assert!(
                 !named("probe_round_closed"),
                 "a dropped span leaves the table"
+            );
+            assert!(
+                named("probe_round_open kind=\"Attestation\" peer=\"p1\""),
+                "the round's kind and peer are part of its name: {:?}",
+                live_spans(500)
             );
             drop(held);
             assert!(!named("probe_round_open"));
