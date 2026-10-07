@@ -2080,13 +2080,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // healthy quiet node. That cost a full ladder run to tell
                 // apart from a working steady state, so it is now impossible:
                 // a tick either finishes or says it did not.
-                let tick = match tokio::time::timeout(
-                    period * 4,
+                // A PANIC in a tick must not end the loop either. openmls can
+                // panic on a peer's malformed KeyPackage (RUSTSEC-2026-0330/
+                // 0331, no isolation in edge before v40.0.9), and a panic in
+                // this spawned task would silently stop self-room key
+                // distribution for the rest of the process. Caught, it is a
+                // failed tick like a timeout.
+                let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
-                )
-                .await
-                {
-                    Ok(t) => t,
+                ));
+                let tick = match tokio::time::timeout(period * 4, guarded).await {
+                    Ok(Ok(t)) => t,
+                    Ok(Err(_panic)) => {
+                        tracing::error!(
+                            "self room: a drive tick PANICKED and was abandoned — the next \
+                             tick starts fresh (edge before v40.0.9 does not isolate openmls \
+                             panics; CIRISEdge#823)"
+                        );
+                        continue;
+                    }
                     Err(_) => {
                         tracing::warn!(
                             after_secs = (period * 4).as_secs(),
