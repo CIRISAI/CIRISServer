@@ -148,6 +148,7 @@ pub const TRIM_ENV: &str = "CIRIS_MALLOC_TRIM_SECS";
 pub const TRIM_INTERVAL_SECS: u64 = 30;
 
 /// Below this, a trim's release is debug-level; at or above it, info.
+#[cfg(target_env = "gnu")]
 const TRIM_LOG_FLOOR_KB: i64 = 64 * 1024;
 
 /// One `kB` field of `/proc/self/status` (`RssAnon`, `VmHWM`, …); `None` off
@@ -160,6 +161,7 @@ pub fn proc_status_kb(field: &str) -> Option<i64> {
 }
 
 /// `RssAnon` in kB — the figure a memory cgroup charges.
+#[cfg(any(target_env = "gnu", target_os = "linux"))]
 fn rss_anon_kb() -> Option<i64> {
     proc_status_kb("RssAnon")
 }
@@ -370,15 +372,18 @@ pub fn live_spans(limit: usize) -> Vec<String> {
 }
 
 /// A rise in `RssAnon` within one second that names itself.
+#[cfg(target_os = "linux")]
 const BURST_KB: i64 = 64 * 1024;
-/// A rise over the last [`CLIMB_SECS`] seconds that names itself: the third
+/// A rise over the last `CLIMB_SECS` seconds that names itself: the third
 /// capped run climbed 718 → 1,190 MB over five seconds with no single second
 /// past the one-second floor.
+#[cfg(target_os = "linux")]
 const CLIMB_KB: i64 = 256 * 1024;
+#[cfg(target_os = "linux")]
 const CLIMB_SECS: usize = 5;
 
-/// Sample `RssAnon` every second; on a one-second rise of [`BURST_KB`] or a
-/// [`CLIMB_SECS`]-second rise of [`CLIMB_KB`], WARN with the rise and the open
+/// Sample `RssAnon` every second; on a one-second rise of `BURST_KB` or a
+/// `CLIMB_SECS`-second rise of `CLIMB_KB`, WARN with the rise and the open
 /// spans. The 0.5.223 capped runs had bursts of +500 MB to +1.1 GB inside 10 s
 /// with no log line naming the work; a 30 s trim period is too coarse to catch
 /// one in flight. One /proc read a second; the span table is read only on a
