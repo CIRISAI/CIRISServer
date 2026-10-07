@@ -337,6 +337,16 @@ tracing pipeline:
    that work (persist writes, edge sends) parent under it, and lens trace
    IDs can link to it. The current W3C trace and span IDs are readable from
    Python.
+   Executor hops need care: `loop.run_in_executor(None, …)` does not copy
+   `contextvars` into the worker thread (only `asyncio.to_thread` and
+   `contextvars.copy_context().run` do), and the agent uses it for the node
+   fold start and some persist calls. So the API also:
+   - accepts the span context as an explicit argument on each Rust call,
+     captured before the hop;
+   - offers a helper that wraps a callable with the current span context for
+     executor use.
+   Without these, spans parent correctly inside coroutines but silently
+   detach across executor hops.
 4. **One log stream:** a Python logging handler that writes into the host's
    JSON log layer, with `trace_id`/`span_id` attached when a span is current.
    One structured log per process.
