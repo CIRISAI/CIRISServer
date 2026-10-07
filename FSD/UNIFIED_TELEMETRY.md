@@ -1,6 +1,6 @@
 # Unified telemetry — one model from leviculum to the agent
 
-**Status:** proposal, 2026-10-07.
+**Status:** accepted 2026-10-07 (decisions in §5).
 **Owners:** server (host and exposure); persist, edge and leviculum (their own signals).
 **Substrate at writing:** persist v53.1.7, edge v40.0.6, leviculum 0.27 (canonical) / 0.29 (edge main), verify v19.0.0. Agent `2e1eccf54`.
 
@@ -53,17 +53,25 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
 
 ### persist
 - **No metrics crate, no spans** (no `#[instrument]` or `*_span!` anywhere).
-  No timing on any query or fold.
+  No timing on any query or fold. `tracing` is already a dependency, so spans
+  need no new crate.
 - **Instruments exist but are switched off:**
   - The read probe (`federation/read_probe.rs`) records rows and bytes per read
-    at 38 call sites, but under `#[cfg(test)]`.
+    at 38 call sites (13 sqlite, 13 pg, 12 memory), but under `#[cfg(test)]`.
+    It can't simply be switched on: it's a thread-local Vec with an owned key
+    String per read, and it re-serializes each envelope to count bytes.
+    Production needs aggregate atomics fed from the same sites, with bytes
+    taken from the stored column length.
   - `CacheStats` and `AdmissionStats` count hits, misses, evictions and resident
-    bytes, but the documented `cache_stats()` accessor was never written.
+    bytes, each with a `stats()`. The Engine and PyEngine accessors,
+    `cache_stats()` and `admission_cache_stats()`, are documented in
+    `prelude.rs` but were never written.
 - **No database-level signals:** no SQLite status or memory high-water, no
-  reader-pool saturation, no Postgres pool status or slow-query log, no
-  blocking-pool gauge.
-- **What a host can read today:** `storage_summary` (disk only), and warnings
-  and errors. Nothing is logged when an operation succeeds.
+  saturation signal for the reader pool (the pool itself exists since v43.1,
+  #829), no Postgres pool status or slow-query log, no blocking-pool gauge
+  (145 `spawn_blocking` sites).
+- **What a host can read today:** `storage_summary` (disk only), warnings and
+  errors, and about 56 `info!` sites. There is no logging per operation.
 
 ### edge
 - **One hand-rolled struct**, `EdgeMetrics`
@@ -229,17 +237,27 @@ model. **P2** is SOTA polish.
 - **P2:** exemplars on round histograms.
 
 ### persist
-- **P0:**
-  - The read probe always on, as aggregate counters:
-    `ciris.persist.read.rows` and `.bytes`, by door (`list_attestations_by/for/since/…`) and fold.
-  - Write the `cache_stats()` accessor.
+- **P0 (CIRISPersist#1014, planned with #1013 as pin-compatible v53.1.8):**
+  - Read counters always on, as aggregate atomics fed from the read-probe
+    sites, with bytes taken from the stored column length:
+    `ciris.persist.read.rows` and `.bytes` by door (`list_attestations_by/for/since/…`).
+  - Counters attributed per fold: consent, trust-root walks, audience, serve
+    tier, admission gates. Door counters show the rows but not which fold
+    read them; this attribution is what found the 1.63 GB scorer pass.
+  - The Engine and PyEngine accessors `cache_stats()` and `admission_cache_stats()`.
+  - Snapshot accessor on Engine and PyEngine, plus a catalogue with a
+    completeness gate. Neither needs the facade; P1 emits through it on top of
+    the same counters.
 - **P1:**
   - Spans with `rows`/`bytes`/`elapsed` on every fold entry point: trust-root walks, consent, admission and audience checks, serve tier.
   - Histograms for duration and rows per fold.
   - SQLite `sqlite3_status` / `db_status` gauges (page cache, memory high-water) and reader-pool saturation.
   - Postgres pool status and a slow-query threshold.
-  - A blocking-pool gauge.
-- **P2:** an `EXPLAIN` capture for slow queries above a threshold.
+  - A blocking-pool gauge, owned by whoever builds the tokio runtime: persist
+    on the PyEngine path, the host when embedded. Tokio's blocking-thread
+    metrics need `tokio_unstable`.
+- **P2:** an `EXPLAIN` capture for slow queries above a threshold, of the exact
+  statement the code builds (lesson from the trace-summaries diagnosis).
 
 ### server
 - **P0:**
@@ -270,12 +288,13 @@ model. **P2** is SOTA polish.
 
 ---
 
-## 5. Decisions for the maintainer
-1. **Facade:** the `metrics` crate in libraries, with OTel only in the host
-   (recommended: lightest, works `no_std`-adjacent and on mobile). The
-   alternative is the OTel SDK everywhere (heavier, one ecosystem).
-2. **`/metrics` exposure:** loopback-only plus an authenticated bridge scrape
-   (recommended), or public read.
-3. **Debug symbols:** publish split debuginfo per release (recommended), or
-   symbolised builds only for diagnostic images.
-4. **Scale gate:** P0 and P1 in production before the next scale step (as proposed).
+## 5. Decisions (the maintainer, 2026-10-07)
+1. **Facade: the `metrics` crate in libraries, OTel only in the host.**
+   persist, edge and leviculum depend on `tracing` + `metrics` only; the server
+   installs the Prometheus exporter and the OpenTelemetry layer.
+2. **`/metrics` exposure: loopback-only plus an authenticated scrape** for the
+   bridge and CIRISStatus. Not public.
+3. **Debug symbols: split debuginfo published per release**, keyed by build ID.
+   Wheels stay stripped.
+4. **Scale gate: P0 and P1 in production before the next scale step** (more
+   agents, more canonicals, larger communities).
