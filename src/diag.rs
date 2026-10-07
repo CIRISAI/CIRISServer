@@ -624,8 +624,23 @@ async fn memory_trim() -> Json<Value> {
     }))
 }
 
-/// The diagnostics router. Mounted by compose ONLY when diagnostics are on;
-/// every route in it sits behind the loopback guard the setup routes use.
+/// The always-on read: `GET` [`ROUTE_MEMORY`] only, behind the loopback guard.
+/// Mounted on every node (FSD/UNIFIED_TELEMETRY.md §4, server P0): during the
+/// 0.5.222 OOM the canonical had to be restarted with `CIRIS_DIAGNOSTICS=1` to
+/// read its own heap, and a restart is exactly what erases the state being
+/// diagnosed. A read changes nothing, so it does not wait for the switch;
+/// the trim door, which acts, still does ([`router`]).
+pub fn read_router() -> Router {
+    Router::new()
+        .route(ROUTE_MEMORY, get(memory))
+        .layer(axum::middleware::from_fn(
+            crate::auth::loopback::require_loopback,
+        ))
+}
+
+/// The full diagnostics router: the memory read plus the trim door. Mounted by
+/// compose when diagnostics are on; every route in it sits behind the loopback
+/// guard the setup routes use.
 pub fn router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))

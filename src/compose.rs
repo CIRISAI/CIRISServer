@@ -1820,14 +1820,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // construction — asking earlier would hand the watch `None` and
                 // degrade an honest reading into `unreadable`.
                 crate::trace_plane_watch::spawn(Arc::clone(&engine), crate::ingest_http::held());
-                // Operator diagnostics (CIRISServer#549/#550): mounted ONLY when
-                // asked (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`), and every route
-                // in it sits behind the setup routes' loopback guard. Off, the
-                // paths do not exist on this listener (404, not 403).
+                // Operator diagnostics (CIRISServer#549/#550), behind the setup
+                // routes' loopback guard. The memory READ is always mounted
+                // (FSD/UNIFIED_TELEMETRY.md: reading a node's heap must not need
+                // the restart that erases what is being read); the trim door,
+                // which acts, only when asked (`--diagnostics` /
+                // `CIRIS_DIAGNOSTICS=1`) and is a 404 otherwise.
                 let r = if cfg.diagnostics {
                     r.merge(crate::diag::router())
                 } else {
-                    r
+                    r.merge(crate::diag::read_router())
                 };
                 crate::compose_status::mark("router_built");
                 r

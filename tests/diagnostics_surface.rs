@@ -209,3 +209,32 @@ fn the_bind_phase_carries_its_marks() {
         );
     }
 }
+
+/// FSD/UNIFIED_TELEMETRY.md, server P0: the memory READ is mounted on every node,
+/// diagnostics switch or not, still loopback-only; the trim door, which acts,
+/// is not part of it.
+#[tokio::test]
+async fn the_always_on_read_serves_memory_and_carries_no_trim_door() {
+    let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let remote: SocketAddr = "203.0.113.7:9".parse().unwrap();
+    let call = |method: &'static str, uri: &'static str, from: SocketAddr| async move {
+        let req = Request::builder()
+            .uri(uri)
+            .method(method)
+            .extension(ConnectInfo(from))
+            .body(Body::empty())
+            .unwrap();
+        ciris_server::diag::read_router()
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status()
+    };
+    assert_eq!(call("GET", ROUTE, loopback).await, StatusCode::OK);
+    assert_eq!(call("GET", ROUTE, remote).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        call("POST", ciris_server::diag::ROUTE_TRIM, loopback).await,
+        StatusCode::NOT_FOUND,
+        "trimming acts on the process; it stays behind the diagnostics switch"
+    );
+}

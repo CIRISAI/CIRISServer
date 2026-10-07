@@ -1299,4 +1299,31 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "a node with no Reticulum transport reports null, not 0: {}",
         data["reticulum_link_count"]
     );
+    // FSD/UNIFIED_TELEMETRY.md, server P0: the bundle fields this surface used
+    // to drop, and the log dedup layer's suppression counts, are all served.
+    for key in [
+        "log_dedup_suppressed_total",
+        "inbound_dropped_low_trust",
+        "replication_inbound_backpressure_drops_by_role",
+        "blob_scoped_carriers",
+        "blob_dag_phases",
+        "blob_dag_chunks",
+        "delivery_receipts",
+        "announce_intake_evictions",
+        "link_before_binding",
+        "announce_queue_drop_first_seen",
+        "announce_to_binding_ms_last",
+        "attestation_apply_refusals_by_reason",
+        "apply_refusals_by_class",
+        "removal_delivery",
+    ] {
+        assert!(
+            data.as_object().is_some_and(|o| o.contains_key(key)),
+            "{key} is served on /v1/federation/metrics"
+        );
+    }
+    assert!(
+        data["removal_delivery"]["rows"].is_u64(),
+        "reduced to counts"
+    );
 }
