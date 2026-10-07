@@ -1,6 +1,13 @@
 //! Operator diagnostics — RUNTIME-GATED (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`)
 //! and loopback-only (CIRISServer#549, CIRISServer#550).
 //!
+//! **Since 0.5.224 the memory read is always mounted** ([`read_router`]): a
+//! node's heap must be readable without the restart that erases what is being
+//! read (FSD/UNIFIED_TELEMETRY.md). It answers direct loopback callers only;
+//! a request relayed by a reverse proxy is refused. The switch below now gates
+//! the trim door and the per-step boot marks; the "OFF by default" sections
+//! that follow describe those.
+//!
 //! # What is here
 //!
 //! * [`memory_report`] — glibc's own allocator accounting (`mallinfo2`) beside
@@ -673,6 +680,7 @@ pub fn router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
         .route(ROUTE_TRIM, axum::routing::post(memory_trim))
+        .layer(axum::middleware::from_fn(require_direct))
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ))

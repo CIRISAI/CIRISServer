@@ -255,3 +255,25 @@ async fn the_always_on_read_serves_memory_and_carries_no_trim_door() {
         "trimming acts on the process; it stays behind the diagnostics switch"
     );
 }
+
+/// Codex on #745: the proxy guard covers the FULL diagnostics router too, which
+/// is mounted when the switch is on and carries the mutating trim door.
+#[tokio::test]
+async fn the_full_router_refuses_proxied_requests_too() {
+    let loopback: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    for (method, uri) in [("GET", ROUTE), ("POST", ciris_server::diag::ROUTE_TRIM)] {
+        let req = Request::builder()
+            .uri(uri)
+            .method(method)
+            .header("x-forwarded-for", "203.0.113.7")
+            .extension(ConnectInfo(loopback))
+            .body(Body::empty())
+            .unwrap();
+        let status = ciris_server::diag::router()
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} via a proxy");
+    }
+}

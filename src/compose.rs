@@ -2084,8 +2084,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // panic on a peer's malformed KeyPackage (RUSTSEC-2026-0330/
                 // 0331, no isolation in edge before v40.0.9), and a panic in
                 // this spawned task would silently stop self-room key
-                // distribution for the rest of the process. Caught, it is a
-                // failed tick like a timeout.
+                // distribution for the rest of the process. The add itself is
+                // guarded per member (`mls_guard`: the package is poisoned and
+                // skipped, so it can't panic every tick); this outer catch is
+                // the backstop for anything else in the tick.
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
                 ));

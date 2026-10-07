@@ -208,7 +208,9 @@ pub mod delegation_transparency;
 pub mod deployment;
 /// Operator diagnostics — runtime-gated (`--diagnostics` / `CIRIS_DIAGNOSTICS`),
 /// loopback-only: the mallinfo2 memory report and the CPU clocks behind
-/// `compose_status::mark` (CIRISServer#549 / #550).
+/// `compose_status::mark` (CIRISServer#549 / #550). Since 0.5.224 the memory
+/// read is always mounted (direct loopback only); the switch gates the trim
+/// door and the boot marks.
 pub mod diag;
 pub mod drive;
 pub mod drive_auth;
@@ -339,6 +341,7 @@ pub mod file_custody;
 /// The final genesis ceremony routes (`FSD/FINAL_GENESIS.md`).
 pub mod final_genesis;
 pub mod media_gate;
+pub mod mls_guard;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a
 /// device key.

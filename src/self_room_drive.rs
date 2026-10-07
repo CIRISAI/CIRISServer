@@ -902,17 +902,20 @@ async fn add_members(
             note_unmatched_key_packages(&*dir, node, room.content_group_id()).await;
             continue;
         };
-        let kp = ciris_edge::mls::cohort_group::key_package_from_bytes(&kp_bytes)
-            .map_err(|e| format!("{node}'s KeyPackage: {e}"))?;
         // STEP LOGGING, because an add is rare (once per new device) and its
         // steps are the ones that can block: an MLS commit, then two
         // placements. A tick that stops between them used to leave no trace at
         // all — the loop simply never reported again.
         tracing::info!(%node, room = %room, "self room: adding a device — KeyPackage read");
-        let commit = group
-            .add_member(node, kp)
+        // Decode and add under the panic guard: a malformed package is skipped
+        // (and remembered), not retried into a panic every tick.
+        let commit = match crate::mls_guard::add_member_guarded(&group, node, &kp_bytes)
             .await
-            .map_err(|e| format!("add {node}: {e}"))?;
+            .map_err(|e| format!("add {node}: {e}"))?
+        {
+            crate::mls_guard::GuardedAdd::Added(c) => c,
+            crate::mls_guard::GuardedAdd::Poisoned => continue,
+        };
         let welcome = commit
             .welcome()
             .ok_or_else(|| format!("adding {node} produced no Welcome"))?
