@@ -46,7 +46,9 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
   `TransportStats` with about 21 drop reasons, `PlaneStats`, interface stats).
   There is no registry and no metrics crate.
 - **Gaps:**
-  - Two link counts that are never reconciled: the completion mirror versus the core table.
+  - Two link counts that are never reconciled: the completion mirror versus
+    the core table. On #819 leviculum showed by code that they can't diverge at
+    c2f8d3f; a divergence alarm is still cheap insurance.
   - No API a host can call to list its links. `link_table_entries` exists but isn't exposed on `ReticulumNode`.
   - No idle time, no per-destination count, no lifecycle counters (established, closed-by-reason, failed).
   - Per-link memory accounting only on nRF.
@@ -88,8 +90,13 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
 - **27 separate `LogThrottle`s**, none counting what it suppresses.
 - **Spans:** one INFO span (`anti_entropy_round`) and a handful of
   `#[instrument]` on send paths. Nothing inside a round, and no taxonomy.
-- **Uneven exports:** PyO3 omits about 8 bundle fields, and UniFFI exposes
+- **Uneven exports:** PyO3 omits 8 bundle fields, and UniFFI exposes
   `link_count` but PyO3 doesn't.
+- **No edge logs at all in Python hosts.** The PyO3 wheel never installed a
+  `tracing` subscriber, so every edge line was dropped in agent processes.
+  The fix is `init_logging()` (CIRISEdge#814, PR #815).
+- **#819's cause is edge's dial pool:** it reuses links only while idle and
+  never shrinks, and edge's own keepalives keep idle pooled links alive.
 
 ### server
 - **No metrics framework.** `/v1/federation/metrics` hand-copies about 24 of
@@ -181,7 +188,14 @@ Generalise leviculum's `EVENT_CATALOG` pattern to metrics and spans:
 | **Suppression** | everything we chose not to log | log dedup and every `LogThrottle`, counted by key, so silence is visible |
 | **Memory** | process, allocator, component | RSS/anon/HWM; allocator live and held; resident bytes per component (caches, link table estimate, queues, pools) |
 
-### 3.5 Profiling with symbols
+### 3.5 Open spans name what ran, not what allocated
+The diag-span builds taught one rule: the count of open spans during a memory
+climb shows what was *running*, not what *allocated*. A round waiting on an
+unroutable dial stays open while untraced work allocates. Allocation
+attribution needs a heap profiler (§3.6) or exemplars on cost histograms, not
+span counts alone.
+
+### 3.6 Profiling with symbols
 - **Symbols:** publish split debuginfo for each wheel as a release asset, keyed
   by build ID. Wheels stay stripped.
 - **On-demand heap profiling** behind a cargo feature that the canonical image
@@ -190,7 +204,7 @@ Generalise leviculum's `EVENT_CATALOG` pattern to metrics and spans:
 - **The memory route** (`/v1/node/diagnostics/memory`) becomes always on and
   loopback-only, because it is read-only.
 
-### 3.6 Exposure
+### 3.7 Exposure
 - **`/metrics`** (OpenMetrics) on the read API. Loopback-only by default, plus
   an authenticated scrape for the bridge and CIRISStatus.
 - **OTLP push** of metrics and traces when `CIRIS_OTLP_ENDPOINT` is set.
@@ -210,7 +224,9 @@ model. **P2** is SOTA polish.
 ### leviculum (through edge)
 - **P0:**
   - Expose the live link list on `ReticulumNode`: id, destination, state, age, idle (`last_inbound`), and initiator or responder.
-  - Expose established-link count per destination.
+  - Established-link count per destination: covered by leviculum PR #76,
+    `ReticulumNode::link_census()` (initiator, responder, pending,
+    per-destination), pending a tag.
   - Add cumulative counters: links established, closed by reason, handshake failed.
   - Add an alarm when the mirror and core link counts diverge.
 - **P1:**
@@ -224,13 +240,19 @@ model. **P2** is SOTA polish.
   - A gauge for dial-pool size, per destination class.
   - A counter of pooled links closed, by reason.
   - Round duration and permit-wait histograms.
-  - Wire the transport metrics on the v40.0.x line.
-  - Export every bundle field through PyO3 and UniFFI alike.
+  - Wire the transport metrics on the v40.0.x line: a back-port of v40.1.0's
+    attach-at-build. Counters that only exist in leviculum 0.29 can't exist on
+    0.27.
+  - Export every bundle field through PyO3 and UniFFI alike, with a test that
+    walks the bundle so a new field can't be omitted again.
+  - `init_logging()` (#814/#815): P0 for agent-hosted nodes, which otherwise
+    log nothing from edge.
 - **P1:**
   - Move `EdgeMetrics` onto the facade, with a catalogue and one label style.
   - Histograms for round duration by kind, sweep pages and rows, per-peer resolution, permit wait, and serve-tier refresh.
   - A "fetched but not shipped" counter.
-  - Rename or retire `durable_queue_depth`.
+  - Replace `durable_queue_depth` with `durable_enqueued_total` (#815). A real
+    resident depth needs persist's `outbound_counts()` (CIRISPersist#996).
   - Count `LogThrottle` suppressions.
   - A span taxonomy (`edge.round` › `edge.sweep.page`, `edge.resolve.*`, `edge.push`), as INFO only on unit-of-work boundaries.
   - Ship `init_logging()` (#814).
