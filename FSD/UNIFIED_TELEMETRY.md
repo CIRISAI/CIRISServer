@@ -220,10 +220,23 @@ implementation in both. Neither stack has acting thresholds yet.
   With no recorder installed they cost nothing, which keeps the embedded and
   mobile builds lean.
 - **The server, the only host,** installs:
-  - the recorder, via `metrics-exporter-prometheus`'s handle path (no exporter
-    listener; `/metrics` is served from our own router), **with a periodic
-    `PrometheusHandle::run_upkeep()` task**. `install_recorder` doesn't start
-    upkeep, and without it histogram data accumulates without bound;
+  - **its own recorder**, built on `metrics-util`'s registry rather than
+    `metrics-exporter-prometheus`'s handle. The exporter's handle can only be
+    read back as rendered text, needs an upkeep task that dies with an
+    embedded fold's Tokio runtime, and can't reset when a different node is
+    served. The host recorder is:
+    - **validating:** every emitted label key and value is checked against
+      the merged catalogue. An undeclared value is recorded as `other`, and
+      `ciris.telemetry.label_rejected` counts it by metric, so a runtime
+      string (a peer, an error message) can never mint a series;
+    - **queryable:** the JSON views read typed values from it directly,
+      instead of parsing exposition text and reversing name translation;
+    - **resettable per fold** (below);
+    - **bucketed:** histograms are stored straight into the catalogue's fixed
+      buckets as atomic counters, so there are no sample buffers to drain
+      and no upkeep task to keep alive;
+    - **rendered by us** as Prometheus text, applying the recommended naming
+      rules (unit and `_total` suffixes) from §3.1;
   - the `tracing-opentelemetry` layer;
   - the JSON log layer, plus the correlation layer (§3.9).
   The agent-embedded fold uses the same host code, on Android and iOS too
@@ -234,14 +247,15 @@ implementation in both. Neither stack has acting thresholds yet.
   nowhere. All four pin the same minor (leviculum chose 0.24), and the server
   gains a gate that fails the build unless exactly one `metrics` package is in
   the dependency graph (the same idea as the substrate pin-coupling gate).
-- **The recorder lives for the process; folds don't reinstall it.** The
-  facade permits one global recorder, while the server supports stopping and
-  re-serving a node in the same process (mobile and embedded hosts do this).
-  So the recorder is installed once, idempotently, on first use. Each fold
-  start bumps a `ciris.host.fold.generation` gauge, and fold shutdown resets
-  that fold's gauges, so a re-served node doesn't serve the last fold's stale
-  readings. Counters stay process-cumulative, which is how Prometheus already
-  treats a process (it sees a counter reset only when the process restarts).
+- **The recorder is installed once for the process; its contents belong to
+  the fold.** The facade permits one global recorder, while the server
+  supports stopping and re-serving a node in the same process, possibly with
+  a different `home` and `key_id` (`serve_with_python_adapter`). So the
+  recorder is installed once, idempotently, and **every fold start clears its
+  registry**: counters, gauges and histograms all start from zero, and
+  `ciris.host.fold.generation` increments. One node's counts never appear
+  under another's `/metrics`, and a scraper sees an ordinary counter reset,
+  which Prometheus handles.
 - **The OpenTelemetry layer is reloadable from the first install.** On the
   one-wheel path Python may call `ciris_server.init_tracing` before the node
   starts. Today that subscriber wins and later calls can only swap the file
@@ -265,7 +279,11 @@ Generalise leviculum's `EVENT_CATALOG` pattern to metrics and spans:
   leviculum's `event_catalog_completeness`.
 - **The server merges the four catalogues** into the served `/metrics` HELP
   text and gates on two things:
-  - no name collisions across repos;
+  - no collisions in the **final rendered identity**: the served name after
+    sanitizing dots and invalid characters and adding unit and `_total`
+    suffixes, together with the metric kind and the sanitized label keys.
+    Distinct catalogue spellings (dotted vs underscored, a unit-bearing name
+    vs an explicitly suffixed one) can otherwise render as one series;
   - every label key bounded. **No per-peer series of any kind.** Hashing a
     peer key redacts it but still makes one series per peer, so a long-lived
     or adversarial node could grow the recorder without limit. Per-peer
@@ -323,6 +341,13 @@ span counts alone.
   - or a fanout recorder (`metrics-util`) feeds both the Prometheus handle
     and an OTLP recorder.
   OTLP traces go through the `tracing-opentelemetry` exporter.
+- **The host owns the OTLP providers' lifecycle.** Batch span processors and
+  periodic metric readers buffer completed telemetry, so the host keeps the
+  tracer and meter providers in its state and runs:
+  - a bounded `force_flush` on fold teardown and on any OTel layer reload;
+  - `shutdown` on process exit.
+  Otherwise the last telemetry before a shutdown or failure, the part an
+  investigation needs most, is silently lost.
 - **`/v1/federation/metrics`: its aggregates become a view of the recorder,**
   so no aggregate is hand-copied again. Its per-peer fields stay sourced from
   domain state, because the metrics forbid per-peer series (§3.3).
