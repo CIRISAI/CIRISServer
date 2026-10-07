@@ -115,25 +115,64 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
   drops, apply refusals by class, …).
 
 ### agent (the reference)
+Corrected by the agent team against agent main + #1232 (2.14.0); paths are
+under `ciris_engine/`.
+
 **Worth aligning to:**
-- One collection model: `TelemetryAggregator` polls every service and bus.
-- A standard per-service summary (uptime, requests, errors, error rate, healthy).
-- One surface that exports JSON, OTLP-shaped JSON, Prometheus or Graphite, by pull or scheduled push.
-- A resource monitor whose thresholds act: throttle, defer, reject, shutdown.
-- The signed lens trace contract (`FSD/TRACE_WIRE_FORMAT.md`).
+- **A per-service summary** (uptime, requests, errors, error rate, healthy,
+  `schemas/services/graph/telemetry.py:126`). Two bugs to fix rather than
+  copy: `error_rate` is a 0–1 ratio documented as a percentage, and uptime is
+  read under five aliases.
+- **Two collection models:**
+  - pull: `TelemetryAggregator` over the 6 buses, ~30 services and registry
+    services, on demand behind a 30 s cache;
+  - push: `record_metric` writes a graph node per sample, and handlers
+    memorize metrics directly.
+- **Export in several formats:** two pull endpoints
+  (`/telemetry/unified?format=json|prometheus|graphite` and
+  `/telemetry/otlp/{signal}`) plus a scheduled push in all four formats.
+  The trace push drains the shared reasoning-event buffer, which could starve
+  other consumers.
+- **The lens trace contract, as it lives today:**
+  `CIRISLensCore/docs/PUBLIC_SCHEMA_CONTRACT.md` (TRACE_SCHEMA_VERSION 3.0.0),
+  with sealing and signing in ciris-lens-core (Rust). `FSD/TRACE_WIRE_FORMAT.md`
+  is stale except for §8.
+- **Memory tooling beyond RSS**, though it's tooling, not exported telemetry:
+  - `utils/memory_release.py`: heap give-back on every platform (glibc
+    `malloc_trim`, Bionic `mallopt`, Darwin pressure relief, Windows
+    `_heapmin`), reported as release counts and MB;
+  - `tools/memory_composition.py`: an out-of-process `/proc` smaps report;
+  - an opt-in tracemalloc probe;
+  - Android PSS on the five-platform gate.
+- **`FSD/LOGGING_STANDARD.md`:** normative logging rules.
+
+**Not a model yet — resource thresholds:** the monitor emits
+throttle/defer/reject/shutdown signals, but the only subscriber is the
+monitor itself. The only action taken is `release_memory` for memory, the
+disk limit is never checked, and nothing calls `check_available`. Wiring
+them is an agent follow-up; the shape (thresholds that act) is still the
+target for the server.
 
 **Not worth copying:**
-- No registry of metric names (dotted, snake, legacy and label-in-name, with readers that drift from writers).
-- Unbounded labels (a `timestamp` tag, `thought_id` as a tag).
-- Every sample stored as a graph node and typed "gauge".
-- Prometheus output without labels, guessing counter vs gauge from the name.
-- Hand-rolled OTLP with non-W3C trace IDs.
-- Unstructured logs with no trace ID.
-- RSS-only memory telemetry.
+- **No registry of metric names, and it's a live correctness bug.** Token
+  usage is written as both `llm_tokens_used` and `llm.tokens.total`, both
+  map to "tokens", and they're summed, so token totals are inflated. A reader
+  (`thought_processing_started`) has no writer.
+- **Unbounded labels:** a `timestamp` tag on every sample, and `thought_id`
+  as a tag in four places.
+- **Every sample stored as a gauge graph node.** TSDB consolidation bounds
+  the storage, but there are no in-process counters or histograms.
+- **Prometheus output without labels,** guessing counter vs gauge from the
+  name. The OTLP metrics path does carry attributes and real sum/gauge types.
+- **OTLP trace IDs that can't correlate:** non-hex characters are kept and
+  uppercased, push uses `thought_id` as the trace ID and a sequence number as
+  the span ID, and log-record IDs are SHA-256 hashes unrelated to spans.
+- **Python logs are plain text without trace IDs.** The Rust substrate
+  already logs structured `tracing` into `ciris-server.log`.
 
 **Conclusion:** align to the agent's *shape* (per-component summary, one
-export surface, action thresholds, written contracts), and fix the
-implementation in both.
+export surface, thresholds that act, written contracts), and fix the
+implementation in both. Neither stack has acting thresholds yet.
 
 ---
 
@@ -221,7 +260,7 @@ span counts alone.
 **P0** is needed to fully understand the current leak. **P1** is the unified
 model. **P2** is SOTA polish.
 
-### leviculum (through edge)
+### leviculum (through edge; leviculum#77)
 - **P0:**
   - Expose the live link list on `ReticulumNode`: id, destination, state, age, idle (`last_inbound`), and initiator or responder.
   - Established-link count per destination: covered by leviculum PR #76,
@@ -235,7 +274,7 @@ model. **P2** is SOTA polish.
   - Report per-link memory on std hosts (call the heap census).
 - **P2:** histograms of link age and RTT.
 
-### edge
+### edge (CIRISEdge#820)
 - **P0 (v40.0.7, alongside the #819 reap):**
   - A gauge for dial-pool size, per destination class.
   - A counter of pooled links closed, by reason.
@@ -282,11 +321,11 @@ model. **P2** is SOTA polish.
   statement the code builds (lesson from the trace-summaries diagnosis).
 
 ### server
-- **P0:**
-  - `reticulum_link_count` (#745).
-  - Make the memory route always on, loopback-only.
-  - Read the 13 edge fields we currently ignore.
-  - Make dedup count suppressions, as a metric.
+- **P0 (all in #745, 0.5.224):**
+  - `reticulum_link_count` on `/v1/federation/metrics`.
+  - The memory route always on, loopback-only (trim stays behind the switch).
+  - The 13 edge fields we used to ignore, served.
+  - Dedup suppressions counted (`log_dedup_suppressed_total`).
 - **P1:**
   - Install the recorder and the Prometheus `/metrics` endpoint.
   - JSON logs with trace IDs.
@@ -301,6 +340,11 @@ model. **P2** is SOTA polish.
   - A health/readiness split that matches the agent's.
 
 ### agent (follow-up, tracked on CIRISAgent)
+Correctness first:
+- Fix the token double count (`llm_tokens_used` + `llm.tokens.total`).
+- Wire the resource thresholds to subscribers that act.
+
+Then shape:
 - Adopt the shared names.
 - Real counters and histograms in-process instead of gauge graph nodes.
 - Bounded labels.
