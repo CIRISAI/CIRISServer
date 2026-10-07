@@ -339,11 +339,22 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     let blob_pull_refusals = fold(&bundle.blob_pull_refusals);
     let blob_serve_refusals = fold(&bundle.blob_serve_refusals);
     let first_contact_outcomes = fold(&bundle.first_contact_outcomes);
+    // CIRISEdge#819 — the transport's ESTABLISHED links, read from the link
+    // table itself. leviculum's `COMPLETION_MIRROR_OVER_ENVELOPE` alarm counts
+    // its completion mirror, a bookkeeping set of link ids; on 0.5.223 it
+    // climbed 1024 → 2048 in 35 minutes on the canonical and nothing on this
+    // surface could say whether the links were real. `null` without a
+    // Reticulum transport.
+    let reticulum_link_count = match st.edge.reticulum_transport() {
+        Some(t) => Some(t.link_count().await),
+        None => None,
+    };
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "data": {
+                "reticulum_link_count": reticulum_link_count,
                 "envelopes_sent_total": envelopes_sent,
                 "envelopes_received_total": envelopes_received,
                 "send_failures_total": send_failures,
