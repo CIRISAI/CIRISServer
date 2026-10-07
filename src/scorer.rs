@@ -1856,11 +1856,20 @@ mod coalescing_tests {
     }
 }
 
-/// The CC#46 `analyze` stance for `subject` through persist's by-principals
-/// fold (v44.6.0, CIRISPersist#857): the subject's own rows plus its stewards'
-/// rows that name it — the owner-binding for a node, the login ceremony's
-/// occurrence anchor for an agent (CIRISServer#601 items 5 and 8). Combine rule
-/// is persist's: any revoked → revoked; else any granted → granted.
+/// The CC#46 consent-before-scoring stance for `subject`: persist's
+/// `capacity_consent_stance` (v53.1.8, CIRISPersist#1013), the ONE fold the
+/// emit gate itself asks, so this precheck and the gate cannot disagree. It
+/// walks the principals (the subject's own rows plus its stewards' rows that
+/// name it — the owner-binding for a node, the login ceremony's occurrence
+/// anchor for an agent, CIRISServer#601 items 5 and 8) and asks the
+/// family-narrowed scope `analyze:capacity`: a bare `analyze` covers it, a
+/// grant narrowed to another family does not.
+///
+/// Before v53.1.8 this asked bare `analyze` by principals while the gate read
+/// only the subject's own rows. On the canonical that refused 13 agents at
+/// emit every pass (their only grant was a steward's bare `analyze`), and a
+/// subject that granted only `analyze:capacity` read Unspecified here and was
+/// never scored.
 async fn resolve_analyze_stance_via_steward(
     engine: &Engine,
     attester_key_id: &str,
@@ -1868,11 +1877,10 @@ async fn resolve_analyze_stance_via_steward(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ciris_persist::federation::hard_case::ConsentState, ciris_persist::federation::Error> {
     engine
-        .resolve_scoped_consent_by_principals(
+        .capacity_consent_stance(
             attester_key_id,
             subject_key_id,
-            ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
-            None,
+            ciris_persist::federation::admission::ConsentGatedFamily::Capacity,
             now,
         )
         .await
