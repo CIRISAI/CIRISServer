@@ -249,9 +249,36 @@ span counts alone.
 - **OTLP push** of metrics and traces when `CIRIS_OTLP_ENDPOINT` is set.
 - **The existing JSON surfaces stay** (`/v1/federation/metrics`, `/v1/node/state`)
   as views derived from the same recorder, so no field is hand-copied again.
-- **The agent** points its aggregator at the same names. Its Prometheus and OTLP
-  output gains labels, real types and W3C IDs. That is a follow-up on the agent
-  side, tracked separately.
+- **The agent rides on this surface** (§3.8); it doesn't run a second one.
+
+### 3.8 The agent inherits the substrate's telemetry
+The maintainer's ruling, 2026-10-07 (relayed by the agent team): the agent
+**inherits** unified telemetry from the substrate. It rides on top and adds
+its own signals; it does not build a parallel stack. The folded node is the
+agent's one export surface on every platform, Android and iOS included.
+
+The `ciris_server` wheel provides, through PyO3 into the same recorder and
+tracing pipeline:
+1. **An emit API:** counter, gauge and histogram by catalogued name with
+   bounded labels. Agent metrics appear in the same `/metrics` and OTLP push,
+   with the same HELP text.
+2. **A fifth catalogue:** the agent ships its `telemetry_catalog` (prefix
+   `ciris.agent.*`). The host loads it at fold start and merges it under the
+   same gates: no name collisions, every label key bounded. The agent runs
+   its own completeness test against its emit sites.
+3. **Spans:** start and end a span from Python and read the current W3C
+   trace and span IDs. A thought or LLM call becomes a real span; the node's
+   spans for that work (persist writes, edge sends) parent under it, and lens
+   trace IDs can link to it.
+4. **One log stream:** a Python logging handler that writes into the host's
+   JSON log layer, with `trace_id`/`span_id` attached when a span is current.
+   One structured log per process.
+5. **Readable host gauges:** read access to process and memory figures
+   (RSS/anon/HWM, allocator held), so the agent's resource monitor acts on
+   the host's numbers instead of sampling RSS itself.
+6. **Fold and mobile parity:** the recorder and layers are installed in the
+   agent-embedded fold on Android and iOS too. The emit API is a cheap no-op
+   when no recorder is installed.
 
 ---
 
@@ -334,23 +361,30 @@ model. **P2** is SOTA polish.
   - Merge the catalogues, plus the server-side catalogue gate.
   - Split debuginfo on release.
   - Retire the hand-copy in `federation_surface.rs`.
+  - The agent host API (§3.8, items 1–6), alongside the recorder install:
+    Python emit, the agent catalogue merged under the same gates, Python spans
+    with W3C IDs, a Python log handler into the JSON layer, readable host
+    gauges, and the same install in the mobile fold.
 - **P2:**
   - OTLP push.
   - The jemalloc profiling feature on the canonical image.
   - A health/readiness split that matches the agent's.
 
 ### agent (follow-up, tracked on CIRISAgent)
+The agent inherits the host's telemetry (§3.8).
+
 Correctness first:
 - Fix the token double count (`llm_tokens_used` + `llm.tokens.total`).
-- Wire the resource thresholds to subscribers that act.
+- Wire the resource thresholds to subscribers that act, reading the host's
+  gauges.
 
-Then shape:
-- Adopt the shared names.
-- Real counters and histograms in-process instead of gauge graph nodes.
-- Bounded labels.
-- W3C trace IDs.
-- JSON logs.
-- Expose `/metrics` with labels.
+Then move onto the host:
+- Ship a `telemetry_catalog` (`ciris.agent.*`) with a completeness test.
+- Emit metrics, spans and logs through the host API (§3.8).
+- Delete what the host now serves: the Prometheus, Graphite and OTLP
+  converters, the trace-ID normalisation and the export scheduler (the
+  same "delete the Python layer the substrate owns" pattern as earlier
+  substrate swaps).
 
 ---
 
