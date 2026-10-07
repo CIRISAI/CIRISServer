@@ -1041,6 +1041,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // The first-contact carry for a server-shaped node (CIRISServer#632 / CIRISEdge#671).
     crate::mesh_genesis::carry_allegiance_from_canonicals(&engine, &[]).await;
 
+    // Key registration + peering are the boot's peak (+700 MB in ~10 s on a
+    // copy of the canonical, almost all of it freed by here): return it
+    // before the loops start allocating on top.
+    crate::diag::trim_after("boot: peering done");
     crate::compose_status::phase("holonomic");
     // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
     // The publisher advertises the fountain content THIS node holds as signed
@@ -1882,6 +1886,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // the `?` above). Stamp the milestone so compose_status distinguishes
         // "binding" from "bound and serving".
         crate::compose_status::phase("read_api_serving");
+        crate::diag::trim_after("boot: serving");
         // #276: record the bound addr so an in-process shutdown_node() can stop
         // this node and wait for the port to free on a fold restart.
         crate::node_control::arm(read.listen_addr());

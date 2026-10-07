@@ -263,25 +263,57 @@ impl DedupLayer {
     }
 }
 
-struct MessageVisitor(Option<String>);
+/// The event as the layer keys it: the message, then every other field as
+/// ` name=value`. Keying on the message ALONE folded every structured event
+/// whose message is a constant — `compose phase` with `phase=` naming which,
+/// the allocator's trim lines — into one bucket: on the 0.5.223 capped run only
+/// the first three of ~24 boot phases reached stdout, the rest (`peering`, the
+/// phase the run existed to measure) suppressed as "repeats". Fields go through
+/// the same [`normalize`], so counts and ids still collapse; a name does not.
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+    fields: String,
+}
 
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" && self.0.is_none() {
-            self.0 = Some(format!("{value:?}"));
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            if self.message.is_none() {
+                self.message = Some(format!("{value:?}"));
+            }
+        } else {
+            let _ = write!(self.fields, " {}={value:?}", field.name());
         }
     }
 }
 
+impl MessageVisitor {
+    fn rendered(self) -> Option<String> {
+        self.message.map(|m| m + &self.fields)
+    }
+}
+
+/// Targets whose events are never collapsed: each is already bounded by its
+/// producer, and each exists to be read per occurrence. `compose_status` emits
+/// one line per boot phase/mark (~24 + marks per boot); `diag` emits the
+/// allocator's trim and peak-rise lines, at most one per trim period at info.
+const NEVER_COLLAPSED: &[&str] = &[
+    SUMMARY_TARGET,
+    "ciris_server::compose_status",
+    "ciris_server::diag",
+];
+
 impl<S: Subscriber> Layer<S> for DedupLayer {
     fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
         let meta = event.metadata();
-        if meta.target() == SUMMARY_TARGET {
+        if NEVER_COLLAPSED.contains(&meta.target()) {
             return true;
         }
-        let mut v = MessageVisitor(None);
+        let mut v = MessageVisitor::default();
         event.record(&mut v);
-        match v.0 {
+        match v.rendered() {
             Some(msg) => self.state.admit(meta.target(), *meta.level(), &msg),
             None => true,
         }
@@ -306,6 +338,70 @@ pub fn spawn_flusher(state: DedupState, window: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts the events that reach a sink behind the dedup layer.
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+    impl<S: Subscriber> Layer<S> for Counting {
+        fn on_event(&self, _e: &Event<'_>, _c: Context<'_, S>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn printed(emit: impl FnOnce()) -> usize {
+        use tracing_subscriber::prelude::*;
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (dedup, _state) = DedupLayer::new();
+        let sub = tracing_subscriber::registry()
+            .with(dedup)
+            .with(Counting(Arc::clone(&n)));
+        tracing::subscriber::with_default(sub, emit);
+        n.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn a_constant_message_with_different_fields_is_not_a_repeat() {
+        // The 0.5.223 capped run: `compose phase` printed for 3 of ~24 phases.
+        let phases = ["a", "b", "c", "d", "e", "f", "g", "peering"];
+        assert_eq!(
+            printed(|| {
+                for p in phases {
+                    tracing::info!(phase = p, rss_kb = 123_456, "a constant message");
+                }
+            }),
+            phases.len(),
+            "each named field value is its own event"
+        );
+        // A count alone still collapses: the storm rule is unchanged.
+        assert_eq!(
+            printed(|| {
+                for i in 0..10 {
+                    tracing::warn!(peer = "x", n = 1_000 + i, "a constant message");
+                }
+            }),
+            BURST as usize,
+        );
+    }
+
+    #[test]
+    fn a_diag_field_and_the_bounded_targets_are_never_collapsed() {
+        assert_eq!(
+            printed(|| {
+                for _ in 0..10 {
+                    tracing::warn!(diag = "drop", "operands");
+                }
+            }),
+            10,
+            "`diag=` as a FIELD — the form the #632 rule names — was invisible to a message-only key"
+        );
+        assert_eq!(
+            printed(|| {
+                for _ in 0..10 {
+                    tracing::info!(target: "ciris_server::diag", why = "period", "trim");
+                }
+            }),
+            10
+        );
+    }
 
     #[test]
     fn normalize_collapses_the_ids_that_made_every_refusal_unique() {

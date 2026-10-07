@@ -336,7 +336,12 @@ pub fn spawn(
                         continue;
                     }
                     let t0 = std::time::Instant::now();
-                    match run_pass(&engine, &node_key_id, &cfg).await {
+                    let pass = run_pass(&engine, &node_key_id, &cfg).await;
+                    // A pass's working set is freed at its end; hand it back
+                    // now rather than at the next period, so the next peak
+                    // does not stand on it (the 0.5.222 capped run).
+                    crate::diag::trim_after("scorer pass");
+                    match pass {
                         Ok(emitted) => {
                             last_watermark = current;
                             last_pass_at = std::time::Instant::now();

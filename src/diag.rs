@@ -37,6 +37,11 @@
 //!
 //! Read-only in the sense that matters: it reports, it does not trim. Deciding to
 //! release memory is a separate act from measuring it.
+//!
+//! The allocator POLICY that measurement led to lives here too, outside the
+//! switch: [`tune_allocator`] (the arena cap, #552) and [`spawn_trimmer`] /
+//! [`trim_after`] (return retained heap on a period and after the boot's and the
+//! scorer's peaks — the 0.5.222 capped run read 152 MB live under 1.04 GB held).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -126,6 +131,296 @@ pub fn tune_allocator() {
     }
 }
 
+/// The environment knob for the background trimmer's period, in seconds.
+/// `0` turns it off; unset means [`TRIM_INTERVAL_SECS`].
+pub const TRIM_ENV: &str = "CIRIS_MALLOC_TRIM_SECS";
+
+/// How often the trimmer hands retained heap back to the kernel.
+///
+/// The bridge's capped run of 0.5.222 against a copy of the canonical's data
+/// (2 GiB cgroup) read 152 MB live beside 1.04 GB free-but-retained
+/// (`fordblks`) before the OOM: transient peaks freed into a heap glibc never
+/// shrinks on its own, so every peak raised the floor the next one stood on. A
+/// `malloc_trim(0)` returns those pages (the top of the heap and, since glibc
+/// 2.8, whole free pages inside every arena). It cannot lower a peak; it stops
+/// peaks from stacking. 30 s keeps the floor near the live set while costing one
+/// arena walk per period, off every request path.
+pub const TRIM_INTERVAL_SECS: u64 = 30;
+
+/// Below this, a trim's release is debug-level; at or above it, info.
+const TRIM_LOG_FLOOR_KB: i64 = 64 * 1024;
+
+/// One `kB` field of `/proc/self/status` (`RssAnon`, `VmHWM`, …); `None` off
+/// Linux or when the kernel does not report it.
+pub fn proc_status_kb(field: &str) -> Option<i64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    s.lines()
+        .find_map(|l| l.strip_prefix(field)?.strip_prefix(':'))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+}
+
+/// `RssAnon` in kB — the figure a memory cgroup charges.
+fn rss_anon_kb() -> Option<i64> {
+    proc_status_kb("RssAnon")
+}
+
+/// Live heap in kB (`mallinfo2().uordblks`); `None` where there is no glibc.
+pub fn heap_live_kb() -> Option<i64> {
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: see `memory_report` — reads glibc's own accounting.
+        Some((unsafe { libc::mallinfo2() }.uordblks / 1024) as i64)
+    }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        None
+    }
+}
+
+/// Trim now and say what it released. `why` names the caller (the period, the
+/// end of boot, a scorer pass) so a log reader can tie a release to the work
+/// that made the peak. A no-op where there is no glibc.
+pub fn trim_after(why: &'static str) {
+    #[cfg(target_env = "gnu")]
+    {
+        // A new process peak since the last trim, named by when it was seen:
+        // the 0.5.222 run had a +512 MB single step that no log line explained;
+        // this puts that step inside a ≤ TRIM_INTERVAL_SECS window to read the
+        // other logs against.
+        static LAST_PEAK_KB: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        if let Some(peak) = proc_status_kb("VmHWM") {
+            let last = LAST_PEAK_KB.swap(peak, Ordering::Relaxed);
+            if last > 0 && peak - last >= TRIM_LOG_FLOOR_KB {
+                tracing::warn!(
+                    why,
+                    peak_rss_kb = peak,
+                    previous_peak_rss_kb = last,
+                    risen_kb = peak - last,
+                    "allocator: process peak RSS rose since the last trim"
+                );
+            }
+        }
+        let before = rss_anon_kb();
+        let t0 = std::time::Instant::now();
+        let released = trim();
+        let after = rss_anon_kb();
+        let freed_kb = before.zip(after).map(|(b, a)| b - a);
+        if freed_kb.is_some_and(|k| k >= TRIM_LOG_FLOOR_KB) {
+            tracing::info!(
+                why,
+                rss_anon_before_kb = before,
+                rss_anon_after_kb = after,
+                freed_kb,
+                elapsed_us = t0.elapsed().as_micros() as u64,
+                "allocator: malloc_trim returned retained heap to the kernel"
+            );
+        } else {
+            tracing::debug!(
+                why,
+                ?released,
+                rss_anon_after_kb = after,
+                freed_kb,
+                elapsed_us = t0.elapsed().as_micros() as u64,
+                "allocator: malloc_trim"
+            );
+        }
+    }
+    #[cfg(not(target_env = "gnu"))]
+    let _ = why;
+}
+
+/// Start the background trimmer, once per process: a plain OS thread (no
+/// runtime needed, none starved) that calls [`trim_after`] every
+/// [`TRIM_INTERVAL_SECS`], or every `CIRIS_MALLOC_TRIM_SECS` (`0` = off).
+/// Independent of the diagnostics switch, like [`tune_allocator`]: it is the
+/// fix the instrument found, not an instrument.
+pub fn spawn_trimmer() {
+    #[cfg(target_env = "gnu")]
+    {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            let secs = match std::env::var(TRIM_ENV) {
+                Ok(v) => match v.trim().parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        tracing::warn!(
+                            value = %v,
+                            default_secs = TRIM_INTERVAL_SECS,
+                            "allocator: {TRIM_ENV} is not a whole number of seconds — using the default"
+                        );
+                        TRIM_INTERVAL_SECS
+                    }
+                },
+                Err(_) => TRIM_INTERVAL_SECS,
+            };
+            if secs == 0 {
+                tracing::info!("allocator: periodic malloc_trim OFF ({TRIM_ENV}=0)");
+                return;
+            }
+            let spawned = std::thread::Builder::new()
+                .name("ciris-malloc-trim".into())
+                .spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(secs));
+                    trim_after("period");
+                });
+            match spawned {
+                Ok(_) => tracing::info!(
+                    period_secs = secs,
+                    "allocator: periodic malloc_trim started"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "allocator: could not start the malloc_trim thread — retained heap will not be returned"
+                ),
+            }
+        });
+    }
+}
+
+/// The open spans, by `target::name`, for [`spawn_burst_sampler`] to name what
+/// was running when memory jumped. Every layer of the stack opens spans for its
+/// units of work (edge's replication rounds, the server's loops, persist's
+/// calls), so the live set at the moment of a jump names the work that made it
+/// — without symbols (the wheel ships stripped) or a profiler (none on the
+/// canonical's host). Only spans the subscriber's filter enables are counted.
+#[derive(Default)]
+pub struct LiveSpans;
+
+/// A span's key in the table, kept on the span so `on_close` decrements the
+/// same entry `on_new_span` raised.
+struct LiveKey(String);
+
+/// The span fields worth naming in a burst report: which round KIND and toward
+/// which PEER (edge's `anti_entropy_round` carries both). Five rounds open at
+/// every burst of the third capped run said nothing until it said which.
+const NAMED_FIELDS: &[&str] = &["kind", "peer"];
+
+#[derive(Default)]
+struct LabelVisitor(String);
+
+impl tracing::field::Visit for LabelVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if NAMED_FIELDS.contains(&field.name()) {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
+static LIVE_SPANS: std::sync::Mutex<Option<std::collections::HashMap<String, i64>>> =
+    std::sync::Mutex::new(None);
+
+impl<S> tracing_subscriber::Layer<S> for LiveSpans
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let m = attrs.metadata();
+        let mut label = LabelVisitor::default();
+        attrs.record(&mut label);
+        let key = format!("{}::{}{}", m.target(), m.name(), label.0);
+        if let Ok(mut g) = LIVE_SPANS.lock() {
+            *g.get_or_insert_with(Default::default)
+                .entry(key.clone())
+                .or_default() += 1;
+        }
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(LiveKey(key));
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let Some(span) = ctx.span(&id) else { return };
+        let ext = span.extensions();
+        let Some(LiveKey(key)) = ext.get::<LiveKey>() else {
+            return;
+        };
+        if let Ok(mut g) = LIVE_SPANS.lock() {
+            if let Some(map) = g.as_mut() {
+                if let Some(n) = map.get_mut(key) {
+                    *n -= 1;
+                    if *n <= 0 {
+                        map.remove(key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The open spans right now, most numerous first, as `target::name[ kind= peer=]=count`.
+pub fn live_spans(limit: usize) -> Vec<String> {
+    let Ok(g) = LIVE_SPANS.lock() else {
+        return Vec::new();
+    };
+    let Some(map) = g.as_ref() else {
+        return Vec::new();
+    };
+    let mut v: Vec<_> = map.iter().map(|(k, c)| (*c, k.as_str())).collect();
+    v.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    v.into_iter()
+        .take(limit)
+        .map(|(c, k)| format!("{k}={c}"))
+        .collect()
+}
+
+/// A rise in `RssAnon` within one second that names itself.
+const BURST_KB: i64 = 64 * 1024;
+/// A rise over the last [`CLIMB_SECS`] seconds that names itself: the third
+/// capped run climbed 718 → 1,190 MB over five seconds with no single second
+/// past the one-second floor.
+const CLIMB_KB: i64 = 256 * 1024;
+const CLIMB_SECS: usize = 5;
+
+/// Sample `RssAnon` every second; on a one-second rise of [`BURST_KB`] or a
+/// [`CLIMB_SECS`]-second rise of [`CLIMB_KB`], WARN with the rise and the open
+/// spans. The 0.5.223 capped runs had bursts of +500 MB to +1.1 GB inside 10 s
+/// with no log line naming the work; a 30 s trim period is too coarse to catch
+/// one in flight. One /proc read a second; the span table is read only on a
+/// burst.
+pub fn spawn_burst_sampler() {
+    #[cfg(target_os = "linux")]
+    {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            let _ = std::thread::Builder::new()
+                .name("ciris-mem-burst".into())
+                .spawn(|| {
+                    let mut recent: std::collections::VecDeque<i64> =
+                        std::collections::VecDeque::with_capacity(CLIMB_SECS + 1);
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                        let Some(now) = rss_anon_kb() else { continue };
+                        let last = recent.back().copied();
+                        let oldest = recent.front().copied();
+                        let second = last.map(|p| now - p);
+                        let climb = oldest.map(|p| now - p);
+                        if second.is_some_and(|d| d >= BURST_KB)
+                            || climb.is_some_and(|d| d >= CLIMB_KB)
+                        {
+                            tracing::warn!(
+                                rss_anon_kb = now,
+                                risen_1s_kb = second,
+                                risen_5s_kb = climb,
+                                live_spans = %live_spans(25).join(" | "),
+                                "allocator: memory burst — RssAnon rising; open spans named"
+                            );
+                        }
+                        recent.push_back(now);
+                        if recent.len() > CLIMB_SECS {
+                            recent.pop_front();
+                        }
+                    }
+                });
+        });
+    }
+}
+
 /// Arm diagnostics from the serve entry point: ON if the CLI flag was given or
 /// the environment asks, naming which; returns the resulting state so the
 /// caller can record it on `ServerConfig`. The ONE place the two switches meet,
@@ -134,6 +429,8 @@ pub fn tune_allocator() {
 /// reason.
 pub fn arm(flag: bool) -> bool {
     tune_allocator();
+    spawn_trimmer();
+    spawn_burst_sampler();
     if flag {
         enable(FLAG);
     } else if env_requests() {
@@ -336,6 +633,48 @@ pub fn router() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_burst_report_names_open_spans_and_forgets_closed_ones() {
+        use tracing_subscriber::prelude::*;
+        let sub = tracing_subscriber::registry().with(LiveSpans);
+        tracing::subscriber::with_default(sub, || {
+            let held = tracing::info_span!("probe_round_open", kind = "Attestation", peer = "p1");
+            let named = |s: &str| live_spans(500).iter().any(|l| l.contains(s));
+            {
+                let _brief = tracing::info_span!("probe_round_closed");
+                assert!(named("probe_round_closed"));
+            }
+            assert!(
+                named("probe_round_open"),
+                "a span alive across the read is named"
+            );
+            assert!(
+                !named("probe_round_closed"),
+                "a dropped span leaves the table"
+            );
+            assert!(
+                named("probe_round_open kind=\"Attestation\" peer=\"p1\""),
+                "the round's kind and peer are part of its name: {:?}",
+                live_spans(500)
+            );
+            drop(held);
+            assert!(!named("probe_round_open"));
+        });
+    }
+
+    #[cfg(all(target_env = "gnu", target_os = "linux"))]
+    #[test]
+    fn the_trimmer_reads_the_figure_a_cgroup_charges() {
+        // The release log is only as good as this read: a parse that silently
+        // returned None would log every trim as freeing nothing.
+        let kb = rss_anon_kb().expect("RssAnon in /proc/self/status");
+        assert!(kb > 0);
+        assert!(proc_status_kb("VmHWM").is_some_and(|hwm| hwm >= kb));
+        assert!(proc_status_kb("Rss").is_none(), "a prefix is not a field");
+        assert!(heap_live_kb().is_some());
+        trim_after("test");
+    }
 
     /// The report's whole purpose is the live-vs-held split, so the test
     /// asserts the two numbers are present and that the derived fraction
