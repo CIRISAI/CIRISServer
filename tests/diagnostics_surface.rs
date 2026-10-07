@@ -232,6 +232,23 @@ async fn the_always_on_read_serves_memory_and_carries_no_trim_door() {
     };
     assert_eq!(call("GET", ROUTE, loopback).await, StatusCode::OK);
     assert_eq!(call("GET", ROUTE, remote).await, StatusCode::FORBIDDEN);
+    // A same-host reverse proxy connects from loopback; what it relays carries
+    // forwarding headers and must not pass as local.
+    for header in ["forwarded", "x-forwarded-for", "x-real-ip"] {
+        let req = Request::builder()
+            .uri(ROUTE)
+            .method("GET")
+            .header(header, "203.0.113.7")
+            .extension(ConnectInfo(loopback))
+            .body(Body::empty())
+            .unwrap();
+        let status = ciris_server::diag::read_router()
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "relayed via {header}");
+    }
     assert_eq!(
         call("POST", ciris_server::diag::ROUTE_TRIM, loopback).await,
         StatusCode::NOT_FOUND,

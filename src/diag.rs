@@ -633,9 +633,37 @@ async fn memory_trim() -> Json<Value> {
 pub fn read_router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
+        .layer(axum::middleware::from_fn(require_direct))
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ))
+}
+
+/// Headers a reverse proxy adds when it relays a request.
+const FORWARDING_HEADERS: &[&str] = &["forwarded", "x-forwarded-for", "x-real-ip"];
+
+/// The always-on read answers only callers that reached this socket directly.
+/// A same-host reverse proxy connects from loopback, so behind one the
+/// loopback guard alone would admit every remote request it forwards
+/// (`auth/oauth.rs` documents that deployment). A relayed request carries
+/// forwarding headers; refuse it. The canonical's Caddy forwards an allowlist
+/// of paths from another container, so this is defence in depth there.
+async fn require_direct(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if FORWARDING_HEADERS
+        .iter()
+        .any(|h| req.headers().contains_key(*h))
+    {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "diagnostics are served to direct loopback callers only, not through a proxy",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// The full diagnostics router: the memory read plus the trim door. Mounted by
