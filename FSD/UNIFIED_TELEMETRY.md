@@ -256,13 +256,16 @@ implementation in both. Neither stack has acting thresholds yet.
   `ciris.host.fold.generation` increments. One node's counts never appear
   under another's `/metrics`, and a scraper sees an ordinary counter reset,
   which Prometheus handles.
-- **The OpenTelemetry layer is reloadable from the first install.** On the
-  one-wheel path Python may call `ciris_server.init_tracing` before the node
-  starts. Today that subscriber wins and later calls can only swap the file
-  slot (`install_or_reattach_tracing`), so a later OTel layer can never be
-  added. The first install therefore includes an empty reloadable OTel slot,
-  the same pattern as the file slot, which the host fills when an exporter is
-  configured.
+- **The OpenTelemetry layer is in place from the first install; only its
+  export pipeline is reloaded.** On the one-wheel path Python may call
+  `ciris_server.init_tracing` before the node starts. Today that subscriber
+  wins and later calls can only swap the file slot
+  (`install_or_reattach_tracing`), so a later OTel layer can never be added.
+  The first install therefore includes a `tracing-opentelemetry` layer
+  backed by an ID-generating tracer that exports nothing. Every span gets a
+  W3C trace and span ID from the start, so JSON logs correlate even with no
+  OTLP endpoint configured. Configuring an endpoint swaps in a real export
+  pipeline behind the same layer.
 - **leviculum's `no_std` core** keeps its counter structs. `leviculum-std`
   bridges them into the facade once, so firmware is unaffected.
 
@@ -279,11 +282,15 @@ Generalise leviculum's `EVENT_CATALOG` pattern to metrics and spans:
   leviculum's `event_catalog_completeness`.
 - **The server merges the four catalogues** into the served `/metrics` HELP
   text and gates on two things:
-  - no collisions in the **final rendered identity**: the served name after
-    sanitizing dots and invalid characters and adding unit and `_total`
-    suffixes, together with the metric kind and the sanitized label keys.
-    Distinct catalogue spellings (dotted vs underscored, a unit-bearing name
-    vs an explicitly suffixed one) can otherwise render as one series;
+  - no collisions among **rendered series names**, compared independently of
+    kind. Every name a metric will emit is computed after sanitizing dots and
+    invalid characters and adding unit and `_total` suffixes, including the
+    `_bucket`, `_sum` and `_count` names a histogram generates. Any name
+    produced by two catalogue entries fails the gate. Prometheus allows one
+    type per metric family, so including the kind in the comparison would
+    wrongly let a counter and a gauge both render `ciris_foo`. Distinct
+    catalogue spellings (dotted vs underscored, a unit-bearing name vs an
+    explicitly suffixed one) can render as one name too;
   - every label key bounded. **No per-peer series of any kind.** Hashing a
     peer key redacts it but still makes one series per peer, so a long-lived
     or adversarial node could grow the recorder without limit. Per-peer
@@ -348,11 +355,19 @@ span counts alone.
   - `shutdown` on process exit.
   Otherwise the last telemetry before a shutdown or failure, the part an
   investigation needs most, is silently lost.
-- **`/v1/federation/metrics`: its aggregates become a view of the recorder,**
-  so no aggregate is hand-copied again. Its per-peer fields stay sourced from
-  domain state, because the metrics forbid per-peer series (§3.3).
-  `peer_reachability_ratio` comes from `reachability_tracker()`, and the client
-  uses it to compute mean reachability (`FederationMetrics.kt`).
+- **`/v1/federation/metrics`: its catalogued aggregates become a view of the
+  recorder,** so no aggregate is hand-copied again. Every other field the
+  client reads (`FederationMetrics.kt`) stays sourced from the live handle it
+  comes from today, until it has a catalogued equivalent:
+  - `peer_reachability_ratio`, per peer, from `reachability_tracker()` (the
+    metrics forbid per-peer series, §3.3);
+  - `inline_text_subscriber_count`, from `edge.verified_feed_subscriber_count()`
+    (catalogue it as a gauge before retiring the read);
+  - `durable_queue_depth`, which the client sums: it keeps its name and its
+    current source until persist's `outbound_counts()` (CIRISPersist#996) can
+    serve a real resident depth. `durable_enqueued_total` is served beside
+    it. The contract then changes once, in a release that says so: the field
+    becomes the real gauge.
 - **`/v1/node/state` stays sourced from its domain folds.** It reports persist
   state, storage timestamps, signer attribution and categorical causes
   (`unreadable`, `never_admitted`, `not_exercised`) that tell identical
