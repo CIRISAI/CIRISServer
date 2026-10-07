@@ -363,6 +363,21 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
             )
         })
         .collect();
+    // edge v40.0.7 (CIRISEdge#820 P0): fixed-bucket histograms, served as the
+    // cumulative `le` buckets plus count and sum, the shape a Prometheus
+    // histogram has.
+    let histogram = |h: &ciris_edge::observability::HistogramSnapshot| {
+        serde_json::json!({
+            "buckets": h.buckets().into_iter().map(|(le, n)| (le, serde_json::json!(n))).collect::<serde_json::Map<_, _>>(),
+            "count": h.count,
+            "sum_seconds": h.sum_seconds,
+        })
+    };
+    let round_duration: serde_json::Map<_, _> = bundle
+        .replication_round_duration_seconds
+        .iter()
+        .map(|(k, h)| (k.as_wire_str().to_string(), histogram(h)))
+        .collect();
     let removal_delivery = serde_json::json!({
         "rows": bundle.removal_delivery.len(),
         "offered": bundle.removal_delivery.iter().map(|r| r.offered).sum::<usize>(),
@@ -392,6 +407,11 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         "attestation_apply_refusals_by_reason": bundle.attestation_apply_refusals_by_reason,
         "apply_refusals_by_class": bundle.apply_refusals_by_class,
         "removal_delivery": removal_delivery,
+        "link_pool_links": bundle.link_pool_links,
+        "link_pool_max_per_destination": bundle.link_pool_max_per_destination,
+        "link_pool_closed_by_reason": bundle.link_pool_closed_by_reason,
+        "replication_round_duration_seconds": round_duration,
+        "sweep_permit_wait_seconds": histogram(&bundle.sweep_permit_wait_seconds),
     });
     let mut body = serde_json::json!({
             "data": {

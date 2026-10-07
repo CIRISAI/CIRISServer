@@ -1316,6 +1316,11 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "attestation_apply_refusals_by_reason",
         "apply_refusals_by_class",
         "removal_delivery",
+        "link_pool_links",
+        "link_pool_max_per_destination",
+        "link_pool_closed_by_reason",
+        "replication_round_duration_seconds",
+        "sweep_permit_wait_seconds",
     ] {
         assert!(
             data.as_object().is_some_and(|o| o.contains_key(key)),
@@ -1325,5 +1330,10 @@ async fn the_metrics_surface_names_the_live_link_count() {
     assert!(
         data["removal_delivery"]["rows"].is_u64(),
         "reduced to counts"
+    );
+    let wait = &data["sweep_permit_wait_seconds"];
+    assert!(
+        wait["buckets"]["+Inf"].is_u64() && wait["count"].is_u64(),
+        "a histogram is served as cumulative buckets with count and sum: {wait}"
     );
 }
