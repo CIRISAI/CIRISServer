@@ -42,16 +42,24 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
 - **Strongest discipline in the stack:** about 120 structured events in one
   `EVENT_CATALOG`, with a test that fails on any emitted event name not in the
   catalogue (`leviculum-std/src/event_log.rs:178`, `event_catalog_completeness.rs`).
-- **Metrics:** six separate pull-only snapshot structs (`LinkStats`,
-  `TransportStats` with about 21 drop reasons, `PlaneStats`, interface stats).
-  There is no registry and no metrics crate.
+- **Metrics:** separate pull-only snapshot structs (`LinkStats`,
+  `TransportStats` with about 21 drop reasons, `PlaneStats`, interface stats,
+  and now `LinkCensus` and `LinkLifecycle`). There was no registry and no
+  metrics crate.
 - **Gaps:**
   - Two link counts that are never reconciled: the completion mirror versus
-    the core table. On #819 leviculum showed by code that they can't diverge at
-    c2f8d3f; a divergence alarm is still cheap insurance.
+    the core table's ESTABLISHED links (Active + Stale; the table also holds
+    pending links). On #819 leviculum showed by code that they can't diverge
+    at c2f8d3f; a divergence alarm is still cheap insurance, provided it
+    tolerates a brief in-flight skew.
   - No API a host can call to list its links. `link_table_entries` exists but isn't exposed on `ReticulumNode`.
   - No idle time, no per-destination count, no lifecycle counters (established, closed-by-reason, failed).
-  - Per-link memory accounting only on nRF.
+    Idle time can only come from `last_inbound`, at 1 s resolution and
+    recorded before decryption, so it means "a packet arrived", not "the
+    peer authenticated".
+  - Memory accounting not exposed. The core's `NodeHeapCensus` is
+    platform-independent and works on std, but it's per component (links in
+    aggregate, plus count), not per link, and only the nRF firmware called it.
 
 ### persist
 - **No metrics crate, no spans** (no `#[instrument]` or `*_span!` anywhere).
@@ -92,9 +100,12 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
   `#[instrument]` on send paths. Nothing inside a round, and no taxonomy.
 - **Uneven exports:** PyO3 omits 8 bundle fields, and UniFFI exposes
   `link_count` but PyO3 doesn't.
-- **No edge logs at all in Python hosts.** The PyO3 wheel never installed a
-  `tracing` subscriber, so every edge line was dropped in agent processes.
-  The fix is `init_logging()` (CIRISEdge#814, PR #815).
+- **No edge logs in standalone Python hosts.** Edge's own PyO3 wheel never
+  installed a `tracing` subscriber, so a Python process that loads edge
+  without the server dropped every edge line. The fix is `init_logging()`
+  (CIRISEdge#814, PR #815). The agent-embedded one-wheel path is not
+  affected: `ciris_server.init_tracing` installs the process-global
+  subscriber, which captures `ciris_edge` and `ciris_persist`.
 - **#819's cause is edge's dial pool:** it reuses links only while idle and
   never shrinks, and edge's own keepalives keep idle pooled links alive.
 
@@ -109,10 +120,14 @@ The premise was that instrumentation is ad hoc and driven by need. That holds in
 - **Logs:**
   - Plain text, even though JSON is compiled in.
   - The dedup layer suppresses every component's output and keeps one sample line.
-  - A 512 MiB daily cap drops evidence during storms.
+  - A 512 MiB daily cap writes one marker line and then drops every later
+    event that day, novel errors included, and nothing counts what it drops.
 - **Wheels are stripped,** so no profiler can name a frame in production.
-- **13 edge fields are never read** (first-contact outcomes, inbound low-trust
-  drops, apply refusals by class, …).
+- **13 edge bundle fields were never read** (inbound low-trust drops,
+  backpressure drops by role, blob carriers/phases/chunks, delivery receipts,
+  announce intake/queue/binding, apply refusals by reason and by class,
+  removal delivery). `first_contact_outcomes`, `apply_refusals_by_kind` and
+  `transport_inbound_drops` were already served. #745 serves the 13.
 
 ### agent (the reference)
 Corrected by the agent team against agent main + #1232 (2.14.0); paths are
@@ -179,14 +194,24 @@ implementation in both. Neither stack has acting thresholds yet.
 ## 3. The model
 
 ### 3.1 Standards, not inventions
-- **Names and units:** OpenTelemetry semantic conventions. They render to
-  Prometheus/OpenMetrics names mechanically (`ciris.edge.round.duration` (s) →
-  `ciris_edge_round_duration_seconds`).
+- **Names and units:** OpenTelemetry semantic conventions. The Prometheus
+  name (`ciris.edge.round.duration` (s) → `ciris_edge_round_duration_seconds`,
+  counters ending `_total`) is part of the host contract: the exporter is
+  built with `with_recommended_naming(true)`, which is off by default, so the
+  catalogue, the served names and the queries agree.
 - **Exposition:**
-  - Prometheus/OpenMetrics text at `/metrics` (pull), with exemplars that carry trace IDs.
-  - OTLP push, when an endpoint is configured.
-- **Traces:** W3C Trace Context, so `trace_id` and `span_id` appear in logs, exemplars and spans.
-- **Logs:** JSON lines, with `trace_id`/`span_id` attached when a span is current.
+  - Prometheus text format at `/metrics` (pull). The selected exporter
+    renders Prometheus text and protobuf, not OpenMetrics; OpenMetrics with
+    `Accept` negotiation needs a different renderer and is not promised here.
+  - OTLP metrics push (§3.7).
+- **Traces:** W3C Trace Context, propagated across process boundaries, not
+  just started locally (§3.9).
+- **Logs:** JSON lines, with `trace_id`/`span_id` written by a correlation
+  layer (§3.9).
+- **Exemplars are not promised.** A `metrics` facade histogram records only a
+  number, so `/metrics` from the facade carries no exemplars. If P2 wants
+  them for the few cost histograms, it dual-records those observations
+  through an exemplar-capable OpenTelemetry instrument.
 
 ### 3.2 Libraries emit, the host exports
 - **persist, edge and leviculum** depend only on two zero-cost facades:
@@ -195,25 +220,37 @@ implementation in both. Neither stack has acting thresholds yet.
   With no recorder installed they cost nothing, which keeps the embedded and
   mobile builds lean.
 - **The server, the only host,** installs:
-  - the recorder, via `metrics-exporter-prometheus`;
+  - the recorder, via `metrics-exporter-prometheus`'s handle path (no exporter
+    listener; `/metrics` is served from our own router), **with a periodic
+    `PrometheusHandle::run_upkeep()` task**. `install_recorder` doesn't start
+    upkeep, and without it histogram data accumulates without bound;
   - the `tracing-opentelemetry` layer;
-  - the JSON log layer.
-  The agent-embedded fold uses the same host code.
+  - the JSON log layer, plus the correlation layer (§3.9).
+  The agent-embedded fold uses the same host code, on Android and iOS too
+  (§3.8).
 - **leviculum's `no_std` core** keeps its counter structs. `leviculum-std`
   bridges them into the facade once, so firmware is unaffected.
 
 ### 3.3 One name registry per repo, checked by test
 Generalise leviculum's `EVENT_CATALOG` pattern to metrics and spans:
 - **Each repo carries a `telemetry_catalog`:** name, kind, unit, allowed label
-  keys with their bounded value sets, description, owner.
+  keys with their bounded value sets, description, owner, and, for each
+  histogram, its bucket boundaries. The exporter renders a histogram as a
+  summary unless buckets are configured, so buckets are part of the contract.
+  Changing a histogram's buckets is a breaking change to that series: it
+  gets a new name or a version suffix, never a silent edit.
 - **A completeness test** fails when code emits a name that isn't catalogued,
   or the catalogue lists a name nothing emits. This is the same mechanism as
   leviculum's `event_catalog_completeness`.
 - **The server merges the four catalogues** into the served `/metrics` HELP
   text and gates on two things:
   - no name collisions across repos;
-  - every label key bounded, so no free-form IDs (peer keys go through
-    hashing or top-k, never raw).
+  - every label key bounded. **No per-peer series of any kind.** Hashing a
+    peer key redacts it but still makes one series per peer, so a long-lived
+    or adversarial node could grow the recorder without limit. Per-peer
+    detail is aggregated (by peer class or role), bucketed by a fixed scheme,
+    or held in a capped top-k with an `other` bucket. Per-peer views are
+    served on demand from domain state, not as metric labels.
 
 ### 3.4 What every component reports
 
@@ -237,18 +274,41 @@ span counts alone.
 ### 3.6 Profiling with symbols
 - **Symbols:** publish split debuginfo for each wheel as a release asset, keyed
   by build ID. Wheels stay stripped.
-- **On-demand heap profiling** behind a cargo feature that the canonical image
-  enables: jemalloc with `prof`, dumping a profile on request at a loopback
-  route; or dhat for test harnesses.
-- **The memory route** (`/v1/node/diagnostics/memory`) becomes always on and
-  loopback-only, because it is read-only.
+- **On-demand heap profiling,** without breaking the allocator signals we
+  already rely on. `diag.rs` reads live and held heap from glibc `mallinfo2`
+  and returns retained memory with glibc `malloc_trim`, which is the 0.5.223
+  mitigation. Swapping in jemalloc for `prof` would leave both pointing at a
+  heap Rust no longer uses. So:
+  - the profiling feature carries an allocator-specific backend for the
+    memory report and the trim: under jemalloc, `stats.allocated` /
+    `stats.resident` and an arena purge, behind the same routes;
+  - or profiles are taken without replacing the allocator (heaptrack or
+    bytehound against the symbolised build, or dhat in test harnesses).
+- **The memory route** (`/v1/node/diagnostics/memory`) is always on (#745),
+  loopback-only, and refuses requests carrying proxy forwarding headers.
 
 ### 3.7 Exposure
-- **`/metrics`** (OpenMetrics) on the read API. Loopback-only by default, plus
-  an authenticated scrape for the bridge and CIRISStatus.
-- **OTLP push** of metrics and traces when `CIRIS_OTLP_ENDPOINT` is set.
-- **The existing JSON surfaces stay** (`/v1/federation/metrics`, `/v1/node/state`)
-  as views derived from the same recorder, so no field is hand-copied again.
+- **`/metrics`** (Prometheus text):
+  - **unauthenticated only on a dedicated listener bound to `127.0.0.1`,**
+    which no reverse proxy is configured to reach;
+  - **authenticated on the public read listener,** for the bridge and
+    CIRISStatus. A peer address of loopback is not treated as local there,
+    because a same-host reverse proxy connects from loopback and would make
+    every forwarded request look local.
+- **OTLP metrics push** when `CIRIS_OTLP_ENDPOINT` is set. The `metrics`
+  facade allows one global recorder, so there are two paths:
+  - an OpenTelemetry Collector scrapes `/metrics` and pushes OTLP (no
+    in-process change);
+  - or a fanout recorder (`metrics-util`) feeds both the Prometheus handle
+    and an OTLP recorder.
+  OTLP traces go through the `tracing-opentelemetry` exporter.
+- **`/v1/federation/metrics` becomes a view of the recorder,** so no field is
+  hand-copied again.
+- **`/v1/node/state` stays sourced from its domain folds.** It reports persist
+  state, storage timestamps, signer attribution and categorical causes
+  (`unreadable`, `never_admitted`, `not_exercised`) that tell identical
+  numeric zeroes apart; aggregated series can't carry those. It shares
+  primitive observations with the recorder rather than being rebuilt from it.
 - **The agent rides on this surface** (§3.8); it doesn't run a second one.
 
 ### 3.8 The agent inherits the substrate's telemetry
@@ -266,10 +326,17 @@ tracing pipeline:
    `ciris.agent.*`). The host loads it at fold start and merges it under the
    same gates: no name collisions, every label key bounded. The agent runs
    its own completeness test against its emit sites.
-3. **Spans:** start and end a span from Python and read the current W3C
-   trace and span IDs. A thought or LLM call becomes a real span; the node's
-   spans for that work (persist writes, edge sends) parent under it, and lens
-   trace IDs can link to it.
+3. **Spans, with task-local context:** a Python context manager that holds
+   the span's context in a `contextvars` variable, not a Rust span "entered"
+   on a thread. asyncio tasks interleave on one thread and PyO3 work may run
+   on others, while an entered `tracing` span is thread-scoped and must exit
+   in stack order, so a plain start/end API would attach concurrent thoughts'
+   work to the wrong parent. Each Rust call made under the context manager
+   attaches that context explicitly (to the call, or by instrumenting its
+   future). A thought or LLM call becomes a real span; the node's spans for
+   that work (persist writes, edge sends) parent under it, and lens trace
+   IDs can link to it. The current W3C trace and span IDs are readable from
+   Python.
 4. **One log stream:** a Python logging handler that writes into the host's
    JSON log layer, with `trace_id`/`span_id` attached when a span is current.
    One structured log per process.
@@ -280,6 +347,23 @@ tracing pipeline:
    agent-embedded fold on Android and iOS too. The emit API is a cheap no-op
    when no recorder is installed.
 
+
+### 3.9 Trace context across processes and into logs
+- **Propagation is explicit.** Installing a tracing layer and opening local
+  spans doesn't connect processes; each one starts unrelated traces unless
+  context is injected into outgoing carriers and extracted from incoming
+  ones (OpenTelemetry's `TextMapPropagator`).
+  - **HTTP:** the server extracts `traceparent`/`tracestate` from incoming
+    requests and injects them into outgoing ones (client ↔ server, agent ↔
+    server, server → peers).
+  - **Federation transport:** edge carries the trace context in an envelope
+    or frame field outside the signed content, so it never changes what is
+    signed or verified, and extracts it on receive. This is edge P2.
+- **Logs carry the IDs through a correlation layer.** The standard JSON
+  formatter serializes event and span fields; it doesn't write OpenTelemetry
+  IDs. A small layer reads the current span's OTel context
+  (`get_otel_context`) and writes `trace_id`/`span_id` into each JSON line.
+
 ---
 
 ## 4. Asks, in priority order
@@ -288,6 +372,21 @@ tracing pipeline:
 model. **P2** is SOTA polish.
 
 ### leviculum (through edge; leviculum#77)
+**Status:** P0 and P1 implemented in leviculum PR #76, not merged yet. Edge
+adopts it on main with leviculum's next tag (CIRISEdge#820). It contains:
+- `link_list()`: per link, role, state, age, idle, RTT, interface;
+- `link_census()`;
+- `link_lifecycle()`: established, closed by 7 reasons, handshake-failed,
+  with the invariant established − closed = live tested;
+- `link_count_check()`, with a catalogued `LINK_MIRROR_DIVERGED` alarm
+  (compare every 10 s, alarm after 30 s);
+- `heap_census()`, plus a `leviculum.memory.link_bytes_mean` gauge;
+- the `metrics` 0.24 facade through a pull-based `publish_metrics()`;
+- a 24-entry `METRIC_CATALOG` with bounded labels only (no link, destination
+  or peer IDs);
+- the completeness test extended to metric names, labels and unused entries.
+
+The original asks:
 - **P0:**
   - Expose the live link list on `ReticulumNode`: id, destination, state, age, idle (`last_inbound`), and initiator or responder.
   - Established-link count per destination: covered by leviculum PR #76,
@@ -311,8 +410,9 @@ model. **P2** is SOTA polish.
     0.27.
   - Export every bundle field through PyO3 and UniFFI alike, with a test that
     walks the bundle so a new field can't be omitted again.
-  - `init_logging()` (#814/#815): P0 for agent-hosted nodes, which otherwise
-    log nothing from edge.
+  - `init_logging()` (#814/#815) for standalone edge Python hosts only. In the
+    one-wheel agent fold the server's `init_tracing` owns the single
+    subscriber, and a second install would race it.
 - **P1:**
   - Move `EdgeMetrics` onto the facade, with a catalogue and one label style.
   - Histograms for round duration by kind, sweep pages and rows, per-peer resolution, permit wait, and serve-tier refresh.
@@ -321,8 +421,10 @@ model. **P2** is SOTA polish.
     resident depth needs persist's `outbound_counts()` (CIRISPersist#996).
   - Count `LogThrottle` suppressions.
   - A span taxonomy (`edge.round` › `edge.sweep.page`, `edge.resolve.*`, `edge.push`), as INFO only on unit-of-work boundaries.
-  - Ship `init_logging()` (#814).
-- **P2:** exemplars on round histograms.
+- **P2:**
+  - Trace context carried in a federation envelope or frame field outside
+    the signed content (§3.9).
+  - Exemplars on round histograms, if wanted, through dual-recording (§3.1).
 
 ### persist
 - **P0 (CIRISPersist#1014, planned with #1013 as pin-compatible v53.1.8):**
@@ -355,7 +457,17 @@ model. **P2** is SOTA polish.
   - Dedup suppressions counted (`log_dedup_suppressed_total`).
 - **P1:**
   - Install the recorder and the Prometheus `/metrics` endpoint.
-  - JSON logs with trace IDs.
+  - JSON logs with trace IDs (the correlation layer, §3.9), migrating
+    `telemetry_logs.rs::parse_line` (behind `/v1/telemetry/logs` and the
+    client Logs screen) to parse JSON lines while still reading text lines
+    from older, mixed-format files.
+  - A log-sink drop counter with a bounded reason (`daily_cap`,
+    `write_error`, …) for every event the file sink discards, plus a
+    rollover policy so a storm can't silence novel errors for the rest of
+    the day.
+  - The dedicated loopback-only `/metrics` listener and the authenticated
+    scrape on the public read listener (§3.7).
+  - The trace-context extraction and injection on HTTP (§3.9).
   - Spans per HTTP request and per periodic-loop pass (RED).
   - A per-component memory gauge.
   - Merge the catalogues, plus the server-side catalogue gate.
@@ -366,8 +478,9 @@ model. **P2** is SOTA polish.
     with W3C IDs, a Python log handler into the JSON layer, readable host
     gauges, and the same install in the mobile fold.
 - **P2:**
-  - OTLP push.
-  - The jemalloc profiling feature on the canonical image.
+  - OTLP push of metrics (Collector or fanout recorder) and traces.
+  - Heap profiling on the canonical image, with its allocator-specific
+    memory report and trim (§3.6).
   - A health/readiness split that matches the agent's.
 
 ### agent (follow-up, tracked on CIRISAgent)
@@ -381,10 +494,15 @@ Correctness first:
 Then move onto the host:
 - Ship a `telemetry_catalog` (`ciris.agent.*`) with a completeness test.
 - Emit metrics, spans and logs through the host API (§3.8).
-- Delete what the host now serves: the Prometheus, Graphite and OTLP
-  converters, the trace-ID normalisation and the export scheduler (the
-  same "delete the Python layer the substrate owns" pattern as earlier
-  substrate swaps).
+- Delete each agent exporter only once the host serves an equivalent:
+  - the Prometheus converter once `/metrics` serves agent metrics;
+  - the OTLP converter, trace-ID normalisation and OTLP push once the host's
+    OTLP metrics and traces push is live (§3.7);
+  - Graphite and the JSON push have no host equivalent planned; they stay
+    until a host exporter exists, or are retired through an announced,
+    staged deprecation, never silently.
+  This is the same "delete the Python layer the substrate owns" pattern as
+  earlier substrate swaps.
 
 ---
 
