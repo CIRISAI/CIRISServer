@@ -228,6 +228,27 @@ implementation in both. Neither stack has acting thresholds yet.
   - the JSON log layer, plus the correlation layer (§3.9).
   The agent-embedded fold uses the same host code, on Android and iOS too
   (§3.8).
+- **One `metrics` facade version, linked once.** Each 0.x minor of `metrics`
+  owns its own global recorder, so if persist, edge, leviculum and the server
+  pull different minors, emissions through the other one silently go
+  nowhere. All four pin the same minor (leviculum chose 0.24), and the server
+  gains a gate that fails the build unless exactly one `metrics` package is in
+  the dependency graph (the same idea as the substrate pin-coupling gate).
+- **The recorder lives for the process; folds don't reinstall it.** The
+  facade permits one global recorder, while the server supports stopping and
+  re-serving a node in the same process (mobile and embedded hosts do this).
+  So the recorder is installed once, idempotently, on first use. Each fold
+  start bumps a `ciris.host.fold.generation` gauge, and fold shutdown resets
+  that fold's gauges, so a re-served node doesn't serve the last fold's stale
+  readings. Counters stay process-cumulative, which is how Prometheus already
+  treats a process (it sees a counter reset only when the process restarts).
+- **The OpenTelemetry layer is reloadable from the first install.** On the
+  one-wheel path Python may call `ciris_server.init_tracing` before the node
+  starts. Today that subscriber wins and later calls can only swap the file
+  slot (`install_or_reattach_tracing`), so a later OTel layer can never be
+  added. The first install therefore includes an empty reloadable OTel slot,
+  the same pattern as the file slot, which the host fills when an exporter is
+  configured.
 - **leviculum's `no_std` core** keeps its counter structs. `leviculum-std`
   bridges them into the facade once, so firmware is unaffected.
 
@@ -302,8 +323,11 @@ span counts alone.
   - or a fanout recorder (`metrics-util`) feeds both the Prometheus handle
     and an OTLP recorder.
   OTLP traces go through the `tracing-opentelemetry` exporter.
-- **`/v1/federation/metrics` becomes a view of the recorder,** so no field is
-  hand-copied again.
+- **`/v1/federation/metrics`: its aggregates become a view of the recorder,**
+  so no aggregate is hand-copied again. Its per-peer fields stay sourced from
+  domain state, because the metrics forbid per-peer series (§3.3).
+  `peer_reachability_ratio` comes from `reachability_tracker()`, and the client
+  uses it to compute mean reachability (`FederationMetrics.kt`).
 - **`/v1/node/state` stays sourced from its domain folds.** It reports persist
   state, storage timestamps, signer attribution and categorical causes
   (`unreadable`, `never_admitted`, `not_exercised`) that tell identical
@@ -352,7 +376,13 @@ tracing pipeline:
    One structured log per process.
 5. **Readable host gauges:** read access to process and memory figures
    (RSS/anon/HWM, allocator held), so the agent's resource monitor acts on
-   the host's numbers instead of sampling RSS itself.
+   the host's numbers instead of sampling RSS itself. Each platform needs a
+   backend, and anything unavailable is reported as unavailable, never as 0:
+   - Linux/glibc: `/proc/self/status` and `mallinfo2` (today's `diag.rs`);
+   - Android/Bionic: `/proc/self/status` and Bionic's `mallinfo`;
+   - iOS and macOS: `task_info(TASK_VM_INFO)` footprint and
+     `malloc_zone_statistics` (no `/proc`);
+   - Windows: the process memory counters, allocator held unavailable.
 6. **Fold and mobile parity:** the recorder and layers are installed in the
    agent-embedded fold on Android and iOS too. The emit API is a cheap no-op
    when no recorder is installed.
