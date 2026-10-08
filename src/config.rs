@@ -195,6 +195,11 @@ pub struct ServerConfig {
     /// loopback-only `/v1/node/diagnostics/*` routes and record CPU-vs-wall marks
     /// per boot step. OFF by default; boot-structural (read once, at boot). See
     /// `diag.rs` for why this is a runtime switch and not a cargo feature.
+    ///
+    /// Since 0.5.224 the memory READ (`GET /v1/node/diagnostics/memory`) is
+    /// mounted on every node regardless (direct loopback callers only, no
+    /// proxied requests; FSD/UNIFIED_TELEMETRY.md). This switch now gates only
+    /// the trim door (`POST …/memory/trim`) and the per-step boot marks.
     pub diagnostics: bool,
 }
 

@@ -339,11 +339,83 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     let blob_pull_refusals = fold(&bundle.blob_pull_refusals);
     let blob_serve_refusals = fold(&bundle.blob_serve_refusals);
     let first_contact_outcomes = fold(&bundle.first_contact_outcomes);
+    // CIRISEdge#819 — the transport's ESTABLISHED links, read from the link
+    // table itself. leviculum's `COMPLETION_MIRROR_OVER_ENVELOPE` alarm counts
+    // its completion mirror, a bookkeeping set of link ids; on 0.5.223 it
+    // climbed 1024 → 2048 in 35 minutes on the canonical and nothing on this
+    // surface could say whether the links were real. `null` without a
+    // Reticulum transport.
+    let reticulum_link_count = match st.edge.reticulum_transport() {
+        Some(t) => Some(t.link_count().await),
+        None => None,
+    };
+    // FSD/UNIFIED_TELEMETRY.md, server P0: the bundle fields this surface never
+    // read. Shaped, not copied: phase timers as total + samples, and the
+    // removal-delivery rows (envelope hashes, peer ids) reduced to counts so
+    // nothing unbounded is served.
+    let blob_dag_phases: serde_json::Map<_, _> = bundle
+        .blob_dag_phases
+        .iter()
+        .map(|(k, (total_ns, samples))| {
+            (
+                k.clone(),
+                serde_json::json!({ "total_ns": total_ns, "samples": samples }),
+            )
+        })
+        .collect();
+    // edge v40.0.7 (CIRISEdge#820 P0): fixed-bucket histograms, served as the
+    // cumulative `le` buckets plus count and sum, the shape a Prometheus
+    // histogram has.
+    let histogram = |h: &ciris_edge::observability::HistogramSnapshot| {
+        serde_json::json!({
+            "buckets": h.buckets().into_iter().map(|(le, n)| (le, serde_json::json!(n))).collect::<serde_json::Map<_, _>>(),
+            "count": h.count,
+            "sum_seconds": h.sum_seconds,
+        })
+    };
+    let round_duration: serde_json::Map<_, _> = bundle
+        .replication_round_duration_seconds
+        .iter()
+        .map(|(k, h)| (k.as_wire_str().to_string(), histogram(h)))
+        .collect();
+    let removal_delivery = serde_json::json!({
+        "rows": bundle.removal_delivery.len(),
+        "offered": bundle.removal_delivery.iter().map(|r| r.offered).sum::<usize>(),
+        "acked": bundle.removal_delivery.iter().map(|r| r.acked).sum::<usize>(),
+        "rows_fully_acked": bundle
+            .removal_delivery
+            .iter()
+            .filter(|r| r.unacked_peers.is_empty())
+            .count(),
+    });
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
+    // Built apart from the body below: one `json!` literal this wide exceeds the
+    // macro's recursion limit.
+    let unread = serde_json::json!({
+        "log_dedup_suppressed_total": crate::log_dedup::suppressed_snapshot(),
+        "inbound_dropped_low_trust": bundle.inbound_dropped_low_trust,
+        "replication_inbound_backpressure_drops_by_role":
+                    bundle.replication_inbound_backpressure_drops_by_role,
+        "blob_scoped_carriers": bundle.blob_scoped_carriers,
+        "blob_dag_phases": blob_dag_phases,
+        "blob_dag_chunks": bundle.blob_dag_chunks,
+        "delivery_receipts": bundle.delivery_receipts,
+        "announce_intake_evictions": bundle.announce_intake_evictions,
+        "link_before_binding": bundle.link_before_binding,
+        "announce_queue_drop_first_seen": bundle.announce_queue_drop_first_seen,
+        "announce_to_binding_ms_last": bundle.announce_to_binding_ms_last,
+        "attestation_apply_refusals_by_reason": bundle.attestation_apply_refusals_by_reason,
+        "apply_refusals_by_class": bundle.apply_refusals_by_class,
+        "removal_delivery": removal_delivery,
+        "link_pool_links": bundle.link_pool_links,
+        "link_pool_max_per_destination": bundle.link_pool_max_per_destination,
+        "link_pool_closed_by_reason": bundle.link_pool_closed_by_reason,
+        "replication_round_duration_seconds": round_duration,
+        "sweep_permit_wait_seconds": histogram(&bundle.sweep_permit_wait_seconds),
+    });
+    let mut body = serde_json::json!({
             "data": {
+                "reticulum_link_count": reticulum_link_count,
                 "envelopes_sent_total": envelopes_sent,
                 "envelopes_received_total": envelopes_received,
                 "send_failures_total": send_failures,
@@ -378,9 +450,13 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "receive_decided_total": crate::operator_surface::receive_decided_total(&bundle),
                 "plane_note": "envelopes_sent_total / envelopes_received_total / send_failures_total are the APPLICATION plane (edge.rs send_*/dispatch_inbound). Anti-entropy replication increments none of them, so 0 there says nothing about carriage — read replication_envelopes_served_total and carriage_standing for the send direction (CIRISEdge#434), and replication_applied_total / replication_duplicate_total / apply_refusals_by_kind with receive_standing for the receive direction (CIRISEdge#457). receive_decided_total is their sum: every offered row that reached an apply decision. Undecodable bytes reach no decision and edge counts them nowhere, so they are absent from it rather than folded in.",
             }
-        })),
-    )
-        .into_response()
+    });
+    if let (Some(data), serde_json::Value::Object(extra)) =
+        (body.get_mut("data").and_then(|d| d.as_object_mut()), unread)
+    {
+        data.extend(extra);
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 // ─── POST /v1/federation/content/{content_id} ────────────────────────────────

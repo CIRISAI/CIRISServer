@@ -1,6 +1,13 @@
 //! Operator diagnostics — RUNTIME-GATED (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`)
 //! and loopback-only (CIRISServer#549, CIRISServer#550).
 //!
+//! **Since 0.5.224 the memory read is always mounted** ([`read_router`]): a
+//! node's heap must be readable without the restart that erases what is being
+//! read (FSD/UNIFIED_TELEMETRY.md). It answers direct loopback callers only;
+//! a request relayed by a reverse proxy is refused. The switch below now gates
+//! the trim door and the per-step boot marks; the "OFF by default" sections
+//! that follow describe those.
+//!
 //! # What is here
 //!
 //! * [`memory_report`] — glibc's own allocator accounting (`mallinfo2`) beside
@@ -624,12 +631,56 @@ async fn memory_trim() -> Json<Value> {
     }))
 }
 
-/// The diagnostics router. Mounted by compose ONLY when diagnostics are on;
-/// every route in it sits behind the loopback guard the setup routes use.
+/// The always-on read: `GET` [`ROUTE_MEMORY`] only, behind the loopback guard.
+/// Mounted on every node (FSD/UNIFIED_TELEMETRY.md §4, server P0): during the
+/// 0.5.222 OOM the canonical had to be restarted with `CIRIS_DIAGNOSTICS=1` to
+/// read its own heap, and a restart is exactly what erases the state being
+/// diagnosed. A read changes nothing, so it does not wait for the switch;
+/// the trim door, which acts, still does ([`router`]).
+pub fn read_router() -> Router {
+    Router::new()
+        .route(ROUTE_MEMORY, get(memory))
+        .layer(axum::middleware::from_fn(require_direct))
+        .layer(axum::middleware::from_fn(
+            crate::auth::loopback::require_loopback,
+        ))
+}
+
+/// Headers a reverse proxy adds when it relays a request.
+const FORWARDING_HEADERS: &[&str] = &["forwarded", "x-forwarded-for", "x-real-ip"];
+
+/// The always-on read answers only callers that reached this socket directly.
+/// A same-host reverse proxy connects from loopback, so behind one the
+/// loopback guard alone would admit every remote request it forwards
+/// (`auth/oauth.rs` documents that deployment). A relayed request carries
+/// forwarding headers; refuse it. The canonical's Caddy forwards an allowlist
+/// of paths from another container, so this is defence in depth there.
+async fn require_direct(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if FORWARDING_HEADERS
+        .iter()
+        .any(|h| req.headers().contains_key(*h))
+    {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "diagnostics are served to direct loopback callers only, not through a proxy",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// The full diagnostics router: the memory read plus the trim door. Mounted by
+/// compose when diagnostics are on; every route in it sits behind the loopback
+/// guard the setup routes use.
 pub fn router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
         .route(ROUTE_TRIM, axum::routing::post(memory_trim))
+        .layer(axum::middleware::from_fn(require_direct))
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ))

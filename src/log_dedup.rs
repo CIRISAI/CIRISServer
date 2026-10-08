@@ -141,6 +141,35 @@ struct Entry {
     level: Level,
 }
 
+/// Every event this layer has suppressed since start, by `target:LEVEL`.
+/// Cumulative and never cleared, unlike the per-window map the flusher drains:
+/// the flush summary is itself a log line that can be lost or capped, and
+/// silence must be measurable from outside (FSD/UNIFIED_TELEMETRY.md §3.4,
+/// "suppression"). Keyed by target, which is a module path, so the key set is
+/// bounded by the code, not by the data.
+static SUPPRESSED: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+
+fn count_suppressed(target: &str, level: Level) {
+    if let Ok(mut g) = SUPPRESSED.lock() {
+        *g.get_or_insert_with(HashMap::new)
+            .entry(format!("{target}:{}", level.as_str()))
+            .or_default() += 1;
+    }
+}
+
+/// The cumulative suppression counts, `target:LEVEL` → events suppressed.
+#[must_use]
+pub fn suppressed_snapshot() -> std::collections::BTreeMap<String, u64> {
+    SUPPRESSED
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+        })
+        .unwrap_or_default()
+}
+
 /// Shared collapse state — cloneable so the flusher and the layer share one map.
 #[derive(Clone, Default)]
 pub struct DedupState(Arc<Mutex<HashMap<u64, Entry>>>);
@@ -189,6 +218,7 @@ impl DedupState {
             true
         } else {
             e.suppressed += 1;
+            count_suppressed(target, level);
             false
         }
     }
@@ -338,6 +368,23 @@ pub fn spawn_flusher(state: DedupState, window: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suppressed_events_are_counted_cumulatively_by_target_and_level() {
+        let s = DedupState::default();
+        let target = "dedup_count_probe_target";
+        let before = suppressed_snapshot()
+            .get(&format!("{target}:WARN"))
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..(BURST + 5) {
+            s.admit(target, Level::WARN, "the same storm line");
+        }
+        // Clearing the window must not clear the measurement.
+        s.flush();
+        let after = suppressed_snapshot()[&format!("{target}:WARN")];
+        assert_eq!(after - before, 5, "every suppressed event, and only those");
+    }
 
     /// Counts the events that reach a sink behind the dedup layer.
     struct Counting(Arc<std::sync::atomic::AtomicUsize>);

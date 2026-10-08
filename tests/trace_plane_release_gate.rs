@@ -1263,3 +1263,77 @@ async fn the_federation_identity_zero_names_how_it_was_arrived_at() {
         "one source for the token, or two surfaces will drift apart naming one condition"
     );
 }
+
+/// CIRISEdge#819 — the metrics surface reports the transport's ESTABLISHED
+/// links next to everything else, so a leviculum mirror alarm
+/// (`COMPLETION_MIRROR_OVER_ENVELOPE live_links=N`) can be told apart from a
+/// real link leak from outside the process. Without a Reticulum transport the
+/// figure is `null`, never a confident zero.
+#[tokio::test]
+async fn the_metrics_surface_names_the_live_link_count() {
+    let engine = node(0xE7, "node-linkcount").await;
+    let edge = edge_over(&engine, "edge-linkcount", 0x47).await;
+    let app = ciris_server::federation_surface::router(Arc::clone(&engine), edge);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/federation/metrics")
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("router oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    let data = &body["data"];
+    assert!(
+        data.as_object()
+            .is_some_and(|o| o.contains_key("reticulum_link_count")),
+        "the link count is a named field on the metrics surface: {data}"
+    );
+    assert!(
+        data["reticulum_link_count"].is_null(),
+        "a node with no Reticulum transport reports null, not 0: {}",
+        data["reticulum_link_count"]
+    );
+    // FSD/UNIFIED_TELEMETRY.md, server P0: the bundle fields this surface used
+    // to drop, and the log dedup layer's suppression counts, are all served.
+    for key in [
+        "log_dedup_suppressed_total",
+        "inbound_dropped_low_trust",
+        "replication_inbound_backpressure_drops_by_role",
+        "blob_scoped_carriers",
+        "blob_dag_phases",
+        "blob_dag_chunks",
+        "delivery_receipts",
+        "announce_intake_evictions",
+        "link_before_binding",
+        "announce_queue_drop_first_seen",
+        "announce_to_binding_ms_last",
+        "attestation_apply_refusals_by_reason",
+        "apply_refusals_by_class",
+        "removal_delivery",
+        "link_pool_links",
+        "link_pool_max_per_destination",
+        "link_pool_closed_by_reason",
+        "replication_round_duration_seconds",
+        "sweep_permit_wait_seconds",
+    ] {
+        assert!(
+            data.as_object().is_some_and(|o| o.contains_key(key)),
+            "{key} is served on /v1/federation/metrics"
+        );
+    }
+    assert!(
+        data["removal_delivery"]["rows"].is_u64(),
+        "reduced to counts"
+    );
+    let wait = &data["sweep_permit_wait_seconds"];
+    assert!(
+        wait["buckets"]["+Inf"].is_u64() && wait["count"].is_u64(),
+        "a histogram is served as cumulative buckets with count and sum: {wait}"
+    );
+}

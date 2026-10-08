@@ -1820,14 +1820,16 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // construction — asking earlier would hand the watch `None` and
                 // degrade an honest reading into `unreadable`.
                 crate::trace_plane_watch::spawn(Arc::clone(&engine), crate::ingest_http::held());
-                // Operator diagnostics (CIRISServer#549/#550): mounted ONLY when
-                // asked (`--diagnostics` / `CIRIS_DIAGNOSTICS=1`), and every route
-                // in it sits behind the setup routes' loopback guard. Off, the
-                // paths do not exist on this listener (404, not 403).
+                // Operator diagnostics (CIRISServer#549/#550), behind the setup
+                // routes' loopback guard. The memory READ is always mounted
+                // (FSD/UNIFIED_TELEMETRY.md: reading a node's heap must not need
+                // the restart that erases what is being read); the trim door,
+                // which acts, only when asked (`--diagnostics` /
+                // `CIRIS_DIAGNOSTICS=1`) and is a 404 otherwise.
                 let r = if cfg.diagnostics {
                     r.merge(crate::diag::router())
                 } else {
-                    r
+                    r.merge(crate::diag::read_router())
                 };
                 crate::compose_status::mark("router_built");
                 r
@@ -2078,13 +2080,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // healthy quiet node. That cost a full ladder run to tell
                 // apart from a working steady state, so it is now impossible:
                 // a tick either finishes or says it did not.
-                let tick = match tokio::time::timeout(
-                    period * 4,
+                // A PANIC in a tick must not end the loop either. openmls can
+                // panic on a peer's malformed KeyPackage (RUSTSEC-2026-0330/
+                // 0331, no isolation in edge before v40.0.9), and a panic in
+                // this spawned task would silently stop self-room key
+                // distribution for the rest of the process. The add itself is
+                // guarded per member (`mls_guard`: the package is poisoned and
+                // skipped, so it can't panic every tick); this outer catch is
+                // the backstop for anything else in the tick.
+                let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
-                )
-                .await
-                {
-                    Ok(t) => t,
+                ));
+                let tick = match tokio::time::timeout(period * 4, guarded).await {
+                    Ok(Ok(t)) => t,
+                    Ok(Err(_panic)) => {
+                        tracing::error!(
+                            "self room: a drive tick PANICKED and was abandoned — the next \
+                             tick starts fresh (edge before v40.0.9 does not isolate openmls \
+                             panics; CIRISEdge#823)"
+                        );
+                        continue;
+                    }
                     Err(_) => {
                         tracing::warn!(
                             after_secs = (period * 4).as_secs(),

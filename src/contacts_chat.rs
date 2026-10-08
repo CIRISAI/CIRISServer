@@ -869,9 +869,7 @@ async fn room_key(
     // as before. The value it used to derive from the group is no longer needed
     // by any reader or writer, so it returns the handshake state alone.
     use ciris_edge::chat::{self, PairRole};
-    use ciris_edge::mls::cohort_group::{
-        key_package_from_bytes, key_package_to_bytes, mint_cohort_key_material,
-    };
+    use ciris_edge::mls::cohort_group::{key_package_to_bytes, mint_cohort_key_material};
     use ciris_edge::mls::CohortGroup;
 
     let room = pair_community_key_id(me, peer);
@@ -962,14 +960,20 @@ async fn room_key(
                 }
                 return Ok(RoomHandshake::AwaitingPeer);
             };
+            // A poisoned (panicking) package is screened BEFORE the group is
+            // created, so a refused peer leaves no half-made room behind.
+            if crate::mls_guard::is_poisoned(&kp_bytes) {
+                return Ok(RoomHandshake::AwaitingPeer);
+            }
             let group = CohortGroup::create(store, &room, me, 16)
                 .await
                 .map_err(|e| format!("CohortGroup::create: {e}"))?;
-            let kp = key_package_from_bytes(&kp_bytes).map_err(|e| format!("KeyPackage: {e}"))?;
-            let commit = group
-                .add_member(peer, kp)
-                .await
-                .map_err(|e| format!("add_member: {e}"))?;
+            let commit = match crate::mls_guard::add_member_guarded(&group, peer, &kp_bytes).await?
+            {
+                crate::mls_guard::GuardedAdd::Added(c) => c,
+                // Panicked just now: wait for the peer's next KeyPackage.
+                crate::mls_guard::GuardedAdd::Poisoned => return Ok(RoomHandshake::AwaitingPeer),
+            };
             let epoch = commit.epoch();
             let welcome = commit
                 .welcome()
@@ -1376,7 +1380,6 @@ async fn reconcile_room_group(
     author: &ciris_edge::identity::LocalSigner,
 ) -> Result<(), String> {
     use ciris_edge::chat;
-    use ciris_edge::mls::cohort_group::key_package_from_bytes;
     let dir = st.engine.federation_directory();
     let signers = || ciris_edge::replication::attestation_bind::Signers {
         node: &st.node_signer,
@@ -1421,11 +1424,12 @@ async fn reconcile_room_group(
         let Some(kp_bytes) = chat::key_package_from(&*dir, &member.key_id, room).await? else {
             continue;
         };
-        let kp = key_package_from_bytes(&kp_bytes).map_err(|e| format!("KeyPackage: {e}"))?;
-        let commit = group
-            .add_member(&member.key_id, kp)
-            .await
-            .map_err(|e| format!("add_member({}): {e}", member.key_id))?;
+        let commit =
+            match crate::mls_guard::add_member_guarded(group, &member.key_id, &kp_bytes).await? {
+                crate::mls_guard::GuardedAdd::Added(c) => c,
+                // A malformed package: skip this member, keep adding the rest.
+                crate::mls_guard::GuardedAdd::Poisoned => continue,
+            };
         let epoch = commit.epoch();
         let welcome = commit
             .welcome()
