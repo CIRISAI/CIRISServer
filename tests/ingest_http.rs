@@ -789,7 +789,7 @@ async fn a_mock_llm_batch_is_refused_at_the_route_and_counted() {
     let engine = node(0xB7, "node-mock").await;
     let refusals = ingest_http::IngestRefusals::new();
     let body =
-        br#"{"events":[{"trace_id":"trace-mock-0001","llm_calls":[{"model":"mock-model","prompt_tokens":3}]}]}"#
+        br#"{"events":[{"trace":{"trace_id":"trace-mock-0001","components":[{"event_type":"LLM_CALL","data":{"model":"mock-model","prompt_tokens":3}}]}}]}"#
             .to_vec();
     let (status, resp) =
         post_counted(Arc::clone(&engine), &refusals, CANONICAL_INGEST_PATH, body).await;
@@ -808,4 +808,22 @@ async fn a_mock_llm_batch_is_refused_at_the_route_and_counted() {
         Some(1),
         "the refusal is counted, not only logged"
     );
+}
+
+/// Codex on #753: the mock refusal must hold at BOTH doors a batch enters a
+/// node through. The HTTP route and the Reticulum relay (`LensCoreHandler`)
+/// both call the ONE shared check; a door without it is a door around it.
+#[test]
+fn both_ingest_doors_run_the_shared_mock_check() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    for door in [
+        "src/ingest_http.rs",
+        "crates/ciris-lens-core/src/role/handler.rs",
+    ] {
+        let src = std::fs::read_to_string(format!("{root}/{door}")).expect("read door source");
+        assert!(
+            src.contains("ingest_guard::batch_has_mock_llm_call("),
+            "{door} must run ciris_lens_core::ingest_guard::batch_has_mock_llm_call before persisting"
+        );
+    }
 }

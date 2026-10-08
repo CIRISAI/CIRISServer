@@ -543,49 +543,11 @@ struct IngestState {
 /// give up on a temporary one.
 pub const REFUSAL_TRACE_PLANE_PAUSED: &str = "trace_replication_paused";
 
-/// The stable refusal token for a batch produced by the agent's MOCK LLM.
-///
-/// 1,499 mock-LLM traces (21,836 trace_events rows, ~17% of the corpus)
-/// reached the production canonical between 2026-08-01 and 2026-09-18: the
-/// agent's accord-metrics exporter defaulted to the production endpoint with
-/// no mock guard (CIRISAgent#1244). Mock output is not evidence about any
-/// agent: it skews capacity scoring, and the mock also echoed whole prompts
-/// into structured fields. Refused here, before verification, so a
-/// misconfigured harness can't pollute a production corpus again; persist's
-/// federation-tier admission refuses the same at the replication door
-/// (CIRISPersist#1040). Permanent, not retryable: a producer must stop.
-pub const REFUSAL_MOCK_LLM: &str = "trace_mock_llm_refused";
-
-/// The model name the agent's mock LLM reports on every call.
-pub const MOCK_LLM_MODEL: &str = "mock-model";
-
-/// Does this batch carry an LLM call made by the mock LLM?
-///
-/// A byte scan first, so the common case (no mock anywhere) costs one pass and
-/// no parse. Only a candidate is parsed and walked, and only a JSON object
-/// member `"model"` whose value is exactly [`MOCK_LLM_MODEL`] counts: a prompt
-/// or reply that merely mentions the words is not a mock call.
-#[must_use]
-pub fn batch_names_mock_model(body: &[u8]) -> bool {
-    let needle = MOCK_LLM_MODEL.as_bytes();
-    if !body.windows(needle.len()).any(|w| w == needle) {
-        return false;
-    }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        // Unparseable: not ours to judge here; persist refuses it as schema.
-        return false;
-    };
-    fn walk(v: &serde_json::Value) -> bool {
-        match v {
-            serde_json::Value::Object(m) => m.iter().any(|(k, val)| {
-                (k == "model" && val.as_str() == Some(MOCK_LLM_MODEL)) || walk(val)
-            }),
-            serde_json::Value::Array(a) => a.iter().any(walk),
-            _ => false,
-        }
-    }
-    walk(&v)
-}
+/// The stable refusal token for a batch carrying a call from the agent's mock
+/// LLM, and the shared check that finds one. Both live in
+/// `ciris_lens_core::ingest_guard` so this route and the Reticulum relay
+/// (`LensCoreHandler`) refuse the same batches (CIRISAgent#1244).
+pub use ciris_lens_core::ingest_guard::{MOCK_LLM_MODEL, REFUSAL_MOCK_LLM};
 
 /// Merge the HTTP trace-ingest routes onto the read-API listener.
 ///
@@ -684,7 +646,7 @@ async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
     // A batch from the agent's mock LLM is refused before it is verified or
     // persisted: mock output is not evidence about any agent. Counted, with
     // its own token, so a misconfigured harness shows up in the ledger.
-    if batch_names_mock_model(&body) {
+    if ciris_lens_core::ingest_guard::batch_has_mock_llm_call(&body) {
         st.refusals.observe_handler_refusal(REFUSAL_MOCK_LLM);
         tracing::warn!(
             bytes = body.len(),
@@ -854,26 +816,6 @@ fn ingest_error_body(e: &IngestError) -> IngestErr {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_mock_llm_call_is_recognised_and_a_mention_is_not() {
-        let mock = br#"{"events":[{"llm_calls":[{"model":"mock-model","tokens":3}]}]}"#;
-        assert!(
-            batch_names_mock_model(mock),
-            "a call whose model IS the mock"
-        );
-        let real = br#"{"events":[{"llm_calls":[{"model":"gpt-4o","tokens":3}]}]}"#;
-        assert!(!batch_names_mock_model(real), "a real model is admitted");
-        let mention = br#"{"events":[{"reply":"we tested with mock-model yesterday","llm_calls":[{"model":"gpt-4o"}]}]}"#;
-        assert!(
-            !batch_names_mock_model(mention),
-            "text that merely mentions the words is not a mock call"
-        );
-        assert!(
-            !batch_names_mock_model(b"not json mock-model"),
-            "unparseable is persist's to refuse"
-        );
-    }
 
     #[test]
     fn a_mock_refusal_is_counted_under_its_own_token() {
