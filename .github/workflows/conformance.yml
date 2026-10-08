@@ -188,7 +188,7 @@ jobs:
       # (restore is anonymous on PRs; only main writes — public package,
       # GITHUB_TOKEN, no external secret).
       - name: CIRISCache save (server layer, main only)
-        uses: CIRISAI/CIRISCache/save@v1
+        uses: CIRISAI/CIRISCache/save@v1.1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
