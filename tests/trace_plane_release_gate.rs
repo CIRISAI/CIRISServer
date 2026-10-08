@@ -1325,6 +1325,9 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "outbound_links",
         "inbound_link_closed_by_reason",
         "outbound_link_closed_by_reason",
+        "responder_rounds_total",
+        "responder_link_up_seconds",
+        "responder_link_up_total",
     ] {
         assert!(
             data.as_object().is_some_and(|o| o.contains_key(key)),

@@ -378,6 +378,11 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, h)| (k.as_wire_str().to_string(), histogram(h)))
         .collect();
+    let link_up_seconds: serde_json::Map<_, _> = bundle
+        .responder_link_up_seconds
+        .iter()
+        .map(|(stage, h)| (stage.clone(), histogram(h)))
+        .collect();
     let removal_delivery = serde_json::json!({
         "rows": bundle.removal_delivery.len(),
         "offered": bundle.removal_delivery.iter().map(|r| r.offered).sum::<usize>(),
@@ -418,6 +423,13 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         "outbound_links": bundle.outbound_links,
         "inbound_link_closed_by_reason": bundle.inbound_link_closed_by_reason,
         "outbound_link_closed_by_reason": bundle.outbound_link_closed_by_reason,
+        // edge v40.0.11: what each inbound link was FOR. `started` counts a
+        // responder driver starting (once per peer and kind), not a round; the
+        // completion outcomes are the per-round numbers. A peer whose links
+        // start drivers and never complete is the long-soak signature.
+        "responder_rounds_total": bundle.responder_rounds_total,
+        "responder_link_up_seconds": link_up_seconds,
+        "responder_link_up_total": bundle.responder_link_up_total,
         "replication_round_duration_seconds": round_duration,
         "sweep_permit_wait_seconds": histogram(&bundle.sweep_permit_wait_seconds),
     });
