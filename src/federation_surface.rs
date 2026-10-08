@@ -410,6 +410,14 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         "link_pool_links": bundle.link_pool_links,
         "link_pool_max_per_destination": bundle.link_pool_max_per_destination,
         "link_pool_closed_by_reason": bundle.link_pool_closed_by_reason,
+        // edge v40.0.10: links by DIRECTION, and every departure by reason. The
+        // canonical is the responder for every other node's pool, so its
+        // growth on 0.5.224 was inbound links that only the inbound idle reap
+        // (`inbound_link_closed_by_reason.idle_expired`) closes.
+        "inbound_links": bundle.inbound_links,
+        "outbound_links": bundle.outbound_links,
+        "inbound_link_closed_by_reason": bundle.inbound_link_closed_by_reason,
+        "outbound_link_closed_by_reason": bundle.outbound_link_closed_by_reason,
         "replication_round_duration_seconds": round_duration,
         "sweep_permit_wait_seconds": histogram(&bundle.sweep_permit_wait_seconds),
     });

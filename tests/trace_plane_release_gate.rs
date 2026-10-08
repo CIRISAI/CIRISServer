@@ -1321,6 +1321,10 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "link_pool_closed_by_reason",
         "replication_round_duration_seconds",
         "sweep_permit_wait_seconds",
+        "inbound_links",
+        "outbound_links",
+        "inbound_link_closed_by_reason",
+        "outbound_link_closed_by_reason",
     ] {
         assert!(
             data.as_object().is_some_and(|o| o.contains_key(key)),
