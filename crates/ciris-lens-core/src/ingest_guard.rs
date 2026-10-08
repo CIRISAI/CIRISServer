@@ -56,27 +56,45 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Walk ONLY the batch's trace components, `events[*].trace.components[*]`
+/// (persist's `BatchEnvelope` -> `BatchEvent::CompleteTrace` ->
+/// `CompleteTrace.components`). Component `data` and batch metadata are opaque
+/// and never searched, so an object that merely looks like an LLM call inside
+/// another component's payload is not one.
 fn has_mock_llm_call(v: &Value) -> bool {
-    match v {
-        Value::Object(m) => {
-            let is_mock_call = m.get("event_type").and_then(Value::as_str) == Some(LLM_CALL_EVENT)
-                && m.get("data")
-                    .and_then(|d| d.get("model"))
-                    .and_then(Value::as_str)
-                    == Some(MOCK_LLM_MODEL);
-            is_mock_call || m.values().any(has_mock_llm_call)
-        }
-        Value::Array(a) => a.iter().any(has_mock_llm_call),
-        _ => false,
-    }
+    let Some(events) = v.get("events").and_then(Value::as_array) else {
+        return false;
+    };
+    events
+        .iter()
+        .filter_map(|e| e.get("trace")?.get("components")?.as_array())
+        .flatten()
+        .any(is_mock_llm_component)
+}
+
+fn is_mock_llm_component(c: &Value) -> bool {
+    c.get("event_type").and_then(Value::as_str) == Some(LLM_CALL_EVENT)
+        && c.get("data")
+            .and_then(|d| d.get("model"))
+            .and_then(Value::as_str)
+            == Some(MOCK_LLM_MODEL)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A batch envelope holding one trace whose components are `components`.
+    fn batch(components: &str) -> String {
+        format!(
+            r#"{{"events":[{{"event_type":"complete_trace","trace":{{"trace_id":"t1","components":[{components}]}}}}]}}"#
+        )
+    }
+
     fn call(model: &str) -> String {
-        format!(r#"{{"components":[{{"event_type":"LLM_CALL","data":{{"model":"{model}"}}}}]}}"#)
+        batch(&format!(
+            r#"{{"event_type":"LLM_CALL","data":{{"model":"{model}"}}}}"#
+        ))
     }
 
     #[test]
@@ -87,19 +105,42 @@ mod tests {
 
     #[test]
     fn an_escaped_spelling_of_the_mock_model_is_still_refused() {
-        // `-` is '-': serde decodes this to exactly "mock-model".
-        let escaped = r#"{"components":[{"event_type":"LLM_CALL","data":{"model":"mock-model"}}]}"#;
+        // JSON `\u002d` is '-' and `\u006d` is 'm': serde decodes both to
+        // exactly "mock-model", while the raw bytes never spell it. Written
+        // with an escaped backslash so the escape survives into the bytes.
+        let escaped =
+            batch("{\"event_type\":\"LLM_CALL\",\"data\":{\"model\":\"mock\\u002dmodel\"}}");
+        assert!(
+            !escaped.contains("mock-model"),
+            "the bytes must not spell it"
+        );
         assert!(batch_has_mock_llm_call(escaped.as_bytes()));
-        let fully = r#"{"components":[{"event_type":"LLM_CALL","data":{"model":"mock-model"}}]}"#;
+        let fully =
+            batch("{\"event_type\":\"LLM_CALL\",\"data\":{\"model\":\"\\u006dock-model\"}}");
+        assert!(!fully.contains("mock-model"));
         assert!(batch_has_mock_llm_call(fully.as_bytes()));
     }
 
     #[test]
     fn a_model_field_outside_an_llm_call_is_not_a_mock_call() {
-        let tool = r#"{"components":[
-            {"event_type":"ACTION_RESULT","data":{"model":"mock-model","note":"mock-model"}},
-            {"event_type":"LLM_CALL","data":{"model":"gpt-4o"}}]}"#;
+        let tool = batch(
+            r#"{"event_type":"ACTION_RESULT","data":{"model":"mock-model","note":"mock-model"}},
+               {"event_type":"LLM_CALL","data":{"model":"gpt-4o"}}"#,
+        );
         assert!(!batch_has_mock_llm_call(tool.as_bytes()));
+    }
+
+    #[test]
+    fn an_llm_call_lookalike_inside_opaque_data_is_not_a_component() {
+        // Codex on #753: a NON-LLM component whose payload embeds an object
+        // shaped like a mock LLM call. Only the component list is searched.
+        let nested = batch(
+            r#"{"event_type":"ACTION_RESULT","data":{"result":{"event_type":"LLM_CALL","data":{"model":"mock-model"}}}}"#,
+        );
+        assert!(!batch_has_mock_llm_call(nested.as_bytes()));
+        // And a lookalike in batch-level metadata is not one either.
+        let meta = r#"{"correlation":{"event_type":"LLM_CALL","data":{"model":"mock-model"}},"events":[]}"#;
+        assert!(!batch_has_mock_llm_call(meta.as_bytes()));
     }
 
     #[test]
