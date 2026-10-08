@@ -179,7 +179,7 @@ jobs:
 
       - name: CIRISCache save (windows-x64 server layer)
         if: github.ref == 'refs/heads/main'
-        uses: CIRISAI/CIRISCache/save@v1
+        uses: CIRISAI/CIRISCache/save@v1.1
         continue-on-error: true
         with:
           key: ${{ steps.cachekey.outputs.key }}
