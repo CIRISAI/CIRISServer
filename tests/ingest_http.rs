@@ -777,3 +777,35 @@ async fn an_unreadable_mesh_config_plane_leaves_the_relay_accepting() {
     );
     assert_eq!(body["trace_events_inserted"].as_u64(), Some(1), "{body}");
 }
+
+/// CIRISAgent#1244: a batch carrying an LLM call from the agent's MOCK LLM is
+/// refused at the route, before verification, with its own token, and counted.
+/// 1,499 such traces reached the production canonical between 2026-08-01 and
+/// 2026-09-18 because the agent's exporter defaulted to the production
+/// endpoint. The refusal needs no valid signature to fire, which is the point:
+/// a misconfigured harness is stopped before any work is spent on its batch.
+#[tokio::test]
+async fn a_mock_llm_batch_is_refused_at_the_route_and_counted() {
+    let engine = node(0xB7, "node-mock").await;
+    let refusals = ingest_http::IngestRefusals::new();
+    let body =
+        br#"{"events":[{"trace_id":"trace-mock-0001","llm_calls":[{"model":"mock-model","prompt_tokens":3}]}]}"#
+            .to_vec();
+    let (status, resp) =
+        post_counted(Arc::clone(&engine), &refusals, CANONICAL_INGEST_PATH, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{resp}");
+    assert_eq!(
+        resp["error"].as_str(),
+        Some(ingest_http::REFUSAL_MOCK_LLM),
+        "the refusal carries its own token: {resp}"
+    );
+    let ledger = refusals.snapshot();
+    assert_eq!(
+        ledger
+            .by_kind_in_window
+            .get(ingest_http::REFUSAL_MOCK_LLM)
+            .copied(),
+        Some(1),
+        "the refusal is counted, not only logged"
+    );
+}
