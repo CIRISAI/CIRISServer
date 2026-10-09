@@ -111,7 +111,11 @@ async fn resolve_empty_corpus_is_baked_defaults() {
     );
     assert_eq!(resolved.scorer_window, 500);
     assert_eq!(resolved.scorer_sample_gate, 20);
-    assert_eq!(resolved.scorer_target_n_eff, 8.0);
+    // RATCHET's calibration (CIRISServer#757): rows gate 20, target 4.5 (the
+    // withdrawn 8.0 sat above every n_eff ever observed), coverage 4, floor 1.
+    assert_eq!(resolved.scorer_target_n_eff, 4.5);
+    assert_eq!(resolved.scorer_min_feature_dim, 4);
+    assert_eq!(resolved.scorer_n_eff_floor, 1.0);
     assert_eq!(resolved.replication_reconcile_secs, 30);
     assert_eq!(resolved.mode, "server");
 }
@@ -148,6 +152,18 @@ async fn resolve_reflects_overrides_per_key() {
     .await;
     set(
         &engine,
+        config_reconcile::KEY_SCORER_MIN_FEATURE_DIM,
+        ConfigValue::I64(6),
+    )
+    .await;
+    set(
+        &engine,
+        config_reconcile::KEY_SCORER_N_EFF_FLOOR,
+        ConfigValue::F64(1.5),
+    )
+    .await;
+    set(
+        &engine,
         config_reconcile::KEY_TRANSPORT_NODE,
         ConfigValue::Bool(false),
     )
@@ -176,6 +192,8 @@ async fn resolve_reflects_overrides_per_key() {
     assert_eq!(r.scorer_window, 123);
     assert_eq!(r.scorer_sample_gate, 5);
     assert_eq!(r.scorer_target_n_eff, 12.5);
+    assert_eq!(r.scorer_min_feature_dim, 6);
+    assert_eq!(r.scorer_n_eff_floor, 1.5);
     assert!(!r.transport_node, "transport.node override");
     assert!(!r.store_and_forward, "store_and_forward override");
     assert_eq!(r.replication_reconcile_secs, 90);
@@ -235,4 +253,34 @@ async fn resolve_falls_back_on_bad_value_per_key() {
         "non-positive reconcile secs falls back to default"
     );
     assert_eq!(r.mode, d.mode, "blank mode falls back to default");
+}
+
+/// CIRISServer#757 — a band needs width. A floor at or above the target would
+/// divide by zero or invert the band, so the resolver falls back to BOTH
+/// defaults rather than pairing an operator's value with a default it was not
+/// chosen against.
+#[tokio::test]
+async fn a_floor_at_or_above_the_target_falls_back_to_both_defaults() {
+    let engine = node().await;
+    register_self(&engine).await;
+    set(
+        &engine,
+        config_reconcile::KEY_SCORER_TARGET_N_EFF,
+        ConfigValue::F64(3.0),
+    )
+    .await;
+    set(
+        &engine,
+        config_reconcile::KEY_SCORER_N_EFF_FLOOR,
+        ConfigValue::F64(3.0),
+    )
+    .await;
+    let r = config_reconcile::resolve(&engine).await;
+    assert_eq!(
+        (r.scorer_n_eff_floor, r.scorer_target_n_eff),
+        (
+            config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+            config_reconcile::DEFAULT_SCORER_TARGET_N_EFF
+        )
+    );
 }
