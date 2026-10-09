@@ -196,6 +196,12 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|((t, c), v)| (format!("{}:{c}", t.0), serde_json::json!(v)))
         .collect();
+    // CIRISEdge#858 (edge v40.0.12): rows parked on a signer, per plane.
+    let rows_parked_on_signer: serde_json::Map<_, _> = bundle
+        .rows_parked_on_signer
+        .iter()
+        .map(|(k, v)| (k.as_wire_str().to_string(), serde_json::json!(v)))
+        .collect();
     let verify_failures: serde_json::Map<_, _> = bundle
         .verify_failures_total
         .iter()
@@ -432,6 +438,25 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         "responder_link_up_total": bundle.responder_link_up_total,
         "replication_round_duration_seconds": round_duration,
         "sweep_permit_wait_seconds": histogram(&bundle.sweep_permit_wait_seconds),
+        // edge v40.0.12 (CIRISEdge#858): the park. A row whose signer this node
+        // has not met is parked, not refused every round; the host's
+        // `release_parked_on` (a claim, any local key registration) and a Key
+        // or binding arriving by replication release it. Parks that only ever
+        // grow, with releases flat, are a missing release path.
+        "rows_parked_on_signer": rows_parked_on_signer,
+        "signer_releases": bundle.signer_releases,
+        "retry_suppressions": bundle.retry_suppressions,
+        "signer_park_evictions": bundle.signer_park_evictions,
+        "refusal_memory_len": bundle.refusal_memory_len,
+        "refusal_memory_capacity": bundle.refusal_memory_capacity,
+        "parked_on_signer_len": bundle.parked_on_signer_len,
+        "parked_on_signer_capacity": bundle.parked_on_signer_capacity,
+        // An inbound link whose LinkEstablished the canonical dropped under
+        // control-plane overflow, rebuilt from its next event (CIRISEdge#859).
+        "recovered_links_total": bundle.recovered_links_total,
+        // Must stay 0: a lane shipped before its dialer claimed it (the
+        // dial-publish race that kept v40.0.11 from publishing).
+        "unclaimed_ship_refused_total": bundle.unclaimed_ship_refused_total,
     });
     let mut body = serde_json::json!({
             "data": {

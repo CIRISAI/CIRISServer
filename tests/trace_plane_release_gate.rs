@@ -1328,6 +1328,16 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "responder_rounds_total",
         "responder_link_up_seconds",
         "responder_link_up_total",
+        "rows_parked_on_signer",
+        "signer_releases",
+        "retry_suppressions",
+        "signer_park_evictions",
+        "refusal_memory_len",
+        "refusal_memory_capacity",
+        "parked_on_signer_len",
+        "parked_on_signer_capacity",
+        "recovered_links_total",
+        "unclaimed_ship_refused_total",
     ] {
         assert!(
             data.as_object().is_some_and(|o| o.contains_key(key)),
@@ -1343,4 +1353,31 @@ async fn the_metrics_surface_names_the_live_link_count() {
         wait["buckets"]["+Inf"].is_u64() && wait["count"].is_u64(),
         "a histogram is served as cumulative buckets with count and sum: {wait}"
     );
+}
+
+/// CIRISEdge#858 — every LOCAL key write releases what edge parked on that
+/// key. A local write bypasses edge's replication apply choke, so without the
+/// call the parked rows wait out their window (1–6 h) although they would now
+/// admit: on Eric's fresh laptop the old node's owner rows were refused every
+/// round after the claim. Each file that writes a key or an owner-binding
+/// locally must reach `release_parked_on`, and no `put_public_key` /
+/// `register_federation_key` may appear without it.
+#[test]
+fn every_local_key_write_releases_what_edge_parked_on_it() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    for (file, writes) in [
+        // The ONE register chokepoint every attested path goes through.
+        ("src/hardware_attestation.rs", 1),
+        // The claim: owner key (gate + legacy put) and the binding's node.
+        ("src/auth/ownership.rs", 3),
+        // Allegiance import and genesis install write keys directly.
+        ("src/mesh_genesis.rs", 2),
+    ] {
+        let src = std::fs::read_to_string(format!("{root}/{file}")).expect("read source");
+        let calls = src.matches("release_parked_on(").count();
+        assert!(
+            calls >= writes,
+            "{file}: {calls} release_parked_on call(s), expected at least {writes} (CIRISEdge#858)"
+        );
+    }
 }

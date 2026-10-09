@@ -4423,6 +4423,35 @@ pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::
     RUNTIME.get().map(Arc::clone)
 }
 
+/// CIRISEdge#858 (edge v40.0.12) — release every row edge PARKED waiting on
+/// `key_id`, and re-ask the peers that offered them.
+///
+/// Edge parks a replicated row whose signer this node has never met, and
+/// releases it itself when that signer's Key or binding arrives THROUGH
+/// replication. A key this node writes LOCALLY (a claim's owner Key, the
+/// owner-binding's node, any `register_attested_federation_key`) bypasses that
+/// choke; without this call the parked rows wait out their window (1–6 h)
+/// although they would now admit. Measured on Eric's fresh laptop: the old
+/// node's owner rows refused every round after the claim.
+///
+/// Every local registration path calls this after its write succeeds.
+/// Idempotent and cheap; before the runtime starts (boot, tests) it does
+/// nothing, and the boot path's rows have not been offered yet.
+pub(crate) fn release_parked_on(key_id: &str, why: &'static str) {
+    let Some(runtime) = held_replication_runtime() else {
+        return;
+    };
+    let released = runtime.release_signer(key_id);
+    if released > 0 {
+        tracing::info!(
+            key_id,
+            released,
+            why,
+            "released rows parked on a locally registered signer (CIRISEdge#858)"
+        );
+    }
+}
+
 /// CIRISEdge#636 (edge v26.1.0) — the publish-side KICK. A caller that just
 /// authored rows the federation should see (the claim/announce bundle, a
 /// consent grant, an owner-binding, a chat KeyPackage / Welcome / message)

@@ -1260,7 +1260,10 @@ pub async fn adopt_allegiance_facts(
             }
         }
         match dir.put_public_key(rec.clone()).await {
-            Ok(()) => out.keys_registered += 1,
+            Ok(()) => {
+                out.keys_registered += 1;
+                crate::compose::release_parked_on(&id, "allegiance key import");
+            }
             Err(e) if is_already_exists(&e) => out.keys_already_held += 1,
             Err(e) => out.refused.push((id, e.to_string())),
         }
@@ -1724,7 +1727,7 @@ where
     let mut identity_conflicts: Vec<String> = Vec::new();
     for rec in bundle.holders.iter().chain(bundle.serve_nodes.iter()) {
         match dir.put_public_key(rec.clone()).await {
-            Ok(()) => {}
+            Ok(()) => crate::compose::release_parked_on(&rec.record.key_id, "genesis key install"),
             Err(e) if is_already_exists(&e) => {
                 identity_conflicts.push(rec.record.key_id.clone());
             }
