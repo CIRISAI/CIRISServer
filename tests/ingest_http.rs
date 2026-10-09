@@ -810,15 +810,19 @@ async fn a_mock_llm_batch_is_refused_at_the_route_and_counted() {
     );
 }
 
-/// Codex on #753: the mock refusal must hold at BOTH doors a batch enters a
-/// node through. The HTTP route and the Reticulum relay (`LensCoreHandler`)
-/// both call the ONE shared check; a door without it is a door around it.
+/// Codex on #753: the mock refusal must hold at EVERY door a batch enters a
+/// node's persist through. Two ingest doors: the HTTP route and the Reticulum
+/// relay (`LensCoreHandler`). Two local capture doors: the sovereign
+/// `CaptureClient::capture_event` and the cohabitation PyO3 capture. All four
+/// call the ONE shared check; a door without it is a door around it.
 #[test]
-fn both_ingest_doors_run_the_shared_mock_check() {
+fn every_ingest_and_capture_door_runs_the_shared_mock_check() {
     let root = env!("CARGO_MANIFEST_DIR");
     for door in [
         "src/ingest_http.rs",
         "crates/ciris-lens-core/src/role/handler.rs",
+        "crates/ciris-lens-core/src/capture/client.rs",
+        "crates/ciris-lens-core/src/ffi/pyo3.rs",
     ] {
         let src = std::fs::read_to_string(format!("{root}/{door}")).expect("read door source");
         assert!(
