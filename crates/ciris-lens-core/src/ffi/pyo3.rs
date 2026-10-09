@@ -1040,6 +1040,21 @@ impl PyLensClient {
                         )
                         .map_err(|e| PyRuntimeError::new_err(format!("build_batch_bytes: {e}")))?;
 
+                        // 3d'. The mock-LLM refusal, before the tee and the persist:
+                        // this path calls the Python engine directly and passes
+                        // neither ingest door (Codex on #753, CIRISAgent#1244).
+                        if crate::ingest_guard::batch_has_mock_llm_call(&batch_bytes) {
+                            tracing::warn!(
+                                trace_id = %trace_id,
+                                refusal = crate::ingest_guard::REFUSAL_MOCK_LLM,
+                                "capture REFUSED a mock-LLM trace — not persisted, scored or \
+                                 replicated (CIRISAgent#1244)"
+                            );
+                            return Err(PyRuntimeError::new_err(
+                                crate::capture::ClientError::MockLlmRefused.to_string(),
+                            ));
+                        }
+
                         // 3e. Local-copy tee (best-effort, never fails persist).
                         cap.tee_write_if_configured(&trace_id, &batch_bytes);
 

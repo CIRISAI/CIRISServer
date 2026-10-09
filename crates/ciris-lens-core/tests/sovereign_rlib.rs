@@ -405,3 +405,69 @@ async fn sovereign_rlib_consent_gate() {
         other => panic!("expected ConsentBlocked {{ reason: \"no_consent\" }}, got: {other:?}",),
     }
 }
+
+// ── Test 3: the mock-LLM refusal on the local capture door ──────────────────
+//
+// Codex on CIRISServer#753: a locally captured batch passes neither the HTTP
+// nor the relay ingest door, so the mock refusal (CIRISAgent#1244) must run
+// in `capture_event` too, before the local persist. A trace whose LLM call
+// came from the mock is refused and stores nothing; the same trace with a
+// real model is sealed and persisted.
+
+async fn capture_with_llm_model(
+    model: &str,
+    thought: &str,
+) -> Result<CaptureEventOutcome, ciris_lens_core::capture::ClientError> {
+    let signer = test_signer(0xCD, "sovereign-mock-key");
+    let engine = Arc::new(
+        Engine::with_signer(signer.clone(), "sqlite::memory:")
+            .await
+            .expect("Engine::with_signer"),
+    );
+    register_key_in_directory(&engine, &signer).await;
+    let client = CaptureClient::new(
+        engine,
+        Arc::new(NullScrubber),
+        "generic".into(),
+        "2.7.9".into(),
+        None,
+        None,
+        ConsentConfig {
+            consent_timestamp: Some("2026-01-01T00:00:00Z".into()),
+        },
+        Some(deployment_profile()),
+        None,
+    );
+    client
+        .capture_event(inbound("THOUGHT_START", thought, "2026-06-01T00:00:00Z"))
+        .await
+        .expect("THOUGHT_START");
+    let mut llm = inbound("LLM_CALL", thought, "2026-06-01T00:00:01Z");
+    llm.data = json!({
+        "handler_name": "EthicalPDMA",
+        "service_name": "OpenAICompatibleLLM",
+        "timestamp": "2026-06-01T00:00:01Z",
+        "duration_ms": 12.0,
+        "status": "ok",
+        "model": model,
+        "prompt_tokens": 3,
+    });
+    client.capture_event(llm).await.expect("LLM_CALL appends");
+    client
+        .capture_event(inbound("ACTION_RESULT", thought, "2026-06-01T00:00:02Z"))
+        .await
+}
+
+#[tokio::test]
+async fn a_mock_llm_trace_is_refused_at_local_capture_and_a_real_one_persists() {
+    let refused = capture_with_llm_model("mock-model", "thought-mock-1").await;
+    match refused {
+        Err(ciris_lens_core::capture::ClientError::MockLlmRefused) => {}
+        other => panic!("a mock-LLM trace must be refused before persist, got: {other:?}"),
+    }
+    let admitted = capture_with_llm_model("gpt-4o", "thought-real-1").await;
+    assert!(
+        matches!(admitted, Ok(CaptureEventOutcome::SealedAndPersisted { .. })),
+        "a real model's trace persists as before, got: {admitted:?}"
+    );
+}

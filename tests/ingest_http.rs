@@ -777,3 +777,57 @@ async fn an_unreadable_mesh_config_plane_leaves_the_relay_accepting() {
     );
     assert_eq!(body["trace_events_inserted"].as_u64(), Some(1), "{body}");
 }
+
+/// CIRISAgent#1244: a batch carrying an LLM call from the agent's MOCK LLM is
+/// refused at the route, before verification, with its own token, and counted.
+/// 1,499 such traces reached the production canonical between 2026-08-01 and
+/// 2026-09-18 because the agent's exporter defaulted to the production
+/// endpoint. The refusal needs no valid signature to fire, which is the point:
+/// a misconfigured harness is stopped before any work is spent on its batch.
+#[tokio::test]
+async fn a_mock_llm_batch_is_refused_at_the_route_and_counted() {
+    let engine = node(0xB7, "node-mock").await;
+    let refusals = ingest_http::IngestRefusals::new();
+    let body =
+        br#"{"events":[{"trace":{"trace_id":"trace-mock-0001","components":[{"event_type":"LLM_CALL","data":{"model":"mock-model","prompt_tokens":3}}]}}]}"#
+            .to_vec();
+    let (status, resp) =
+        post_counted(Arc::clone(&engine), &refusals, CANONICAL_INGEST_PATH, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{resp}");
+    assert_eq!(
+        resp["error"].as_str(),
+        Some(ingest_http::REFUSAL_MOCK_LLM),
+        "the refusal carries its own token: {resp}"
+    );
+    let ledger = refusals.snapshot();
+    assert_eq!(
+        ledger
+            .by_kind_in_window
+            .get(ingest_http::REFUSAL_MOCK_LLM)
+            .copied(),
+        Some(1),
+        "the refusal is counted, not only logged"
+    );
+}
+
+/// Codex on #753: the mock refusal must hold at EVERY door a batch enters a
+/// node's persist through. Two ingest doors: the HTTP route and the Reticulum
+/// relay (`LensCoreHandler`). Two local capture doors: the sovereign
+/// `CaptureClient::capture_event` and the cohabitation PyO3 capture. All four
+/// call the ONE shared check; a door without it is a door around it.
+#[test]
+fn every_ingest_and_capture_door_runs_the_shared_mock_check() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    for door in [
+        "src/ingest_http.rs",
+        "crates/ciris-lens-core/src/role/handler.rs",
+        "crates/ciris-lens-core/src/capture/client.rs",
+        "crates/ciris-lens-core/src/ffi/pyo3.rs",
+    ] {
+        let src = std::fs::read_to_string(format!("{root}/{door}")).expect("read door source");
+        assert!(
+            src.contains("ingest_guard::batch_has_mock_llm_call("),
+            "{door} must run ciris_lens_core::ingest_guard::batch_has_mock_llm_call before persisting"
+        );
+    }
+}

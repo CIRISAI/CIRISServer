@@ -315,6 +315,12 @@ impl IngestRefusals {
         self.record(now, e.kind(), signer);
     }
 
+    /// Record a refusal this handler makes ITSELF, before persist sees the
+    /// batch, under the handler's own stable token (e.g. [`REFUSAL_MOCK_LLM`]).
+    pub fn observe_handler_refusal(&self, kind: &'static str) {
+        self.record(Utc::now(), kind, None);
+    }
+
     fn record(&self, now: DateTime<Utc>, kind: &'static str, signer: Option<String>) {
         let Ok(mut l) = self.inner.lock() else { return };
         l.refused_total = l.refused_total.saturating_add(1);
@@ -537,6 +543,12 @@ struct IngestState {
 /// give up on a temporary one.
 pub const REFUSAL_TRACE_PLANE_PAUSED: &str = "trace_replication_paused";
 
+/// The stable refusal token for a batch carrying a call from the agent's mock
+/// LLM, and the shared check that finds one. Both live in
+/// `ciris_lens_core::ingest_guard` so this route and the Reticulum relay
+/// (`LensCoreHandler`) refuse the same batches (CIRISAgent#1244).
+pub use ciris_lens_core::ingest_guard::{MOCK_LLM_MODEL, REFUSAL_MOCK_LLM};
+
 /// Merge the HTTP trace-ingest routes onto the read-API listener.
 ///
 /// Both the legacy path (so the bridge forwards unchanged) AND the canonical
@@ -626,6 +638,32 @@ async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
                 // namespace the producer signed under — the body was never even
                 // parsed. Claiming one here would send an honest producer
                 // chasing a key problem it does not have.
+                key_id_namespace: None,
+            }),
+        )
+            .into_response();
+    }
+    // A batch from the agent's mock LLM is refused before it is verified or
+    // persisted: mock output is not evidence about any agent. Counted, with
+    // its own token, so a misconfigured harness shows up in the ledger.
+    if ciris_lens_core::ingest_guard::batch_has_mock_llm_call(&body) {
+        st.refusals.observe_handler_refusal(REFUSAL_MOCK_LLM);
+        tracing::warn!(
+            bytes = body.len(),
+            "HTTP ingest REFUSED: the batch carries an LLM call from the agent's MOCK LLM \
+             (model=\"mock-model\"). Nothing was verified or persisted. A test harness is \
+             shipping traces to a real node; point it at a local endpoint (CIRISAgent#1244)."
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(IngestErr {
+                error: REFUSAL_MOCK_LLM,
+                detail: Some(
+                    "This batch carries an LLM call made by the agent's mock LLM \
+                     (model=\"mock-model\"). Mock output is not admitted to a production \
+                     node. Point test harnesses at a local endpoint."
+                        .to_string(),
+                ),
                 key_id_namespace: None,
             }),
         )
@@ -778,6 +816,19 @@ fn ingest_error_body(e: &IngestError) -> IngestErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mock_refusal_is_counted_under_its_own_token() {
+        let l = IngestRefusals::new();
+        l.observe_handler_refusal(REFUSAL_MOCK_LLM);
+        let b = l.snapshot();
+        assert_eq!(b.refused_total, 1);
+        assert_eq!(b.by_kind_in_window.get(REFUSAL_MOCK_LLM).copied(), Some(1));
+        assert_eq!(
+            b.unattributed_in_window, 1,
+            "a handler refusal names no signer"
+        );
+    }
 
     #[test]
     fn legacy_path_is_the_decommissioned_lens_python_path() {

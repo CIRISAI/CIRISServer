@@ -73,6 +73,21 @@ impl LensCoreHandler {
     /// bytes). Fire-and-forget: errors are logged, never returned to the
     /// emitter (opaque events carry no response leg).
     async fn persist_batch(&self, sender_key_id: &str, payload: &[u8]) {
+        // The same admission check the HTTP ingest route runs, before any
+        // verification or persistence: a batch from the agent's mock LLM is
+        // not evidence about any agent (CIRISAgent#1244). Shared so neither
+        // door can be walked around.
+        if crate::ingest_guard::batch_has_mock_llm_call(payload) {
+            tracing::warn!(
+                peer = %sender_key_id,
+                bytes = payload.len(),
+                refusal = crate::ingest_guard::REFUSAL_MOCK_LLM,
+                "relay REFUSED an opaque trace batch carrying a mock-LLM call (kind {:#010x}); \
+                 nothing verified or persisted",
+                ACCORD_EVENTS_KIND,
+            );
+            return;
+        }
         match self
             .engine
             .receive_and_persist(payload, &NullScrubber)
