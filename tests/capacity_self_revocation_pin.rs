@@ -393,6 +393,8 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        min_feature_dim: ciris_server::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
+        n_eff_floor: ciris_server::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
     };
     // CC#46 — the attester is the node's DERIVED key id (what emit_attestation_self
     // stamps and what is registered), not the bare NODE_KEY_ID alias.

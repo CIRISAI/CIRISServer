@@ -17,7 +17,7 @@ pub use axis_calibration::{
 pub use calibration::{
     BundleError, CalibrationBundle, CohortCentroid, Projection, Standardization,
 };
-pub use capacity::capacity;
+pub use capacity::{assess_capacity, CapacityAssessment, CapacityGates, CapacityIndeterminate};
 pub use n_eff::kish_n_eff;
 pub use result::{
     AxisFamily, DetectionEvent, IndeterminateReason, ManifoldConformity, Score, Severity,
