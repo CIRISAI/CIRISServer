@@ -17,7 +17,7 @@
 //! Each tick [`resolve`]s every migrated knob (typed read with a baked default
 //! fallback) and `watch::Sender::send_replace`s the new [`ResolvedConfig`]:
 //!
-//!   - **scorer.{cadence_secs,window,sample_gate,target_n_eff}** — fully HOT: the
+//!   - **scorer.{cadence_secs,window,sample_gate,target_n_eff,min_feature_dim,n_eff_floor}** — fully HOT: the
 //!     scorer reads `*rx.borrow()` each cycle, so a `POST /v1/config` retunes the
 //!     next scoring pass with no restart.
 //!   - **replication.reconcile_secs** — HOT-ish: the replication reconciler reads
@@ -75,18 +75,38 @@ pub const DEFAULT_STORE_AND_FORWARD: bool = true;
 /// extraction over those rows only. It does not walk the corpus. So the cadence
 /// was never the thing protecting load — `scorer_window` is.
 ///
-/// Noise is prevented by the SAMPLE GATE, not by the clock: `capacity()` returns
-/// 0.0 at or below `scorer_sample_gate` (20) surviving rows, so sweeping more
-/// often cannot manufacture signal from a thin corpus. It only shortens the wait
-/// once a corpus is genuinely scoreable.
+/// Noise is prevented by the SAMPLE GATE, not by the clock: below
+/// `scorer_sample_gate` (20) surviving rows the scorer emits NOTHING
+/// (Indeterminate, CIRISServer#757), so sweeping more often cannot manufacture
+/// signal from a thin corpus. It only shortens the wait once a corpus is
+/// genuinely scoreable.
 pub const DEFAULT_SCORER_CADENCE_SECS: u64 = 60;
 /// Default for `scorer.window` — the measure_n_eff.py default window cap.
 pub const DEFAULT_SCORER_WINDOW: i64 = 500;
-/// Default for `scorer.sample_gate` — measure_n_eff.py refuses fewer than 20 rows.
+/// Default for `scorer.sample_gate` — measure_n_eff.py refuses fewer than 20
+/// ROWS. A row count, compared against the surviving feature rows, never
+/// against `n_eff` (CIRISServer#757: it was compared against an effective rank
+/// bounded by 11, so every score ever issued was 0.0). RATCHET's measured knee
+/// on the 6,465 production rows is also N≈20.
 pub const DEFAULT_SCORER_SAMPLE_GATE: u32 = 20;
-/// Default for `scorer.target_n_eff` — a modest saturation target for an early
-/// federation (RATCHET owns the real value).
-pub const DEFAULT_SCORER_TARGET_N_EFF: f64 = 8.0;
+/// Default for `scorer.target_n_eff` — the `n_eff_pr` at which capacity
+/// saturates at 1.0. RATCHET's value (CIRISServer#757,
+/// `RATCHET/experiments/capacity_rows/proposed_values.json`): the p95 of the
+/// plateau at the 20-row gate, 4.48, 95% CI [3.78, 5.10], n=56. The withdrawn
+/// 8.0 sat above every observation (max 5.31). Estimated mostly on
+/// unclaimed-bootstrap subjects and on windows that included mock-LLM traces
+/// (CIRISPersist#1040); recalibrate after the purge.
+pub const DEFAULT_SCORER_TARGET_N_EFF: f64 = 4.5;
+/// Default for `scorer.min_feature_dim` — the fewest features a window must
+/// cover to be scored. `n_eff_pr` is bounded by `feature_dim`, so a window
+/// covering 2 features has a rank ceiling of 2 by construction (Spearman
+/// `n_eff_pr` vs `feature_dim` = 0.74 at N≥20). Below it: Indeterminate.
+pub const DEFAULT_SCORER_MIN_FEATURE_DIM: u32 = 4;
+/// Default for `scorer.n_eff_floor` — the rank floor the band starts from.
+/// Rank 1 is one direction of variance: no independent constraint at all, so
+/// `n_eff_pr <= 1.0` scores 0.0 and the band runs linearly from the floor to
+/// `target_n_eff`.
+pub const DEFAULT_SCORER_N_EFF_FLOOR: f64 = 1.0;
 /// Default for `replication.reconcile_secs`. Was
 /// `CIRIS_SERVER_REPLICATION_RECONCILE_SECS`.
 pub const DEFAULT_REPLICATION_RECONCILE_SECS: u64 = 30;
@@ -182,6 +202,10 @@ pub const KEY_SCORER_WINDOW: &str = "scorer.window";
 pub const KEY_SCORER_SAMPLE_GATE: &str = "scorer.sample_gate";
 /// `scorer.target_n_eff` — N_eff saturation point (capacity 1.0).
 pub const KEY_SCORER_TARGET_N_EFF: &str = "scorer.target_n_eff";
+/// `scorer.min_feature_dim` — fewest features a scored window must cover.
+pub const KEY_SCORER_MIN_FEATURE_DIM: &str = "scorer.min_feature_dim";
+/// `scorer.n_eff_floor` — the rank floor the capacity band starts from.
+pub const KEY_SCORER_N_EFF_FLOOR: &str = "scorer.n_eff_floor";
 /// `replication.reconcile_secs` — the replication reconciler cadence.
 pub const KEY_REPLICATION_RECONCILE_SECS: &str = "replication.reconcile_secs";
 /// `retention.cadence_secs` — how often the retention/eviction loop runs.
@@ -253,6 +277,10 @@ pub struct ResolvedConfig {
     pub scorer_sample_gate: u32,
     /// `scorer.target_n_eff` (HOT). N_eff saturation point.
     pub scorer_target_n_eff: f64,
+    /// `scorer.min_feature_dim` (HOT). Fewest features a scored window covers.
+    pub scorer_min_feature_dim: u32,
+    /// `scorer.n_eff_floor` (HOT). The rank floor the band starts from.
+    pub scorer_n_eff_floor: f64,
     /// `replication.reconcile_secs` (HOT-ish — applies next reconcile tick).
     pub replication_reconcile_secs: u64,
     /// `retention.cadence_secs` (HOT). How often the retention loop enforces the
@@ -324,6 +352,8 @@ impl Default for ResolvedConfig {
             scorer_window: DEFAULT_SCORER_WINDOW,
             scorer_sample_gate: DEFAULT_SCORER_SAMPLE_GATE,
             scorer_target_n_eff: DEFAULT_SCORER_TARGET_N_EFF,
+            scorer_min_feature_dim: DEFAULT_SCORER_MIN_FEATURE_DIM,
+            scorer_n_eff_floor: DEFAULT_SCORER_N_EFF_FLOOR,
             replication_reconcile_secs: DEFAULT_REPLICATION_RECONCILE_SECS,
             retention_cadence_secs: DEFAULT_RETENTION_CADENCE_SECS,
             retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
@@ -437,6 +467,23 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         .and_then(|s| s.f64(KEY_SCORER_TARGET_N_EFF))
         .filter(|t| t.is_finite() && *t > 0.0)
         .unwrap_or(d.scorer_target_n_eff);
+    let scorer_min_feature_dim = snap
+        .and_then(|s| s.i64(KEY_SCORER_MIN_FEATURE_DIM))
+        .filter(|g| (1..=1_000).contains(g))
+        .map(|g| g as u32)
+        .unwrap_or(d.scorer_min_feature_dim);
+    let scorer_n_eff_floor = snap
+        .and_then(|s| s.f64(KEY_SCORER_N_EFF_FLOOR))
+        .filter(|f| f.is_finite() && *f >= 0.0)
+        .unwrap_or(d.scorer_n_eff_floor);
+    // A band needs width: a target at or below the floor would divide by zero
+    // or invert the band. Fall back to BOTH defaults rather than mixing an
+    // operator's value with a default it was not chosen against.
+    let (scorer_n_eff_floor, scorer_target_n_eff) = if scorer_target_n_eff > scorer_n_eff_floor {
+        (scorer_n_eff_floor, scorer_target_n_eff)
+    } else {
+        (d.scorer_n_eff_floor, d.scorer_target_n_eff)
+    };
     let replication_reconcile_secs = snap
         .and_then(|s| s.i64(KEY_REPLICATION_RECONCILE_SECS))
         .filter(|s| *s > 0)
@@ -537,6 +584,8 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         scorer_window,
         scorer_sample_gate,
         scorer_target_n_eff,
+        scorer_min_feature_dim,
+        scorer_n_eff_floor,
         replication_reconcile_secs,
         retention_cadence_secs,
         retention_max_age_days,
