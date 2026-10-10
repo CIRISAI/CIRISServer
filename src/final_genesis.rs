@@ -362,7 +362,24 @@ async fn serve_node_input(
     if !envelope.is_object() {
         envelope = serde_json::json!({});
     }
-    envelope["roles"] = serde_json::json!(SERVE_NODE_ROLES);
+    // The genesis roles, in the record's OWN order when it already carries
+    // exactly that set: rewriting the order changes the signed envelope, and
+    // the 2026-10-04 bundle's canonical-1 envelope then differed from the
+    // canonical's stored one by role order alone, so a byte-identical
+    // comparison of the two would fail (persist, 2026-10-06).
+    let same_set = envelope
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .is_some_and(|held| {
+            let mut a: Vec<&str> = held.iter().filter_map(|r| r.as_str()).collect();
+            let mut b: Vec<&str> = SERVE_NODE_ROLES.to_vec();
+            a.sort_unstable();
+            b.sort_unstable();
+            a == b
+        });
+    if !same_set {
+        envelope["roles"] = serde_json::json!(SERVE_NODE_ROLES);
+    }
     stamp_valid_from(&mut envelope, produced_at);
     if let Some(h) = hints {
         envelope["transport_hints"] = serde_json::Value::Array(h);
