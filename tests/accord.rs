@@ -459,7 +459,9 @@ async fn register_holders_list_roster_and_verify_2_of_3_invocation() {
     );
     assert_eq!(verdict["valid_signatures"], 2);
 
-    // ── 4. A 1-of-3 invocation FAILS the threshold ───────────────────────────
+    // ── 4. A 1-of-3 drill VERIFIES: rc7 (CIRISConstitution#146) puts the fire
+    //       floor — and a drill rehearses the fire — at ONE holder, from verify's
+    //       required_signatures. The threshold the verdict reports is the kind's.
     let inv2 = drill_invocation("drill-002");
     let one = vec![holders[0].cosign(&inv2).await];
     let verdict2: serde_json::Value = client
@@ -476,10 +478,14 @@ async fn register_holders_list_roster_and_verify_2_of_3_invocation() {
         .await
         .unwrap();
     assert_eq!(
-        verdict2["verified"], false,
-        "1-of-3 must NOT verify; got {verdict2}"
+        verdict2["verified"], true,
+        "one holder verifies a drill under rc7; got {verdict2}"
     );
-    assert_eq!(verdict2["reason"], "quorum_not_met");
+    assert_eq!(
+        verdict2["threshold"], 1,
+        "the kind's threshold; got {verdict2}"
+    );
+    assert_eq!(verdict2["valid_signatures"], 1);
 
     // ── 5. Replaying the SAME invocation id is rejected by the dedup window ───
     let replay = client
@@ -1803,7 +1809,9 @@ async fn complete_drill_via_message_is_recorded_in_events_and_never_latches() {
     );
     assert_eq!(drills[0]["invocation_id"], "drill-rec-001");
     assert_eq!(drills[0]["event_type"], "drill");
-    assert_eq!(drills[0]["quorum_threshold"], 2);
+    // rc7: the recorded threshold is verify's for the kind (one holder); both
+    // cosigning seats are still recorded as the signers that verified.
+    assert_eq!(drills[0]["quorum_threshold"], 1);
     let signers = drills[0]["signers"].as_array().unwrap();
     assert_eq!(
         signers.len(),

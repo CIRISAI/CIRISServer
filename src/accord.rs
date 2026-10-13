@@ -2649,7 +2649,7 @@ async fn family_history(State(st): State<AccordState>) -> Response {
 // EVERY canonical op is resolved in ONE place ([`canonical_op_quorum_m`]) from the
 // LIVE roster + the op class — never hard-coded. So as the founder set grows the
 // same ops scale: structural ops already read the family's entrenched `quorum:M/N`
-// (via [`kill_switch_quorum_m`]); operational ops are a single-holder bootstrap
+// (via [`family_quorum_m`]); operational ops are a single-holder bootstrap
 // today, and moving them to m-of-n is a one-line change in that one function.
 
 /// The authority class of a canonical-server op → its required quorum.
@@ -2675,7 +2675,7 @@ async fn canonical_op_quorum_m(
 ) -> usize {
     match class {
         // Additive bootstrap — 1-of-N today (policy knob). Swap to
-        // `kill_switch_quorum_m(engine, roster).await` to make it m-of-n.
+        // `family_quorum_m(engine, roster.len()).await` to make it m-of-n.
         CanonicalOpClass::Operational => 1,
         // Structural — the family's entrenched `quorum:M/N` (already m-of-n).
         CanonicalOpClass::Structural => family_quorum_m(engine, roster.len()).await,
