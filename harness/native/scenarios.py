@@ -589,10 +589,12 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
     r = a.must("POST", "/v1/accord/halt", {"invocation": fire, **sign(holders[0])})
     obj = r.get("invocation") or r
     delivered = deliver_everywhere(obj, a)
-    if r.get("halted") is not True or not latched_everywhere(True):
+    # The open door answers the signed object + quorum_met; whether the node
+    # LATCHED is read where the agent gate reads it: /v1/accord/halt-status.
+    if r.get("quorum_met") is not True or not latched_everywhere(True):
         ok = False
         step.fail("fire", "ONE holder's constitutional row must latch on every node that holds the root",
-                  nodes, r"HALT", cc="CC 4.2.1.1", got=r, delivered=delivered)
+                  nodes, r"HALT", cc="CC 4.2.1.1", quorum_met=r.get("quorum_met"), delivered=delivered)
     st = {n.name: status(n) for n in nodes}
     step("fire", proves="one row, fired on receipt, latched everywhere; each node counts its own fuse",
          lapses_at={k: v.get("halt", {}).get("lapses_at") for k, v in st.items()},

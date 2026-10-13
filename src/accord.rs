@@ -386,6 +386,14 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
     }
 }
 
+/// The signatures a halt-plane row needs, from the ONE place that keeps them
+/// (CIRISVerify#305, CC 4.2.1.1 "signatures per kind"). An empty roster admits
+/// nothing: `usize::MAX`, so no count ever reaches it.
+#[must_use]
+pub fn halt_plane_threshold(kind: InvocationKind, roster_len: usize) -> usize {
+    kind.required_signatures(roster_len).unwrap_or(usize::MAX)
+}
+
 /// The live kill-switch quorum **M**. Anchored to the family's ENTRENCHED
 /// `consensus_protocol` (`quorum:M/N`) — the M the founders voted to entrench and the
 /// SAME one [`crate::accord_reactivate`] honors — so the irreversible-kill bar can
@@ -401,21 +409,12 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
 /// strict majority of the standing roster — read in [`halt_plane_threshold`].
 /// This function decides ROSTER CHANGES (`family/supersede`, structural
 /// canonical ops), per CC 4.2.6's `fire ≤ roster-change ≤ standing`.
-
 /// The family's **entrenched** M (`quorum:M/N`), falling back to a strict
 /// majority over `roster_n` when the family cannot be resolved locally. The one
 /// place the threshold is decided — callers that only know the seat count use
 /// this directly rather than fabricating [`ThresholdMember`]s just to be
 /// counted. Never returns a hard-coded `2`: the accord's threshold is
 /// governance state that must be read, not assumed.
-/// The signatures a halt-plane row needs, from the ONE place that keeps them
-/// (CIRISVerify#305, CC 4.2.1.1 "signatures per kind"). An empty roster admits
-/// nothing: `usize::MAX`, so no count ever reaches it.
-#[must_use]
-pub fn halt_plane_threshold(kind: InvocationKind, roster_len: usize) -> usize {
-    kind.required_signatures(roster_len).unwrap_or(usize::MAX)
-}
-
 pub(crate) async fn family_quorum_m(engine: &Engine, roster_n: usize) -> usize {
     if let Ok(Some(family)) = crate::family::lookup(engine, HUMANITY_ACCORD_FAMILY_KEY_ID).await {
         if let Some(m) = family

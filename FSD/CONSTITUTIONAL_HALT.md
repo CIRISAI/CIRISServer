@@ -145,8 +145,10 @@ serves that reader; the agent's half is CIRISAgent#1231 and rc8's lead item.
   CSD-129 "Drill, halt, announce: end to end" (federation → safety): drill, announce,
   fire from one node and hand out of band to the others, every node latched and still
   serving, ingest refused, confirm, resume, a short-fused halt lapsing, a late
-  confirmation refused. Not covered yet: an agent process whose act gate reads the
-  status (CIRISAgent#1231); `rows.jsonl` per node for CC's offline replay (T8 iii).
+  confirmation refused. **Ran green 2026-10-13** on the first run (26 steps, 20 s fuse,
+  `first_failure: null`; `python -m harness.native halt --binary target/debug/ciris-server`
+  with `CIRIS_TEST_HALT_FUSE_SECS=20`). Not covered yet: an agent process whose act gate
+  reads the status (CIRISAgent#1231); `rows.jsonl` per node for CC's offline replay (T8 iii).
 
 ## 5. What is removed
 
