@@ -56,7 +56,7 @@ use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::hard_case::ConsentState;
 use ciris_persist::federation::types::cohort_scope;
 use ciris_persist::federation::EmitAttestationInput;
-use ciris_persist::prelude::{CallerScope, Engine, TraceFilter, TraceSummary};
+use ciris_persist::prelude::{CallerScope, Engine, TimeWindow, TraceFilter, TraceSummary};
 
 use crate::key_standing;
 
@@ -108,6 +108,25 @@ pub struct ScorerConfig {
     pub min_feature_dim: u32,
     /// The rank floor the band starts from.
     pub n_eff_floor: f64,
+    /// An agent with a trace admitted within this many days is ACTIVE and is
+    /// scored this pass, on its own window (CIRISServer#758).
+    pub active_lookback_days: i64,
+}
+
+/// The scoring knobs as one comparable value: when it changes, the next tick
+/// must run even though the corpus has not moved (Codex on #758 — the
+/// watermark short-circuit otherwise holds a threshold change until a trace
+/// arrives or the hourly refresh).
+#[must_use]
+pub fn scoring_knobs(cfg: &ScorerConfig) -> (i64, u32, u64, u32, u64, i64) {
+    (
+        cfg.window,
+        cfg.sample_size_gate,
+        cfg.target_n_eff.to_bits(),
+        cfg.min_feature_dim,
+        cfg.n_eff_floor.to_bits(),
+        cfg.active_lookback_days,
+    )
 }
 
 impl ScorerConfig {
@@ -139,6 +158,7 @@ impl Default for ScorerConfig {
             target_n_eff: crate::config_reconcile::DEFAULT_SCORER_TARGET_N_EFF,
             min_feature_dim: crate::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
             n_eff_floor: crate::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+            active_lookback_days: crate::config_reconcile::DEFAULT_SCORER_ACTIVE_LOOKBACK_DAYS,
         }
     }
 }
@@ -156,6 +176,7 @@ impl ScorerConfig {
             target_n_eff: r.scorer_target_n_eff,
             min_feature_dim: r.scorer_min_feature_dim,
             n_eff_floor: r.scorer_n_eff_floor,
+            active_lookback_days: r.scorer_active_lookback_days,
         };
         // TEST-ANCHOR-FENCED knob overrides (mesh-repro traceflow E2E,
         // CIRISServer#315 / CIRISAgent#924): a harness canonical has no owner
@@ -204,6 +225,11 @@ impl ScorerConfig {
 /// still runs a full pass at least this often. One hour against a 24 h bucket
 /// floor leaves a wide margin.
 pub const IDLE_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Bound on the active-agent enumeration (phase 1 of [`run_pass`]): pages of
+/// `scorer.window` rows walked by cursor over the lookback. 200 × 500 = 100,000
+/// traces; the canonical's whole corpus is ~9,000. Hitting it is WARNed.
+const MAX_ENUMERATION_PAGES: usize = 200;
 
 /// The corpus watermark a tick compares against the previous pass's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +344,7 @@ pub fn spawn(
         // against, and when it ran (CIRISServer#553).
         let mut last_watermark: Option<CorpusWatermark> = None;
         let mut last_pass_at = std::time::Instant::now();
+        let mut knobs = scoring_knobs(&ScorerConfig::from_resolved(&config_rx.borrow()));
         loop {
             // CIRISServer#315 ask 2: select on the CONFIG WATCH as well as the
             // tick, so a hot knob write re-arms the timer IMMEDIATELY instead of
@@ -341,6 +368,14 @@ pub fn spawn(
                         tracing::info!(
                             cadence_secs = cadence.as_secs(),
                             "capacity scorer cadence retuned from config:* (hot)"
+                        );
+                    }
+                    if scoring_knobs(&cfg) != knobs {
+                        knobs = scoring_knobs(&cfg);
+                        last_watermark = None;
+                        tracing::info!(
+                            "capacity scorer thresholds changed from config:* — forcing a pass \
+                             over the unchanged corpus"
                         );
                     }
                     let current = corpus_watermark(&engine).await;
@@ -391,6 +426,17 @@ pub fn spawn(
                         break;
                     }
                     let cfg = ScorerConfig::from_resolved(&config_rx.borrow());
+                    if scoring_knobs(&cfg) != knobs {
+                        // A threshold change is a reason to re-derive every
+                        // score; drop the watermark so the next tick cannot
+                        // take `Skip` on an unchanged corpus.
+                        knobs = scoring_knobs(&cfg);
+                        last_watermark = None;
+                        tracing::info!(
+                            "capacity scorer thresholds changed from config:* — the next tick \
+                             re-scores the corpus"
+                        );
+                    }
                     if cfg.cadence != cadence {
                         cadence = cfg.cadence;
                         // `retune` re-anchors to NOW, so the next pass runs one
@@ -413,31 +459,97 @@ pub fn spawn(
 /// Public so the integration test can drive a single deterministic pass without
 /// waiting on the timer. Returns the number of `capacity:*` attestations emitted.
 pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) -> Result<usize> {
-    // Enumerate the agents present in the corpus by their agent_id_hash (the
-    // AV-9 per-agent key on every trace summary). We page the unfiltered trace
-    // window once and group — the read surface has no distinct-agent primitive.
-    // Through the ONE door (src/backend.rs). Asking for SQLite by name here
-    // meant every pass on a postgres node returned Err and no agent was ever
-    // scored — 21 ticks, 21 failures, observed on the scout node.
-    let page = crate::backend::list_trace_summaries(
-        engine,
-        TraceFilter::default(),
-        None,
-        cfg.window,
-        CallerScope::Unauthenticated,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("list trace summaries: {e}"))?;
-
-    // Group summaries by agent_id_hash → that agent's feature rows.
-    let mut by_agent: std::collections::BTreeMap<String, Vec<&TraceSummary>> =
-        std::collections::BTreeMap::new();
-    for s in &page.items {
-        by_agent.entry(s.agent_id_hash.clone()).or_default().push(s);
+    let pass_started = std::time::Instant::now();
+    // ── Phase 1: WHO IS ACTIVE (CIRISServer#758) ─────────────────────────────
+    //
+    // Every active agent is scored on its OWN window. This used to page ONE
+    // unfiltered 500-row window and group it: each agent got its share of the
+    // page, so with ~25 live agents nobody could reach the 20-row gate, and a
+    // score was not recomputable (it depended on what everyone else emitted
+    // that minute). CC 3.4.5 answers correctness by recomputability; "this
+    // agent's latest `window` rows as of `asserted_at`" is.
+    //
+    // Persist's read surface still has no distinct-agent primitive, so the
+    // active set is enumerated by paging the lookback by cursor (the
+    // "sample-the-recent-corpus" stopgap the Lens gift package names), bounded
+    // by MAX_ENUMERATION_PAGES. Through the ONE door (src/backend.rs): asking
+    // for SQLite by name here once meant every pass on a postgres node
+    // returned Err and no agent was ever scored.
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::days(cfg.active_lookback_days.max(1));
+    let mut active: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut cursor = None;
+    let mut enumeration_pages = 0usize;
+    let mut enumeration_rows = 0usize;
+    loop {
+        let page = crate::backend::list_trace_summaries(
+            engine,
+            // ADMITTED within the lookback: active from this node's point of
+            // view, which is what a node's scorer can know; a backlog that
+            // lands late is scored when it lands. Indexed on the canonical;
+            // 30 days was 748 traces (two pages) for 122 agents.
+            TraceFilter {
+                admitted_window: Some(TimeWindow { since, until: now }),
+                ..TraceFilter::default()
+            },
+            cursor.take(),
+            cfg.window,
+            CallerScope::Unauthenticated,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("enumerate active agents: {e}"))?;
+        enumeration_pages += 1;
+        enumeration_rows += page.items.len();
+        for s in &page.items {
+            active.insert(s.agent_id_hash.clone());
+        }
+        match page.next_cursor {
+            Some(c) if enumeration_pages < MAX_ENUMERATION_PAGES => cursor = Some(c),
+            Some(_) => {
+                tracing::warn!(
+                    enumeration_pages,
+                    enumeration_rows,
+                    lookback_days = cfg.active_lookback_days,
+                    "capacity scorer: the active-agent enumeration hit its page bound — agents \
+                     beyond it are not scored this pass; shorten scorer.active_lookback_days or \
+                     raise scorer.window"
+                );
+                break;
+            }
+            None => break,
+        }
     }
 
-    let n_summaries = page.items.len();
+    // ── Phase 2: each active agent's OWN latest `window` rows ────────────────
+    let mut by_agent: std::collections::BTreeMap<String, Vec<TraceSummary>> =
+        std::collections::BTreeMap::new();
+    for hash in active {
+        let page = crate::backend::list_trace_summaries(
+            engine,
+            TraceFilter {
+                agent_id_hash: Some(hash.clone()),
+                ..TraceFilter::default()
+            },
+            None,
+            cfg.window,
+            CallerScope::Unauthenticated,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("list trace summaries for {hash}: {e}"))?;
+        by_agent.insert(hash, page.items);
+    }
+
+    let n_summaries: usize = by_agent.values().map(Vec::len).sum();
     let n_agents = by_agent.len();
+    tracing::info!(
+        enumeration_pages,
+        enumeration_rows,
+        lookback_days = cfg.active_lookback_days,
+        active_agents = n_agents,
+        window_rows = n_summaries,
+        read_ms = pass_started.elapsed().as_millis() as u64,
+        "capacity scorer: active agents enumerated and read, one window each"
+    );
     let mut empty_matrix_agents = 0usize;
     let mut unchanged_agents = 0usize;
     let mut not_consented_agents = 0usize;
@@ -451,10 +563,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     let mut standing_unreadable_agents = 0usize;
     let mut unregistered_agents = 0usize;
     // CIRISServer#757 — windows that carry no number yet. A legitimate state
-    // (a thin corpus), so it counts toward `accounted` below.
+    // (a thin corpus), so it counts toward `accounted` below. Split by WHY:
+    // too few rows is the ordinary cold start; too few features that VARY on
+    // every agent at once is a flat extractor, and must not read as calm.
     let mut indeterminate_agents = 0usize;
+    let mut below_sample_gate_agents = 0usize;
+    let mut below_coverage_agents = 0usize;
     let mut emitted = 0usize;
-    for (agent_id_hash, traces) in by_agent {
+    for (agent_id_hash, rows) in by_agent {
+        let traces: Vec<&TraceSummary> = rows.iter().collect();
         // Attest ABOUT the agent's REGISTERED federation key_id (persist v20.1.0 /
         // CIRISPersist#498): `TraceSummary.agent_key_id` is the `signing_key_id`
         // resolved from `federation_keys` at verify time, so it is guaranteed to
@@ -480,6 +597,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             Ok(ScoreOutcome::Emitted) => emitted += 1,
             Ok(ScoreOutcome::Indeterminate { why }) => {
                 indeterminate_agents += 1;
+                match why {
+                    scoring::CapacityIndeterminate::BelowSampleGate { .. } => {
+                        below_sample_gate_agents += 1;
+                    }
+                    scoring::CapacityIndeterminate::BelowFeatureCoverage { .. } => {
+                        below_coverage_agents += 1;
+                    }
+                    scoring::CapacityIndeterminate::NoBand => {}
+                }
                 tracing::debug!(
                     agent = %attested_key_id,
                     ?why,
@@ -673,6 +799,24 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             + empty_matrix_agents
             + unregistered_agents
             + indeterminate_agents;
+        // Every agent that cleared the ROW gate failed COVERAGE: the features
+        // are flat across the whole active set, which is an extractor or a
+        // fixture fault, not a cold start. Said before the quiet branch below
+        // can call it steady state.
+        let reached_row_gate = n_agents
+            .saturating_sub(unregistered_agents)
+            .saturating_sub(empty_matrix_agents)
+            .saturating_sub(below_sample_gate_agents);
+        if below_coverage_agents > 0 && below_coverage_agents >= reached_row_gate {
+            tracing::warn!(
+                n_agents,
+                below_coverage_agents,
+                min_feature_dim = cfg.min_feature_dim,
+                "capacity scorer: every agent past the row gate has fewer than min_feature_dim \
+                 features that VARY — flat features across the corpus is an extractor fault, not \
+                 a thin corpus"
+            );
+        }
         if consent_unreadable_agents > 0 {
             // Its own line, ahead of the generic zero WARN, because the MESSAGE
             // is what an operator reads: "the agents do not account for it" sends
@@ -691,7 +835,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 empty_matrix_agents,
                 unregistered_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 window = cfg.window,
                 raw_trace_events,
                 narrowing,
@@ -714,7 +866,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 empty_matrix_agents,
                 unregistered_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 window = cfg.window,
                 raw_trace_events,
                 narrowing,
@@ -735,7 +895,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 empty_matrix_agents,
                 unregistered_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 "capacity scorer pass authored nothing — every score already stands within its \
                  coalescing bucket, or the window is still Indeterminate (steady state, not a \
                  fault)"
@@ -751,7 +919,15 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 empty_matrix_agents,
                 unregistered_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 indeterminate_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
+                below_sample_gate_agents,
+                below_coverage_agents,
                 window = cfg.window,
                 raw_trace_events,
                 sample_size_gate = cfg.sample_size_gate,
@@ -776,6 +952,8 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             standing_unreadable_agents,
             unregistered_agents,
             indeterminate_agents,
+            below_sample_gate_agents,
+            below_coverage_agents,
             "capacity scorer pass authored rows BUT the CC#46 `analyze` consent fold failed to \
              read for some subjects — those are NOT declines and were not scored"
         );
@@ -795,6 +973,8 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             standing_unreadable_agents,
             unregistered_agents,
             indeterminate_agents,
+            below_sample_gate_agents,
+            below_coverage_agents,
             "capacity scorer pass authored rows BUT the standing-rows read failed for some \
              subjects — that is NOT \"nothing stands\", and those subjects were not scored"
         );
@@ -809,6 +989,8 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             standing_unreadable_agents,
             unregistered_agents,
             indeterminate_agents,
+            below_sample_gate_agents,
+            below_coverage_agents,
             "capacity scorer pass complete (capacity attestations authored → replication)"
         );
     }
@@ -1481,6 +1663,9 @@ async fn score_and_emit(
         "target_n_eff": cfg.target_n_eff,
         "min_feature_dim": cfg.min_feature_dim,
         "n_eff_floor": cfg.n_eff_floor,
+        // Recomputability (CC 3.4.5): the window is "this agent's latest
+        // `window` rows as of `asserted_at`"; a reader needs the width.
+        "window": cfg.window,
         // This producer SETS the signed instant on purpose, and the emit stamp
         // honours a producer-set value rather than overwriting it — which is the
         // case that honouring exists for. `asserted_at` here is FLOORED to a

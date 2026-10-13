@@ -417,8 +417,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
-        min_feature_dim: ciris_server::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
-        n_eff_floor: ciris_server::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+        ..ScorerConfig::default()
     };
     // CC#46: without the subject's `analyze` consent the scorer authors NOTHING
     // (and the refusal is a WARN naming the missing scope, not a panic) — so this
@@ -590,8 +589,7 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
-        min_feature_dim: ciris_server::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
-        n_eff_floor: ciris_server::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+        ..ScorerConfig::default()
     };
 
     // (1) baseline — the pass authors the subject's capacity row.
@@ -807,8 +805,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
-        min_feature_dim: ciris_server::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
-        n_eff_floor: ciris_server::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+        ..ScorerConfig::default()
     };
 
     // (1) GREEN — the subject consented, the fold is readable, a row is
@@ -1034,8 +1031,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
-        min_feature_dim: ciris_server::config_reconcile::DEFAULT_SCORER_MIN_FEATURE_DIM,
-        n_eff_floor: ciris_server::config_reconcile::DEFAULT_SCORER_N_EFF_FLOOR,
+        ..ScorerConfig::default()
     };
 
     // (1) GREEN — cold corpus, the read works, one row is authored, nothing

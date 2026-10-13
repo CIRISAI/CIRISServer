@@ -17,7 +17,7 @@
 //! Each tick [`resolve`]s every migrated knob (typed read with a baked default
 //! fallback) and `watch::Sender::send_replace`s the new [`ResolvedConfig`]:
 //!
-//!   - **scorer.{cadence_secs,window,sample_gate,target_n_eff,min_feature_dim,n_eff_floor}** — fully HOT: the
+//!   - **scorer.{cadence_secs,window,sample_gate,target_n_eff,min_feature_dim,n_eff_floor,active_lookback_days}** — fully HOT: the
 //!     scorer reads `*rx.borrow()` each cycle, so a `POST /v1/config` retunes the
 //!     next scoring pass with no restart.
 //!   - **replication.reconcile_secs** — HOT-ish: the replication reconciler reads
@@ -107,6 +107,13 @@ pub const DEFAULT_SCORER_MIN_FEATURE_DIM: u32 = 4;
 /// `n_eff_pr <= 1.0` scores 0.0 and the band runs linearly from the floor to
 /// `target_n_eff`.
 pub const DEFAULT_SCORER_N_EFF_FLOOR: f64 = 1.0;
+/// Default for `scorer.active_lookback_days` — an agent is ACTIVE, and scored,
+/// when it has a trace admitted within this many days. Each active agent is
+/// then read on its OWN window of the latest `scorer.window` rows
+/// (CIRISServer#758: one shared 500-row page gave each agent only its share,
+/// so nobody could reach the row gate once ~25 agents were live). On the
+/// canonical, 30 days = 122 agents, 7 days = 56; a per-agent read is ~20 ms.
+pub const DEFAULT_SCORER_ACTIVE_LOOKBACK_DAYS: i64 = 30;
 /// Default for `replication.reconcile_secs`. Was
 /// `CIRIS_SERVER_REPLICATION_RECONCILE_SECS`.
 pub const DEFAULT_REPLICATION_RECONCILE_SECS: u64 = 30;
@@ -206,6 +213,8 @@ pub const KEY_SCORER_TARGET_N_EFF: &str = "scorer.target_n_eff";
 pub const KEY_SCORER_MIN_FEATURE_DIM: &str = "scorer.min_feature_dim";
 /// `scorer.n_eff_floor` — the rank floor the capacity band starts from.
 pub const KEY_SCORER_N_EFF_FLOOR: &str = "scorer.n_eff_floor";
+/// `scorer.active_lookback_days` — an agent with a trace this recent is scored.
+pub const KEY_SCORER_ACTIVE_LOOKBACK_DAYS: &str = "scorer.active_lookback_days";
 /// `replication.reconcile_secs` — the replication reconciler cadence.
 pub const KEY_REPLICATION_RECONCILE_SECS: &str = "replication.reconcile_secs";
 /// `retention.cadence_secs` — how often the retention/eviction loop runs.
@@ -281,6 +290,8 @@ pub struct ResolvedConfig {
     pub scorer_min_feature_dim: u32,
     /// `scorer.n_eff_floor` (HOT). The rank floor the band starts from.
     pub scorer_n_eff_floor: f64,
+    /// `scorer.active_lookback_days` (HOT). Who counts as active this pass.
+    pub scorer_active_lookback_days: i64,
     /// `replication.reconcile_secs` (HOT-ish — applies next reconcile tick).
     pub replication_reconcile_secs: u64,
     /// `retention.cadence_secs` (HOT). How often the retention loop enforces the
@@ -354,6 +365,7 @@ impl Default for ResolvedConfig {
             scorer_target_n_eff: DEFAULT_SCORER_TARGET_N_EFF,
             scorer_min_feature_dim: DEFAULT_SCORER_MIN_FEATURE_DIM,
             scorer_n_eff_floor: DEFAULT_SCORER_N_EFF_FLOOR,
+            scorer_active_lookback_days: DEFAULT_SCORER_ACTIVE_LOOKBACK_DAYS,
             replication_reconcile_secs: DEFAULT_REPLICATION_RECONCILE_SECS,
             retention_cadence_secs: DEFAULT_RETENTION_CADENCE_SECS,
             retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
@@ -467,15 +479,22 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         .and_then(|s| s.f64(KEY_SCORER_TARGET_N_EFF))
         .filter(|t| t.is_finite() && *t > 0.0)
         .unwrap_or(d.scorer_target_n_eff);
+    // Bounded by the feature matrix's width: a minimum above FEATURE_DIM (11)
+    // is a configuration under which no window can ever be scored (Codex on
+    // #758), so it falls back rather than silencing the scorer for good.
     let scorer_min_feature_dim = snap
         .and_then(|s| s.i64(KEY_SCORER_MIN_FEATURE_DIM))
-        .filter(|g| (1..=1_000).contains(g))
+        .filter(|g| (1..=crate::scorer::n_eff::FEATURE_DIM as i64).contains(g))
         .map(|g| g as u32)
         .unwrap_or(d.scorer_min_feature_dim);
     let scorer_n_eff_floor = snap
         .and_then(|s| s.f64(KEY_SCORER_N_EFF_FLOOR))
         .filter(|f| f.is_finite() && *f >= 0.0)
         .unwrap_or(d.scorer_n_eff_floor);
+    let scorer_active_lookback_days = snap
+        .and_then(|s| s.i64(KEY_SCORER_ACTIVE_LOOKBACK_DAYS))
+        .filter(|d| (1..=3_650).contains(d))
+        .unwrap_or(d.scorer_active_lookback_days);
     // A band needs width: a target at or below the floor would divide by zero
     // or invert the band. Fall back to BOTH defaults rather than mixing an
     // operator's value with a default it was not chosen against.
@@ -586,6 +605,7 @@ pub async fn resolve(engine: &Arc<Engine>) -> ResolvedConfig {
         scorer_target_n_eff,
         scorer_min_feature_dim,
         scorer_n_eff_floor,
+        scorer_active_lookback_days,
         replication_reconcile_secs,
         retention_cadence_secs,
         retention_max_age_days,

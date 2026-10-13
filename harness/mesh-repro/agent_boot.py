@@ -91,20 +91,32 @@ def emit_synthetic_traces(engine, key_id: str, n: int) -> None:
     sealed = 0
     for i in range(n):
         tid = f"th_harness_{i:03d}"
+        # VARY the scorer's features per trace (CIRISServer#757 / #758). The
+        # scorer's coverage gate counts features with non-zero variance across
+        # the window (min_feature_dim = 4 in production); identical values on
+        # every trace gave feature_dim = 0, which only "scored" while a units
+        # bug signed 0.0 for every window. Five features vary here, on a
+        # non-collinear pattern, so the window is scoreable under the
+        # PRODUCTION gates and not under a fenced relaxation.
+        csdma = round(0.95 - 0.07 * (i % 5), 3)
+        dsdma = round(0.60 + 0.08 * ((i * 3) % 5), 3)
+        k_eff = round(1.5 + 0.5 * ((i * 2) % 4), 3)
+        corr = round(0.20 + 0.05 * ((i * 7) % 6), 3)
+        passed = (i % 3) != 2
         components = [
             ("THOUGHT_START", {"thought_type": "seed", "thought_depth": 1, "round_number": i, "task_priority": 0}),
             ("DMA_RESULTS", {
-                "csdma": {"plausibility_score": 0.9}, "dsdma": {"domain_alignment": 0.8, "domain": "harness"},
+                "csdma": {"plausibility_score": csdma}, "dsdma": {"domain_alignment": dsdma, "domain": "harness"},
                 "pdma": {"has_conflicts": False},
-                "csdma_plausibility_score": 0.9, "dsdma_domain_alignment": 0.8, "dsdma_domain": "harness",
+                "csdma_plausibility_score": csdma, "dsdma_domain_alignment": dsdma, "dsdma_domain": "harness",
             }),
             ("IDMA_RESULT", {
-                "k_eff": 2.0, "correlation_risk": 0.3, "fragility_flag": False, "phase": "healthy",
-                "idma_k_eff": 2.0, "idma_correlation_risk": 0.3, "idma_fragility_flag": False, "idma_phase": "healthy",
+                "k_eff": k_eff, "correlation_risk": corr, "fragility_flag": False, "phase": "healthy",
+                "idma_k_eff": k_eff, "idma_correlation_risk": corr, "idma_fragility_flag": False, "idma_phase": "healthy",
             }),
             ("CONSCIENCE_RESULT", {
-                "conscience_passed": True, "action_was_overridden": False,
-                "entropy_passed": True, "coherence_passed": True,
+                "conscience_passed": passed, "action_was_overridden": False,
+                "entropy_passed": True, "coherence_passed": passed,
                 "optimization_veto_passed": True, "epistemic_humility_passed": True,
             }),
             ("ACTION_RESULT", {
