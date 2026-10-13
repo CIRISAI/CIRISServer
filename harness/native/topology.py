@@ -20,14 +20,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .mesh import Mesh, MeshError, Node, wait_for
-from .scenarios import Steps, _BODY, _HANDSHAKE
+from .scenarios import Steps, _BODY, _HANDSHAKE, mint_accord_root
 
 Decl = Dict[str, Any]
 
-# What the synthetic anchor mints today (src/test_bless.rs): ONE key root, ONE
-# software holder, lifecycle active. Everything else is declared and refused.
+# What the harness mints today: the synthetic anchor's ONE key root, ONE
+# software holder, lifecycle active (src/test_bless.rs); and, since 0.5.225
+# (T8, CSD-129), an INFRASTRUCTURE root minted by the 0.5.220 ceremony over the
+# routes with three software holders (`scenarios.mint_accord_root`). Everything
+# else is declared and refused.
 BUILDABLE_ROOT = {"kind": "key", "holders": 1, "custody": "software_test",
                   "lifecycle": {"recipe": {}, "verdict": "rooted"}}
+BUILDABLE_ACCORD_ROOT = {"kind": "infrastructure", "custody": "software_test",
+                         "lifecycle": {"recipe": {"ceremony": "final_genesis"}, "verdict": "rooted"}}
+
+
+def _is_accord_root(r: Decl) -> bool:
+    return all(r.get(k) == v for k, v in BUILDABLE_ACCORD_ROOT.items())
 
 LAYERS = ["roots", "canonicals", "nodes", "persons", "relations", "actor", "negatives"]
 LAST_STEPS: Any = None  # the running build's Steps, so a failure can name its first failing layer
@@ -79,6 +88,12 @@ def check(t: Decl) -> List[str]:
         if isinstance(lc, str):
             raise Unrealizable(f"root {r['id']}: lifecycle is a row recipe + asserted verdict, e.g. "
                                "{recipe: {resignations: 1}, verdict: stalled}, not the flag {lc!r}")
+        if _is_accord_root(r):
+            f, m = r.get("founders", {}), r.get("quorum", 0)
+            if (f.get("seated"), m) != (3, 2):
+                not_yet.append(f"root {r['id']}: founders.seated={f.get('seated')} quorum={m} "
+                               "(the ceremony mints exactly three seated holders at quorum:2/3)")
+            continue
         for k, v in BUILDABLE_ROOT.items():
             if r.get(k, v) != v:
                 not_yet.append(f"root {r['id']}: {k}={r.get(k)!r} (the anchor mints {v!r})")
@@ -243,8 +258,21 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     LAST_STEPS = step
     N: Dict[str, Node] = {}
 
-    # 1–2. roots + canonicals: the synthetic anchor's ceremony, one canonical.
+    # 1–2. roots + canonicals: the synthetic anchor's ceremony, one canonical —
+    #      or, for an infrastructure root (T8), the 0.5.220 ceremony over the
+    #      routes with three software holders, and the canonical rebooted on it.
+    roots_by_id = _ids(t, "roots")
     for c in t["canonicals"]:
+        root = roots_by_id[c["holds"]]
+        if _is_accord_root(root):
+            fuse = (root.get("charter") or {}).get("halt_fuse_secs")
+            if fuse:
+                mesh.base_env.setdefault("CIRIS_TEST_HALT_FUSE_SECS", str(fuse))
+            N[c["id"]], anchor, _done = mint_accord_root(mesh, args, step)
+            step("root+canonical", layer="roots/canonicals", canonical=c["id"], holds=c["holds"],
+                 proves="the ceremony minted the accord root; the canonical boots on the bundle, claimed and announced",
+                 holders=[h["key_id"] for h in anchor["holders"]])
+            continue
         N[c["id"]] = mesh.start_canonical()
         step("root+canonical", layer="roots/canonicals", canonical=c["id"], holds=c["holds"],
              proves="the anchor's ceremony ran: charter root→root, grant root→node, trust edge node→root",

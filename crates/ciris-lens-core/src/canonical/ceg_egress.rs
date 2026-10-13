@@ -108,7 +108,7 @@ pub struct DetectionAttestation {
     /// per `cohort_scope` policy (e.g. `community` attestations are only
     /// visible to `ciris-canonical` members). For federation publication,
     /// this MUST be `community` or broader (never `self` / `family`,
-    /// which are structurally invisible — `cohort_scope::suppresses_holds_bytes`).
+    /// which are structurally invisible — `cohort_scope::is_structurally_invisible`).
     pub cohort_scope: String,
     /// RFC-3339 timestamp of the detection event.
     pub ts: String,
@@ -147,7 +147,7 @@ impl DetectionAttestation {
 /// # Cohort-scope gate
 ///
 /// This function skips any event whose `cohort_scope` would be
-/// `self` or `family` (`cohort_scope::suppresses_holds_bytes == true`),
+/// `self` or `family` (`cohort_scope::is_structurally_invisible == true`),
 /// since those are structurally invisible and MUST NOT enter the
 /// federation publication path. Only `community` / `affiliations` /
 /// `species` / `biosphere` / `federation` events are included.

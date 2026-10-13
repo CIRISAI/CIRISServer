@@ -1109,6 +1109,13 @@ struct CreateInvocationRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs (PIN, slot, …).
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1126,9 +1133,23 @@ async fn resolve_holder_signature(
     holder_key_id: Option<&str>,
     usb_path: Option<&str>,
     pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    test_seed: Option<&str>,
 ) -> Result<ThresholdSignature, Response> {
     if let Some(sig) = submitted {
         return Ok(sig);
+    }
+    // The harness's software holder (test anchor only; refused on a production
+    // build and outside CIRIS_TESTING_MODE).
+    #[cfg(feature = "test-anchor")]
+    if let Some(seed) = test_seed {
+        return test_holder_sign_invocation(holder_key_id, seed, invocation).await;
+    }
+    #[cfg(not(feature = "test-anchor"))]
+    if test_seed.is_some() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "test_holder_seed_b64 is accepted only on a test-anchor build",
+        ));
     }
     let holder = holder_key_id.map(str::trim).filter(|s| !s.is_empty());
     let usb = usb_path.map(str::trim).filter(|s| !s.is_empty());
@@ -1147,6 +1168,71 @@ async fn resolve_holder_signature(
 /// ML-DSA-65 as a `HardwareRootedIdentity` and calling its bound signer. The
 /// `member_id` is the identity's federation `key_id` (see [`co_sign_accord_family`]
 /// for the same derivation). `pkcs11`-gated.
+/// TEST ANCHOR ONLY — sign an invocation as a software holder derived from a
+/// 32-byte seed, exactly as persist's `Identity::from_seeds` derives the
+/// final-genesis dry-run holders (Ed25519 from the seed, ML-DSA-65 from
+/// `test_anchor_mldsa_seed(seed)`), so the signature verifies against the
+/// roster that ceremony seated. Fenced twice: the feature AND
+/// `CIRIS_TESTING_MODE=true`, like `/v1/accord/final-genesis/sign`.
+#[cfg(feature = "test-anchor")]
+async fn test_holder_sign_invocation(
+    holder_key_id: Option<&str>,
+    seed_b64: &str,
+    invocation: &Invocation,
+) -> Result<ThresholdSignature, Response> {
+    use base64::Engine as _;
+    use ciris_keyring::PqcSigner as _;
+    use ed25519_dalek::Signer as _;
+    if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "a software holder seed is accepted only with CIRIS_TESTING_MODE=true",
+        ));
+    }
+    let Some(holder) = holder_key_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "test_holder_seed_b64 needs the holder's key_id",
+        ));
+    };
+    let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(seed_b64.trim())
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "test_holder_seed_b64 must be base64 of exactly 32 bytes",
+            )
+        })?;
+    let ed = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let mldsa = ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+        &ciris_persist::federation::genesis::test_anchor_mldsa_seed(&seed),
+        format!("{holder}-pqc"),
+    )
+    .map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            &format!("software holder ml-dsa: {e}"),
+        )
+    })?;
+    let canonical = invocation.canonical_bytes();
+    let ed_sig = ed.sign(&canonical).to_bytes();
+    let mut bound = canonical.clone();
+    bound.extend_from_slice(&ed_sig);
+    let pqc_sig = mldsa.sign(&bound).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("software holder sign: {e}"),
+        )
+    })?;
+    Ok(ThresholdSignature {
+        member_id: holder.to_string(),
+        ed25519_signature_base64: base64::engine::general_purpose::STANDARD.encode(ed_sig),
+        mldsa65_signature_base64: Some(base64::engine::general_purpose::STANDARD.encode(&pqc_sig)),
+    })
+}
+
 #[cfg(feature = "pkcs11")]
 async fn hardware_sign_invocation(
     holder_key_id: &str,
@@ -1240,6 +1326,7 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1262,6 +1349,13 @@ struct DrillRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1312,6 +1406,7 @@ async fn initiate_drill(State(st): State<AccordState>, body: axum::body::Bytes) 
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1335,6 +1430,13 @@ struct HaltRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1388,6 +1490,7 @@ async fn initiate_halt(State(st): State<AccordState>, body: axum::body::Bytes) -
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1405,6 +1508,7 @@ async fn open_invocation(
     holder_key_id: Option<String>,
     usb_path: Option<String>,
     pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    test_seed: Option<String>,
 ) -> Response {
     let roster = match accord_roster(&st.engine).await {
         Ok(r) => r,
@@ -1417,6 +1521,7 @@ async fn open_invocation(
         holder_key_id.as_deref(),
         usb_path.as_deref(),
         pkcs11,
+        test_seed.as_deref(),
     )
     .await
     {
@@ -1486,6 +1591,13 @@ struct AnnounceRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1559,6 +1671,7 @@ async fn initiate_announce(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id.as_deref(),
         req.mldsa_usb_path.as_deref(),
         &req.pkcs11,
+        req.test_holder_seed_b64.as_deref(),
     )
     .await
     {
@@ -1733,6 +1846,13 @@ struct ConcurRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1767,6 +1887,7 @@ async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id.as_deref(),
         req.mldsa_usb_path.as_deref(),
         &req.pkcs11,
+        req.test_holder_seed_b64.as_deref(),
     )
     .await
     {
@@ -2853,6 +2974,7 @@ mod tests {
             None,
             None,
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect("a submitted signature is returned verbatim");
@@ -2871,6 +2993,7 @@ mod tests {
             None,
             None,
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("no signature + no hardware inputs must be rejected");
@@ -2888,6 +3011,7 @@ mod tests {
             Some("   "),
             Some(""),
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("blank holder/usb inputs must be rejected");
@@ -2924,6 +3048,7 @@ mod tests {
             Some("accord-holder-1"),
             Some("/tmp/usb"),
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("the hardware path needs pkcs11");

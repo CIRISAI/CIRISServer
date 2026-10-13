@@ -525,7 +525,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
 /// inherently must CROSS to the peer: the agent (sender) reads
 /// `delegates_to(root → canonical, infra:serve)` from ITS directory, so canonical
 /// must replicate it. `federation` is the scope that replicates (`self`/`family`
-/// suppress `holds_bytes` and stay local — `cohort_scope::suppresses_holds_bytes`).
+/// suppress `holds_bytes` and stay local — `cohort_scope::is_structurally_invisible`).
 async fn perform_trust_root_ceremony(
     engine: &std::sync::Arc<Engine>,
     test_root: &ciris_verify_core::self_at_login::HybridSigningIdentity,

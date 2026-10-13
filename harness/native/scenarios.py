@@ -330,22 +330,14 @@ def _owned_canonical_baseline(mesh: Mesh, args: Any, step: "Steps") -> Record:
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "baseline": True}
 
 
-def final_genesis(mesh: Mesh, args: Any) -> Record:
-    """Mint the root through the ceremony ROUTES with three software holders,
-    then boot a fleet on that bundle as its baked genesis — production
-    admission, no locally minted trust rows anywhere."""
-    step = Steps("""
-FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GENESIS.md §3).
-  trust root: a THREE-holder test anchor (persist's software ceremony holders); every node runs
-              CIRIS_TEST_NO_CEREMONY=true, so it holds only what it was SEEDED or SENT.
-  mint:       on the canonical's own loopback routes — plan (serve node = the canonical's real
-              key), each holder signs twice, finish → ONE v3 bundle.
-  boot:       canonical + two person nodes restart/boot with that bundle installed as the baked
-              genesis (CIRIS_TEST_GENESIS_BUNDLE), peer over the production routes.
-  proves:     the bundle verifies at boot on every node, the root is valid, ciris-canonical is in
-              force with the canonical seated, and the people's nodes are Rooted with it.""")
-    if os.environ.get("FINAL_GENESIS_BASELINE") == "1":
-        return _owned_canonical_baseline(mesh, args, step)
+def mint_accord_root(mesh: Mesh, args: Any, step: "Steps"):
+    """Layers 1-2 of the T8 catalogue entry: the 0.5.220 ceremony over the
+    routes with THREE software holders, and a canonical rebooted on the minted
+    bundle as its baked genesis, claimed and announced. Returns
+    (canonical, anchor, done): `anchor["holders"]` carries each holder's
+    `key_id` and `seed_b64`, which the test-anchor accord doors accept as
+    `test_holder_seed_b64`; every node the mesh adds afterwards boots on the
+    bundle (`mesh.base_env[CIRIS_TEST_GENESIS_BUNDLE]`)."""
     anchor_bin = mesh.binary.parent / "examples" / "test_ceremony_anchor"
     if not anchor_bin.is_file():
         raise MeshError(f"no {anchor_bin}: cargo build --features test-anchor --example test_ceremony_anchor")
@@ -409,6 +401,14 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
     c.announce()
     c.self_record()
     step("canonical_claimed", owner=c.owner_key_id)
+    mesh.accord_holders = anchor["holders"]
+    return c, anchor, done
+
+
+def mint_accord_mesh(mesh: Mesh, args: Any, step: "Steps"):
+    """The root plus two people (alice, bob) claimed, announced and peered —
+    the FINAL_GENESIS scenario's layers 1-3 and the halt scenario's fixture."""
+    c, anchor, done = mint_accord_root(mesh, args, step)
     a = mesh.add("alice")
     b = mesh.add("bob")
     a.claim("alice-person")
@@ -421,6 +421,26 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
     a.peer_with(b)
     b.peer_with(a)
     step("people_booted_claimed_peered")
+    return c, a, b, anchor, done
+
+
+def final_genesis(mesh: Mesh, args: Any) -> Record:
+    """Mint the root through the ceremony ROUTES with three software holders,
+    then boot a fleet on that bundle as its baked genesis — production
+    admission, no locally minted trust rows anywhere."""
+    step = Steps("""
+FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GENESIS.md §3).
+  trust root: a THREE-holder test anchor (persist's software ceremony holders); every node runs
+              CIRIS_TEST_NO_CEREMONY=true, so it holds only what it was SEEDED or SENT.
+  mint:       on the canonical's own loopback routes — plan (serve node = the canonical's real
+              key), each holder signs twice, finish → ONE v3 bundle.
+  boot:       canonical + two person nodes restart/boot with that bundle installed as the baked
+              genesis (CIRIS_TEST_GENESIS_BUNDLE), peer over the production routes.
+  proves:     the bundle verifies at boot on every node, the root is valid, ciris-canonical is in
+              force with the canonical seated, and the people's nodes are Rooted with it.""")
+    if os.environ.get("FINAL_GENESIS_BASELINE") == "1":
+        return _owned_canonical_baseline(mesh, args, step)
+    c, a, b, anchor, done = mint_accord_mesh(mesh, args, step)
 
     # 4. What every node now holds.
     verdict: Record = {}
@@ -472,8 +492,204 @@ FINAL GENESIS — the 0.5.220 ceremony, minted and then booted on (FSD/FINAL_GEN
             "first_failure": step.first_failure}
 
 
+
+
+# ── CSD-129: drill, halt, announce — end to end (federation → safety, T8) ───
+
+
+def _inv(kind: str, inv_id: str, payload: bytes, **binding: str) -> Record:
+    """An `accord:invoke` / `accord:lifecycle` row in the shape the server
+    deserializes (verify 20.1 `Invocation`): a holder-minted nonce, a short
+    validity, the payload digest, and the ONE binding line a lifecycle kind
+    carries (`resumes_halt_id` / `confirms_halt_id`)."""
+    import base64
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    row: Record = {
+        "invocation_kind": kind,
+        "invocation_id": inv_id,
+        "nonce": base64.b64encode(os.urandom(32)).decode(),
+        "asserted_at": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "valid_until": (now + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "payload_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    row.update(binding)
+    return row
+
+
+def halt(mesh: Mesh, args: Any) -> Record:
+    """CSD-129 — the kill switch end to end on the T8 topology (CC 4.2.1.1 /
+    4.2.1.3 as amended by CIRISConstitution#146, rc7)."""
+    fuse = int(os.environ.get("CIRIS_TEST_HALT_FUSE_SECS", "20"))
+    step = Steps(f"""
+CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T8).
+  root:     the ceremony-minted humanity accord, three software holders, quorum 2/3;
+            charter fuse overridden to {fuse} s (CIRIS_TEST_HALT_FUSE_SECS, test anchor only).
+  nodes:    the canonical (serve) + alice + bob, claimed, announced, peered, Rooted.
+  steps:    drill (one holder) → announce (one holder) → FIRE (one holder) → every node
+            latched, still serving, ingest refused 423 → CONFIRM (majority, within the fuse)
+            → RESUME (majority, resumes_halt_id) → a second FIRE lapses after the fuse and a
+            late confirmation confirms nothing.
+  asserts:  CC 4.2.1.1 one-row fire / idempotent latch / agent pause with zero data
+            disruption / the fuse; CC 4.2.1.3 confirmed + active at a strict majority;
+            4.2.1.2 a drill never halts; the node's ONE gate (src/halt_gate.rs) refuses
+            agent reasoning at the ingest door while the latch stands.""")
+    mesh.base_env["CIRIS_TEST_HALT_FUSE_SECS"] = str(fuse)
+    c, a, b, anchor, _done = mint_accord_mesh(mesh, args, step)
+    holders = anchor["holders"]
+    nodes = [c, a, b]
+    ok = True
+
+    def status(n: Node) -> Record:
+        return n.must("GET", "/v1/accord/halt-status")
+
+    def latched_everywhere(expect: bool) -> bool:
+        return all(bool(status(n)["halted"]) is expect for n in nodes)
+
+    def sign(h: Record) -> Record:
+        return {"key_id": h["key_id"], "test_holder_seed_b64": h["seed_b64"]}
+
+    def deliver_everywhere(obj: Record, skip: Node) -> Dict[str, Record]:
+        """Publication rides any channel (CC 4.2.1.1): the row is also handed to
+        every node directly, out of band, beside the peer fan-out."""
+        return {n.name: n.must("POST", "/v1/accord/message", obj) for n in nodes if n is not skip}
+
+    for n in nodes:
+        if status(n)["halted"] is not False:
+            ok = False
+            step.fail(f"baseline_halted:{n.name}", "a fresh node reads halted before any row", [n], r"HALT")
+    step("baseline", proves="no node is halted", nodes=[n.name for n in nodes])
+
+    # 1. DRILL — one holder rehearses the fire path; nothing latches (4.2.1.2).
+    drill = _inv("drill", "csd129-drill", b"csd129 drill")
+    r = c.must("POST", "/v1/accord/drill", {"invocation": drill, **sign(holders[0])})
+    deliver_everywhere(r.get("invocation") or r, c)
+    events = c.must("GET", "/v1/accord/events")
+    drilled = any(e.get("invocation_id") == "csd129-drill" for e in events.get("drills", []))
+    if not (r.get("quorum_met") is True and drilled and latched_everywhere(False)):
+        ok = False
+        step.fail("drill", "a one-holder drill must complete, surface, and halt nobody", [c], r"DRILL|drill",
+                  cc="CC 4.2.1.2", got=r)
+    step("drill", proves="one holder completes a drill; it is surfaced; no latch anywhere", quorum_met=r.get("quorum_met"))
+
+    # 2. ANNOUNCE — one holder's notify, visibly distinct from a halt.
+    msg = "CSD-129 drill of the accord notify channel"
+    notify = _inv("notify", "csd129-notify", msg.encode())
+    r = c.must("POST", "/v1/accord/announce", {"invocation": notify, "message": msg, **sign(holders[1])})
+    events = c.must("GET", "/v1/accord/events")
+    announced = any(e.get("invocation_id") == "csd129-notify" for e in events.get("announcements", []))
+    if not (announced and latched_everywhere(False)):
+        ok = False
+        step.fail("announce", "a one-holder notify must surface as an announcement and halt nobody", [c], r"ANNOUNCE|notify", cc="CC 4.2.1.2")
+    step("announce", proves="a notify is an announcement, never a halt")
+
+    # 3. FIRE — one holder, from alice (its peer fan-out reaches the canonical),
+    #    then handed to bob out of band.
+    fire = _inv("constitutional", "csd129-halt-1", b"csd129 halt 1")
+    r = a.must("POST", "/v1/accord/halt", {"invocation": fire, **sign(holders[0])})
+    obj = r.get("invocation") or r
+    delivered = deliver_everywhere(obj, a)
+    if r.get("halted") is not True or not latched_everywhere(True):
+        ok = False
+        step.fail("fire", "ONE holder's constitutional row must latch on every node that holds the root",
+                  nodes, r"HALT", cc="CC 4.2.1.1", got=r, delivered=delivered)
+    st = {n.name: status(n) for n in nodes}
+    step("fire", proves="one row, fired on receipt, latched everywhere; each node counts its own fuse",
+         lapses_at={k: v.get("halt", {}).get("lapses_at") for k, v in st.items()},
+         received_at={k: v.get("halt", {}).get("received_at") for k, v in st.items()})
+
+    # 3a. Zero data disruption: the node still serves.
+    serving = {n.name: n.api("GET", "/health")[0] for n in nodes}
+    if any(code != 200 for code in serving.values()):
+        ok = False
+        step.fail("serving_while_halted", "a halt pauses agents; the node must keep serving", nodes, r"halt", cc="CC 4.2.1.1", health=serving)
+    step("serving_while_halted", proves="/health answers 200 on every halted node", health=serving)
+
+    # 3b. The ONE gate: agent reasoning is refused at the ingest door.
+    batch = json.dumps({"events": [{"trace": {"trace_id": "csd129-trace", "components": [
+        {"event_type": "LLM_CALL", "data": {"model": "gpt-4o"}}]}}]}).encode()
+    code, body = c.api("POST", "/v1/ingest/accord-events", json.loads(batch))
+    if code != 423 or (body or {}).get("error") != "accord_halt_in_effect":
+        ok = False
+        step.fail("gate_refuses_ingest", "while the latch stands, the ingest door must refuse 423 accord_halt_in_effect",
+                  [c], r"halt gate|HTTP ingest REFUSED", cc="CC 4.2.1.1", got={"status": code, "body": body})
+    step("gate_refuses_ingest", proves="the node's absolute gate refuses agent reasoning", status=code)
+
+    # 3c. Idempotent: the same row again changes nothing.
+    again = c.must("POST", "/v1/accord/message", obj)
+    step("replay", proves="a replayed halt re-latches idempotently", halted=again.get("halted"))
+
+    # 4. CONFIRM — a strict majority (B+C) names the halt within the fuse.
+    confirm = _inv("lifecycle:confirmed", "csd129-confirm-1", b"csd129 confirm", confirms_halt_id="csd129-halt-1")
+    opened = c.must("POST", "/v1/accord/invocation", {"invocation": confirm, **sign(holders[1])})
+    concurred = c.must("POST", "/v1/accord/invocation/concur",
+                       {"invocation_kind": "lifecycle:confirmed", "invocation_id": "csd129-confirm-1", **sign(holders[2])})
+    cobj = concurred.get("invocation") or concurred
+    delivered = deliver_everywhere(cobj, c)
+    st = {n.name: status(n) for n in nodes}
+    confirmed = all(v.get("halted") is True and v.get("halt", {}).get("lapses_at") is None for v in st.values())
+    if opened.get("quorum_met") is not False or not confirmed:
+        ok = False
+        step.fail("confirm", "one signature must not confirm; a strict majority within the fuse must, everywhere",
+                  nodes, r"CONFIRMED|confirm", cc="CC 4.2.1.3", opened=opened.get("quorum_met"), delivered=delivered)
+    step("confirm", proves="a lone signature confirms nothing; the majority keeps the halt past its fuse")
+
+    # 5. RESUME — a strict majority naming THIS halt ends it, everywhere.
+    wrong = _inv("lifecycle:active", "csd129-resume-wrong", b"csd129 resume", resumes_halt_id="csd129-other")
+    c.must("POST", "/v1/accord/invocation", {"invocation": wrong, **sign(holders[1])})
+    w = c.must("POST", "/v1/accord/invocation/concur",
+               {"invocation_kind": "lifecycle:active", "invocation_id": "csd129-resume-wrong", **sign(holders[2])})
+    if status(c)["halted"] is not True:
+        ok = False
+        step.fail("resume_wrong_halt", "a resumption naming another halt must release nothing", [c], r"RELEASED", cc="CC 4.2.1.3", got=w)
+    step("resume_wrong_halt", proves="resumes_halt_id binds the resumption to one halt")
+    resume = _inv("lifecycle:active", "csd129-resume-1", b"csd129 resume", resumes_halt_id="csd129-halt-1")
+    c.must("POST", "/v1/accord/invocation", {"invocation": resume, **sign(holders[1])})
+    r = c.must("POST", "/v1/accord/invocation/concur",
+               {"invocation_kind": "lifecycle:active", "invocation_id": "csd129-resume-1", **sign(holders[2])})
+    deliver_everywhere(r.get("invocation") or r, c)
+    if not latched_everywhere(False):
+        ok = False
+        step.fail("resume", "a strict majority naming the halt must end it on every node", nodes, r"RELEASED", cc="CC 4.2.1.3")
+    code, body = c.api("POST", "/v1/ingest/accord-events", json.loads(batch))
+    step("resume", proves="the latch is gone everywhere and the ingest door opens again", ingest_status=code)
+
+    # 6. THE FUSE — a lone halt lapses `fuse` seconds after each node received it.
+    fire2 = _inv("constitutional", "csd129-halt-2", b"csd129 halt 2")
+    r = b.must("POST", "/v1/accord/halt", {"invocation": fire2, **sign(holders[2])})
+    deliver_everywhere(r.get("invocation") or r, b)
+    if not latched_everywhere(True):
+        ok = False
+        step.fail("fire2", "the second halt must latch everywhere", nodes, r"HALT", cc="CC 4.2.1.1")
+    try:
+        wait_for("the lone halt to lapse everywhere", lambda: latched_everywhere(False), fuse + 15, every=1.0)
+        step("fuse_lapsed", proves=f"an unconfirmed halt lapses {fuse} s after receipt, on each node's own clock",
+             lapsed={n.name: status(n).get("lapsed") for n in nodes})
+    except MeshError:
+        ok = False
+        step.fail("fuse_lapsed", "an unconfirmed halt must lapse after the fuse", nodes, r"LAPSED|lapse", cc="CC 4.2.1.1 the fuse")
+    late = _inv("lifecycle:confirmed", "csd129-confirm-late", b"csd129 confirm late", confirms_halt_id="csd129-halt-2")
+    c.must("POST", "/v1/accord/invocation", {"invocation": late, **sign(holders[1])})
+    r = c.must("POST", "/v1/accord/invocation/concur",
+               {"invocation_kind": "lifecycle:confirmed", "invocation_id": "csd129-confirm-late", **sign(holders[2])})
+    if status(c)["halted"] is not False:
+        ok = False
+        step.fail("late_confirm", "a confirmation after the fuse confirms nothing", [c], r"halt_fuse_lapsed", cc="CC 4.2.1.3", got=r)
+    step("late_confirm", proves="a confirmation after the fuse confirms nothing; a fresh halt is fired instead")
+
+    not_covered = [
+        "an agent process on a node whose act gate reads /v1/accord/halt-status (CIRISAgent#1231)",
+        "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
+        "a real YubiKey holder (software holders here)",
+    ]
+    step("not_covered", checks=not_covered)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "fuse_secs": fuse,
+            "not_covered": not_covered, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
+    "halt": halt,
     "chat": chat,
     "corpus": corpus,
 }

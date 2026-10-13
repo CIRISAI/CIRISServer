@@ -101,6 +101,53 @@ same latch).
 has left; the mandatory visual distinction between a notify and a halt (CC 4.2.1.2) is the
 client's.
 
+## 4a. The node's ONE absolute gate (Eric, 2026-10-13: "the latch reader is in the node")
+
+`src/halt_gate.rs` is the single predicate every door an agent's reasoning or act
+crosses asks, on every call, with the fuse computed for that instant:
+
+| door | ask | refusal |
+|---|---|---|
+| HTTP trace ingest (`ingest_http`) | `halt_gate::in_effect()` | `423 LOCKED`, `error: accord_halt_in_effect`, counted in the ingest ledger |
+| relay opaque trace batches (lens-core `LensCoreHandler::persist_batch`) | `halt_gate::halted()` (the host-installed hook) | dropped, WARN with the token |
+| local capture (lens-core `CaptureClient::capture_event`, PyO3 capture) | same hook | `ClientError::HaltInEffect` |
+| the agent's own act gate | `GET /v1/accord/halt-status` → `halted` | the agent refuses the act and records it as its `ACTION_RESULT` (CC (c), CIRISAgent#1231) |
+
+Absolute: no caller, role, tier or flag reads past it (CC 4.2.1.3); it ends only as
+the latch ends. Not cached: the latch is one small file and the act cadence is the
+bound CC sets on a reader. Fail-closed: an unreadable latch reads as in effect. It
+is installed at compose before any door opens and asserted installed; a source scan
+(`tests/halt_gate.rs`) pins every door's ask and the installer. Nothing on the
+serving side reads it (zero data disruption).
+
+What the node cannot do alone: an agent's effectful acts that never cross the node
+(an adapter speaking to Discord) are stopped only by the agent's reader. The node
+serves that reader; the agent's half is CIRISAgent#1231 and rc8's lead item.
+
+## 4b. Test anchor doors (never on a production build)
+
+- `test_holder_seed_b64` on `/v1/accord/{invocation,drill,halt,announce,invocation/concur}`
+  (feature `test-anchor` AND `CIRIS_TESTING_MODE=true`): sign as the software holder
+  derived from the seed, exactly as the final-genesis dry-run holders are derived.
+- `CIRIS_TEST_HALT_FUSE_SECS` (`CIRIS_TESTING_MODE=true`): the fuse, because the
+  ceremony's charter names none and a ladder cannot wait a day.
+
+## 4c. Where it is proven
+
+- `tests/accord.rs`: one holder fires and the node keeps serving; a lone
+  `lifecycle:active` releases nothing and a majority naming the halt releases it; a
+  majority `lifecycle:confirmed` within the fuse keeps the halt and after it confirms
+  nothing; thresholds are verify's (source scan + table).
+- `tests/halt_gate.rs`: the ingest door refuses 423 while the latch stands and opens
+  when it ends; every door asks the gate; compose installs it.
+- `harness/native`: catalogue entry **T8** (`topologies/t8-accord-halt.yaml`, built by
+  the 0.5.220 ceremony with three software holders) and the **`halt`** scenario =
+  CSD-129 "Drill, halt, announce: end to end" (federation → safety): drill, announce,
+  fire from one node and hand out of band to the others, every node latched and still
+  serving, ingest refused, confirm, resume, a short-fused halt lapsing, a late
+  confirmation refused. Not covered yet: an agent process whose act gate reads the
+  status (CIRISAgent#1231); `rows.jsonl` per node for CC's offline replay (T8 iii).
+
 ## 5. What is removed
 
 - `AccordHalt::exit_on_halt` and the `exit(42)` / `abort()` paths. A node does not stop.

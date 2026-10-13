@@ -533,6 +533,18 @@ fn policy_m(consensus_protocol: &str) -> Option<usize> {
 /// conformant with the 24-hour fuse).
 #[must_use]
 pub fn baked_halt_fuse_secs() -> u64 {
+    // TEST-ANCHOR-FENCED override (CIRIS_TESTING_MODE=true only): the ceremony
+    // routes mint a charter with no `halt_fuse_secs`, and a ladder cannot wait
+    // 24 h to watch a lone halt lapse. A production node never reads this.
+    if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true") {
+        if let Some(secs) = std::env::var("CIRIS_TEST_HALT_FUSE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+        {
+            return secs;
+        }
+    }
     charter_of(ciris_persist::federation::genesis::canonical_genesis_bundle())
         .and_then(|c| c.attestation_envelope.get("halt_fuse_secs"))
         .and_then(serde_json::Value::as_u64)

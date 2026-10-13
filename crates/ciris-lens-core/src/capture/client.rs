@@ -130,6 +130,16 @@ pub enum ClientError {
     )]
     MockLlmRefused,
 
+    /// A constitutional halt is in effect on this node (CC 4.2.1.1, rc7): no
+    /// agent reasoning is admitted through any door while it stands. The act
+    /// the trace records was refused by the host's gate; this is the capture
+    /// door saying the same thing.
+    #[error(
+        "{}: a constitutional halt is in effect on this node",
+        crate::halt_gate::REFUSAL_HALT_IN_EFFECT
+    )]
+    HaltInEffect,
+
     /// Consent resolution via the Engine's federation directory failed
     /// (e.g. a directory read error). Stringified to avoid coupling to
     /// [`ConsentError`] variants at the public API boundary.
@@ -738,6 +748,17 @@ impl CaptureClient {
                     deployment_profile.as_ref(),
                 )
                 .await?;
+
+                // The constitutional halt (CC 4.2.1.1, rc7), asked before any
+                // door admits a byte: the host's gate answers for this instant.
+                if crate::halt_gate::halted() {
+                    tracing::warn!(
+                        trace_id = %trace_id,
+                        refusal = crate::halt_gate::REFUSAL_HALT_IN_EFFECT,
+                        "capture REFUSED — a constitutional halt is in effect on this node"
+                    );
+                    return Err(ClientError::HaltInEffect);
+                }
 
                 // The third door (Codex on #753): a locally captured batch never
                 // passes the HTTP or relay ingest, so the mock refusal runs here

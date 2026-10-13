@@ -1040,6 +1040,13 @@ impl PyLensClient {
                         )
                         .map_err(|e| PyRuntimeError::new_err(format!("build_batch_bytes: {e}")))?;
 
+                        // 3d''. The constitutional halt, before anything (CC 4.2.1.1, rc7).
+                        if crate::halt_gate::halted() {
+                            return Err(PyRuntimeError::new_err(
+                                crate::capture::ClientError::HaltInEffect.to_string(),
+                            ));
+                        }
+
                         // 3d'. The mock-LLM refusal, before the tee and the persist:
                         // this path calls the Python engine directly and passes
                         // neither ingest door (Codex on #753, CIRISAgent#1244).

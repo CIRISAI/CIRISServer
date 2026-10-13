@@ -170,6 +170,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // node. The latch is READ here (and a presented offline release token
     // consumed), never a reason to refuse to start; the agent act gate reads
     // it through /v1/accord/halt-status.
+    // THE ONE ABSOLUTE GATE every agent door asks (src/halt_gate.rs): installed
+    // before any door exists, and asserted installed, so a build that forgot
+    // the hook cannot serve agents past a halt.
+    crate::halt_gate::install(cfg.home.clone());
+    assert!(
+        crate::halt_gate::is_installed(),
+        "the constitutional-halt gate must be installed before any door opens"
+    );
     if let Err(e) = crate::accord_halt::load_halt_latch(&cfg.home) {
         tracing::warn!(
             error = %format!("{e:#}"),

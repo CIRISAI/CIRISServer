@@ -267,6 +267,14 @@ pub mod field_conformance;
 /// `scores` rows (latest-wins by version). Public so the integration test
 /// (`tests/graph_config.rs`) can drive the store directly.
 pub mod graph_config;
+/// HTTP trace-ingest endpoint (the `listen+1` relay runbook §3.4 promised) — the
+/// legacy lens-python path `POST /lens-api/api/v1/accord/events` (+ a canonical
+/// alias) re-opened on the read-API listener. Deserializes the agent emitter's
+/// signed `AccordEventsBatch` JSON and feeds it to the SAME verify-before-persist
+/// path the Reticulum relay uses (`Engine::receive_and_persist`); the CEG
+/// signature is the auth, so it is unauthenticated like the relay. Public so the
+/// integration test (`tests/ingest_http.rs`) can drive the router directly.
+pub mod halt_gate;
 /// **CC 4.2.2.1** (CIRISServer#159, closes CC 8.3.1 R5) — the hardware-class
 /// admission gate. `federation_keys.hardware_class` (which rides inside
 /// `attestation_evidence`) was an UNCHECKED SELF-REPORT on every admission path
@@ -304,13 +312,6 @@ mod identity_gate;
 /// replaces the per-module hand-rolled `new_uuid_v4` copies.
 pub mod ids;
 mod import;
-/// HTTP trace-ingest endpoint (the `listen+1` relay runbook §3.4 promised) — the
-/// legacy lens-python path `POST /lens-api/api/v1/accord/events` (+ a canonical
-/// alias) re-opened on the read-API listener. Deserializes the agent emitter's
-/// signed `AccordEventsBatch` JSON and feeds it to the SAME verify-before-persist
-/// path the Reticulum relay uses (`Engine::receive_and_persist`); the CEG
-/// signature is the auth, so it is unauthenticated like the relay. Public so the
-/// integration test (`tests/ingest_http.rs`) can drive the router directly.
 pub mod ingest_http;
 /// **`revoked_after` enforcement** (CIRISServer#355) — the consumer-side read of
 /// persist's time-bounded de-admission. One place decides whether a key's claim
