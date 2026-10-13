@@ -1578,15 +1578,15 @@ async fn score_and_emit(
     // then such an agent scores only on a legacy machine-authored grant.
     let stance =
         resolve_analyze_stance_via_steward(engine, node_key_id, attested_key_id, now).await;
-    match stance {
-        Ok(ConsentState::Granted) => {}
-        Ok(declined) => return Ok(ScoreOutcome::NotConsented { stance: declined }),
+    let consent_basis = match stance {
+        Ok((ConsentState::Granted, basis)) => basis,
+        Ok((declined, _)) => return Ok(ScoreOutcome::NotConsented { stance: declined }),
         Err(e) => {
             return Ok(ScoreOutcome::ConsentUnreadable {
                 error: e.to_string(),
             })
         }
-    }
+    };
 
     // ── What already stands, read ONCE (CIRISServer#374) ────────────────────
     //
@@ -1663,6 +1663,22 @@ async fn score_and_emit(
         "target_n_eff": cfg.target_n_eff,
         "min_feature_dim": cfg.min_feature_dim,
         "n_eff_floor": cfg.n_eff_floor,
+        // CIRISPersist#1041 — the consent rows this score rests on: each
+        // deciding grant's attestation_id, its principal and how that
+        // principal stands behind the subject (subject / occurrence_of /
+        // delegates_to). A reader can verify the gate's basis without
+        // re-running the fold.
+        "consent_basis": consent_basis
+            .rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "principal": r.principal,
+                    "paths": r.paths,
+                    "attestation_id": r.attestation_id,
+                })
+            })
+            .collect::<Vec<_>>(),
         // Recomputability (CC 3.4.5): the window is "this agent's latest
         // `window` rows as of `asserted_at`"; a reader needs the width.
         "window": cfg.window,
@@ -2140,9 +2156,19 @@ async fn resolve_analyze_stance_via_steward(
     attester_key_id: &str,
     subject_key_id: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<ciris_persist::federation::hard_case::ConsentState, ciris_persist::federation::Error> {
+) -> Result<
+    (
+        ciris_persist::federation::hard_case::ConsentState,
+        ciris_persist::federation::consent_by_humans::ConsentBasis,
+    ),
+    ciris_persist::federation::Error,
+> {
+    // persist v54.1.0 (CIRISPersist#1041): the SAME fold the emit gate decides
+    // on, and the rows it rests on — so the score can name its consent basis
+    // (RATCHET's ask: a scored subject's grant was invisible to a scan that
+    // did not know the identity-anchor path).
     engine
-        .capacity_consent_stance(
+        .capacity_consent_stance_with_basis(
             attester_key_id,
             subject_key_id,
             ciris_persist::federation::admission::ConsentGatedFamily::Capacity,

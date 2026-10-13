@@ -511,6 +511,21 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     );
     // The envelope score field mirrors the row weight.
     assert!((env["score"].as_f64().unwrap() - score).abs() < 1e-12);
+    // CIRISPersist#1041 — the score names the consent rows it rests on. The
+    // fixture's grant is the subject's OWN, so the basis is one row, the
+    // agent's, under the `subject` path.
+    let basis = env["consent_basis"]
+        .as_array()
+        .expect("consent_basis is an array of deciding rows");
+    assert_eq!(basis.len(), 1, "one deciding grant; got {env}");
+    assert_eq!(basis[0]["principal"], agent_key_id, "{env}");
+    assert!(
+        basis[0]["paths"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|x| x == "subject")),
+        "the subject's own grant decides: {env}"
+    );
+    assert!(basis[0]["attestation_id"].is_string(), "{env}");
 
     // The hybrid signature components are populated (PQC-complete row).
     assert!(!att.scrub_signature_classical.is_empty());
