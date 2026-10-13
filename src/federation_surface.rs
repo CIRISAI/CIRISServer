@@ -162,7 +162,7 @@ async fn get_identity(State(st): State<SurfaceState>) -> Response {
 ///   - `envelopes_{sent,received}_total`: `MessageType` Debug repr
 ///     ("InlineText", "FederationAnnouncement", …).
 ///   - `send_failures_total`: `"<transport>:<cause>"`.
-///   - `verify_failures_total` / `durable_queue_depth`: the enums' stable
+///   - `verify_failures_total` / `durable_enqueued_total`: the enums' stable
 ///     snake-case `as_str` labels.
 ///   - `transport_bytes_{in,out}_total`: the transport id string.
 ///   - `peer_reachability_ratio`: `"<peer_key>:<medium>"`.
@@ -207,8 +207,20 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), serde_json::json!(v)))
         .collect();
-    let durable_depth: serde_json::Map<_, _> = bundle
-        .durable_queue_depth
+    // CIRISEdge#845 (edge v40.2 / persist v54 `outbound_counts`): the depth is
+    // RESIDENT rows (pending / sending / awaiting_ack) read from the queue
+    // itself, no longer a counter edge kept beside it; the cumulative enqueue
+    // count stays on the bundle per delivery class. `null` when the queue
+    // could not be counted — never 0, which would read as drained.
+    let durable_depth = match st.edge.durable_queue_depth().await {
+        Ok(n) => serde_json::json!(n),
+        Err(e) => {
+            tracing::warn!(error = %e, "metrics: durable queue depth unreadable");
+            serde_json::Value::Null
+        }
+    };
+    let durable_enqueued: serde_json::Map<_, _> = bundle
+        .durable_enqueued_total
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), serde_json::json!(v)))
         .collect();
@@ -466,6 +478,7 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 "send_failures_total": send_failures,
                 "verify_failures_total": verify_failures,
                 "durable_queue_depth": durable_depth,
+                "durable_enqueued_total": durable_enqueued,
                 "transport_bytes_in_total": bytes_in,
                 "transport_bytes_out_total": bytes_out,
                 "peer_reachability_ratio": reachability,

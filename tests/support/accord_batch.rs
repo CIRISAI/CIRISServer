@@ -86,6 +86,7 @@ pub fn build_batch_bytes_at(
     };
 
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.into(),
         thought_id: trace_id.into(),
         task_id: Some("task-http-ingest".into()),

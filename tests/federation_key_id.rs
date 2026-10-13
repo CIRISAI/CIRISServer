@@ -177,6 +177,7 @@ fn the_trust_roots_own_key_ids_are_not_in_this_namespace() {
 
 fn sealed_trace() -> CompleteTrace {
     CompleteTrace {
+        run_kind: None,
         trace_id: "t-371".into(),
         thought_id: "th-371".into(),
         task_id: None,

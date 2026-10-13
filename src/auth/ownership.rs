@@ -942,6 +942,22 @@ pub async fn rebind_owner_key_record(
             Ok(OwnerKeyRecordState::Rebound)
         }
         RebindOutcome::Unchanged => Ok(OwnerKeyRecordState::Bound),
+        // persist v54.1.0 (CIRISPersist#1042 / #1047): the stored row failed
+        // verify_key_registration and the incoming one, same pubkeys and claim,
+        // verifies — persist REPLACED it and kept the old bytes in
+        // federation_key_registration_history (replacement_kind =
+        // invalid_replaced). From the owner's side that is a repair: the record
+        // now binds and re-serves, exactly the Rebound outcome.
+        RebindOutcome::InvalidReplaced => {
+            tracing::info!(
+                owner_key_id = %owner_key_id,
+                identity_type = %stored.identity_type,
+                "owner registration record REPLACED — the stored row did not verify and the \
+                 re-sent one does; persist kept the old bytes in the registration history \
+                 (CIRISPersist#1042)"
+            );
+            Ok(OwnerKeyRecordState::Rebound)
+        }
         RebindOutcome::Refused { reason } => {
             tracing::warn!(
                 owner_key_id = %owner_key_id,

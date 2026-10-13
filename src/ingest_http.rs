@@ -449,6 +449,10 @@ fn refused_signer(e: &IngestError) -> Option<&str> {
         | IngestError::Store(_)
         | IngestError::Sign(_)
         | IngestError::ScopeRefused(_)
+        // persist v54.1.0: refused on a NAMED ground before any write
+        // (trace_run_kind_mock / purge_tombstoned). The ground is about the
+        // trace, not the signer; counted, not attributed.
+        | IngestError::TraceRefused { .. }
         | IngestError::PipelineInvariant { .. } => None,
     }
 }
@@ -746,6 +750,11 @@ fn ingest_status(e: &IngestError) -> StatusCode {
         // the level or loading a model, and calling it a server fault would send
         // an operator to the wrong logs.
         IngestError::ScrubTreatmentMismatch { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        // persist v54.1.0 — a trace the substrate refuses on a named ground
+        // (`trace_run_kind_mock`: a signed mock run_kind offered to a canonical;
+        // `purge_tombstoned`: a steward purge tombstoned it). 422: the producer
+        // must stop sending it; nothing here is a server fault.
+        IngestError::TraceRefused { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         IngestError::Sign(_) | IngestError::Scrub(_) | IngestError::PipelineInvariant { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

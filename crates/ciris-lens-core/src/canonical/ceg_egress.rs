@@ -175,7 +175,7 @@ pub fn build_state_publication(
 ) -> LensStatePublication {
     let detection_attestations = events
         .iter()
-        .filter(|(_, scope)| !cohort_scope::suppresses_holds_bytes(scope))
+        .filter(|(_, scope)| !cohort_scope::is_structurally_invisible(scope))
         .map(|(event, scope)| DetectionAttestation::from_event(event, scope.as_str()))
         .collect();
 

@@ -166,7 +166,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // from a caller's dropped connection (CIRISServer#568). After the first
     // phase has opened, so its compose_status mark has somewhere to land.
     let previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
-    crate::accord_halt::check_halt_gate(&cfg.home)?;
+    // rc7 (CIRISConstitution#146): a halt pauses agents, it does not stop a
+    // node. The latch is READ here (and a presented offline release token
+    // consumed), never a reason to refuse to start; the agent act gate reads
+    // it through /v1/accord/halt-status.
+    if let Err(e) = crate::accord_halt::load_halt_latch(&cfg.home) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            "halt latch unreadable at boot — a latch that cannot be read is served as \
+             `halted: null`; read the file by hand"
+        );
+    }
 
     crate::compose_status::phase("capabilities");
     let caps = Capabilities::detect(&cfg);
@@ -1599,7 +1609,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             // self (an operator who lists this node in bootstrap_peers
                             // must not make it gossip/halt-loop back to itself).
                             peers: accord_peers.clone(),
-                            exit_on_halt: true,
                             // #347: the latch's release binding names THIS node,
                             // so an offline release token is not replayable
                             // against any other node in the mesh. `cfg.key_id` is

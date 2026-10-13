@@ -641,6 +641,7 @@ fn build_batch_bytes(agent_sk: &SigningKey, key_id: &str, trace_id: &str) -> Vec
         agent_id_hash: None,
     };
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.into(),
         thought_id: trace_id.into(),
         task_id: Some("task-meshseed".into()),

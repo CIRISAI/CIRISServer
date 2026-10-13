@@ -74,7 +74,7 @@
 //! ## What it deliberately does not stop
 //!
 //! An operator with filesystem write can still delete the latch. That was already
-//! true (`check_halt_gate` is a file-presence gate) and the halt never claimed
+//! true (`load_halt_latch` reads the file's presence) and the halt never claimed
 //! durability against a hostile local root — CC 4.2 puts the authority outside
 //! the federation, not outside the disk. The property this module adds is
 //! narrower and checkable: **nobody without an accord quorum can produce a
@@ -115,7 +115,7 @@ use crate::accord_halt::{halt_latch_path, HaltRecord};
 pub const RELEASE_BINDING_PURPOSE: &str = "ciris.accord.halt_release.v1";
 
 /// The file an operator drops into the node `home` to present a release token.
-/// The boot gate consumes it ([`crate::accord_halt::check_halt_gate`]); the
+/// Boot consumes it ([`crate::accord_halt::load_halt_latch`]); the
 /// `ciris-server accord release --token <path>` CLI takes it from anywhere.
 pub const RELEASE_TOKEN_FILE: &str = "HUMANITY_ACCORD_RELEASE.json";
 
@@ -495,6 +495,7 @@ pub fn build_release_invocation(
         invocation_kind: InvocationKind::LifecycleActive,
         invocation_id: invocation_id.to_string(),
         resumes_halt_id: Some(binding.halt_invocation_id.clone()),
+        confirms_halt_id: None,
         nonce: nonce.to_string(),
         asserted_at: asserted_at.to_string(),
         valid_until: valid_until.to_string(),
@@ -787,6 +788,9 @@ mod tests {
             valid_signers: vec!["A1".into(), "B1".into()],
             quorum_threshold: 2,
             latched_at: "2026-08-01T00:00:00.000Z".into(),
+            received_at: None,
+            fuse_secs: None,
+            confirmed: None,
             node_id: Some(node.into()),
             halt_payload_sha256: Some("ab".repeat(32)),
             latch_id: Some(latch_id.into()),
@@ -1053,8 +1057,10 @@ mod tests {
         let rec = record("node-alpha", "halt-001", "latch-aaa");
         crate::accord_halt::latch_halt(&home, &rec).unwrap();
         assert!(
-            crate::accord_halt::check_halt_gate(&home).is_err(),
-            "latched ⇒ boot refused"
+            crate::accord_halt::load_halt_latch(&home)
+                .unwrap()
+                .is_some(),
+            "latched ⇒ the latch is read at boot (rc7: read, never refused)"
         );
 
         let tok = token_for(&rec, &[&seats[0], &seats[1]]);
@@ -1065,8 +1071,10 @@ mod tests {
             "the latch must be cleared"
         );
         assert!(
-            crate::accord_halt::check_halt_gate(&home).is_ok(),
-            "released ⇒ boot allowed"
+            crate::accord_halt::load_halt_latch(&home)
+                .unwrap()
+                .is_none(),
+            "released ⇒ nothing stands"
         );
 
         let journal = read_release_journal(&home);

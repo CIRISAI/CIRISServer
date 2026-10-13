@@ -276,6 +276,7 @@ fn build_trace_batch(agent: &Agent, idx: usize) -> Vec<u8> {
 
     let trace_id = format!("trace-rcpt-{idx:04}");
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.clone(),
         thought_id: trace_id.clone(),
         task_id: Some("task-rcpt".into()),
