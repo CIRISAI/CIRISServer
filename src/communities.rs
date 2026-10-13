@@ -183,6 +183,17 @@ impl Tier {
             Self::Affiliations => Cohort::Affiliations,
         }
     }
+    /// The membership scope a proposal for this room is filed and read under.
+    /// persist v54 (CIRISPersist#1034, CC 4.4.3.2.8) refuses a proposal
+    /// addressed under a cohort other than the one the signed record declares,
+    /// so an affiliation's invitations ride `affiliations`, never `community`
+    /// (edge v41.0.1 `GroupScope::Affiliations`).
+    fn group_scope(self) -> ciris_edge::membership::GroupScope {
+        match self {
+            Self::Community => ciris_edge::membership::GroupScope::Community,
+            Self::Affiliations => ciris_edge::membership::GroupScope::Affiliations,
+        }
+    }
 
     /// Read off the record's policy blob. Absent or anything else is
     /// `community` — the tier every pair room and every pre-#594 room has.
@@ -1774,7 +1785,7 @@ async fn invite(
     let dir = st.engine.federation_directory();
     match ciris_edge::membership::propose(
         dir.as_ref(),
-        ciris_edge::membership::GroupScope::Community,
+        room.tier.group_scope(),
         room.id(),
         &key_id,
         role.as_deref(),
@@ -1790,7 +1801,7 @@ async fn invite(
             );
             crate::compose::kick_replication("community invitation sent");
             crate::membership_invites::invited(
-                ciris_edge::membership::GroupScope::Community,
+                room.tier.group_scope(),
                 room.id(),
                 &proposal,
                 &key_id,
@@ -1819,7 +1830,7 @@ async fn list_invites(
         Err(r) => return r,
     };
     let dir = st.engine.federation_directory();
-    let scope = ciris_edge::membership::GroupScope::Community;
+    let scope = room.tier.group_scope();
     let active = |r: &Room| -> std::collections::HashSet<String> {
         r.roster.iter().map(|m| m.key_id.clone()).collect()
     };
@@ -1905,7 +1916,7 @@ async fn withdraw_invite(
     let dir = st.engine.federation_directory();
     crate::membership_invites::withdraw(
         dir.as_ref(),
-        ciris_edge::membership::GroupScope::Community,
+        room.tier.group_scope(),
         room.id(),
         &proposal_id,
         &pen,
