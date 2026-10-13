@@ -102,6 +102,7 @@ fn batch_bytes(agent_sk: &SigningKey, mldsa: &MlDsa65Signer, trace_id: &str) -> 
     let mut data = serde_json::Map::new();
     data.insert("seq".into(), serde_json::json!(0));
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.into(),
         thought_id: trace_id.into(),
         task_id: Some("bench".into()),
