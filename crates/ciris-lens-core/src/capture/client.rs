@@ -246,7 +246,8 @@ pub enum PrepareSealOutcome {
     /// 3. Obtain canonical bytes via `seal::canonical_bytes(&trace)`.
     /// 4. Sign the bytes and call `seal::apply_signature(&mut trace, sig, key_id)`.
     /// 5. Call `build_batch_bytes(&[trace], &provenance)`.
-    /// 6. Persist the bytes; call `tee_write_if_configured` for the local tee.
+    /// 6. Call `tee_write_if_configured` for the local tee (before the mock
+    ///    refusal, CIRISServer#766), then persist the bytes.
     ReadyToSeal {
         /// The sealed `CompleteTrace` — stamp, sign, and batch. Boxed to
         /// reduce the enum's stack size (CompleteTrace is large).
@@ -744,22 +745,30 @@ impl CaptureClient {
                 // reader, and the ACTION_RESULT of an act it refused lands
                 // through this path (0.5.226).
 
+                // ── Gap 4: local-copy tee (best-effort, never fails persist) ──
+                // FIRST, before the mock refusal (CIRISServer#766, 0.5.226): the
+                // tee is a plain file in an operator-chosen directory — never
+                // scored, never replicated, never read by edge — and since
+                // CIRISAgent#1244/#1246 it is the ONE sink a mock trace may
+                // reach (the agent keeps mock traces local-only). 0.5.225
+                // refused before the tee and the agent's QA had no traces at all.
+                self.tee_write_if_configured(&trace_id, &bytes);
+
                 // The third door (Codex on #753): a locally captured batch never
                 // passes the HTTP or relay ingest, so the mock refusal runs here
-                // too, before the tee and the persist. A mock trace stored locally
-                // would be scored here and replicated to the canonical.
+                // too, before the PERSIST. A mock trace stored in persist would
+                // be scored here and replicated to the canonical; the tee above
+                // is neither.
                 if crate::ingest_guard::batch_has_mock_llm_call(&bytes) {
                     tracing::warn!(
                         trace_id = %trace_id,
                         refusal = crate::ingest_guard::REFUSAL_MOCK_LLM,
-                        "capture REFUSED a mock-LLM trace — not persisted, scored or replicated \
-                         (CIRISAgent#1244)"
+                        "capture REFUSED a mock-LLM trace — not persisted, scored or replicated; \
+                         the local tee (if configured) holds the only copy (CIRISAgent#1244, \
+                         CIRISServer#766)"
                     );
                     return Err(ClientError::MockLlmRefused);
                 }
-
-                // ── Gap 4: local-copy tee (best-effort, never fails persist) ──
-                self.tee_write_if_configured(&trace_id, &bytes);
 
                 // Persist locally.
                 let batch_summary = self

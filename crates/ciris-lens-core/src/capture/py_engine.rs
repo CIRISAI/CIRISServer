@@ -85,8 +85,11 @@ pub enum PyPrepareOutcome {
     /// 2. Call `engine.local_sign(canonical_bytes)` → sig: bytes (64 bytes)
     /// 3. Call `seal::apply_signature(&mut trace, &sig, &key_id)`
     /// 4. Call `build_batch_bytes(&[trace], &provenance)` → batch_bytes
-    /// 5. Call `engine.receive_and_persist(batch_bytes)` → summary dict
-    /// 6. Call `tee_write_if_configured(&trace_id, &batch_bytes)`
+    /// 5. Call `tee_write_if_configured(&trace_id, &batch_bytes)` — before the
+    ///    mock-LLM refusal (CIRISServer#766): the tee is the one sink a mock
+    ///    trace may reach
+    /// 6. Refuse a mock-LLM batch (`MockLlmRefused`, nothing persisted); else
+    ///    call `engine.receive_and_persist(batch_bytes)` → summary dict
     ReadyToSeal {
         /// Boxed to keep the enum's stack size reasonable (CompleteTrace is large).
         trace: Box<CompleteTrace>,

@@ -278,8 +278,15 @@ async fn sovereign_rlib_end_to_end() {
         }),
         "the hook is unset until a host installs it"
     );
+    // The hook is PROCESS-wide (a OnceLock the host sets once), and the other
+    // tests in this binary seal their own real traces concurrently, so the
+    // vector may carry their ids. Every assertion here counts THIS trace's id.
     assert!(
-        SEALED.lock().unwrap().is_empty(),
+        !SEALED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "thought-sovereign-1"),
         "THOUGHT_START seals nothing"
     );
 
@@ -303,9 +310,15 @@ async fn sovereign_rlib_end_to_end() {
         "trace_id must match thought_id"
     );
     assert_eq!(
-        *SEALED.lock().unwrap(),
-        vec![trace_id.clone()],
-        "the after-seal hook fired once, naming the sealed trace"
+        SEALED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| **id == trace_id)
+            .count(),
+        1,
+        "the after-seal hook fired once, naming the sealed trace (process-wide hook; \
+         sibling tests' ids may sit beside it)"
     );
     assert!(
         summary.trace_events_inserted > 0,
@@ -413,11 +426,29 @@ async fn sovereign_rlib_consent_gate() {
 // in `capture_event` too, before the local persist. A trace whose LLM call
 // came from the mock is refused and stores nothing; the same trace with a
 // real model is sealed and persisted.
+//
+// CIRISServer#766 (0.5.226): the local tee (`local_copy_dir`) runs BEFORE the
+// refusal. The agent keeps mock traces local-only (CIRISAgent#1244/#1246) and
+// the tee is the one sink they may reach — a plain file, never scored,
+// replicated or read by edge. 0.5.225 refused before the tee and the agent's
+// QA saw no traces at all.
 
 async fn capture_with_llm_model(
     model: &str,
     thought: &str,
 ) -> Result<CaptureEventOutcome, ciris_lens_core::capture::ClientError> {
+    capture_with_llm_model_teed(model, thought, None).await.0
+}
+
+/// Returns the outcome AND the engine, so a test can count what persisted.
+async fn capture_with_llm_model_teed(
+    model: &str,
+    thought: &str,
+    local_copy_dir: Option<std::path::PathBuf>,
+) -> (
+    Result<CaptureEventOutcome, ciris_lens_core::capture::ClientError>,
+    Arc<Engine>,
+) {
     let signer = test_signer(0xCD, "sovereign-mock-key");
     let engine = Arc::new(
         Engine::with_signer(signer.clone(), "sqlite::memory:")
@@ -426,7 +457,7 @@ async fn capture_with_llm_model(
     );
     register_key_in_directory(&engine, &signer).await;
     let client = CaptureClient::new(
-        engine,
+        Arc::clone(&engine),
         Arc::new(NullScrubber),
         "generic".into(),
         "2.7.9".into(),
@@ -436,7 +467,7 @@ async fn capture_with_llm_model(
             consent_timestamp: Some("2026-01-01T00:00:00Z".into()),
         },
         Some(deployment_profile()),
-        None,
+        local_copy_dir,
     );
     client
         .capture_event(inbound("THOUGHT_START", thought, "2026-06-01T00:00:00Z"))
@@ -453,9 +484,105 @@ async fn capture_with_llm_model(
         "prompt_tokens": 3,
     });
     client.capture_event(llm).await.expect("LLM_CALL appends");
-    client
+    let out = client
         .capture_event(inbound("ACTION_RESULT", thought, "2026-06-01T00:00:02Z"))
+        .await;
+    (out, engine)
+}
+
+async fn trace_event_rows(engine: &Engine) -> u64 {
+    engine
+        .storage_summary()
         .await
+        .expect("storage_summary")
+        .trace_events
+        .rows
+}
+
+fn fresh_tee_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "lens-tee-{tag}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("tee dir");
+    dir
+}
+
+fn tee_files(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .expect("read tee dir")
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+/// CIRISServer#766 (1): a mock batch with the tee configured leaves ONE file
+/// in the tee, is refused `MockLlmRefused`, and persists nothing.
+#[tokio::test]
+async fn a_mock_llm_trace_reaches_the_local_tee_and_is_then_refused() {
+    let dir = fresh_tee_dir("mock");
+    let (out, engine) =
+        capture_with_llm_model_teed("mock-model", "thought-mock-tee-1", Some(dir.clone())).await;
+    match out {
+        Err(ciris_lens_core::capture::ClientError::MockLlmRefused) => {}
+        other => panic!("a mock-LLM trace is still refused after the tee, got: {other:?}"),
+    }
+    let files = tee_files(&dir);
+    assert_eq!(
+        files,
+        vec!["lens-batch-00000000.json".to_string()],
+        "the tee is the one sink a mock trace may reach (CIRISAgent#1244/#1246)"
+    );
+    let bytes = std::fs::read(dir.join(&files[0])).unwrap();
+    assert!(
+        ciris_lens_core::ingest_guard::batch_has_mock_llm_call(&bytes),
+        "the teed file is the refused mock batch itself"
+    );
+    assert_eq!(
+        trace_event_rows(&engine).await,
+        0,
+        "nothing persisted: the tee is not persist, not scored, not replicated"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// CIRISServer#766 (2, the negative): the same mock batch with NO tee
+/// configured leaves no file anywhere and persists nothing.
+#[tokio::test]
+async fn a_mock_llm_trace_with_no_tee_leaves_nothing() {
+    let (out, engine) =
+        capture_with_llm_model_teed("mock-model", "thought-mock-notee-1", None).await;
+    assert!(
+        matches!(
+            out,
+            Err(ciris_lens_core::capture::ClientError::MockLlmRefused)
+        ),
+        "{out:?}"
+    );
+    assert_eq!(trace_event_rows(&engine).await, 0);
+}
+
+/// CIRISServer#766 (3): a real model's batch is unchanged — teed AND persisted.
+#[tokio::test]
+async fn a_real_llm_trace_is_teed_and_persisted() {
+    let dir = fresh_tee_dir("real");
+    let (out, engine) =
+        capture_with_llm_model_teed("gpt-4o", "thought-real-tee-1", Some(dir.clone())).await;
+    assert!(
+        matches!(out, Ok(CaptureEventOutcome::SealedAndPersisted { .. })),
+        "{out:?}"
+    );
+    assert_eq!(
+        tee_files(&dir),
+        vec!["lens-batch-00000000.json".to_string()]
+    );
+    assert!(
+        trace_event_rows(&engine).await > 0,
+        "the real trace persisted"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
