@@ -166,7 +166,25 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // from a caller's dropped connection (CIRISServer#568). After the first
     // phase has opened, so its compose_status mark has somewhere to land.
     let previous_serve = crate::serve_marker::inspect_at_boot(&cfg.data_dir);
-    crate::accord_halt::check_halt_gate(&cfg.home)?;
+    // rc7 (CIRISConstitution#146): a halt pauses agents, it does not stop a
+    // node. The latch is READ here (and a presented offline release token
+    // consumed), never a reason to refuse to start; the agent act gate reads
+    // it through /v1/accord/halt-status.
+    // THE ONE ABSOLUTE GATE every agent door asks (src/halt_gate.rs): installed
+    // before any door exists, and asserted installed, so a build that forgot
+    // the hook cannot serve agents past a halt.
+    crate::halt_gate::install(cfg.home.clone());
+    assert!(
+        crate::halt_gate::is_installed(),
+        "the constitutional-halt gate must be installed before any door opens"
+    );
+    if let Err(e) = crate::accord_halt::load_halt_latch(&cfg.home) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            "halt latch unreadable at boot — a latch that cannot be read is served as \
+             `halted: null`; read the file by hand"
+        );
+    }
 
     crate::compose_status::phase("capabilities");
     let caps = Capabilities::detect(&cfg);
@@ -1599,7 +1617,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             // self (an operator who lists this node in bootstrap_peers
                             // must not make it gossip/halt-loop back to itself).
                             peers: accord_peers.clone(),
-                            exit_on_halt: true,
                             // #347: the latch's release binding names THIS node,
                             // so an offline release token is not replayable
                             // against any other node in the mesh. `cfg.key_id` is
@@ -4421,6 +4438,35 @@ static RUNTIME: tokio::sync::OnceCell<Arc<ciris_edge::replication::ReplicationRu
 pub(crate) fn held_replication_runtime() -> Option<Arc<ciris_edge::replication::ReplicationRuntime>>
 {
     RUNTIME.get().map(Arc::clone)
+}
+
+/// CIRISEdge#858 (edge v40.0.12) — release every row edge PARKED waiting on
+/// `key_id`, and re-ask the peers that offered them.
+///
+/// Edge parks a replicated row whose signer this node has never met, and
+/// releases it itself when that signer's Key or binding arrives THROUGH
+/// replication. A key this node writes LOCALLY (a claim's owner Key, the
+/// owner-binding's node, any `register_attested_federation_key`) bypasses that
+/// choke; without this call the parked rows wait out their window (1–6 h)
+/// although they would now admit. Measured on Eric's fresh laptop: the old
+/// node's owner rows refused every round after the claim.
+///
+/// Every local registration path calls this after its write succeeds.
+/// Idempotent and cheap; before the runtime starts (boot, tests) it does
+/// nothing, and the boot path's rows have not been offered yet.
+pub(crate) fn release_parked_on(key_id: &str, why: &'static str) {
+    let Some(runtime) = held_replication_runtime() else {
+        return;
+    };
+    let released = runtime.release_signer(key_id);
+    if released > 0 {
+        tracing::info!(
+            key_id,
+            released,
+            why,
+            "released rows parked on a locally registered signer (CIRISEdge#858)"
+        );
+    }
 }
 
 /// CIRISEdge#636 (edge v26.1.0) — the publish-side KICK. A caller that just

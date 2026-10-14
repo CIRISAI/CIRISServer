@@ -515,7 +515,12 @@ pub async fn register_attested_federation_key(
     signed: SignedKeyRecord,
 ) -> Result<(), FederationError> {
     admit_hardware_class(&signed.record, Utc::now())?;
-    engine.register_federation_key(signed).await
+    let key_id = signed.record.key_id.clone();
+    engine.register_federation_key(signed).await?;
+    // CIRISEdge#858 — a locally registered key bypasses edge's apply choke;
+    // release what replication parked on it.
+    crate::compose::release_parked_on(&key_id, "local key registration");
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,40 @@
+# T8 — a trust root with M-of-N holders: halt, confirm, resume (CIRISClient#179 §2
+# catalogue; CSD-129 "Drill, halt, announce: end to end"; CSD-067/068/069/105).
+# Realized by the 0.5.220 ceremony over the routes with three SOFTWARE holders
+# (harness/native/scenarios.py `mint_accord_mesh`): the canonical boots on the
+# minted bundle as its baked genesis; alice and bob claim, announce, peer and Root
+# through it. The charter the ceremony mints names no halt_fuse_secs, so the
+# fuse is the constitutional default (86400); the halt scenario overrides it
+# with CIRIS_TEST_HALT_FUSE_SECS (test anchor only) because a ladder cannot
+# wait a day to watch a lone halt lapse.
+catalog_id: T8
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure            # the humanity accord: keyless family, seated holders
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2                       # quorum:2/3 — roster changes and lifecycle rows
+      charter: {halt_fuse_secs: 86400}
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C], accepts: HA, announced: true}
+    - {id: B, dials: [C], accepts: HA, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: HA}
+    - {id: bob,   owns: [B], accepts: HA}
+  relations:
+    - {rel: peered, between: [A, C]}
+    - {rel: peered, between: [B, C]}
+    - {rel: peered, between: [A, B]}
+    - {rel: rooted_with, between: [alice, bob], wait: 120}
+  # The scenarios' actor is a seated HOLDER (anchor["holders"][i]), not a person
+  # on a screen; the person/device pair here is what the generic build layer
+  # drives and what CSD-003 / CSD-105 render the halt state on.
+  actor: {person: alice, device: A}
+  # The halt negatives (the node never exits under a constitutional halt; no
+  # operator tier releases it; a lone lifecycle:active releases nothing) are
+  # asserted by the `halt` scenario (CSD-129), not by the generic build layer.
+  negatives: []

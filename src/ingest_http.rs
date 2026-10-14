@@ -315,6 +315,12 @@ impl IngestRefusals {
         self.record(now, e.kind(), signer);
     }
 
+    /// Record a refusal this handler makes ITSELF, before persist sees the
+    /// batch, under the handler's own stable token (e.g. [`REFUSAL_MOCK_LLM`]).
+    pub fn observe_handler_refusal(&self, kind: &'static str) {
+        self.record(Utc::now(), kind, None);
+    }
+
     fn record(&self, now: DateTime<Utc>, kind: &'static str, signer: Option<String>) {
         let Ok(mut l) = self.inner.lock() else { return };
         l.refused_total = l.refused_total.saturating_add(1);
@@ -443,6 +449,10 @@ fn refused_signer(e: &IngestError) -> Option<&str> {
         | IngestError::Store(_)
         | IngestError::Sign(_)
         | IngestError::ScopeRefused(_)
+        // persist v54.1.0: refused on a NAMED ground before any write
+        // (trace_run_kind_mock / purge_tombstoned). The ground is about the
+        // trace, not the signer; counted, not attributed.
+        | IngestError::TraceRefused { .. }
         | IngestError::PipelineInvariant { .. } => None,
     }
 }
@@ -536,6 +546,12 @@ struct IngestState {
 /// that cannot tell them apart will either retry a permanent failure forever or
 /// give up on a temporary one.
 pub const REFUSAL_TRACE_PLANE_PAUSED: &str = "trace_replication_paused";
+
+/// The stable refusal token for a batch carrying a call from the agent's mock
+/// LLM, and the shared check that finds one. Both live in
+/// `ciris_lens_core::ingest_guard` so this route and the Reticulum relay
+/// (`LensCoreHandler`) refuse the same batches (CIRISAgent#1244).
+pub use ciris_lens_core::ingest_guard::{MOCK_LLM_MODEL, REFUSAL_MOCK_LLM};
 
 /// Merge the HTTP trace-ingest routes onto the read-API listener.
 ///
@@ -631,6 +647,61 @@ async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
         )
             .into_response();
     }
+    // THE CONSTITUTIONAL HALT (CC 4.2.1.1, rc7): while it is in effect on this
+    // node no agent reasoning is admitted through any door, this one first.
+    // 423 LOCKED: the batch is well-formed and the producer is not at fault;
+    // the node is paused for agents until the accord ends the halt.
+    if crate::halt_gate::in_effect() {
+        st.refusals
+            .observe_handler_refusal(crate::halt_gate::REFUSAL_HALT_IN_EFFECT);
+        let halt = crate::halt_gate::standing();
+        tracing::warn!(
+            bytes = body.len(),
+            halt = ?halt.as_ref().map(|h| h.invocation_id.clone()),
+            "HTTP ingest REFUSED: a constitutional halt is in effect on this node — nothing \
+             verified or persisted (CC 4.2.1.1)"
+        );
+        return (
+            StatusCode::LOCKED,
+            Json(IngestErr {
+                error: crate::halt_gate::REFUSAL_HALT_IN_EFFECT,
+                detail: Some(
+                    "a constitutional halt is in effect on this node; agent reasoning is not \
+                     admitted until a strict majority of the accord ends it (GET \
+                     /v1/accord/halt-status)"
+                        .into(),
+                ),
+                key_id_namespace: None,
+            }),
+        )
+            .into_response();
+    }
+    // A batch from the agent's mock LLM is refused before it is verified or
+    // persisted: mock output is not evidence about any agent. Counted, with
+    // its own token, so a misconfigured harness shows up in the ledger.
+    if ciris_lens_core::ingest_guard::batch_has_mock_llm_call(&body) {
+        st.refusals.observe_handler_refusal(REFUSAL_MOCK_LLM);
+        tracing::warn!(
+            bytes = body.len(),
+            "HTTP ingest REFUSED: the batch carries an LLM call from the agent's MOCK LLM \
+             (model=\"mock-model\"). Nothing was verified or persisted. A test harness is \
+             shipping traces to a real node; point it at a local endpoint (CIRISAgent#1244)."
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(IngestErr {
+                error: REFUSAL_MOCK_LLM,
+                detail: Some(
+                    "This batch carries an LLM call made by the agent's mock LLM \
+                     (model=\"mock-model\"). Mock output is not admitted to a production \
+                     node. Point test harnesses at a local endpoint."
+                        .to_string(),
+                ),
+                key_id_namespace: None,
+            }),
+        )
+            .into_response();
+    }
     let engine = st.engine;
     // The SAME call the RET relay's `LensCoreHandler::handle` makes — the raw
     // posted bytes ARE a `BatchEnvelope`/`AccordEventsBatch` JSON; persist's
@@ -708,6 +779,11 @@ fn ingest_status(e: &IngestError) -> StatusCode {
         // the level or loading a model, and calling it a server fault would send
         // an operator to the wrong logs.
         IngestError::ScrubTreatmentMismatch { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        // persist v54.1.0 — a trace the substrate refuses on a named ground
+        // (`trace_run_kind_mock`: a signed mock run_kind offered to a canonical;
+        // `purge_tombstoned`: a steward purge tombstoned it). 422: the producer
+        // must stop sending it; nothing here is a server fault.
+        IngestError::TraceRefused { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         IngestError::Sign(_) | IngestError::Scrub(_) | IngestError::PipelineInvariant { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -778,6 +854,19 @@ fn ingest_error_body(e: &IngestError) -> IngestErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mock_refusal_is_counted_under_its_own_token() {
+        let l = IngestRefusals::new();
+        l.observe_handler_refusal(REFUSAL_MOCK_LLM);
+        let b = l.snapshot();
+        assert_eq!(b.refused_total, 1);
+        assert_eq!(b.by_kind_in_window.get(REFUSAL_MOCK_LLM).copied(), Some(1));
+        assert_eq!(
+            b.unattributed_in_window, 1,
+            "a handler refusal names no signer"
+        );
+    }
 
     #[test]
     fn legacy_path_is_the_decommissioned_lens_python_path() {

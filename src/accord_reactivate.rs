@@ -1,7 +1,8 @@
 //! **`ciris-server accord reactivate`** — the constitutional way back from a
 //! HUMANITY_ACCORD halt (CC 4.2.1 §69 / CEG §9.2).
 //!
-//! A halted node refuses to boot (the disk latch + [`crate::accord_halt::check_halt_gate`]).
+//! A halted node pauses its agents and keeps serving (the disk latch, read by
+//! [`crate::accord_halt::load_halt_latch`] at boot — rc7, CIRISConstitution#146).
 //! The **only** thing that clears it is a verified **`accord:lifecycle:active`**
 //! invocation carrying ≥M of the N family seats' cosignatures — *"not an operator
 //! restart."* The quorum, not the operator, brings the node back. verify v6.11.0's
@@ -213,6 +214,7 @@ mod tests {
                 } else {
                     None
                 },
+                confirms_halt_id: None,
                 nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
                 asserted_at: "2026-06-21T00:00:00.000Z".into(),
                 valid_until: "2030-01-01T00:00:00.000Z".into(),

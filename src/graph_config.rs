@@ -133,7 +133,7 @@ pub fn config_key_is_a_leaf(key: &str) -> Result<()> {
 /// The `cohort_scope` EVERY config row is authored at (CIRISServer#324). `self` —
 /// a config row is a self-report about THIS node's own runtime, so it is normatively
 /// `cohort_scope::self` (CC 4.4.3.4.3; `FSD/namespace_supersets.json` `config:*`
-/// invariant): one of the two scopes persist's `cohort_scope::suppresses_holds_bytes`
+/// invariant): one of the two scopes persist's `cohort_scope::is_structurally_invisible`
 /// protects (`SELF | FAMILY`), making the row structurally invisible — no
 /// `holds_bytes:sha256:*` directory attestation, not cohort-replicable. `federation`
 /// (the pre-#324 assigned-but-wrong value) is the ONE scope that protection does NOT
@@ -144,7 +144,7 @@ pub fn config_key_is_a_leaf(key: &str) -> Result<()> {
 /// BOTH producer sites route through this ONE const so they cannot drift:
 /// [`config_envelope`]'s inline envelope JSON AND — load-bearingly —
 /// [`set_config`]'s typed `EmitAttestationInput::cohort_scope` (the field persist's
-/// admission, `suppresses_holds_bytes`, the DEK cascade, and the directory projection
+/// admission, `is_structurally_invisible`, the DEK cascade, and the directory projection
 /// actually read; the envelope JSON alone lands in `EnvelopeCore::extra` and is never
 /// lifted onto the row, T3's #324 finding). Single source of truth so the §5
 /// conformance check ([`crate::field_conformance::check_config_cohort_scope_self`])

@@ -770,6 +770,14 @@ pub async fn apply_signed_owner_binding(
     )
     .await?;
 
+    // CIRISEdge#858 — the claim wrote the owner's Key and the binding locally,
+    // past edge's apply choke. Release what replication parked on either: the
+    // OLD node's rows signed by this owner, and rows waiting on this node's
+    // binding. (Two `release_signer` calls rather than `release_bound_signer`:
+    // this function holds the envelope, not the wire bytes edge parses.)
+    crate::compose::release_parked_on(&binding.attesting_key_id, "owner-binding: owner key");
+    crate::compose::release_parked_on(this_node_key_id, "owner-binding: bound node");
+
     Ok(AppliedOwnerBinding {
         responsible_user_key_id: binding.attesting_key_id.clone(),
         attestation_id,
@@ -934,6 +942,22 @@ pub async fn rebind_owner_key_record(
             Ok(OwnerKeyRecordState::Rebound)
         }
         RebindOutcome::Unchanged => Ok(OwnerKeyRecordState::Bound),
+        // persist v54.1.0 (CIRISPersist#1042 / #1047): the stored row failed
+        // verify_key_registration and the incoming one, same pubkeys and claim,
+        // verifies — persist REPLACED it and kept the old bytes in
+        // federation_key_registration_history (replacement_kind =
+        // invalid_replaced). From the owner's side that is a repair: the record
+        // now binds and re-serves, exactly the Rebound outcome.
+        RebindOutcome::InvalidReplaced => {
+            tracing::info!(
+                owner_key_id = %owner_key_id,
+                identity_type = %stored.identity_type,
+                "owner registration record REPLACED — the stored row did not verify and the \
+                 re-sent one does; persist kept the old bytes in the registration history \
+                 (CIRISPersist#1042)"
+            );
+            Ok(OwnerKeyRecordState::Rebound)
+        }
         RebindOutcome::Refused { reason } => {
             tracing::warn!(
                 owner_key_id = %owner_key_id,
@@ -1054,11 +1078,13 @@ async fn register_user_key(
         // future evidence-bearing binding cannot slip a class claim in unchecked.
         crate::hardware_attestation::admit_hardware_class(&signed.record, chrono::Utc::now())
             .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+        let key_id = signed.record.key_id.clone();
         engine
             .federation_directory()
             .put_public_key(signed)
             .await
             .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+        crate::compose::release_parked_on(&key_id, "legacy owner key registration");
     }
     Ok(())
 }

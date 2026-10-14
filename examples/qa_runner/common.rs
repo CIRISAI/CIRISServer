@@ -374,7 +374,8 @@ pub fn invocation(kind: &str, id: &str, payload: &[u8]) -> serde_json::Value {
 fn invocation_canonical_bytes(inv: &serde_json::Value) -> Vec<u8> {
     let s = |k: &str| inv[k].as_str().unwrap_or_default().to_string();
     format!(
-        "ciris.accord_invoke.v1\ninvocation_kind={}\ninvocation_id={}\nnonce={}\nasserted_at={}\nvalid_until={}\npayload_sha256={}",
+        // verify v20.1.0 (CIRISVerify#305): the invoke domain moved to v2.
+        "ciris.accord_invoke.v2\ninvocation_kind={}\ninvocation_id={}\nnonce={}\nasserted_at={}\nvalid_until={}\npayload_sha256={}",
         s("invocation_kind"),
         s("invocation_id"),
         s("nonce"),

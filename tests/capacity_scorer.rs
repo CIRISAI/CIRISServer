@@ -303,6 +303,7 @@ fn build_trace_batch(
 
     let trace_id = format!("trace-cap-{idx:04}");
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.clone(),
         thought_id: trace_id.clone(),
         task_id: Some("task-cap".into()),
@@ -416,6 +417,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        ..ScorerConfig::default()
     };
     // CC#46: without the subject's `analyze` consent the scorer authors NOTHING
     // (and the refusal is a WARN naming the missing scope, not a panic) — so this
@@ -426,6 +428,27 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     // unconsented and the gate would still refuse (the 0.5.138 derived-vs-alias
     // identity-fork class, in miniature).
     grant_analyze_consent(&node, &agent_key_id, &agent_signer, &node_key_id).await;
+
+    // CIRISServer#757 — below the ROW gate the window is Indeterminate and the
+    // scorer authors NOTHING. It used to author a signed 0.0 (5,757 of the
+    // canonical's 6,465 scores came from fewer than 20 rows). 30 traces under a
+    // 31-row gate: no row, no number.
+    let thin = ScorerConfig {
+        sample_size_gate: N_TRACES as u32 + 1,
+        ..cfg.clone()
+    };
+    let emitted = scorer::run_pass(&node, &node_key_id, &thin)
+        .await
+        .expect("an Indeterminate pass is not an error");
+    assert_eq!(emitted, 0, "below the row gate nothing is authored");
+    assert!(
+        node.federation_directory()
+            .list_attestations_for(&agent_key_id)
+            .await
+            .expect("list attestations")
+            .is_empty(),
+        "Indeterminate emits no row: never a signed 0.0"
+    );
 
     let emitted = scorer::run_pass(&node, &node_key_id, &cfg)
         .await
@@ -488,6 +511,21 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     );
     // The envelope score field mirrors the row weight.
     assert!((env["score"].as_f64().unwrap() - score).abs() < 1e-12);
+    // CIRISPersist#1041 — the score names the consent rows it rests on. The
+    // fixture's grant is the subject's OWN, so the basis is one row, the
+    // agent's, under the `subject` path.
+    let basis = env["consent_basis"]
+        .as_array()
+        .expect("consent_basis is an array of deciding rows");
+    assert_eq!(basis.len(), 1, "one deciding grant; got {env}");
+    assert_eq!(basis[0]["principal"], agent_key_id, "{env}");
+    assert!(
+        basis[0]["paths"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|x| x == "subject")),
+        "the subject's own grant decides: {env}"
+    );
+    assert!(basis[0]["attestation_id"].is_string(), "{env}");
 
     // The hybrid signature components are populated (PQC-complete row).
     assert!(!att.scrub_signature_classical.is_empty());
@@ -566,6 +604,7 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        ..ScorerConfig::default()
     };
 
     // (1) baseline — the pass authors the subject's capacity row.
@@ -781,6 +820,7 @@ async fn an_unreadable_consent_fold_is_not_a_decline() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        ..ScorerConfig::default()
     };
 
     // (1) GREEN — the subject consented, the fold is readable, a row is
@@ -1006,6 +1046,7 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        ..ScorerConfig::default()
     };
 
     // (1) GREEN — cold corpus, the read works, one row is authored, nothing

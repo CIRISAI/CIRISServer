@@ -6,7 +6,7 @@
 //! There are TWO `cohort_scope` values on a config write and they must agree:
 //!
 //!   1. the STORED, typed `Attestation::cohort_scope` column — the value persist's
-//!      admission, `cohort_scope::suppresses_holds_bytes` (`SELF | FAMILY`), the
+//!      admission, `cohort_scope::is_structurally_invisible` (`SELF | FAMILY`), the
 //!      at-rest DEK cascade, and the federation-directory projection actually read.
 //!      This is sourced from `EmitAttestationInput::cohort_scope`
 //!      (`emit_attestation_assemble`), which `set_config` now sets to `SELF`.
@@ -175,8 +175,8 @@ async fn every_config_key_is_self_scoped() {
         // Belt-and-suspenders: `self` is one of the two scopes persist's
         // structural-invisibility predicate protects.
         assert!(
-            cohort_scope::suppresses_holds_bytes(&row.cohort_scope),
-            "config key {key:?}: cohort_scope {:?} must be suppresses_holds_bytes-protected",
+            cohort_scope::is_structurally_invisible(&row.cohort_scope),
+            "config key {key:?}: cohort_scope {:?} must be is_structurally_invisible-protected",
             row.cohort_scope
         );
     }

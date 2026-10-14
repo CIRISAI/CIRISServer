@@ -37,7 +37,6 @@ pub async fn run(report: &mut Report) {
         AccordHalt {
             home: None,
             peers: Vec::new(),
-            exit_on_halt: false,
             // #347: the QA runner exercises the halt path, not the offline
             // release; a `None` node_id latches with no release binding.
             node_id: None,

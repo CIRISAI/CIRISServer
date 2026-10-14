@@ -8,7 +8,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 2.2	CLM-conformance	CIRISServer	src/conformance.rs#require_op	ciris-server@main
 2.3.1	CLM-subject_kind-subject-2	—	—	open
 2.3.2.1	CLM-registry-canonical	—	—	open
-2.4.1.1	CLM-withdraws	CIRISPersist	src/federation/admission.rs#resolve_withdraws_admission_rule	ciris-persist@v17.0.1
+2.4.1.1	CLM-withdraws	CIRISPersist	src/federation/admission.rs#resolve_withdraws_admission_rule_at	ciris-persist@v17.0.1
 2.6.1.1	CLM-round-trip	CIRISVerify	src/ciris-verify-core/src/jcs.rs#verify_jcs_hybrid_signature	ciris-verify-core@v10.1.1
 2.6.1.1.1	CLM-canonicalization-array	CIRISVerify	src/ciris-verify-core/src/operational_admit.rs#check_set_semantics_sorted	ciris-verify-core@v10.1.1
 2.6.1.2	CLM-per-field	—	—	open
@@ -66,7 +66,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.4.3.4.1	CLM-cascade	CIRISPersist	src/federation/at_rest_cascade.rs#encrypt_and_cascade	ciris-persist@v17.0.1
 4.4.3.4.3	CLM-cohort	CIRISVerify	src/ciris-verify-core/src/self_at_login.rs#perform_self_at_login	ciris-verify-core@v10.1.1
 4.4.3.4.3.1	CLM-canonicalization-signing	CIRISVerify	src/ciris-verify-core/src/self_at_login.rs#sign_partnership_grant	ciris-verify-core@v10.1.1
-4.4.3.5.4	CLM-multi-subject	CIRISPersist	src/federation/admission.rs#resolve_withdraws_admission_rule	ciris-persist@v17.0.1
+4.4.3.5.4	CLM-multi-subject	CIRISPersist	src/federation/admission.rs#resolve_withdraws_admission_rule_at	ciris-persist@v17.0.1
 4.4.3.6	CLM-policy-attestation	—	—	open
 4.4.3.10	CLM-policy-trusted	—	—	open
 4.5.1.1	CLM-axis	CIRISPersist	src/federation/schema_resolver.rs#BlobBackedSchemaResolver	ciris-persist@v17.0.1

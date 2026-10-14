@@ -137,6 +137,7 @@ fn build_batch_bytes() -> Vec<u8> {
     };
 
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: TRACE_ID.into(),
         thought_id: TRACE_ID.into(),
         task_id: Some("task-egress".into()),

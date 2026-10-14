@@ -120,7 +120,10 @@ use ciris_verify_core::threshold::{
     verify_threshold_signatures, QuorumPolicy, ThresholdMember, ThresholdSignature,
 };
 
-use crate::accord_halt::{latch_halt, HaltRecord, HALT_EXIT_CODE};
+use crate::accord_halt::{
+    confirm_halt, latch_halt, read_halt_latch, release_halt, HaltConfirmation, HaltRecord,
+    HaltStanding,
+};
 use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::resolve_bearer;
 
@@ -128,7 +131,7 @@ use crate::auth::session::resolve_bearer;
 /// no seats) — a strict majority of an empty set is 1, so state that plainly
 /// rather than pretending to know the accord's M. Everywhere a roster IS
 /// resolvable, the threshold comes from the family's entrenched `quorum:M/N`
-/// via [`kill_switch_quorum_m`]. Never hard-code `2`: the accord's threshold and
+/// via [`family_quorum_m`]. Never hard-code `2`: the accord's threshold and
 /// seat count are governance state, and a literal here would misreport to an
 /// operator how many humans an operation actually requires.
 const ACCORD_THRESHOLD_UNKNOWN: usize = 0;
@@ -180,9 +183,6 @@ pub struct AccordHalt {
     /// authentic accord messages to — and, for a global halt, replicates to FIRST
     /// (before latching). From `bootstrap_peers`; may be empty (0.5 canonical mesh).
     pub peers: Vec<String>,
-    /// Whether a verified 2-of-3 `CONSTITUTIONAL` halt terminates the process after
-    /// latching (`true` in prod; `false` in tests so the runner survives).
-    pub exit_on_halt: bool,
     /// This node's federation `key_id` (`cfg.key_id`, the FSD-003 fingerprinted
     /// form) — stamped into the latch's **release binding** (CIRISServer#347) so a
     /// release token is valid against this node and no other. `None` disables the
@@ -198,7 +198,6 @@ impl AccordHalt {
         Self {
             home: None,
             peers: Vec::new(),
-            exit_on_halt: false,
             node_id: None,
         }
     }
@@ -387,6 +386,14 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
     }
 }
 
+/// The signatures a halt-plane row needs, from the ONE place that keeps them
+/// (CIRISVerify#305, CC 4.2.1.1 "signatures per kind"). An empty roster admits
+/// nothing: `usize::MAX`, so no count ever reaches it.
+#[must_use]
+pub fn halt_plane_threshold(kind: InvocationKind, roster_len: usize) -> usize {
+    kind.required_signatures(roster_len).unwrap_or(usize::MAX)
+}
+
 /// The live kill-switch quorum **M**. Anchored to the family's ENTRENCHED
 /// `consensus_protocol` (`quorum:M/N`) — the M the founders voted to entrench and the
 /// SAME one [`crate::accord_reactivate`] honors — so the irreversible-kill bar can
@@ -394,10 +401,14 @@ async fn accord_roster(engine: &Engine) -> Result<Vec<ThresholdMember>, Response
 /// shrinking the live roster). Falls back to strict-majority of the roster only when
 /// no family is entrenched (cold-start / baked-genesis recognition). NEVER a
 /// hard-coded 2 (N1 review finding: the halt paths previously used the literal `2`).
-async fn kill_switch_quorum_m(engine: &Engine, roster: &[ThresholdMember]) -> usize {
-    family_quorum_m(engine, roster.len()).await
-}
-
+///
+/// **Not the halt plane.** Since rc7 (CIRISConstitution#146) the threshold for
+/// every `accord:invoke` / `accord:lifecycle` row is verify's
+/// [`InvocationKind::required_signatures`] — `constitutional` / `drill` /
+/// `notify` fire at ONE holder, `lifecycle:confirmed` / `lifecycle:active` at a
+/// strict majority of the standing roster — read in [`halt_plane_threshold`].
+/// This function decides ROSTER CHANGES (`family/supersede`, structural
+/// canonical ops), per CC 4.2.6's `fire ≤ roster-change ≤ standing`.
 /// The family's **entrenched** M (`quorum:M/N`), falling back to a strict
 /// majority over `roster_n` when the family cannot be resolved locally. The one
 /// place the threshold is decided — callers that only know the seat count use
@@ -777,7 +788,7 @@ async fn verify_invocation_handler(
     // N1: the threshold is the family's LIVE strict-majority M (a grown 3/5 needs 3),
     // not a hard-coded 2. Verify the hybrid cosignatures over §9.2.1 canonical bytes
     // against the seated roster at M (the same primitive reactivate uses).
-    let m = kill_switch_quorum_m(&st.engine, &holders).await;
+    let m = halt_plane_threshold(req.invocation.invocation_kind, holders.len());
     let canonical = req.invocation.canonical_bytes();
     match verify_threshold_signatures(&canonical, &holders, &req.signatures, m) {
         Ok(valid) => (
@@ -1097,6 +1108,13 @@ struct CreateInvocationRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs (PIN, slot, …).
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1114,9 +1132,23 @@ async fn resolve_holder_signature(
     holder_key_id: Option<&str>,
     usb_path: Option<&str>,
     pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    test_seed: Option<&str>,
 ) -> Result<ThresholdSignature, Response> {
     if let Some(sig) = submitted {
         return Ok(sig);
+    }
+    // The harness's software holder (test anchor only; refused on a production
+    // build and outside CIRIS_TESTING_MODE).
+    #[cfg(feature = "test-anchor")]
+    if let Some(seed) = test_seed {
+        return test_holder_sign_invocation(holder_key_id, seed, invocation).await;
+    }
+    #[cfg(not(feature = "test-anchor"))]
+    if test_seed.is_some() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "test_holder_seed_b64 is accepted only on a test-anchor build",
+        ));
     }
     let holder = holder_key_id.map(str::trim).filter(|s| !s.is_empty());
     let usb = usb_path.map(str::trim).filter(|s| !s.is_empty());
@@ -1135,6 +1167,71 @@ async fn resolve_holder_signature(
 /// ML-DSA-65 as a `HardwareRootedIdentity` and calling its bound signer. The
 /// `member_id` is the identity's federation `key_id` (see [`co_sign_accord_family`]
 /// for the same derivation). `pkcs11`-gated.
+/// TEST ANCHOR ONLY — sign an invocation as a software holder derived from a
+/// 32-byte seed, exactly as persist's `Identity::from_seeds` derives the
+/// final-genesis dry-run holders (Ed25519 from the seed, ML-DSA-65 from
+/// `test_anchor_mldsa_seed(seed)`), so the signature verifies against the
+/// roster that ceremony seated. Fenced twice: the feature AND
+/// `CIRIS_TESTING_MODE=true`, like `/v1/accord/final-genesis/sign`.
+#[cfg(feature = "test-anchor")]
+async fn test_holder_sign_invocation(
+    holder_key_id: Option<&str>,
+    seed_b64: &str,
+    invocation: &Invocation,
+) -> Result<ThresholdSignature, Response> {
+    use base64::Engine as _;
+    use ciris_keyring::PqcSigner as _;
+    use ed25519_dalek::Signer as _;
+    if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "a software holder seed is accepted only with CIRIS_TESTING_MODE=true",
+        ));
+    }
+    let Some(holder) = holder_key_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "test_holder_seed_b64 needs the holder's key_id",
+        ));
+    };
+    let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(seed_b64.trim())
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "test_holder_seed_b64 must be base64 of exactly 32 bytes",
+            )
+        })?;
+    let ed = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let mldsa = ciris_keyring::MlDsa65SoftwareSigner::from_seed_bytes(
+        &ciris_persist::federation::genesis::test_anchor_mldsa_seed(&seed),
+        format!("{holder}-pqc"),
+    )
+    .map_err(|e| {
+        err(
+            StatusCode::BAD_REQUEST,
+            &format!("software holder ml-dsa: {e}"),
+        )
+    })?;
+    let canonical = invocation.canonical_bytes();
+    let ed_sig = ed.sign(&canonical).to_bytes();
+    let mut bound = canonical.clone();
+    bound.extend_from_slice(&ed_sig);
+    let pqc_sig = mldsa.sign(&bound).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("software holder sign: {e}"),
+        )
+    })?;
+    Ok(ThresholdSignature {
+        member_id: holder.to_string(),
+        ed25519_signature_base64: base64::engine::general_purpose::STANDARD.encode(ed_sig),
+        mldsa65_signature_base64: Some(base64::engine::general_purpose::STANDARD.encode(&pqc_sig)),
+    })
+}
+
 #[cfg(feature = "pkcs11")]
 async fn hardware_sign_invocation(
     holder_key_id: &str,
@@ -1203,6 +1300,7 @@ fn synth_invocation(kind: InvocationKind, invocation_id: &str, payload: &[u8]) -
         invocation_kind: kind,
         invocation_id: invocation_id.to_string(),
         resumes_halt_id: None,
+        confirms_halt_id: None,
         nonce: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce),
         asserted_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         valid_until: (now + chrono::Duration::hours(1))
@@ -1227,6 +1325,7 @@ async fn create_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1249,6 +1348,13 @@ struct DrillRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1299,6 +1405,7 @@ async fn initiate_drill(State(st): State<AccordState>, body: axum::body::Bytes) 
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1322,6 +1429,13 @@ struct HaltRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1375,6 +1489,7 @@ async fn initiate_halt(State(st): State<AccordState>, body: axum::body::Bytes) -
         req.key_id,
         req.mldsa_usb_path,
         &req.pkcs11,
+        req.test_holder_seed_b64,
     )
     .await
 }
@@ -1392,6 +1507,7 @@ async fn open_invocation(
     holder_key_id: Option<String>,
     usb_path: Option<String>,
     pkcs11: &crate::accord_provision::ProvisionPkcs11,
+    test_seed: Option<String>,
 ) -> Response {
     let roster = match accord_roster(&st.engine).await {
         Ok(r) => r,
@@ -1404,6 +1520,7 @@ async fn open_invocation(
         holder_key_id.as_deref(),
         usb_path.as_deref(),
         pkcs11,
+        test_seed.as_deref(),
     )
     .await
     {
@@ -1473,6 +1590,13 @@ struct AnnounceRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1546,6 +1670,7 @@ async fn initiate_announce(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id.as_deref(),
         req.mldsa_usb_path.as_deref(),
         &req.pkcs11,
+        req.test_holder_seed_b64.as_deref(),
     )
     .await
     {
@@ -1597,42 +1722,81 @@ async fn initiate_announce(State(st): State<AccordState>, body: axum::body::Byte
 /// `GET /v1/accord/halt-status` — read-only view of the disk halt latch (the
 /// enforceable kill-switch state, [`crate::accord_halt`]). `halted` is derived from
 /// the latch file's PRESENCE (fail-secure: a present-but-unreadable latch still reads
-/// `halted: true`, matching [`crate::accord_halt::check_halt_gate`]); `record` is the
+/// `halted: true`, computed by [`crate::accord_halt::HaltRecord::standing_at`]); `record` is the
 /// best-effort parsed [`HaltRecord`] (who/when/invocation_id) or `null`. Halt
 /// ENFORCEMENT is unchanged — this endpoint never writes or clears the latch.
 async fn halt_status(State(st): State<AccordState>) -> Response {
     let Some(home) = &st.halt.home else {
-        // No disk-latch configured (test / no-home context) — never halted.
         return (
             StatusCode::OK,
-            Json(serde_json::json!({ "halted": false, "record": null })),
+            Json(serde_json::json!({ "halted": false, "lapsed": false, "halt": null, "record": null })),
         )
             .into_response();
     };
     let path = crate::accord_halt::halt_latch_path(home);
-    let halted = path.exists();
-    let record: Option<HaltRecord> = if halted {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-    } else {
-        None
+    let now = chrono::Utc::now();
+    // `halted` is computed on every read (the fuse), never stored. An
+    // unreadable latch reads as `halted: null` with the error named: the
+    // agent gate must not mistake "cannot read" for "not halted".
+    let (halted, lapsed, halt, record, error) = match read_halt_latch(home) {
+        Ok(Some(rec)) => match rec.standing_at(now) {
+            HaltStanding::InEffect { lapses_at } => (
+                serde_json::json!(true),
+                false,
+                serde_json::json!({
+                    "invocation_id": rec.invocation_id,
+                    "received_at": rec.received_at().to_rfc3339(),
+                    "fuse_secs": rec.fuse_secs(),
+                    "lapses_at": lapses_at,
+                    "confirmed": rec.confirmed,
+                    "valid_signers": rec.valid_signers,
+                }),
+                Some(rec),
+                None,
+            ),
+            HaltStanding::Lapsed { lapsed_at } => (
+                serde_json::json!(false),
+                true,
+                serde_json::json!({
+                    "invocation_id": rec.invocation_id,
+                    "received_at": rec.received_at().to_rfc3339(),
+                    "fuse_secs": rec.fuse_secs(),
+                    "lapsed_at": lapsed_at,
+                    "valid_signers": rec.valid_signers,
+                }),
+                Some(rec),
+                None,
+            ),
+        },
+        Ok(None) => (
+            serde_json::json!(false),
+            false,
+            serde_json::Value::Null,
+            None,
+            None,
+        ),
+        Err(e) => (
+            serde_json::Value::Null,
+            false,
+            serde_json::Value::Null,
+            None,
+            Some(format!("{e:#}")),
+        ),
     };
-    // CIRISServer#347 — a release is a governance act and is surfaced as such:
-    // the append-only journal of every honoured/refused offline release attempt.
-    // Read from disk (not memory) so it survives the restart the release caused,
-    // which is the only way a node can report on its own un-halt.
     let releases = crate::accord_release::read_release_journal(home);
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "halted": halted,
+            "lapsed": lapsed,
+            "halt": halt,
             "latch_path": path.display().to_string(),
             "record": record,
             "releases": releases,
             "release_token_path": crate::accord_release::release_token_path(home)
                 .display()
                 .to_string(),
+            "error": error,
         })),
     )
         .into_response()
@@ -1681,6 +1845,13 @@ struct ConcurRequest {
     /// Hardware-sign path: the USB directory holding the wrapped ML-DSA-65 half.
     #[serde(default)]
     mldsa_usb_path: Option<String>,
+    /// TEST ANCHOR ONLY (`--features test-anchor` AND `CIRIS_TESTING_MODE=true`):
+    /// sign as a SOFTWARE holder derived from this seed — the final-genesis
+    /// dry-run holders (`/v1/accord/final-genesis/sign` takes the same field).
+    /// The harness fires drills, halts, confirmations and resumptions with it.
+    /// Ignored (refused) on every production build.
+    #[serde(default)]
+    test_holder_seed_b64: Option<String>,
     /// Hardware-sign path: the holder's YubiKey PKCS#11 / PIV knobs.
     #[serde(default)]
     pkcs11: crate::accord_provision::ProvisionPkcs11,
@@ -1715,6 +1886,7 @@ async fn concur_invocation(State(st): State<AccordState>, body: axum::body::Byte
         req.key_id.as_deref(),
         req.mldsa_usb_path.as_deref(),
         &req.pkcs11,
+        req.test_holder_seed_b64.as_deref(),
     )
     .await
     {
@@ -1812,9 +1984,18 @@ struct AccordOutcome {
     invocation_id: String,
     quorum_met: bool,
     valid_signers: Vec<String>,
-    /// A 2-of-3 `CONSTITUTIONAL` halt was honored (latched; process termination
-    /// scheduled in prod).
+    /// A `constitutional` halt was honored: the latch is written and the agents
+    /// on this node are paused. The node keeps serving (rc7).
     halted: bool,
+    /// A majority `lifecycle:confirmed` named the standing halt within its fuse;
+    /// the latch no longer lapses.
+    confirmed: bool,
+    /// A majority `lifecycle:active` named the standing halt; the latch is gone.
+    released: bool,
+    /// Why a quorum-complete lifecycle row did nothing here: `confirms_unknown_halt`,
+    /// `halt_fuse_lapsed`, `resumes_unknown_halt`, `latch_unreadable`,
+    /// `latch_write_failed`, `no_latch_home`.
+    refusal: Option<&'static str>,
 }
 
 /// Replicate an authentic accord object to every known peer's `/v1/accord/message`.
@@ -1887,7 +2068,9 @@ async fn replicate_and_maybe_halt(
     // NOT the hard-coded 2 in accord_invocation_status. valid_signers is the set of
     // distinct, validly-hybrid-signed seats; the roster is the seated family.
     let _ = assert_distinct_roster(&roster); // defense-in-depth; roster is seat-distinct
-    let m = kill_switch_quorum_m(&st.engine, &roster).await;
+                                             // rc7: the threshold is the KIND's, from verify — one holder fires a halt.
+    let kind = parsed.invocation.invocation_kind;
+    let m = halt_plane_threshold(kind, roster.len());
     let quorum_met = status.valid_signers.len() >= m;
 
     let mut outcome = AccordOutcome {
@@ -1897,6 +2080,9 @@ async fn replicate_and_maybe_halt(
         quorum_met,
         valid_signers: status.valid_signers.clone(),
         halted: false,
+        confirmed: false,
+        released: false,
+        refusal: None,
     };
     if !outcome.authentic {
         return Ok(outcome);
@@ -1955,47 +2141,39 @@ async fn replicate_and_maybe_halt(
         }
     }
 
-    let is_global_halt =
-        status.invocation_kind == InvocationKind::Constitutional.as_str() && quorum_met;
-    // B3: the loop-stop key includes `is_global_halt`, so a SUB-quorum sighting of
-    // this invocation (gossiped earlier with <M sigs) does NOT suppress the later
-    // QUORUM-meeting halt — the halt relays on its own first quorum-sighting even if
-    // the sub-quorum object was already seen.
+    let is_global_halt = kind == InvocationKind::Constitutional && quorum_met;
+    // A row that BINDS at its threshold (a fire, a confirmation, a resumption)
+    // is tracked apart from its sub-threshold sightings, so earlier gossip of
+    // the same id never suppresses the relay of the binding one (B3).
+    let binding = quorum_met
+        && matches!(
+            kind,
+            InvocationKind::Constitutional
+                | InvocationKind::LifecycleConfirmed
+                | InvocationKind::LifecycleActive
+        );
     let key = (
         status.invocation_kind.clone(),
         status.invocation_id.clone(),
-        is_global_halt,
+        binding,
     );
     let first_sight = {
         let mut seen = st.seen.lock().expect("seen lock");
-        // Bounded backstop: clearing only costs a possible re-gossip, which is
-        // idempotent (a duplicate halt re-latches; a duplicate notify re-fans once).
         if seen.len() >= MAX_SEEN_INVOCATIONS {
             seen.clear();
         }
         seen.insert(key)
     };
-
     if is_global_halt {
-        // Requirement: replicate to known peers BEFORE initiating the halt (so the
-        // kill propagates before this node goes dark). AWAITED but bounded by
-        // REPLICATION_TIMEOUT — a hung peer can never delay the latch. Deduped on
-        // first QUORUM-sighting (A→B→A storms stopped; the halt still reaches every
-        // peer because each node relays its OWN first quorum-sighting before going dark).
+        // Replicate FIRST (the kill must propagate even if this node's disk is
+        // failing), then latch. The node then KEEPS RUNNING: a constitutional
+        // halt is an agent pause (CC 4.2.1.1, rc7) — only the agent act gate
+        // reads the latch, through /v1/accord/halt-status.
         if first_sight {
             replicate_to_peers(&st.http, &st.halt.peers, obj).await;
         }
-        // The disk latch is the load-bearing, LOCAL, fast gate. B4: a halt must NEVER
-        // resurrect — so the clean exit is GATED on a durable latch. We retry with
-        // backoff; if the latch can NOT be written, we do NOT take the exit(42) path
-        // (which would let the next startup boot un-gated). Instead we abort() loudly
-        // AFTER replicating to peers — a crash an auto-restarter must NOT silently
-        // bring back, and the peers already hold the halt.
         if let Some(home) = &st.halt.home {
-            // CIRISServer#347: the record carries the RELEASE BINDING — this node's
-            // id, this halt's payload hash, and a fresh per-latch id — so the dark
-            // machine's own disk states what would lift it, and a token minted for
-            // any other (node, halt, latch) triple is refused.
+            let fuse_secs = crate::mesh_genesis::baked_halt_fuse_secs();
             let record = HaltRecord::new(
                 status.invocation_kind.clone(),
                 status.invocation_id.clone(),
@@ -2004,7 +2182,8 @@ async fn replicate_and_maybe_halt(
                 now.clone(),
                 st.halt.node_id.clone(),
                 Some(parsed.invocation.payload_sha256.clone()),
-            );
+            )
+            .with_fuse(fuse_secs);
             let mut latched = None;
             for attempt in 1..=8u32 {
                 match latch_halt(home, &record) {
@@ -2014,7 +2193,6 @@ async fn replicate_and_maybe_halt(
                     }
                     Err(e) => {
                         tracing::error!(attempt, error = %e, "halt latch write failed — retrying");
-                        // Backoff (capped) so a transient disk fault can clear.
                         tokio::time::sleep(std::time::Duration::from_millis(
                             (50u64 << attempt.min(6)).min(2000),
                         ))
@@ -2026,48 +2204,123 @@ async fn replicate_and_maybe_halt(
                 Some(p) => tracing::error!(
                     latch = %p.display(),
                     invocation_id = %status.invocation_id,
-                    "HUMANITY_ACCORD HALT honored — node latched down (full halt, CC 4.2.1)"
+                    signers = ?status.valid_signers,
+                    fuse_secs,
+                    lapses_at = %record.lapses_at().to_rfc3339(),
+                    "HUMANITY_ACCORD HALT IN EFFECT — the agents on this node are PAUSED; the node \
+                     keeps serving (CC 4.2.1.1, rc7). Unconfirmed, it lapses at the instant above; a \
+                     strict-majority accord:lifecycle:confirmed keeps it, a majority \
+                     accord:lifecycle:active ends it."
                 ),
-                None => {
-                    // B4 fail-secure: the latch is the ONLY thing that gates the next
-                    // boot. Without it we must NOT exit into a restartable, un-gated
-                    // serving state. Abort hard (the halt is already replicated to
-                    // peers) — a node that cannot latch its own halt must be treated
-                    // as compromised and NOT auto-restarted without a manual latch.
-                    if st.halt.exit_on_halt {
-                        tracing::error!(
-                            invocation_id = %status.invocation_id,
-                            "HALT LATCH WRITE FAILED after retries — ABORTING (NOT a clean halt \
-                             exit). The latch is NOT durable: do NOT auto-restart this node; an \
-                             operator MUST create the halt latch before it may run again."
-                        );
-                        // Flush the response, then abort (distinct from the clean exit 42).
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        std::process::abort();
-                    } else {
-                        tracing::error!(
-                            invocation_id = %status.invocation_id,
-                            "HALT LATCH WRITE FAILED after retries and the latch is NOT durable \
-                             (exit_on_halt off) — an operator MUST create the halt latch."
-                        );
-                    }
-                }
+                None => tracing::error!(
+                    invocation_id = %status.invocation_id,
+                    "HALT LATCH WRITE FAILED after retries — the halt is NOT durable on this node; \
+                     the agent gate reads no pause here until an operator repairs the home and \
+                     the row is re-delivered"
+                ),
             }
         }
         outcome.halted = true;
-        // Full halt, fail-secure: terminate after a short grace so the HTTP
-        // response flushes. The disk latch blocks the next startup. (Only reached
-        // when the latch is durable OR no home is configured — the no-durable-latch
-        // case aborted above.)
-        if st.halt.exit_on_halt {
-            tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                std::process::exit(HALT_EXIT_CODE);
-            });
+    } else if quorum_met && kind == InvocationKind::LifecycleConfirmed {
+        // CC 4.2.1.3: a strict majority names the standing halt within its fuse.
+        let Some(home) = &st.halt.home else {
+            outcome.refusal = Some("no_latch_home");
+            return Ok(outcome);
+        };
+        match read_halt_latch(home) {
+            Ok(Some(rec)) => {
+                let now_t = chrono::Utc::now();
+                let names_it = parsed.invocation.confirms_halt_id.as_deref()
+                    == Some(rec.invocation_id.as_str());
+                if !names_it {
+                    outcome.refusal = Some("confirms_unknown_halt");
+                } else if !rec.in_effect_at(now_t) {
+                    // "a confirmation after the fuse has lapsed confirms nothing,
+                    // and a fresh halt is fired instead"
+                    outcome.refusal = Some("halt_fuse_lapsed");
+                } else if rec.confirmed.is_some() {
+                    outcome.confirmed = true; // idempotent re-delivery
+                } else {
+                    let confirmation = HaltConfirmation {
+                        invocation_id: status.invocation_id.clone(),
+                        signers: status.valid_signers.clone(),
+                        received_at: now_t.to_rfc3339(),
+                    };
+                    match confirm_halt(home, rec, confirmation) {
+                        Ok(_) => {
+                            outcome.confirmed = true;
+                            tracing::warn!(
+                                invocation_id = %status.invocation_id,
+                                signers = ?status.valid_signers,
+                                "HUMANITY_ACCORD HALT CONFIRMED by a strict majority — the pause no \
+                                 longer lapses; only a majority accord:lifecycle:active ends it"
+                            );
+                            if first_sight {
+                                replicate_to_peers(&st.http, &st.halt.peers, obj).await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %format!("{e:#}"), "confirming the halt latch failed");
+                            outcome.refusal = Some("latch_write_failed");
+                        }
+                    }
+                }
+            }
+            Ok(None) => outcome.refusal = Some("confirms_unknown_halt"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "halt latch unreadable");
+                outcome.refusal = Some("latch_unreadable");
+            }
+        }
+    } else if quorum_met && kind == InvocationKind::LifecycleActive {
+        // CC 4.2.1.3: resumption at a strict majority, naming the ONE halt it ends.
+        let Some(home) = &st.halt.home else {
+            outcome.refusal = Some("no_latch_home");
+            return Ok(outcome);
+        };
+        match read_halt_latch(home) {
+            Ok(Some(rec)) => {
+                if parsed.invocation.resumes_halt_id.as_deref() != Some(rec.invocation_id.as_str())
+                {
+                    outcome.refusal = Some("resumes_unknown_halt");
+                } else {
+                    let entry = serde_json::json!({
+                        "event": "accord_halt_release",
+                        "outcome": "honored_over_wire",
+                        "released_at": now,
+                        "resumption_invocation_id": status.invocation_id,
+                        "signers": status.valid_signers,
+                        "threshold": m,
+                        "halt_record": rec,
+                    });
+                    match release_halt(home, &rec, &entry) {
+                        Ok(()) => {
+                            outcome.released = true;
+                            tracing::warn!(
+                                invocation_id = %status.invocation_id,
+                                resumes = %rec.invocation_id,
+                                signers = ?status.valid_signers,
+                                "HUMANITY_ACCORD HALT RELEASED — a strict majority's \
+                                 accord:lifecycle:active named this halt; the agents may resume"
+                            );
+                            if first_sight {
+                                replicate_to_peers(&st.http, &st.halt.peers, obj).await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %format!("{e:#}"), "releasing the halt latch failed");
+                            outcome.refusal = Some("latch_write_failed");
+                        }
+                    }
+                }
+            }
+            Ok(None) => outcome.refusal = Some("resumes_unknown_halt"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "halt latch unreadable");
+                outcome.refusal = Some("latch_unreadable");
+            }
         }
     } else if first_sight {
-        // Ordinary accord-holder-signed traffic (concurrence-seeking notify/drill/
-        // sub-quorum): gossip onward once, fire-and-forget (the holder isn't blocked).
         let http = st.http.clone();
         let peers = st.halt.peers.clone();
         let obj = obj.clone();
@@ -2100,6 +2353,9 @@ async fn ingest_message(State(st): State<AccordState>, body: axum::body::Bytes) 
                 "quorum_met": o.quorum_met,
                 "valid_signers": o.valid_signers,
                 "halted": o.halted,
+                "confirmed": o.confirmed,
+                "released": o.released,
+                "refusal": o.refusal,
             })),
         )
             .into_response(),
@@ -2392,7 +2648,7 @@ async fn family_history(State(st): State<AccordState>) -> Response {
 // EVERY canonical op is resolved in ONE place ([`canonical_op_quorum_m`]) from the
 // LIVE roster + the op class — never hard-coded. So as the founder set grows the
 // same ops scale: structural ops already read the family's entrenched `quorum:M/N`
-// (via [`kill_switch_quorum_m`]); operational ops are a single-holder bootstrap
+// (via [`family_quorum_m`]); operational ops are a single-holder bootstrap
 // today, and moving them to m-of-n is a one-line change in that one function.
 
 /// The authority class of a canonical-server op → its required quorum.
@@ -2418,10 +2674,10 @@ async fn canonical_op_quorum_m(
 ) -> usize {
     match class {
         // Additive bootstrap — 1-of-N today (policy knob). Swap to
-        // `kill_switch_quorum_m(engine, roster).await` to make it m-of-n.
+        // `family_quorum_m(engine, roster.len()).await` to make it m-of-n.
         CanonicalOpClass::Operational => 1,
         // Structural — the family's entrenched `quorum:M/N` (already m-of-n).
-        CanonicalOpClass::Structural => kill_switch_quorum_m(engine, roster).await,
+        CanonicalOpClass::Structural => family_quorum_m(engine, roster.len()).await,
     }
 }
 
@@ -2689,6 +2945,7 @@ mod tests {
             invocation_kind: InvocationKind::Notify,
             invocation_id: "notify-test-1".to_string(),
             resumes_halt_id: None,
+            confirms_halt_id: None,
             nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
             asserted_at: "2026-07-05T00:00:00.000Z".to_string(),
             valid_until: "2026-07-05T01:00:00.000Z".to_string(),
@@ -2716,6 +2973,7 @@ mod tests {
             None,
             None,
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect("a submitted signature is returned verbatim");
@@ -2734,6 +2992,7 @@ mod tests {
             None,
             None,
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("no signature + no hardware inputs must be rejected");
@@ -2751,6 +3010,7 @@ mod tests {
             Some("   "),
             Some(""),
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("blank holder/usb inputs must be rejected");
@@ -2787,6 +3047,7 @@ mod tests {
             Some("accord-holder-1"),
             Some("/tmp/usb"),
             &crate::accord_provision::ProvisionPkcs11::default(),
+            None,
         )
         .await
         .expect_err("the hardware path needs pkcs11");

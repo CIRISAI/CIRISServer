@@ -456,10 +456,22 @@ async fn unregistered_peer_liveness_is_rejected() {
         .await;
     let err = res.expect_err("unregistered-peer attestation must be rejected");
     let msg = format!("{err:?}");
+    // persist v54.1.0 (CIRISPersist#1042): the unknown-attester refusal is the
+    // TYPED, retryable `AttesterKeyUnknown { attesting_key_id, plane }` — the
+    // row waits for the Key, it is not malformed. Earlier persists said it as
+    // the FK gate's "does not exist" / InvalidArgument; either is the same door.
     assert!(
-        msg.contains("does not exist") || msg.contains("InvalidArgument"),
-        "rejection must be the attesting-key FK gate, got: {msg}"
+        msg.contains("AttesterKeyUnknown")
+            || msg.contains("does not exist")
+            || msg.contains("InvalidArgument"),
+        "rejection must be the attesting-key gate, got: {msg}"
     );
+    if msg.contains("AttesterKeyUnknown") {
+        assert!(
+            msg.contains("\"ciris-status\""),
+            "the refusal names the unknown attester: {msg}"
+        );
+    }
 }
 
 /// v8.8.0 fail-secure: a FORGED / unverifiable peer `SignedKeyRecord` (the

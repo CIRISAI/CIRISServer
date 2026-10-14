@@ -17,7 +17,7 @@
 //! ## Which measure feeds `capacity()`
 //!
 //! The scorer feeds **`n_eff_pr`** (participation ratio) into
-//! `scoring::capacity::capacity`. measure_n_eff.py reports both and notes PR
+//! `scoring::assess_capacity`. measure_n_eff.py reports both and notes PR
 //! "penalizes variance concentration more aggressively" — the conservative
 //! choice for an anti-Sybil independence claim (a near-degenerate spectrum is
 //! pushed toward 1, not flattered). `scoring/calibration.rs` does not specify a

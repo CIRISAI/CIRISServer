@@ -526,6 +526,32 @@ fn policy_m(consensus_protocol: &str) -> Option<usize> {
 }
 
 /// The charter carried by a bundle, if any: the self-loop `delegates_to`.
+/// CC 4.2.1.1 — the fuse a one-holder `constitutional` halt runs on: the
+/// charter member `halt_fuse_secs` of the baked genesis charter, or the
+/// constitutional default (24 h) when the charter names none (the final
+/// genesis charter, minted 2026-10-04 before the ruling, omits it and is
+/// conformant with the 24-hour fuse).
+#[must_use]
+pub fn baked_halt_fuse_secs() -> u64 {
+    // TEST-ANCHOR-FENCED override (CIRIS_TESTING_MODE=true only): the ceremony
+    // routes mint a charter with no `halt_fuse_secs`, and a ladder cannot wait
+    // 24 h to watch a lone halt lapse. A production node never reads this.
+    if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true") {
+        if let Some(secs) = std::env::var("CIRIS_TEST_HALT_FUSE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+        {
+            return secs;
+        }
+    }
+    charter_of(ciris_persist::federation::genesis::canonical_genesis_bundle())
+        .and_then(|c| c.attestation_envelope.get("halt_fuse_secs"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|s| *s > 0)
+        .unwrap_or(crate::accord_halt::HALT_FUSE_SECS_DEFAULT)
+}
+
 fn charter_of(bundle: &GenesisBundle) -> Option<&Attestation> {
     // Identified by its ATTESTATION ID, not by a self-loop. Through 0.5.141 this
     // matched `attesting_key_id == attested_key_id`, which silently stops finding
@@ -1260,7 +1286,10 @@ pub async fn adopt_allegiance_facts(
             }
         }
         match dir.put_public_key(rec.clone()).await {
-            Ok(()) => out.keys_registered += 1,
+            Ok(()) => {
+                out.keys_registered += 1;
+                crate::compose::release_parked_on(&id, "allegiance key import");
+            }
             Err(e) if is_already_exists(&e) => out.keys_already_held += 1,
             Err(e) => out.refused.push((id, e.to_string())),
         }
@@ -1724,7 +1753,7 @@ where
     let mut identity_conflicts: Vec<String> = Vec::new();
     for rec in bundle.holders.iter().chain(bundle.serve_nodes.iter()) {
         match dir.put_public_key(rec.clone()).await {
-            Ok(()) => {}
+            Ok(()) => crate::compose::release_parked_on(&rec.record.key_id, "genesis key install"),
             Err(e) if is_already_exists(&e) => {
                 identity_conflicts.push(rec.record.key_id.clone());
             }

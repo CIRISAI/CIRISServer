@@ -750,11 +750,11 @@ pub fn check_aggregation_policy_fail_secure() -> Result<(), String> {
 /// node's own runtime, so both config producers (`graph_config::config_envelope` and
 /// the load-bearing typed `set_config`, CIRISServer#324) stamp
 /// [`crate::graph_config::CONFIG_COHORT_SCOPE`] — the ONE const both route through.
-/// The pre-#324 value was `federation`, the ONE scope `suppresses_holds_bytes`
+/// The pre-#324 value was `federation`, the ONE scope `is_structurally_invisible`
 /// (`SELF | FAMILY`) does NOT protect, which left config directory-advertised +
 /// cohort-replicable. This check reads the emitted const, not persist's API in the
 /// abstract: repointing `CONFIG_COHORT_SCOPE` at `federation` reds this check because
-/// `suppresses_holds_bytes(CONFIG_COHORT_SCOPE)` goes false — a genuine
+/// `is_structurally_invisible(CONFIG_COHORT_SCOPE)` goes false — a genuine
 /// red-until-fix on the emitted value, the property T3's #324 fix actually changed
 /// (the prior form validated only persist's function and would have stayed green
 /// throughout the entire `federation` defect window).
@@ -763,9 +763,9 @@ pub fn check_config_cohort_scope_self() -> Result<(), String> {
     let emitted = crate::graph_config::CONFIG_COHORT_SCOPE;
     // (1) The emitted value MUST suppress holds_bytes — the red-until-fix core.
     // `federation` (pre-#324) does not, so a regression there reds here.
-    if !cohort_scope::suppresses_holds_bytes(emitted) {
+    if !cohort_scope::is_structurally_invisible(emitted) {
         return Err(format!(
-            "config's emitted cohort_scope ({emitted:?}) must suppress holds_bytes (structural \
+            "config's emitted cohort_scope ({emitted:?}) must be structurally invisible (persist v55 renamed is_structurally_invisible; structural \
              invisibility, CC 4.4.3.4.3); `federation` — the pre-#324 assigned-but-wrong value — \
              does NOT suppress and would leave every config key directory-advertised + replicable"
         ));
@@ -782,9 +782,9 @@ pub fn check_config_cohort_scope_self() -> Result<(), String> {
     // (3) Sibling invariant the fix depends on: `federation` must NOT suppress — else
     // the pre-#324 value would have been harmless and the fix meaningless. Guards
     // against a persist-side change that would silently defang this whole check.
-    if cohort_scope::suppresses_holds_bytes(cohort_scope::FEDERATION) {
+    if cohort_scope::is_structurally_invisible(cohort_scope::FEDERATION) {
         return Err(
-            "cohort_scope=federation must NOT suppress holds_bytes — it is the assigned-but-wrong \
+            "cohort_scope=federation must NOT be structurally invisible — it is the assigned-but-wrong \
              config scope the #324 fix replaced with self"
                 .into(),
         );

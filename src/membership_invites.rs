@@ -681,6 +681,9 @@ fn kind_token(scope: GroupScope) -> &'static str {
     match scope {
         GroupScope::Family => "family",
         GroupScope::Community => "community",
+        // persist v54 / edge v41.0.1: an affiliation is the community machinery
+        // at its own tier, and its invitations say so (CC 4.4.3.2.8).
+        GroupScope::Affiliations => "affiliations",
     }
 }
 
@@ -785,7 +788,9 @@ async fn group_name(
             .ok()
             .flatten()
             .map(|f| f.family_name),
-        GroupScope::Community => dir
+        // An affiliation is a community-plane record declared at its own tier;
+        // persist keeps both in the one community table (CC 4.4.3.2.8).
+        GroupScope::Community | GroupScope::Affiliations => dir
             .lookup_community(group)
             .await
             .ok()

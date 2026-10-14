@@ -282,7 +282,7 @@ async fn serve(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 /// Serve an explicit router (used by the operational-halt tests, which need a
-/// `router_with_halt` carrying a temp `home` + `exit_on_halt: false`).
+/// `router_with_halt` carrying a temp `home`; rc7: a halt never exits the process).
 async fn serve_app(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -324,6 +324,7 @@ fn constitutional_invocation(id: &str) -> Invocation {
         invocation_id: id.to_string(),
         // verify v8.3.0: forbidden for every kind except `lifecycle:active`.
         resumes_halt_id: None,
+        confirms_halt_id: None,
         nonce: BASE64.encode([9u8; 32]),
         asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
         valid_until: "2030-01-01T00:00:00.000Z".to_string(),
@@ -398,6 +399,7 @@ fn drill_invocation(id: &str) -> Invocation {
         invocation_id: id.to_string(),
         // verify v8.3.0: forbidden for every kind except `lifecycle:active`.
         resumes_halt_id: None,
+        confirms_halt_id: None,
         nonce: BASE64.encode([7u8; 32]),
         asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
         valid_until: "2030-01-01T00:00:00.000Z".to_string(),
@@ -457,7 +459,9 @@ async fn register_holders_list_roster_and_verify_2_of_3_invocation() {
     );
     assert_eq!(verdict["valid_signatures"], 2);
 
-    // ── 4. A 1-of-3 invocation FAILS the threshold ───────────────────────────
+    // ── 4. A 1-of-3 drill VERIFIES: rc7 (CIRISConstitution#146) puts the fire
+    //       floor — and a drill rehearses the fire — at ONE holder, from verify's
+    //       required_signatures. The threshold the verdict reports is the kind's.
     let inv2 = drill_invocation("drill-002");
     let one = vec![holders[0].cosign(&inv2).await];
     let verdict2: serde_json::Value = client
@@ -474,10 +478,14 @@ async fn register_holders_list_roster_and_verify_2_of_3_invocation() {
         .await
         .unwrap();
     assert_eq!(
-        verdict2["verified"], false,
-        "1-of-3 must NOT verify; got {verdict2}"
+        verdict2["verified"], true,
+        "one holder verifies a drill under rc7; got {verdict2}"
     );
-    assert_eq!(verdict2["reason"], "quorum_not_met");
+    assert_eq!(
+        verdict2["threshold"], 1,
+        "the kind's threshold; got {verdict2}"
+    );
+    assert_eq!(verdict2["valid_signatures"], 1);
 
     // ── 5. Replaying the SAME invocation id is rejected by the dedup window ───
     let replay = client
@@ -653,9 +661,12 @@ async fn invocation_concurrence_advances_to_quorum() {
         .json()
         .await
         .unwrap();
+    // rc7 (CIRISConstitution#146): a drill rehearses the fire path, and the
+    // fire floor is ONE holder — so one signature already meets the kind's
+    // threshold (verify's required_signatures). Concurrence still accumulates.
     assert_eq!(
-        created["quorum_met"], false,
-        "1-of-3 is sub-quorum; got {created}"
+        created["quorum_met"], true,
+        "one holder completes a drill under rc7; got {created}"
     );
 
     // Holder B concurs → 2-of-3 quorum met.
@@ -673,7 +684,7 @@ async fn invocation_concurrence_advances_to_quorum() {
         .unwrap();
     assert_eq!(
         concurred["quorum_met"], true,
-        "2-of-3 must meet quorum; got {concurred}"
+        "a second signature keeps it complete; got {concurred}"
     );
 
     // The pending list reflects the met quorum.
@@ -912,7 +923,6 @@ async fn serve_haltable(
         accord::AccordHalt {
             home: Some(home.clone()),
             peers: Vec::new(),
-            exit_on_halt: false, // never kill the test runner
             // #347: what the latch's release binding names this node.
             node_id: Some(format!("node-under-test-{tag}")),
         },
@@ -922,14 +932,16 @@ async fn serve_haltable(
 }
 
 #[tokio::test]
-async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
-    // The operational kill-switch: a 2-of-3 CONSTITUTIONAL accord message latches
-    // the disk halt + the latch then gates startup (not a recoverable pause).
+async fn one_holder_constitutional_latches_and_the_node_keeps_serving() {
+    // rc7 (CIRISConstitution#146): ONE seated holder's hybrid signature fires a
+    // constitutional halt on receipt. The node latches with the instant it
+    // received the row and the charter fuse, serves the latch on
+    // /v1/accord/halt-status for the agent act gate, and KEEPS SERVING —
+    // it neither exits nor refuses to boot (a halt is an agent pause).
     let engine = node().await;
     let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
     let (base, home, _h) = serve_haltable(Arc::clone(&engine), "halt").await;
     let client = reqwest::Client::new();
-
     let holders = [
         Holder::new("accord-holder-a", 0xC1),
         Holder::new("accord-holder-b", 0xC2),
@@ -938,16 +950,9 @@ async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
     establish_family(&engine, &base, &owner, &holders).await;
 
     let inv = constitutional_invocation("halt-001");
-    let roster = vec![
-        holders[0].threshold_member(None).await,
-        holders[1].threshold_member(None).await,
-    ];
-    let sigs = vec![
-        cosign_typed(&holders[0], &inv).await,
-        cosign_typed(&holders[1], &inv).await,
-    ];
+    let roster = vec![holders[0].threshold_member(None).await];
+    let sigs = vec![cosign_typed(&holders[0], &inv).await];
     let obj = invocation_object(&roster, &inv, &sigs);
-
     let resp = client
         .post(format!("{base}/v1/accord/message"))
         .json(&obj)
@@ -956,38 +961,41 @@ async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
         .expect("deliver halt message");
     assert_eq!(resp.status(), 200, "authentic halt message accepted");
     let body = resp.json::<serde_json::Value>().await.unwrap();
-    assert_eq!(body["quorum_met"], true, "2-of-3 met; got {body}");
+    assert_eq!(
+        body["quorum_met"], true,
+        "ONE holder is the fire floor; got {body}"
+    );
     assert_eq!(
         body["halted"], true,
-        "CONSTITUTIONAL 2-of-3 ⇒ halted; got {body}"
+        "a constitutional row by one holder halts; got {body}"
     );
 
-    // The disk latch was written + now gates a fresh startup.
     let latch = home.join("HUMANITY_ACCORD_HALT");
     assert!(
         latch.exists(),
         "halt latch must be written to {}",
         latch.display()
     );
-    assert!(
-        ciris_server::accord_halt::check_halt_gate(&home).is_err(),
-        "a present halt latch must refuse startup"
-    );
-    // #347: the latch states WHAT WOULD LIFT IT — a dark machine's own disk names
-    // the exact payload the accord must cosign. Read it back off the file, not from
-    // the in-process record, because "an operator with only this file" is the
-    // scenario the release token exists for.
     let record: ciris_server::accord_halt::HaltRecord =
         serde_json::from_str(&std::fs::read_to_string(&latch).unwrap()).expect("latch parses");
     assert_eq!(
-        record.node_id.as_deref(),
-        Some("node-under-test-halt"),
-        "the latch must name the node it is on"
+        record.quorum_threshold, 1,
+        "verify's threshold for the kind is recorded"
+    );
+    assert!(
+        record.received_at.is_some(),
+        "the fuse counts from THIS node's receipt"
     );
     assert_eq!(
+        record.fuse_secs,
+        Some(ciris_server::accord_halt::HALT_FUSE_SECS_DEFAULT),
+        "the test charter names no halt_fuse_secs, so the constitutional default applies"
+    );
+    assert!(record.in_effect_at(chrono::Utc::now()));
+    assert_eq!(record.node_id.as_deref(), Some("node-under-test-halt"));
+    assert_eq!(
         record.halt_payload_sha256.as_deref(),
-        Some(hex::encode(Sha256::digest(b"halt-payload")).as_str()),
-        "the latch must name the halt payload it honored"
+        Some(hex::encode(Sha256::digest(b"halt-payload")).as_str())
     );
     assert!(
         record.latch_id.is_some(),
@@ -999,28 +1007,55 @@ async fn constitutional_2of3_message_latches_global_halt_and_gates_startup() {
             .unwrap()
             .payload_sha256()
             .ok(),
-        "the stamped release digest must match the recomputed one"
     );
 
-    // Manual removal clears the gate (the NON-conformant operator override — CC 4.2.3).
+    // The node keeps serving: boot would read the latch, never refuse it, and
+    // the served read is what the agent's act gate consults.
+    assert!(
+        ciris_server::accord_halt::load_halt_latch(&home)
+            .unwrap()
+            .is_some(),
+        "boot READS a present latch (rc7) and does not refuse to start"
+    );
+    let status = client
+        .get(format!("{base}/v1/accord/halt-status"))
+        .send()
+        .await
+        .expect("the node still answers while halted")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(status["halted"], true, "{status}");
+    assert_eq!(status["lapsed"], false, "{status}");
+    assert_eq!(status["halt"]["invocation_id"], "halt-001", "{status}");
+    assert!(
+        status["halt"]["lapses_at"].is_string(),
+        "an unconfirmed halt names its lapse: {status}"
+    );
+    assert!(status["halt"]["confirmed"].is_null(), "{status}");
+
+    // Idempotent: the same row again changes nothing and still reads halted.
+    let again = client
+        .post(format!("{base}/v1/accord/message"))
+        .json(&obj)
+        .send()
+        .await
+        .expect("replay")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        again["halted"], true,
+        "a replayed halt re-latches idempotently; got {again}"
+    );
+
     std::fs::remove_file(&latch).unwrap();
-    assert!(ciris_server::accord_halt::check_halt_gate(&home).is_ok());
+    assert!(ciris_server::accord_halt::load_halt_latch(&home)
+        .unwrap()
+        .is_none());
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// **CIRISServer#347 end-to-end** — a REAL 2-of-3 halt over HTTP, then the offline
-/// release round-trip against the resulting latch. Two properties in one arc:
-///
-/// 1. the **boot gate** verifies a presented token against the BAKED accord genesis
-///    and refuses anything else — proven by presenting a token that is perfectly
-///    valid except that it is signed by these test seats rather than the pinned
-///    founders. The latch survives and the refusal is journaled.
-/// 2. with the authority those signatures actually belong to, the same token
-///    releases: latch cleared, gate passes, honoured entry in the audit journal.
-///
-/// The split is honest about what a software test can reach: nothing in-process
-/// holds the real A1/B1/C1 private halves, so the *honouring* leg injects its
-/// authority while the *refusing* leg exercises the production one.
 #[tokio::test]
 async fn offline_release_token_round_trips_against_a_real_halt_latch() {
     use ciris_server::accord_release::{
@@ -1062,8 +1097,10 @@ async fn offline_release_token_round_trips_against_a_real_halt_latch() {
         .unwrap();
     assert_eq!(body["halted"], true, "the halt must latch; got {body}");
     assert!(
-        ciris_server::accord_halt::check_halt_gate(&home).is_err(),
-        "a latched node must refuse to start"
+        ciris_server::accord_halt::load_halt_latch(&home)
+            .unwrap()
+            .is_some(),
+        "a present latch is READ at boot, never a refusal to start (rc7)"
     );
 
     // ── The release REQUEST: derived from the latch alone. No engine is opened, no
@@ -1096,10 +1133,14 @@ async fn offline_release_token_round_trips_against_a_real_halt_latch() {
         serde_json::to_vec_pretty(&token).unwrap(),
     )
     .unwrap();
-    let refused = ciris_server::accord_halt::check_halt_gate(&home)
-        .expect_err("a token signed by non-baked keys must NOT release the node");
-    let refused = format!("{refused:#}");
-    assert!(refused.contains("REFUSED"), "{refused}");
+    // rc7: boot READS the latch and consumes the presented token; a token
+    // signed by non-baked keys releases nothing and the latch stays.
+    let still =
+        ciris_server::accord_halt::load_halt_latch(&home).expect("boot never refuses to start");
+    assert!(
+        still.is_some(),
+        "a refused release must leave the latch in place"
+    );
     assert!(
         latch.exists(),
         "a refused release must leave the latch in place"
@@ -1142,8 +1183,10 @@ async fn offline_release_token_round_trips_against_a_real_halt_latch() {
     assert_eq!(verdict.latch_id, record.latch_id.clone().unwrap());
     assert!(!latch.exists(), "the latch must be cleared");
     assert!(
-        ciris_server::accord_halt::check_halt_gate(&home).is_ok(),
-        "released ⇒ the node may start"
+        ciris_server::accord_halt::load_halt_latch(&home)
+            .unwrap()
+            .is_none(),
+        "released ⇒ nothing stands"
     );
     assert!(
         !release_token_path(&home).exists(),
@@ -1194,7 +1237,7 @@ async fn offline_release_token_round_trips_against_a_real_halt_latch() {
 }
 
 #[tokio::test]
-async fn drill_2of3_message_is_surfaced_but_does_not_halt() {
+async fn a_drill_at_the_fire_floor_is_surfaced_but_never_halts() {
     // EAS-style: a drill (or notify) exercises the SAME delivery path — replicate +
     // surface — but NEVER halts, even at a full 2-of-3.
     let engine = node().await;
@@ -1399,15 +1442,19 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
+    // rc7: the SEATED primary alone is the fire floor, so this fires — but the
+    // spare still verifies as nothing: exactly one valid signer, the seat.
     assert_eq!(
-        body["quorum_met"], false,
-        "one human's primary + spare must NOT reach 2-of-3; got {body}"
+        body["quorum_met"], true,
+        "the seated primary fires under rc7; got {body}"
     );
-    assert_eq!(body["halted"], false, "must NOT halt; got {body}");
-    assert!(
-        !home.join("HUMANITY_ACCORD_HALT").exists(),
-        "the self-quorum attempt must not latch a halt"
+    assert_eq!(body["halted"], true, "got {body}");
+    assert_eq!(
+        body["valid_signers"].as_array().map(Vec::len),
+        Some(1),
+        "a spare is not a seat and verifies as nothing: {body}"
     );
+    assert!(home.join("HUMANITY_ACCORD_HALT").exists());
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -1695,6 +1742,7 @@ fn notify_invocation(id: &str, message: &str) -> Invocation {
         invocation_kind: InvocationKind::Notify,
         invocation_id: id.to_string(),
         resumes_halt_id: None,
+        confirms_halt_id: None,
         nonce: BASE64.encode([5u8; 32]),
         asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
         valid_until: "2030-01-01T00:00:00.000Z".to_string(),
@@ -1761,7 +1809,9 @@ async fn complete_drill_via_message_is_recorded_in_events_and_never_latches() {
     );
     assert_eq!(drills[0]["invocation_id"], "drill-rec-001");
     assert_eq!(drills[0]["event_type"], "drill");
-    assert_eq!(drills[0]["quorum_threshold"], 2);
+    // rc7: the recorded threshold is verify's for the kind (one holder); both
+    // cosigning seats are still recorded as the signers that verified.
+    assert_eq!(drills[0]["quorum_threshold"], 1);
     let signers = drills[0]["signers"].as_array().unwrap();
     assert_eq!(
         signers.len(),
@@ -1895,7 +1945,7 @@ async fn announce_with_unbound_message_is_rejected() {
 }
 
 #[tokio::test]
-async fn sub_quorum_drill_is_not_recorded() {
+async fn a_one_holder_drill_is_recorded_at_once_and_a_second_signature_does_not_duplicate_it() {
     // A drill opened with a single (sub-quorum) cosignature only ACCUMULATES — it is
     // NOT surfaced as a completed event until it reaches the family quorum.
     let engine = node().await;
@@ -1918,11 +1968,12 @@ async fn sub_quorum_drill_is_not_recorded() {
         .send()
         .await
         .expect("open drill");
-    assert_eq!(opened.status(), 200, "a 1-of-3 drill opens (sub-quorum)");
+    assert_eq!(opened.status(), 200, "a one-holder drill opens");
     let opened_body = opened.json::<serde_json::Value>().await.unwrap();
+    // rc7: a drill rehearses the fire path and the fire floor is ONE holder.
     assert_eq!(
-        opened_body["quorum_met"], false,
-        "1-of-3 is sub-quorum; got {opened_body}"
+        opened_body["quorum_met"], true,
+        "one holder completes a drill; got {opened_body}"
     );
 
     let events = client
@@ -1933,9 +1984,10 @@ async fn sub_quorum_drill_is_not_recorded() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    assert!(
-        events["drills"].as_array().unwrap().is_empty(),
-        "a sub-quorum drill must NOT be recorded; got {events}"
+    assert_eq!(
+        events["drills"].as_array().unwrap().len(),
+        1,
+        "a one-holder drill is recorded the moment it completes; got {events}"
     );
 
     // A concurring second seat reaches quorum → NOW the drill is surfaced.
@@ -1962,7 +2014,7 @@ async fn sub_quorum_drill_is_not_recorded() {
     assert_eq!(
         events2["drills"].as_array().unwrap().len(),
         1,
-        "reaching quorum via concur surfaces the drill; got {events2}"
+        "a second signature does not record the drill twice; got {events2}"
     );
 }
 
@@ -2066,4 +2118,312 @@ async fn halt_status_reflects_the_disk_latch() {
     );
     let _ = std::fs::remove_file(home.join("HUMANITY_ACCORD_HALT"));
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// ─── rc7: the fuse, the confirmation, the resumption, and whose thresholds ───
+
+/// A lifecycle row over the lifecycle domain (CC 4.2.1.3): `lifecycle:active`
+/// names the halt it ends (`resumes_halt_id`), `lifecycle:confirmed` the halt
+/// it keeps (`confirms_halt_id`).
+fn lifecycle_invocation(kind: InvocationKind, id: &str, halt_id: &str) -> Invocation {
+    Invocation {
+        invocation_kind: kind,
+        invocation_id: id.to_string(),
+        resumes_halt_id: if kind == InvocationKind::LifecycleActive {
+            Some(halt_id.to_string())
+        } else {
+            None
+        },
+        confirms_halt_id: if kind == InvocationKind::LifecycleConfirmed {
+            Some(halt_id.to_string())
+        } else {
+            None
+        },
+        nonce: BASE64.encode([3u8; 32]),
+        asserted_at: "2026-06-20T00:00:00.000Z".to_string(),
+        valid_until: "2030-01-01T00:00:00.000Z".to_string(),
+        payload_sha256: hex::encode(Sha256::digest(b"lifecycle-payload")),
+    }
+}
+
+async fn deliver(
+    client: &reqwest::Client,
+    base: &str,
+    obj: &serde_json::Value,
+) -> serde_json::Value {
+    client
+        .post(format!("{base}/v1/accord/message"))
+        .json(obj)
+        .send()
+        .await
+        .expect("deliver accord object")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
+}
+
+async fn halt_status(client: &reqwest::Client, base: &str) -> serde_json::Value {
+    client
+        .get(format!("{base}/v1/accord/halt-status"))
+        .send()
+        .await
+        .expect("halt-status")
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
+}
+
+/// Fire a one-holder halt and return its id.
+async fn fire_halt(client: &reqwest::Client, base: &str, holders: &[Holder], id: &str) {
+    let inv = constitutional_invocation(id);
+    let obj = invocation_object(
+        &[holders[0].threshold_member(None).await],
+        &inv,
+        &[cosign_typed(&holders[0], &inv).await],
+    );
+    let body = deliver(client, base, &obj).await;
+    assert_eq!(body["halted"], true, "one holder fires; got {body}");
+}
+
+#[tokio::test]
+async fn a_majority_lifecycle_active_naming_the_halt_releases_it_and_a_lone_one_does_not() {
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "resume").await;
+    let client = reqwest::Client::new();
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+    fire_halt(&client, &base, &holders, "halt-r-001").await;
+    assert_eq!(halt_status(&client, &base).await["halted"], true);
+
+    // A LONE lifecycle:active is below the resumption threshold (strict
+    // majority, CC 4.2.1.3): nothing is released.
+    let lone = lifecycle_invocation(InvocationKind::LifecycleActive, "resume-lone", "halt-r-001");
+    let body = deliver(
+        &client,
+        &base,
+        &invocation_object(
+            &[holders[0].threshold_member(None).await],
+            &lone,
+            &[cosign_typed(&holders[0], &lone).await],
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["quorum_met"], false,
+        "a lone signature cannot un-fire; got {body}"
+    );
+    assert_eq!(body["released"], false, "{body}");
+    assert_eq!(
+        halt_status(&client, &base).await["halted"],
+        true,
+        "still halted"
+    );
+
+    // A majority naming a DIFFERENT halt releases nothing (resumes_halt_id binds).
+    let wrong = lifecycle_invocation(
+        InvocationKind::LifecycleActive,
+        "resume-wrong",
+        "halt-other",
+    );
+    let roster = vec![
+        holders[0].threshold_member(None).await,
+        holders[1].threshold_member(None).await,
+    ];
+    let body = deliver(
+        &client,
+        &base,
+        &invocation_object(
+            &roster,
+            &wrong,
+            &[
+                cosign_typed(&holders[0], &wrong).await,
+                cosign_typed(&holders[1], &wrong).await,
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(body["quorum_met"], true, "{body}");
+    assert_eq!(body["released"], false, "{body}");
+    assert_eq!(body["refusal"], "resumes_unknown_halt", "{body}");
+    assert_eq!(
+        halt_status(&client, &base).await["halted"],
+        true,
+        "still halted"
+    );
+
+    // A majority naming THIS halt ends it; the latch is gone and journaled.
+    let right = lifecycle_invocation(
+        InvocationKind::LifecycleActive,
+        "resume-right",
+        "halt-r-001",
+    );
+    let body = deliver(
+        &client,
+        &base,
+        &invocation_object(
+            &roster,
+            &right,
+            &[
+                cosign_typed(&holders[0], &right).await,
+                cosign_typed(&holders[1], &right).await,
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(body["released"], true, "{body}");
+    assert!(
+        !home.join("HUMANITY_ACCORD_HALT").exists(),
+        "the latch is cleared"
+    );
+    let status = halt_status(&client, &base).await;
+    assert_eq!(status["halted"], false, "{status}");
+    assert!(
+        status["releases"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|e| e["outcome"] == "honored_over_wire")),
+        "the resumption is journaled beside the offline releases: {status}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn a_majority_lifecycle_confirmed_within_the_fuse_keeps_the_halt_and_after_it_confirms_nothing(
+) {
+    let engine = node().await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, home, _h) = serve_haltable(Arc::clone(&engine), "confirm").await;
+    let client = reqwest::Client::new();
+    let holders = [
+        Holder::new("accord-holder-a", 0xC1),
+        Holder::new("accord-holder-b", 0xC2),
+        Holder::new("accord-holder-c", 0xC3),
+    ];
+    establish_family(&engine, &base, &owner, &holders).await;
+    fire_halt(&client, &base, &holders, "halt-c-001").await;
+    let before = halt_status(&client, &base).await;
+    assert!(
+        before["halt"]["lapses_at"].is_string(),
+        "unconfirmed: it lapses: {before}"
+    );
+
+    let roster = vec![
+        holders[1].threshold_member(None).await,
+        holders[2].threshold_member(None).await,
+    ];
+    let confirm = lifecycle_invocation(
+        InvocationKind::LifecycleConfirmed,
+        "confirm-001",
+        "halt-c-001",
+    );
+    let body = deliver(
+        &client,
+        &base,
+        &invocation_object(
+            &roster,
+            &confirm,
+            &[
+                cosign_typed(&holders[1], &confirm).await,
+                cosign_typed(&holders[2], &confirm).await,
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(body["quorum_met"], true, "{body}");
+    assert_eq!(
+        body["confirmed"], true,
+        "a strict majority confirms; got {body}"
+    );
+    let after = halt_status(&client, &base).await;
+    assert_eq!(after["halted"], true, "{after}");
+    assert!(
+        after["halt"]["lapses_at"].is_null(),
+        "confirmed: it no longer lapses: {after}"
+    );
+    assert_eq!(
+        after["halt"]["confirmed"]["invocation_id"], "confirm-001",
+        "{after}"
+    );
+
+    // The fuse: a latch received long ago with a 1 s fuse has lapsed — it reads
+    // halted:false, and a confirmation now confirms nothing (CC 4.2.1.3).
+    let mut lapsed: ciris_server::accord_halt::HaltRecord =
+        serde_json::from_str(&std::fs::read_to_string(home.join("HUMANITY_ACCORD_HALT")).unwrap())
+            .unwrap();
+    lapsed.confirmed = None;
+    lapsed.received_at = Some("2026-01-01T00:00:00Z".into());
+    lapsed = lapsed.with_fuse(1);
+    ciris_server::accord_halt::latch_halt(&home, &lapsed).unwrap();
+    let status = halt_status(&client, &base).await;
+    assert_eq!(status["halted"], false, "{status}");
+    assert_eq!(status["lapsed"], true, "{status}");
+    let late = lifecycle_invocation(
+        InvocationKind::LifecycleConfirmed,
+        "confirm-late",
+        "halt-c-001",
+    );
+    let body = deliver(
+        &client,
+        &base,
+        &invocation_object(
+            &roster,
+            &late,
+            &[
+                cosign_typed(&holders[1], &late).await,
+                cosign_typed(&holders[2], &late).await,
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(body["confirmed"], false, "{body}");
+    assert_eq!(body["refusal"], "halt_fuse_lapsed", "{body}");
+    assert_eq!(
+        halt_status(&client, &base).await["halted"],
+        false,
+        "a lapsed halt stays lapsed"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// CIRISServer#737: the halt plane's thresholds are verify's
+/// (`InvocationKind::required_signatures`), never decided here. The family's
+/// `quorum:M/N` still decides ROSTER changes, and only those.
+#[test]
+fn thresholds_on_the_halt_plane_are_verifys_not_ours() {
+    let src =
+        std::fs::read_to_string(format!("{}/src/accord.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(
+        !src.contains("kill_switch_quorum_m"),
+        "the server-side halt threshold is gone; verify keeps the table"
+    );
+    assert!(
+        src.contains("halt_plane_threshold(kind, roster.len())"),
+        "the message path reads the kind's threshold from verify"
+    );
+    assert!(
+        !src.contains("std::process::exit(") && !src.contains("std::process::abort("),
+        "rc7: a halt never stops the node"
+    );
+    for (kind, n) in [
+        (InvocationKind::Constitutional, 1),
+        (InvocationKind::Drill, 1),
+        (InvocationKind::Notify, 1),
+        (InvocationKind::LifecycleConfirmed, 2),
+        (InvocationKind::LifecycleActive, 2),
+    ] {
+        assert_eq!(
+            ciris_server::accord::halt_plane_threshold(kind, 3),
+            n,
+            "{kind:?} over a 3-seat roster"
+        );
+    }
+    assert_eq!(
+        ciris_server::accord::halt_plane_threshold(InvocationKind::Constitutional, 0),
+        usize::MAX,
+        "an empty roster admits nothing"
+    );
 }

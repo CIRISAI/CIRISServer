@@ -1,12 +1,23 @@
 //! Reusable QA module — the HUMANITY_ACCORD kill-switch lifecycle over the real
 //! HTTP surface, with SOFTWARE holders: register holders → genesis (entrench the
 //! family) → roster=seats (spares are not seats) → invocation open/concur → 2/3
-//! verify → self-quorum refused → CONSTITUTIONAL halt latched + startup gated.
+//! verify → self-quorum refused → ONE holder's CONSTITUTIONAL row latches the halt
+//! and the node keeps serving (rc7, CIRISConstitution#146).
 
 use ciris_server::accord::AccordHalt;
-use ciris_server::accord_halt::{check_halt_gate, halt_latch_path};
+use ciris_server::accord_halt::{halt_latch_path, load_halt_latch};
 
 use crate::common::{invocation, mint_owner_session, node, seat_holder, serve, Report, SoftId};
+
+async fn jget(client: &reqwest::Client, url: String) -> (u16, serde_json::Value) {
+    let resp = client.get(url).send().await.expect("GET");
+    let status = resp.status().as_u16();
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
 
 async fn jpost(
     client: &reqwest::Client,
@@ -41,7 +52,6 @@ pub async fn run(report: &mut Report) {
         AccordHalt {
             home: Some(home.clone()),
             peers: Vec::new(),
-            exit_on_halt: false,
             // #347: the QA runner exercises the halt path, not the offline
             // release; a `None` node_id latches with no release binding.
             node_id: None,
@@ -122,7 +132,8 @@ pub async fn run(report: &mut Report) {
         ),
     );
 
-    // 5. Invocation concurrence: open (1/3, sub-quorum) → concur (2/3).
+    // 5. Invocation concurrence: open (1/3 — under rc7 ONE holder already completes a
+    //    drill, verify's required_signatures) → concur (2/3 keeps it complete).
     let inv = invocation("drill", "qa-concur", b"qa-concur");
     let (_s, opened) = jpost(
         &client,
@@ -133,8 +144,8 @@ pub async fn run(report: &mut Report) {
     .await;
     report.check(
         m,
-        "open invocation → sub-quorum",
-        opened["quorum_met"] == false,
+        "open invocation → one holder completes a drill (rc7 fire floor)",
+        opened["quorum_met"] == true,
         format!("quorum_met={}", opened["quorum_met"]),
     );
     let (_s, concurred) = jpost(
@@ -146,7 +157,7 @@ pub async fn run(report: &mut Report) {
     .await;
     report.check(
         m,
-        "concur → 2/3 quorum met",
+        "concur → still complete at 2/3",
         concurred["quorum_met"] == true,
         format!("quorum_met={}", concurred["quorum_met"]),
     );
@@ -192,9 +203,10 @@ pub async fn run(report: &mut Report) {
         format!("{sqr}"),
     );
 
-    // 8. The real kill: open a CONSTITUTIONAL invocation + concur to 2/3 (the concur
-    //    itself latches the halt), then deliver the server-produced 2/3 object to
-    //    /v1/accord/message → halted; the latch then gates startup.
+    // 8. The real kill (rc7): ONE holder's CONSTITUTIONAL row latches the halt on
+    //    receipt; a second signature keeps it complete; the object re-delivered to
+    //    /v1/accord/message re-latches idempotently; the node KEEPS SERVING and boot
+    //    only READS the latch (an agent pause, never a node stop).
     let halt = invocation("CONSTITUTIONAL", "qa-halt", b"qa-halt");
     jpost(
         &client,
@@ -212,7 +224,7 @@ pub async fn run(report: &mut Report) {
     .await;
     report.check(
         m,
-        "2/3 CONSTITUTIONAL concur → quorum met",
+        "CONSTITUTIONAL concur → still complete at 2/3 (one holder already fired)",
         concurred["quorum_met"] == true,
         format!("quorum_met={}", concurred["quorum_met"]),
     );
@@ -221,16 +233,23 @@ pub async fn run(report: &mut Report) {
     let (_s, hr) = jpost(&client, format!("{base}/v1/accord/message"), None, obj).await;
     report.check(
         m,
-        "deliver 2/3 CONSTITUTIONAL to /message → halted",
+        "deliver the CONSTITUTIONAL object to /message → halted (idempotent re-latch)",
         hr["halted"] == true,
         format!("{hr}"),
     );
     report.check(m, "halt latch written", halt_latch_path(&home).exists(), "");
     report.check(
         m,
-        "startup gate refuses boot while latched",
-        check_halt_gate(&home).is_err(),
+        "boot READS the latch and never refuses to start (rc7)",
+        matches!(load_halt_latch(&home), Ok(Some(_))),
         "",
+    );
+    let (_s, status) = jget(&client, format!("{base}/v1/accord/halt-status")).await;
+    report.check(
+        m,
+        "the node keeps serving while halted: /v1/accord/halt-status reads halted=true",
+        status["halted"] == true && status["halt"]["lapses_at"].is_string(),
+        format!("{status}"),
     );
 
     let _ = std::fs::remove_dir_all(&home);
@@ -249,7 +268,6 @@ pub async fn run_membership(report: &mut Report) {
         AccordHalt {
             home: None,
             peers: Vec::new(),
-            exit_on_halt: false,
             // #347: the QA runner exercises the halt path, not the offline
             // release; a `None` node_id latches with no release binding.
             node_id: None,
@@ -442,7 +460,6 @@ pub async fn run_ceremony(report: &mut Report) {
         AccordHalt {
             home: None,
             peers: Vec::new(),
-            exit_on_halt: false,
             // #347: the QA runner exercises the halt path, not the offline
             // release; a `None` node_id latches with no release binding.
             node_id: None,

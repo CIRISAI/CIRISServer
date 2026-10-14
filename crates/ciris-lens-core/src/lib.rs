@@ -76,6 +76,8 @@ pub mod config;
 pub mod detector;
 pub mod extract;
 pub mod ffi;
+pub mod halt_gate;
+pub mod ingest_guard;
 pub mod key_id;
 pub mod observability;
 pub mod pipeline;

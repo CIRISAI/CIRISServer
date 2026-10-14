@@ -253,6 +253,7 @@ fn build_trace_batch(
 
     let trace_id = format!("trace-cap-{idx:04}");
     let mut trace = CompleteTrace {
+        run_kind: None,
         trace_id: trace_id.clone(),
         thought_id: trace_id.clone(),
         task_id: Some("task-cap".into()),
@@ -393,6 +394,7 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
         window: 500,
         sample_size_gate: 2,
         target_n_eff: 8.0,
+        ..ScorerConfig::default()
     };
     // CC#46 — the attester is the node's DERIVED key id (what emit_attestation_self
     // stamps and what is registered), not the bare NODE_KEY_ID alias.
