@@ -899,7 +899,8 @@ impl PyLensClient {
             //    d. engine.local_pqc_sign(canonical ‖ ed25519_sig) (Python) → ML-DSA-65
             //    e. engine.local_pqc_public_key_b64() (Python) — rides the envelope
             //    f. PyEngineCapture::apply_hybrid_signature_and_batch (Rust)
-            //    g. tee_write_if_configured (Rust)
+            //    g. tee_write_if_configured (Rust) — before the mock refusal (#766)
+            //    g'. the mock-LLM refusal (Rust) — MockLlmRefused, nothing persisted
             //    h. engine.receive_and_persist(batch_bytes) (Python) → summary
             //    i. Extract trace_events_inserted + signatures_verified from summary
             LensClientInner::Cohabitation { capture, py_engine } => {
@@ -1040,23 +1041,27 @@ impl PyLensClient {
                         )
                         .map_err(|e| PyRuntimeError::new_err(format!("build_batch_bytes: {e}")))?;
 
-                        // 3d'. The mock-LLM refusal, before the tee and the persist:
-                        // this path calls the Python engine directly and passes
-                        // neither ingest door (Codex on #753, CIRISAgent#1244).
+                        // 3e. Local-copy tee (best-effort, never fails persist) —
+                        // FIRST (CIRISServer#766): the tee is the one sink a mock
+                        // trace may reach (CIRISAgent#1244/#1246); it is never
+                        // scored, replicated or read by edge.
+                        cap.tee_write_if_configured(&trace_id, &batch_bytes);
+
+                        // 3e'. The mock-LLM refusal, before the persist: this path
+                        // calls the Python engine directly and passes neither
+                        // ingest door (Codex on #753, CIRISAgent#1244).
                         if crate::ingest_guard::batch_has_mock_llm_call(&batch_bytes) {
                             tracing::warn!(
                                 trace_id = %trace_id,
                                 refusal = crate::ingest_guard::REFUSAL_MOCK_LLM,
                                 "capture REFUSED a mock-LLM trace — not persisted, scored or \
-                                 replicated (CIRISAgent#1244)"
+                                 replicated; the local tee (if configured) holds the only copy \
+                                 (CIRISAgent#1244, CIRISServer#766)"
                             );
                             return Err(PyRuntimeError::new_err(
                                 crate::capture::ClientError::MockLlmRefused.to_string(),
                             ));
                         }
-
-                        // 3e. Local-copy tee (best-effort, never fails persist).
-                        cap.tee_write_if_configured(&trace_id, &batch_bytes);
 
                         // 3f. Persist via Python engine.
                         //
