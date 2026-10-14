@@ -73,19 +73,9 @@ impl LensCoreHandler {
     /// bytes). Fire-and-forget: errors are logged, never returned to the
     /// emitter (opaque events carry no response leg).
     async fn persist_batch(&self, sender_key_id: &str, payload: &[u8]) {
-        // The constitutional halt (CC 4.2.1.1, rc7): while it is in effect on
-        // this node no agent reasoning is admitted through any door. Asked
-        // first, before a byte is parsed.
-        if crate::halt_gate::halted() {
-            tracing::warn!(
-                peer = %sender_key_id,
-                bytes = payload.len(),
-                refusal = crate::halt_gate::REFUSAL_HALT_IN_EFFECT,
-                "relay REFUSED an opaque trace batch — a constitutional halt is in effect on this \
-                 node; nothing verified or persisted"
-            );
-            return;
-        }
+        // No constitutional-halt read here (CC 4.2.1.1, rc7): this is a data
+        // door, and the latch's one reader is the agent's act gate. A refused
+        // act's ACTION_RESULT replicates through this path (0.5.226).
         // The same admission check the HTTP ingest route runs, before any
         // verification or persistence: a batch from the agent's mock LLM is
         // not evidence about any agent (CIRISAgent#1244). Shared so neither

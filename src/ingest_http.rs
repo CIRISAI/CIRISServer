@@ -647,35 +647,14 @@ async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
         )
             .into_response();
     }
-    // THE CONSTITUTIONAL HALT (CC 4.2.1.1, rc7): while it is in effect on this
-    // node no agent reasoning is admitted through any door, this one first.
-    // 423 LOCKED: the batch is well-formed and the producer is not at fault;
-    // the node is paused for agents until the accord ends the halt.
-    if crate::halt_gate::in_effect() {
-        st.refusals
-            .observe_handler_refusal(crate::halt_gate::REFUSAL_HALT_IN_EFFECT);
-        let halt = crate::halt_gate::standing();
-        tracing::warn!(
-            bytes = body.len(),
-            halt = ?halt.as_ref().map(|h| h.invocation_id.clone()),
-            "HTTP ingest REFUSED: a constitutional halt is in effect on this node — nothing \
-             verified or persisted (CC 4.2.1.1)"
-        );
-        return (
-            StatusCode::LOCKED,
-            Json(IngestErr {
-                error: crate::halt_gate::REFUSAL_HALT_IN_EFFECT,
-                detail: Some(
-                    "a constitutional halt is in effect on this node; agent reasoning is not \
-                     admitted until a strict majority of the accord ends it (GET \
-                     /v1/accord/halt-status)"
-                        .into(),
-                ),
-                key_id_namespace: None,
-            }),
-        )
-            .into_response();
-    }
+    // The constitutional halt (CC 4.2.1.1, rc7) is NOT read here. This is a
+    // data door: a halt pauses agents, with zero data disruption by
+    // construction, and the latch has exactly one reader — the agent's act
+    // gate (GET /v1/accord/halt-status). 0.5.225 refused this door 423 while
+    // halted; 0.5.226 removed that (CC on re-pin 17): a refused act's terminal
+    // ACTION_RESULT travels THIS path to the record, and a door that refuses
+    // it makes the pause erase its own evidence. `tests/halt_gate.rs` pins
+    // that no data door reads the latch.
     // A batch from the agent's mock LLM is refused before it is verified or
     // persisted: mock output is not evidence about any agent. Counted, with
     // its own token, so a misconfigured harness shows up in the ledger.

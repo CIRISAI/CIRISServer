@@ -90,7 +90,13 @@ not a finding, but a *new exploitation path* on one of them is:
   peers at the same `asserted_at`; both verify; nothing compares them.
 - **Every removal is an append on a pull-only plane.** Revoke, purge, erase,
   de-admit and halt alike. Unreached holders never learn.
-- **The halt latch is not reversible over the network.** `src/accord_halt.rs`
+- **The halt latch is not reversible over the network.** *(0.5.225 rc7
+  superseded the exit model below: a halt now PAUSES AGENTS, the node keeps
+  serving, the latch is read by the agent's act gate over
+  `GET /v1/accord/halt-status` and by no data door, and a strict-majority
+  `lifecycle:active` on the running node releases it — see
+  `FSD/CONSTITUTIONAL_HALT.md`. The paragraph is kept as the history of the
+  offline release token.)* `src/accord_halt.rs`
   latches to disk and `exit(42)`s; `check_halt_gate` refuses boot. A halted node
   is not running, so the un-halt cannot be *delivered* to it. Since
   CIRISServer#347 it can be *found*: the latch records a release binding, and
