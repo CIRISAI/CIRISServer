@@ -120,11 +120,14 @@ fn no_data_door_reads_the_latch() {
     let mut offenders = Vec::new();
     for dir in ["src", "crates/ciris-lens-core/src"] {
         walk(&root.join(dir), &mut |path| {
+            // Forward slashes on every host: Windows hands back `src\\compose.rs`,
+            // and the allow-list below is spelled the POSIX way (main went red
+            // on windows-latest at c70f96bb for exactly this).
             let rel = path
                 .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
             if rel == "src/halt_gate.rs" {
                 return;
             }
