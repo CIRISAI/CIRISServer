@@ -42,7 +42,10 @@ jobs:
     # job timed out mid-link at exactly 40:00 on the first LTO run. A timeout
     # reports as `cancelled`, not `failure`, which reads like someone stopped
     # it — so it is worth saying plainly here that LTO is what costs the time.
-    timeout-minutes: 75
+    # 0.5.226 (#761): the wheel step alone took 70 m 34 s on 0.5.225 (persist
+    # v55 / edge v41 lengthen the LTO link) and the 75-minute budget cut the job
+    # during the cache save, skipping the installer. Budget what the step costs.
+    timeout-minutes: 110
     # GATING since 0.5.203 (CIRISServer#562). This job carried
     # `continue-on-error: true` from the day the Windows wheel could not build
     # (CIRISPersist#200 / CIRISEdge#90); the wheel has published since 0.5.202,

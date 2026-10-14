@@ -527,13 +527,14 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
             charter fuse overridden to {fuse} s (CIRIS_TEST_HALT_FUSE_SECS, test anchor only).
   nodes:    the canonical (serve) + alice + bob, claimed, announced, peered, Rooted.
   steps:    drill (one holder) → announce (one holder) → FIRE (one holder) → every node
-            latched, still serving, ingest refused 423 → CONFIRM (majority, within the fuse)
+            latched, still serving, ingest still admits → CONFIRM (majority, within the fuse)
             → RESUME (majority, resumes_halt_id) → a second FIRE lapses after the fuse and a
             late confirmation confirms nothing.
   asserts:  CC 4.2.1.1 one-row fire / idempotent latch / agent pause with zero data
             disruption / the fuse; CC 4.2.1.3 confirmed + active at a strict majority;
-            4.2.1.2 a drill never halts; the node's ONE gate (src/halt_gate.rs) refuses
-            agent reasoning at the ingest door while the latch stands.""")
+            4.2.1.2 a drill never halts; NO data door reads the latch (0.5.226, CC re-pin
+            17): the ingest door admits while the latch stands, so a refused act's
+            ACTION_RESULT can reach the record.""")
     mesh.base_env["CIRIS_TEST_HALT_FUSE_SECS"] = str(fuse)
     c, a, b, anchor, _done = mint_accord_mesh(mesh, args, step)
     holders = anchor["holders"]
@@ -607,15 +608,18 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
         step.fail("serving_while_halted", "a halt pauses agents; the node must keep serving", nodes, r"halt", cc="CC 4.2.1.1", health=serving)
     step("serving_while_halted", proves="/health answers 200 on every halted node", health=serving)
 
-    # 3b. The ONE gate: agent reasoning is refused at the ingest door.
+    # 3b. Zero data disruption at the data doors: the ingest door is NOT a
+    # reader of the latch (0.5.226). The latch's one reader is the agent's act
+    # gate; the ACTION_RESULT of an act it refused must land through this door,
+    # so a 423 here would make the pause erase its own evidence (CC 4.2.1.1).
     batch = json.dumps({"events": [{"trace": {"trace_id": "csd129-trace", "components": [
         {"event_type": "LLM_CALL", "data": {"model": "gpt-4o"}}]}}]}).encode()
     code, body = c.api("POST", "/v1/ingest/accord-events", json.loads(batch))
-    if code != 423 or (body or {}).get("error") != "accord_halt_in_effect":
+    if code == 423 or (body or {}).get("error") == "accord_halt_in_effect":
         ok = False
-        step.fail("gate_refuses_ingest", "while the latch stands, the ingest door must refuse 423 accord_halt_in_effect",
+        step.fail("ingest_admits_while_halted", "a data door must not read the latch: the ingest door answered the halt refusal",
                   [c], r"halt gate|HTTP ingest REFUSED", cc="CC 4.2.1.1", got={"status": code, "body": body})
-    step("gate_refuses_ingest", proves="the node's absolute gate refuses agent reasoning", status=code)
+    step("ingest_admits_while_halted", proves="no data door reads the latch; the ingest door does its ordinary work under a halt", status=code)
 
     # 3c. Idempotent: the same row again changes nothing.
     again = c.must("POST", "/v1/accord/message", obj)
@@ -680,7 +684,7 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
     step("late_confirm", proves="a confirmation after the fuse confirms nothing; a fresh halt is fired instead")
 
     not_covered = [
-        "an agent process on a node whose act gate reads /v1/accord/halt-status (CIRISAgent#1231)",
+        "an agent process on a node whose act gate reads /v1/accord/halt-status (CIRISAgent#1231 / PR #1262: ActionDispatcher._refuse_under_accord_halt emits the terminal ACTION_RESULT this door must now admit)",
         "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
         "a real YubiKey holder (software holders here)",
     ]

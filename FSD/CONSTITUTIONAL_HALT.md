@@ -101,28 +101,45 @@ same latch).
 has left; the mandatory visual distinction between a notify and a halt (CC 4.2.1.2) is the
 client's.
 
-## 4a. The node's ONE absolute gate (Eric, 2026-10-13: "the latch reader is in the node")
+## 4a. The latch has ONE reader: the agent's act gate (0.5.226, CC re-pin 17)
 
-`src/halt_gate.rs` is the single predicate every door an agent's reasoning or act
-crosses asks, on every call, with the fuse computed for that instant:
+`src/halt_gate.rs` is the node's halt predicate — read from the latch on every call,
+with the fuse computed for that instant, fail-closed on an unreadable latch — and it
+is served, not enforced, by the node:
 
-| door | ask | refusal |
+| reader | ask | what happens |
 |---|---|---|
-| HTTP trace ingest (`ingest_http`) | `halt_gate::in_effect()` | `423 LOCKED`, `error: accord_halt_in_effect`, counted in the ingest ledger |
-| relay opaque trace batches (lens-core `LensCoreHandler::persist_batch`) | `halt_gate::halted()` (the host-installed hook) | dropped, WARN with the token |
-| local capture (lens-core `CaptureClient::capture_event`, PyO3 capture) | same hook | `ClientError::HaltInEffect` |
-| the agent's own act gate | `GET /v1/accord/halt-status` → `halted` | the agent refuses the act and records it as its `ACTION_RESULT` (CC (c), CIRISAgent#1231) |
+| the agent's act gate (CIRISAgent#1231 → PR #1262) | `ciris_engine/logic/utils/halt_latch.py#read_halt_latch`: `GET /v1/accord/halt-status` → `halted`, cached ≤ 1 s, before every effectful act in `ActionDispatcher._dispatch_inner`; unreachable or `halted: null` = halted | `ActionDispatcher._refuse_under_accord_halt`: exactly one terminal `ACTION_RESULT` with `error=accord_halt_in_effect:<invocation_id>` plus the audit row, through the normal trace pipeline; the agent's own `/v1/agent/interact` and `/v1/agent/message` answer `423 {error: accord_halt_in_effect, reason: ACCORD_HALT, halt: …}` |
 
-Absolute: no caller, role, tier or flag reads past it (CC 4.2.1.3); it ends only as
-the latch ends. Not cached: the latch is one small file and the act cadence is the
-bound CC sets on a reader. Fail-closed: an unreadable latch reads as in effect. It
-is installed at compose before any door opens and asserted installed; a source scan
-(`tests/halt_gate.rs`) pins every door's ask and the installer. Nothing on the
-serving side reads it (zero data disruption).
+**No data door reads it.** Trace ingest (`ingest_http`), the relay's opaque trace
+batches (lens-core `LensCoreHandler::persist_batch`), both local capture paths, files,
+roster, consent, replication and every serving read do their ordinary work under a
+halt. Why, in one sentence: *a refused act's terminal `ACTION_RESULT` must reach the
+record, or the pause erases its own evidence.* The agent-side design (Eric,
+2026-10-14, on CIRISAgent#1231) ships that `ACTION_RESULT` through the HTTP ingest or
+the in-process capture — exactly the doors 0.5.225 refused.
 
-What the node cannot do alone: an agent's effectful acts that never cross the node
-(an adapter speaking to Discord) are stopped only by the agent's reader. The node
-serves that reader; the agent's half is CIRISAgent#1231 and rc8's lead item.
+History: 0.5.225 installed the predicate into those four doors and refused them
+`423 accord_halt_in_effect` ("the node's ONE absolute gate", Eric 2026-10-13). CC's
+rule on re-pin 17 (4.2.1.1, "zero data disruption by construction"): the latch is
+read by exactly one thing, the agent's act gate; gating any data path is a violation.
+0.5.226 removed every node-side reader and lens-core's `set_halt_gate` hook (an
+installed-but-unasked hook is the arming≠driving class). The witness is
+`tests/halt_gate.rs::no_data_door_reads_the_latch`: a source scan over `src/` and
+`crates/ciris-lens-core/src/` that goes red the moment any file but `halt_gate.rs`
+and `compose.rs` (install + assert only) names the predicate — the L3 mutant for
+4.2.1.1 — plus an HTTP test that the ingest door answers the same with and without
+a standing latch.
+
+Absolute where it is read: no caller, role, tier or flag reads past it (CC 4.2.1.3);
+it ends only as the latch ends. Not cached: the latch is one small file and the act
+cadence is the bound CC sets on a reader.
+
+What the node cannot do alone: an agent's effectful acts — all of them — are stopped
+only by the agent's reader. The node serves that reader; the agent's half is
+CIRISAgent#1231, implemented as CIRISAgent PR #1262 (2026-10-14, against 0.5.225, not
+yet merged). Its refusal `ACTION_RESULT` lands only on a 0.5.226+ node; the agent's QA
+module targets 0.5.226.
 
 ## 4b. Test anchor doors (never on a production build)
 
@@ -138,14 +155,16 @@ serves that reader; the agent's half is CIRISAgent#1231 and rc8's lead item.
   `lifecycle:active` releases nothing and a majority naming the halt releases it; a
   majority `lifecycle:confirmed` within the fuse keeps the halt and after it confirms
   nothing; thresholds are verify's (source scan + table).
-- `tests/halt_gate.rs`: the ingest door refuses 423 while the latch stands and opens
-  when it ends; every door asks the gate; compose installs it.
+- `tests/halt_gate.rs` (0.5.226): the ingest door does its ordinary work while the latch
+  stands (same answer as with no latch); `no_data_door_reads_the_latch` source-scans
+  `src/` and lens-core for any reader outside `halt_gate.rs` / `compose.rs`; compose
+  installs the predicate; lens-core carries no hook.
 - `harness/native`: catalogue entry **T8** (`topologies/t8-accord-halt.yaml`, built by
   the 0.5.220 ceremony with three software holders) and the **`halt`** scenario =
   CSD-129 "Drill, halt, announce: end to end" (federation → safety): drill, announce,
   fire from one node and hand out of band to the others, every node latched and still
-  serving, ingest refused, confirm, resume, a short-fused halt lapsing, a late
-  confirmation refused. **Ran green 2026-10-13** on the first run (26 steps, 20 s fuse,
+  serving, ingest STILL ADMITTING (0.5.226; it was "refused" on 0.5.225), confirm,
+  resume, a short-fused halt lapsing, a late confirmation refused. **Ran green 2026-10-13** on the first run (26 steps, 20 s fuse,
   `first_failure: null`; `python -m harness.native halt --binary target/debug/ciris-server`
   with `CIRIS_TEST_HALT_FUSE_SECS=20`). Not covered yet: an agent process whose act gate
   reads the status (CIRISAgent#1231); `rows.jsonl` per node for CC's offline replay (T8 iii).
