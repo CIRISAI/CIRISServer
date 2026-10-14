@@ -278,8 +278,15 @@ async fn sovereign_rlib_end_to_end() {
         }),
         "the hook is unset until a host installs it"
     );
+    // The hook is PROCESS-wide (a OnceLock the host sets once), and the other
+    // tests in this binary seal their own real traces concurrently, so the
+    // vector may carry their ids. Every assertion here counts THIS trace's id.
     assert!(
-        SEALED.lock().unwrap().is_empty(),
+        !SEALED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "thought-sovereign-1"),
         "THOUGHT_START seals nothing"
     );
 
@@ -303,9 +310,15 @@ async fn sovereign_rlib_end_to_end() {
         "trace_id must match thought_id"
     );
     assert_eq!(
-        *SEALED.lock().unwrap(),
-        vec![trace_id.clone()],
-        "the after-seal hook fired once, naming the sealed trace"
+        SEALED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| **id == trace_id)
+            .count(),
+        1,
+        "the after-seal hook fired once, naming the sealed trace (process-wide hook; \
+         sibling tests' ids may sit beside it)"
     );
     assert!(
         summary.trace_events_inserted > 0,
