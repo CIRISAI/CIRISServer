@@ -684,7 +684,7 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
     step("late_confirm", proves="a confirmation after the fuse confirms nothing; a fresh halt is fired instead")
 
     not_covered = [
-        "an agent process on a node whose act gate reads /v1/accord/halt-status (CIRISAgent#1231)",
+        "an agent process on a node whose act gate reads /v1/accord/halt-status (CIRISAgent#1231 / PR #1262: ActionDispatcher._refuse_under_accord_halt emits the terminal ACTION_RESULT this door must now admit)",
         "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
         "a real YubiKey holder (software holders here)",
     ]

@@ -109,7 +109,7 @@ is served, not enforced, by the node:
 
 | reader | ask | what happens |
 |---|---|---|
-| the agent's act gate (CIRISAgent#1231) | `GET /v1/accord/halt-status` → `halted` before every effectful act; unreachable = halted | the agent refuses the act and records the refusal as a terminal `ACTION_RESULT` naming the halt's `invocation_id`, through its normal trace pipeline |
+| the agent's act gate (CIRISAgent#1231 → PR #1262) | `ciris_engine/logic/utils/halt_latch.py#read_halt_latch`: `GET /v1/accord/halt-status` → `halted`, cached ≤ 1 s, before every effectful act in `ActionDispatcher._dispatch_inner`; unreachable or `halted: null` = halted | `ActionDispatcher._refuse_under_accord_halt`: exactly one terminal `ACTION_RESULT` with `error=accord_halt_in_effect:<invocation_id>` plus the audit row, through the normal trace pipeline; the agent's own `/v1/agent/interact` and `/v1/agent/message` answer `423 {error: accord_halt_in_effect, reason: ACCORD_HALT, halt: …}` |
 
 **No data door reads it.** Trace ingest (`ingest_http`), the relay's opaque trace
 batches (lens-core `LensCoreHandler::persist_batch`), both local capture paths, files,
@@ -137,8 +137,9 @@ cadence is the bound CC sets on a reader.
 
 What the node cannot do alone: an agent's effectful acts — all of them — are stopped
 only by the agent's reader. The node serves that reader; the agent's half is
-CIRISAgent#1231 (design decided 2026-10-14; implementation restarts when its session's
-capacity returns, 2026-10-18).
+CIRISAgent#1231, implemented as CIRISAgent PR #1262 (2026-10-14, against 0.5.225, not
+yet merged). Its refusal `ACTION_RESULT` lands only on a 0.5.226+ node; the agent's QA
+module targets 0.5.226.
 
 ## 4b. Test anchor doors (never on a production build)
 
