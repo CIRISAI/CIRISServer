@@ -99,8 +99,10 @@ ciris-server --home /var/lib/ciris --key-id ciris-status-1
 ```
 On a wiped/fresh home the node mints its hybrid (Ed25519 + ML-DSA-65) federation key under
 the `--key-id` label, applies all persist migrations, and (no ROOT yet) prints the
-**OWNERSHIP UNCLAIMED** banner with the `CIRIS-V1-…` NodeCode + a one-time `CLAIM PIN`
-(also written `0600` to `<home>/claim_pin`). Capture both. Leave it running.
+**OWNERSHIP UNCLAIMED** banner with the `CIRIS-V1-…` NodeCode + the PATH of the one-time
+`CLAIM PIN` file (`<home>/claim_pin`, `0600`; since 0.5.227 the banner names the file and never
+prints the value — the PIN is a file on disk, not a log line). Capture the NodeCode, read the
+PIN from the file. Leave it running.
 
 ### 3. Mint the founder fed-ID (once, on whichever box you claim from)
 The owner identity is `<key-id>-user` at the node's user-seed path. Mint it headless:
