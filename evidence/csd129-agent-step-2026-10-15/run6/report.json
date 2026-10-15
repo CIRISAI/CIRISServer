@@ -1,0 +1,378 @@
+{
+ "scenario": "halt_agent",
+ "binary": "/home/emoore/CIRISServer/.claude/worktrees/w226/target/debug/ciris-server",
+ "args": {
+  "scenario": "halt_agent",
+  "topology": null,
+  "binary": "target/debug/ciris-server",
+  "work": "/tmp/ciris-native-mesh-agent",
+  "keep": false,
+  "owner_wait": 90,
+  "ready_wait": 180,
+  "arrive_wait": 180,
+  "contact_via": "owner",
+  "rooted_wait": 0,
+  "reachable_wait": 120,
+  "only": "",
+  "rust_log": "info,ciris_edge=debug",
+  "agent_url": "http://127.0.0.1:4243",
+  "agent_wait": 1800.0,
+  "direct": false
+ },
+ "verdict": "PASS",
+ "steps": [
+  {
+   "t": 0.1,
+   "step": "anchor",
+   "holders": [
+    "test-accord-holder-0",
+    "test-accord-holder-1",
+    "test-accord-holder-2"
+   ]
+  },
+  {
+   "t": 4.4,
+   "step": "canonical_booted",
+   "key_id": "native-canonical-z5cisqkmxn"
+  },
+  {
+   "t": 4.7,
+   "step": "planned",
+   "complete": false,
+   "owed": {
+    "authz": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "community:ciris-canonical": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "family:humanity-accord": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "record:native-canonical-z5cisqkmxn": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "row:genesis-charter": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "row:genesis-grant:native-canonical-z5cisqkmxn": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ],
+    "row:genesis-lifecycle": [
+     "test-accord-holder-0",
+     "test-accord-holder-1",
+     "test-accord-holder-2"
+    ]
+   }
+  },
+  {
+   "t": 4.9,
+   "step": "signed:round1:test-accord-holder-0",
+   "signed": [
+    "record:native-canonical-z5cisqkmxn",
+    "row:genesis-charter",
+    "row:genesis-grant:native-canonical-z5cisqkmxn",
+    "row:genesis-lifecycle"
+   ],
+   "complete": null
+  },
+  {
+   "t": 5.1,
+   "step": "signed:round1:test-accord-holder-1",
+   "signed": [
+    "record:native-canonical-z5cisqkmxn",
+    "row:genesis-charter",
+    "row:genesis-grant:native-canonical-z5cisqkmxn",
+    "row:genesis-lifecycle"
+   ],
+   "complete": null
+  },
+  {
+   "t": 5.3,
+   "step": "signed:round1:test-accord-holder-2",
+   "signed": [
+    "record:native-canonical-z5cisqkmxn",
+    "row:genesis-charter",
+    "row:genesis-grant:native-canonical-z5cisqkmxn",
+    "row:genesis-lifecycle"
+   ],
+   "complete": null
+  },
+  {
+   "t": 5.4,
+   "step": "signed:round2:test-accord-holder-0",
+   "signed": [
+    "family:humanity-accord",
+    "community:ciris-canonical",
+    "authz"
+   ],
+   "complete": null
+  },
+  {
+   "t": 5.6,
+   "step": "signed:round2:test-accord-holder-1",
+   "signed": [
+    "family:humanity-accord",
+    "community:ciris-canonical",
+    "authz"
+   ],
+   "complete": null
+  },
+  {
+   "t": 5.9,
+   "step": "signed:round2:test-accord-holder-2",
+   "signed": [
+    "family:humanity-accord",
+    "community:ciris-canonical",
+    "authz"
+   ],
+   "complete": null
+  },
+  {
+   "t": 7.5,
+   "step": "finished",
+   "bundle_sha256": "sha256:95682b74244f7824f3b4bb562520f0e66598a31b92ee4a23322021537d7d29b1",
+   "verified": {
+    "attestations": [
+     "genesis-charter",
+     "genesis-grant:native-canonical-z5cisqkmxn",
+     "genesis-lifecycle"
+    ],
+    "community_key_id": "ciris-canonical",
+    "founders": 3,
+    "quorum_verified": 3,
+    "serve_nodes": [
+     "native-canonical-z5cisqkmxn"
+    ]
+   },
+   "proves": "persist assembled the bundle and verify_ceremony_outputs passed"
+  },
+  {
+   "t": 14.1,
+   "step": "canonical_rebooted_on_bundle",
+   "evidence": [
+    "2026-10-15T14:46:24.116796Z  WARN ciris_server::compose: TEST-ANCHOR: booting on a ceremony-minted genesis bundle in place of the baked one path=\"/tmp/ciris-native-mesh-agent/canonical/home/final-genesis/canonical_seed.json\""
+   ]
+  },
+  {
+   "t": 15.0,
+   "step": "canonical_claimed",
+   "owner": "operator-person-user-s2jhcvqbxu"
+  },
+  {
+   "t": 39.8,
+   "step": "people_booted_claimed_peered"
+  },
+  {
+   "t": 39.8,
+   "step": "handoff",
+   "path": "/tmp/ciris-native-mesh-agent/agent_handoff.json",
+   "agent_url": "http://127.0.0.1:4243",
+   "canonical": "127.0.0.1:43186"
+  },
+  {
+   "t": 57.8,
+   "step": "agent_node_up",
+   "node_key_id": "ciris-node-bootstrap-zzdfbnacsd"
+  },
+  {
+   "t": 58.7,
+   "step": "agent_claimed",
+   "claimed": {
+    "owner_key_id": "agent-person-user-f4orbrxmfy",
+    "announced": true
+   },
+   "proves": "the agent's node has a responsible party and is announced"
+  },
+  {
+   "t": 71.1,
+   "step": "agent_peered",
+   "rooted": true,
+   "proves": "the agent's node is a production peer of the canonical"
+  },
+  {
+   "t": 87.2,
+   "step": "agent_ready",
+   "agent_id_hash": "fc47ac2932de3a35",
+   "has_owner_token": true,
+   "peered_back": [
+    200,
+    {
+     "peer_key_id": "native-canonical-z5cisqkmxn",
+     "grant_attestation_id": "f8e1acb4-50d0-4f15-87db-5d05a402358b",
+     "grant_content_hash": "cda2e554f008f53d9fd14033ac4f3e002e5d6392378809157ab7b9e75488d4e2",
+     "freshly_emitted": true,
+     "attestation_prefixes": [
+      "capacity:",
+      "chat:",
+      "file:",
+      "ownership:",
+      "self:delegates_to:",
+      "trace:"
+     ],
+     "reconciler_note": "consent:replication recorded; the node's reconcile loop converges the live replication runtime to it at runtime via set_peers \u2014 the peer becomes an active Initiator immediately, no restart (edge v5.1.0, CIRISEdge#173 resolved)",
+     "negotiated_ceg_wire_version": "1.0.0-rc2",
+     "conformance": {
+      "profiles": [
+       "CCP",
+       "CCC",
+       "CCS"
+      ],
+      "build_profiles": [
+       "CCP",
+       "CCC",
+       "CCS"
+      ],
+      "ceg_wire_version": "1.0.0-rc2",
+      "wire_vocabulary_sha256": "c6bd6aa44111b226a6f204801b1afaa7153fb43296652c1f7cbc23228ac9346c",
+      "declared_by_config": false,
+      "capabilities": []
+     }
+    }
+   ]
+  },
+  {
+   "t": 87.5,
+   "step": "fire",
+   "seconds_after_ready": 0.33,
+   "halt": {
+    "confirmed": null,
+    "fuse_secs": 120,
+    "invocation_id": "csd129-agent-halt-1",
+    "lapses_at": "2026-10-15T14:49:41.382528219+00:00",
+    "received_at": "2026-10-15T14:47:41.382528219+00:00",
+    "valid_signers": [
+     "test-accord-holder-0"
+    ]
+   },
+   "proves": "one row, fired on receipt, latched on the agent's node while its act is in flight"
+  },
+  {
+   "t": 87.9,
+   "step": "confirm",
+   "halt": {
+    "confirmed": {
+     "invocation_id": "csd129-agent-confirm-1",
+     "received_at": "2026-10-15T14:47:41.789571046+00:00",
+     "signers": [
+      "test-accord-holder-1",
+      "test-accord-holder-2"
+     ]
+    },
+    "fuse_secs": 120,
+    "invocation_id": "csd129-agent-halt-1",
+    "lapses_at": null,
+    "received_at": "2026-10-15T14:47:41.382528219+00:00",
+    "valid_signers": [
+     "test-accord-holder-0"
+    ]
+   },
+   "proves": "the halt stands on the agent's node, confirmed, past any fuse"
+  },
+  {
+   "t": 117.9,
+   "step": "act_refused",
+   "status": 423,
+   "trace_id": "th_seed_d2a0eeae_90a123a6-2c4",
+   "latch_stood": true,
+   "proves": "the ONE reader of the latch, the agent's act gate, refused the act"
+  },
+  {
+   "t": 121.0,
+   "step": "record_holds_refusal",
+   "trace_id": "th_seed_d2a0eeae_90a123a6-2c4",
+   "canonical_rows": 16,
+   "receipt": {
+    "agent_id_hash": "fc47ac2932de3a35",
+    "asked_trace_id": "th_seed_d2a0eeae_90a123a6-2c4",
+    "holds_trace": true,
+    "newest": {
+     "completed_at": "2026-10-15T14:48:11.123046Z",
+     "started_at": "2026-10-15T14:47:20.563904Z",
+     "trace_id": "th_seed_d2a0eeae_90a123a6-2c4"
+    },
+    "nonce": "csd129",
+    "read_at": "2026-10-15T14:48:14.916408097Z",
+    "traces": 1
+   },
+   "latch_on_canonical": true,
+   "latch_on_agent": true,
+   "proves": "no data door read the latch: the terminal ACTION_RESULT of a refused act is held by the canonical under the halt"
+  },
+  {
+   "t": 121.4,
+   "step": "resume",
+   "proves": "the latch is gone on the agent's node; the agent may act again"
+  },
+  {
+   "t": 121.4,
+   "step": "not_covered",
+   "checks": [
+    "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
+    "a real YubiKey holder (software holders here)"
+   ]
+  }
+ ],
+ "fuse_secs": 120,
+ "agent_url": "http://127.0.0.1:4243",
+ "agent": {
+  "node_key_id": "ciris-node-bootstrap-zzdfbnacsd",
+  "agent_id_hash": "fc47ac2932de3a35",
+  "trace_id": "th_seed_d2a0eeae_90a123a6-2c4"
+ },
+ "not_covered": [
+  "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
+  "a real YubiKey holder (software holders here)"
+ ],
+ "first_failure": null,
+ "nodes": {
+  "canonical": {
+   "url": "http://127.0.0.1:43187",
+   "transport": "127.0.0.1:43186",
+   "token": "<redacted>",
+   "owner_key_id": "operator-person-user-s2jhcvqbxu",
+   "node_key_id": "native-canonical-z5cisqkmxn",
+   "home": "/tmp/ciris-native-mesh-agent/canonical/home",
+   "log": "/tmp/ciris-native-mesh-agent/canonical/node.log"
+  },
+  "alice": {
+   "url": "http://127.0.0.1:43189",
+   "transport": "127.0.0.1:43188",
+   "token": "<redacted>",
+   "owner_key_id": "alice-person-user-bj6fnoaa7r",
+   "node_key_id": "native-alice-kbsamzplrj",
+   "home": "/tmp/ciris-native-mesh-agent/alice/home",
+   "log": "/tmp/ciris-native-mesh-agent/alice/node.log"
+  },
+  "bob": {
+   "url": "http://127.0.0.1:43191",
+   "transport": "127.0.0.1:43190",
+   "token": "<redacted>",
+   "owner_key_id": "bob-person-user-cthj6h3dua",
+   "node_key_id": "native-bob-t4stmblu4c",
+   "home": "/tmp/ciris-native-mesh-agent/bob/home",
+   "log": "/tmp/ciris-native-mesh-agent/bob/node.log"
+  },
+  "agent": {
+   "url": "http://127.0.0.1:4243",
+   "transport": "127.0.0.1:4242",
+   "token": "<redacted>",
+   "owner_key_id": "agent-person-user-f4orbrxmfy",
+   "node_key_id": "ciris-node-bootstrap-zzdfbnacsd",
+   "home": "/tmp/ciris-qa-accord-halt-xuyxvd9x",
+   "log": "/tmp/ciris-native-mesh-agent/agent/unused.log"
+  }
+ }
+}
