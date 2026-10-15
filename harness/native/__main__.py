@@ -34,6 +34,10 @@ def main() -> int:
     ap.add_argument("--reachable-wait", type=float, default=120, help="chat: seconds to re-add a contact until reachable_nodes>=1 (0 = no gate)")
     ap.add_argument("--only", default="", help="corpus: comma-separated file names")
     ap.add_argument("--rust-log", default="info,ciris_edge=debug")
+    ap.add_argument("--agent-url", default="http://127.0.0.1:4243",
+                    help="halt_agent: the agent's own node fold (never bound by this harness)")
+    ap.add_argument("--agent-wait", type=float, default=1800,
+                    help="halt_agent: seconds to wait for the agent's node, its ready file and its act")
     ap.add_argument("--direct", action="store_true",
                     help="chat: the second node also dials the first (direct neighbours)")
     args = ap.parse_args()
