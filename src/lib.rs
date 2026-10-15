@@ -3342,6 +3342,12 @@ mod python {
         // the verify-FFI anchor at init, so the fold survives even a linker that
         // ignores `#[used]` on statics (CIRISServer#232). Cheap XOR-fold; discarded.
         let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
+        // Test-anchor builds only: a ceremony-minted genesis bundle named by
+        // CIRIS_TEST_GENESIS_BUNDLE is installed at IMPORT time, so an embedding
+        // agent's own persist `Engine` (built in Python before any serve call)
+        // seeds against it — see `compose::install_test_genesis_bundle`.
+        #[cfg(feature = "test-anchor")]
+        crate::compose::install_test_genesis_bundle().map_err(py_err)?;
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_egress_scrub, m)?)?;

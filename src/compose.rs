@@ -3637,8 +3637,19 @@ async fn register_substrate_key(
 /// `install_test_ceremony_outputs_json` BEFORE the Engine exists, so the boot
 /// seed runs every production leg against it (persist honours it only while
 /// the test anchor is live). Compiled out of production builds.
+///
+/// Called from TWO places, because the embedded node has two births: the
+/// server's own [`build_engine`] (the binary, `serve`), and the PyO3 module's
+/// init (`ciris_server._native`), which runs at `import ciris_server` — BEFORE
+/// an embedding agent constructs its persist `Engine` in Python and hands it
+/// to `serve_with_python_adapter` as `current_rust_engine()`. On that path
+/// `build_engine` never runs, so without the import-time install the agent's
+/// node seeded NOTHING past the family under a test anchor and
+/// `canonical_bootstrap_hints()` came back empty (`canonical_targets=[]`, CSD-129
+/// agent step, 2026-10-15). A second call re-installs the same file (persist
+/// replaces); harmless.
 #[cfg(feature = "test-anchor")]
-fn install_test_genesis_bundle() -> Result<()> {
+pub(crate) fn install_test_genesis_bundle() -> Result<()> {
     let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") else {
         return Ok(());
     };
