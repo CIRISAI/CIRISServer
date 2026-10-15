@@ -3346,8 +3346,18 @@ mod python {
         // CIRIS_TEST_GENESIS_BUNDLE is installed at IMPORT time, so an embedding
         // agent's own persist `Engine` (built in Python before any serve call)
         // seeds against it — see `compose::install_test_genesis_bundle`.
+        // tracing is not initialised yet at import, so the WARN inside is
+        // dropped; the one visible witness of the import-time install is this
+        // stderr line (a runner greps it; a production wheel never prints it).
         #[cfg(feature = "test-anchor")]
-        crate::compose::install_test_genesis_bundle().map_err(py_err)?;
+        {
+            crate::compose::install_test_genesis_bundle().map_err(py_err)?;
+            if let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") {
+                eprintln!(
+                    "ciris_server: TEST-ANCHOR: ceremony-minted genesis bundle installed at import path={path}"
+                );
+            }
+        }
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_egress_scrub, m)?)?;
