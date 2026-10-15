@@ -2939,6 +2939,19 @@ mod python {
     /// `deliverable=true` but no delivery ⇒ driver-layer frame loss (grep the log
     /// for the edge FramesDropped WARN, leviculum#25). In-process only, never over
     /// the wire; GIL released.
+    /// `ciris_server.test_anchor_compiled() -> bool`: whether THIS extension was
+    /// built with the `test-anchor` feature — the synthetic trust root,
+    /// `CIRIS_TEST_GENESIS_BUNDLE`, `CIRIS_TEST_NO_CEREMONY`,
+    /// `CIRIS_TEST_BLESS_CANONICAL` and `CIRIS_TEST_CANONICAL_DIAL` are honoured
+    /// only there. A runner that must boot the embedded node INSIDE a test-anchor
+    /// mesh (the CSD-129 agent step, `harness/native halt_agent`) asks this
+    /// instead of scanning the .so for strings; the PyPI wheel answers `false`.
+    #[pyfunction]
+    #[pyo3(name = "test_anchor_compiled")]
+    fn py_test_anchor_compiled() -> bool {
+        cfg!(feature = "test-anchor")
+    }
+
     #[pyfunction]
     #[pyo3(name = "delivery_status")]
     fn py_delivery_status(py: Python<'_>) -> String {
@@ -3336,6 +3349,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_test_anchor_compiled, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_receipt, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_state, m)?)?;
