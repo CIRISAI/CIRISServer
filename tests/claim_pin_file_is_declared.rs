@@ -123,3 +123,45 @@ fn the_path_is_omitted_rather_than_empty_when_no_pin_is_armed() {
          fallback distinguishes those"
     );
 }
+
+/// The PIN VALUE never goes through a log macro (Eric, 2026-10-15, via
+/// CIRISAgent#1277: "the claim PIN is a file on disk, never a log line"). The
+/// tracing sink is a persisted `ciris-server.log`; the banner names the FILE.
+/// Source scan of the one function that holds both the value and the banner: no
+/// `tracing::`/`println!`/`eprintln!` invocation inside it may interpolate
+/// `claim_pin`. (The mutant: put `{claim_pin}` back in the banner → red.)
+#[test]
+fn the_banner_names_the_pin_file_never_the_pin() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/auth/bootstrap.rs"
+    ))
+    .unwrap();
+    let start = src
+        .find("pub fn announce_ownership_unclaimed(")
+        .expect("the banner fn");
+    let body = &src[start..];
+    let end = body.find("\n}\n").expect("fn end");
+    let body = &body[..end];
+    // The only `claim_pin` uses allowed in the fn: the stash and the FILE write
+    // (`format!("{claim_pin}\n")` into the 0600 file is the whole point).
+    for (i, line) in body.lines().enumerate() {
+        let logs =
+            line.contains("tracing::") || line.contains("println!") || line.contains("eprintln!");
+        let interpolates = line.contains("{claim_pin}")
+            || line.contains("%claim_pin")
+            || line.contains("?claim_pin");
+        assert!(
+            !(logs && interpolates),
+            "line {i} logs the PIN value: {line}"
+        );
+        assert!(
+            !line.contains("CLAIM PIN: {claim_pin}"),
+            "line {i}: the banner prints the PIN value: {line}"
+        );
+    }
+    assert!(
+        body.contains("CLAIM PIN: {where_to_find_it}"),
+        "the banner names where the PIN is, not what it is"
+    );
+}

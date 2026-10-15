@@ -551,6 +551,33 @@ pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str, pin_file: 
     // the intended recipient and reads it via `first_run_claim_pin()`.
     stash_first_run_claim_pin(claim_pin);
 
+    // The PIN is a FILE on disk, never a log line (Eric, 2026-10-15, via
+    // CIRISAgent#1277): the tracing sink is a persisted `ciris-server.log`, and
+    // a one-time secret that sits in a log file outlives its one use. The file
+    // is written FIRST so the banner can name it; the banner carries the PATH
+    // (as `GET /v1/setup/status` already does — `claim_pin_file`), and the value
+    // reaches an operator only through that 0600 file or, on the embedded
+    // topology, the in-process accessor.
+    let where_to_find_it: String = match pin_file {
+        Some(path) => match std::fs::write(&path, format!("{claim_pin}\n")) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                }
+                tracing::info!(pin_file = %path.display(), "one-time claim PIN written to file (0600; consumed on the first successful claim)");
+                format!("read it from {} (0600 file)", path.display())
+            }
+            Err(e) => {
+                tracing::warn!(pin_file = %path.display(), error = %e, "could not write the claim PIN file — the PIN is reachable only in-process (first_run_claim_pin())");
+                "the PIN file could not be written; the embedding host reads first_run_claim_pin()"
+                    .to_string()
+            }
+        },
+        None => "in-process only: the embedding host reads first_run_claim_pin()".to_string(),
+    };
+
     tracing::warn!(
         "\n\
          ╔══════════════════════════════════════════════════════════════════════╗\n\
@@ -559,31 +586,13 @@ pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str, pin_file: 
          ║  To claim ownership (POST /v1/setup/root), present BOTH:             ║\n\
          ║                                                                      ║\n\
          ║    NodeCode : {node_code}\n\
-         ║    CLAIM PIN: {claim_pin}   (one-time; console-only — NEVER over HTTP)\n\
+         ║    CLAIM PIN: {where_to_find_it}\n\
          ║                                                                      ║\n\
          ║  The NodeCode is a PUBLIC handle (GET /v1/federation/node-code).     ║\n\
-         ║  The PIN is the operator-presence secret: it is printed ONLY here    ║\n\
-         ║  and is consumed on the first successful claim.                      ║\n\
+         ║  The PIN is the operator-presence secret: a one-time FILE, never a   ║\n\
+         ║  log line and never over HTTP; it is consumed on the first claim.    ║\n\
          ╚══════════════════════════════════════════════════════════════════════╝"
     );
-
-    // Optional headless-ops sink: write the PIN to a 0600 file when a path is
-    // supplied (the conventional `home/claim_pin`; Server 0.5 — not env).
-    if let Some(path) = pin_file {
-        match std::fs::write(&path, format!("{claim_pin}\n")) {
-            Ok(()) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
-                tracing::info!(pin_file = %path.display(), "one-time claim PIN ALSO written to file (0600; remove after claim)");
-            }
-            Err(e) => {
-                tracing::warn!(pin_file = %path.display(), error = %e, "could not write claim PIN file (PIN remains available on the console)")
-            }
-        }
-    }
 }
 
 // ─── POST /v1/setup/root — the first-run root-claim route ────────────────────
