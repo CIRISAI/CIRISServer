@@ -136,7 +136,10 @@ fn the_banner_names_the_pin_file_never_the_pin() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/auth/bootstrap.rs"
     ))
-    .unwrap();
+    .unwrap()
+    // CRLF-normalised: a Windows checkout (autocrlf) reads "\r\n}\r\n" and the
+    // fn-end probe below never matched (main red at 5843681b, windows-latest only).
+    .replace("\r\n", "\n");
     let start = src
         .find("pub fn announce_ownership_unclaimed(")
         .expect("the banner fn");
