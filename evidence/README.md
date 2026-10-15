@@ -50,6 +50,15 @@ and several rows were demoted to `open` on exactly that ground (2026-07 evidence
 137 rows re-read against the CC text; 29 mis-assignments + 44 over-claims corrected).
 An honest `open` is worth more than a plausible symbol that does not hold the line.
 
+## Measured runs
+
+- [`csd129-agent-step-2026-10-15/`](csd129-agent-step-2026-10-15/) — the CSD-129 **agent
+  step** (4.2.1.1 / CLM-halt-one-row), cited by symbol as
+  `harness/native/scenarios.py#halt_agent`: one holder's row latched on the agent's own
+  node mid-thought, majority confirm, the act refused 423, its terminal ACTION_RESULT
+  held by the canonical's signed receipt while both nodes read halted, resume. The
+  directory's README has the step table, the files, and the three defects the runs found.
+
 ## Open findings → close them (implement) or `normative-only`
 
 These claims are tagged `impl:CIRISServer#155` but have no reference-implementation

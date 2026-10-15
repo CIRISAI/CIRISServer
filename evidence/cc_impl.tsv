@@ -54,6 +54,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.2	CLM-halt-authority	CIRISServer	src/accord.rs#halt_plane_threshold	ciris-server@v0.5.225
 4.2.1.1	CLM-halt-one-row	CIRISServer	tests/halt_gate.rs#no_data_door_reads_the_latch	ciris-server@main
 4.2.1.1	CLM-halt-one-row	CIRISServer	tests/halt_gate.rs#while_a_halt_is_in_effect_the_ingest_door_does_its_ordinary_work	ciris-server@main
+4.2.1.1	CLM-halt-one-row	CIRISServer	harness/native/scenarios.py#halt_agent	ciris-server@main
 4.2.1	CLM-accord-reach	CIRISServer	src/accord.rs#replicate_and_maybe_halt	ciris-server@v0.5.225
 4.2.1	CLM-accord-reach	CIRISServer	src/accord.rs#ingest_message	ciris-server@v0.5.225
 4.2.1.1	CLM-halt-one-row	CIRISServer	src/accord_halt.rs#HaltRecord::new	ciris-server@v0.5.225
