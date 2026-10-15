@@ -768,6 +768,7 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
                "people": {n.name: {"url": n.url, "node_key_id": n.node_key_id} for n in (a, b)},
                "holders": holders, "fuse_secs": fuse, "files": files,
                "protocol": ["boot the agent with env exported and a FRESH CIRIS_HOME; the node MUST BE OWNED before agent_ready (claim via POST /v1/setup/root or the PIN flow) — an unowned node refuses federation peering and ships no trace to a canonical; then announce",
+                            "OPTIONAL, before the message: write agent_up.json {node_home: <the embedded node's home dir, where it wrote claim_pin>} and wait for agent_claimed.json — the harness claims + announces your node for you",
                             "submit one real-LLM message; when its round has STARTED (an act is in flight), write agent_ready.json {agent_id_hash, token?} — the halt lands on your node within seconds",
                             "wait for halt_fired.json (written the instant your node reads halted:true), then POST /v1/agent/interact once (expect 423)",
                             "write agent_acted.json {status, trace_id: the trace carrying the in-flight act's refusal ACTION_RESULT, agent_id_hash}",
@@ -787,6 +788,36 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
     mesh.nodes["agent"] = agent
     step("agent_node_up", node_key_id=agent.node_key_id)
 
+    # 1b. OWNED — an unowned node refuses federation peering and ships nothing to
+    #     a canonical (CC 3.2 / 1.13.5). The runner's API setup path leaves the
+    #     node unowned, so when it writes agent_up.json {"node_home": <the
+    #     embedded node's home>} BEFORE submitting its message, this harness
+    #     claims the node the way the ladders do (owner identity minted here,
+    #     `claim` over the console PIN the node wrote under its home), announces
+    #     it, and answers with agent_claimed.json {owner_key_id, token}. A runner
+    #     that claimed by itself skips straight to agent_ready.json.
+    up_path, claimed_path = mesh.work / "agent_up.json", mesh.work / "agent_claimed.json"
+    claimed: Any = "runner_did_not_ask"
+    first = wait_for("agent_up.json (to claim) or agent_ready.json (already owned)",
+                     lambda: "up" if up_path.is_file() else ("ready" if Path(files["agent_ready"]).is_file() else None),
+                     agent_wait, every=1.0)
+    if first == "up":
+        up = json.loads(up_path.read_text())
+        agent.home = Path(str(up.get("node_home") or ""))
+        agent.env = dict(env)
+        try:
+            agent.claim("agent-person", pin_timeout=30.0)
+            agent.announce()
+            agent.self_record()
+            claimed = {"owner_key_id": agent.owner_key_id, "announced": True}
+            claimed_path.write_text(json.dumps({"owner_key_id": agent.owner_key_id, "token": agent.token}), encoding="utf-8")
+        except MeshError as e:
+            ok = False
+            claimed = {"error": str(e)[:600]}
+            claimed_path.write_text(json.dumps({"error": str(e)[:600]}), encoding="utf-8")
+            step.fail("agent_claimed", "the harness could not claim the agent's node over its console PIN", [c], r"claim", node_home=str(agent.home), got=str(e)[:400])
+    step("agent_claimed", proves="the agent's node has a responsible party and is announced", claimed=claimed)
+
     # 2. PEERED — production peering from the canonical's side, as soon as the
     #    agent's node answers (its own side is the node's prime to
     #    CIRIS_TEST_CANONICAL_DIAL; no owner claim is required of it). Rooted
@@ -805,7 +836,7 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
     step("agent_peered", proves="the agent's node is a production peer of the canonical", rooted=rooted)
     ready = wait_for("agent_ready.json (the runner has an act in flight)",
                      lambda: json.loads(ready_path.read_text()) if ready_path.is_file() else None, agent_wait, every=0.5)
-    agent.token = str(ready.get("token") or "")
+    agent.token = agent.token or str(ready.get("token") or "")
     # Best-effort from the agent's side: an UNOWNED node refuses federation
     # peering (CC 3.2 / 1.13.5 — "claim ownership first via POST /v1/setup/root")
     # and ships nothing to a canonical; record the answer, let step 5 be the judge.
