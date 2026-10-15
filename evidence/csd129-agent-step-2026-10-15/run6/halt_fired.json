@@ -1,0 +1,1 @@
+{"invocation_id": "csd129-agent-halt-1", "halt": {"confirmed": null, "fuse_secs": 120, "invocation_id": "csd129-agent-halt-1", "lapses_at": "2026-10-15T14:49:41.382528219+00:00", "received_at": "2026-10-15T14:47:41.382528219+00:00", "valid_signers": ["test-accord-holder-0"]}, "fired_at": 1792075661.4591432}

@@ -506,6 +506,16 @@ class Mesh:
         self.binary = Path(binary).resolve()
         if not self.binary.is_file():
             raise MeshError(f"no binary at {self.binary}")
+        # A `cargo test` in the same worktree rebuilds target/debug/ciris-server
+        # WITHOUT --features test-anchor; such a binary ignores the synthetic root
+        # and the ceremony plan then fails with "holders {A1, B1, C1}" (the baked
+        # production holders) — three times in one day (2026-10-15). Refuse it
+        # here, by name, before a single node boots.
+        if b"CIRIS_TEST_GENESIS_BUNDLE" not in self.binary.read_bytes():
+            raise MeshError(
+                f"{self.binary} was built WITHOUT --features test-anchor (no CIRIS_TEST_GENESIS_BUNDLE "
+                "handler in it) — a cargo test in this worktree probably rebuilt it; run "
+                "`cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor` first")
         self.work = Path(work).resolve()
         self.keep = keep
         self.base_env = {**anchor_env(), "RUST_LOG": rust_log, **(extra_env or {})}

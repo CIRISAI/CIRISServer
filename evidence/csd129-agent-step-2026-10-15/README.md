@@ -31,3 +31,25 @@ intake answered from a 1 s cached latch read (CIRISAgent#1262 @b729a04ab).
 
 Still not covered: T8 iii/vii (rows.jsonl offline replay, roster_fold_digest); a real
 YubiKey holder (software holders here).
+
+## run6/ — the same chain on the MERGED pins (2026-10-15 14:47–14:48Z)
+
+Server: CIRISServer main @a75da61c (the harness; node code = v0.5.226's, wheel built with
+`--features test-anchor`). Agent: **CIRISAgent main @b95a3dc78019ce9811ec83c703ab79e5cc23b950**
+(#1262 merged, incl. the pending-interact 423 change that landed after run 5) via runner
+CIRISAgent#1275 @754c96502 (runner + test files only), real LLM (qwen3.6-35b-a3b). Per Eric
+(2026-10-14): the agent step is re-run against the tag + agent main after #1262 — this is it.
+
+| t (s) | step | fact |
+|---|---|---|
+| 57.8 | agent_node_up | the agent's own node fold on :4243 |
+| 58.7 | agent_claimed | harness claimed it over its console PIN, announced |
+| 71.1 | agent_peered | Rooted = True with the native canonical |
+| 87.2 | agent_ready | runner reports a real-LLM thought in flight; its own peering to the canonical 200 |
+| 87.5 | fire | ONE holder's row latched on the agent's node 0.33 s after ready |
+| 87.9 | confirm | strict majority; `lapses_at: null` |
+| 117.9 | act_refused | `POST /v1/agent/interact` → 423, terminal ACTION_RESULT trace `th_seed_d2a0eeae_90a123a6-2c4`; latch standing |
+| 121.0 | record_holds_refusal | canonical's signed receipt `holds_trace: True`, 16 rows, read with both nodes `halted: true` |
+| 121.4 | resume | majority `lifecycle:active` → agent node `halted: false` |
+
+Files as in run 5 (tokens redacted). Verdict PASS, no failing step.
