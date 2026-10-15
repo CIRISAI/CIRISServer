@@ -767,7 +767,7 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
                              "record": c.record, "owner_key_id": c.owner_key_id},
                "people": {n.name: {"url": n.url, "node_key_id": n.node_key_id} for n in (a, b)},
                "holders": holders, "fuse_secs": fuse, "files": files,
-               "protocol": ["boot the agent with env exported and a FRESH CIRIS_HOME; complete setup/claim; announce",
+               "protocol": ["boot the agent with env exported and a FRESH CIRIS_HOME; the node MUST BE OWNED before agent_ready (claim via POST /v1/setup/root or the PIN flow) — an unowned node refuses federation peering and ships no trace to a canonical; then announce",
                             "submit one real-LLM message; when its round has STARTED (an act is in flight), write agent_ready.json {agent_id_hash, token?} — the halt lands on your node within seconds",
                             "wait for halt_fired.json (written the instant your node reads halted:true), then POST /v1/agent/interact once (expect 423)",
                             "write agent_acted.json {status, trace_id: the trace carrying the in-flight act's refusal ACTION_RESULT, agent_id_hash}",
@@ -806,10 +806,18 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
     ready = wait_for("agent_ready.json (the runner has an act in flight)",
                      lambda: json.loads(ready_path.read_text()) if ready_path.is_file() else None, agent_wait, every=0.5)
     agent.token = str(ready.get("token") or "")
+    # Best-effort from the agent's side: an UNOWNED node refuses federation
+    # peering (CC 3.2 / 1.13.5 — "claim ownership first via POST /v1/setup/root")
+    # and ships nothing to a canonical; record the answer, let step 5 be the judge.
+    peered_back: Any = "not_attempted"
     if agent.token:
-        agent.peer_with(c)
+        if c.record is None:
+            c.self_record()
+        peered_back = agent.api("POST", "/v1/federation/peering", {
+            "peer_key_id": c.record["record"]["key_id"], "peer_key_record": c.record,
+            "attestation_prefixes": ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:", "trace:"]})
     ready_at = time.time()
-    step("agent_ready", agent_id_hash=ready.get("agent_id_hash"), has_owner_token=bool(agent.token))
+    step("agent_ready", agent_id_hash=ready.get("agent_id_hash"), has_owner_token=bool(agent.token), peered_back=peered_back)
 
     # 3. FIRE — one holder, from alice; the row goes to the agent's node FIRST,
     #    out of band, then to the rest of the mesh. halt_fired.json is written
