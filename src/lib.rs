@@ -2939,6 +2939,19 @@ mod python {
     /// `deliverable=true` but no delivery ⇒ driver-layer frame loss (grep the log
     /// for the edge FramesDropped WARN, leviculum#25). In-process only, never over
     /// the wire; GIL released.
+    /// `ciris_server.test_anchor_compiled() -> bool`: whether THIS extension was
+    /// built with the `test-anchor` feature — the synthetic trust root,
+    /// `CIRIS_TEST_GENESIS_BUNDLE`, `CIRIS_TEST_NO_CEREMONY`,
+    /// `CIRIS_TEST_BLESS_CANONICAL` and `CIRIS_TEST_CANONICAL_DIAL` are honoured
+    /// only there. A runner that must boot the embedded node INSIDE a test-anchor
+    /// mesh (the CSD-129 agent step, `harness/native halt_agent`) asks this
+    /// instead of scanning the .so for strings; the PyPI wheel answers `false`.
+    #[pyfunction]
+    #[pyo3(name = "test_anchor_compiled")]
+    fn py_test_anchor_compiled() -> bool {
+        cfg!(feature = "test-anchor")
+    }
+
     #[pyfunction]
     #[pyo3(name = "delivery_status")]
     fn py_delivery_status(py: Python<'_>) -> String {
@@ -3329,6 +3342,22 @@ mod python {
         // the verify-FFI anchor at init, so the fold survives even a linker that
         // ignores `#[used]` on statics (CIRISServer#232). Cheap XOR-fold; discarded.
         let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
+        // Test-anchor builds only: a ceremony-minted genesis bundle named by
+        // CIRIS_TEST_GENESIS_BUNDLE is installed at IMPORT time, so an embedding
+        // agent's own persist `Engine` (built in Python before any serve call)
+        // seeds against it — see `compose::install_test_genesis_bundle`.
+        // tracing is not initialised yet at import, so the WARN inside is
+        // dropped; the one visible witness of the import-time install is this
+        // stderr line (a runner greps it; a production wheel never prints it).
+        #[cfg(feature = "test-anchor")]
+        {
+            crate::compose::install_test_genesis_bundle().map_err(py_err)?;
+            if let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") {
+                eprintln!(
+                    "ciris_server: TEST-ANCHOR: ceremony-minted genesis bundle installed at import path={path}"
+                );
+            }
+        }
         m.add_function(wrap_pyfunction!(py_main, m)?)?;
         m.add_function(wrap_pyfunction!(py_import_traces, m)?)?;
         m.add_function(wrap_pyfunction!(py_egress_scrub, m)?)?;
@@ -3336,6 +3365,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_start_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_reprime_federation_delivery, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_status, m)?)?;
+        m.add_function(wrap_pyfunction!(py_test_anchor_compiled, m)?)?;
         m.add_function(wrap_pyfunction!(py_delivery_receipt, m)?)?;
         m.add_function(wrap_pyfunction!(py_analyze_consent_stance, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_state, m)?)?;

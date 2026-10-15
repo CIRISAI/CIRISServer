@@ -1,0 +1,58 @@
+── PLAN ──
+CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology T8 + one
+  agent-hosted node.
+  root:     the ceremony-minted humanity accord, three software holders, quorum 2/3;
+            fuse 120 s (CIRIS_TEST_HALT_FUSE_SECS); the halt is CONFIRMED so it stands
+            while the agent acts.
+  nodes:    the canonical (serve) + alice + bob (this harness) + the AGENT's node fold at
+            http://127.0.0.1:4243 (the agent's own process, booted on agent_handoff.json's env).
+  steps:    mesh up → handoff → agent node up, claimed → peered with the canonical →
+            FIRE + CONFIRM → agent's act REFUSED (423, terminal ACTION_RESULT) → that
+            trace HELD by the canonical (receipt + row) while the latch still stands →
+            RESUME → agent node reads halted:false.
+  asserts:  the latch has ONE reader (the agent's act gate); every data door between the
+            refused act and the canonical did its ordinary work under the halt.
+──
+{"t": 0.1, "step": "anchor", "holders": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"]}
+{"t": 3.1, "step": "canonical_booted", "key_id": "native-canonical-nds5xdhoh3"}
+{"t": 3.2, "step": "planned", "complete": false, "owed": {"authz": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "community:ciris-canonical": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "family:humanity-accord": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "record:native-canonical-nds5xdhoh3": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "row:genesis-charter": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "row:genesis-grant:native-canonical-nds5xdhoh3": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"], "row:genesis-lifecycle": ["test-accord-holder-0", "test-accord-holder-1", "test-accord-holder-2"]}}
+{"t": 3.4, "step": "signed:round1:test-accord-holder-0", "signed": ["record:native-canonical-nds5xdhoh3", "row:genesis-charter", "row:genesis-grant:native-canonical-nds5xdhoh3", "row:genesis-lifecycle"], "complete": null}
+{"t": 3.5, "step": "signed:round1:test-accord-holder-1", "signed": ["record:native-canonical-nds5xdhoh3", "row:genesis-charter", "row:genesis-grant:native-canonical-nds5xdhoh3", "row:genesis-lifecycle"], "complete": null}
+{"t": 3.7, "step": "signed:round1:test-accord-holder-2", "signed": ["record:native-canonical-nds5xdhoh3", "row:genesis-charter", "row:genesis-grant:native-canonical-nds5xdhoh3", "row:genesis-lifecycle"], "complete": null}
+{"t": 3.8, "step": "signed:round2:test-accord-holder-0", "signed": ["family:humanity-accord", "community:ciris-canonical", "authz"], "complete": null}
+{"t": 4.0, "step": "signed:round2:test-accord-holder-1", "signed": ["family:humanity-accord", "community:ciris-canonical", "authz"], "complete": null}
+{"t": 4.1, "step": "signed:round2:test-accord-holder-2", "signed": ["family:humanity-accord", "community:ciris-canonical", "authz"], "complete": null}
+{"t": 5.2, "step": "finished", "bundle_sha256": "sha256:2049461263689bd0fdad829a32ea6354c776a19bc3c2a44d6af3e221de592acc", "verified": {"attestations": ["genesis-charter", "genesis-grant:native-canonical-nds5xdhoh3", "genesis-lifecycle"], "community_key_id": "ciris-canonical", "founders": 3, "quorum_verified": 3, "serve_nodes": ["native-canonical-nds5xdhoh3"]}, "proves": "persist assembled the bundle and verify_ceremony_outputs passed"}
+{"t": 10.0, "step": "canonical_rebooted_on_bundle", "evidence": ["2026-10-15T02:38:23.068255Z  WARN ciris_server::compose: TEST-ANCHOR: booting on a ceremony-minted genesis bundle in place of the baked one path=\"/tmp/ciris-native-mesh-agent/canonical/home/final-genesis/canonical_seed.json\""]}
+{"t": 10.6, "step": "canonical_claimed", "owner": "operator-person-user-2yqdx5jrx2"}
+{"t": 23.8, "step": "people_booted_claimed_peered"}
+{"t": 23.8, "step": "handoff", "path": "/tmp/ciris-native-mesh-agent/agent_handoff.json", "agent_url": "http://127.0.0.1:4243", "canonical": "127.0.0.1:43186"}
+handoff written: /tmp/ciris-native-mesh-agent/agent_handoff.json  (waiting up to 1800 s for the agent's node at http://127.0.0.1:4243)
+{"t": 35.8, "step": "agent_node_up", "node_key_id": "ciris-node-bootstrap-s6tdj72ruu"}
+{"t": 36.5, "step": "agent_claimed", "claimed": {"owner_key_id": "agent-person-user-ug4oz24tdm", "announced": true}, "proves": "the agent's node has a responsible party and is announced"}
+{"t": 48.8, "step": "agent_peered", "rooted": true, "proves": "the agent's node is a production peer of the canonical"}
+{"t": 53.1, "step": "agent_ready", "agent_id_hash": "9e611f14b48e238c", "has_owner_token": true, "peered_back": [200, {"peer_key_id": "native-canonical-nds5xdhoh3", "grant_attestation_id": "4e3309a2-98ba-4b26-99bc-3318b2c5bfc3", "grant_content_hash": "5aa0a9bf61460481e5c96f261e3e032129bb83d24705d84b86269810dd406f38", "freshly_emitted": true, "attestation_prefixes": ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:", "trace:"], "reconciler_note": "consent:replication recorded; the node's reconcile loop converges the live replication runtime to it at runtime via set_peers \u2014 the peer becomes an active Initiator immediately, no restart (edge v5.1.0, CIRISEdge#173 resolved)", "negotiated_ceg_wire_version": "1.0.0-rc2", "conformance": {"profiles": ["CCP", "CCC", "CCS"], "build_profiles": ["CCP", "CCC", "CCS"], "ceg_wire_version": "1.0.0-rc2", "wire_vocabulary_sha256": "c6bd6aa44111b226a6f204801b1afaa7153fb43296652c1f7cbc23228ac9346c", "declared_by_config": false, "capabilities": []}}]}
+{"t": 53.2, "step": "fire", "seconds_after_ready": 0.09, "halt": {"confirmed": null, "fuse_secs": 120, "invocation_id": "csd129-agent-halt-1", "lapses_at": "2026-10-15T02:41:09.263282725+00:00", "received_at": "2026-10-15T02:39:09.263282725+00:00", "valid_signers": ["test-accord-holder-0"]}, "proves": "one row, fired on receipt, latched on the agent's node while its act is in flight"}
+halt latched on http://127.0.0.1:4243 0.09s after agent_ready: /tmp/ciris-native-mesh-agent/halt_fired.json
+{"t": 53.5, "step": "confirm", "halt": {"confirmed": {"invocation_id": "csd129-agent-confirm-1", "received_at": "2026-10-15T02:39:09.493029770+00:00", "signers": ["test-accord-holder-1", "test-accord-holder-2"]}, "fuse_secs": 120, "invocation_id": "csd129-agent-halt-1", "lapses_at": null, "received_at": "2026-10-15T02:39:09.263282725+00:00", "valid_signers": ["test-accord-holder-0"]}, "proves": "the halt stands on the agent's node, confirmed, past any fuse"}
+halt confirmed (waiting up to 1800 s for agent_acted.json)
+{"t": 57.5, "step": "act_refused", "status": 423, "trace_id": "th_seed_ec0f74c6_8b058099-bce", "latch_stood": true, "proves": "the ONE reader of the latch, the agent's act gate, refused the act"}
+{"t": 81.7, "step": "record_holds_refusal", "trace_id": "th_seed_ec0f74c6_8b058099-bce", "canonical_rows": 16, "receipt": {"agent_id_hash": "9e611f14b48e238c", "asked_trace_id": "th_seed_ec0f74c6_8b058099-bce", "holds_trace": true, "newest": {"completed_at": "2026-10-15T02:39:12.052164Z", "started_at": "2026-10-15T02:38:57.076102Z", "trace_id": "th_seed_ec0f74c6_8b058099-bce"}, "nonce": "csd129", "read_at": "2026-10-15T02:39:37.719304206Z", "traces": 1}, "latch_on_canonical": true, "latch_on_agent": true, "proves": "no data door read the latch: the terminal ACTION_RESULT of a refused act is held by the canonical under the halt"}
+{"t": 81.9, "step": "resume", "proves": "the latch is gone on the agent's node; the agent may act again"}
+{"t": 81.9, "step": "not_covered", "checks": ["rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)", "a real YubiKey holder (software holders here)"]}
+═══ VERDICT {
+ "verdict": "PASS",
+ "fuse_secs": 120,
+ "agent_url": "http://127.0.0.1:4243",
+ "agent": {
+  "node_key_id": "ciris-node-bootstrap-s6tdj72ruu",
+  "agent_id_hash": "9e611f14b48e238c",
+  "trace_id": "th_seed_ec0f74c6_8b058099-bce"
+ },
+ "not_covered": [
+  "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
+  "a real YubiKey holder (software holders here)"
+ ],
+ "first_failure": null
+}
+report: /tmp/ciris-native-mesh-agent/report.json

@@ -693,9 +693,274 @@ CSD-129 — DRILL, HALT, ANNOUNCE: END TO END (federation → safety, topology T
             "not_covered": not_covered, "first_failure": step.first_failure}
 
 
+def halt_agent(mesh: Mesh, args: Any) -> Record:
+    """CSD-129, the AGENT step — what `halt` lists under `not_covered`: an agent
+    process whose act gate reads `/v1/accord/halt-status` on its OWN node fold,
+    that node booted inside this T8 mesh, a holder's halt latched on it, one act
+    refused, and the refused act's terminal ACTION_RESULT admitted by the data
+    doors and held by the canonical (CC 4.2.1.1: "a refused act's terminal
+    ACTION_RESULT must reach the record, or the pause erases its own evidence").
+
+    Two processes meet through files under `--work` (the agent is another
+    repo's process — CIRISAgent#1231 / PR #1262 — launched by its own runner):
+
+      agent_handoff.json  (written here)  the env the agent's node must boot
+                                          under, the canonical's url/record, the
+                                          software holders, and these file names
+      agent_ready.json    (agent writes)  {"agent_id_hash": …, "token": optional
+                                          owner bearer of the agent's node}
+      halt_fired.json     (written here)  {"invocation_id": …} once the agent's
+                                          node reads halted:true and the halt is
+                                          CONFIRMED (so it outlives the fuse)
+      agent_acted.json    (agent writes)  {"status": 423, "trace_id": <the
+                                          terminal ACTION_RESULT's trace>,
+                                          "agent_id_hash": …}
+      done.json           (written here)  after the resume
+
+    The agent's node is reached at `--agent-url` (its fold, 127.0.0.1:4243 by
+    default — the harness never binds that port itself)."""
+    # A longer fuse than `halt`'s 20 s: the agent's refusal happens on its next
+    # dispatcher step after the latch, and the confirm below is what keeps the
+    # halt standing while the runner interacts and the trace replicates.
+    fuse = int(os.environ.get("CIRIS_TEST_HALT_FUSE_SECS", "120"))
+    agent_url = str(getattr(args, "agent_url", "http://127.0.0.1:4243")).rstrip("/")
+    agent_wait = float(getattr(args, "agent_wait", 1800))
+    step = Steps(f"""
+CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology T8 + one
+  agent-hosted node.
+  root:     the ceremony-minted humanity accord, three software holders, quorum 2/3;
+            fuse {fuse} s (CIRIS_TEST_HALT_FUSE_SECS); the halt is CONFIRMED so it stands
+            while the agent acts.
+  nodes:    the canonical (serve) + alice + bob (this harness) + the AGENT's node fold at
+            {agent_url} (the agent's own process, booted on agent_handoff.json's env).
+  steps:    mesh up → handoff → agent node up, claimed → peered with the canonical →
+            FIRE + CONFIRM → agent's act REFUSED (423, terminal ACTION_RESULT) → that
+            trace HELD by the canonical (receipt + row) while the latch still stands →
+            RESUME → agent node reads halted:false.
+  asserts:  the latch has ONE reader (the agent's act gate); every data door between the
+            refused act and the canonical did its ordinary work under the halt.""")
+    mesh.base_env["CIRIS_TEST_HALT_FUSE_SECS"] = str(fuse)
+    c, a, b, anchor, _done = mint_accord_mesh(mesh, args, step)
+    holders = anchor["holders"]
+    ok = True
+    from .mesh import http  # the agent's node is driven without a bearer
+
+    def sign(h: Record) -> Record:
+        return {"key_id": h["key_id"], "test_holder_seed_b64": h["seed_b64"]}
+
+    def status_of(url: str) -> Record:
+        code, body = http("GET", f"{url}/v1/accord/halt-status")
+        if code != 200 or not isinstance(body, dict):
+            raise MeshError(f"halt-status at {url} answered {code}: {str(body)[:200]}")
+        return body
+
+    files = {k: str(mesh.work / f"{k}.json") for k in ("agent_handoff", "agent_ready", "halt_fired", "agent_acted", "done")}
+    for k in ("agent_ready", "halt_fired", "agent_acted", "done"):
+        Path(files[k]).unlink(missing_ok=True)
+
+    # 0. HANDOFF — everything the agent's node needs to boot INSIDE this mesh.
+    env = {k: v for k, v in mesh.base_env.items() if k.startswith("CIRIS_")}
+    env.update({"CIRIS_TEST_BLESS_CANONICAL": "false", "CIRIS_TEST_CANONICAL_DIAL": c.transport,
+                "CIRIS_DEVICE_CLASS": "laptop", "CIRIS_TEST_HALT_FUSE_SECS": str(fuse)})
+    handoff = {"env": env, "agent_url": agent_url,
+               "canonical": {"url": c.url, "transport": c.transport, "node_key_id": c.node_key_id,
+                             "record": c.record, "owner_key_id": c.owner_key_id},
+               "people": {n.name: {"url": n.url, "node_key_id": n.node_key_id} for n in (a, b)},
+               "holders": holders, "fuse_secs": fuse, "files": files,
+               "protocol": ["boot the agent with env exported and a FRESH CIRIS_HOME; the node MUST BE OWNED before agent_ready (claim via POST /v1/setup/root or the PIN flow) — an unowned node refuses federation peering and ships no trace to a canonical; then announce",
+                            "OPTIONAL, before the message: write agent_up.json {node_home: <the embedded node's home dir, where it wrote claim_pin>} and wait for agent_claimed.json — the harness claims + announces your node for you",
+                            "submit one real-LLM message; when its round has STARTED (an act is in flight), write agent_ready.json {agent_id_hash, token?} — the halt lands on your node within seconds",
+                            "wait for halt_fired.json (written the instant your node reads halted:true), then POST /v1/agent/interact once (expect 423)",
+                            "write agent_acted.json {status, trace_id: the trace carrying the in-flight act's refusal ACTION_RESULT, agent_id_hash}",
+                            "wait for done.json"]}
+    Path(files["agent_handoff"]).write_text(json.dumps(handoff, indent=1, default=str), encoding="utf-8")
+    step("handoff", path=files["agent_handoff"], agent_url=agent_url, canonical=c.transport)
+    print(f"handoff written: {files['agent_handoff']}  (waiting up to {agent_wait:.0f} s for the agent's node at {agent_url})", flush=True)
+
+    # 1. THE AGENT'S NODE — up, identified, then its runner says it is claimed.
+    def agent_record() -> Optional[Record]:
+        code, body = http("GET", f"{agent_url}/v1/federation/self-key-record")
+        return body if code == 200 and isinstance(body, dict) and body.get("record") else None
+    rec = wait_for("the agent's node fold to answer its self-key-record", agent_record, agent_wait, every=3.0)
+    agent = Node(name="agent", binary=mesh.binary, home=mesh.work / "agent", key_id=rec["record"]["key_id"],
+                 port=int(agent_url.rsplit(":", 1)[1]) - 1, env={}, log_path=mesh.work / "agent" / "unused.log")
+    agent.record, agent.node_key_id = rec, rec["record"]["key_id"]
+    mesh.nodes["agent"] = agent
+    step("agent_node_up", node_key_id=agent.node_key_id)
+
+    # 1b. OWNED — an unowned node refuses federation peering and ships nothing to
+    #     a canonical (CC 3.2 / 1.13.5). The runner's API setup path leaves the
+    #     node unowned, so when it writes agent_up.json {"node_home": <the
+    #     embedded node's home>} BEFORE submitting its message, this harness
+    #     claims the node the way the ladders do (owner identity minted here,
+    #     `claim` over the console PIN the node wrote under its home), announces
+    #     it, and answers with agent_claimed.json {owner_key_id, token}. A runner
+    #     that claimed by itself skips straight to agent_ready.json.
+    up_path, claimed_path = mesh.work / "agent_up.json", mesh.work / "agent_claimed.json"
+    claimed: Any = "runner_did_not_ask"
+    first = wait_for("agent_up.json (to claim) or agent_ready.json (already owned)",
+                     lambda: "up" if up_path.is_file() else ("ready" if Path(files["agent_ready"]).is_file() else None),
+                     agent_wait, every=1.0)
+    if first == "up":
+        up = json.loads(up_path.read_text())
+        agent.home = Path(str(up.get("node_home") or ""))
+        agent.env = dict(env)
+        try:
+            agent.claim("agent-person", pin_timeout=30.0)
+            agent.announce()
+            agent.self_record()
+            claimed = {"owner_key_id": agent.owner_key_id, "announced": True}
+            claimed_path.write_text(json.dumps({"owner_key_id": agent.owner_key_id, "token": agent.token}), encoding="utf-8")
+        except MeshError as e:
+            ok = False
+            claimed = {"error": str(e)[:600]}
+            claimed_path.write_text(json.dumps({"error": str(e)[:600]}), encoding="utf-8")
+            step.fail("agent_claimed", "the harness could not claim the agent's node over its console PIN", [c], r"claim", node_home=str(agent.home), got=str(e)[:400])
+    step("agent_claimed", proves="the agent's node has a responsible party and is announced", claimed=claimed)
+
+    # 2. PEERED — production peering from the canonical's side, as soon as the
+    #    agent's node answers (its own side is the node's prime to
+    #    CIRIS_TEST_CANONICAL_DIAL; no owner claim is required of it). Rooted
+    #    is OBSERVED, never waited on past the runner's ready signal: the
+    #    runner writes agent_ready.json when an act is IN FLIGHT, and the halt
+    #    must land before that act completes.
+    c.peer_with(agent)
+    ready_path = Path(files["agent_ready"])
+    rooted: Optional[bool] = None
+    t0 = time.time()
+    while time.time() - t0 < 120 and not ready_path.is_file():
+        rooted = c.rooted_with(agent)
+        if rooted:
+            break
+        time.sleep(2.0)
+    step("agent_peered", proves="the agent's node is a production peer of the canonical", rooted=rooted)
+    ready = wait_for("agent_ready.json (the runner has an act in flight)",
+                     lambda: json.loads(ready_path.read_text()) if ready_path.is_file() else None, agent_wait, every=0.5)
+    agent.token = agent.token or str(ready.get("token") or "")
+    # Best-effort from the agent's side: an UNOWNED node refuses federation
+    # peering (CC 3.2 / 1.13.5 — "claim ownership first via POST /v1/setup/root")
+    # and ships nothing to a canonical; record the answer, let step 5 be the judge.
+    peered_back: Any = "not_attempted"
+    if agent.token:
+        if c.record is None:
+            c.self_record()
+        peered_back = agent.api("POST", "/v1/federation/peering", {
+            "peer_key_id": c.record["record"]["key_id"], "peer_key_record": c.record,
+            "attestation_prefixes": ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:", "trace:"]})
+    ready_at = time.time()
+    step("agent_ready", agent_id_hash=ready.get("agent_id_hash"), has_owner_token=bool(agent.token), peered_back=peered_back)
+
+    # 3. FIRE — one holder, from alice; the row goes to the agent's node FIRST,
+    #    out of band, then to the rest of the mesh. halt_fired.json is written
+    #    the instant the agent's node reads halted:true (the runner's act is in
+    #    flight); the CONFIRM follows so the halt outlives the fuse.
+    if status_of(agent_url)["halted"] is not False:
+        ok = False
+        step.fail("agent_baseline", "the agent's node reads halted before any row", [c], r"HALT")
+    inv_id = "csd129-agent-halt-1"
+    fire = _inv("constitutional", inv_id, b"csd129 agent halt 1")
+    r = a.must("POST", "/v1/accord/halt", {"invocation": fire, **sign(holders[0])})
+    obj = r.get("invocation") or r
+    delivered: Dict[str, Any] = {"agent": http("POST", f"{agent_url}/v1/accord/message", body=obj)}
+    try:
+        wait_for("the agent's node to latch", lambda: True if status_of(agent_url)["halted"] is True else None, 30, every=0.25)
+    except MeshError:
+        ok = False
+        step.fail("fire", "ONE holder's constitutional row must latch on the agent's node", [c, a], r"HALT", cc="CC 4.2.1.1", delivered=delivered)
+    st = status_of(agent_url)
+    Path(files["halt_fired"]).write_text(json.dumps({"invocation_id": inv_id, "halt": st.get("halt"), "fired_at": time.time()}), encoding="utf-8")
+    latched_after = round(time.time() - ready_at, 2)
+    step("fire", proves="one row, fired on receipt, latched on the agent's node while its act is in flight",
+         seconds_after_ready=latched_after, halt=st.get("halt"))
+    print(f"halt latched on {agent_url} {latched_after}s after agent_ready: {files['halt_fired']}", flush=True)
+    for n in (c, b):
+        delivered[n.name] = n.must("POST", "/v1/accord/message", obj)
+    confirm = _inv("lifecycle:confirmed", "csd129-agent-confirm-1", b"csd129 agent confirm", confirms_halt_id=inv_id)
+    c.must("POST", "/v1/accord/invocation", {"invocation": confirm, **sign(holders[1])})
+    concurred = c.must("POST", "/v1/accord/invocation/concur",
+                       {"invocation_kind": "lifecycle:confirmed", "invocation_id": "csd129-agent-confirm-1", **sign(holders[2])})
+    cobj = concurred.get("invocation") or concurred
+    http("POST", f"{agent_url}/v1/accord/message", body=cobj)
+    for n in (a, b):
+        n.must("POST", "/v1/accord/message", cobj)
+    try:
+        wait_for("the agent's node to read the halt as confirmed",
+                 # `confirmed` is the confirming row {invocation_id, received_at, signers}, null until a majority lands.
+                 lambda: True if (status_of(agent_url).get("halt") or {}).get("confirmed") else None, 30, every=1.0)
+    except MeshError:
+        ok = False
+        step.fail("confirm", "a strict majority must confirm the halt on the agent's node within the fuse", [c], r"CONFIRMED|confirm", cc="CC 4.2.1.3")
+    step("confirm", proves="the halt stands on the agent's node, confirmed, past any fuse", halt=status_of(agent_url).get("halt"))
+    print(f"halt confirmed (waiting up to {agent_wait:.0f} s for agent_acted.json)", flush=True)
+
+    # 4. THE REFUSED ACT — the agent's runner acts once and reports.
+    acted = wait_for("agent_acted.json", lambda: json.loads(Path(files["agent_acted"]).read_text()) if Path(files["agent_acted"]).is_file() else None,
+                     agent_wait, every=2.0)
+    still = status_of(agent_url)
+    if int(acted.get("status") or 0) != 423 or still.get("halted") is not True:
+        ok = False
+        step.fail("act_refused", "the act gate must refuse (423) while the latch stands on its node", [c], r"accord_halt_in_effect",
+                  cc="CC 4.2.1.1 / CIRISAgent#1231", got=acted, latch=still.get("halted"))
+    step("act_refused", proves="the ONE reader of the latch, the agent's act gate, refused the act", status=acted.get("status"),
+         trace_id=acted.get("trace_id"), latch_stood=still.get("halted"))
+
+    # 5. THE RECORD — the refused act's terminal ACTION_RESULT crossed every data
+    #    door under the halt: the canonical HOLDS that trace (its signed receipt,
+    #    and the row itself), asked while the latch still stands.
+    trace_id, hash_ = str(acted.get("trace_id") or ""), str(acted.get("agent_id_hash") or ready.get("agent_id_hash") or "")
+    def receipt() -> Optional[Record]:
+        code, body = http("GET", f"{c.url}/v1/traces/receipt?agent_id_hash={hash_}&trace_id={trace_id}&nonce=csd129")
+        if code != 200 or not isinstance(body, dict):
+            return None
+        data = body.get("data") if isinstance(body.get("data"), dict) else body
+        return body if data.get("holds_trace") is True else None
+    held: Any = None
+    try:
+        held = wait_for("the canonical to hold the refused act's trace", receipt, float(getattr(args, "arrive_wait", 180)), every=3.0)
+    except MeshError:
+        held = None
+    rows = c.rows("SELECT count(*) FROM trace_events WHERE trace_id = ?", (trace_id,))
+    row_count = sum(int(r[0]) for r in rows) if rows else 0
+    if not trace_id or held is None or row_count < 1:
+        ok = False
+        step.fail("record_holds_refusal", "the refused act's terminal ACTION_RESULT must reach the record while the halt stands",
+                  [c, agent], r"ingest|replicat|refus", cc="CC 4.2.1.1", trace_id=trace_id, agent_id_hash=hash_, rows=row_count,
+                  latch_on_canonical=status_of(c.url).get("halted"))
+    step("record_holds_refusal", proves="no data door read the latch: the terminal ACTION_RESULT of a refused act is held by the canonical under the halt",
+         trace_id=trace_id, canonical_rows=row_count, receipt=(held or {}).get("data", held),
+         latch_on_canonical=status_of(c.url).get("halted"), latch_on_agent=status_of(agent_url).get("halted"))
+
+    # 6. RESUME — a strict majority naming THIS halt ends it, on the agent's node too.
+    resume = _inv("lifecycle:active", "csd129-agent-resume-1", b"csd129 agent resume", resumes_halt_id=inv_id)
+    c.must("POST", "/v1/accord/invocation", {"invocation": resume, **sign(holders[1])})
+    r = c.must("POST", "/v1/accord/invocation/concur",
+               {"invocation_kind": "lifecycle:active", "invocation_id": "csd129-agent-resume-1", **sign(holders[2])})
+    robj = r.get("invocation") or r
+    for n in (a, b):
+        n.must("POST", "/v1/accord/message", robj)
+    http("POST", f"{agent_url}/v1/accord/message", body=robj)
+    try:
+        wait_for("the agent's node to release", lambda: True if status_of(agent_url)["halted"] is False else None, 30, every=1.0)
+    except MeshError:
+        ok = False
+        step.fail("resume", "a strict majority naming the halt must end it on the agent's node", [c], r"RELEASED", cc="CC 4.2.1.3")
+    Path(files["done"]).write_text(json.dumps({"verdict": "PASS" if ok else "FAIL", "resumed_at": time.time()}), encoding="utf-8")
+    step("resume", proves="the latch is gone on the agent's node; the agent may act again")
+
+    not_covered = [
+        "rows.jsonl per node for CC's offline replay (T8 iii) and roster_fold_digest (T8 vii)",
+        "a real YubiKey holder (software holders here)",
+    ]
+    step("not_covered", checks=not_covered)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "fuse_secs": fuse, "agent_url": agent_url,
+            "agent": {"node_key_id": agent.node_key_id, "agent_id_hash": hash_, "trace_id": trace_id},
+            "not_covered": not_covered, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
+    "halt_agent": halt_agent,
     "chat": chat,
     "corpus": corpus,
 }
