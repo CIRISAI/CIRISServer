@@ -885,7 +885,8 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
         n.must("POST", "/v1/accord/message", cobj)
     try:
         wait_for("the agent's node to read the halt as confirmed",
-                 lambda: True if (status_of(agent_url).get("halt") or {}).get("confirmed") is True else None, 30, every=1.0)
+                 # `confirmed` is the confirming row {invocation_id, received_at, signers}, null until a majority lands.
+                 lambda: True if (status_of(agent_url).get("halt") or {}).get("confirmed") else None, 30, every=1.0)
     except MeshError:
         ok = False
         step.fail("confirm", "a strict majority must confirm the halt on the agent's node within the fuse", [c], r"CONFIRMED|confirm", cc="CC 4.2.1.3")
