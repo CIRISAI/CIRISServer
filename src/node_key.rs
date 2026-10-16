@@ -62,7 +62,7 @@
 //! owner appears in the agent's steward set.
 
 use anyhow::{Context, Result};
-use ciris_keyring::{HardwareSigner, MlDsa65SoftwareSigner, PqcSigner, SealedEd25519Signer};
+use ciris_keyring::{HardwareSigner, MlDsa65SoftwareSigner, PqcSigner};
 use ciris_persist::federation::types::identity_type;
 use ciris_persist::federation::FederationDirectory;
 use std::sync::Arc;
@@ -220,7 +220,7 @@ fn legacy_node_alias(host_alias: &str) -> String {
 /// no-migration rather than merely rare.
 fn resolve_node_alias(host_alias: &str, identity_dir: &std::path::Path) -> String {
     let legacy = legacy_node_alias(host_alias);
-    match SealedEd25519Signer::open_existing(legacy.clone(), identity_dir.to_path_buf()) {
+    match crate::key_tier::ed25519_open_existing(&legacy, identity_dir) {
         // ABSENT — genuinely no legacy identity. Take the base alias.
         Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => NODE_ALIAS.to_owned(),
 
@@ -443,8 +443,7 @@ pub async fn node_signer(
     let alias = resolve_node_alias(keystore_alias, identity_dir);
 
     let ed: Arc<dyn HardwareSigner> = Arc::from(
-        SealedEd25519Signer::open_or_create(alias.clone(), identity_dir.to_path_buf(), None)
-            .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+        crate::key_tier::ed25519_open_or_create(&alias, identity_dir)
             .map_err(|e| anyhow::anyhow!("open-or-mint node Ed25519 signer: {e}"))?,
     );
 
@@ -1311,6 +1310,17 @@ pub async fn provision_node_identity(
     identity_dir: &std::path::Path,
     actor_key_id: Option<&str>,
 ) -> Result<String> {
+    // The embedded node's FIRST birth (the agent calls this before any serve):
+    // register where the owner's pen lives NOW, the same convention compose uses
+    // (`<identity_dir>/user`, alias from `active_user_alias`). Without it every
+    // owner act that runs before compose — the consent migration, the owner-record
+    // heal, the agent's boot-time consent grants — found no seed dir and fell to
+    // the provisional machine path (Eric's desktop, 2026-10-16, CIRISServer#783).
+    // `OnceLock`: compose's later registration of the same path is a no-op.
+    set_user_seed_dir(identity_dir.join("user"), format!("{keystore_alias}-user"));
+    if let Some(home) = identity_dir.parent() {
+        crate::key_tier::pin_process_tier(home);
+    }
     let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
     let (key_id, record_json) = register_node_key_with_record(engine, &identity).await?;
 

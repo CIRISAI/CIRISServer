@@ -603,7 +603,7 @@ async fn open_hardware_authorizer(
         Some(match pqc_name {
             "tpm" | "platform-sealed" | "platform_sealed" => {
                 let seed_dir = pqc_or_seed_dir(req, cfg);
-                match ciris_keyring::get_platform_sealed_mldsa65_signer(key_id, seed_dir.clone()) {
+                match crate::key_tier::mldsa65_open_existing(key_id, &seed_dir) {
                     Ok(s) => Arc::from(s),
                     Err(e) => {
                         return Err(bad(format!(
