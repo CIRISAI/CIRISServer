@@ -1210,7 +1210,7 @@ pub async fn consent_author(
         node_key_id = %node_key_id,
         "consent authored by INFRASTRUCTURE: this node has no owner binding yet, so the \
          grant is PROVISIONAL and will be re-signed by the owner once the node is claimed \
-         (CIRISServer#599). If this node IS claimed, the owner's seed is not where compose \
+         (history: CIRISServer#599). If this node IS claimed, the owner's seed is not where compose \
          registered it — check active_user_alias under the user seed dir"
     );
     Ok(machine(

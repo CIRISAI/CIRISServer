@@ -92,7 +92,7 @@ pub async fn add_member_guarded(
                 member,
                 "MLS: adding this KeyPackage PANICKED (openmls/libcrux, RUSTSEC-2026-0330/0331) \
                  — the package is poisoned for this process and the member skipped until it \
-                 publishes a fresh one (CIRISEdge#823)"
+                 publishes a fresh one (history: CIRISEdge#823)"
             );
             Ok(GuardedAdd::Poisoned)
         }

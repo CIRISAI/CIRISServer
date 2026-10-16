@@ -664,7 +664,7 @@ async fn ingest(State(st): State<IngestState>, body: Bytes) -> Response {
             bytes = body.len(),
             "HTTP ingest REFUSED: the batch carries an LLM call from the agent's MOCK LLM \
              (model=\"mock-model\"). Nothing was verified or persisted. A test harness is \
-             shipping traces to a real node; point it at a local endpoint (CIRISAgent#1244)."
+             shipping traces to a real node; point it at a local endpoint (history: CIRISAgent#1244)."
         );
         return (
             StatusCode::UNPROCESSABLE_ENTITY,

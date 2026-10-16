@@ -139,7 +139,7 @@ pub async fn reactivate_accord(cfg: &ServerConfig, proof: ReactivationProof) -> 
         })?
     } else {
         tracing::warn!(
-            "HUMANITY_ACCORD genesis is NOT yet baked into verify (CIRISVerify#107 / G2) — the \
+            "HUMANITY_ACCORD genesis is NOT yet baked into verify (history: CIRISVerify#107 / G2) — the \
              original-mesh continuity check is falling back to the LOCAL persist version-1 \
              snapshot, which an operator with DB write could forge. Bake the genesis to pin this \
              floor against a captured host."

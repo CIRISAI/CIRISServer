@@ -299,7 +299,7 @@ fn spawn_watchdog() {
                         warnings,
                         "compose phase STUCK — boot has not progressed past this \
                          phase (watchdog record-and-continue; poll \
-                         ciris_server.compose_status() for the live snapshot) [#279]"
+                         ciris_server.compose_status() for the live snapshot) [history: #279]"
                     );
                 }
             }

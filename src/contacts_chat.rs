@@ -1587,7 +1587,7 @@ impl CarriedReproposals {
                     room = %room,
                     placed = self.placed.len(),
                     "chat: N-member room — this node lost a commit contest; its re-proposals \
-                     were carried as rows against the winner's line (CIRISEdge#604)"
+                     were carried as rows against the winner's line (history: CIRISEdge#604)"
                 );
             }
             return;
@@ -1600,7 +1600,7 @@ impl CarriedReproposals {
             welcome_not_carried = self.welcome_not_carried,
             "chat: N-member room — a re-proposal after a lost commit contest was NOT fully \
              carried; this node's epoch runs ahead of its peers on a line only it holds \
-             until a later commit resolves it (CIRISServer#602)"
+             until a later commit resolves it (tracked: CIRISServer#602)"
         );
     }
 }
@@ -1831,7 +1831,7 @@ pub(crate) struct Owner {
 /// same one `federation_peers::require_owner_session` +
 /// `auth::gate::require_owner_bound` apply to the peer sideband writes; the
 /// difference is that every refusal here carries a typed `reason_id`
-/// (CIRISServer#389), because this surface is one a client localizes.
+/// (history: CIRISServer#389), because this surface is one a client localizes.
 pub(crate) async fn require_owner(st: &ChatState, headers: &HeaderMap) -> Result<Owner, Response> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)

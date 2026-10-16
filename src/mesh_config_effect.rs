@@ -795,7 +795,7 @@ fn log_reading(reading: &EffectiveMeshConfig, headline: &str) {
             "{headline}: the mesh-config plane could NOT be read — every wired consumer keeps \
              its own default. This is not a statement that nothing is set."
         ),
-        // v30.0.0 (CIRISPersist#601 item 1) — a PARTIAL read is its own line.
+        // v30.0.0 (history: CIRISPersist#601 item 1) — a PARTIAL read is its own line.
         // The fold is still honoured (most-restrictive across roots means an
         // unread root can only have tightened the answer), but "we could not
         // ask root R" must not print as "root R had nothing to say".

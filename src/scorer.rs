@@ -871,7 +871,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 window = cfg.window,
                 raw_trace_events,
                 narrowing,
-                "capacity scorer pass emitted ZERO because the CC#46 `analyze` consent fold \
+                "capacity scorer pass emitted ZERO because the history: CC#46 `analyze` consent fold \
                  FAILED TO READ — these subjects did NOT decline, their answer is unreadable, \
                  and capacity:* is the one family CC 3.4.5 gates on that read"
             );
@@ -985,7 +985,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             indeterminate_agents,
             below_sample_gate_agents,
             below_coverage_agents,
-            "capacity scorer pass authored rows BUT the CC#46 `analyze` consent fold failed to \
+            "capacity scorer pass authored rows BUT the history: CC#46 `analyze` consent fold failed to \
              read for some subjects — those are NOT declines and were not scored"
         );
     } else if standing_unreadable_agents > 0 {

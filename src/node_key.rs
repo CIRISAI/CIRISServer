@@ -1022,7 +1022,7 @@ pub async fn heal_owner_key_record(
     let Some(signer) = pen.signer.as_ref() else {
         tracing::warn!(
             owner_key_id = %pen.key_id,
-            "owner resolved but no pen came with it — owner record heal skipped (#606)"
+            "owner resolved but no pen came with it — owner record heal skipped (history: #606)"
         );
         return Ok(None);
     };

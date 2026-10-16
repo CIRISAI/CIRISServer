@@ -296,7 +296,7 @@ pub fn warn_suspect(path: &'static str, att: &Attestation, fold: &KeyStatementFo
         covered_by = ?fold.covered_by,
         considered = fold.considered,
         "revoked_after: statement NOT admitted — a revocation this node holds covers the \
-         instant the attester signed for (CIRISServer#355)"
+         instant the attester signed for (history: CIRISServer#355)"
     );
 }
 

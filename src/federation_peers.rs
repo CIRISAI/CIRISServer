@@ -1142,7 +1142,7 @@ async fn test_genesis_bundle(State(st): State<PeersState>) -> Response {
         serve = %self_key_id,
         "TEST-ANCHOR: served a genesis bundle assembled the production way (charter + serve grant + \
          lifecycle, 1-of-1 authorized by the SW test root) — the harness agent's trust root arrives \
-         by IMPORT, not by a local ceremony (CIRISServer#632)"
+         by IMPORT, not by a local ceremony (history: CIRISServer#632)"
     );
     (
         StatusCode::OK,
@@ -1185,7 +1185,7 @@ async fn test_admit_peer(
             peer = %key_id,
             "TEST-ANCHOR: CIRIS_TEST_ADMIT_NO_BLESS=true — admitting the peer's record AS \
              RECEIVED (self-signed, not scrubbed): the peer will NOT root here and its \
-             frames must pass attribution the way a production agent's do (CIRISServer#632)"
+             frames must pass attribution the way a production agent's do (history: CIRISServer#632)"
         );
         rec.clone()
     } else {
@@ -1378,7 +1378,7 @@ async fn test_admit_peer(
                 grant = %consent.attestation_id,
                 freshly_emitted = consent.freshly_emitted,
                 "TEST-ANCHOR: canonical RECIPROCAL consent:replication VERIFIED in the \
-                 list_consent_peers projection (CIRISEdge#396 item 1) — the peer is now in this \
+                 list_consent_peers projection (history: CIRISEdge#396 item 1) — the peer is now in this \
                  node's attestation send-set, so its leg-B delegates_to(root→self, infra:serve) \
                  candidate can cross (prefix self:delegates_to: only; no trace: promotion)"
             );
@@ -1391,7 +1391,7 @@ async fn test_admit_peer(
                 grant = %consent.attestation_id,
                 "TEST-ANCHOR: reciprocal consent:replication row emitted but the peer is ABSENT \
                  from list_consent_peers(self) — the consent_peer_set projection did not take; \
-                 edge will still withhold the plane (CIRISEdge#425 silent-false)"
+                 edge will still withhold the plane (history: CIRISEdge#425 silent-false)"
             );
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,

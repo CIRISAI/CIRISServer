@@ -119,7 +119,7 @@ pub async fn resolve(engine: &Engine, surface: &'static str) -> Result<String, U
                 surface = surface,
                 error = %unresolved.cause,
                 "cannot resolve this node's own signing identity — refusing to act under a \
-                 guessed one (CIRISServer#372: the identity is DERIVED from the signer in use, \
+                 guessed one (tracked: CIRISServer#372: the identity is DERIVED from the signer in use, \
                  never a CLI label)"
             );
             Err(unresolved)

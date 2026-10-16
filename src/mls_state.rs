@@ -125,7 +125,7 @@ pub async fn open_for_node(
                 detail = %detail,
                 "MLS state EPHEMERAL — this host has no hardware-sealed seed to root the store in, \
                  so room state lives in memory: a restart loses every group, and this device \
-                 rejoins its rooms by publishing a fresh KeyPackage (CIRISServer#630)"
+                 rejoins its rooms by publishing a fresh KeyPackage (tracked: CIRISServer#630)"
             );
             (
                 ScopeStateProvider::ephemeral(),
@@ -140,7 +140,7 @@ pub async fn open_for_node(
                 error = %e,
                 "MLS state store EXISTS and will NOT open (wrong key, tampered rows or a backend \
                  fault) — running with EPHEMERAL room state rather than overwrite it. Inspect \
-                 the store before deleting anything (CIRISServer#630)"
+                 the store before deleting anything (tracked: CIRISServer#630)"
             );
             (
                 ScopeStateProvider::ephemeral(),

@@ -478,7 +478,7 @@ pub async fn subject_flag(
                     dimension,
                     verdict = ?verdict,
                     "REFUSED a content_class withdrawal from an unauthorised or \
-                     unevaluable emitter — the subject stays flagged (CIRISServer#363)"
+                     unevaluable emitter — the subject stays flagged (history: CIRISServer#363)"
                 );
                 continue;
             }
