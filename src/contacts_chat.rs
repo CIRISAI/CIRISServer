@@ -495,62 +495,80 @@ async fn duties_of(
 /// previous rung not having completed".
 fn contact_stall_refusal(stall: &ciris_edge::contact::LadderStall) -> Response {
     use ciris_edge::contact::LadderStall as S;
-    let (status, reason_id, detail) = match stall {
-        // 404, not 202. By the time a stall reaches here the caller has already
-        // established that the directory does not know this key at all — the
-        // "known person, no node yet" case is handled at the call site and never
-        // arrives — so this is genuinely "who?", and a `nobody-v1` that will
-        // never converge must not be reported as a wait that resolves itself.
+    // #776 — `detail` is what a PERSON reads (the client renders it when its
+    // bundle lacks the id); the operator detail (rungs, announce, admission,
+    // directory convergence) goes to the log under the same reason_id.
+    let (status, reason_id, detail, operator) = match stall {
+        // 404, not 202: the directory does not know this key at all, so this is
+        // genuinely "who?" and must not be reported as a wait that resolves.
         S::NotYetDiscovered { fed_id } => (
             StatusCode::NOT_FOUND,
             "contacts.unknown_fed_id",
             format!(
-                "{fed_id} is not in this node's federation directory. If they are real \
-                 and this is simply early, the rung before this one is `announce`: they \
-                 announce, this node admits it, and the key body is fetched on the next \
-                 round. If they handed you a CODE, paste that instead — a v3 code names \
-                 their nodes directly and needs no directory convergence at all"
+                "We can't find {fed_id} yet. Ask them for their contact code and paste \
+                 that instead: a contact code works even before their details reach \
+                 this device."
             ),
+            "not in this node's federation directory; the prior rung is announce \
+             (they announce, this node admits it, the key body arrives next round); a \
+             v3 code needs no directory convergence"
+                .to_string(),
         ),
         S::Unreachable { fed_id } => (
             StatusCode::ACCEPTED,
             "contacts.unreachable",
             format!(
-                "{fed_id} is known but nothing answered — ownership is not \
-                 reachability. Their nodes may be offline; Reticulum routes to them \
-                 when they return, however many hops away they are"
+                "{fed_id} is a contact, but none of their devices answered. Messages go \
+                 through when one of their devices is back online."
             ),
+            "known (owner-binding resolves) but no node answered discovery; ownership \
+             is not reachability"
+                .to_string(),
         ),
         S::AwaitingConsent { fed_id } => (
             StatusCode::ACCEPTED,
             "contacts.awaiting_consent",
-            format!("{fed_id} has not consented yet. The ladder is waiting on a PERSON, and retrying changes nothing"),
+            format!(
+                "Waiting for {fed_id} to accept. There is nothing to retry: this \
+                 finishes when they accept."
+            ),
+            "their reciprocal consent grant is not live yet".to_string(),
         ),
         S::ConsentNotGranted { fed_id } => (
             StatusCode::CONFLICT,
             "contacts.consent_not_granted",
-            format!("this node has not consented to {fed_id} — the reciprocal of awaiting their consent, and this half is ours to fix"),
+            format!("You haven't accepted {fed_id} on this device yet. Accept them to continue."),
+            "this node holds no live consent grant to them".to_string(),
         ),
         S::PriorRungIncomplete { rung, prior } => (
             StatusCode::CONFLICT,
             "contacts.prior_rung_incomplete",
-            format!("`{rung}` cannot complete because `{prior}` has not — look there, not here"),
+            "This step cannot finish because an earlier step has not. Look there \
+             rather than here."
+                .to_string(),
+            format!("`{rung}` cannot complete because `{prior}` has not"),
         ),
         S::MalformedCode { detail } => (
             StatusCode::BAD_REQUEST,
             "contacts.malformed_code",
+            "That looks like a CIRIS code, but it does not decode. A truncated or \
+             corrupted paste does not repair itself, so ask for the code again rather \
+             than trying this one again."
+                .to_string(),
             format!(
-                "that looks like a CIRIS code but does not decode ({detail}). TERMINAL — \
-                 a truncated or corrupted paste does not repair itself, so ask for the \
-                 code again rather than retrying this one"
+                "does not decode: {detail} (terminal; a truncated paste does not repair itself)"
             ),
         ),
         other => (
             StatusCode::BAD_REQUEST,
             "contacts.unresolvable",
-            format!("that identifier does not resolve to a contact: {other:?}"),
+            "That isn't a person's code. Ask them for their contact code: People › \
+             Share my contact code."
+                .to_string(),
+            format!("does not resolve to a contact: {other:?}"),
         ),
     };
+    tracing::info!(reason_id, operator = %operator, "contact ladder stall");
     ciris_edge::contact::log_rung(ciris_edge::contact::Rung::Discover, "", Some(stall));
     refuse(status, reason_id, detail)
 }
@@ -1793,6 +1811,7 @@ async fn ensure_room_addresses(st: &ChatState, room: &str, group: &ciris_edge::m
 /// The owner-authority context every route here runs under: WHICH node, and
 /// WHICH human is responsible for it. The owner's key is the chat identity —
 /// messages are authored by the person, not by the box.
+#[derive(Clone)]
 pub(crate) struct Owner {
     /// This node's #247 DERIVED federation key_id.
     pub(crate) node_key_id: String,
@@ -2243,7 +2262,13 @@ async fn add_contact(
             )
         }
     };
-    let key_id = req.key_id.trim().to_owned();
+    add_contact_for_owner(st, owner, req.key_id.trim().to_owned()).await
+}
+
+/// The add-contact ladder for an ALREADY-AUTHORIZED owner — the body of
+/// `POST /v1/contacts`, and what [`pending_contacts`] re-runs when a v3 code's
+/// key body arrives (#777), so the completion is the same code path, not a copy.
+async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> Response {
     // The pasted input, kept verbatim: a fedcode's commitment is checked
     // against the CODE, not against the id it resolved to.
     let pasted = key_id.clone();
@@ -2400,10 +2425,10 @@ async fn add_contact(
                         return refuse(
                             StatusCode::CONFLICT,
                             "contacts.code_commitment_mismatch",
+                            // #776: the person reads the first; the log above holds `{e}`.
                             format!(
-                                "the post-quantum key held for {} does not match the commitment \
-                                 in this code, so the key and the code do not name the same \
-                                 identity: {e}",
+                                "This code doesn't match the person it names, so it was not \
+                                 added. Ask them to send their contact code again. ({})",
                                 admission.key_id
                             ),
                         );
@@ -2427,13 +2452,15 @@ async fn add_contact(
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            format!(
-                                "this code names {} and this node does not hold their key yet; \
-                                 fetching it needs the replication runtime, which this process \
-                                 is not running (no Reticulum transport). Add them from a node \
-                                 that is on the mesh, or through peering",
-                                admission.key_id
-                            ),
+                            // #776: person-facing; the operator cause is the log line.
+                            {
+                                tracing::warn!(key_id = %admission.key_id,
+                                    "contacts: v3 key pull impossible — no replication runtime (no Reticulum transport) in this process");
+                                "This device isn't connected to the network right now, so it \
+                                 can't look this contact up. Check that the app is online and \
+                                 try again."
+                                    .to_string()
+                            },
                         );
                     };
                     let pulling = ciris_edge::contact::PersistLens::new(directory.as_ref())
@@ -2447,11 +2474,13 @@ async fn add_contact(
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            format!(
-                                "this node could not queue a Key Pull for {} — the replication \
-                                 runtime refused the request; see the node log",
-                                admission.key_id
-                            ),
+                            {
+                                tracing::warn!(key_id = %admission.key_id,
+                                    "contacts: the replication runtime refused to queue the Key Pull");
+                                "This device couldn't ask the network for this contact's \
+                                 details. Try again in a minute."
+                                    .to_string()
+                            },
                         );
                     }
                     tracing::info!(
@@ -2462,9 +2491,14 @@ async fn add_contact(
                          completes when the record arrives and matches the commitment. \
                          Paste the code again (or retry) after the next anti-entropy round"
                     );
+                    // #777 — remember the owner's intent; the contact completes when the
+                    // record arrives and matches the commitment, with no second paste.
+                    pending_contacts::record(&st, &owner, &pasted, &admission.key_id);
                     return crate::auth::refusal::refuse_with(
                         StatusCode::ACCEPTED,
                         "contacts.awaiting_key_body",
+                        // Fallback text = the client bundle's (the localization guard pins it);
+                        // the person-facing rewrite lands in CIRISClient's en.json (#776).
                         "the key this code names is being fetched from the mesh; retry once it \
                          has arrived and the contact will be verified against the code's \
                          commitment",
@@ -5220,4 +5254,196 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// **Pending v3 contacts (#777).** `POST /v1/contacts` with a code whose key
+/// body this node does not hold yet answers 202 `contacts.awaiting_key_body`
+/// and queues a Key Pull. Before #777 nothing finished the contact when the
+/// body arrived — the person had to paste the code again, while the response
+/// said `converges_on_its_own: true`. Now the owner's intent (the pasted code,
+/// under the owner authorization of the request that made it) is held here, and
+/// a background pass re-runs the SAME add path ([`add_contact_for_owner`]) once
+/// the key is in the directory: a match completes the contact (grant emitted,
+/// chat opens), a commitment mismatch discards it, and an entry expires after
+/// [`PENDING_TTL`]. In memory only: a restart drops pending entries (the
+/// person can paste the code again; the log says which were dropped).
+pub(crate) mod pending_contacts {
+    use super::{add_contact_for_owner, ChatState, Owner};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// How long a pending contact waits for its key body.
+    pub const PENDING_TTL: Duration = Duration::from_secs(24 * 3600);
+    /// How often the pass looks for arrived key bodies.
+    pub const PASS_EVERY: Duration = Duration::from_secs(10);
+
+    struct Pending {
+        st: ChatState,
+        owner: Owner,
+        key_id: String,
+        since: Instant,
+    }
+
+    fn table() -> &'static Mutex<HashMap<(String, String), Pending>> {
+        static T: OnceLock<Mutex<HashMap<(String, String), Pending>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Hold `pasted` for the owner until `key_id`'s record arrives. Idempotent
+    /// per (owner, code): a second paste refreshes nothing but the clock.
+    pub(crate) fn record(st: &ChatState, owner: &Owner, pasted: &str, key_id: &str) {
+        let k = (owner.key_id.clone(), pasted.to_owned());
+        let fresh = {
+            let mut t = table().lock().expect("pending contacts lock");
+            let fresh = !t.contains_key(&k);
+            t.insert(
+                k,
+                Pending {
+                    st: st.clone(),
+                    owner: owner.clone(),
+                    key_id: key_id.to_owned(),
+                    since: Instant::now(),
+                },
+            );
+            fresh
+        };
+        if fresh {
+            tracing::info!(owner = %owner.key_id, key_id, "contacts: pending — the contact completes when this key's record arrives (no second paste needed)");
+        }
+        ensure_pass();
+    }
+
+    /// How many contacts are waiting (for status surfaces and tests).
+    pub(crate) fn len() -> usize {
+        table().lock().map(|t| t.len()).unwrap_or(0)
+    }
+
+    fn ensure_pass() {
+        static STARTED: OnceLock<()> = OnceLock::new();
+        if STARTED.set(()).is_err() {
+            return;
+        }
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async {
+                loop {
+                    tokio::time::sleep(PASS_EVERY).await;
+                    pass().await;
+                }
+            });
+        }
+    }
+
+    /// One pass: complete, discard or expire every pending contact.
+    pub(crate) async fn pass() {
+        let due: Vec<((String, String), ChatState, Owner, String, Instant)> = {
+            let t = table().lock().expect("pending contacts lock");
+            t.iter()
+                .map(|(k, p)| {
+                    (
+                        k.clone(),
+                        p.st.clone(),
+                        p.owner.clone(),
+                        p.key_id.clone(),
+                        p.since,
+                    )
+                })
+                .collect()
+        };
+        for (k, st, owner, key_id, since) in due {
+            if since.elapsed() > PENDING_TTL {
+                table().lock().expect("lock").remove(&k);
+                tracing::info!(owner = %owner.key_id, key_id, "contacts: pending contact expired — the key never arrived; the person can paste the code again");
+                continue;
+            }
+            let held = matches!(
+                st.engine
+                    .federation_directory()
+                    .lookup_public_key(&key_id)
+                    .await,
+                Ok(Some(_))
+            );
+            if !held {
+                continue;
+            }
+            let resp = add_contact_for_owner(st, owner.clone(), k.1.clone()).await;
+            let status = resp.status();
+            if status == axum::http::StatusCode::ACCEPTED {
+                continue; // still converging (e.g. reachability), keep it
+            }
+            table().lock().expect("lock").remove(&k);
+            if status.is_success() {
+                tracing::info!(owner = %owner.key_id, key_id, "contacts: pending contact COMPLETED — the key arrived and matched the code");
+            } else {
+                tracing::warn!(owner = %owner.key_id, key_id, status = status.as_u16(), "contacts: pending contact discarded — the add path refused it once the key arrived (see the refusal logged just above)");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_copy_tests {
+    use super::*;
+    use ciris_edge::contact::{LadderStall as S, Rung};
+
+    /// #776 — every contact-ladder refusal a person reads is plain language: no
+    /// rung, announce, admit, peering, bookmark, directory, key body, ladder.
+    #[tokio::test]
+    async fn contact_refusals_speak_plainly_to_people() {
+        let banned = [
+            "rung",
+            "announce",
+            "admit",
+            "peering",
+            "bookmark",
+            "directory",
+            "key body",
+            "ladder",
+            "consent grant",
+        ];
+        let stalls = vec![
+            S::NotYetDiscovered {
+                fed_id: "francesco-x".into(),
+            },
+            S::Unreachable {
+                fed_id: "francesco-x".into(),
+            },
+            S::AwaitingConsent {
+                fed_id: "francesco-x".into(),
+            },
+            S::ConsentNotGranted {
+                fed_id: "francesco-x".into(),
+            },
+            S::PriorRungIncomplete {
+                rung: Rung::Discover,
+                prior: Rung::Announce,
+            },
+            S::MalformedCode {
+                detail: "base32 decode failed".into(),
+            },
+            S::CodeIdentityMismatch {
+                claimed_key_id: "a".into(),
+                derived_key_id: "b".into(),
+            },
+            S::DirectoryUnreadable { key_id: "k".into() },
+        ];
+        for stall in stalls {
+            let resp = contact_stall_refusal(&stall);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let msg = body["error"].as_str().unwrap().to_lowercase();
+            assert!(
+                body["reason_id"].as_str().unwrap().starts_with("contacts."),
+                "reason_id kept: {body}"
+            );
+            for w in banned {
+                assert!(
+                    !msg.contains(w),
+                    "{stall:?}: the person-facing text says {w:?}: {msg}"
+                );
+            }
+        }
+    }
 }
