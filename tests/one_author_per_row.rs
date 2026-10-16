@@ -310,6 +310,13 @@ fn no_producer_writes_the_signed_instant_unbucketed() {
              produce_signed_identity_occurrence and never reaches put_attestation, so the \
              instant-binding gate does not govern it. It is truncated to milliseconds anyway.",
         ),
+        (
+            "src/add_device.rs",
+            "the owner signs a new device's content-only identity OCCURRENCE at approval \
+             (FSD/ADD_DEVICE.md), the same shape as compose's: verify's \
+             produce_signed_identity_occurrence, never put_attestation. The instant is built \
+             from_timestamp_millis, so both halves carry the same millisecond value.",
+        ),
     ];
 
     let mut offenders = Vec::new();

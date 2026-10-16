@@ -957,6 +957,165 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
             "not_covered": not_covered, "first_failure": step.first_failure}
 
 
+def add_device(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#177 (FSD/ADD_DEVICE.md, formal/add_device) on the real wire:
+    a fresh, UNOWNED node B asks its person's existing node A to add it, peer to
+    peer on edge's first-contact plane (device-join kind 0x0000_0002); the owner
+    consents on A; B ends owned by the same identity with its OWN occurrence
+    keys, and a self file written on A before the join opens on B."""
+    step = Steps("""
+ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CIRISServer#177).
+  nodes:  the canonical; A (alice: claimed, announced, joined); B (fresh, UNOWNED); C (fresh,
+          UNOWNED — a stranger who also asks).
+  proves: (1) a request while A's window is closed is refused, not queued (N2);
+          (2) B's request is held with a matching code A derived; C's code differs (N1);
+          (3) the owner approves B: owner-binding + B's occurrence signed by the owner (N4);
+          (4) B applies it with its own claim PIN and collects its session locally;
+          (5) B's occurrence is active under the owner's identity on A AND on B;
+          (6) a self file written on A BEFORE the join opens on B (the self DEK re-wrap);
+          (7) the owner denies C; C reads denied; A's pending set is empty again (N3).""")
+    ok = True
+    # The production shape: the root is a ceremony-minted genesis bundle every node
+    # boots on, and no node is self-blessed (CIRIS_TEST_NO_CEREMONY) — so a fresh,
+    # unowned device's key record stays SELF-SIGNED, which edge's first contact
+    # requires, and it holds the root it will be Rooted under once owned.
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step)
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    a.self_record()
+    a.peer_with(cnl)
+    cnl.peer_with(a)
+    b = mesh.add("newdev")
+    c = mesh.add("stranger")
+    b_pin = (b.home / "claim_pin").read_text().strip()
+    b.self_record()
+    c.self_record()
+    step("booted", alice_owner=a.owner_key_id, b_node=b.node_key_id, c_node=c.node_key_id)
+
+    # A self file on A before anything joins.
+    secret = os.urandom(64)
+    written = a.write_file(secret, "application/octet-stream", "before-join.bin")
+    file_id = written.get("attestation_id") or written.get("id")
+    step("self_file_on_A", attestation_id=file_id)
+
+    code_link = a.contact_code()
+    # (1) window closed → refused, not queued.
+    # Retry past "unreachable" (no route yet this soon after boot) to a DEFINITIVE answer.
+    closed: Any = None
+
+    def closed_answer() -> Optional[Tuple[int, Any]]:
+        nonlocal closed
+        closed = c.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": "stranger"})
+        return closed if closed[0] != 502 else None
+    try:
+        code, body = wait_for("C to get a definitive answer while A's window is closed", closed_answer,
+                              args.owner_wait, every=5)
+    except MeshError:
+        code, body = closed
+    if code != 409 or (body or {}).get("reason_id") != "add_device.not_accepting":
+        ok = False
+        step.fail("closed_window", "a request while A's window is closed must be refused, not queued", [a, c],
+                  r"device-join|add-device", got={"status": code, "body": body})
+    step("closed_window_refused", status=code, reason_id=(body or {}).get("reason_id"))
+
+    a.must("POST", "/v1/self/device-requests/open", {"seconds": 600})
+    step("window_opened")
+
+    # (2) B asks, then C asks.
+    def ask(n: Node, label: str) -> Tuple[int, Any]:
+        last: Any = None
+
+        def once() -> Optional[Tuple[int, Any]]:
+            nonlocal last
+            last = n.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": label})
+            return last if last[0] == 202 else None
+        try:
+            return wait_for(f"{n.name} to reach A with its join request", once, args.owner_wait, every=5)
+        except MeshError:
+            return last
+    b_code, b_body = ask(b, "new laptop")
+    c_code, c_body = ask(c, "not yours")
+    b_match, c_match = (b_body or {}).get("match_code"), (c_body or {}).get("match_code")
+    if b_code != 202 or c_code != 202 or not b_match or b_match == c_match:
+        ok = False
+        step.fail("requests_held", "both requests must be held, each with its own A-derived code", [a, b, c],
+                  r"device-join|add-device", b={"status": b_code, "body": b_body}, c={"status": c_code, "body": c_body})
+    step("requests_held", b_match=b_match, c_match=c_match)
+    listed = a.must("GET", "/v1/self/device-requests").get("requests", [])
+    b_row = next((r for r in listed if r.get("node_key_id") == b.node_key_id), None)
+    c_row = next((r for r in listed if r.get("node_key_id") == c.node_key_id), None)
+    if not b_row or b_row.get("match_code") != b_match:
+        ok = False
+        step.fail("owner_sees_code", "A's owner must see B's request with the code B shows", [a], r"device-join",
+                  listed=listed)
+    step("owner_sees_codes", pending=len(listed), b_code_matches=bool(b_row and b_row.get("match_code") == b_match))
+
+    # (3) the owner approves B — the request whose code matches the device in hand.
+    approved = a.must("POST", f"/v1/self/device-requests/{b_row['request_id']}/approve")
+    occ = approved.get("occurrence_key_id")
+    step("approved", occurrence=occ, self_dek_granted=approved.get("self_dek_granted"))
+
+    # (4) B applies with its own PIN, then collects its session locally.
+    def b_state() -> Optional[Dict[str, Any]]:
+        st = b.must("GET", "/v1/setup/add-device")
+        return st if st.get("state") in ("applied", "failed", "denied", "expired") else None
+    try:
+        final = wait_for("B to apply the owner's approval", b_state, args.arrive_wait, every=2)
+    except MeshError:
+        final = b.must("GET", "/v1/setup/add-device")
+    if final.get("state") != "applied":
+        ok = False
+        step.fail("applied", "B must apply the approval", [a, b], r"add-device|setup/root|occurrence", state=final)
+    step("b_applied", state=final.get("state"))
+    code, sess = b.api("POST", "/v1/setup/claimed-session", {"claim_pin": b_pin})
+    if code != 200 or not (sess or {}).get("access_token"):
+        ok = False
+        step.fail("session", "B's wizard must collect its owner session with its own PIN", [b], r"claimed-session|claim",
+                  got={"status": code, "body": sess})
+    else:
+        b.token = sess["access_token"]
+    step("b_session", status=code)
+
+    # (5) B's occurrence is active under the owner's identity on A and on B.
+    q = ("SELECT count(*) FROM federation_identity_occurrences WHERE identity_key_id = ? "
+         "AND occurrence_key_id = ?")
+    on_a = sum(int(r[0]) for r in a.rows(q, (a.owner_key_id, occ)))
+    on_b = sum(int(r[0]) for r in b.rows(q, (a.owner_key_id, occ)))
+    owner_b = b.rows("SELECT count(*) FROM federation_keys WHERE key_id = ?", (a.owner_key_id,))
+    if not (on_a >= 1 and on_b >= 1):
+        ok = False
+        step.fail("occurrence", "B's occurrence must be active under the owner on both nodes", [a, b], r"occurrence",
+                  on_a=on_a, on_b=on_b)
+    step("occurrence_on_both", on_a=on_a, on_b=on_b, owner_key_on_b=sum(int(r[0]) for r in owner_b))
+
+    # (6) the self file written on A before the join opens on B.
+    def opened() -> Optional[bool]:
+        code, raw = b.read_raw(file_id)
+        return True if code == 200 and raw == secret else None
+    try:
+        wait_for("the pre-join self file to open on B", opened, args.arrive_wait, every=3)
+        step("self_file_opens_on_B", proves="the self DEKs were re-wrapped to B and the file replicated")
+    except MeshError:
+        code, raw = b.read_raw(file_id)
+        ok = False
+        step.fail("self_file", "a self file written on A before the join must open on B", [a, b],
+                  r"rewrap|re-wrap|self_dek|files|grant", status=code, body=str(raw)[:200])
+
+    # (7) the owner denies C; C reads denied; A's pending set is empty.
+    if c_row:
+        a.must("POST", f"/v1/self/device-requests/{c_row['request_id']}/deny")
+        try:
+            got = wait_for("C to read denied", lambda: (lambda s: s if s.get("state") == "denied" else None)(
+                c.must("GET", "/v1/setup/add-device")), 60, every=2)
+        except MeshError:
+            got = c.must("GET", "/v1/setup/add-device")
+        left = a.must("GET", "/v1/self/device-requests").get("requests", [])
+        if got.get("state") != "denied" or left:
+            ok = False
+            step.fail("deny", "a denied stranger reads denied and frees its slot", [a, c], r"device-join",
+                      c_state=got, still_pending=left)
+        step("stranger_denied", c_state=got.get("state"), pending_after=len(left))
 def contact_edges(mesh: Mesh, args: Any) -> Record:
     """The contact edges from Eric's report (CIRISServer#777, #778), on the real
     wire: add by fed ID before the person is known, then after they converge;
@@ -1235,6 +1394,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
+    "add_device": add_device,
     "contact_edges": contact_edges,
     "fresh_claim": fresh_claim,
     "owner_key_tpm_appears": owner_key_tpm_appears,

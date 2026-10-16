@@ -1140,6 +1140,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // sends for real over RNS via `send_opaque_request` on the retained
     // `Arc<Edge>` (FSD §6). This retires the v8.0.0 `local_only_requester` stub
     // that 502'd cross-node sends while edge's `run(self)` consumed the Edge.
+    // ADD A DEVICE (CIRISServer#177): the device-join answerer on this node's
+    // edge (A's side) and the send handle (B's side).
+    crate::add_device::register_answerer(&edge);
+    crate::add_device::set_edge(Arc::clone(&edge));
     let mesh_requester = crate::mesh_relay::edge_mesh_requester_with_loopback(
         Arc::clone(&edge),
         node_code.key_id.clone(),
@@ -1404,6 +1408,30 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             crate::auth::loopback::require_loopback,
                         )),
                     )
+                    // ADD A DEVICE (CIRISServer#177, FSD/ADD_DEVICE.md): B's
+                    // loopback first-run routes + A's owner-session routes. The
+                    // device-join answerer and the send handle are wired on the
+                    // edge below.
+                    .merge(crate::add_device::router(
+                        crate::add_device::AddDeviceState {
+                            engine: Arc::clone(&engine),
+                            node_key_id: node_code.key_id.clone(),
+                            node_code: crate::nodecode::encode(&node_code).unwrap_or_default(),
+                            self_key_record: serde_json::from_str::<
+                                ciris_persist::federation::types::SignedKeyRecord,
+                            >(&self_key_record_json)
+                            .ok(),
+                            user_key_id: format!("{}-user", cfg.keystore_alias),
+                            user_seed_dir: crate::user_seed_dir(&cfg),
+                            identity_dir: cfg.identity_dir.clone(),
+                            local_self_url: format!(
+                                "http://127.0.0.1:{}",
+                                cfg.read_api_addr().port()
+                            ),
+                            claim_pin_file: cfg.claim_pin_file(),
+                            policy: strict,
+                        },
+                    ))
                     // MESH CONTROL RELAY (#128 Phase D — C1): POST /v1/mesh/relay.
                     // The owner (or an `owner:act-on-behalf` dgrant whose
                     // constraints permit `mesh_relay`) drives an allow-listed
@@ -5435,6 +5463,12 @@ async fn build_edge(
     );
     let mut builder = Edge::builder()
         .directory(backend.clone())
+        // CIRISEdge#683/#727: first contact (a never-seen device's key record),
+        // the requester's introductions and the owner-binding rung all read
+        // edge's FEDERATION directory. It was never wired here, so every one of
+        // them answered "first contact needs a federation directory" or quietly
+        // skipped — the add-device flow (#177) found it on its first run.
+        .federation_directory(engine.federation_directory())
         .queue(backend)
         .signer(signer)
         // The TYPED reticulum path (not the generic `.transport(Arc<dyn Transport>)`):
