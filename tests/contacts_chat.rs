@@ -3909,8 +3909,15 @@ async fn a_node_that_consents_to_send_traces_lists_no_infrastructure_and_no_self
     // The canonical, as production holds it: the baked, accord-conferred row the
     // engine seeds at genesis (a self-claimed `canonical` row is refused by the
     // directory, rightly).
-    let canonicals = engine.list_canonical_servers().await.expect("canonical servers");
-    let canonical_owned = canonicals.first().expect("the baked genesis seeds a canonical").key_id.clone();
+    let canonicals = engine
+        .list_canonical_servers()
+        .await
+        .expect("canonical servers");
+    let canonical_owned = canonicals
+        .first()
+        .expect("the baked genesis seeds a canonical")
+        .key_id
+        .clone();
     let canonical = canonical_owned.as_str();
     let prefixes = ciris_server::peer::default_attestation_prefixes();
     assert!(
