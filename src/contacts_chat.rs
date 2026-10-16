@@ -2449,18 +2449,18 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                 // server answers an identifier Pull for any subject on a public plane.
                 Ok(_) => {
                     let Some(runtime) = crate::compose::held_replication_runtime() else {
+                        // #776: the operator cause goes to the log; the person reads
+                        // the client bundle's text (the guard pins this fallback to it).
+                        tracing::warn!(
+                            key_id = %admission.key_id,
+                            "contacts: v3 key pull impossible — no replication runtime (no \
+                             Reticulum transport) in this process"
+                        );
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            // #776: person-facing; the operator cause is the log line.
-                            {
-                                tracing::warn!(key_id = %admission.key_id,
-                                    "contacts: v3 key pull impossible — no replication runtime (no Reticulum transport) in this process");
-                                "This device isn't connected to the network right now, so it \
-                                 can't look this contact up. Check that the app is online and \
-                                 try again."
-                                    .to_string()
-                            },
+                            "This device is not on the mesh, so it cannot fetch their key. Add \
+                             them from a device that is.",
                         );
                     };
                     let pulling = ciris_edge::contact::PersistLens::new(directory.as_ref())
@@ -2471,16 +2471,15 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                     )
                     .await
                     {
+                        tracing::warn!(
+                            key_id = %admission.key_id,
+                            "contacts: the replication runtime refused to queue the Key Pull"
+                        );
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            {
-                                tracing::warn!(key_id = %admission.key_id,
-                                    "contacts: the replication runtime refused to queue the Key Pull");
-                                "This device couldn't ask the network for this contact's \
-                                 details. Try again in a minute."
-                                    .to_string()
-                            },
+                            "This device is not on the mesh, so it cannot fetch their key. Add \
+                             them from a device that is.",
                         );
                     }
                     tracing::info!(
@@ -2494,11 +2493,11 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                     // #777 — remember the owner's intent; the contact completes when the
                     // record arrives and matches the commitment, with no second paste.
                     pending_contacts::record(&st, &owner, &pasted, &admission.key_id);
+                    // Fallback text = the client bundle's (the localization guard pins it);
+                    // the person-facing rewrite lands in CIRISClient's en.json (#776).
                     return crate::auth::refusal::refuse_with(
                         StatusCode::ACCEPTED,
                         "contacts.awaiting_key_body",
-                        // Fallback text = the client bundle's (the localization guard pins it);
-                        // the person-facing rewrite lands in CIRISClient's en.json (#776).
                         "the key this code names is being fetched from the mesh; retry once it \
                          has arrived and the contact will be verified against the code's \
                          commitment",
