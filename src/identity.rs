@@ -426,6 +426,18 @@ pub(crate) fn open_user_signer(
         }
     }
 
+    // RE-OPEN of a platform-sealed identity: read the tier from disk first. A key
+    // minted while the TPM was unusable lives in SOFTWARE storage; the keyring's
+    // factory, once a TPM appears, mints a TPM master and SUPERSEDES that key on a
+    // mere re-open (Eric's desktop, 2026-10-08 → CIRISServer#783).
+    if let UserIdentityBackend::PlatformSealed = backend {
+        return crate::key_tier::ed25519_open_existing(&cfg.key_id, &cfg.seed_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "open the user-identity signing key ({}): {e}",
+                backend.label()
+            )
+        });
+    }
     match get_user_identity_signer(cfg) {
         Ok(s) => Ok(s),
         Err(e) => {
@@ -512,11 +524,8 @@ pub(crate) fn open_software_hybrid_identity(
 
     let ed: Arc<dyn HardwareSigner> = Arc::from(open_software_ed25519_signer(alias, seed_dir)?);
     let pqc: Arc<dyn PqcSigner> = Arc::from(
-        ciris_keyring::get_platform_sealed_mldsa65_signer(
-            alias,
-            sealed_keys_dir_for(seed_dir, alias),
-        )
-        .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for '{alias}': {e}"))?,
+        crate::key_tier::mldsa65_open_existing(alias, &sealed_keys_dir_for(seed_dir, alias))
+            .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for '{alias}': {e}"))?,
     );
     HardwareRootedIdentity::new(key_id.to_owned(), ed, pqc)
         .map_err(|e| anyhow::anyhow!("build software-rooted self identity: {e}"))
@@ -667,7 +676,7 @@ pub async fn mint_user_identity(
     // Re-open from the SAME directory the mint sealed into — resolving again
     // would be a second answer to a question already settled at step 0.
     let pqc_dir = keys_dir.clone();
-    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(key_id_alias, pqc_dir)
+    let pqc = crate::key_tier::mldsa65_open_existing(key_id_alias, &pqc_dir)
         .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half: {e}"))?;
     let ml_pub = pqc
         .public_key()
@@ -1543,9 +1552,9 @@ async fn user_signer_parts(
 
     // The ML-DSA-65 half + the Ed25519 seed were sealed/stored under the ALIAS
     // (`seal_alias` at mint time); re-open under the alias.
-    let pqc = ciris_keyring::get_platform_sealed_mldsa65_signer(
+    let pqc = crate::key_tier::mldsa65_open_existing(
         user_key_id,
-        sealed_keys_dir_for(&cfg.seed_dir, user_key_id),
+        &sealed_keys_dir_for(&cfg.seed_dir, user_key_id),
     )
     .map_err(|e| anyhow::anyhow!("re-open sealed ML-DSA-65 half for the user signer: {e}"))?;
     let pqc: Arc<dyn PqcSigner> = Arc::from(pqc);

@@ -319,6 +319,7 @@ pub mod ingest_http;
 /// row column, so the five read paths that ask the question cannot answer it
 /// differently. Public so the gate tests can drive the fold directly.
 pub mod key_standing;
+pub mod key_tier;
 /// Directed-consent federation peering (CIRISServer federation Round 2): mutual
 /// key registration + the `consent:replication:v1` grant that authorizes
 /// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
