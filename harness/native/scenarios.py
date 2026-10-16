@@ -957,10 +957,116 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
             "not_covered": not_covered, "first_failure": step.first_failure}
 
 
+def contact_edges(mesh: Mesh, args: Any) -> Record:
+    """The contact edges from Eric's report (CIRISServer#777, #778), on the real
+    wire: add by fed ID before the person is known, then after they converge;
+    add by v3 code before this node holds their key, then watch it finish with
+    NO further client call."""
+    step = Steps("""
+CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-16).
+  #778  add by FED ID: bob not yet announced → 404 contacts.unknown_fed_id (a person's
+        "who?", final) → bob announces → alice's directory converges → the SAME add
+        succeeds, bob is listed, POST /v1/chat opens.
+  #777  add by v3 CODE before alice holds carol's key → 202 contacts.awaiting_key_body →
+        with NO second paste, carol appears in alice's contacts once her key arrives,
+        and POST /v1/chat opens.""")
+    ok = True
+    cnl = mesh.canonical if mesh.canonical is not None else mesh.start_canonical()
+
+    def join(n: Node) -> None:
+        # Production's mesh participation: the node consents to replicate to the
+        # canonical (the agent's "Send traces" consent), which is what carries a
+        # person's key and owner-binding to the canonical at all.
+        n.self_record()
+        n.peer_with(cnl)
+
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    join(a)
+    b = mesh.add("bob")
+    b.claim("bob-person")
+    join(b)
+    step("booted", alice=a.owner_key_id, bob=b.owner_key_id)
+
+    def contacts(n: Node) -> List[str]:
+        return [c.get("key_id", "") for c in n.must("GET", "/v1/contacts").get("contacts", [])]
+
+    # ── #778 ──
+    code, body = a.api("POST", "/v1/contacts", {"key_id": b.owner_key_id})
+    if code != 404 or (body or {}).get("reason_id") != "contacts.unknown_fed_id":
+        ok = False
+        step.fail("fed_id_unknown", "an unknown fed ID must be a 404 contacts.unknown_fed_id", [a], r"contacts",
+                  got={"status": code, "body": body})
+    step("fed_id_unknown", status=code, reason_id=(body or {}).get("reason_id"))
+    b.announce()
+    b.self_record()
+    # Convergence is judged by the act itself — the same add a person retries —
+    # not by a directory probe (the peers listing never lists USER keys).
+    t_announced = time.monotonic()
+    last: Any = None
+
+    def added() -> Optional[bool]:
+        nonlocal last
+        last = a.api("POST", "/v1/contacts", {"key_id": b.owner_key_id})
+        return True if last[0] in (200, 201) else None
+    try:
+        wait_for("the same fed-ID add to succeed once bob's key converges", added, args.owner_wait, every=5)
+        step("fed_id_converged", seconds=round(time.monotonic() - t_announced, 1),
+             proves="bob announced; his key reached alice through the canonical; the add succeeded")
+    except MeshError:
+        ok = False
+        step.fail("fed_id_never_converged", "bob announced but the fed-ID add never succeeded",
+                  [a, b, mesh.canonical], r"announce|Key|refus|contacts", last=last)
+    code, body = last if last else (0, None)
+    listed = b.owner_key_id in contacts(a)
+    chat_code, chat_body = a.api("POST", "/v1/chat", {"key_id": b.owner_key_id})
+    if not (code in (200, 201) and listed and chat_code in (200, 201)):
+        ok = False
+        step.fail("fed_id_added", "after convergence the same fed-ID add must list bob and open a chat", [a],
+                  r"contacts|chat", add={"status": code, "body": body}, listed=listed,
+                  chat={"status": chat_code, "body": chat_body})
+    step("fed_id_added", status=code, listed=listed, chat_status=chat_code)
+
+    # ── #777 ──
+    c = mesh.add("carol")
+    c.claim("carol-person")
+    c.announce()
+    join(c)
+    carol_code = c.contact_code()
+    code, body = a.api("POST", "/v1/contacts", {"key_id": carol_code})
+    reason = (body or {}).get("reason_id")
+    if code != 202 or reason != "contacts.awaiting_key_body":
+        # Alice already held carol's key: the synchronous path ran, so the
+        # pending path this step exists for was NOT exercised. Say so.
+        ok = False
+        step.fail("code_pending_not_exercised",
+                  "alice already held carol's key before the paste, so the pending path was not exercised "
+                  "(rerun; this step needs the paste to beat replication)", [a],
+                  r"contacts", got={"status": code, "reason_id": reason})
+    step("code_pending", status=code, reason_id=reason, converges_on_its_own=(body or {}).get("converges_on_its_own"))
+    try:
+        wait_for("carol to appear in alice's contacts with no second paste",
+                 lambda: c.owner_key_id in contacts(a), args.arrive_wait, every=3)
+        step("code_completed_on_its_own", proves="the node finished the pending contact when carol's key arrived")
+    except MeshError:
+        ok = False
+        step.fail("code_never_completed", "the pending v3 contact never completed on its own", [a],
+                  r"pending|contacts")
+    chat_code, chat_body = a.api("POST", "/v1/chat", {"key_id": c.owner_key_id})
+    if chat_code not in (200, 201):
+        ok = False
+        step.fail("code_chat", "a completed pending contact must open a chat", [a], r"chat",
+                  got={"status": chat_code, "body": chat_body})
+    step("code_chat", status=chat_code)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
+    "contact_edges": contact_edges,
     "chat": chat,
     "corpus": corpus,
 }
