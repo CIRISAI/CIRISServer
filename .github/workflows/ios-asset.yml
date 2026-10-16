@@ -269,7 +269,7 @@ jobs:
       # warm iOS target/ instead of cold-compiling the substrate. Persist saves
       # from its iOS lane for exactly this reason. continue-on-error, so a
       # missing package scope can never turn the build red.
-      - uses: CIRISAI/CIRISCache/save@v1
+      - uses: CIRISAI/CIRISCache/save@v1.1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
