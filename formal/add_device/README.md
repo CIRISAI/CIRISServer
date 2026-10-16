@@ -35,6 +35,12 @@ content-KEM keys), never a second identity. Conventions follow
 3. **Per-key limits do not stop sybils** (keys are free). The ceiling bounds A's resources (safety holds under any flood) but availability holds only with fair eviction (`AddDevice_sybil` vs `_fair`). Residual risk: availability only, never safety.
 4. **B pins A's key from the v3 contact code** and admits introductions only from a solicited answer on its own challenge — the model's forged answers (`AttackerForge`) never move B.
 
+## What the model does and does not prove
+
+- **The matching code is an oracle here.** `Careful` models an owner who approves only the request whose `Code` equals the one on the device in their hand. The model proves an owner who can tell the requests apart is safe and a careless one is not; it does **not** prove the code unforgeable. That load is carried by the normative property: A derives the code from (requester key, challenge), so an attacker who copies B's challenge still shows a different code — `Code(r) == <<r.from, r.ch>>` depends on `r.from`.
+- **Owner presence is an assumption.** `live` and `sybil_fair` assume strong fairness on the owner approving B's request: the owner is present with B and acts within the window.
+- **A closed window refuses, it does not queue.** `AAdmit` requires `open`; a request arriving while the owner has not opened "add a device" is never admitted (`Inv_WindowRespected`) and, per edge's first-contact order (D3), gets no answer. The implementation drops it before any cryptography.
+
 Assumptions: the honest owner holds B, compares the codes, answers within the window and never denies B's own request; B's request does not expire before the owner acts; the network delivers honest messages (weak fairness); the adversary gets no fairness.
 
 Run: `java -cp tla2tools.jar tlc2.TLC -workers 4 -deadlock -config AddDevice_<cfg>.cfg AddDevice.tla`
