@@ -122,6 +122,9 @@ async fn stop_step<T>(name: &'static str, fut: impl std::future::Future<Output =
 
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
+    // Before ANY key is opened by this crate, edge or persist: a home whose keys
+    // are software-tier must not meet a newly loadable TPM plugin (#783).
+    crate::key_tier::pin_process_tier(&cfg.home);
 
     // SIGTERM handling for the life of the PROCESS, installed before anything
     // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`
@@ -3496,13 +3499,10 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         // bricked the node with "Key not found: ed25519.seed" instead of coming back
         // up to first-run. `open_or_create(.., None)` mints a random sealed seed when
         // none exists, so the node self-bootstraps its federation identity.
-        SealedEd25519Signer::open_or_create(
-            cfg.keystore_alias.clone(),
-            cfg.identity_dir.clone(),
-            None,
-        )
-        .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
-        .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
+        // Tier from the files on disk — a software-tier key is never re-opened
+        // through the TPM factory, which would supersede it (CIRISServer#783).
+        crate::key_tier::ed25519_open_or_create(&cfg.keystore_alias, &cfg.identity_dir)
+            .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
     }
 }
 
@@ -3538,8 +3538,7 @@ pub(crate) async fn substrate_persist_signer(
     let alias = format!("{}-substrate", cfg.keystore_alias);
     // Ed25519 half — sealed keystore, open-or-mint (stable seed across restarts).
     let ed: Arc<dyn HardwareSigner> = Arc::from(
-        SealedEd25519Signer::open_or_create(alias.clone(), cfg.identity_dir.clone(), None)
-            .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+        crate::key_tier::ed25519_open_or_create(&alias, &cfg.identity_dir)
             .map_err(|e| anyhow::anyhow!("open-or-mint substrate Ed25519 signer: {e}"))?,
     );
     // ML-DSA-65 half — software seed at substrate_ml_dsa_65.seed (mint-if-absent).
