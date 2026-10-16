@@ -151,7 +151,7 @@ pub fn heal_orphaned_supersession(alias: &str, dir: &Path) -> Vec<PathBuf> {
         restored = ?restored,
         orphaned_seal = %orphan.display(),
         "KEY RESTORED — a re-open had superseded this alias's software key into a TPM tier \
-         that holds NO key (keyring re-open mint, history: CIRISServer#783). The TPM tier was empty, \
+         that holds NO key (keyring re-open mint, tracked: CIRISServer#783). The TPM tier was empty, \
          so the archived key was the only key: it is back under its original name and the \
          empty seal is kept aside. Nothing was deleted."
     );
@@ -300,11 +300,11 @@ pub fn pin_process_tier(home: &Path) -> HomeTier {
                 prior = ?prior,
                 "keyring tier PINNED to software for this process: this home's keys live in the \
                  software tier and a newly loadable TPM plugin would supersede them on their next \
-                 re-open (history: CIRISServer#783). The TPM stays unused until an explicit migration."
+                 re-open (tracked: CIRISServer#783). The TPM stays unused until an explicit migration."
             );
             eprintln!(
                 "ciris_server: keyring tier pinned to software — home {} holds software-tier keys \
-                 (history: CIRISServer#783)",
+                 (tracked: CIRISServer#783)",
                 home.display()
             );
         }
