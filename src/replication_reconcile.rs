@@ -289,7 +289,7 @@ pub async fn reconcile_once(
         // below is the loop's primary duty and must still run.
         Err(e) => tracing::warn!(
             error = %e,
-            "CIRISPersist#530 consent sweep failed this tick — stranded rows (if any) stay \
+            "history: CIRISPersist#530 consent sweep failed this tick — stranded rows (if any) stay \
              unofferable until the next tick; peer convergence continues. This sweep is \
              what carries a locally-authored row from `self` to the audience its \
              covering grant names, so while it is failing, rows accumulate that this \
@@ -298,7 +298,7 @@ pub async fn reconcile_once(
         ),
     }
 
-    // ── The #227 CONSENT-DECAY sweep (CIRISServer#337) ──────────────────────
+    // ── The #227 CONSENT-DECAY sweep (history: CIRISServer#337) ──────────────────────
     // The second of the pair #337 asked for, and the one that was still
     // uncalled: `repair_stranded_scope_backlog` above landed; this did not.
     //
@@ -334,7 +334,7 @@ pub async fn reconcile_once(
                     content_with_decay_class = report.content_with_decay_class,
                     content_decayed = report.content_decayed,
                     symbols_evicted = report.symbols_evicted,
-                    "CIRISPersist#227 consent-decay sweep: {} content unit(s) crossed a decay \
+                    "history: CIRISPersist#227 consent-decay sweep: {} content unit(s) crossed a decay \
                      breakpoint and shed {} symbol(s) — the TEMPORARY/pattern consent windows \
                      are being honoured on the clock, not just at admission",
                     report.content_decayed,
@@ -348,7 +348,7 @@ pub async fn reconcile_once(
         // the target tier from the wall clock — nothing is lost by skipping one.
         Err(e) => tracing::warn!(
             error = %e,
-            "CIRISPersist#227 consent-decay sweep failed this tick — content past a decay \
+            "history: CIRISPersist#227 consent-decay sweep failed this tick — content past a decay \
              breakpoint keeps its symbols until the next tick; peer convergence continues"
         ),
     }
@@ -388,7 +388,7 @@ pub async fn reconcile_once(
                             tracing::warn!(
                                 subject = %subject,
                                 error = %e,
-                                "CIRISServer#472 consent healer: could not widen coverage onto                                  the contact's bound node this tick — retrying next tick"
+                                "history: CIRISServer#472 consent healer: could not widen coverage onto                                  the contact's bound node this tick — retrying next tick"
                             );
                         }
                     }
@@ -396,7 +396,7 @@ pub async fn reconcile_once(
                     Err(e) => tracing::warn!(
                         subject = %subject,
                         error = %e,
-                        "CIRISServer#472 consent healer: bound-node resolution failed this tick"
+                        "history: CIRISServer#472 consent healer: bound-node resolution failed this tick"
                     ),
                 }
             }
@@ -404,7 +404,7 @@ pub async fn reconcile_once(
         // Never fail the tick: peer convergence is this loop's primary duty.
         Err(e) => tracing::warn!(
             error = %e,
-            "CIRISServer#472 consent healer: could not read the live grant set this tick"
+            "history: CIRISServer#472 consent healer: could not read the live grant set this tick"
         ),
     }
 

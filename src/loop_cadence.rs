@@ -162,7 +162,7 @@ pub fn phase_for(name: &str, period: Duration) -> Duration {
             tracing::warn!(
                 loop_name = name,
                 "periodic loop is not registered in loop_cadence::LOOPS — it shares slot 0 \
-                 with the first registered loop and can tick alongside it (CIRISServer#575); \
+                 with the first registered loop and can tick alongside it (history: CIRISServer#575); \
                  add it to that list"
             );
             Duration::ZERO

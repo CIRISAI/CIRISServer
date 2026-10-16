@@ -328,7 +328,7 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
             tracing::warn!(
                 pages,
                 "announced relay: occurrence enumeration hit its page bound — the relay set \
-                 for this pass is TRUNCATED (CIRISEdge#531 bound)"
+                 for this pass is TRUNCATED (history: CIRISEdge#531 bound)"
             );
             break;
         }

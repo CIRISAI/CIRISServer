@@ -1116,6 +1116,277 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
             step.fail("deny", "a denied stranger reads denied and frees its slot", [a, c], r"device-join",
                       c_state=got, still_pending=left)
         step("stranger_denied", c_state=got.get("state"), pending_after=len(left))
+def contact_edges(mesh: Mesh, args: Any) -> Record:
+    """The contact edges from Eric's report (CIRISServer#777, #778), on the real
+    wire: add by fed ID before the person is known, then after they converge;
+    add by v3 code before this node holds their key, then watch it finish with
+    NO further client call."""
+    step = Steps("""
+CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-16).
+  #778  add by FED ID: bob not yet announced → 404 contacts.unknown_fed_id (a person's
+        "who?", final) → bob announces → alice's directory converges → the SAME add
+        succeeds, bob is listed, POST /v1/chat opens.
+  #777  add by v3 CODE before alice holds carol's key → 202 contacts.awaiting_key_body →
+        with NO second paste, carol appears in alice's contacts once her key arrives,
+        and POST /v1/chat opens.""")
+    ok = True
+    cnl = mesh.canonical if mesh.canonical is not None else mesh.start_canonical()
+
+    def join(n: Node) -> None:
+        # Production's mesh participation: the node consents to replicate to the
+        # canonical (the agent's "Send traces" consent), which is what carries a
+        # person's key and owner-binding to the canonical at all.
+        n.self_record()
+        n.peer_with(cnl)
+
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    join(a)
+    b = mesh.add("bob")
+    b.claim("bob-person")
+    join(b)
+    step("booted", alice=a.owner_key_id, bob=b.owner_key_id)
+
+    def contacts(n: Node) -> List[str]:
+        return [c.get("key_id", "") for c in n.must("GET", "/v1/contacts").get("contacts", [])]
+
+    # ── #778 ──
+    code, body = a.api("POST", "/v1/contacts", {"key_id": b.owner_key_id})
+    if code != 404 or (body or {}).get("reason_id") != "contacts.unknown_fed_id":
+        ok = False
+        step.fail("fed_id_unknown", "an unknown fed ID must be a 404 contacts.unknown_fed_id", [a], r"contacts",
+                  got={"status": code, "body": body})
+    step("fed_id_unknown", status=code, reason_id=(body or {}).get("reason_id"))
+    b.announce()
+    b.self_record()
+    # Convergence is judged by the act itself — the same add a person retries —
+    # not by a directory probe (the peers listing never lists USER keys).
+    t_announced = time.monotonic()
+    last: Any = None
+
+    def added() -> Optional[bool]:
+        nonlocal last
+        last = a.api("POST", "/v1/contacts", {"key_id": b.owner_key_id})
+        return True if last[0] in (200, 201) else None
+    try:
+        wait_for("the same fed-ID add to succeed once bob's key converges", added, args.owner_wait, every=5)
+        step("fed_id_converged", seconds=round(time.monotonic() - t_announced, 1),
+             proves="bob announced; his key reached alice through the canonical; the add succeeded")
+    except MeshError:
+        ok = False
+        step.fail("fed_id_never_converged", "bob announced but the fed-ID add never succeeded",
+                  [a, b, mesh.canonical], r"announce|Key|refus|contacts", last=last)
+    code, body = last if last else (0, None)
+    listed = b.owner_key_id in contacts(a)
+    chat_code, chat_body = a.api("POST", "/v1/chat", {"key_id": b.owner_key_id})
+    if not (code in (200, 201) and listed and chat_code in (200, 201)):
+        ok = False
+        step.fail("fed_id_added", "after convergence the same fed-ID add must list bob and open a chat", [a],
+                  r"contacts|chat", add={"status": code, "body": body}, listed=listed,
+                  chat={"status": chat_code, "body": chat_body})
+    step("fed_id_added", status=code, listed=listed, chat_status=chat_code)
+
+    # ── #777 ──
+    c = mesh.add("carol")
+    c.claim("carol-person")
+    c.announce()
+    join(c)
+    carol_code = c.contact_code()
+    code, body = a.api("POST", "/v1/contacts", {"key_id": carol_code})
+    reason = (body or {}).get("reason_id")
+    if code != 202 or reason != "contacts.awaiting_key_body":
+        # Alice already held carol's key: the synchronous path ran, so the
+        # pending path this step exists for was NOT exercised. Say so.
+        ok = False
+        step.fail("code_pending_not_exercised",
+                  "alice already held carol's key before the paste, so the pending path was not exercised "
+                  "(rerun; this step needs the paste to beat replication)", [a],
+                  r"contacts", got={"status": code, "reason_id": reason})
+    step("code_pending", status=code, reason_id=reason, converges_on_its_own=(body or {}).get("converges_on_its_own"))
+    try:
+        wait_for("carol to appear in alice's contacts with no second paste",
+                 lambda: c.owner_key_id in contacts(a), args.arrive_wait, every=3)
+        step("code_completed_on_its_own", proves="the node finished the pending contact when carol's key arrived")
+    except MeshError:
+        ok = False
+        step.fail("code_never_completed", "the pending v3 contact never completed on its own", [a],
+                  r"pending|contacts")
+    chat_code, chat_body = a.api("POST", "/v1/chat", {"key_id": c.owner_key_id})
+    if chat_code not in (200, 201):
+        ok = False
+        step.fail("code_chat", "a completed pending contact must open a chat", [a], r"chat",
+                  got={"status": chat_code, "body": chat_body})
+    step("code_chat", status=chat_code)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
+# The log signatures of the fresh-claim replication storm on Eric's desktop
+# (server 0.5.223, 2026-10-16) — each counted from raw lines PLUS the totals
+# log_dedup folds repeats into ("event repeated N times … sample=<line>").
+_STORM = {
+    "item2_drops": r"item 2 FAILED",
+    "unattributed_crpl": r"source_key_id=None",
+    "round_timeouts": r"round timed out waiting for peer reply",
+    "occurrence_refusals": r"is neither identity .* nor an active occurrence|typed asserted_at diverges",
+}
+
+
+def _storm_counts(n: Node) -> Dict[str, int]:
+    import re as _re
+    out = {k: 0 for k in _STORM}
+    try:
+        text = n.log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = _re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        m = _re.search(r"event repeated (\d+) times.*?\(\d+ suppressed\)", line)
+        for k, pat in _STORM.items():
+            if _re.search(pat, line):
+                # a dedup summary stands for the suppressed repeats it folded
+                sup = _re.search(r"\((\d+) suppressed\)", line)
+                out[k] += int(sup.group(1)) if (m and sup) else 1
+    return out
+
+
+def fresh_claim(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#779 — a freshly claimed LAPTOP node on the real wire must admit
+    its owner's rows at the canonical within a bounded window, with no replication
+    storm. Fixed in 0.5.225 (edge v40.0.12 + CIRISEdge#858 + release_parked_on);
+    gate: this FAILS against a v0.5.223 binary and passes on main."""
+    window = float(getattr(args, "arrive_wait", 180))
+    ceilings = {"item2_drops": 10, "unattributed_crpl": 10, "round_timeouts": 20, "occurrence_refusals": 10}
+    step = Steps(f"""
+FRESH CLAIM — the 0.5.223 storm on Eric's desktop, as a regression test (CIRISServer#779).
+  topology: the canonical + ONE fresh laptop-class node, claimed by a person, announced, and
+            joined to the mesh as an agent joins it (consent to replicate to the canonical).
+  asserts:  within {window:.0f} s the canonical holds the owner's key AND rows the owner signed;
+            over the window the node logs at most {ceilings} of the storm signatures
+            (raw lines + log_dedup folded repeats).""")
+    cnl = mesh.canonical if mesh.canonical is not None else mesh.start_canonical()
+    a = mesh.add("laptop")
+    t0 = time.monotonic()
+    a.claim("fresh-owner")
+    a.announce()
+    a.self_record()
+    a.peer_with(cnl)
+    step("claimed_announced_joined", owner=a.owner_key_id, node=a.node_key_id)
+
+    def owner_rows_at_canonical() -> Optional[Dict[str, int]]:
+        keys = cnl.rows("SELECT count(*) FROM federation_keys WHERE key_id = ?", (a.owner_key_id,))
+        atts = cnl.rows("SELECT count(*) FROM federation_attestations WHERE attesting_key_id = ?",
+                        (a.owner_key_id,))
+        k = sum(int(r[0]) for r in keys) if keys else 0
+        n = sum(int(r[0]) for r in atts) if atts else 0
+        return {"owner_key": k, "owner_rows": n} if (k > 0 and n > 0) else None
+    ok = True
+    try:
+        got = wait_for("the canonical to hold the owner's key and owner-signed rows",
+                       owner_rows_at_canonical, window, every=3)
+        step("owner_rows_admitted", seconds=round(time.monotonic() - t0, 1), **got)
+    except MeshError:
+        ok = False
+        step.fail("owner_rows_NOT_admitted", "a freshly claimed node's owner rows never reached the canonical",
+                  [a, cnl], r"refus|park|parked|item 2|round timed out|occurrence")
+    rest = window - (time.monotonic() - t0)
+    if rest > 0:
+        time.sleep(rest)
+    counts = _storm_counts(a)
+    over = {k: v for k, v in counts.items() if v > ceilings[k]}
+    if over:
+        ok = False
+        step.fail("storm", "the fresh node logged a replication storm", [a], "|".join(_STORM.values()),
+                  counts=counts, ceilings=ceilings)
+    step("storm_counts", counts=counts, ceilings=ceilings, window_s=window)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "storm": counts,
+            "first_failure": step.first_failure}
+
+
+def owner_key_tpm_appears(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#783 / PR #784 on the real wire: an owner fed-ID minted
+    `platform-sealed` while the TPM plugin is invisible lands in the keyring's
+    SOFTWARE tier; when the plugin becomes loadable and the node restarts, the
+    owner key must still open (0.5.227: the re-open archives it and every owner
+    act fails `Key not found: ed25519.seed`). Phase 2 then puts the home into the
+    exact shape Eric's desktop was left in and asserts the node heals it."""
+    plugin = os.environ.get("CIRIS_TPM_PLUGIN_REAL", "")
+    if not plugin or not Path(plugin).is_file():
+        raise MeshError("set CIRIS_TPM_PLUGIN_REAL to a libciris_tpm_plugin.so path (a usable TPM is required)")
+    step = Steps("""
+OWNER KEY WHEN A TPM APPEARS — Eric's desktop, 2026-10-08 (CIRISServer#783, PR #784).
+  phase 1: claim with --backend platform-sealed while the TPM plugin is INVISIBLE → the key is
+           in the SOFTWARE tier; restart with the plugin VISIBLE; an owner act must still sign and
+           nothing may be archived.
+  phase 2: put the home in Eric's exact shape (software pair archived to *.superseded-pre-v8 beside
+           an empty TPM seal); restart; the node must restore the key and sign again.""")
+    ok = True
+    n = mesh.add("laptop", start=False)
+    n.env["CIRIS_TPM_PLUGIN"] = "/nonexistent/libciris_tpm_plugin.so"
+    n.start()
+    n.claim("tpm-owner", backend="platform-sealed")
+    user_dir = n.home / "identity" / "user"
+
+    def files() -> List[str]:
+        return sorted(p.name for p in user_dir.iterdir()) if user_dir.is_dir() else []
+    minted = files()
+    if not any(f.endswith(".ed25519.seed.blob") for f in minted):
+        raise MeshError(f"expected the platform-sealed mint to fall back to the software tier, got {minted}")
+    step("minted_software_tier", files=minted)
+
+    def widener_since(mark: int) -> Optional[str]:
+        """The owner pen, opened by the node itself at runtime start: compose
+        installs the membership widener only with the owner's person key. Eric's
+        desktop logged 'membership widener NOT installed (no owner pen …)'."""
+        lines = n.grep(r"membership widener")
+        new = lines[mark:]
+        return new[-1] if new else None
+
+    def owner_act(mark: int) -> Tuple[int, Any]:
+        try:
+            line = wait_for("the restarted node to try the owner pen", lambda: widener_since(mark), 60, every=1)
+        except MeshError:
+            return 0, "no membership-widener line after restart"
+        return (200, line) if "NOT installed" not in line else (500, line)
+
+    def restart_with_plugin() -> None:
+        n.stop()
+        n.env["CIRIS_TPM_PLUGIN"] = plugin
+        n.start()
+
+    mark = len(n.grep(r"membership widener"))
+    restart_with_plugin()
+    code, body = owner_act(mark)
+    after = files()
+    stranded = [f for f in after if f.endswith("superseded-pre-v8")]
+    keynotfound = n.grep(r"Key not found: ed25519\.seed")
+    if stranded or code not in (200, 201) or keynotfound:
+        ok = False
+        step.fail("tpm_appeared", "the owner key must still open once the TPM plugin is loadable",
+                  [n], r"superseded|SUPERSEDED|Key not found|owner's \(.*\) signer|announce",
+                  status=code, archived=stranded, key_not_found_lines=len(keynotfound))
+    step("tpm_appeared", owner_pen=str(body)[:120], files=after, archived=stranded)
+
+    # Phase 2 — Eric's exact on-disk shape.
+    n.stop()
+    for f in files():
+        if f.endswith(".ed25519.seed.blob") or (f.endswith(".master.key") and not f.endswith("superseded-pre-v8")):
+            (user_dir / f).rename(user_dir / f"{f}.superseded-pre-v8")
+    alias = next((f.split(".")[0] for f in files() if f.endswith(".backend")), "")
+    if alias:
+        (user_dir / f"{alias}.tpmplugin_seal").write_bytes(b"empty TPM tier: a master, no blobs")
+    shaped = files()
+    step("eric_shape", files=shaped)
+    mark = len(n.grep(r"membership widener"))
+    n.start()
+    code, body = owner_act(mark)
+    healed = files()
+    restored = n.grep(r"KEY RESTORED")
+    if code not in (200, 201) or any(f.endswith("superseded-pre-v8") for f in healed) or not restored:
+        ok = False
+        step.fail("healed", "a key superseded into an empty TPM tier must be restored and sign again", [n],
+                  r"KEY RESTORED|superseded|Key not found|announce", status=code, files=healed)
+    step("healed", owner_pen=str(body)[:120], files=healed, restore_logged=bool(restored))
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
@@ -1124,6 +1395,9 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "halt": halt,
     "halt_agent": halt_agent,
     "add_device": add_device,
+    "contact_edges": contact_edges,
+    "fresh_claim": fresh_claim,
+    "owner_key_tpm_appears": owner_key_tpm_appears,
     "chat": chat,
     "corpus": corpus,
 }

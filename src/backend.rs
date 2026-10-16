@@ -610,7 +610,7 @@ pub async fn spawn_blob_puller(
     }
     tracing::warn!(
         "blob puller NOT spawned — this Engine has no read-capable backend; blobs will not \
-         be pulled on this node (edge v25.0.0, CIRISServer#602)"
+         be pulled on this node (edge v25.0.0, tracked: CIRISServer#602)"
     );
     (None, None)
 }

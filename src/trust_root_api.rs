@@ -254,7 +254,7 @@ struct ImportRequest {
     /// Optional: the read-API base URL of the node this bundle came from. Its
     /// allegiance facts (owner-binding, root acceptances) are carried in the
     /// same act, so the Rooted walk toward it works from first contact
-    /// (CIRISServer#632 / CIRISEdge#671). Loopback-gated like the import.
+    /// (history: CIRISServer#632 / history: CIRISEdge#671). Loopback-gated like the import.
     #[serde(default)]
     allegiance_from: Option<String>,
 }
@@ -445,7 +445,7 @@ async fn import_root(State(st): State<TrustRootState>, body: axum::body::Bytes) 
                         rows_inserted = adopted.rows_inserted,
                         rows_already_held = adopted.rows_already_held,
                         refused = ?adopted.refused,
-                        "trust root import: the source node's allegiance facts carried (CIRISEdge#671)"
+                        "trust root import: the source node's allegiance facts carried (history: CIRISEdge#671)"
                     ),
                     Err(e) => {
                         tracing::warn!(from = %base, error = %e, "trust root import: allegiance carry FAILED (non-fatal)")

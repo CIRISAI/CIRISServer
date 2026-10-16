@@ -1340,7 +1340,7 @@ pub fn author_consent_embedded(
                 tracing::error!(
                     peer_key_id,
                     error = %e,
-                    "replication consent authored but the CC#46 `analyze` grant FAILED — this                      peer can receive our traces and may NOT score them; capacity scoring stays                      dead for this node until it is re-authored"
+                    "replication consent authored but the history: CC#46 `analyze` grant FAILED — this                      peer can receive our traces and may NOT score them; capacity scoring stays                      dead for this node until it is re-authored"
                 );
                 None
             }
@@ -1352,7 +1352,7 @@ pub fn author_consent_embedded(
         // all three costs at the moment of the decision.
         tracing::warn!(
             peer_key_id,
-            "consent:replication authored WITHOUT the CC#46 `analyze` grant. This is ALLOWED — \
+            "consent:replication authored WITHOUT the `analyze` grant (history: CC#46). This is ALLOWED — \
              traces will flow. What it costs: (1) you build NO reputation, because every \
              capacity:* claim about you is refused, so none can ever exist; (2) you cannot use \
              streams or services that require third-party capability attestations, since you \
@@ -1372,16 +1372,20 @@ pub fn author_consent_embedded(
             tracing::info!("the owner's registration record was rebound (#606)")
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal })) => {
-            tracing::warn!(%refusal, "the owner's registration record is UNBOUND and could not be rebound (#606)")
+            tracing::warn!(%refusal, "the owner's registration record is UNBOUND and could not be rebound (history: #606)")
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Bound)) => {
-            tracing::info!("the owner's registration record already binds its subject (#606)")
+            tracing::info!(
+                "the owner's registration record already binds its subject (history: #606)"
+            )
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Absent)) => {
-            tracing::warn!("the owner resolved but this node holds no registration record for them — nothing to heal (#606)")
+            tracing::warn!("the owner resolved but this node holds no registration record for them — nothing to heal (history: #606)")
         }
         Ok(None) => {
-            tracing::info!("no owner pen on this node yet — owner record heal skipped (#606)")
+            tracing::info!(
+                "no owner pen on this node yet — owner record heal skipped (history: #606)"
+            )
         }
         Err(e) => tracing::warn!(error = %e, "owner key record heal failed (non-fatal)"),
     }
@@ -1597,7 +1601,7 @@ async fn prime_canonicals(
         }
     }
 
-    // 3b. PRIME the admitted explicit-hash canonical peers (CIRISServer#205 gap #1).
+    // 3b. PRIME the admitted explicit-hash canonical peers (history: CIRISServer#205 gap #1).
     //    `ciris-canonical-1` is a v7.0.0 EXPLICIT-HASH destination that CANNOT
     //    announce (Leviculum `ExplicitHashCannotAnnounce`), so `knows_peer(canonical)`
     //    stays false and sends can't address it — zero delivery — until the peer is

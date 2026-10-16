@@ -1157,3 +1157,56 @@ async fn an_unreadable_standing_read_is_not_nothing_standing() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **#781 — a node never scores the agent it hosts.** On an agent-hosted node
+/// the engine signs as the actor, so the hosted agent's traces carry a key this
+/// process wields; Eric's desktop logged `capacity attestation violates CEG §7.5
+/// anti-Goodhart` on every pass, because the scorer computed the score and only
+/// then hit the guard. The pass must skip that agent BY RULE, before the work,
+/// name the rule in the log, and never reach the guard.
+#[tokio::test]
+async fn the_agent_this_node_hosts_is_skipped_by_rule_not_erred() {
+    let (node, _node_ed_pub_b64, _node_mldsa_pub_b64) = node_a_with_keys().await;
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    let agent_pub_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
+    let mldsa = fixture_pqc::signer();
+    let (_agent_signer, agent_key_id) = agent_identity();
+    register_key_hybrid(
+        &node,
+        &agent_key_id,
+        &agent_pub_b64,
+        Some(&agent_pqc_pubkey_b64()),
+        identity_type::AGENT,
+    )
+    .await;
+    for i in 0..30 {
+        let bytes = build_trace_batch(&agent_key_id, &agent_sk, &mldsa, i);
+        node.receive_and_persist(&bytes, &NullScrubber)
+            .await
+            .expect("ingest");
+    }
+    let cfg = ScorerConfig {
+        cadence: std::time::Duration::from_secs(3600),
+        window: 500,
+        sample_size_gate: 2,
+        target_n_eff: 8.0,
+        ..ScorerConfig::default()
+    };
+    // The attester IS the hosted agent's key — what an agent-hosted process wields.
+    let (result, log) = log_capture::capture(scorer::run_pass(&node, &agent_key_id, &cfg)).await;
+    let log = log.render();
+    let emitted = result.expect("a self-hosted agent is a skip, never an error");
+    assert_eq!(emitted, 0, "nothing authored about itself");
+    assert!(
+        !log.contains("violates CEG §7.5"),
+        "the pass must never reach the anti-Goodhart guard: {log}"
+    );
+    assert!(
+        log.contains("hosted by this node") && log.contains("anti-Goodhart"),
+        "the skip names its rule: {log}"
+    );
+    assert!(
+        !log.contains("do not account for it"),
+        "a self-hosted skip accounts for a zero pass; it is not an alarm: {log}"
+    );
+}

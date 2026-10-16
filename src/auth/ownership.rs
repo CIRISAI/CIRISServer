@@ -871,7 +871,7 @@ pub async fn rebind_owner_key_record(
             owner_key_id = %owner_key_id,
             "owner registration record is ABSENT on this node — nothing to rebind; if the \
              owner is known to this node, the id the caller resolved and the id the row \
-             was registered under disagree (CIRISServer#606)"
+             was registered under disagree (history: CIRISServer#606)"
         );
         return Ok(OwnerKeyRecordState::Absent);
     };
@@ -963,7 +963,7 @@ pub async fn rebind_owner_key_record(
                 owner_key_id = %owner_key_id,
                 refusal = ?reason,
                 "owner registration record is UNBOUND and the rebind door refused — the \
-                 record stays refused by every verify v15.2.0 peer (CIRISServer#606)"
+                 record stays refused by every verify v15.2.0 peer (history: CIRISServer#606)"
             );
             Ok(OwnerKeyRecordState::Unbound {
                 refusal: format!("{reason:?}"),

@@ -1771,7 +1771,7 @@ async fn oauth_login(
                 tracing::warn!(
                     provider = %provider,
                     "oauth login refused: no usable client id for this provider — the wheel was \
-                     built without the credential, or with only half of it (CIRISServer#387)"
+                     built without the credential, or with only half of it (history: CIRISServer#387)"
                 );
                 // This is a BROWSER leg — the human just clicked a sign-in
                 // button — so the refusal is a page (CIRISServer#424); JSON
@@ -2038,7 +2038,7 @@ async fn oauth_callback(
                 provider = %provider,
                 upstream = %e,
                 "oauth code exchange FAILED at the provider — raw upstream error retained \
-                 here only (CIRISServer#424)"
+                 here only (history: CIRISServer#424)"
             );
             let message = format!(
                 "the {provider} sign-in could not be completed — the provider rejected the \

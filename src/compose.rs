@@ -113,7 +113,7 @@ async fn stop_step<T>(name: &'static str, fut: impl std::future::Future<Output =
                 "teardown step did NOT finish within its budget: {name} — proceeding without \
                  it; the process will exit and the runtime takes the straggler with it. This \
                  step is the reason a stop of this node used to hang until SIGKILL \
-                 (CIRISServer#568)"
+                 (history: CIRISServer#568)"
             );
             None
         }
@@ -122,6 +122,9 @@ async fn stop_step<T>(name: &'static str, fut: impl std::future::Future<Output =
 
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
     cfg.ensure_dirs()?;
+    // Before ANY key is opened by this crate, edge or persist: a home whose keys
+    // are software-tier must not meet a newly loadable TPM plugin (#783).
+    crate::key_tier::pin_process_tier(&cfg.home);
 
     // SIGTERM handling for the life of the PROCESS, installed before anything
     // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`
@@ -516,7 +519,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         }
 
         // 0.5.203 re-authored the actor's consent onto the node key here. Gone in
-        // 0.5.211 (CIRISServer#601): every consent read is keyed by the engine's
+        // 0.5.211 (tracked: CIRISServer#601): every consent read is keyed by the engine's
         // (actor's) key, and persist's by-principals fold does not count a node's
         // row for the agent — the redirect moved rows OFF the key that reads
         // them. The owner's re-sign below (`migrate_consent_to_owner`) is the
@@ -526,7 +529,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Consent is by humans: any live grant a machine key authored (the engine key
     // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
     // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
-    // nodes and bare harnesses are a no-op here (CIRISServer#599).
+    // nodes and bare harnesses are a no-op here (history: CIRISServer#599).
     match if crate::peer::owner_authored_consent_enabled() {
         crate::node_key::migrate_consent_to_owner(&engine).await
     } else {
@@ -544,29 +547,31 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     }
     // Split home: anchor the agent to its human before consent is re-signed —
     // the human's grant names the agent, and the fold finds it only through
-    // this anchor (CIRISServer#601 items 7–8). No-op elsewhere.
+    // this anchor (tracked: CIRISServer#601 items 7–8). No-op elsewhere.
     // The owner's registration record must bind its subject or no verify
     // v15.2.0 peer admits it — and it rides the first identity round to every
-    // node this owner stewards (CIRISServer#606). Healed here, from the
+    // node this owner stewards (history: CIRISServer#606). Healed here, from the
     // owner's own pen, before anything below replicates it.
     // Every outcome is named. The `Ok(_) => {}` arm this replaces swallowed an
     // `Absent` on the production canonical for a whole boot with the owner's pen
-    // on disk (CIRISServer#606, 2026-09-24): no line, row unchanged.
+    // on disk (history: CIRISServer#606, 2026-09-24): no line, row unchanged.
     match crate::node_key::heal_owner_key_record(&engine).await {
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Rebound)) => {
-            tracing::info!("boot: the owner's registration record was rebound (#606)")
+            tracing::info!("boot: the owner's registration record was rebound (history: #606)")
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Unbound { refusal })) => {
-            tracing::warn!(%refusal, "boot: the owner's registration record is UNBOUND and could not be rebound (#606)")
+            tracing::warn!(%refusal, "boot: the owner's registration record is UNBOUND and could not be rebound (history: #606)")
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Bound)) => {
-            tracing::info!("boot: the owner's registration record already binds its subject (#606)")
+            tracing::info!(
+                "boot: the owner's registration record already binds its subject (history: #606)"
+            )
         }
         Ok(Some(crate::auth::ownership::OwnerKeyRecordState::Absent)) => {
-            tracing::warn!("boot: the owner resolved but this node holds no registration record for them — nothing to heal (#606)")
+            tracing::warn!("boot: the owner resolved but this node holds no registration record for them — nothing to heal (history: #606)")
         }
         Ok(None) => {
-            tracing::info!("boot: no owner pen on this node (unowned, or no user seed registered) — owner record heal skipped (#606)")
+            tracing::info!("boot: no owner pen on this node (unowned, or no user seed registered) — owner record heal skipped (history: #606)")
         }
         Err(e) => tracing::warn!(error = %e, "boot: owner key record heal failed (non-fatal)"),
     }
@@ -580,7 +585,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // Consent is by humans: any live grant a machine key authored (the engine key
     // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim
     // grant) is re-signed by the owner when the owner's pen is on disk. Unowned
-    // nodes and bare harnesses are a no-op here (CIRISServer#599).
+    // nodes and bare harnesses are a no-op here (history: CIRISServer#599).
     match if crate::peer::owner_authored_consent_enabled() {
         crate::node_key::migrate_consent_to_owner(&engine).await
     } else {
@@ -640,7 +645,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         ),
     }
     // WHAT STATE IS THIS NODE ACTUALLY IN? Ask persist, do not infer it from
-    // whether the install returned Err (CIRISServer#400, persist v31.0.0).
+    // whether the install returned Err (history: CIRISServer#400, persist v31.0.0).
     //
     // Before this, a failed install logged `stage 1 FAILED` — which reads as a
     // fault and is wrong twice over. A node that has not had its ceremony yet is
@@ -1218,7 +1223,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             min_gib = cfg.lens_store_min_gib,
             "lens-store capability OFF (low disk) — corpus-growth tiers (scorer/\
              holonomic/replication) disabled, but the read API + fabric surface \
-             still serve on the read-API port [#279]"
+             still serve on the read-API port [history: #279]"
         );
     }
     // The serve marker goes down BEFORE the bind: lens-core binds and exposes
@@ -1230,7 +1235,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let marker_written = if crate::serve_marker::previous_still_running(&previous_serve) {
         tracing::warn!(
             "serve marker withheld — the previous serve on this home is still running; \
-             its marker stands until it stops (CIRISServer#568)"
+             its marker stands until it stops (history: CIRISServer#568)"
         );
         false
     } else {
@@ -2143,7 +2148,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         tracing::error!(
                             "self room: a drive tick PANICKED and was abandoned — the next \
                              tick starts fresh (edge before v40.0.9 does not isolate openmls \
-                             panics; CIRISEdge#823)"
+                             panics; history: CIRISEdge#823)"
                         );
                         continue;
                     }
@@ -2572,7 +2577,7 @@ async fn enrich_read_api_bind_error(err: anyhow::Error, port: u16) -> anyhow::Er
         port,
         verdict = verdict.as_str(),
         holder = %holder,
-        "read API failed to start — probed the port for a CIRIS `node` block [#410]"
+        "read API failed to start — probed the port for a CIRIS `node` block [history: #410]"
     );
     err.context(format!(
         "read API could not start on port {port}. Port probe verdict: \
@@ -2725,18 +2730,18 @@ pub(crate) fn ms_exact(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chr
 }
 
 /// **Boot self-publish of THIS node's SIGNED identity occurrence** — the sealability
-/// twin of [`publish_self_transport_destination`] (CIRISServer#227 S1, occurrence-KEX
+/// twin of [`publish_self_transport_destination`] (history: CIRISServer#227 S1, occurrence-KEX
 /// arc 4/4). The transport binding says *how to reach me*; the occurrence says *how to
 /// SEAL to me*: it carries the content-tier `encryption_pubkeys` (x25519 + ML-KEM-768)
 /// that a peer's `resolve_peer_kex_pubkeys` reads before `FederationSession::initiate`.
 ///
-/// Custody-agnostic by construction (CIRISVerify#183): the enc pubkeys come from
+/// Custody-agnostic by construction (history: CIRISVerify#183): the enc pubkeys come from
 /// [`ciris_keyring::self_enc_keys::SelfEncKeys`] — derived INSIDE the keyring from the
 /// same sealed Ed25519 seed the federation signer uses (retrieve → HKDF → scrub; no
 /// private half ever crosses an API). Deterministic, so every boot and every restore
 /// republishes the identical keypair (the #151 restore property).
 ///
-/// The occurrence is SIGNED (CIRISPersist#418, v14): the envelope — byte-matching what
+/// The occurrence is SIGNED (history: CIRISPersist#418, v14): the envelope — byte-matching what
 /// `verify_transport_binding` JCS-canonicalizes, including the REQUIRED
 /// `transport_destination` member (edge's transport identity + dest-hash, which the
 /// gate recomputes per §5.6.8.8.1.1, and which satisfies C4 since the content-KEM
@@ -2752,7 +2757,7 @@ pub(crate) fn ms_exact(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chr
 /// Best-effort (mirrors the transport publish): no Reticulum transport → debug no-op.
 /// THE AGENT DOES NOTHING — the node self-publishes its sealability, deleting the
 /// agent-side publish step entirely.
-/// **The ONE self-occurrence envelope builder** (CIRISServer#454).
+/// **The ONE self-occurrence envelope builder** (history: CIRISServer#454).
 ///
 /// Extracted because the producer and the end-to-end test each had their own,
 /// and they disagreed. `tests/occurrence_kex_e2e.rs` built an envelope carrying
@@ -3524,13 +3529,10 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         // bricked the node with "Key not found: ed25519.seed" instead of coming back
         // up to first-run. `open_or_create(.., None)` mints a random sealed seed when
         // none exists, so the node self-bootstraps its federation identity.
-        SealedEd25519Signer::open_or_create(
-            cfg.keystore_alias.clone(),
-            cfg.identity_dir.clone(),
-            None,
-        )
-        .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
-        .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
+        // Tier from the files on disk — a software-tier key is never re-opened
+        // through the TPM factory, which would supersede it (CIRISServer#783).
+        crate::key_tier::ed25519_open_or_create(&cfg.keystore_alias, &cfg.identity_dir)
+            .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
     }
 }
 
@@ -3566,8 +3568,7 @@ pub(crate) async fn substrate_persist_signer(
     let alias = format!("{}-substrate", cfg.keystore_alias);
     // Ed25519 half — sealed keystore, open-or-mint (stable seed across restarts).
     let ed: Arc<dyn HardwareSigner> = Arc::from(
-        SealedEd25519Signer::open_or_create(alias.clone(), cfg.identity_dir.clone(), None)
-            .map(|s| Box::new(s) as Box<dyn HardwareSigner>)
+        crate::key_tier::ed25519_open_or_create(&alias, &cfg.identity_dir)
             .map_err(|e| anyhow::anyhow!("open-or-mint substrate Ed25519 signer: {e}"))?,
     );
     // ML-DSA-65 half — software seed at substrate_ml_dsa_65.seed (mint-if-absent).
@@ -3831,7 +3832,7 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
                 "AV-77 peer de-admission gate FAILED TO ARM — set_self_key_id did not \
                  stick, so de-admission is DORMANT and a de-admitted peer would keep \
                  writing. Refusing to boot rather than serve with a sanction gate that \
-                 silently does nothing (CIRISPersist#543)"
+                 silently does nothing (history: CIRISPersist#543)"
             );
             anyhow::bail!("AV-77 arm failed: set_self_key_id({key_id}) read back as {other:?}")
         }
@@ -5724,13 +5725,13 @@ pub async fn run_config_get(
 /// the shared Edge (the node's single identity) + serves the registry trust
 /// surface over the shared Engine. SCAFFOLD. (0.5 is config-as-CEG; registry is 0.6.)
 async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
-    todo!("registry slice (Server 0.6) — pin ciris-registry-core (CIRISRegistry#76) + attach to the shared Edge")
+    todo!("registry slice (Server 0.6) — pin ciris-registry-core (history: CIRISRegistry#76) + attach to the shared Edge")
 }
 
 /// Consensus slice — folds in at **Server 1.0** (CIRISNodeCore#38). `install(&edge)`
 /// on the shared Edge + the WBD `route_deferral` / Wise-Authority surface. SCAFFOLD.
 async fn compose_node(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
-    todo!("node slice (Server 1.0) — pin ciris-node-core (CIRISNodeCore#38) + install(&edge)")
+    todo!("node slice (Server 1.0) — pin ciris-node-core (tracked: CIRISNodeCore#38) + install(&edge)")
 }
 
 #[cfg(test)]

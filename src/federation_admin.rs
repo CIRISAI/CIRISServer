@@ -718,7 +718,7 @@ async fn consent(
                 tracing::error!(
                     peer_key_id = %req.peer_key_id,
                     error = %e,
-                    "replication consent authored but the CC#46 `analyze` grant FAILED — this \
+                    "replication consent authored but the history: CC#46 `analyze` grant FAILED — this \
                      peer can receive traces from us and may NOT score them; capacity scoring \
                      stays dead until it is re-authored"
                 );
