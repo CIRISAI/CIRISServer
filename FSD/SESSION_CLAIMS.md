@@ -94,6 +94,7 @@ and the request itself is the person's attendance (it passes
 | claim-remote, upgrade-owner, announce | `claim_remote.rs` | — |
 | second-device approval: `approve`, `claim`, `token` | `auth/device_grant.rs` | pending grants live IN MEMORY on the node that issued the code (never replicate): one handler by construction. If they ever replicate: (self room, `device_grant:<request attestation id>`). |
 | release / announce / label a device | `self_devices.rs` | — |
+| add a device: `approve` (signs B's binding and occurrence, re-wraps the self DEKs to it — a direct `rekey_self_occurrence_add` caller) | `add_device.rs` | pending join requests live IN MEMORY on the node the owner opened **Add a device** on (never replicate): one handler by construction. If they ever replicate: (self room, `device_join:<request_id>`). `FSD/ADD_DEVICE.md` |
 | households, communities, drive, notes, contacts add/withdraw | `family_api.rs`, `communities.rs`, `drive.rs`, `contacts_chat.rs` | — |
 
 ### 2.4 Named, not gated in this cut

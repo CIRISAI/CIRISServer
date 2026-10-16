@@ -111,7 +111,9 @@ fn every_gated_act_calls_the_session_gate_first() {
 /// occurrence bound ON THIS DEVICE (the person's own `POST /v1/self/occurrence`,
 /// the portable-occurrence doors, and this node's own actor occurrence at
 /// boot): the device doing its own binding, never a reaction to a sibling's
-/// row (FSD §2.2 / §2.3).
+/// row (FSD §2.2 / §2.3). A third, also §2.3: `add_device`'s `approve`, the
+/// owner consenting on THIS device to a new device's occurrence
+/// (`FSD/ADD_DEVICE.md`).
 #[test]
 fn the_rewrap_door_has_no_ungated_loop_caller() {
     let mut callers = Vec::new();
@@ -138,7 +140,11 @@ fn the_rewrap_door_has_no_ungated_loop_caller() {
     }
     let unexpected: Vec<&String> = callers
         .iter()
-        .filter(|c| !c.starts_with("self_rewrap.rs:") && !c.starts_with("occurrence.rs:"))
+        .filter(|c| {
+            !c.starts_with("self_rewrap.rs:")
+                && !c.starts_with("occurrence.rs:")
+                && !c.starts_with("add_device.rs:")
+        })
         .collect();
     assert!(
         unexpected.is_empty(),

@@ -802,7 +802,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     ///
     /// 20 -> 19 for 0.5.222: `ciris-client` 0.5.228 carries
     /// `drive.device_class_not_personal`; the floor rose to 0.5.228 with it.
-    const MAX_UNCOVERED: usize = 19;
+    ///
+    /// 19 -> 30 for 0.5.228: the add-device plane's eleven `add_device.*` ids
+    /// (`FSD/ADD_DEVICE.md` §4.1), queued for the client bundle with their
+    /// English, the same shape as every plane above.
+    const MAX_UNCOVERED: usize = 30;
 
     let en = load_en();
     let ids = scraped_server_ids();

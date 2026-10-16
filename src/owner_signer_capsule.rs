@@ -377,6 +377,18 @@ async fn open_owned(
                 edge_signer,
             })
         }
+        // A FULL OCCURRENCE of the owner (CIRISServer#177): a device that joined
+        // the identity holds its OWN key, which persist accepts as acting for
+        // the identity (an active occurrence, `signer_acts_for`). The binding
+        // check is the same question asked of the roster rather than of one key.
+        Ok(Some((signer, edge_signer)))
+            if crate::auth::verify::signer_acts_for(engine, signer.key_id(), owner).await =>
+        {
+            Ok(OwnerSignerCapsule {
+                signer,
+                edge_signer,
+            })
+        }
         Ok(Some(_)) => Err(CapsuleRefusal::NotTheOwner),
         Ok(None) => Err(CapsuleRefusal::NoFedIdentity),
         Err(e) => Err(CapsuleRefusal::Unavailable(e.to_string())),
