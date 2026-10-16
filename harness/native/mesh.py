@@ -232,7 +232,7 @@ class Node:
 
     # -- identity --
 
-    def claim(self, alias: Optional[str] = None, pin_timeout: float = 90.0) -> None:
+    def claim(self, alias: Optional[str] = None, pin_timeout: float = 90.0, backend: str = "software") -> None:
         """Mint (or reuse) an owner identity under `alias` and claim this node
         with it over the console claim, as the ladders do."""
         alias = alias or f"{self.key_id}-owner"
@@ -244,14 +244,14 @@ class Node:
         if not user_seed.exists():
             # `--key-id` here is the OWNER's alias, not the node's: not `_cli`.
             got = subprocess.run(
-                [str(self.binary), "identity", "create", "--backend", "software",
+                [str(self.binary), "identity", "create", "--backend", backend,
                  "--home", str(self.home), "--key-id", alias],
                 capture_output=True, text=True, timeout=180, env={**os.environ, **self.env})
             if got.returncode != 0:
                 raise MeshError(f"{self.name}: identity create exited {got.returncode}: "
                                 f"{(got.stderr or got.stdout)[-800:]}")
         out = subprocess.run(
-            [str(self.binary), "claim", "--backend", "software", "--home", str(self.home),
+            [str(self.binary), "claim", "--backend", backend, "--home", str(self.home),
              "--key-id", alias, "--node-code", code, "--claim-pin", pin,
              "--cohort-scope", "self", "--target-url", self.url],
             capture_output=True, text=True, timeout=180, env={**os.environ, **self.env})

@@ -3343,6 +3343,9 @@ mod python {
         // the verify-FFI anchor at init, so the fold survives even a linker that
         // ignores `#[used]` on statics (CIRISServer#232). Cheap XOR-fold; discarded.
         let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
+        // The embedded agent opens keys (its persist Engine) right after import,
+        // before any serve names a home: pin the keyring tier now (#783).
+        crate::key_tier::pin_process_tier_at_import();
         // Test-anchor builds only: a ceremony-minted genesis bundle named by
         // CIRIS_TEST_GENESIS_BUNDLE is installed at IMPORT time, so an embedding
         // agent's own persist `Engine` (built in Python before any serve call)

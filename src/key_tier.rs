@@ -225,3 +225,104 @@ pub fn mldsa65_open_existing(alias: &str, dir: &Path) -> Result<Box<dyn PqcSigne
         }),
     }
 }
+
+/// What [`pin_process_tier`] decided for a home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeTier {
+    /// Software-tier keys and no live plugin tier: the TPM plugin is made
+    /// unselectable for this process so no component can supersede them.
+    PinnedSoftware,
+    /// A live plugin tier exists (a seal WITH blobs): left alone.
+    HasTpmKeys,
+    /// No key material: a fresh home — new keys may take the best tier.
+    Fresh,
+}
+
+/// The sentinel `CIRIS_TPM_PLUGIN` path that makes the keyring's plugin load
+/// fail, so `create_platform_storage` never selects the TPM tier.
+pub const TPM_PLUGIN_DISABLED: &str = "/nonexistent/ciris-tpm-plugin-disabled:software-tier-home";
+
+fn scan(dir: &Path, depth: usize, found: &mut (bool, bool)) {
+    let Ok(it) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in it.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 {
+                scan(&p, depth - 1, found);
+            }
+            continue;
+        }
+        let n = e.file_name().to_string_lossy().into_owned();
+        if n.ends_with(".master.key") {
+            found.0 = true;
+        }
+        if n.ends_with(".tpmp_blob") {
+            found.1 = true;
+        }
+    }
+}
+
+/// **Pin the whole process to the tier this home's keys live in** (#783).
+///
+/// The keyring's own components — CIRISEdge opening the node key at edge init,
+/// persist's keyring signer under `identity/keyring/`, verify-core's identity
+/// mint — open sealed keys through `create_platform_storage`, which supersedes a
+/// software-tier key the moment the TPM plugin is loadable. The server cannot
+/// route THEIR opens through [`ed25519_open_existing`], so it removes the hazard
+/// at its source for this process: a home whose keys are all software-tier (a
+/// `*.master.key` present, no plugin blob anywhere) gets `CIRIS_TPM_PLUGIN`
+/// pointed at [`TPM_PLUGIN_DISABLED`] BEFORE any component opens a key. A fresh
+/// home keeps TPM custody for new keys; a home with live TPM keys is untouched.
+/// A deliberate software→TPM migration is a separate, explicit act (adopt).
+pub fn pin_process_tier(home: &Path) -> HomeTier {
+    let mut found = (false, false); // (software master, plugin blob)
+    for sub in ["identity", "keys"] {
+        scan(&home.join(sub), 2, &mut found);
+    }
+    let tier = match found {
+        (_, true) => HomeTier::HasTpmKeys,
+        (true, false) => HomeTier::PinnedSoftware,
+        (false, false) => HomeTier::Fresh,
+    };
+    if tier == HomeTier::PinnedSoftware {
+        let prior = std::env::var("CIRIS_TPM_PLUGIN").ok();
+        if prior.as_deref() != Some(TPM_PLUGIN_DISABLED) {
+            // SAFETY: called at process start (module init / the first boot
+            // step), before any thread this crate spawns reads the environment.
+            unsafe { std::env::set_var("CIRIS_TPM_PLUGIN", TPM_PLUGIN_DISABLED) };
+            tracing::warn!(
+                home = %home.display(),
+                prior = ?prior,
+                "keyring tier PINNED to software for this process: this home's keys live in the \
+                 software tier and a newly loadable TPM plugin would supersede them on their next \
+                 re-open (CIRISServer#783). The TPM stays unused until an explicit migration."
+            );
+            eprintln!(
+                "ciris_server: keyring tier pinned to software — home {} holds software-tier keys \
+                 (CIRISServer#783)",
+                home.display()
+            );
+        }
+    }
+    tier
+}
+
+/// The embedded entry (PyO3 module init): the agent builds its persist Engine
+/// — which opens keys — before any serve call names a home, so pin every home
+/// this process could be serving: `CIRIS_HOME`, else the agent default `~/ciris`.
+pub fn pin_process_tier_at_import() {
+    let mut homes: Vec<PathBuf> = Vec::new();
+    if let Some(h) = std::env::var_os("CIRIS_HOME") {
+        homes.push(PathBuf::from(h));
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        homes.push(PathBuf::from(h).join("ciris"));
+    }
+    for h in homes {
+        if h.is_dir() && pin_process_tier(&h) == HomeTier::PinnedSoftware {
+            return;
+        }
+    }
+}

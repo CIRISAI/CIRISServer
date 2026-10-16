@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .mesh import HARNESS, Mesh, MeshError, Node, wait_for
 
@@ -957,10 +957,98 @@ CSD-129 — THE AGENT STEP (CC 4.2.1.1 one reader; CC 1.13.6 totality), topology
             "not_covered": not_covered, "first_failure": step.first_failure}
 
 
+def owner_key_tpm_appears(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#783 / PR #784 on the real wire: an owner fed-ID minted
+    `platform-sealed` while the TPM plugin is invisible lands in the keyring's
+    SOFTWARE tier; when the plugin becomes loadable and the node restarts, the
+    owner key must still open (0.5.227: the re-open archives it and every owner
+    act fails `Key not found: ed25519.seed`). Phase 2 then puts the home into the
+    exact shape Eric's desktop was left in and asserts the node heals it."""
+    plugin = os.environ.get("CIRIS_TPM_PLUGIN_REAL", "")
+    if not plugin or not Path(plugin).is_file():
+        raise MeshError("set CIRIS_TPM_PLUGIN_REAL to a libciris_tpm_plugin.so path (a usable TPM is required)")
+    step = Steps("""
+OWNER KEY WHEN A TPM APPEARS — Eric's desktop, 2026-10-08 (CIRISServer#783, PR #784).
+  phase 1: claim with --backend platform-sealed while the TPM plugin is INVISIBLE → the key is
+           in the SOFTWARE tier; restart with the plugin VISIBLE; an owner act must still sign and
+           nothing may be archived.
+  phase 2: put the home in Eric's exact shape (software pair archived to *.superseded-pre-v8 beside
+           an empty TPM seal); restart; the node must restore the key and sign again.""")
+    ok = True
+    n = mesh.add("laptop", start=False)
+    n.env["CIRIS_TPM_PLUGIN"] = "/nonexistent/libciris_tpm_plugin.so"
+    n.start()
+    n.claim("tpm-owner", backend="platform-sealed")
+    user_dir = n.home / "identity" / "user"
+
+    def files() -> List[str]:
+        return sorted(p.name for p in user_dir.iterdir()) if user_dir.is_dir() else []
+    minted = files()
+    if not any(f.endswith(".ed25519.seed.blob") for f in minted):
+        raise MeshError(f"expected the platform-sealed mint to fall back to the software tier, got {minted}")
+    step("minted_software_tier", files=minted)
+
+    def widener_since(mark: int) -> Optional[str]:
+        """The owner pen, opened by the node itself at runtime start: compose
+        installs the membership widener only with the owner's person key. Eric's
+        desktop logged 'membership widener NOT installed (no owner pen …)'."""
+        lines = n.grep(r"membership widener")
+        new = lines[mark:]
+        return new[-1] if new else None
+
+    def owner_act(mark: int) -> Tuple[int, Any]:
+        try:
+            line = wait_for("the restarted node to try the owner pen", lambda: widener_since(mark), 60, every=1)
+        except MeshError:
+            return 0, "no membership-widener line after restart"
+        return (200, line) if "NOT installed" not in line else (500, line)
+
+    def restart_with_plugin() -> None:
+        n.stop()
+        n.env["CIRIS_TPM_PLUGIN"] = plugin
+        n.start()
+
+    mark = len(n.grep(r"membership widener"))
+    restart_with_plugin()
+    code, body = owner_act(mark)
+    after = files()
+    stranded = [f for f in after if f.endswith("superseded-pre-v8")]
+    keynotfound = n.grep(r"Key not found: ed25519\.seed")
+    if stranded or code not in (200, 201) or keynotfound:
+        ok = False
+        step.fail("tpm_appeared", "the owner key must still open once the TPM plugin is loadable",
+                  [n], r"superseded|SUPERSEDED|Key not found|owner's \(.*\) signer|announce",
+                  status=code, archived=stranded, key_not_found_lines=len(keynotfound))
+    step("tpm_appeared", owner_pen=str(body)[:120], files=after, archived=stranded)
+
+    # Phase 2 — Eric's exact on-disk shape.
+    n.stop()
+    for f in files():
+        if f.endswith(".ed25519.seed.blob") or (f.endswith(".master.key") and not f.endswith("superseded-pre-v8")):
+            (user_dir / f).rename(user_dir / f"{f}.superseded-pre-v8")
+    alias = next((f.split(".")[0] for f in files() if f.endswith(".backend")), "")
+    if alias:
+        (user_dir / f"{alias}.tpmplugin_seal").write_bytes(b"empty TPM tier: a master, no blobs")
+    shaped = files()
+    step("eric_shape", files=shaped)
+    mark = len(n.grep(r"membership widener"))
+    n.start()
+    code, body = owner_act(mark)
+    healed = files()
+    restored = n.grep(r"KEY RESTORED")
+    if code not in (200, 201) or any(f.endswith("superseded-pre-v8") for f in healed) or not restored:
+        ok = False
+        step.fail("healed", "a key superseded into an empty TPM tier must be restored and sign again", [n],
+                  r"KEY RESTORED|superseded|Key not found|announce", status=code, files=healed)
+    step("healed", owner_pen=str(body)[:120], files=healed, restore_logged=bool(restored))
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
+    "owner_key_tpm_appears": owner_key_tpm_appears,
     "chat": chat,
     "corpus": corpus,
 }

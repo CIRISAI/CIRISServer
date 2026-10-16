@@ -416,13 +416,12 @@ pub(crate) fn open_user_signer(
     // prior FedID (Ed25519 kept, ML-DSA silently regenerated → verify failures).
     if create {
         if let UserIdentityBackend::PlatformSealed = backend {
-            let signer = ciris_keyring::SealedEd25519Signer::open_or_create(
-                cfg.key_id.clone(),
-                cfg.seed_dir.clone(),
-                None,
-            )
-            .map_err(|e| anyhow::anyhow!("first-seal the platform-sealed user Ed25519 key: {e}"))?;
-            return Ok(Box::new(signer));
+            // Through the tier-aware door: `identity create` on an EXISTING
+            // software-tier identity is a re-open, and the keyring's own
+            // open_or_create would supersede it once a TPM is visible (#783).
+            return crate::key_tier::ed25519_open_or_create(&cfg.key_id, &cfg.seed_dir).map_err(
+                |e| anyhow::anyhow!("first-seal the platform-sealed user Ed25519 key: {e}"),
+            );
         }
     }
 

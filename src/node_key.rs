@@ -1318,6 +1318,9 @@ pub async fn provision_node_identity(
     // the provisional machine path (Eric's desktop, 2026-10-16, CIRISServer#783).
     // `OnceLock`: compose's later registration of the same path is a no-op.
     set_user_seed_dir(identity_dir.join("user"), format!("{keystore_alias}-user"));
+    if let Some(home) = identity_dir.parent() {
+        crate::key_tier::pin_process_tier(home);
+    }
     let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
     let (key_id, record_json) = register_node_key_with_record(engine, &identity).await?;
 
