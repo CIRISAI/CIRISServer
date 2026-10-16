@@ -570,6 +570,17 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
     let mut below_sample_gate_agents = 0usize;
     let mut below_coverage_agents = 0usize;
     let mut emitted = 0usize;
+    // #781 — the agent hosted IN this process. On an agent-hosted node the
+    // engine signs as the actor, so the node's own agent's traces carry a key
+    // this process wields; scoring it is self-attestation, which
+    // `CapacityAttestation::new` refuses (CEG §7.5). Reaching that guard made
+    // every pass on Eric's desktop end in an error. Excluded BY RULE, before
+    // the work, and counted, not erred.
+    let mut self_agents = 0usize;
+    let own_keys: Vec<&str> = [Some(node_key_id), crate::node_key::actor_identity()]
+        .into_iter()
+        .flatten()
+        .collect();
     for (agent_id_hash, rows) in by_agent {
         let traces: Vec<&TraceSummary> = rows.iter().collect();
         // Attest ABOUT the agent's REGISTERED federation key_id (persist v20.1.0 /
@@ -593,6 +604,17 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             continue;
         };
 
+        if own_keys.contains(&attested_key_id.as_str()) {
+            self_agents += 1;
+            tracing::debug!(
+                agent = %attested_key_id,
+                rule = "anti_goodhart_self",
+                attester = %node_key_id,
+                "capacity scorer: skipped — this agent is hosted by this node, and a node \
+                 never scores itself (CEG §7.5 anti-Goodhart)"
+            );
+            continue;
+        }
         match score_and_emit(engine, node_key_id, &attested_key_id, &traces, cfg).await {
             Ok(ScoreOutcome::Emitted) => emitted += 1,
             Ok(ScoreOutcome::Indeterminate { why }) => {
@@ -795,6 +817,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
         // first of the two `|| ` triggers here. A blind coalescer therefore
         // wrote a row a minute AND reported itself as the steady state.
         let accounted = unchanged_agents
+            + self_agents
             + not_consented_agents
             + empty_matrix_agents
             + unregistered_agents
@@ -834,6 +857,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 standing_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
+                self_agents,
                 indeterminate_agents,
                 below_sample_gate_agents,
                 below_coverage_agents,
@@ -865,6 +889,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 standing_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
+                self_agents,
                 indeterminate_agents,
                 below_sample_gate_agents,
                 below_coverage_agents,
@@ -882,7 +907,10 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                  is NOT \"nothing stands\"; the scorer cannot tell whether it has already \
                  authored these scores, so it authored none"
             );
-        } else if (unchanged_agents > 0 || not_consented_agents > 0 || indeterminate_agents > 0)
+        } else if (unchanged_agents > 0
+            || not_consented_agents > 0
+            || indeterminate_agents > 0
+            || self_agents > 0)
             && accounted >= n_agents
         {
             tracing::info!(
@@ -894,6 +922,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 standing_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
+                self_agents,
                 indeterminate_agents,
                 below_sample_gate_agents,
                 below_coverage_agents,
@@ -918,6 +947,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
                 standing_unreadable_agents,
                 empty_matrix_agents,
                 unregistered_agents,
+                self_agents,
                 indeterminate_agents,
                 below_sample_gate_agents,
                 below_coverage_agents,
@@ -951,6 +981,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             consent_unreadable_agents,
             standing_unreadable_agents,
             unregistered_agents,
+            self_agents,
             indeterminate_agents,
             below_sample_gate_agents,
             below_coverage_agents,
@@ -972,6 +1003,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             consent_unreadable_agents,
             standing_unreadable_agents,
             unregistered_agents,
+            self_agents,
             indeterminate_agents,
             below_sample_gate_agents,
             below_coverage_agents,
@@ -988,6 +1020,7 @@ pub async fn run_pass(engine: &Engine, node_key_id: &str, cfg: &ScorerConfig) ->
             consent_unreadable_agents,
             standing_unreadable_agents,
             unregistered_agents,
+            self_agents,
             indeterminate_agents,
             below_sample_gate_agents,
             below_coverage_agents,
