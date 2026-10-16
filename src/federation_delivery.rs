@@ -1352,7 +1352,7 @@ pub fn author_consent_embedded(
         // all three costs at the moment of the decision.
         tracing::warn!(
             peer_key_id,
-            "consent:replication authored WITHOUT the history: CC#46 `analyze` grant. This is ALLOWED — \
+            "consent:replication authored WITHOUT the `analyze` grant (history: CC#46). This is ALLOWED — \
              traces will flow. What it costs: (1) you build NO reputation, because every \
              capacity:* claim about you is refused, so none can ever exist; (2) you cannot use \
              streams or services that require third-party capability attestations, since you \
