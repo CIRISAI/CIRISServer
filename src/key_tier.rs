@@ -51,7 +51,9 @@ pub enum OnDiskTier {
     TpmPlugin,
     /// `{alias}.master.key` and no plugin seal — the keyring's software tier.
     Software,
-    /// No artifacts for this alias.
+    /// No file-tier artifacts for this alias: either nothing exists, or the key
+    /// lives in a tier with no files here (Secure Enclave, keychain, Android
+    /// Keystore) — the keyring's own open decides.
     Absent,
 }
 
@@ -184,10 +186,12 @@ pub fn ed25519_open_existing(
             seed.iter_mut().for_each(|b| *b = 0);
             Ok(Box::new(signer?))
         }
-        OnDiskTier::TpmPlugin => Ok(Box::new(SealedEd25519Signer::open_existing(alias, dir)?)),
-        OnDiskTier::Absent => Err(KeyringError::KeyNotFound {
-            alias: ED25519_SEED_ID.to_owned(),
-        }),
+        // A plugin seal, or a tier with no files here (Secure Enclave / keychain
+        // on macOS, Android Keystore): the keyring's own load-only re-open. Only
+        // a recognised SOFTWARE key bypasses the factory.
+        OnDiskTier::TpmPlugin | OnDiskTier::Absent => {
+            Ok(Box::new(SealedEd25519Signer::open_existing(alias, dir)?))
+        }
     }
 }
 
@@ -219,10 +223,9 @@ pub fn mldsa65_open_existing(alias: &str, dir: &Path) -> Result<Box<dyn PqcSigne
             seed.iter_mut().for_each(|b| *b = 0);
             Ok(Box::new(signer?))
         }
-        OnDiskTier::TpmPlugin => Ok(Box::new(SealedMlDsa65Signer::open_existing(alias, dir)?)),
-        OnDiskTier::Absent => Err(KeyringError::KeyNotFound {
-            alias: MLDSA65_SEED_ID.to_owned(),
-        }),
+        OnDiskTier::TpmPlugin | OnDiskTier::Absent => {
+            Ok(Box::new(SealedMlDsa65Signer::open_existing(alias, dir)?))
+        }
     }
 }
 
