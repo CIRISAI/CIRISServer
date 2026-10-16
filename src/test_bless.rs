@@ -257,7 +257,7 @@ pub(crate) async fn maybe_test_bless_self(
                 test_root = %root_pub_b64,
                 ?outcome,
                 "TEST-ANCHOR SELF-BLESS ACTIVE — this node is blessed by a SOFTWARE test trust root, \
-                 NOT the humanity-accord anchor (CIRISServer#258; local harness only)."
+                 NOT the humanity-accord anchor (history: CIRISServer#258; local harness only)."
             );
         }
         Err(e) => {
@@ -323,7 +323,7 @@ pub(crate) async fn maybe_test_bless_delivery_self(engine: &std::sync::Arc<Engin
     tracing::warn!(
         bless_canonical,
         "TEST-ANCHOR: bare-agent delivery path — running leg-B trust-root ceremony \
-         (CIRISEdge#386; the agent never runs serve_with_adapter, so leg B is minted HERE)"
+         (history: CIRISEdge#386; the agent never runs serve_with_adapter, so leg B is minted HERE)"
     );
     perform_trust_root_ceremony(engine, &test_root, bless_canonical).await?;
     // CIRISConstitution#46 / persist v22.0.0 — CONSENT BEFORE SCORING. Minted only
@@ -384,7 +384,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
     if canonicals.is_empty() {
         tracing::warn!(
             "TEST-ANCHOR: no canonical servers in the directory yet — no `analyze` consent \
-             minted, so any capacity:* score about this node will be REFUSED by CC#46 until \
+             minted, so any capacity:* score about this node will be REFUSED by history: CC#46 until \
              one appears"
         );
         return Ok(());
@@ -446,7 +446,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
                 subject = %self_key_id,
                 attester = %attester,
                 scope = ANALYZE_CONSENT_SCOPE,
-                "TEST-ANCHOR: `analyze` consent GRANTED and RESOLVED (CIRISConstitution#46) — \
+                "TEST-ANCHOR: `analyze` consent GRANTED and RESOLVED (history: CIRISConstitution#46) — \
                  the canonical may now author capacity:* about this node"
             ),
             Ok(state) => tracing::error!(
@@ -454,7 +454,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
                 attester = %attester,
                 resolved = ?state,
                 "TEST-ANCHOR: `analyze` consent row emitted but the scoped fold does NOT \
-                 resolve to Granted — capacity:* will still be refused (CC#46). Check the \
+                 resolve to Granted — capacity:* will still be refused (history: CC#46). Check the \
                  envelope `scope` shape and the row's tier/cohort_scope"
             ),
             Err(e) => tracing::error!(
@@ -467,7 +467,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
     Ok(())
 }
 
-/// **Leg B of the CIRISEdge#386 trace-serve gate — the miniature trust-root
+/// **Leg B of the history: CIRISEdge#386 trace-serve gate — the miniature trust-root
 /// ceremony.** A faithful model of the production owner-binding claim flow
 /// (`crate::auth::ownership`), scaled to the SW test root.
 ///

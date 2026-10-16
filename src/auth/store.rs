@@ -579,7 +579,7 @@ fn one_named(ident: &str, mut found: Vec<WaCert>) -> Result<Option<WaCert>, Stor
             tracing::error!(
                 name = %ident, holders = ?holders,
                 "AMBIGUOUS LOGIN NAME — multiple active certs answer to this name. Refusing to \
-                 choose (CIRISAgent#1029): resolving one of them silently authenticates the \
+                 choose (history: CIRISAgent#1029): resolving one of them silently authenticates the \
                  caller as whichever the node ordered first, and presents as an eternal \
                  `password mismatch` when the password belongs to the other."
             );

@@ -1419,7 +1419,7 @@ pub fn router(
                 tracing::warn!(
                     error = %e,
                     "claim-remote: this node's self key record does not parse — claims will not \
-                     introduce this node to the targets it claims (CIRISServer#678)"
+                     introduce this node to the targets it claims (tracked: CIRISServer#678)"
                 )
             })
             .ok()
@@ -1481,8 +1481,8 @@ async fn anchor_agent_after_claim(engine: &std::sync::Arc<ciris_persist::prelude
 }
 
 /// The owner accepts every trust root this node accepted, with the pen the
-/// claim just used (CIRISServer#632 step 2) — the edge peers walk for Rooted
-/// (CIRISEdge#659). Logged, never fatal: the claim succeeded either way, and a
+/// claim just used (history: CIRISServer#632 step 2) — the edge peers walk for Rooted
+/// (history: CIRISEdge#659). Logged, never fatal: the claim succeeded either way, and a
 /// missing acceptance shows up as "not Rooted by any peer", named at boot.
 async fn accept_roots_as_owner_with(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
@@ -1495,7 +1495,7 @@ async fn accept_roots_as_owner_with(
             owner = %owner_key_id,
             roots = ?newly,
             "claim: the OWNER accepted this node's trust root(s) — peers sharing a valid root \
-             now read this node Rooted (CIRISEdge#659)"
+             now read this node Rooted (history: CIRISEdge#659)"
         ),
         Ok(_) => tracing::info!(
             owner = %owner_key_id,
@@ -1512,7 +1512,7 @@ async fn accept_roots_as_owner_with(
 }
 
 /// Heal the owner's registration record with the pen a claim just used
-/// (CIRISServer#606). Logged, never fatal: the claim succeeded; a record the
+/// (history: CIRISServer#606). Logged, never fatal: the claim succeeded; a record the
 /// door refuses stays as it is and `delivery_status.owner_key_record` says so.
 async fn heal_owner_record_with(
     engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
@@ -1522,18 +1522,18 @@ async fn heal_owner_record_with(
     use crate::auth::ownership::OwnerKeyRecordState as S;
     match crate::auth::ownership::rebind_owner_key_record(engine, user_signer, owner_key_id).await {
         Ok(S::Rebound) => {
-            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record was rebound (#606)")
+            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record was rebound (history: #606)")
         }
         Ok(S::Unbound { refusal }) => {
-            tracing::warn!(owner = %owner_key_id, %refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (#606)")
+            tracing::warn!(owner = %owner_key_id, %refusal, "claim: the owner's registration record is UNBOUND and could not be rebound (history: #606)")
         }
         // Every outcome is named: a silent arm here hid a heal that looked up
-        // the wrong key on the production canonical (CIRISServer#606).
+        // the wrong key on the production canonical (history: CIRISServer#606).
         Ok(S::Bound) => {
-            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record already binds its subject (#606)")
+            tracing::info!(owner = %owner_key_id, "claim: the owner's registration record already binds its subject (history: #606)")
         }
         Ok(S::Absent) => {
-            tracing::warn!(owner = %owner_key_id, "claim: no registration record for the owner on this node — nothing to heal (#606)")
+            tracing::warn!(owner = %owner_key_id, "claim: no registration record for the owner on this node — nothing to heal (history: #606)")
         }
         Err(e) => {
             tracing::warn!(owner = %owner_key_id, error = %e, "claim: owner key record heal failed (non-fatal)")

@@ -39,7 +39,7 @@ pub fn refuse_with(
     extra: serde_json::Value,
 ) -> Response {
     let msg = msg.into();
-    tracing::info!(reason_id, "auth refused: {msg}");
+    log_answer(code, reason_id, &msg);
     let mut body = json!({ "error": msg, "reason_id": reason_id });
     if let (Some(dst), Some(src)) = (body.as_object_mut(), extra.as_object()) {
         for (k, v) in src {
@@ -51,6 +51,45 @@ pub fn refuse_with(
 
 pub fn refuse(code: StatusCode, reason_id: &'static str, msg: impl Into<String>) -> Response {
     let msg = msg.into();
-    tracing::info!(reason_id, "auth refused: {msg}");
+    log_answer(code, reason_id, &msg);
     (code, Json(json!({ "error": msg, "reason_id": reason_id }))).into_response()
+}
+
+/// What kind of answer a status is, for the log line (#780). A 2xx built
+/// through these helpers is a typed NOT-YET (`contacts.awaiting_key_body`,
+/// `contacts.awaiting_consent`, …) — logging it as "auth refused" made operators
+/// and the agent read a pending state as a failure.
+pub fn answer_class(code: StatusCode) -> &'static str {
+    if code.is_success() {
+        "pending"
+    } else if code.is_server_error() {
+        "unavailable"
+    } else {
+        "refused"
+    }
+}
+
+fn log_answer(code: StatusCode, reason_id: &'static str, msg: &str) {
+    let class = answer_class(code);
+    let status = code.as_u16();
+    if code.is_server_error() {
+        tracing::warn!(reason_id, status, class, "{class}: {msg}");
+    } else {
+        tracing::info!(reason_id, status, class, "{class}: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod answer_class_tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_answer_is_never_logged_as_a_refusal() {
+        assert_eq!(answer_class(StatusCode::ACCEPTED), "pending");
+        assert_eq!(answer_class(StatusCode::OK), "pending");
+        assert_eq!(answer_class(StatusCode::FORBIDDEN), "refused");
+        assert_eq!(answer_class(StatusCode::NOT_FOUND), "refused");
+        assert_eq!(answer_class(StatusCode::CONFLICT), "refused");
+        assert_eq!(answer_class(StatusCode::SERVICE_UNAVAILABLE), "unavailable");
+    }
 }

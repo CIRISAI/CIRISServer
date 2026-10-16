@@ -186,7 +186,7 @@ pub fn inspect_at_boot(data_dir: &Path) -> Previous {
                     "the previous serve on this home is STILL RUNNING (its serve marker is \
                      present and its pid is alive) — this boot will fail to bind the read API \
                      with AddrInUse. Stop it through shutdown_node() / SIGTERM first \
-                     (CIRISServer#568)"
+                     (history: CIRISServer#568)"
                 ),
                 _ => tracing::warn!(
                     previous_pid = marker.pid,
@@ -200,7 +200,7 @@ pub fn inspect_at_boot(data_dir: &Path) -> Previous {
                      shutdown_node() / SIGTERM drained its read API. Any HTTP response in \
                      flight at that instant was lost to its caller, and a client that kept a \
                      pooled connection to it will see a reset on its next request. This is the \
-                     HOST's hand-off, not a node restart (CIRISServer#568)"
+                     HOST's hand-off, not a node restart (history: CIRISServer#568)"
                 ),
             }
         }
@@ -210,7 +210,7 @@ pub fn inspect_at_boot(data_dir: &Path) -> Previous {
                 path = %path.display(),
                 error = %error,
                 "a serve marker is present but unreadable — the previous serve did not stop \
-                 through the door, and what it wrote is damaged (CIRISServer#568)"
+                 through the door, and what it wrote is damaged (history: CIRISServer#568)"
             );
         }
     }

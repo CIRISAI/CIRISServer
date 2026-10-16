@@ -192,7 +192,7 @@ fn declining_to_be_scored_states_what_it_costs() {
     .expect("src/federation_delivery.rs must be readable");
 
     let start = src
-        .find("WITHOUT the CC#46")
+        .find("WITHOUT the `analyze` grant")
         .expect("the no-analyze WARN must exist — silence is how 240 peers got here");
     let warn: String = src[start..start + 1200]
         .split_whitespace()

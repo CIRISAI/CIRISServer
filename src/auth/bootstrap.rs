@@ -319,7 +319,7 @@ pub async fn bootstrap_if_needed(
                     wa_id = %wa_id,
                     owner = %owner,
                     "SELF-HEAL: this node's CEG owner-binding names an owner whose ROOT cert \
-                     was INACTIVE with no other active root — the pre-#403 logout-deactivates-\
+                     was INACTIVE with no other active root — the pre-history: #403 logout-deactivates-\
                      the-owner defect, or a hand-edit. Reactivated the owner's ROOT; first-run \
                      stays closed and no claim PIN is minted."
                 );
