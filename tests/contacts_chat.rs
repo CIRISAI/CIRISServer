@@ -3893,3 +3893,60 @@ async fn a_joiner_who_asks_once_converges_with_nobody_reading_the_room() {
         "the seated room's request is removed"
     );
 }
+
+/// **#775 — infrastructure is never a contact.** Sharing traces with a canonical
+/// emits a `consent:replication` grant under the DEFAULT prefixes, which include
+/// `chat:`; every such node listed the canonical as a person (Eric's and
+/// Francesco's installs, 2026-10-16). A node that consents to send traces to a
+/// canonical — and to its own owner's other device — lists ZERO contacts; a real
+/// person added beside them is listed, alone.
+#[tokio::test]
+async fn a_node_that_consents_to_send_traces_lists_no_infrastructure_and_no_self_as_contacts() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let node = node_key_id(&engine).await;
+    let client = reqwest::Client::new();
+
+    // The canonical, as production holds it: the baked, accord-conferred row the
+    // engine seeds at genesis (a self-claimed `canonical` row is refused by the
+    // directory, rightly).
+    let canonicals = engine.list_canonical_servers().await.expect("canonical servers");
+    let canonical_owned = canonicals.first().expect("the baked genesis seeds a canonical").key_id.clone();
+    let canonical = canonical_owned.as_str();
+    let prefixes = ciris_server::peer::default_attestation_prefixes();
+    assert!(
+        prefixes.iter().any(|p| p == "chat:"),
+        "the default covers chat: — the premise of #775"
+    );
+    ciris_server::peer::emit_replication_consent(&engine, &node, canonical, &prefixes)
+        .await
+        .expect("the traces consent to the canonical");
+
+    // The owner's own fed-ID as a grant subject (what a second device or client
+    // key resolves to).
+    ciris_server::peer::emit_replication_consent(&engine, &node, &owner_id.key_id, &prefixes)
+        .await
+        .expect("a grant naming the owner's own identity");
+
+    let listed = contacts_list(&client, &base, &owner).await;
+    assert_eq!(
+        listed["total"], 0,
+        "neither the canonical nor the owner themselves is a contact: {listed}"
+    );
+
+    // A real person beside them is listed, alone.
+    ciris_server::peer::emit_replication_consent(&engine, &node, CONTACT_KEY_ID, &prefixes)
+        .await
+        .expect("a person's grant");
+    let listed = contacts_list(&client, &base, &owner).await;
+    let ids: Vec<String> = listed["contacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["key_id"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(listed["total"], 1, "exactly the person: {listed}");
+    assert!(
+        !ids.iter().any(|k| k == canonical),
+        "the canonical never appears: {ids:?}"
+    );
+}

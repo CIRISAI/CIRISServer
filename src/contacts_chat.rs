@@ -2004,6 +2004,13 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     let mut peer_ids: Vec<String> = Vec::new();
     let mut receipts: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
+    // #775 — a contact is a PERSON other than the owner. Two kinds of live
+    // chat-covering grant are not: a canonical server (the mesh-participation
+    // consent "Send traces" covers edge's default prefixes, which include
+    // `chat:`, so every node that shares traces held a chat-covering grant to
+    // the canonical and listed infrastructure as a person), and the owner's OWN
+    // devices (a client key or second node resolves to the owner's fed-ID).
+    let mut infra_skipped: Vec<String> = Vec::new();
     for grant in &grant_rows {
         let receipt = crate::peer::grant_receipt(grant);
         let covers_chat = receipt["consent_prefixes"].as_array().is_some_and(|a| {
@@ -2014,6 +2021,10 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             continue;
         }
         for subject in &grant.subject_key_ids {
+            if is_infrastructure_subject(&st.engine, subject).await {
+                infra_skipped.push(subject.clone());
+                continue;
+            }
             let person = match ciris_edge::contact::resolve(&lens, subject).await {
                 Ok(resolved) => resolved.fed_id,
                 Err(stall) => {
@@ -2028,11 +2039,22 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
                     subject.clone()
                 }
             };
+            if person == owner.key_id {
+                // One of the owner's own devices — never a contact of themselves.
+                continue;
+            }
             if !peer_ids.contains(&person) {
                 peer_ids.push(person.clone());
                 receipts.insert(person, receipt.clone());
             }
         }
+    }
+    if !infra_skipped.is_empty() {
+        tracing::debug!(
+            skipped = ?infra_skipped,
+            "contacts: chat-covering grants to infrastructure (canonical servers) are not \
+             people and are not listed"
+        );
     }
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
@@ -2095,6 +2117,28 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
         Json(serde_json::json!({ "contacts": contacts, "total": total })),
     )
         .into_response()
+}
+
+/// Is `key_id` infrastructure rather than a person's key — a canonical server?
+/// Persist's tombstone-aware `is_canonical` (the conferred role), OR the raw
+/// directory row naming the `canonical` role: a canonical whose conferral has
+/// not landed on this node (Eric's desktop logs "carries the canonical role but
+/// is not accord-conferred") is still not a person.
+async fn is_infrastructure_subject(engine: &Engine, key_id: &str) -> bool {
+    if engine.is_canonical(key_id).await.unwrap_or(false) {
+        return true;
+    }
+    match engine
+        .federation_directory()
+        .lookup_public_key(key_id)
+        .await
+    {
+        Ok(Some(rec)) => rec
+            .identity_type
+            .split([',', ' ', '|'])
+            .any(|t| t.trim() == "canonical"),
+        _ => false,
+    }
 }
 
 // ─── POST /v1/contacts ──────────────────────────────────────────────────────
