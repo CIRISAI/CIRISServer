@@ -5278,6 +5278,9 @@ pub(crate) mod pending_contacts {
     /// How often the pass looks for arrived key bodies.
     pub const PASS_EVERY: Duration = Duration::from_secs(10);
 
+    type Key = (String, String);
+    type Due = (Key, ChatState, Owner, String, Instant);
+
     struct Pending {
         st: ChatState,
         owner: Owner,
@@ -5285,8 +5288,8 @@ pub(crate) mod pending_contacts {
         since: Instant,
     }
 
-    fn table() -> &'static Mutex<HashMap<(String, String), Pending>> {
-        static T: OnceLock<Mutex<HashMap<(String, String), Pending>>> = OnceLock::new();
+    fn table() -> &'static Mutex<HashMap<Key, Pending>> {
+        static T: OnceLock<Mutex<HashMap<Key, Pending>>> = OnceLock::new();
         T.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
@@ -5314,11 +5317,6 @@ pub(crate) mod pending_contacts {
         ensure_pass();
     }
 
-    /// How many contacts are waiting (for status surfaces and tests).
-    pub(crate) fn len() -> usize {
-        table().lock().map(|t| t.len()).unwrap_or(0)
-    }
-
     fn ensure_pass() {
         static STARTED: OnceLock<()> = OnceLock::new();
         if STARTED.set(()).is_err() {
@@ -5336,7 +5334,7 @@ pub(crate) mod pending_contacts {
 
     /// One pass: complete, discard or expire every pending contact.
     pub(crate) async fn pass() {
-        let due: Vec<((String, String), ChatState, Owner, String, Instant)> = {
+        let due: Vec<Due> = {
             let t = table().lock().expect("pending contacts lock");
             t.iter()
                 .map(|(k, p)| {
