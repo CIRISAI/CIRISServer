@@ -1062,11 +1062,94 @@ CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-1
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+# The log signatures of the fresh-claim replication storm on Eric's desktop
+# (server 0.5.223, 2026-10-16) — each counted from raw lines PLUS the totals
+# log_dedup folds repeats into ("event repeated N times … sample=<line>").
+_STORM = {
+    "item2_drops": r"item 2 FAILED",
+    "unattributed_crpl": r"source_key_id=None",
+    "round_timeouts": r"round timed out waiting for peer reply",
+    "occurrence_refusals": r"is neither identity .* nor an active occurrence|typed asserted_at diverges",
+}
+
+
+def _storm_counts(n: Node) -> Dict[str, int]:
+    import re as _re
+    out = {k: 0 for k in _STORM}
+    try:
+        text = n.log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = _re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        m = _re.search(r"event repeated (\d+) times.*?\(\d+ suppressed\)", line)
+        for k, pat in _STORM.items():
+            if _re.search(pat, line):
+                # a dedup summary stands for the suppressed repeats it folded
+                sup = _re.search(r"\((\d+) suppressed\)", line)
+                out[k] += int(sup.group(1)) if (m and sup) else 1
+    return out
+
+
+def fresh_claim(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#779 — a freshly claimed LAPTOP node on the real wire must admit
+    its owner's rows at the canonical within a bounded window, with no replication
+    storm. Fixed in 0.5.225 (edge v40.0.12 + CIRISEdge#858 + release_parked_on);
+    gate: this FAILS against a v0.5.223 binary and passes on main."""
+    window = float(getattr(args, "arrive_wait", 180))
+    ceilings = {"item2_drops": 10, "unattributed_crpl": 10, "round_timeouts": 20, "occurrence_refusals": 10}
+    step = Steps(f"""
+FRESH CLAIM — the 0.5.223 storm on Eric's desktop, as a regression test (CIRISServer#779).
+  topology: the canonical + ONE fresh laptop-class node, claimed by a person, announced, and
+            joined to the mesh as an agent joins it (consent to replicate to the canonical).
+  asserts:  within {window:.0f} s the canonical holds the owner's key AND rows the owner signed;
+            over the window the node logs at most {ceilings} of the storm signatures
+            (raw lines + log_dedup folded repeats).""")
+    cnl = mesh.canonical if mesh.canonical is not None else mesh.start_canonical()
+    a = mesh.add("laptop")
+    t0 = time.monotonic()
+    a.claim("fresh-owner")
+    a.announce()
+    a.self_record()
+    a.peer_with(cnl)
+    step("claimed_announced_joined", owner=a.owner_key_id, node=a.node_key_id)
+
+    def owner_rows_at_canonical() -> Optional[Dict[str, int]]:
+        keys = cnl.rows("SELECT count(*) FROM federation_keys WHERE key_id = ?", (a.owner_key_id,))
+        atts = cnl.rows("SELECT count(*) FROM federation_attestations WHERE attesting_key_id = ?",
+                        (a.owner_key_id,))
+        k = sum(int(r[0]) for r in keys) if keys else 0
+        n = sum(int(r[0]) for r in atts) if atts else 0
+        return {"owner_key": k, "owner_rows": n} if (k > 0 and n > 0) else None
+    ok = True
+    try:
+        got = wait_for("the canonical to hold the owner's key and owner-signed rows",
+                       owner_rows_at_canonical, window, every=3)
+        step("owner_rows_admitted", seconds=round(time.monotonic() - t0, 1), **got)
+    except MeshError:
+        ok = False
+        step.fail("owner_rows_NOT_admitted", "a freshly claimed node's owner rows never reached the canonical",
+                  [a, cnl], r"refus|park|parked|item 2|round timed out|occurrence")
+    rest = window - (time.monotonic() - t0)
+    if rest > 0:
+        time.sleep(rest)
+    counts = _storm_counts(a)
+    over = {k: v for k, v in counts.items() if v > ceilings[k]}
+    if over:
+        ok = False
+        step.fail("storm", "the fresh node logged a replication storm", [a], "|".join(_STORM.values()),
+                  counts=counts, ceilings=ceilings)
+    step("storm_counts", counts=counts, ceilings=ceilings, window_s=window)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "storm": counts,
+            "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
     "contact_edges": contact_edges,
+    "fresh_claim": fresh_claim,
     "chat": chat,
     "corpus": corpus,
 }
