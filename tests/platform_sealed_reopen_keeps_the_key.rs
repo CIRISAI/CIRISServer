@@ -79,8 +79,15 @@ fn canary_the_keyring_factory_still_supersedes_a_software_key_on_reopen() {
 
     let tpm_tier_appeared = after.iter().any(|n| n.ends_with(".tpmplugin_seal"));
     if !tpm_tier_appeared {
-        eprintln!("no usable TPM plugin in this process — the re-open stayed on software; nothing to prove here");
-        assert!(opened.is_ok(), "a software re-open must still open the key");
+        // No TPM plugin here, so the canary has nothing to observe. Not asserting
+        // the keyring's own re-open succeeds: on macOS the platform factory picks
+        // the keychain/Secure Enclave tier and cannot see software-tier files at
+        // all (KeyNotFound) — the same stranding, by another route, which is why
+        // the server opens software-tier keys through `key_tier` (tested above).
+        eprintln!(
+            "no usable TPM plugin in this process — canary not applicable (keyring open: {:?})",
+            opened.as_ref().err()
+        );
         return;
     }
     // CANARY. The keyring (verify v20.1.0, f4ea1a2) still supersedes a software
