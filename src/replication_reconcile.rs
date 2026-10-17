@@ -761,6 +761,15 @@ pub fn spawn(
                     // inside reconcile_once.
                     let count = reconciled.count();
                     if let Some((gained, lost)) = note_convergence(&mut last_logged, reconciled) {
+                        if !gained.is_empty() {
+                            crate::receive_axis::pull_on_peers_gained(
+                                &engine,
+                                &runtime,
+                                &node_key_id,
+                                &gained,
+                            )
+                            .await;
+                        }
                         // Name who moved, in both directions. A bare count
                         // ("converged to 2") cannot answer the question an
                         // operator actually has at this line, which is *which*
