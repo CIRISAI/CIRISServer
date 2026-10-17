@@ -131,12 +131,9 @@ pub async fn drive_once(st: &SelfRoomState) -> SelfRoomTick {
     // cross-device self bytes are permanently unavailable on exactly the
     // topology the agent runs. Third instance of this axis in one review; see
     // `drive_auth::owner` and the publish-own set (CIRISServer#629).
-    let node_key = match crate::node_key::wire_identity() {
-        Some(w) => w.to_owned(),
-        None => match st.engine.local_derived_key_id().await {
-            Ok(k) => k,
-            Err(e) => return SelfRoomTick::Failed(format!("resolve this node's key: {e}")),
-        },
+    let node_key = match bound_node_key(st).await {
+        Ok(k) => k,
+        Err(e) => return SelfRoomTick::Failed(e),
     };
     let owner = match st.engine.owner_of(&node_key).await {
         Ok(Some(o)) => o,
@@ -561,6 +558,21 @@ async fn first_rival(
     best
 }
 
+/// The key this node's owner-binding is over: the wire node on a split install
+/// (compose moves the binding off the actor), else the engine's own key. Every
+/// owner lookup in this drive goes through here, so the tick and the pen can
+/// never ask about two different keys again (CIRISServer#628, #783).
+async fn bound_node_key(st: &SelfRoomState) -> Result<String, String> {
+    match crate::node_key::wire_identity() {
+        Some(w) => Ok(w.to_owned()),
+        None => st
+            .engine
+            .local_derived_key_id()
+            .await
+            .map_err(|e| format!("resolve this node's key: {e}")),
+    }
+}
+
 /// Open the owner's pen — the actor a `self` row is crossed as.
 ///
 /// Authorized by the node's OWNER BINDING, not by a session: this is a loop,
@@ -574,7 +586,13 @@ async fn owner_pen(
     owner: &str,
 ) -> Result<crate::owner_signer_capsule::OwnerSignerCapsule, String> {
     let _ = owner; // the binding names the owner; we do not take the caller's word for it
-    crate::owner_signer_capsule::for_owned_node(&st.engine, &st.node_signer.key_id)
+                   // The SAME key the tick resolved its owner through: the wire node, whose
+                   // owner-binding a split moved off the actor. `st.node_signer` is the
+                   // engine's ACTOR key on a split install, so asking the capsule about it
+                   // answered `Unowned` every 30 s on Eric's desktop agent while the tick
+                   // above had just found the owner (CIRISServer#783).
+    let node_key = bound_node_key(st).await?;
+    crate::owner_signer_capsule::for_owned_node(&st.engine, &node_key)
         .await
         .map_err(|e| {
             format!(

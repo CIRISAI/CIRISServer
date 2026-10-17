@@ -117,3 +117,43 @@ fn the_binding_door_verifies_the_seed_derives_the_owner() {
         "an UNCLAIMED node must be refused by name before any seed is opened"
     );
 }
+
+/// **A loop asks about the key its owner-binding is over, never the signer's**
+/// (CIRISServer#783).
+///
+/// On an actor/node split, compose moves the owner-binding from the engine's
+/// ACTOR key onto a minted node key. `self_room_drive` resolved its owner
+/// through the node key (#628) but opened the pen with `st.node_signer.key_id`,
+/// the actor, so `for_owned_node` answered `Unowned` every 30 s on Eric's
+/// desktop agent while the same tick had just found the owner. Any
+/// `for_owned_node` argument naming a signer's key id is that bug again.
+#[test]
+fn no_owner_pen_is_opened_on_a_signer_key() {
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir("src").expect("read src/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.to_string_lossy().to_string();
+        let src = read_src(&name);
+        for needle in ["for_owned_node(", "for_owned_node_in("] {
+            for (i, _) in src.match_indices(needle) {
+                if src[..i].ends_with("fn ") {
+                    continue;
+                }
+                let tail = &src[i..src.len().min(i + 300)];
+                let args = tail.split_once(')').map_or(tail, |(a, _)| a);
+                if args.contains("signer.key_id") || args.contains("local_derived_key_id") {
+                    let line = src[..i].matches('\n').count() + 1;
+                    offenders.push(format!("{name}:{line}"));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "for_owned_node is asked about a SIGNER's key, which is the actor on a split install \
+         and owns nothing: {offenders:?} — pass the bound node key (`wire_identity()`)"
+    );
+}
