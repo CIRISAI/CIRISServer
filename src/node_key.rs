@@ -1031,6 +1031,114 @@ pub async fn heal_owner_key_record(
     Ok(Some(state))
 }
 
+/// **A seated canonical's owner-binding must be announced** (CIRISServer#788).
+///
+/// A node the trust root seats as canonical serves the federation's bootstrap:
+/// every fresh node needs ITS identity occurrence (the KEX keys) and its signed
+/// transport destination. Edge serves an OWNED node's identity rows to
+/// everyone only when its owner-binding is announced (`cohort_scope:
+/// federation`, CIRISEdge#682); the CC ruling (2026-10-17) is that publicity is
+/// the owner's act, so a seated canonical MUST be announced by its owner. The
+/// production canonical sat at `self` from 2026-07-02 and no fresh node ever
+/// completed key exchange with it.
+///
+/// At boot, on a seated canonical only: already announced or unowned → fine;
+/// owned and unannounced with the owner's pen on disk → announced now, signed by
+/// the owner; owned and unannounced without the pen → a loud ERROR naming the
+/// fix. The verdict is also served on the health `node` block
+/// (`canonical_announce`) so a deploy runbook can assert it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeatedAnnounce {
+    /// Not a trust-root-seated canonical: nothing to check.
+    NotSeated,
+    /// Seated and unowned: edge serves its identity rows to everyone already.
+    Unowned,
+    /// Seated, owned, owner-binding already at federation scope.
+    Announced,
+    /// Seated, owned, was unannounced; announced at this boot by the owner.
+    AnnouncedNow { attestation_id: Option<String> },
+    /// Seated, owned, unannounced, and the owner's pen is not on this node.
+    NotAnnounced { owner: String },
+    /// The check itself could not complete.
+    CheckFailed(String),
+}
+
+impl SeatedAnnounce {
+    /// The word served on the health `node` block. `None` off a seated canonical.
+    #[must_use]
+    pub fn word(&self) -> Option<&'static str> {
+        match self {
+            Self::NotSeated => None,
+            Self::Unowned => Some("unowned"),
+            Self::Announced => Some("announced"),
+            Self::AnnouncedNow { .. } => Some("announced"),
+            Self::NotAnnounced { .. } => Some("NOT_ANNOUNCED"),
+            Self::CheckFailed(_) => Some("check_failed"),
+        }
+    }
+}
+
+static SEATED_ANNOUNCE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// The last seated-canonical announce verdict this process reached, if any.
+#[must_use]
+pub fn seated_announce_word() -> Option<&'static str> {
+    *SEATED_ANNOUNCE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// See [`SeatedAnnounce`]. Never fails the boot; the caller logs the verdict.
+pub async fn ensure_seated_canonical_announced(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> SeatedAnnounce {
+    let verdict = seated_announce_inner(engine).await;
+    *SEATED_ANNOUNCE.lock().unwrap_or_else(|p| p.into_inner()) = verdict.word();
+    verdict
+}
+
+async fn seated_announce_inner(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+) -> SeatedAnnounce {
+    let node_key = match wire_identity() {
+        Some(w) => w.to_owned(),
+        None => match engine.local_derived_key_id().await {
+            Ok(k) => k,
+            Err(e) => return SeatedAnnounce::CheckFailed(format!("resolve this node's key: {e}")),
+        },
+    };
+    match engine.is_canonical(&node_key).await {
+        Ok(true) => {}
+        Ok(false) => return SeatedAnnounce::NotSeated,
+        Err(e) => return SeatedAnnounce::CheckFailed(format!("is_canonical({node_key}): {e}")),
+    }
+    let Some(owner) = crate::auth::ownership::is_steward_bound(engine, &node_key).await else {
+        return SeatedAnnounce::Unowned;
+    };
+    match crate::auth::ownership::announced_nodes_of(engine, &owner).await {
+        Ok(nodes) if nodes.iter().any(|n| n == &node_key) => return SeatedAnnounce::Announced,
+        Ok(_) => {}
+        Err(e) => return SeatedAnnounce::CheckFailed(format!("announced_nodes_of({owner}): {e}")),
+    }
+    let pen = match crate::peer::owner_consent_pen(engine, &node_key).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return SeatedAnnounce::NotAnnounced { owner },
+        Err(e) => {
+            tracing::debug!(error = %format!("{e:#}"), "seated canonical: owner pen not resolvable");
+            return SeatedAnnounce::NotAnnounced { owner };
+        }
+    };
+    let Some(signer) = pen.signer.as_ref() else {
+        return SeatedAnnounce::NotAnnounced { owner };
+    };
+    match crate::auth::ownership::promote_owner_binding_to_federation(engine, signer, &node_key)
+        .await
+    {
+        Ok(p) => SeatedAnnounce::AnnouncedNow {
+            attestation_id: p.attestation_id,
+        },
+        Err(e) => SeatedAnnounce::CheckFailed(format!("announce as the owner: {e}")),
+    }
+}
+
 /// The OWNER's acceptance of every trust root this node accepted, written with
 /// the owner's own pen (CIRISServer#632 step 2; CIRISEdge#659's Rooted walk).
 ///

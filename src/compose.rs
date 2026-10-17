@@ -575,6 +575,29 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         }
         Err(e) => tracing::warn!(error = %e, "boot: owner key record heal failed (non-fatal)"),
     }
+    // CIRISServer#788 — a seated canonical must be announced by its owner, or no
+    // fresh node can reach its KEX keys and signed route (CIRISEdge#682).
+    match crate::node_key::ensure_seated_canonical_announced(&engine).await {
+        crate::node_key::SeatedAnnounce::NotSeated => {}
+        crate::node_key::SeatedAnnounce::Unowned => tracing::info!(
+            "boot: seated canonical is unowned — its identity rows reach everyone (tracked: CIRISServer#788)"
+        ),
+        crate::node_key::SeatedAnnounce::Announced => tracing::info!(
+            "boot: seated canonical is ANNOUNCED — its KEX occurrence and route reach every node (tracked: CIRISServer#788)"
+        ),
+        crate::node_key::SeatedAnnounce::AnnouncedNow { attestation_id } => tracing::warn!(
+            attestation_id = ?attestation_id,
+            "boot: seated canonical was NOT announced — announced now, signed by its owner; fresh nodes can now reach its KEX occurrence and route (tracked: CIRISServer#788)"
+        ),
+        crate::node_key::SeatedAnnounce::NotAnnounced { owner } => tracing::error!(
+            owner = %owner,
+            "boot: this node is SEATED as a canonical but its owner-binding is NOT announced and the owner's pen is not on this node — no fresh node can reach its KEX occurrence or signed route, so key exchange with it never completes (tracked: CIRISServer#788, history: CIRISEdge#682). Fix: place the owner's pen for one boot (the node announces itself) or announce it from the owner's device (POST /v1/self/nodes/{{node}}/announce)"
+        ),
+        crate::node_key::SeatedAnnounce::CheckFailed(e) => tracing::warn!(
+            error = %e,
+            "boot: seated canonical announce check could not complete (tracked: CIRISServer#788)"
+        ),
+    }
     match crate::node_key::anchor_agent_to_owner(&engine).await {
         Ok(Some(pair)) => {
             tracing::info!(bilateral_pair_id = %pair, "boot: agent anchored to owner")

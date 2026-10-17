@@ -330,7 +330,7 @@ def _owned_canonical_baseline(mesh: Mesh, args: Any, step: "Steps") -> Record:
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "baseline": True}
 
 
-def mint_accord_root(mesh: Mesh, args: Any, step: "Steps"):
+def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True):
     """Layers 1-2 of the T8 catalogue entry: the 0.5.220 ceremony over the
     routes with THREE software holders, and a canonical rebooted on the minted
     bundle as its baked genesis, claimed and announced. Returns
@@ -398,7 +398,8 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps"):
     # The production canonical is OWNED (the operator's fedID) — an unowned
     # node refuses federation peering.
     c.claim("operator-person")
-    c.announce()
+    if announce:
+        c.announce()
     c.self_record()
     step("canonical_claimed", owner=c.owner_key_id)
     mesh.accord_holders = anchor["holders"]
@@ -1390,11 +1391,152 @@ OWNER KEY WHEN A TPM APPEARS — Eric's desktop, 2026-10-08 (CIRISServer#783, PR
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+def kex_fresh_node(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#788: does a fresh node ever hold the canonical's KEX keys?
+
+    Key exchange reads the canonical's identity OCCURRENCE (X25519 + ML-KEM),
+    and the receive gate admits the canonical's frames only once the node holds
+    its SIGNED transport destination (CIRISEdge#393 item 2). The baked trust
+    root carries neither. Two nodes, one difference:
+      P - production shape: claimed, announced, peers WITH the canonical; the
+          canonical never peers back (it does not in production).
+      Q - harness shape: the same, plus the canonical peers back
+          (`cnl.peer_with(q)`, what most ladders do).
+    PASS only when P holds both rows within the window: the #788 e2e."""
+    step = Steps(kex_fresh_node.__doc__ or "")
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step)
+    if not cnl.node_key_id:
+        cnl.self_record()
+    ck = cnl.node_key_id  # the REGISTERED id; `key_id` is the keystore alias
+
+    def held(n: Node) -> Dict[str, int]:
+        occ = n.rows("SELECT count(*) FROM federation_identity_occurrences "
+                     "WHERE occurrence_key_id = ? AND pubkey_x25519_base64 IS NOT NULL", (ck,))
+        route = n.rows("SELECT count(*) FROM transport_destinations "
+                       "WHERE occurrence_key_id = ? AND signature IS NOT NULL", (ck,))
+        return {"kex_occurrence": sum(r[0] for r in occ), "signed_route": sum(r[0] for r in route)}
+
+    p = mesh.add("prodshape")
+    p.claim("p-person")
+    p.announce()
+    p.self_record()
+    p.peer_with(cnl)
+    q = mesh.add("harnessshape")
+    q.claim("q-person")
+    q.announce()
+    q.self_record()
+    q.peer_with(cnl)
+    cnl.peer_with(q)
+    step("peered", p="node -> canonical only", q="node -> canonical AND canonical -> node")
+
+    window = float(getattr(args, "arrive_wait", 90) or 90)
+    t0 = time.monotonic()
+    first: Dict[str, Optional[float]] = {"P": None, "Q": None}
+    seen: Dict[str, Dict[str, int]] = {}
+    while time.monotonic() - t0 < window:
+        for tag, n in (("P", p), ("Q", q)):
+            seen[tag] = held(n)
+            if first[tag] is None and seen[tag]["kex_occurrence"] and seen[tag]["signed_route"]:
+                first[tag] = round(time.monotonic() - t0, 1)
+        if first["P"] is not None and first["Q"] is not None:
+            break
+        time.sleep(3)
+    dropped = {tag: len([l for l in n.grep(r"item 2 FAILED") if ck in l]) for tag, n in (("P", p), ("Q", q))}
+    step("held", window_s=window, P=seen.get("P"), Q=seen.get("Q"),
+         P_kex_at_s=first["P"], Q_kex_at_s=first["Q"], canonical_frames_dropped=dropped,
+         proves="which peering shape delivers the canonical's KEX occurrence and signed route")
+    ok = first["P"] is not None
+    if not ok:
+        step.fail("prod_shape_kex", "a node peered the production way never holds the canonical's KEX "
+                  "occurrence and signed route — key exchange cannot complete (CIRISServer#788)",
+                  [p, cnl], r"item 2 FAILED|SignedTransportDestination|rooting_unknown_key_id")
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
+def kex_unannounced_canonical(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#788, production-faithful: the canonical is claimed by its
+    owner but NOT announced (production sat at `cohort_scope: self` from
+    2026-07-02). Edge serves an owned node's identity rows to everyone only once
+    it is announced (CIRISEdge#682), so a fresh node cannot reach the
+    canonical's KEX occurrence or signed route. Then the canonical restarts with
+    its owner's pen on disk: the boot check must announce it, signed by the
+    owner, and the fresh node must then hold both rows.
+      phase 1  unannounced  → the fresh node does NOT hold them (the field bug)
+      restart  boot check   → `canonical_announce: announced` on /health
+      phase 2  announced    → the fresh node holds both rows"""
+    step = Steps(kex_unannounced_canonical.__doc__ or "")
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step, announce=False)
+    if not cnl.node_key_id:
+        cnl.self_record()
+    ck = cnl.node_key_id
+
+    def held(n: Node) -> Dict[str, int]:
+        occ = n.rows("SELECT count(*) FROM federation_identity_occurrences "
+                     "WHERE occurrence_key_id = ? AND pubkey_x25519_base64 IS NOT NULL", (ck,))
+        route = n.rows("SELECT count(*) FROM transport_destinations "
+                       "WHERE occurrence_key_id = ? AND signature IS NOT NULL", (ck,))
+        return {"kex_occurrence": sum(r[0] for r in occ), "signed_route": sum(r[0] for r in route)}
+
+    def node_block(n: Node) -> Dict[str, Any]:
+        st, body = n.api("GET", "/health")
+        return (body or {}).get("node", {}) if isinstance(body, dict) else {}
+
+    p = mesh.add("fresh")
+    p.claim("fresh-person")
+    p.announce()
+    p.self_record()
+    p.peer_with(cnl)
+    ok = True
+
+    phase1 = float(getattr(args, "unannounced_wait", 45) or 45)
+    t0 = time.monotonic()
+    got1 = held(p)
+    while time.monotonic() - t0 < phase1 and not (got1["kex_occurrence"] and got1["signed_route"]):
+        time.sleep(3)
+        got1 = held(p)
+    leaked = bool(got1["kex_occurrence"] and got1["signed_route"])
+    step("phase1_unannounced", held=got1, window_s=phase1, canonical_node_block=node_block(cnl),
+         proves="an owned, unannounced canonical withholds its KEX occurrence and route from a fresh node")
+    if leaked:
+        ok = False
+        step.fail("phase1_unannounced", "the fresh node received the canonical's rows while the canonical "
+                  "was unannounced — the scenario does not reproduce the field condition", [p, cnl],
+                  r"IdentityRowNodeNotAnnounced|announce")
+
+    cnl.stop()
+    cnl.start()
+    blk = node_block(cnl)
+    announced_line = cnl.grep(r"seated canonical (was NOT announced — announced now|is ANNOUNCED)")
+    step("canonical_restarted", canonical_announce=blk.get("canonical_announce"),
+         boot_line=(announced_line[-1][-220:] if announced_line else None))
+    if blk.get("canonical_announce") != "announced":
+        ok = False
+        step.fail("canonical_announce", "the seated canonical did not announce itself at boot with its "
+                  "owner's pen on disk (CIRISServer#788)", [cnl], r"seated canonical")
+
+    phase2 = float(getattr(args, "arrive_wait", 120) or 120)
+    t0 = time.monotonic()
+    got2 = held(p)
+    while time.monotonic() - t0 < phase2 and not (got2["kex_occurrence"] and got2["signed_route"]):
+        time.sleep(3)
+        got2 = held(p)
+    arrived = bool(got2["kex_occurrence"] and got2["signed_route"])
+    step("phase2_announced", held=got2, after_s=round(time.monotonic() - t0, 1),
+         proves="once announced, a fresh node holds the canonical's KEX occurrence and signed route")
+    if not arrived:
+        ok = False
+        step.fail("phase2_announced", "the canonical is announced but the fresh node still lacks its KEX "
+                  "occurrence or signed route", [p, cnl], r"item 2 FAILED|IdentityRow|announce")
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
     "add_device": add_device,
+    "kex_fresh_node": kex_fresh_node,
+    "kex_unannounced_canonical": kex_unannounced_canonical,
     "contact_edges": contact_edges,
     "fresh_claim": fresh_claim,
     "owner_key_tpm_appears": owner_key_tpm_appears,

@@ -137,6 +137,68 @@ pub async fn pull_owner_testimony(engine: &Arc<Engine>, node_key_id: &str) -> Pu
     }
 }
 
+/// **Ask each newly gained peer for what it holds that bears on us**
+/// (CIRISServer#788).
+///
+/// Two subjects per peer, both through edge's subject-scoped `Pull`
+/// (CIRISEdge#462), never through the advertised walk:
+///
+/// 1. **The peer itself.** Its key record, identity occurrence (the KEX
+///    keys) and signed transport destination are public subject-pull kinds
+///    (CIRISEdge#552), so any attributed requester may name them. Before this,
+///    a fresh node only met the canonical's own occurrence if it happened to
+///    sit in the first page of the canonical's advertised walk: on production
+///    it sits behind 1,993 other rows, and key exchange never completed.
+/// 2. **This node's owner**, when it has one: every record about or by the
+///    owner's fedID the peer holds, which brings the owner's other announced
+///    devices and agents.
+///
+/// Called by both reconcile loops on a GAIN in the consent peer set
+/// ([`crate::replication_reconcile::note_convergence`]). The first tick after
+/// boot gains every peer, so a boot asks every peer once. Fire-and-forget:
+/// replies converge through the ordinary round loop. Returns the
+/// `(peer, subject)` pairs that could not be sent.
+pub async fn pull_on_peers_gained(
+    engine: &Arc<Engine>,
+    runtime: &Arc<ciris_edge::replication::ReplicationRuntime>,
+    node_key_id: &str,
+    gained: &[String],
+) -> Vec<(String, String)> {
+    let own = own_keys(node_key_id);
+    let owner = owner_of_any(engine, &own).await;
+    let mut failed = Vec::new();
+    for peer in gained {
+        if own.contains(peer) {
+            continue;
+        }
+        let mut subjects = vec![peer.clone()];
+        if let Some(o) = owner.as_ref() {
+            if o != peer {
+                subjects.push(o.clone());
+            }
+        }
+        for subject in &subjects {
+            if let Err(e) = runtime.pull_subject_testimony(peer, subject).await {
+                tracing::warn!(
+                    peer = %peer,
+                    subject = %subject,
+                    error = %e,
+                    "peering pull FAILED — this peer was not asked for the records bearing on \
+                     this subject (tracked: CIRISServer#788)"
+                );
+                failed.push((peer.clone(), subject.clone()));
+            }
+        }
+        tracing::info!(
+            peer = %peer,
+            subjects = %subjects.join(", "),
+            "peering pull DISPATCHED — asked a newly gained peer for its own key, occurrence \
+             and route, and for every record bearing on this node's owner (tracked: CIRISServer#788)"
+        );
+    }
+    failed
+}
+
 /// **This node's own keys**, the caller's first, deduped: the key the caller
 /// names, the wire identity (the NODE key on a split install) and the actor
 /// identity. A read keyed on "this node's key" must fold over all of them — the
