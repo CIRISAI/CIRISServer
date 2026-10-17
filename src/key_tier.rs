@@ -313,19 +313,56 @@ pub fn pin_process_tier(home: &Path) -> HomeTier {
 }
 
 /// The embedded entry (PyO3 module init): the agent builds its persist Engine
-/// — which opens keys — before any serve call names a home, so pin every home
-/// this process could be serving: `CIRIS_HOME`, else the agent default `~/ciris`.
+/// — which opens keys — before any serve call names a home, so pin the home
+/// this process will be serving now.
+///
+/// **Exactly one home is inspected:** `CIRIS_HOME` when it is set, else the
+/// agent default `~/ciris`. A set `CIRIS_HOME` is the caller naming its home,
+/// so the default is never read then — a harness or test that points
+/// `CIRIS_HOME` at a scratch dir does not inherit a tier decision made
+/// against the user's real home (CIRISAgent on 0.5.228). Read-only: the scan
+/// lists file NAMES under `identity/` and `keys/`; the only effect is
+/// `CIRIS_TPM_PLUGIN` in this process's environment.
 pub fn pin_process_tier_at_import() {
-    let mut homes: Vec<PathBuf> = Vec::new();
-    if let Some(h) = std::env::var_os("CIRIS_HOME") {
-        homes.push(PathBuf::from(h));
-    }
-    if let Some(h) = std::env::var_os("HOME") {
-        homes.push(PathBuf::from(h).join("ciris"));
-    }
-    for h in homes {
-        if h.is_dir() && pin_process_tier(&h) == HomeTier::PinnedSoftware {
-            return;
+    if let Some(h) = import_home(std::env::var_os("CIRIS_HOME"), std::env::var_os("HOME")) {
+        if h.is_dir() {
+            pin_process_tier(&h);
         }
+    }
+}
+
+/// The ONE home [`pin_process_tier_at_import`] inspects.
+fn import_home(
+    ciris_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    match ciris_home {
+        Some(h) if !h.is_empty() => Some(PathBuf::from(h)),
+        _ => home.map(|h| PathBuf::from(h).join("ciris")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::import_home;
+    use std::path::PathBuf;
+
+    /// A set `CIRIS_HOME` is the only home inspected: the user's default
+    /// `~/ciris` is never read then (CIRISAgent on 0.5.228).
+    #[test]
+    fn a_set_ciris_home_is_the_only_home_inspected() {
+        assert_eq!(
+            import_home(Some("/scratch/h".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/scratch/h"))
+        );
+        assert_eq!(
+            import_home(None, Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/ciris"))
+        );
+        assert_eq!(
+            import_home(Some("".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/ciris"))
+        );
+        assert_eq!(import_home(None, None), None);
     }
 }
