@@ -1404,7 +1404,9 @@ def kex_fresh_node(mesh: Mesh, args: Any) -> Record:
     PASS only when P holds both rows within the window: the #788 e2e."""
     step = Steps(kex_fresh_node.__doc__ or "")
     cnl, _anchor, _done = mint_accord_root(mesh, args, step)
-    ck = cnl.key_id
+    if not cnl.node_key_id:
+        cnl.self_record()
+    ck = cnl.node_key_id  # the REGISTERED id; `key_id` is the keystore alias
 
     def held(n: Node) -> Dict[str, int]:
         occ = n.rows("SELECT count(*) FROM federation_identity_occurrences "
