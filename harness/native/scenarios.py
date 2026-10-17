@@ -1390,11 +1390,72 @@ OWNER KEY WHEN A TPM APPEARS — Eric's desktop, 2026-10-08 (CIRISServer#783, PR
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+def kex_fresh_node(mesh: Mesh, args: Any) -> Record:
+    """CIRISServer#788: does a fresh node ever hold the canonical's KEX keys?
+
+    Key exchange reads the canonical's identity OCCURRENCE (X25519 + ML-KEM),
+    and the receive gate admits the canonical's frames only once the node holds
+    its SIGNED transport destination (CIRISEdge#393 item 2). The baked trust
+    root carries neither. Two nodes, one difference:
+      P - production shape: claimed, announced, peers WITH the canonical; the
+          canonical never peers back (it does not in production).
+      Q - harness shape: the same, plus the canonical peers back
+          (`cnl.peer_with(q)`, what most ladders do).
+    PASS only when P holds both rows within the window: the #788 e2e."""
+    step = Steps(kex_fresh_node.__doc__ or "")
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step)
+    ck = cnl.key_id
+
+    def held(n: Node) -> Dict[str, int]:
+        occ = n.rows("SELECT count(*) FROM federation_identity_occurrences "
+                     "WHERE occurrence_key_id = ? AND pubkey_x25519_base64 IS NOT NULL", (ck,))
+        route = n.rows("SELECT count(*) FROM transport_destinations "
+                       "WHERE occurrence_key_id = ? AND signature IS NOT NULL", (ck,))
+        return {"kex_occurrence": sum(r[0] for r in occ), "signed_route": sum(r[0] for r in route)}
+
+    p = mesh.add("prodshape")
+    p.claim("p-person")
+    p.announce()
+    p.self_record()
+    p.peer_with(cnl)
+    q = mesh.add("harnessshape")
+    q.claim("q-person")
+    q.announce()
+    q.self_record()
+    q.peer_with(cnl)
+    cnl.peer_with(q)
+    step("peered", p="node -> canonical only", q="node -> canonical AND canonical -> node")
+
+    window = float(getattr(args, "arrive_wait", 90) or 90)
+    t0 = time.monotonic()
+    first: Dict[str, Optional[float]] = {"P": None, "Q": None}
+    seen: Dict[str, Dict[str, int]] = {}
+    while time.monotonic() - t0 < window:
+        for tag, n in (("P", p), ("Q", q)):
+            seen[tag] = held(n)
+            if first[tag] is None and seen[tag]["kex_occurrence"] and seen[tag]["signed_route"]:
+                first[tag] = round(time.monotonic() - t0, 1)
+        if first["P"] is not None and first["Q"] is not None:
+            break
+        time.sleep(3)
+    dropped = {tag: len([l for l in n.grep(r"item 2 FAILED") if ck in l]) for tag, n in (("P", p), ("Q", q))}
+    step("held", window_s=window, P=seen.get("P"), Q=seen.get("Q"),
+         P_kex_at_s=first["P"], Q_kex_at_s=first["Q"], canonical_frames_dropped=dropped,
+         proves="which peering shape delivers the canonical's KEX occurrence and signed route")
+    ok = first["P"] is not None
+    if not ok:
+        step.fail("prod_shape_kex", "a node peered the production way never holds the canonical's KEX "
+                  "occurrence and signed route — key exchange cannot complete (CIRISServer#788)",
+                  [p, cnl], r"item 2 FAILED|SignedTransportDestination|rooting_unknown_key_id")
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
     "add_device": add_device,
+    "kex_fresh_node": kex_fresh_node,
     "contact_edges": contact_edges,
     "fresh_claim": fresh_claim,
     "owner_key_tpm_appears": owner_key_tpm_appears,
