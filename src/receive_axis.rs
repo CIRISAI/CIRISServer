@@ -184,7 +184,7 @@ pub async fn pull_on_peers_gained(
                     subject = %subject,
                     error = %e,
                     "peering pull FAILED — this peer was not asked for the records bearing on \
-                     this subject (CIRISServer#788)"
+                     this subject (tracked: CIRISServer#788)"
                 );
                 failed.push((peer.clone(), subject.clone()));
             }
@@ -193,7 +193,7 @@ pub async fn pull_on_peers_gained(
             peer = %peer,
             subjects = %subjects.join(", "),
             "peering pull DISPATCHED — asked a newly gained peer for its own key, occurrence \
-             and route, and for every record bearing on this node's owner (CIRISServer#788)"
+             and route, and for every record bearing on this node's owner (tracked: CIRISServer#788)"
         );
     }
     failed

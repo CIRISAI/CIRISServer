@@ -91,6 +91,16 @@ fn home_fingerprint(abs: &Path) -> String {
 /// cannot disagree on a shared field (the axis-fusion guard: two readers of
 /// one fact must be one renderer).
 fn render(resolved: Option<&Resolved>) -> serde_json::Value {
+    let mut v = render_base(resolved);
+    // CIRISServer#788 — only on a trust-root-seated canonical: whether its
+    // owner-binding is announced, so a deploy runbook can assert it.
+    if let (Some(word), Some(obj)) = (crate::node_key::seated_announce_word(), v.as_object_mut()) {
+        obj.insert("canonical_announce".into(), serde_json::Value::from(word));
+    }
+    v
+}
+
+fn render_base(resolved: Option<&Resolved>) -> serde_json::Value {
     let (id, started) = instance();
     let started = started.to_rfc3339_opts(SecondsFormat::Millis, true);
     match resolved {
