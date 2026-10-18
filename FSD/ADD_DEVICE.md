@@ -95,6 +95,7 @@ A verified approval is **held** in memory and on disk (`<home>/add_device_pendin
 |---|---|---|
 | `POST /v1/setup/add-device` | `{contact, label?}` — `contact` is the QR/long form/short form | `{state: "requested", match_code, target_node}` or a typed refusal |
 | `GET /v1/setup/add-device` | — | `{state: idle\|requested\|approved\|applied\|denied\|expired\|failed, match_code, owner_key_id, detail}`. `idle` = no request on this boot. `approved` = verified and held, not yet applied. `expired` = the request lapsed here (15 min) or the other device no longer holds it. |
+| `DELETE /v1/setup/add-device` | — | The person changed their mind: retires the poll, discards a held approval and the request's never-used keys, and sends the other device a **withdraw** (`op: "withdraw"`, same sender and challenge only). The other device drops a pending request; an approved one is **undone** there (its occurrence revoked and owner-binding withdrawn, by `evict_device` under the owner-binding's loop authority). Answers `{state: "idle", detail: "cancelled"}`; 409 `add_device.already_owned` once the claim applied. |
 | `POST /v1/setup/add-device/complete` | — | Applies the held approval at the end of first run: `{state: "applied", …}`, or 409 `add_device.not_approved`, or 502 `add_device.apply_failed`. |
 
 After `complete` answers `applied`, the wizard collects its session with the existing
@@ -151,7 +152,7 @@ After `complete` answers `applied`, the wizard collects its session with the exi
 
 ### On the wire — opaque kind `0x0000_0002`
 
-JSON payloads, `op` discriminated: `join` and `status` (B → A); answers carry `status`
+JSON payloads, `op` discriminated: `join`, `status` and `withdraw` (B → A); answers carry `status`
 `pending | approved | denied | unknown | not_accepting`.
 
 ## 5. What already exists and is reused

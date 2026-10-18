@@ -989,9 +989,13 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
     cnl.peer_with(a)
     b = mesh.add("newdev")
     c = mesh.add("stranger")
+    d = mesh.add("changer")   # withdraws before approval (8)
+    e = mesh.add("regret")    # withdraws after approval (9)
     b_pin = (b.home / "claim_pin").read_text().strip()
     b.self_record()
     c.self_record()
+    d.self_record()
+    e.self_record()
     step("booted", alice_owner=a.owner_key_id, b_node=b.node_key_id, c_node=c.node_key_id)
 
     # A self file on A before anything joins.
@@ -1140,6 +1144,56 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
             step.fail("deny", "a denied stranger reads denied and frees its slot", [a, c], r"device-join",
                       c_state=got, still_pending=left)
         step("stranger_denied", c_state=got.get("state"), pending_after=len(left))
+
+    # (8) a device that changes its mind BEFORE approval: DELETE on the new
+    # device drops the request from the owner's list (the Withdraw op).
+    d_code, _ = ask(d, "changed my mind")
+    in_list = lambda: next((r for r in a.must("GET", "/v1/self/device-requests").get("requests", [])
+                            if r.get("node_key_id") == d.node_key_id), None)
+    seen = in_list() is not None
+    c_code2, c_body2 = d.api("DELETE", "/v1/setup/add-device")
+    try:
+        wait_for("A to drop the withdrawn request", lambda: True if in_list() is None else None, 60, every=2)
+        dropped = True
+    except MeshError:
+        dropped = False
+    if d_code != 202 or not seen or c_code2 != 200 or (c_body2 or {}).get("state") != "idle" or not dropped:
+        ok = False
+        step.fail("withdraw_pending", "a pending request withdrawn by its device leaves the owner's list", [a, d],
+                  r"device-join|add-device", request=d_code, seen=seen, cancel=c_code2, body=c_body2,
+                  dropped=dropped)
+    step("withdrawn_pending_dropped", request=d_code, seen_before=seen, cancel_status=c_code2, dropped=dropped)
+
+    # (9) a device that changes its mind AFTER approval: the owner's device
+    # evicts what it recorded (B's occurrence revoked) — nothing lingers.
+    e_code, _ = ask(e, "regret")
+    e_row = in_row = next((r for r in a.must("GET", "/v1/self/device-requests").get("requests", [])
+                           if r.get("node_key_id") == e.node_key_id), None)
+    occ_e = None
+    if e_row:
+        occ_e = a.must("POST", f"/v1/self/device-requests/{e_row['request_id']}/approve").get("occurrence_key_id")
+        try:
+            wait_for("E to verify and hold", lambda: (lambda st: st if st.get("state") == "approved" else None)(
+                e.must("GET", "/v1/setup/add-device")), args.arrive_wait, every=2)
+        except MeshError:
+            pass
+    e_cancel, _ = e.api("DELETE", "/v1/setup/add-device")
+    revq = ("SELECT count(*) FROM federation_identity_occurrence_revocations "
+            "WHERE identity_key_id = ? AND occurrence_key_id = ?")
+    def revoked() -> Optional[bool]:
+        n = sum(int(r[0]) for r in a.rows(revq, (a.owner_key_id, occ_e or "")))
+        return True if n >= 1 else None
+    try:
+        wait_for("A to revoke the withdrawn device's occurrence", revoked, 90, every=3)
+        is_revoked = True
+    except MeshError:
+        is_revoked = False
+    if e_code != 202 or not occ_e or e_cancel != 200 or not is_revoked:
+        ok = False
+        step.fail("withdraw_approved", "an approval withdrawn by its device is undone on the owner's device "
+                  "(occurrence revoked)", [a, e], r"device-join|evict|revok", request=e_code, occurrence=occ_e,
+                  cancel=e_cancel, revoked=is_revoked)
+    step("withdrawn_approval_undone", occurrence=occ_e, cancel_status=e_cancel, revoked_on_a=is_revoked)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
