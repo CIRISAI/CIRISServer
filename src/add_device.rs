@@ -491,7 +491,10 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         node_code: st.node_code.clone(),
         challenge: challenge.clone(),
         label,
-        device_class: crate::auth::occurrence::DEVICE_CLASS_LAPTOP.into(),
+        // The HOST's class (desktop launcher: laptop; mobile: phone; headless:
+        // server), not a constant: it is what the owner sees and what the
+        // occurrence records (CIRISClient#189).
+        device_class: crate::backend::host_device_class().into(),
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
     }));
@@ -637,6 +640,19 @@ async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, as
             }
             Ok(JoinAnswer::Denied) => {
                 set_progress(|p| p.state = "denied".into());
+                return;
+            }
+            // The approving device no longer holds this request: it expired
+            // there (15 min undecided, or an approval not collected within 15
+            // min of the decision). Name it `expired`, not `failed`, so the
+            // wizard can say why (CIRISClient#189).
+            Ok(JoinAnswer::Unknown) => {
+                set_progress(|p| {
+                    p.state = "expired".into();
+                    p.detail = Some(
+                        "your other device no longer holds this request — send a new one".into(),
+                    );
+                });
                 return;
             }
             Ok(other) => {

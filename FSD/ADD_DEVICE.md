@@ -94,7 +94,7 @@ A verified approval is **held** in memory and on disk (`<home>/add_device_pendin
 | Route | Body | Answer |
 |---|---|---|
 | `POST /v1/setup/add-device` | `{contact, label?}` — `contact` is the QR/long form/short form | `{state: "requested", match_code, target_node}` or a typed refusal |
-| `GET /v1/setup/add-device` | — | `{state: requested\|approved\|applied\|denied\|expired\|failed, match_code, owner_key_id, detail}`. `approved` = verified and held, not yet applied. |
+| `GET /v1/setup/add-device` | — | `{state: idle\|requested\|approved\|applied\|denied\|expired\|failed, match_code, owner_key_id, detail}`. `idle` = no request on this boot. `approved` = verified and held, not yet applied. `expired` = the request lapsed here (15 min) or the other device no longer holds it. |
 | `POST /v1/setup/add-device/complete` | — | Applies the held approval at the end of first run: `{state: "applied", …}`, or 409 `add_device.not_approved`, or 502 `add_device.apply_failed`. |
 
 After `complete` answers `applied`, the wizard collects its session with the existing
@@ -126,6 +126,28 @@ After `complete` answers `applied`, the wizard collects its session with the exi
 | `add_device.approve_failed` | the approval could not be signed and recorded |
 | `add_device.not_approved` | your other device has not approved this one yet |
 | `add_device.apply_failed` | the approval could not be applied on this device |
+
+### 4.2 Restarts, and the HTTP status of every refusal
+
+**Restarts.** Only an `approved` request survives a restart of the new device: the verified approval is held on disk and the status answers `approved` again after boot. A restart while `requested` comes back as `idle`. The minted request keys were never used, so the wizard sends a new request, and the other device's stale entry expires on its own.
+
+| id | HTTP | when |
+|---|---|---|
+| `add_device.already_owned` | 409 | this device already has an owner |
+| `add_device.not_accepting` | 409 | the other device has not opened Add a device |
+| `add_device.not_approved` | 409 | `complete` before the approval |
+| `add_device.unknown_identity` | 404 | the entered fedID does not resolve |
+| `add_device.no_device` | 404 | the code names no device to ask |
+| `add_device.request_unknown` | 404 | approve/deny of a request the owner's device no longer holds |
+| `add_device.unreachable` | 502 | the other device could not be reached |
+| `add_device.unexpected` | 502 | the other device answered something unrecognised |
+| `add_device.apply_failed` | 502 | applying the held approval failed (`detail` says why) |
+| `add_device.no_transport` | 503 | no mesh transport on this device |
+| `add_device.mint_failed` | 500 | minting or registering this device's keys failed (`detail` says why) |
+| `add_device.rng` | 500 | no randomness for the challenge |
+| `add_device.approve_failed` | 500 | the owner's device could not sign or record the approval |
+
+**The claim carries no owner password.** It is the owner-binding through `setup/root` with the device's own claim PIN. A host that also keeps a local account (the agent) must not assume a password-claimed node on this path.
 
 ### On the wire — opaque kind `0x0000_0002`
 
