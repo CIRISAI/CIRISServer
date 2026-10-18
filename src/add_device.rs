@@ -117,6 +117,12 @@ pub struct Approval {
     pub claimer_key_record: Option<SignedKeyRecord>,
     /// B's occurrence under the owner's self, signed by the owner.
     pub occurrence: SignedIdentityOccurrence,
+    /// The owner's full v3 code (key id, Ed25519 key, ML-DSA-65 commitment, and
+    /// the approving node with its transport key). The signer is REMOTE, so B
+    /// validates the whole approval against this and the fedID the person
+    /// entered, offline: no canonical lookup.
+    #[serde(default)]
+    pub owner_code: Option<String>,
 }
 
 /// N1: the matching code, derived by A from (requester key, challenge). Six
@@ -323,6 +329,10 @@ pub struct JoinProgress {
     pub target_node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence_key_id: Option<String>,
+    /// The identity this device is joining, once the owner's approval verified.
+    /// The wizard SHOWS it; it never asks for a fedID name on this path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -522,6 +532,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             match_code: Some(code.clone()),
             target_node: Some(target.clone()),
             occurrence_key_id: Some(keyset.key_id.clone()),
+            owner_key_id: None,
             detail: None,
         }
     });
@@ -529,10 +540,14 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     tokio::spawn(poll_until_answered(
         st,
         edge,
-        target.clone(),
-        request_id,
-        challenge,
-        alias,
+        Asked {
+            target: target.clone(),
+            request_id,
+            challenge,
+            alias,
+            expected_owner: subject.fed_id.clone(),
+            occurrence_key: keyset.key_id.clone(),
+        },
     ));
     (
         StatusCode::ACCEPTED,
@@ -541,15 +556,29 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         .into_response()
 }
 
-/// B's poll: ask until the owner answers, then apply (binding first, N4).
-async fn poll_until_answered(
-    st: AddDeviceState,
-    edge: Arc<ciris_edge::Edge>,
+/// One outstanding join request on B: where it went and what it expects back.
+struct Asked {
     target: String,
     request_id: String,
     challenge: String,
+    /// The alias B minted its occurrence keys under.
     alias: String,
-) {
+    /// The fedID the person entered; the approval must be for exactly it.
+    expected_owner: String,
+    /// The occurrence key B minted; the owner's occurrence must name it.
+    occurrence_key: String,
+}
+
+/// B's poll: ask until the owner answers, then verify and hold (§2.1).
+async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, asked: Asked) {
+    let Asked {
+        target,
+        request_id,
+        challenge,
+        alias,
+        expected_owner,
+        occurrence_key,
+    } = asked;
     let deadline = Instant::now() + REQUEST_TTL;
     while Instant::now() < deadline {
         tokio::time::sleep(POLL_EVERY).await;
@@ -575,14 +604,26 @@ async fn poll_until_answered(
         match serde_json::from_slice::<JoinAnswer>(&x.response.payload) {
             Ok(JoinAnswer::Pending { .. }) => continue,
             Ok(JoinAnswer::Approved(a)) => {
-                set_progress(|p| p.state = "approved".into());
-                match apply(&st, *a, &alias).await {
-                    Ok(()) => {
-                        set_progress(|p| p.state = "applied".into());
-                        tracing::info!("add-device: APPLIED — this device is now an occurrence of its owner's identity");
+                // VALIDATE now, APPLY at the end of the wizard: the claim then
+                // lands at the same point in first run as a new identity's.
+                match preflight(&st, &a, &expected_owner, &occurrence_key) {
+                    Ok(owner) => {
+                        let held = Pending {
+                            approval: *a,
+                            alias: alias.clone(),
+                            owner: owner.clone(),
+                        };
+                        if let Err(e) = hold(&st, held) {
+                            tracing::warn!(error = %e, "add-device: verified approval could not be kept on disk; held in memory only");
+                        }
+                        set_progress(|p| {
+                            p.state = "approved".into();
+                            p.owner_key_id = Some(owner.clone());
+                        });
+                        tracing::info!(owner = %owner, "add-device: the owner's approval VERIFIED offline and HELD — the claim applies when first run completes (POST /v1/setup/add-device/complete)");
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "add-device: the owner approved but applying failed");
+                        tracing::warn!(error = %e, "add-device: the owner's approval did NOT verify — nothing applied");
                         set_progress(|p| {
                             p.state = "failed".into();
                             p.detail = Some(e);
@@ -606,6 +647,235 @@ async fn poll_until_answered(
         }
     }
     set_progress(|p| p.state = "expired".into());
+}
+
+// ─── B: validate now, apply at the end of first run ────────────────────────
+
+/// A verified approval waiting for the wizard to finish.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Pending {
+    approval: Approval,
+    alias: String,
+    owner: String,
+}
+
+fn pending() -> &'static Mutex<Option<Pending>> {
+    static P: OnceLock<Mutex<Option<Pending>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
+fn pending_path(st: &AddDeviceState) -> std::path::PathBuf {
+    st.identity_dir
+        .parent()
+        .unwrap_or(&st.identity_dir)
+        .join("add_device_pending.json")
+}
+
+/// Keep a verified approval in memory and on disk (0600), so a restart mid-
+/// wizard still completes. It holds only public, signed material.
+fn hold(st: &AddDeviceState, p: Pending) -> Result<(), String> {
+    let path = pending_path(st);
+    let bytes = serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?;
+    if let Ok(mut g) = pending().lock() {
+        *g = Some(p);
+    }
+    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// On boot: a verified approval written before a restart is held again.
+fn restore_pending(st: &AddDeviceState) {
+    let path = pending_path(st);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    match serde_json::from_slice::<Pending>(&bytes) {
+        Ok(p) => {
+            let owner = p.owner.clone();
+            if let Ok(mut g) = pending().lock() {
+                *g = Some(p);
+            }
+            set_progress(|pr| {
+                pr.state = "approved".into();
+                pr.owner_key_id = Some(owner);
+            });
+            tracing::info!(path = %path.display(), "add-device: a verified approval from before this boot is HELD — complete first run to apply it");
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "add-device: unreadable held approval ignored")
+        }
+    }
+}
+
+/// **Verify the owner's approval offline, without applying it.** The signer is
+/// remote, so everything is checked against the owner's v3 code carried in the
+/// approval and the fedID the person entered:
+/// 1. the approval pins THIS node's NodeCode;
+/// 2. the v3 code names the identity the person entered;
+/// 3. the code's fedID fingerprint matches its Ed25519 key;
+/// 4. the binding's Ed25519 key is the code's, and its full ML-DSA-65 key
+///    matches the code's commitment;
+/// 5. the owner-binding verifies (structure + hybrid signature, Strict);
+/// 6. the occurrence names this identity and this device's minted key, and its
+///    hybrid signature verifies under the same owner keys;
+/// 7. this device still has its claim PIN (local presence for the apply).
+///
+/// Returns the owner's fedID.
+fn preflight(
+    st: &AddDeviceState,
+    a: &Approval,
+    expected_owner: &str,
+    occurrence_key: &str,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    use ciris_verify_core::fedcode;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    if a.node_code != st.node_code {
+        return Err("the approval pins a different node than this one".into());
+    }
+    let node_key = crate::nodecode::decode(&st.node_code)
+        .map_err(|e| format!("this node's own NodeCode: {e}"))?
+        .key_id;
+    let code = a
+        .owner_code
+        .as_deref()
+        .ok_or("the approval carries no owner code (v3); the approving device must be upgraded")?;
+    let fc = fedcode::decode(code).map_err(|e| format!("the owner's code: {e}"))?;
+    if fc.key_id != expected_owner {
+        return Err(format!(
+            "the approval is for {} but you entered {expected_owner}",
+            fc.key_id
+        ));
+    }
+    let ed = b64
+        .decode(&fc.pubkey_ed25519_base64)
+        .map_err(|e| format!("the code's Ed25519 key: {e}"))?;
+    let derived = fedcode::derive_key_id("x", &ed);
+    let fp = derived.rsplit('-').next().unwrap_or_default();
+    if fp.is_empty() || !fc.key_id.ends_with(fp) {
+        return Err("the code's fedID does not match its own Ed25519 key".into());
+    }
+    let b = &a.owner_binding;
+    if b.attesting_key_id != fc.key_id {
+        return Err("the owner-binding is signed by someone other than the code's identity".into());
+    }
+    if b.ed25519_pubkey_b64 != fc.pubkey_ed25519_base64 {
+        return Err("the owner-binding's Ed25519 key is not the code's".into());
+    }
+    let pqc = b64
+        .decode(&b.ml_dsa_65_pubkey_b64)
+        .map_err(|e| format!("the owner-binding's ML-DSA-65 key: {e}"))?;
+    fedcode::AdmittedHybridKey::admit(&fc, &pqc)
+        .map_err(|e| format!("the owner's ML-DSA-65 key vs the code's commitment: {e}"))?;
+    crate::auth::ownership::verify_signed_owner_binding(&node_key, st.policy, b)
+        .map_err(|e| format!("the owner-binding: {e}"))?;
+    let occ = &a.occurrence;
+    let row = &occ.identity_occurrence;
+    if occ.attesting_key_id != fc.key_id || row.identity_key_id != fc.key_id {
+        return Err("the occurrence is not the owner's".into());
+    }
+    if row.occurrence_key_id != occurrence_key {
+        return Err("the occurrence names a different key than this device minted".into());
+    }
+    let bytes = ciris_persist::verify::canonical::ceg_produce_canonicalize(&occ.signed_envelope)
+        .map_err(|e| format!("the occurrence envelope: {e}"))?;
+    let members = [ciris_verify_core::threshold::ThresholdMember {
+        member_id: fc.key_id.clone(),
+        ed25519_public_key_base64: fc.pubkey_ed25519_base64.clone(),
+        mldsa65_public_key_base64: Some(b.ml_dsa_65_pubkey_b64.clone()),
+        role: None,
+    }];
+    let sigs = [ciris_verify_core::threshold::ThresholdSignature {
+        member_id: fc.key_id.clone(),
+        ed25519_signature_base64: occ.signature.ed25519_signature_base64.clone(),
+        mldsa65_signature_base64: occ.signature.mldsa65_signature_base64.clone(),
+    }];
+    ciris_verify_core::threshold::verify_threshold_signatures(&bytes, &members, &sigs, 1)
+        .map_err(|e| format!("the occurrence signature: {e}"))?;
+    let pin = std::fs::read_to_string(&st.claim_pin_file).unwrap_or_default();
+    if pin.trim().is_empty() {
+        return Err("this device has no claim PIN left; it may already be claimed".into());
+    }
+    Ok(fc.key_id)
+}
+
+/// `POST /v1/setup/add-device/complete` — the end of first run on a device
+/// joining an existing identity: apply the verified, held approval (the claim
+/// through this node's own setup/root, then the occurrence and the active
+/// identity). The wizard then collects its session with `claimed-session`, as
+/// the new-identity path does.
+async fn complete(State(st): State<AddDeviceState>) -> Response {
+    let held = pending().lock().ok().and_then(|g| g.clone());
+    let Some(p) = held else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "add_device.not_approved",
+            "your other device has not approved this one yet",
+        );
+    };
+    match apply(&st, p.approval, &p.alias).await {
+        Ok(()) => {
+            if let Ok(mut g) = pending().lock() {
+                *g = None;
+            }
+            let _ = std::fs::remove_file(pending_path(&st));
+            set_progress(|pr| pr.state = "applied".into());
+            tracing::info!(owner = %p.owner, "add-device: APPLIED at first-run completion — this device is now an occurrence of its owner's identity");
+            (
+                StatusCode::OK,
+                Json(progress().lock().map(|pr| pr.clone()).unwrap_or_default()),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "add-device: applying the held approval failed");
+            refuse(StatusCode::BAD_GATEWAY, "add_device.apply_failed", e)
+        }
+    }
+}
+
+/// The owner's v3 code, built from the owner's registered key and this
+/// (approving) node's transport key, so B can verify and reach A offline.
+async fn owner_code(st: &AddDeviceState, owner: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    use ciris_verify_core::fedcode;
+    let directory = st.engine.federation_directory();
+    let rec = directory
+        .lookup_public_key(owner)
+        .await
+        .map_err(|e| format!("look up the owner's key: {e}"))?
+        .ok_or("the owner's key is not registered on this device")?;
+    let pqc_b64 = rec
+        .pubkey_ml_dsa_65_base64
+        .as_deref()
+        .ok_or("the owner's key record carries no ML-DSA-65 half")?;
+    let pqc = base64::engine::general_purpose::STANDARD
+        .decode(pqc_b64)
+        .map_err(|e| format!("the owner's ML-DSA-65 key: {e}"))?;
+    let commitment = hex::encode(Sha256::digest(&pqc));
+    let mut fc = fedcode::FedCode::new(
+        fedcode::FedKind::User,
+        owner.to_string(),
+        rec.pubkey_ed25519_base64.clone(),
+    )
+    .with_ml_dsa_65_pubkey_sha256(commitment);
+    let me = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_else(|| st.node_key_id.clone());
+    if let Ok(routes) = directory.list_transport_destinations_for(&me).await {
+        if let Some(t) = routes
+            .into_iter()
+            .find_map(|d| d.transport_ed25519_pubkey_base64)
+        {
+            fc = fc.with_owned_nodes(vec![fedcode::OwnedNode::new(me, t)]);
+        }
+    }
+    fedcode::encode(&fc).map_err(|e| format!("encode the owner's code: {e}"))
 }
 
 /// Apply the owner's approval on B: the binding through B's OWN setup/root with
@@ -963,6 +1233,7 @@ async fn sign_and_record(
             owner_binding,
             claimer_key_record: st.self_key_record.clone(),
             occurrence,
+            owner_code: Some(owner_code(st, &owner).await?),
         },
         intro,
         granted,
@@ -972,10 +1243,15 @@ async fn sign_and_record(
 /// The routes. B's are loopback-only (first-run, no session); A's are
 /// owner-session gated.
 pub fn router(state: AddDeviceState) -> Router {
+    restore_pending(&state);
     let setup = Router::new()
         .route(
             "/v1/setup/add-device",
             axum::routing::post(start).get(status),
+        )
+        .route(
+            "/v1/setup/add-device/complete",
+            axum::routing::post(complete),
         )
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,

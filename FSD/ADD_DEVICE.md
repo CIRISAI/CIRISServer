@@ -6,15 +6,16 @@ node's one permitted message is a device-join request); recommendations adopted 
 
 ## 1. What the person does
 
-1. On the **new** device B, the first-run wizard offers **Add device**. The person enters their
-   fedID the way *Share my ID* shows it: the QR (photo), the long form (paste), or the short form.
-2. On the **existing** device A, the person opens **Add a device** (a time-boxed window).
-3. Both screens show the same **matching code**. A asks *Consent to claim new device?*
-4. On **Yes**, B finishes setup signed in as the person, holding its own keys as a new
-   **occurrence of the same identity**, and the person's files open on it.
+**On the new device B (first-run wizard):**
+1. The first step asks: **Set up a new CIRIS ID**, or **Add this device to an existing CIRIS ID**.
+2. The person names the device, for example "S23 Phone" or "2023 Laptop". This is the optional custom name; it travels with the request so the approver sees it.
+3. For an existing ID, they enter their fedID the way *Share my ID* shows it: the QR (photo), the long form (paste) or the short form. The wizard **never asks for a fedID name** on this path. The identity is the existing one, and B's status names it (`owner_key_id`) once the approval verifies.
+4. The rest of the wizard (every option the new node needs) is completed as usual while the approval happens on the other device.
+5. At the end, the wizard calls **`POST /v1/setup/add-device/complete`**. The claim is applied there, at the same point in first run as a new identity's claim. Then the wizard collects its session with `POST /v1/setup/claimed-session {claim_pin}`.
 
-B is never a second identity: the fedID on B is the same identity as on A, with a different
-keypair (Eric, 2026-10-16). No key material crosses the wire in either direction.
+**On the existing device A:** the person opens **Add a device** (a time-boxed window). Both screens show the same **matching code**, and A asks *Consent to claim new device?*
+
+B is never a second identity: the fedID on B is the same identity as on A, with a different keypair (Eric, 2026-10-16). No key material crosses the wire in either direction.
 
 ## 2. The exchange
 
@@ -47,6 +48,21 @@ B (unowned, node key minted at boot)                A (owned; owner's pen opens 
   wizard collects its owner session (claimed-session, PIN, loopback, once)
 ```
 
+## 2.1 Validate on arrival, apply at the end of first run (0.5.231)
+
+The approval is **verified the moment it arrives and applied only when first run completes**. First-run timing is then the same whether the person sets up a new identity or joins an existing one.
+
+The signer (A) is remote, so A's approval carries the owner's **full v3 code**: fedID, Ed25519 key, ML-DSA-65 commitment, and A's node with its transport key. B verifies offline, with no canonical lookup:
+1. the approval pins B's own NodeCode;
+2. the v3 code names the fedID the person entered;
+3. the fedID's fingerprint matches the code's Ed25519 key;
+4. the owner-binding's Ed25519 key is the code's, and its full ML-DSA-65 key matches the code's commitment (`AdmittedHybridKey::admit`);
+5. the owner-binding verifies: its structure and the hybrid signature, Strict (`ownership::verify_signed_owner_binding`, the verify half of `apply_signed_owner_binding`, with no writes);
+6. the occurrence names this identity and B's minted key, and its hybrid signature verifies under the same keys (JCS of the envelope, the bytes persist checks);
+7. B still holds its claim PIN.
+
+A verified approval is **held** in memory and on disk (`<home>/add_device_pending.json`, 0600, public signed material only), so a restart mid-wizard still completes. `POST /v1/setup/add-device/complete` applies it: the binding through B's own `setup/root` with its claim PIN, then the occurrence and the active identity. Completing before approval answers 409 `add_device.not_approved`.
+
 ## 3. Normative properties
 
 - **N1 — The matching code is derived by A**, from (requester key, challenge), never supplied by
@@ -78,9 +94,10 @@ B (unowned, node key minted at boot)                A (owned; owner's pen opens 
 | Route | Body | Answer |
 |---|---|---|
 | `POST /v1/setup/add-device` | `{contact, label?}` — `contact` is the QR/long form/short form | `{state: "requested", match_code, target_node}` or a typed refusal |
-| `GET /v1/setup/add-device` | — | `{state: requested\|approved\|applied\|denied\|expired\|failed, match_code, detail}` |
+| `GET /v1/setup/add-device` | — | `{state: requested\|approved\|applied\|denied\|expired\|failed, match_code, owner_key_id, detail}`. `approved` = verified and held, not yet applied. |
+| `POST /v1/setup/add-device/complete` | — | Applies the held approval at the end of first run: `{state: "applied", …}`, or 409 `add_device.not_approved`, or 502 `add_device.apply_failed`. |
 
-After `applied`, the wizard collects its session with the existing
+After `complete` answers `applied`, the wizard collects its session with the existing
 `POST /v1/setup/claimed-session {claim_pin}`.
 
 ### On A (the existing device) — owner session
@@ -107,6 +124,8 @@ After `applied`, the wizard collects its session with the existing
 | `add_device.unexpected` | unexpected answer from your other device |
 | `add_device.request_unknown` | no such pending request |
 | `add_device.approve_failed` | the approval could not be signed and recorded |
+| `add_device.not_approved` | your other device has not approved this one yet |
+| `add_device.apply_failed` | the approval could not be applied on this device |
 
 ### On the wire — opaque kind `0x0000_0002`
 
