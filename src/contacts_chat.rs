@@ -2498,9 +2498,8 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                     return crate::auth::refusal::refuse_with(
                         StatusCode::ACCEPTED,
                         "contacts.awaiting_key_body",
-                        "the key this code names is being fetched from the mesh; retry once it \
-                         has arrived and the contact will be verified against the code's \
-                         commitment",
+                        "the key this code names is being fetched from the mesh; the contact \
+                         completes on its own once it arrives and is verified against the code",
                         serde_json::json!({
                             "key_id": admission.key_id,
                             "fed_id": subject.fed_id,

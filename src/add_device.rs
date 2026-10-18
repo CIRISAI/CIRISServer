@@ -38,7 +38,7 @@ use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::auth::refusal::refuse;
+use crate::auth::refusal::{refuse, refuse_with};
 
 /// The server's device-join kind on edge's opaque plane (CIRISEdge#683,
 /// `FSD/FIRST_CONTACT.md` §2.2).
@@ -437,10 +437,11 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     {
         Ok(k) => k,
         Err(e) => {
-            return refuse(
+            return refuse_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "add_device.mint_failed",
-                format!("mint device keys: {e:#}"),
+                "could not mint this device's keys",
+                serde_json::json!({ "detail": format!("mint device keys: {e:#}") }),
             )
         }
     };
@@ -460,18 +461,20 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         )
         .await
         {
-            return refuse(
+            return refuse_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "add_device.mint_failed",
-                format!("register this device's new occurrence key: {e:#}"),
+                "could not mint this device's keys",
+                serde_json::json!({ "detail": format!("register this device's new occurrence key: {e:#}") }),
             );
         }
     }
     let Some(enc) = keyset.encryption_pubkeys.clone() else {
-        return refuse(
+        return refuse_with(
             StatusCode::INTERNAL_SERVER_ERROR,
             "add_device.mint_failed",
-            "device keys carry no encryption keys",
+            "could not mint this device's keys",
+            serde_json::json!({ "detail": "device keys carry no encryption keys" }),
         );
     };
     let mut ch = [0u8; 32];
