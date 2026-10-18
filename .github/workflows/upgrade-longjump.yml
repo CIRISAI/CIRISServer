@@ -42,7 +42,9 @@ on:
       from-version:
         description: "Released ciris-server version to upgrade FROM"
         required: false
-        default: "0.5.203"
+        # 0.5.203 was removed from PyPI on 2026-10-18 (its release entry is gone,
+        # not yanked); 0.5.207 is the oldest release this lane can still install.
+        default: "0.5.207"
   pull_request:
     paths:
       # Anything that can change how an EXISTING database is read or migrated.
@@ -71,7 +73,7 @@ jobs:
     env:
       # The floor we claim to support upgrading from. Logged every run, so a
       # jump that quietly shortens is visible rather than assumed.
-      FROM_VERSION: ${{ inputs.from-version || '0.5.203' }}
+      FROM_VERSION: ${{ inputs.from-version || '0.5.207' }}
     steps:
       - uses: actions/checkout@v4
 

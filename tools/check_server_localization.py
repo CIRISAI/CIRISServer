@@ -841,11 +841,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # refusals land before the `ciris-client` bundle that carries them; the ids
     # and their English are in the FSD for the client release.
     "add_device.already_owned",
+    "add_device.apply_failed",
     "add_device.approve_failed",
     "add_device.mint_failed",
     "add_device.no_device",
     "add_device.no_transport",
     "add_device.not_accepting",
+    "add_device.not_approved",
     "add_device.request_unknown",
     "add_device.rng",
     "add_device.unexpected",

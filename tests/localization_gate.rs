@@ -806,7 +806,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 19 -> 30 for 0.5.228: the add-device plane's eleven `add_device.*` ids
     /// (`FSD/ADD_DEVICE.md` §4.1), queued for the client bundle with their
     /// English, the same shape as every plane above.
-    const MAX_UNCOVERED: usize = 30;
+    ///
+    /// 30 -> 32 for 0.5.231: `add_device.not_approved` and `add_device.apply_failed`
+    /// (the deferred first-run claim, `FSD/ADD_DEVICE.md` §2.1), queued for the
+    /// client bundle with their English.
+    const MAX_UNCOVERED: usize = 32;
 
     let en = load_en();
     let ids = scraped_server_ids();

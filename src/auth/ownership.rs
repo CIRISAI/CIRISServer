@@ -666,41 +666,21 @@ pub struct AppliedOwnerBinding {
     pub attestation_id: String,
 }
 
-/// **Receiving side (the node being claimed).** Validate a complete, user-signed
-/// [`SignedOwnerBinding`] against THIS node, verify the user's hybrid signature
-/// over the JCS-canonical bytes of its envelope (Strict), register the user's
-/// key as `identity_type "user"`, and persist the GENUINELY USER-SIGNED
-/// `delegates_to` via [`persist_user_signed_owner_binding`]. Returns the
-/// responsible user + the persisted attestation id (the caller binds ROOT).
+/// **Verify an owner-binding without applying it** (CIRISServer#177 deferred
+/// claim): the structural checks and the user's hybrid signature that
+/// [`apply_signed_owner_binding`] runs, with no engine, no registration and no
+/// write. A device joining an existing identity validates the owner's consent
+/// with this as soon as it arrives, then applies the claim at the end of its
+/// first-run wizard, as the new-identity path does.
 ///
-/// Validation (all enforced; any failure → `Err`, nothing persisted):
-/// - `envelope.node_key_id` == `this_node_key_id` (CC: attests THIS node);
-/// - `envelope.delegation_purpose` == [`OWNER_BINDING_PURPOSE`];
-/// - `envelope.scope` is infra-only ([`scopes_are_infra_only`] — REJECT agency,
-///   CC 1.13.5);
-/// - `envelope.attesting_key_id` == `binding.attesting_key_id` (the claiming
-///   user; no third-party / mismatched granter);
-/// - the user's hybrid signature verifies over `canonicalize(envelope)` against
-///   the SUPPLIED user pubkeys ([`verify_hybrid`], Strict — both halves).
-///
-/// The user's key is registered through
-/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
-/// as `identity_type "user"` BEFORE persisting the binding (so
-/// `put_attestation`'s attesting-key-exists FK is satisfied and
-/// [`is_steward_bound`]'s granter-is-user check resolves).
-///
-/// `cohort_scope` is the cohort the node is claimed under (CIRISServer#125 —
-/// `self` by default; the caller threads it from the validated claim). It is NOT
-/// part of the user-signed envelope, so it is stamped only on the persisted row
-/// (see [`persist_user_signed_owner_binding`]); changing it cannot affect the
-/// signature verified above.
-pub async fn apply_signed_owner_binding(
-    engine: &Engine,
+/// # Errors
+/// The same [`OwnershipError`]s `apply_signed_owner_binding` returns before it
+/// writes anything.
+pub fn verify_signed_owner_binding(
     this_node_key_id: &str,
-    cohort_scope: &str,
     policy: HybridPolicy,
     binding: &SignedOwnerBinding,
-) -> Result<AppliedOwnerBinding, OwnershipError> {
+) -> Result<(), OwnershipError> {
     let envelope = &binding.envelope;
 
     // ── Structural validation (independent of the signature) ──────────────────
@@ -754,6 +734,46 @@ pub async fn apply_signed_owner_binding(
         None,
     )
     .map_err(|e| OwnershipError::Verify(e.to_string()))?;
+    Ok(())
+}
+
+/// **Receiving side (the node being claimed).** Validate a complete, user-signed
+/// [`SignedOwnerBinding`] against THIS node, verify the user's hybrid signature
+/// over the JCS-canonical bytes of its envelope (Strict), register the user's
+/// key as `identity_type "user"`, and persist the GENUINELY USER-SIGNED
+/// `delegates_to` via [`persist_user_signed_owner_binding`]. Returns the
+/// responsible user + the persisted attestation id (the caller binds ROOT).
+///
+/// Validation (all enforced; any failure → `Err`, nothing persisted):
+/// - `envelope.node_key_id` == `this_node_key_id` (CC: attests THIS node);
+/// - `envelope.delegation_purpose` == [`OWNER_BINDING_PURPOSE`];
+/// - `envelope.scope` is infra-only ([`scopes_are_infra_only`] — REJECT agency,
+///   CC 1.13.5);
+/// - `envelope.attesting_key_id` == `binding.attesting_key_id` (the claiming
+///   user; no third-party / mismatched granter);
+/// - the user's hybrid signature verifies over `canonicalize(envelope)` against
+///   the SUPPLIED user pubkeys ([`verify_hybrid`], Strict — both halves).
+///
+/// The user's key is registered through
+/// [`put_public_key`](ciris_persist::federation::FederationDirectory::put_public_key)
+/// as `identity_type "user"` BEFORE persisting the binding (so
+/// `put_attestation`'s attesting-key-exists FK is satisfied and
+/// [`is_steward_bound`]'s granter-is-user check resolves).
+///
+/// `cohort_scope` is the cohort the node is claimed under (CIRISServer#125 —
+/// `self` by default; the caller threads it from the validated claim). It is NOT
+/// part of the user-signed envelope, so it is stamped only on the persisted row
+/// (see [`persist_user_signed_owner_binding`]); changing it cannot affect the
+/// signature verified above.
+pub async fn apply_signed_owner_binding(
+    engine: &Engine,
+    this_node_key_id: &str,
+    cohort_scope: &str,
+    policy: HybridPolicy,
+    binding: &SignedOwnerBinding,
+) -> Result<AppliedOwnerBinding, OwnershipError> {
+    verify_signed_owner_binding(this_node_key_id, policy, binding)?;
+    let envelope = &binding.envelope;
 
     // ── Register the user's key as identity_type "user" (CC 3.2) ──────────────
     register_user_key(engine, binding).await?;

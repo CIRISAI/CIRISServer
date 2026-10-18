@@ -1052,23 +1052,46 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
                   listed=listed)
     step("owner_sees_codes", pending=len(listed), b_code_matches=bool(b_row and b_row.get("match_code") == b_match))
 
+    # (2b) completing before the owner approves is refused — nothing to apply.
+    early_code, early_body = b.api("POST", "/v1/setup/add-device/complete", {})
+    if early_code != 409:
+        ok = False
+        step.fail("complete_before_approval", "completing before approval must be refused (409)", [b],
+                  r"add-device", status=early_code, body=str(early_body)[:200])
+    step("complete_before_approval_refused", status=early_code)
+
     # (3) the owner approves B — the request whose code matches the device in hand.
     approved = a.must("POST", f"/v1/self/device-requests/{b_row['request_id']}/approve")
     occ = approved.get("occurrence_key_id")
     step("approved", occurrence=occ, self_dek_granted=approved.get("self_dek_granted"))
 
-    # (4) B applies with its own PIN, then collects its session locally.
+    # (4) B VERIFIES the approval offline (against the owner's v3 code it carries
+    # and the fedID the person entered) and HOLDS it — the claim is not applied
+    # mid-wizard, so first-run timing matches the new-identity path.
     def b_state() -> Optional[Dict[str, Any]]:
         st = b.must("GET", "/v1/setup/add-device")
-        return st if st.get("state") in ("applied", "failed", "denied", "expired") else None
+        return st if st.get("state") in ("approved", "applied", "failed", "denied", "expired") else None
     try:
-        final = wait_for("B to apply the owner's approval", b_state, args.arrive_wait, every=2)
+        held = wait_for("B to verify and hold the owner's approval", b_state, args.arrive_wait, every=2)
     except MeshError:
-        final = b.must("GET", "/v1/setup/add-device")
-    if final.get("state") != "applied":
+        held = b.must("GET", "/v1/setup/add-device")
+    owner_shown = held.get("owner_key_id")
+    still_unclaimed = b.api("GET", "/v1/setup/status")[1]
+    if held.get("state") != "approved" or owner_shown != a.owner_key_id:
         ok = False
-        step.fail("applied", "B must apply the approval", [a, b], r"add-device|setup/root|occurrence", state=final)
-    step("b_applied", state=final.get("state"))
+        step.fail("approved_held", "B must verify the approval and hold it, naming the owner's fedID for the "
+                  "wizard to show (never asking for it)", [a, b], r"add-device", state=held)
+    step("b_verified_and_held", state=held.get("state"), owner_key_id=owner_shown,
+         setup_status=str(still_unclaimed)[:200],
+         proves="the owner's consent is validated offline before the claim; the fedID comes from the existing identity")
+
+    # (5) the end of B's first-run wizard: apply the held claim.
+    code_c, final = b.api("POST", "/v1/setup/add-device/complete", {})
+    if code_c != 200 or (final or {}).get("state") != "applied":
+        ok = False
+        step.fail("applied", "completing first run must apply the held approval", [a, b],
+                  r"add-device|setup/root|occurrence", status=code_c, state=final)
+    step("b_applied", state=(final or {}).get("state"))
     code, sess = b.api("POST", "/v1/setup/claimed-session", {"claim_pin": b_pin})
     if code != 200 or not (sess or {}).get("access_token"):
         ok = False
@@ -1117,6 +1140,9 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
             step.fail("deny", "a denied stranger reads denied and frees its slot", [a, c], r"device-join",
                       c_state=got, still_pending=left)
         step("stranger_denied", c_state=got.get("state"), pending_after=len(left))
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 def contact_edges(mesh: Mesh, args: Any) -> Record:
     """The contact edges from Eric's report (CIRISServer#777, #778), on the real
     wire: add by fed ID before the person is known, then after they converge;
