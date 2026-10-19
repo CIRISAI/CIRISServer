@@ -836,23 +836,8 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # THE FINAL GENESIS (0.5.220, FSD/FINAL_GENESIS.md): the ceremony routes'
     # refusals, for the client's 3-of-3 re-mint screens (to come, CSD-067 §3).
     # Queued for the client bundle with their English.
-    # ADD A DEVICE (0.5.228, `FSD/ADD_DEVICE.md` §4.1): the new device's
-    # first-run join and the existing device's approval. A whole plane whose
-    # refusals land before the `ciris-client` bundle that carries them; the ids
-    # and their English are in the FSD for the client release.
-    "add_device.already_owned",
-    "add_device.apply_failed",
-    "add_device.approve_failed",
-    "add_device.mint_failed",
-    "add_device.no_device",
-    "add_device.no_transport",
-    "add_device.not_accepting",
-    "add_device.not_approved",
-    "add_device.request_unknown",
-    "add_device.rng",
-    "add_device.unexpected",
-    "add_device.unknown_identity",
-    "add_device.unreachable",
+    # ADD A DEVICE (0.5.228, `FSD/ADD_DEVICE.md` §4.1): PAID AT CLIENT 0.5.229
+    # (CIRISClient#189) — its bundle carries all thirteen `add_device.*` ids.
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",

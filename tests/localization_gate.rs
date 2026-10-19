@@ -810,7 +810,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 30 -> 32 for 0.5.231: `add_device.not_approved` and `add_device.apply_failed`
     /// (the deferred first-run claim, `FSD/ADD_DEVICE.md` §2.1), queued for the
     /// client bundle with their English.
-    const MAX_UNCOVERED: usize = 32;
+    /// 32 -> 19 for 0.5.232: `ciris-client` 0.5.229 (CIRISClient#189, #194)
+    /// carries all thirteen `add_device.*` ids; the floor in pyproject.toml rose
+    /// to 0.5.229 with it.
+    const MAX_UNCOVERED: usize = 19;
 
     let en = load_en();
     let ids = scraped_server_ids();
