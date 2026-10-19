@@ -543,17 +543,16 @@ fn contact_stall_refusal(stall: &ciris_edge::contact::LadderStall) -> Response {
         S::PriorRungIncomplete { rung, prior } => (
             StatusCode::CONFLICT,
             "contacts.prior_rung_incomplete",
-            "This step cannot finish because an earlier step has not. Look there \
-             rather than here."
+            "We can't finish adding this contact yet because an earlier step hasn't \
+             finished. We'll keep trying."
                 .to_string(),
             format!("`{rung}` cannot complete because `{prior}` has not"),
         ),
         S::MalformedCode { detail } => (
             StatusCode::BAD_REQUEST,
             "contacts.malformed_code",
-            "That looks like a CIRIS code, but it does not decode. A truncated or \
-             corrupted paste does not repair itself, so ask for the code again rather \
-             than trying this one again."
+            "That code didn't come through whole. Ask the person to share it again \
+             and paste the new one."
                 .to_string(),
             format!(
                 "does not decode: {detail} (terminal; a truncated paste does not repair itself)"
@@ -2283,7 +2282,7 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         return refuse(
             StatusCode::BAD_REQUEST,
             "contacts.self_contact",
-            "refusing to add this node's own identity as a contact",
+            "That's your own ID — you can't add yourself as a contact.",
         );
     }
     let directory = st.engine.federation_directory();
@@ -2387,10 +2386,14 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
             let code = match ciris_verify_core::fedcode::decode(&pasted) {
                 Ok(c) => c,
                 Err(e) => {
-                    return refuse(
+                    return crate::auth::refusal::refuse_with(
                         StatusCode::BAD_REQUEST,
                         "contacts.malformed_code",
-                        format!("the code decoded for resolution but not for verification: {e}"),
+                        "That code didn't come through whole. Ask the person to share it \
+                         again and paste the new one.",
+                        serde_json::json!({
+                            "detail": format!("decoded for resolution but not for verification: {e}")
+                        }),
                     )
                 }
             };
@@ -2459,8 +2462,9 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            "This device is not on the mesh, so it cannot fetch their key. Add \
-                             them from a device that is.",
+                            "This device isn't connected to the CIRIS network right now, so it can't \
+                             look this person up. Try again when it's online, or add them from \
+                             another of your devices.",
                         );
                     };
                     let pulling = ciris_edge::contact::PersistLens::new(directory.as_ref())
@@ -2478,8 +2482,9 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                         return refuse(
                             StatusCode::SERVICE_UNAVAILABLE,
                             "contacts.key_pull_unavailable",
-                            "This device is not on the mesh, so it cannot fetch their key. Add \
-                             them from a device that is.",
+                            "This device isn't connected to the CIRIS network right now, so it can't \
+                             look this person up. Try again when it's online, or add them from \
+                             another of your devices.",
                         );
                     }
                     tracing::info!(
@@ -2498,9 +2503,8 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
                     return crate::auth::refusal::refuse_with(
                         StatusCode::ACCEPTED,
                         "contacts.awaiting_key_body",
-                        "the key this code names is being fetched from the mesh; retry once it \
-                         has arrived and the contact will be verified against the code's \
-                         commitment",
+                        "We're still getting this person's key. They'll be added once it \
+                         arrives — usually within a minute.",
                         serde_json::json!({
                             "key_id": admission.key_id,
                             "fed_id": subject.fed_id,

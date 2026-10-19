@@ -38,7 +38,7 @@ use ciris_persist::prelude::{Engine, HybridPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::auth::refusal::refuse;
+use crate::auth::refusal::{refuse, refuse_with};
 
 /// The server's device-join kind on edge's opaque plane (CIRISEdge#683,
 /// `FSD/FIRST_CONTACT.md` §2.2).
@@ -67,6 +67,14 @@ pub enum JoinOp {
     Join(Box<JoinRequest>),
     /// Ask how the owner answered.
     Status {
+        request_id: String,
+        challenge: String,
+    },
+    /// The requester changed its mind (wrong fedID, or a new ID after all).
+    /// Honoured only from the same sender with the same challenge. A pending
+    /// request is dropped; an APPROVED one is undone (the owner's device evicts
+    /// what it recorded for it).
+    Withdraw {
         request_id: String,
         challenge: String,
     },
@@ -272,6 +280,36 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
             )
             .into()
         }
+        JoinOp::Withdraw {
+            request_id,
+            challenge,
+        } => {
+            let before = h.pending.len();
+            h.pending.retain(|p| {
+                !(p.id == request_id
+                    && p.sender == ctx.sender_key_id
+                    && p.req.challenge == challenge)
+            });
+            if h.pending.len() != before {
+                tracing::info!(request_id = %request_id, node = %ctx.sender_key_id, "device-join: the requester WITHDREW its pending request");
+                return opaque(200, &JoinAnswer::Unknown).into();
+            }
+            let ours = h
+                .decided
+                .get(&request_id)
+                .is_some_and(|d| d.sender == ctx.sender_key_id && d.challenge == challenge);
+            if ours {
+                if let Some(Decided {
+                    decision: Decision::Approved(a, _),
+                    ..
+                }) = h.decided.remove(&request_id)
+                {
+                    undo_approval(*a, request_id.clone());
+                }
+                return opaque(200, &JoinAnswer::Unknown).into();
+            }
+            opaque(404, &JoinAnswer::Unknown).into()
+        }
         JoinOp::Status {
             request_id,
             challenge,
@@ -437,10 +475,11 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     {
         Ok(k) => k,
         Err(e) => {
-            return refuse(
+            return refuse_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "add_device.mint_failed",
-                format!("mint device keys: {e:#}"),
+                "could not mint this device's keys",
+                serde_json::json!({ "detail": format!("mint device keys: {e:#}") }),
             )
         }
     };
@@ -460,18 +499,20 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         )
         .await
         {
-            return refuse(
+            return refuse_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "add_device.mint_failed",
-                format!("register this device's new occurrence key: {e:#}"),
+                "could not mint this device's keys",
+                serde_json::json!({ "detail": format!("register this device's new occurrence key: {e:#}") }),
             );
         }
     }
     let Some(enc) = keyset.encryption_pubkeys.clone() else {
-        return refuse(
+        return refuse_with(
             StatusCode::INTERNAL_SERVER_ERROR,
             "add_device.mint_failed",
-            "device keys carry no encryption keys",
+            "could not mint this device's keys",
+            serde_json::json!({ "detail": "device keys carry no encryption keys" }),
         );
     };
     let mut ch = [0u8; 32];
@@ -488,7 +529,10 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         node_code: st.node_code.clone(),
         challenge: challenge.clone(),
         label,
-        device_class: crate::auth::occurrence::DEVICE_CLASS_LAPTOP.into(),
+        // The HOST's class (desktop launcher: laptop; mobile: phone; headless:
+        // server), not a constant: it is what the owner sees and what the
+        // occurrence records (CIRISClient#189).
+        device_class: crate::backend::host_device_class().into(),
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
     }));
@@ -537,6 +581,15 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         }
     });
     tracing::info!(target = %target, request_id = %request_id, "add-device: request sent — waiting for the owner's consent");
+    let gen = GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    if let Ok(mut c) = current().lock() {
+        *c = Some(CurrentAsk {
+            target: target.clone(),
+            request_id: request_id.clone(),
+            challenge: challenge.clone(),
+            alias: alias.clone(),
+        });
+    }
     tokio::spawn(poll_until_answered(
         st,
         edge,
@@ -547,6 +600,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             alias,
             expected_owner: subject.fed_id.clone(),
             occurrence_key: keyset.key_id.clone(),
+            gen,
         },
     ));
     (
@@ -567,6 +621,8 @@ struct Asked {
     expected_owner: String,
     /// The occurrence key B minted; the owner's occurrence must name it.
     occurrence_key: String,
+    /// This request's generation; a cancel or a newer request retires the poll.
+    gen: u64,
 }
 
 /// B's poll: ask until the owner answers, then verify and hold (§2.1).
@@ -578,9 +634,13 @@ async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, as
         alias,
         expected_owner,
         occurrence_key,
+        gen,
     } = asked;
     let deadline = Instant::now() + REQUEST_TTL;
     while Instant::now() < deadline {
+        if GEN.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return; // cancelled, or replaced by a newer request
+        }
         tokio::time::sleep(POLL_EVERY).await;
         let op = JoinOp::Status {
             request_id: request_id.clone(),
@@ -612,6 +672,9 @@ async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, as
                             approval: *a,
                             alias: alias.clone(),
                             owner: owner.clone(),
+                            target: target.clone(),
+                            request_id: request_id.clone(),
+                            challenge: challenge.clone(),
                         };
                         if let Err(e) = hold(&st, held) {
                             tracing::warn!(error = %e, "add-device: verified approval could not be kept on disk; held in memory only");
@@ -636,6 +699,19 @@ async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, as
                 set_progress(|p| p.state = "denied".into());
                 return;
             }
+            // The approving device no longer holds this request: it expired
+            // there (15 min undecided, or an approval not collected within 15
+            // min of the decision). Name it `expired`, not `failed`, so the
+            // wizard can say why (CIRISClient#189).
+            Ok(JoinAnswer::Unknown) => {
+                set_progress(|p| {
+                    p.state = "expired".into();
+                    p.detail = Some(
+                        "your other device no longer holds this request — send a new one".into(),
+                    );
+                });
+                return;
+            }
             Ok(other) => {
                 set_progress(|p| {
                     p.state = "failed".into();
@@ -649,6 +725,152 @@ async fn poll_until_answered(st: AddDeviceState, edge: Arc<ciris_edge::Edge>, as
     set_progress(|p| p.state = "expired".into());
 }
 
+// ─── withdraw / cancel ──────────────────────────────────────────────────────
+
+/// A's state, for undoing an approval its requester withdrew.
+static A_STATE: OnceLock<AddDeviceState> = OnceLock::new();
+
+/// B's request generation: a cancel or a newer request retires the old poll.
+static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// B's outstanding request, for `DELETE /v1/setup/add-device`.
+struct CurrentAsk {
+    target: String,
+    request_id: String,
+    challenge: String,
+    alias: String,
+}
+
+fn current() -> &'static Mutex<Option<CurrentAsk>> {
+    static C: OnceLock<Mutex<Option<CurrentAsk>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+/// On A: the requester withdrew AFTER the owner approved. Undo what the
+/// approval recorded here — revoke B's occurrence and withdraw the
+/// owner-binding — under the owner-binding's loop authority. Safe on the
+/// requester's word: it only removes what that requester asked for.
+fn undo_approval(a: Approval, request_id: String) {
+    let Some(st) = A_STATE.get().cloned() else {
+        tracing::warn!(request_id = %request_id, "device-join: approved request withdrawn, but no state to undo it with — remove the device from your list");
+        return;
+    };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(request_id = %request_id, "device-join: approved request withdrawn off a runtime — remove the device from your list");
+        return;
+    };
+    handle.spawn(async move {
+        let owner = a.owner_binding.attesting_key_id.clone();
+        let occurrence = a.occurrence.identity_occurrence.occurrence_key_id.clone();
+        let node = match crate::nodecode::decode(&a.node_code) {
+            Ok(nc) => nc.key_id,
+            Err(e) => {
+                tracing::warn!(error = %e, "device-join: withdrawn approval names an unreadable node");
+                return;
+            }
+        };
+        let me = crate::node_key::wire_identity()
+            .map(str::to_owned)
+            .unwrap_or_else(|| st.node_key_id.clone());
+        let capsule = match crate::owner_signer_capsule::for_owned_node(&st.engine, &me).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = ?e, node = %node, "device-join: approved request withdrawn but the owner's pen is not here — remove the device from your list");
+                return;
+            }
+        };
+        let report = crate::self_devices::evict_device(
+            &st.engine,
+            &capsule,
+            &owner,
+            std::slice::from_ref(&node),
+            std::slice::from_ref(&occurrence),
+            Some("the device withdrew its own join request"),
+        )
+        .await;
+        tracing::info!(request_id = %request_id, node = %node, occurrence = %occurrence, report = ?report, "device-join: an APPROVED request was withdrawn by its device — evicted");
+    });
+}
+
+/// Remove `<alias>.*` files in `dir` (B's never-used request keys).
+fn remove_alias_files(dir: &std::path::Path, alias: &str) {
+    let prefix = format!("{alias}.");
+    if let Ok(it) = std::fs::read_dir(dir) {
+        for e in it.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// `DELETE /v1/setup/add-device` — the person changed their mind. Retire the
+/// poll, discard a held approval and this request's never-used keys, and tell
+/// the other device to drop (or undo) it. Answers `idle`. Refused once the
+/// claim has been applied.
+async fn cancel(State(st): State<AddDeviceState>) -> Response {
+    if !crate::auth::bootstrap::is_first_run(&st.engine).await {
+        return refuse(
+            StatusCode::CONFLICT,
+            "add_device.already_owned",
+            "this device already has an owner",
+        );
+    }
+    GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let cur = current().lock().ok().and_then(|mut c| c.take());
+    let held = pending().lock().ok().and_then(|mut g| g.take());
+    let _ = std::fs::remove_file(pending_path(&st));
+    let (target, request_id, challenge, alias) = match (cur, held) {
+        (Some(c), _) => (c.target, c.request_id, c.challenge, c.alias),
+        (None, Some(p)) => (p.target, p.request_id, p.challenge, p.alias),
+        (None, None) => Default::default(),
+    };
+    if !alias.is_empty() {
+        let user = st.identity_dir.join("user");
+        remove_alias_files(&crate::identity::sealed_keys_dir_for(&user, &alias), &alias);
+        remove_alias_files(&user, &alias);
+    }
+    if !target.is_empty() && !request_id.is_empty() {
+        if let Some(edge) = EDGE.get().cloned() {
+            let op = JoinOp::Withdraw {
+                request_id: request_id.clone(),
+                challenge,
+            };
+            tokio::spawn(async move {
+                match edge
+                    .send_opaque_request_introducing(
+                        &target,
+                        DEVICE_JOIN_KIND,
+                        serde_json::to_vec(&op).unwrap_or_default(),
+                        ROUND_TIMEOUT_MS,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(request_id = %request_id, "add-device: withdrawal delivered to the other device")
+                    }
+                    Err(e) => {
+                        tracing::info!(request_id = %request_id, error = %e, "add-device: withdrawal not delivered; the other device's entry lapses on its own")
+                    }
+                }
+            });
+        }
+    }
+    set_progress(|p| {
+        *p = JoinProgress {
+            state: "idle".into(),
+            detail: Some("cancelled".into()),
+            ..Default::default()
+        }
+    });
+    tracing::info!("add-device: request CANCELLED by the person");
+    (
+        StatusCode::OK,
+        Json(progress().lock().map(|p| p.clone()).unwrap_or_default()),
+    )
+        .into_response()
+}
+
 // ─── B: validate now, apply at the end of first run ────────────────────────
 
 /// A verified approval waiting for the wizard to finish.
@@ -657,6 +879,13 @@ struct Pending {
     approval: Approval,
     alias: String,
     owner: String,
+    /// Where the request went, so a cancel after a restart can still withdraw.
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    request_id: String,
+    #[serde(default)]
+    challenge: String,
 }
 
 fn pending() -> &'static Mutex<Option<Pending>> {
@@ -1244,10 +1473,11 @@ async fn sign_and_record(
 /// owner-session gated.
 pub fn router(state: AddDeviceState) -> Router {
     restore_pending(&state);
+    let _ = A_STATE.set(state.clone());
     let setup = Router::new()
         .route(
             "/v1/setup/add-device",
-            axum::routing::post(start).get(status),
+            axum::routing::post(start).get(status).delete(cancel),
         )
         .route(
             "/v1/setup/add-device/complete",
