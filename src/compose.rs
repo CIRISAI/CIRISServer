@@ -2838,7 +2838,7 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
 }
 
 /// **CEG-native trusted-peer boot prime.** Root — via edge's out-of-band
-/// `prime_peer` (`inject_rooted_peer_for_test`) — every peer the persisted CEG
+/// `prime_peer` (edge v43.1.0's production prime) — every peer the persisted CEG
 /// state marks TRUSTED, i.e. every `transport_destinations` row with
 /// [`BindingProvenance::Rooted`](ciris_persist::federation::self_at_login::BindingProvenance::Rooted).
 ///
@@ -2983,10 +2983,15 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
             }
         }
         match crate::federation_delivery::resolve_reticulum_prime_binding(peer_dests) {
-            Ok(Some((dest_hash, ed25519))) => {
-                transport
-                    .inject_rooted_peer_for_test(key_id, dest_hash, ed25519)
-                    .await;
+            Ok(Some((dest_hash, identity))) => {
+                if let Err(e) = transport.prime_peer(key_id, dest_hash, identity).await {
+                    // edge v43.1.0: the identity does not reproduce the
+                    // destination (peer_binding_prime_refused) — never root it.
+                    tracing::warn!(peer = %key_id, error = %e,
+                        "trusted-peer prime: edge REFUSED the binding — skip");
+                    refused += 1;
+                    continue;
+                }
                 primed += 1;
                 // DEBUG, not INFO, and one transport call rather than three. The
                 // pair of `knows_peer` probes existed only to fill two log fields,
@@ -3084,7 +3089,7 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
             .into_iter()
             .filter(|d| d.retired_at.is_none())
             .collect();
-        let (dest_hash, transport_ed) =
+        let (dest_hash, identity) =
             match crate::federation_delivery::resolve_reticulum_prime_binding(&live) {
                 Ok(Some(binding)) => binding,
                 Ok(None) => {
@@ -3106,9 +3111,15 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
                 }
             };
         let before = transport.knows_peer(key_id).await;
-        transport
-            .inject_rooted_peer_for_test(key_id, dest_hash, transport_ed)
-            .await;
+        if let Err(e) = transport.prime_peer(key_id, dest_hash, identity).await {
+            tracing::warn!(
+                canonical = %key_id,
+                error = %e,
+                "canonical prime: edge REFUSED the published binding — the identity does not \
+                 reproduce its destination (peer_binding_prime_refused); NOT primed"
+            );
+            continue;
+        }
         let after = transport.knows_peer(key_id).await;
         primed += 1;
         tracing::info!(

@@ -1598,7 +1598,9 @@ async fn prime_canonicals(
     //    ROOTED out-of-band via edge's prime mechanism. persist v13.5.0 (#397) now
     //    carries the transport-tier `(dest-hash, transport-Ed25519)` binding in the
     //    directory, so we resolve + prime each admitted canonical here (mirrors edge
-    //    v9.3.0's `PyEdge::prime_peer` — the same `inject_rooted_peer_for_test` core).
+    //    v9.3.0's `PyEdge::prime_peer`; since edge v43.1.0 the production
+    //    `ReticulumTransport::prime_peer`, which refuses an identity that does not
+    //    reproduce the destination).
     //    Best-effort: a missing/undecodable binding WARNs and skips (the expected
     //    state until Node A publishes its transport binding via the canonical
     //    address-update) — never fatal. `reticulum_transport()` is `None` on a
@@ -1611,11 +1613,20 @@ async fn prime_canonicals(
             for canonical in &admitted_targets {
                 match directory.list_transport_destinations_for(canonical).await {
                     Ok(dests) => match resolve_reticulum_prime_binding(&dests) {
-                        Ok(Some((dest_hash, ed25519))) => {
+                        Ok(Some((dest_hash, identity))) => {
                             let before = transport.knows_peer(canonical).await;
-                            transport
-                                .inject_rooted_peer_for_test(canonical, dest_hash, ed25519)
-                                .await;
+                            if let Err(e) =
+                                transport.prime_peer(canonical, dest_hash, identity).await
+                            {
+                                tracing::warn!(
+                                    canonical = %canonical,
+                                    error = %e,
+                                    "federation delivery: {canonical}: edge REFUSED the prime — \
+                                     the published identity does not reproduce its destination \
+                                     (peer_binding_prime_refused); it stays unrooted"
+                                );
+                                continue;
+                            }
                             let after = transport.knows_peer(canonical).await;
                             tracing::info!(
                                 canonical = %canonical,
@@ -1993,38 +2004,51 @@ pub(crate) fn distinct_canonical_key_ids(
 /// Select the reticulum transport-tier binding from a directory's transport
 /// destinations for an occurrence and decode it into the raw `prime` inputs.
 ///
-/// Picks the first entry with `transport_kind == "reticulum"` that carries a
-/// `transport_ed25519_pubkey_base64` (the #397 field), then decodes:
+/// Picks the first entry with `transport_kind == "reticulum"` that carries BOTH
+/// transport halves — `transport_ed25519_pubkey_base64` (#397) and
+/// `transport_x25519_pubkey_base64` (#411) — then decodes:
 ///   - `destination` (lowercase hex) → the 16-byte RNS dest-hash,
-///   - `transport_ed25519_pubkey_base64` (base64-standard) → the 32-byte
-///     transport-tier Ed25519 verifying key.
+///   - the two base64-standard halves → the 64-byte Reticulum transport
+///     identity `x25519(32) ‖ ed25519(32)` edge's `prime_peer` takes.
 ///
 /// Returns:
-///   - `Ok(Some((dest_hash, ed25519)))` — a usable binding to prime with.
-///   - `Ok(None)` — no reticulum entry carries a transport ed25519 pubkey yet
-///     (Node A hasn't published its transport binding — the caller WARNs + skips).
+///   - `Ok(Some((dest_hash, identity)))` — a usable binding to prime with.
+///   - `Ok(None)` — no reticulum entry carries both halves yet (the peer hasn't
+///     published its full transport binding — the caller skips; its announce
+///     roots it).
 ///   - `Err(_)` — an entry was found but its hex/base64 is malformed or the wrong
 ///     length (the caller WARNs + skips that target).
 ///
 /// Pure over its input slice so the resolve/decode/selection logic is unit-testable
-/// without a live directory or transport (the actual `inject_rooted_peer_for_test`
-/// needs a live edge — covered by the agent live-lens QA).
+/// without a live directory or transport (the actual `prime_peer`
+/// needs a live edge — covered by the native harness, whose canonical prime every topology rides).
 pub(crate) fn resolve_reticulum_prime_binding(
     dests: &[ciris_persist::federation::TransportDestination],
-) -> Result<Option<([u8; 16], [u8; 32])>> {
+) -> Result<Option<([u8; 16], [u8; 64])>> {
     use base64::Engine as _;
 
-    let Some(entry) = dests
-        .iter()
-        .find(|d| d.transport_kind == "reticulum" && d.transport_ed25519_pubkey_base64.is_some())
-    else {
+    // edge v43.1.0's `prime_peer` takes the FULL 64-byte transport identity
+    // (`x25519 ‖ ed25519`) and refuses one that does not reproduce the named
+    // destination, so an entry needs BOTH halves to be primeable. A row with
+    // only the Ed25519 half (a pre-#411 publisher) is not primed: the peer's
+    // next announce roots it, and rooting a half-identity is exactly the wrong
+    // key edge now refuses.
+    let Some(entry) = dests.iter().find(|d| {
+        d.transport_kind == "reticulum"
+            && d.transport_ed25519_pubkey_base64.is_some()
+            && d.transport_x25519_pubkey_base64.is_some()
+    }) else {
         return Ok(None);
     };
-    // Safe: the `find` predicate guarantees `Some`.
-    let pubkey_b64 = entry
+    // Safe: the `find` predicate guarantees both are `Some`.
+    let ed_b64 = entry
         .transport_ed25519_pubkey_base64
         .as_deref()
         .expect("find predicate guarantees transport_ed25519_pubkey_base64 is Some");
+    let x_b64 = entry
+        .transport_x25519_pubkey_base64
+        .as_deref()
+        .expect("find predicate guarantees transport_x25519_pubkey_base64 is Some");
 
     let dest_hash_vec = hex::decode(&entry.destination).with_context(|| {
         format!(
@@ -2039,17 +2063,23 @@ pub(crate) fn resolve_reticulum_prime_binding(
         )
     })?;
 
-    let ed_vec = base64::engine::general_purpose::STANDARD
-        .decode(pubkey_b64)
-        .context("transport_ed25519_pubkey_base64 must be base64-standard")?;
-    let ed25519: [u8; 32] = ed_vec.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "transport ed25519 pubkey must decode to 32 bytes; got {}",
-            ed_vec.len()
-        )
-    })?;
-
-    Ok(Some((dest_hash, ed25519)))
+    let half = |b64: &str, name: &str| -> Result<[u8; 32]> {
+        let v = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .with_context(|| format!("transport_{name}_pubkey_base64 must be base64-standard"))?;
+        v.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "transport {name} pubkey must decode to 32 bytes; got {}",
+                v.len()
+            )
+        })
+    };
+    let x25519 = half(x_b64, "x25519")?;
+    let ed25519 = half(ed_b64, "ed25519")?;
+    let mut identity = [0u8; 64];
+    identity[..32].copy_from_slice(&x25519);
+    identity[32..].copy_from_slice(&ed25519);
+    Ok(Some((dest_hash, identity)))
 }
 
 /// READ-ONLY: does the owner's registration record bind its subject?
@@ -2259,6 +2289,15 @@ mod tests {
     /// A `TransportDestination` fixture. `dest`/`ed_b64` are the raw address +
     /// transport-Ed25519 (already encoded as the store carries them).
     fn dest(kind: &str, dest_hex: &str, ed_b64: Option<&str>) -> TransportDestination {
+        dest_x(kind, dest_hex, ed_b64, Some(&good_x_b64()))
+    }
+
+    fn dest_x(
+        kind: &str,
+        dest_hex: &str,
+        ed_b64: Option<&str>,
+        x_b64: Option<&str>,
+    ) -> TransportDestination {
         TransportDestination {
             occurrence_key_id: "canon-1".to_string(),
             transport_kind: kind.to_string(),
@@ -2266,7 +2305,7 @@ mod tests {
             asserted_at: chrono::Utc::now(),
             last_seen_at: None,
             transport_ed25519_pubkey_base64: ed_b64.map(str::to_string),
-            transport_x25519_pubkey_base64: None,
+            transport_x25519_pubkey_base64: x_b64.map(str::to_string),
             binding_provenance: ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
             epoch: 0,
             retired_at: None,
@@ -2280,15 +2319,52 @@ mod tests {
     fn good_ed_b64() -> String {
         base64::engine::general_purpose::STANDARD.encode([0x11u8; 32])
     }
+    fn good_x_b64() -> String {
+        base64::engine::general_purpose::STANDARD.encode([0x22u8; 32])
+    }
+
+    /// The 64-byte identity edge's `prime_peer` takes: x25519 ‖ ed25519.
+    fn identity_of(x: u8, ed: u8) -> [u8; 64] {
+        let mut id = [x; 64];
+        id[32..].fill(ed);
+        id
+    }
 
     #[test]
-    fn prime_binding_decodes_reticulum_entry_16_32() {
+    fn prime_binding_needs_the_x25519_half() {
+        // An Ed25519-only row (a pre-#411 publisher) is not primeable: edge's
+        // prime_peer takes the whole transport identity.
+        let dests = vec![dest_x(
+            "reticulum",
+            &good_hex_16(),
+            Some(&good_ed_b64()),
+            None,
+        )];
+        assert!(resolve_reticulum_prime_binding(&dests)
+            .expect("ok")
+            .is_none());
+    }
+
+    #[test]
+    fn prime_binding_err_on_bad_x25519_length() {
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
+        let dests = vec![dest_x(
+            "reticulum",
+            &good_hex_16(),
+            Some(&good_ed_b64()),
+            Some(&short),
+        )];
+        assert!(resolve_reticulum_prime_binding(&dests).is_err());
+    }
+
+    #[test]
+    fn prime_binding_decodes_reticulum_entry_16_64() {
         let dests = vec![dest("reticulum", &good_hex_16(), Some(&good_ed_b64()))];
         let (dh, ed) = resolve_reticulum_prime_binding(&dests)
             .expect("decodes")
             .expect("some binding");
         assert_eq!(dh, [0xAB; 16]);
-        assert_eq!(ed, [0x11; 32]);
+        assert_eq!(ed, identity_of(0x22, 0x11));
     }
 
     #[test]
@@ -2308,7 +2384,7 @@ mod tests {
             .expect("decodes")
             .expect("some binding");
         assert_eq!(dh, [0xCD; 16]);
-        assert_eq!(ed, [0x11; 32]);
+        assert_eq!(ed, identity_of(0x22, 0x11));
     }
 
     #[test]
