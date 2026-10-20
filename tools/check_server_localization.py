@@ -845,12 +845,14 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # A THIRD DEVICE (persist v59, CC 3.3.6.3): from a roster of two keys the
     # approval's occurrence is a proposal the self roster holds (lands by the
     # quorum or lone path, CIRISServer#794). Queued for the client bundle.
-    "add_device.roster_change_held",
     # Edge v43 (sealed links): the new device waits for its other device's
     # route through the canonical; not there yet answers 503, retryable.
     "add_device.owner_route_pending",
     # A held approval names an earlier ask's key; a second ask is refused.
     "add_device.approval_held",
+    # The self roster's held changes (CIRISServer#794, CC 3.3.6.3).
+    "self.roster_proposal_unknown",
+    "self.roster_own_proposal",
     # The 2-of-3 AMEND (CC 5.3.4, the steward's ruling on CIRISConstitution#172):
     # carried bytes changed, below quorum, input refused, nothing planned.
     # The canonical's transit row for the amend (GET /v1/trust-root/transit-row).

@@ -2,9 +2,9 @@
 # catalogue v2, CC formal/roster). alice's genesis key is roster key one; two
 # devices join by approval (T3's flow), so her roster holds three keys and both
 # paths are open. A3 is stolen WITH its authentication (a staging: the key stays
-# live, the model reads it as the thief's). A1 proposes the eviction and A2
-# co-signs it — the quorum path. No route proposes or co-signs an eviction today
-# (the only eviction is a unilateral revoke), so both are known red.
+# live, the model reads it as the thief's). A3's addition is itself a roster
+# change from two keys, so A1's approval is HELD and A2 assents. A1 proposes
+# the eviction and A2 co-signs it — the quorum path (CIRISServer#794).
 catalog_id: T10
 catalogue_version: 2
 title: A stolen device — the owner evicts it by the quorum path
@@ -33,11 +33,18 @@ topology:
     - {rel: join_request, person: alice, device: A2, label: "Laptop"}
     - {rel: join_approve, person: alice, device: A2}
     - {rel: join_complete, person: alice, device: A2}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A2, C]}
+    - {rel: peered, between: [A1, A2]}
     - {rel: join_request, person: alice, device: A3, label: "Phone"}
-    - {rel: join_approve, person: alice, device: A3}
+    - {rel: join_approve, person: alice, device: A3, held: true}
+    - {rel: join_assent, person: alice, device: A3, by: A2}
     - {rel: join_complete, person: alice, device: A3}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A3, C]}
+    - {rel: peered, between: [A1, A3]}
     - {rel: steal, person: alice, device: A3}
-    - {rel: evict_propose, person: alice, target: A3, by: A1, known_red: "CIRISServer#794"}
-    - {rel: evict_cosign, person: alice, target: A3, by: A2, known_red: "CIRISServer#794"}
+    - {rel: evict_propose, person: alice, target: A3, by: A1}
+    - {rel: evict_cosign, person: alice, target: A3, by: A2}
   actor: {person: alice, device: A1}
   negatives: []

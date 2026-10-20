@@ -2103,6 +2103,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // torn-down engine while the next serve starts a second one, and two
         // drivers would contend over the same person's room (Codex,
         // CIRISServer#628).
+        let engine_for_roster = Arc::clone(&engine);
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
@@ -2133,6 +2134,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // guarded per member (`mls_guard`: the package is poisoned and
                 // skipped, so it can't panic every tick); this outer catch is
                 // the backstop for anything else in the tick.
+                // THE SELF-ROSTER SWEEP (CIRISServer#794, CC 3.3.6.3): a held
+                // roster change lands by the lone path only when SOMETHING asks
+                // after its window closes — persist executes on an answer's
+                // arrival, never on the clock. Every node holding a self decides
+                // it, so every node sweeps; one indexed read when nothing is open.
+                // Here rather than a loop of its own: the self plane's tick, and
+                // `loop_cadence::LOOPS` is full at the shortest cadence.
+                match engine_for_roster.execute_self_roster_due().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        landed = n,
+                        "self roster: held change(s) LANDED (CC 3.3.6.3 two-path)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "self roster: the sweep could not run — held changes wait for the next tick"
+                    ),
+                }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
                 ));

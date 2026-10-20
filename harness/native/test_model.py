@@ -41,7 +41,7 @@ def test_every_relation_in_the_typing_is_built_or_refused_by_name():
 
 def test_every_step_awaiting_a_route_is_marked_known_red_by_its_issue(cat):
     bad = copy.deepcopy(cat)
-    rel = next(r for r in bad["T10"].topology["relations"] if r["rel"] == "evict_propose")
+    rel = next(r for r in bad["T11"].topology["relations"] if r["rel"] == "evict_lone")
     del rel["known_red"]
     assert any("awaits CIRISServer#794" in p for p in model.evaluate(bad)["problems"])
     rel["known_red"] = "CIRISServer#1"

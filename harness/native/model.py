@@ -313,6 +313,10 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
         stage = f"agent.retirement.{rel['stage']}"
         return {stage}, {a for a in ATOMS if a.startswith("agent.retirement.") and a != stage}
     if k == "join_approve":
+        if rel.get("held"):
+            return set(), set()  # a held self-roster proposal: still requested (CC 3.3.6.3)
+        return {"device.join_approved"}, {"device.join_requested"}
+    if k == "join_assent":
         return {"device.join_approved"}, {"device.join_requested"}
     if k == "join_complete":
         return {"device.joined", "node.claimed", "person.multi_device"}, {"device.join_approved", "device.join_requested"}
@@ -339,7 +343,7 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
 
 KNOWN_RELATIONS = {
     "peered", "rooted_with", "reachable", "contact", "room", "message", "file", "bigfile", "corpus",
-    "custody", "roster", "note", "session", "withdraw", "join_request", "join_approve", "join_complete",
+    "custody", "roster", "note", "session", "withdraw", "join_request", "join_approve", "join_assent", "join_complete",
     "household", "member", "age_assurance", "community", "moderator", "quorum_change", "cosign",
     "authority", "delegation", "agent", "steward", "wise_authority", "halt", "confirm", "resume",
     "guardian_bond", "moderator",

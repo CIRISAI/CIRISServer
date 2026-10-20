@@ -30,12 +30,19 @@ topology:
     - {rel: join_request, person: alice, device: A2, label: "Laptop"}
     - {rel: join_approve, person: alice, device: A2}
     - {rel: join_complete, person: alice, device: A2}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A2, C]}
+    - {rel: peered, between: [A1, A2]}
     - {rel: join_request, person: alice, device: A3, label: "Phone"}
-    - {rel: join_approve, person: alice, device: A3}
+    - {rel: join_approve, person: alice, device: A3, held: true}   # from two roster keys: a proposal (CC 3.3.6.3)
+    - {rel: join_assent, person: alice, device: A3, by: A2}
     - {rel: join_complete, person: alice, device: A3}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A3, C]}
+    - {rel: peered, between: [A1, A3]}
     - {rel: lose, person: alice, device: A2}
     - {rel: lose, person: alice, device: A3}
-    - {rel: evict_lone, person: alice, target: A2, by: A1, known_red: "CIRISServer#794"}
-    - {rel: evict_lone, person: alice, target: A3, by: A1, known_red: "CIRISServer#794"}
+    - {rel: evict_lone, person: alice, target: A2, by: A1, known_red: "CIRISServer#794"}   # waits on persist's test-anchor W_self seam
+    - {rel: evict_lone, person: alice, target: A3, by: A1, known_red: "CIRISServer#794"}   # waits on persist's test-anchor W_self seam
   actor: {person: alice, device: A1}
   negatives: []

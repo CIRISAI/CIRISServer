@@ -1402,6 +1402,144 @@ async fn contact_code(
     .into_response()
 }
 
+// ─── THE SELF ROSTER'S HELD CHANGES (CIRISServer#794, CC 3.3.6.3) ──────────
+//
+// From a roster of two or more keys, adding a device or evicting one is a
+// PROPOSAL that persist holds (`federation_self_roster_not_landed`) and decides
+// with the shared two-path function: a strict majority of the live roster
+// lands it at once; otherwise the lone path lands it after `W_self` unless the
+// other keys object. persist owns the rule, the rows and the executor
+// (`self_roster::{standing, vote_envelope, execute_due}`); this is the owner's
+// door onto it. Proposing needs no route of its own: the add-device approval
+// and the device revoke ARE the proposals when they are held.
+
+/// One held change as the owner's devices see it.
+fn standing_view(st: &ciris_persist::federation::self_roster::Standing) -> serde_json::Value {
+    let mut v = serde_json::to_value(st).unwrap_or(serde_json::Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("outcome".into(), st.decision.token().into());
+        o.insert("lands".into(), st.decision.lands().into());
+    }
+    v
+}
+
+/// `GET /v1/self/roster/proposals` — every open change to the caller's roster,
+/// decided now, with the live roster it was decided against.
+async fn roster_proposals(State(st): State<SelfState>, headers: HeaderMap) -> Response {
+    let caller = match gate(owner_caller(&st.engine, &headers, false).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let owner = &caller.owner_key_id;
+    let dir = st.engine.federation_directory();
+    let roster = match ciris_persist::federation::self_roster::roster_now(dir.as_ref(), owner).await
+    {
+        Ok(r) => r,
+        Err(e) => return store_unavailable(format!("self_roster::roster_now: {e:#}")),
+    };
+    let standing = match st.engine.self_roster_standing(owner).await {
+        Ok(s) => s,
+        Err(e) => return store_unavailable(format!("self_roster_standing: {e:#}")),
+    };
+    Json(serde_json::json!({
+        "identity_key_id": owner,
+        "roster": roster,
+        "w_self_secs": ciris_persist::federation::self_roster::W_SELF_SECS,
+        "proposals": standing.iter().map(standing_view).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+async fn assent_proposal(
+    State(st): State<SelfState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<String>,
+) -> Response {
+    answer_proposal(st, headers, proposal_id, true).await
+}
+
+async fn object_proposal(
+    State(st): State<SelfState>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<String>,
+) -> Response {
+    answer_proposal(st, headers, proposal_id, false).await
+}
+
+/// Sign this device's answer to a held change with its pen — a roster key
+/// signs as the fedID (CIRISServer#793) — and report where the change stands.
+///
+/// The answer is a `scores` row to the fedID at `federation` scope: proposal
+/// rows are minted at federation, and every node holding the self decides
+/// landing from the answers IT holds, so an answer kept on the self's own
+/// devices would let the canonical land by the lone path a change the devices
+/// had refused (persist, 2026-10-20). persist executes on admission, so a
+/// deciding answer lands the change before this returns.
+async fn answer_proposal(
+    st: SelfState,
+    headers: HeaderMap,
+    proposal_id: String,
+    assent: bool,
+) -> Response {
+    use ciris_persist::federation::self_roster;
+    let caller = match gate(owner_caller(&st.engine, &headers, false).await) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let owner = caller.owner_key_id.clone();
+    let open = match st.engine.self_roster_standing(&owner).await {
+        Ok(s) => s,
+        Err(e) => return store_unavailable(format!("self_roster_standing: {e:#}")),
+    };
+    let Some(target) = open.iter().find(|s| s.proposal.id == proposal_id) else {
+        return refuse_with(
+            StatusCode::NOT_FOUND,
+            "self.roster_proposal_unknown",
+            "There is no open change to your devices with that id.",
+            proposal_id,
+        );
+    };
+    let capsule = match pen(&st, &caller).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    if capsule.key_id() == target.proposal.proposer {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "self.roster_own_proposal",
+            "This device proposed that change; another of your devices answers it.",
+            proposal_id,
+        );
+    }
+    let score = if assent { 1.0 } else { -1.0 };
+    let spec = crate::attest::Spec::new(
+        attestation_type::SCORES,
+        cohort_scope::FEDERATION,
+        self_roster::vote_envelope(&owner, &proposal_id, assent),
+    )
+    .attested_to(&owner)
+    .weighing(Some(score));
+    let answer_id = match emit_as_owner(&st.engine, &capsule, spec).await {
+        Ok(id) => id,
+        Err(e) => return store_unavailable(format!("emit roster answer: {e}")),
+    };
+    let _ = crate::compose::kick_replication("self:roster_answer");
+    let after = match st.engine.self_roster_standing(&owner).await {
+        Ok(s) => s,
+        Err(e) => return store_unavailable(format!("self_roster_standing: {e:#}")),
+    };
+    // Gone from the open set = settled (landed, or cancelled by objections).
+    let now = after.iter().find(|s| s.proposal.id == proposal_id);
+    Json(serde_json::json!({
+        "proposal_id": proposal_id,
+        "answer": if assent { "assent" } else { "object" },
+        "answer_attestation_id": answer_id,
+        "settled": now.is_none(),
+        "proposal": now.map(standing_view),
+    }))
+    .into_response()
+}
+
 // ─── Router ─────────────────────────────────────────────────────────────────
 
 /// The self-device routes. `user_seed_dir` is where the owner's fed-ID is
@@ -1429,6 +1567,20 @@ pub fn router(engine: Arc<Engine>, user_seed_dir: std::path::PathBuf) -> Router 
         )
         // CIRISServer#673 — the person's shareable contact code (and QR form).
         .route("/v1/self/contact-code", axum::routing::get(contact_code))
+        // CIRISServer#794 (CC 3.3.6.3) — the self roster's held changes and
+        // the answers a roster key signs to them.
+        .route(
+            "/v1/self/roster/proposals",
+            axum::routing::get(roster_proposals),
+        )
+        .route(
+            "/v1/self/roster/proposals/{proposal_id}/assent",
+            axum::routing::post(assent_proposal),
+        )
+        .route(
+            "/v1/self/roster/proposals/{proposal_id}/object",
+            axum::routing::post(object_proposal),
+        )
         .with_state(SelfState {
             engine,
             user_seed_dir,

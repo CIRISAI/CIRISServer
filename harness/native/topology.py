@@ -69,9 +69,8 @@ REFUSED_RELATIONS: Dict[str, str] = {
 # checks they agree), so a plan reports which states wait on which issue; the
 # builder raises on them, naming the issue, when asked to build through.
 AWAITING_ROUTE: Dict[str, str] = {
-    "evict_propose": "CIRISServer#794",   # CC 3.3.6.3 quorum path (persist half: CIRISPersist#1099)
-    "evict_cosign": "CIRISServer#794",
-    "evict_lone": "CIRISServer#794",      # lone path over W_self, no clock override
+    # evict_propose / evict_cosign: built (CIRISServer#794, the quorum path).
+    "evict_lone": "CIRISServer#794",      # lone path over W_self: waits on persist's test-anchor W_self seam
     "moderator_lapse": "CIRISServer#795",
     "merit_promote": "CIRISServer#795",
     "invite_window": "CIRISServer#796",   # CC 4.5.13 two-path invitation: window + approval floor
@@ -314,6 +313,22 @@ def export_rows(mesh: Mesh) -> Decl:
         out[name] = {"rows": len(rows), "keys": len(keys), "routes": len(routes), "sha256": h.hexdigest(), "path": str(path),
                      "roots": standing}
     return out
+
+
+def _roster_answer(by: "Node", proposal_id: Optional[str], answer: str, kind: str, target: str) -> Dict[str, Any]:
+    """Answer a held self-roster change from `by` (CIRISServer#794): the
+    proposal must be listed there, then the answer is signed by `by`'s pen."""
+    if not proposal_id:
+        raise MeshError(f"no held {kind} proposal for {target} to answer")
+
+    def listed() -> Optional[bool]:
+        props = by.must("GET", "/v1/self/roster/proposals").get("proposals", [])
+        return True if any(x["proposal"]["id"] == proposal_id for x in props) else None
+    wait_for(f"{by.name} to hold the {kind} proposal of {target}", listed, 60.0, every=2)
+    code, got = by.api("POST", f"/v1/self/roster/proposals/{proposal_id}/{answer}", {})
+    if code != 200:
+        raise MeshError(f"{by.name}: {answer} on {proposal_id} answered {code}: {str(got)[:300]}")
+    return got or {}
 
 
 def build(mesh: Mesh, t: Decl, args: Any, checkpoint: Any = None, stop_before: Optional[str] = None) -> Decl:
@@ -1176,8 +1191,23 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
         elif k == "join_approve":
             j = ctx.joins[rel["device"]]
             new = N[rel["device"]]
-            approved = j["host"].must("POST", f"/v1/self/device-requests/{j['row']['request_id']}/approve")
+            code_a, approved = j["host"].api("POST", f"/v1/self/device-requests/{j['row']['request_id']}/approve")
+            approved = approved or {}
             j["occurrence"] = approved.get("occurrence_key_id")
+            if rel.get("held"):
+                # From a roster of two or more keys the addition is a PROPOSAL
+                # (CC 3.3.6.3): the approval is held until the roster lands it.
+                if code_a != 202 or not approved.get("held") or not approved.get("proposal_id"):
+                    step.fail(f"join_NOT_held_by_roster:{rel['device']}", "from two roster keys an approval must be "
+                              "HELD as a self-roster proposal", [j["host"], new], r"add-device|device-join|roster",
+                              layer="relations", rel="join_approve", cc="CC 3.3.6.3", status=code_a, got=approved)
+                    raise MeshError("join approval not held by the roster")
+                j["proposal"] = approved["proposal_id"]
+                step(f"join_approve_held:{rel['device']}", layer="relations", proposal=j["proposal"],
+                     proves="the approval is a held self-roster proposal; the new device keeps waiting")
+                continue
+            if code_a != 200:
+                raise MeshError(f"{j['host'].name}: approve answered {code_a}: {str(approved)[:300]}")
 
             def held() -> Optional[Dict[str, Any]]:
                 st_ = new.must("GET", "/v1/setup/add-device")
@@ -1190,6 +1220,56 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                 raise MeshError("join approval not held")
             step(f"join_approve:{rel['device']}", layer="relations", occurrence=j["occurrence"],
                  proves="approved on the existing device; verified and held, unapplied, on the new one")
+        elif k == "join_assent":
+            # Another roster key assents to a held addition (CC 3.3.6.3 quorum
+            # path); the owner's device then delivers the approval it held.
+            j = ctx.joins[rel["device"]]
+            new, by = N[rel["device"]], N[rel["by"]]
+            _roster_answer(by, j["proposal"], "assent", "add", j["occurrence"])
+
+            def held_now() -> Optional[Dict[str, Any]]:
+                st_ = new.must("GET", "/v1/setup/add-device")
+                return st_ if st_.get("state") in ("approved", "applied", "failed", "denied", "expired") else None
+            got = wait_for(f"{rel['device']} to receive the approval the roster landed", held_now,
+                           float(rel.get("wait", 180)), every=2)
+            if got.get("state") != "approved":
+                raise MeshError(f"{rel['device']}: after the assent the join is {got}")
+            step(f"join_assent:{rel['device']}", layer="relations", by=rel["by"], proposal=j["proposal"],
+                 proves="a second roster key assented; the addition landed by the quorum path and the held "
+                        "approval reached the new device")
+        elif k in ("evict_propose", "evict_cosign"):
+            p_ = rel["person"]
+            target = ctx.joins.get(rel["target"], {}).get("occurrence")
+            if not target:
+                raise MeshError(f"{k}: {rel['target']} has no roster key in this build")
+            by = N[rel["by"]]
+            if k == "evict_propose":
+                code_r, got = by.api("POST", "/v1/self/occurrence/revoke",
+                                     {"identity_key_id": by.owner_key_id, "occurrence_key_id": target,
+                                      "reason": f"{rel['target']} stolen (harness)"})
+                if code_r != 200 or not (got or {}).get("held"):
+                    step.fail(f"evict_NOT_held:{rel['target']}", "from two or more roster keys an eviction must be "
+                              "HELD as a proposal", [by], r"roster|occurrence|revoke", layer="relations",
+                              rel=k, cc="CC 3.3.6.3", status=code_r, got=got)
+                    raise MeshError("eviction not held")
+                listed = by.must("GET", "/v1/self/roster/proposals").get("proposals", [])
+                prop = next((x for x in listed if x["proposal"]["kind"] == "evict"
+                             and x["proposal"]["target"] == target), None)
+                if not prop:
+                    raise MeshError(f"{rel['by']} lists no held eviction of {target}: {listed}")
+                ctx.joins[rel["target"]]["evict_proposal"] = prop["proposal"]["id"]
+                step(f"evict_propose:{rel['target']}", layer="relations", by=rel["by"], proposal=prop["proposal"]["id"],
+                     proves="the eviction is a held proposal (CC 3.3.6.3)")
+            else:
+                pid = ctx.joins[rel["target"]].get("evict_proposal")
+                _roster_answer(by, pid, "assent", "evict", target)
+
+                def gone() -> Optional[bool]:
+                    roster = by.must("GET", "/v1/self/roster/proposals").get("roster", [])
+                    return True if target not in roster else None
+                wait_for(f"{target} to leave {p_}'s roster", gone, float(rel.get("wait", 60)), every=2)
+                step(f"evict_cosign:{rel['target']}", layer="relations", by=rel["by"], proposal=pid,
+                     proves="a second roster key co-signed; the eviction landed by the quorum path")
         elif k == "join_complete":
             j = ctx.joins[rel["device"]]
             new = N[rel["device"]]

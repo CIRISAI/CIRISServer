@@ -162,6 +162,16 @@ struct Held {
     req: JoinRequest,
     code: String,
     at: Instant,
+    /// Approved by the owner but HELD by the self roster (CC 3.3.6.3): set
+    /// when the approval became a proposal, so the undecided-request TTL does
+    /// not drop it while the roster decides ([`HELD_TTL`]).
+    held_since: Option<Instant>,
+}
+
+/// How long an approval the self roster holds stays resumable: the lone
+/// path's window and an hour's margin for the sweep that lands it.
+fn held_ttl() -> Duration {
+    Duration::from_secs(ciris_persist::federation::self_roster::W_SELF_SECS as u64 + 3600)
 }
 
 enum Decision {
@@ -192,8 +202,10 @@ impl Host {
     fn sweep(&mut self) {
         let now = Instant::now();
         let before = self.pending.len();
-        self.pending
-            .retain(|h| now.duration_since(h.at) < REQUEST_TTL);
+        self.pending.retain(|h| match h.held_since {
+            Some(since) => now.duration_since(since) < held_ttl(),
+            None => now.duration_since(h.at) < REQUEST_TTL,
+        });
         if self.pending.len() != before {
             tracing::info!(
                 expired = before - self.pending.len(),
@@ -270,6 +282,7 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
                 req: *req,
                 code: code.clone(),
                 at: Instant::now(),
+                held_since: None,
             });
             opaque(
                 202,
@@ -1337,47 +1350,146 @@ async fn approve(
         }
     };
     match sign_and_record(&st, &sender, &req).await {
-        Ok((approval, intro, granted)) => {
-            let occurrence_key_id = approval
-                .occurrence
-                .identity_occurrence
-                .occurrence_key_id
-                .clone();
-            let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
-            h.pending.retain(|p| p.id != id); // N3
-            h.decided.insert(
+        Ok(signed) => record_approved(&id, &sender, &req, &code, signed).into_response(),
+        Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
+            // CC 3.3.6.3: from a roster of two or more keys the addition is a
+            // PROPOSAL. Hold the request (the new device keeps polling and sees
+            // it pending) and resume it the moment the roster lands the key.
+            let occ_key = req.occurrence_key_record.record.key_id.clone();
+            {
+                let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(p) = h.pending.iter_mut().find(|p| p.id == id) {
+                    p.held_since.get_or_insert_with(Instant::now);
+                }
+            }
+            let owner = crate::auth::ownership::is_steward_bound(&st.engine, &st.node_key_id)
+                .await
+                .unwrap_or_default();
+            let proposal_id = st
+                .engine
+                .self_roster_standing(&owner)
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.into_iter()
+                        .find(|s| s.proposal.target == occ_key)
+                        .map(|s| s.proposal.id)
+                });
+            tokio::spawn(resume_when_landed(
+                st.clone(),
                 id.clone(),
-                Decided {
-                    sender: sender.clone(),
-                    challenge: req.challenge.clone(),
-                    decision: Decision::Approved(Box::new(approval), intro),
-                    at: Instant::now(),
-                },
-            );
+                owner,
+                occ_key.clone(),
+            ));
             tracing::info!(
-                request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
-                "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
+                request_id = %id, node = %sender, occurrence = %occ_key, proposal = ?proposal_id,
+                "device-join: approval HELD by the self roster — resumes when the roster lands the key (CC 3.3.6.3)"
             );
             (
-                StatusCode::OK,
+                StatusCode::ACCEPTED,
                 Json(serde_json::json!({
-                    "approved": true,
+                    "approved": false,
+                    "held": true,
                     "match_code": code,
                     "node_key_id": sender,
-                    "occurrence_key_id": occurrence_key_id,
-                    "self_dek_granted": granted,
+                    "occurrence_key_id": occ_key,
+                    "proposal_id": proposal_id,
+                    "detail": e,
                 })),
             )
                 .into_response()
-        }
-        Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
-            refuse(StatusCode::CONFLICT, "add_device.roster_change_held", e)
         }
         Err(e) => refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "add_device.approve_failed",
             e,
         ),
+    }
+}
+
+/// Move an approved request to `decided`, where the new device's next poll
+/// collects it. One body for the approval made at once and the one resumed.
+fn record_approved(
+    id: &str,
+    sender: &str,
+    req: &JoinRequest,
+    code: &str,
+    (approval, intro, granted): (Approval, ciris_edge::Introductions, usize),
+) -> (StatusCode, Json<serde_json::Value>) {
+    let occurrence_key_id = approval
+        .occurrence
+        .identity_occurrence
+        .occurrence_key_id
+        .clone();
+    let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+    h.pending.retain(|p| p.id != id); // N3
+    h.decided.insert(
+        id.to_owned(),
+        Decided {
+            sender: sender.to_owned(),
+            challenge: req.challenge.clone(),
+            decision: Decision::Approved(Box::new(approval), intro),
+            at: Instant::now(),
+        },
+    );
+    tracing::info!(
+        request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
+        "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "approved": true,
+            "match_code": code,
+            "node_key_id": sender,
+            "occurrence_key_id": occurrence_key_id,
+            "self_dek_granted": granted,
+        })),
+    )
+}
+
+/// How often a held approval re-reads the roster.
+const HELD_RECHECK: Duration = Duration::from_secs(5);
+
+/// **Resume a held approval** once the self roster lands its key (a quorum of
+/// the other devices assented, or the lone path's window closed). The signing
+/// is re-run whole: the key is now on the roster, so the re-signed occurrence
+/// is a re-assertion, not a roster change, and lands at once — and the
+/// approval the new device collects is the ordinary one. Ends when the request
+/// leaves `pending` (denied, withdrawn, expired) or is approved.
+async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_key: String) {
+    let dir = st.engine.federation_directory();
+    loop {
+        tokio::time::sleep(HELD_RECHECK).await;
+        let held = {
+            let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+            h.sweep();
+            h.pending
+                .iter()
+                .find(|p| p.id == id && p.held_since.is_some())
+                .map(|p| (p.sender.clone(), p.req.clone(), p.code.clone()))
+        };
+        let Some((sender, req, code)) = held else {
+            return;
+        };
+        match ciris_persist::federation::self_roster::roster_now(dir.as_ref(), &owner).await {
+            Ok(r) if r.contains(&occ_key) => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(error = %format!("{e:#}"), "device-join: roster read for a held approval");
+                continue;
+            }
+        }
+        match sign_and_record(&st, &sender, &req).await {
+            Ok(signed) => {
+                let _ = record_approved(&id, &sender, &req, &code, signed);
+                tracing::info!(request_id = %id, occurrence = %occ_key, "device-join: the self roster LANDED the key — the held approval is delivered");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(request_id = %id, error = %e, "device-join: the roster landed the key but re-signing the approval failed — retrying");
+            }
+        }
     }
 }
 
