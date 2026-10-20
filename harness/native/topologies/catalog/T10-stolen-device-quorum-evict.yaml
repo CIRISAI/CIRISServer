@@ -6,10 +6,10 @@
 # change from two keys, so A1's approval is HELD and A2 assents. A1 proposes
 # the eviction and A2 co-signs it — the quorum path (CIRISServer#794).
 catalog_id: T10
-catalogue_version: 2
+catalogue_version: 3
 title: A stolen device — the owner evicts it by the quorum path
 serves: [CSD-037, CSD-095]
-promises: [key.holder.owner, key.holder.thief, key.membership.proposed_evict, key.membership.evicted,
+promises: [key.membership.proposed_add, key.holder.owner, key.holder.thief, key.membership.proposed_evict, key.membership.evicted,
            self.roster_size.three_more]
 topology:
   roots:

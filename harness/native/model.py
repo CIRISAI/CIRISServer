@@ -34,7 +34,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
-CATALOGUE_VERSION = 2
+CATALOGUE_VERSION = 3
 CATALOG_IDS = [f"T{i}" for i in range(20)]
 HERE = Path(__file__).parent
 CATALOG_DIR = HERE / "topologies" / "catalog"
@@ -314,10 +314,12 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
         return {stage}, {a for a in ATOMS if a.startswith("agent.retirement.") and a != stage}
     if k == "join_approve":
         if rel.get("held"):
-            return set(), set()  # a held self-roster proposal: still requested (CC 3.3.6.3)
+            # From two roster keys the approval is an ADDITION PROPOSAL (CC
+            # 3.3.6.3); the new device is still only requested.
+            return {"key.membership.proposed_add"}, set()
         return {"device.join_approved"}, {"device.join_requested"}
     if k == "join_assent":
-        return {"device.join_approved"}, {"device.join_requested"}
+        return {"device.join_approved"}, {"device.join_requested", "key.membership.proposed_add"}
     if k == "join_complete":
         return {"device.joined", "node.claimed", "person.multi_device"}, {"device.join_approved", "device.join_requested"}
     if k == "member":

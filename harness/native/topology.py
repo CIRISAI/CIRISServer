@@ -1203,6 +1203,17 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                               layer="relations", rel="join_approve", cc="CC 3.3.6.3", status=code_a, got=approved)
                     raise MeshError("join approval not held by the roster")
                 j["proposal"] = approved["proposal_id"]
+                # The state is the SELF's: it holds once the person's other
+                # devices hold the addition proposal and can answer it.
+                for d in persons[rel["person"]]["owns"]:
+                    other = N[d]
+                    if other is j["host"] or other is new or not other.token:
+                        continue
+
+                    def holds_add(n: "Node" = other) -> Optional[bool]:
+                        props = n.must("GET", "/v1/self/roster/proposals").get("proposals", [])
+                        return True if any(x["proposal"]["id"] == j["proposal"] for x in props) else None
+                    wait_for(f"{d} to hold the addition proposal", holds_add, float(rel.get("wait", 60)), every=1)
                 step(f"join_approve_held:{rel['device']}", layer="relations", proposal=j["proposal"],
                      proves="the approval is a held self-roster proposal; the new device keeps waiting")
                 continue

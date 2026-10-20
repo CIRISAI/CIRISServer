@@ -4,7 +4,7 @@
 # → notified → custodian minted → retired. Every agent step needs a CIRISAgent
 # process (refused here, as T7): the builder stands up the node and stops.
 catalog_id: T16
-catalogue_version: 2
+catalogue_version: 3
 title: An agent retired under the Standard
 serves: [CSD-111]
 promises: [agent.bond.unbound, agent.bond.lapsed, agent.retirement.decided, agent.retirement.frozen,

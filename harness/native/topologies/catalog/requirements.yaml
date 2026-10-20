@@ -48,6 +48,15 @@ CSD-096:
 CSD-095:
   topology: T10
   tests:
+    # From two keys an addition (a third device's approval) is a proposal
+    # another device answers.
+    add_held:
+      at: [key.membership.proposed_add, device.join_requested]
+      probe:
+        node: A2
+        path: /v1/self/roster/proposals
+        status: 200
+        expect: {proposals.0.proposal.kind: add, proposals.0.decision.outcome: pending}
     # From three keys an eviction is a proposal another device answers; it
     # lands by the quorum path.
     evict_held:
@@ -61,10 +70,8 @@ CSD-095:
       at: [key.membership.evicted, key.holder.thief]
       probe: {node: A2, path: /v1/self/roster/proposals, status: 200, expect: {proposals.0: null}}
     # NOT YET: the lone path (T11: two devices lost, recovered alone after
-    # W_self) and the held ADDITION. One card names one topology (CSD/4 §1) and
-    # T10 reaches neither; the lone path waits on persist's test-anchor W_self
-    # seam (CIRISPersist#1111), the held addition on a vocabulary atom for it
-    # (asked of CIRISConstitution).
+    # W_self). One card names one topology (CSD/4 §1) and T10 does not reach
+    # it; it also waits on persist's test-anchor W_self seam (CIRISPersist#1111).
 CSD-091:
   topology: T2
   tests:

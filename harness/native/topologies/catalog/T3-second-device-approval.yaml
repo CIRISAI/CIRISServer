@@ -7,7 +7,7 @@
 # its own checkpoint. The infrastructure root (ceremony + CIRIS_TEST_NO_CEREMONY)
 # keeps an unowned device's record self-signed, which first contact requires.
 catalog_id: T3
-catalogue_version: 2
+catalogue_version: 3
 title: Two people, contact by code, second device by approval
 serves: [CSD-092, CSD-093, CSD-094, CSD-037]
 promises: [contact.via_code, device.join_requested, device.join_approved, device.joined, person.multi_device,

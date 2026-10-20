@@ -5,7 +5,7 @@
 # no route the harness can drive yet — the builder stops before them, by name,
 # and everything up to the seated child is tested.
 catalog_id: T4
-catalogue_version: 2
+catalogue_version: 3
 title: A household — guardian on two devices, one child
 serves: [CSD-100, CSD-101, CSD-119]
 derives: [3c]

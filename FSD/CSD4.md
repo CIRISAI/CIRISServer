@@ -1,6 +1,6 @@
 # CSD/4 — the topology catalogue, locked
 
-**Status:** LOCKED at catalogue version 2 (2026-10-18; version 1 the same day, bumped when the steward ruled the push waits on exhaustiveness over CC's formally defined states). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `9c739427`. **Owner:** CIRISServer (the
+**Status:** LOCKED at catalogue version 3 (2026-10-20; version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
 catalogue, the model, the builder). **Consumers:** CIRISClient's CSD cards and
 `check_csd_v3`, the native harness, CC's `tools/topology_to_cfg.py`.
 **Source of the ruling:** the steward on CIRISClient#179 §2: *do not give CSD authors
@@ -33,7 +33,7 @@ compares the card against it. `check_csd_v3` refuses, by name:
 `topology:` is a hint. The planner may choose a cheaper entry that reaches the same
 states (§6.1) and reports the change as `reselected`.
 
-## 2. The catalogue (version 2)
+## 2. The catalogue (version 3)
 
 Twenty entries, each one checked-in yaml file in `harness/native/topologies/catalog/`,
 named `T<n>-<slug>.yaml`, carrying `catalog_id`, `catalogue_version`, `title`,
@@ -78,7 +78,7 @@ The pre-catalogue declarations (`topologies/csd-091…`, `csd-092…`, `csd-094�
 `csd-107…`, `selffiles`, `bigfile*`) stay as regression fixtures and are not
 catalogue entries. T1, T2 and T3 subsume their states.
 
-## 3. The vocabulary (version 2)
+## 3. The vocabulary (version 3)
 
 Closed, and **owned by the constitution** (steward decision 2026-10-18). CIRISConstitution
 publishes `manifests/topology_vocabulary.json`, which maps each atom to its plane state
@@ -208,6 +208,13 @@ One atom per modelled state no version-1 entry exercised, named `<variable>.<sta
 | `agent.retirement.custodian_minted` | agent | 7.5.5 | agent: retirement = custodian_minted — entered by retirement:custodian_minted row (agent self-emits to retired; custodian after) (signer: agent / custodian) |
 | `agent.retirement.retired` | agent | 7.5.5 | agent: retirement = retired — entered by retirement:retired row (agent self-emits to retired; custodian after) (signer: agent / custodian) |
 | `agent.halt_gate.acting` | agent | 4.2.1.1 1.13.6 | agent: halt_gate = acting — entered by no latched halt read by the act gate (signer: —) |
+
+
+### 3.2 Added in version 3
+
+| atom | plane | CC | meaning |
+|---|---|---|---|
+| `key.membership.proposed_add` | self | 3.3.6.3 | roster key: membership = proposed_add — entered by an addition proposal from a roster of two or more keys (signer: a live roster key); ends when the addition lands (quorum, or after W_self: the key on the roster, `device.join_approved` on the new device) or the proposal is withdrawn or refused; distinct from `device.join_requested`, which holds before the owner's approval |
 
 ## 4. Change control
 

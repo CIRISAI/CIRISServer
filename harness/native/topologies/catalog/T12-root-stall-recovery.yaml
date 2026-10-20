@@ -6,7 +6,7 @@
 # widens the roster back (T7 recovery). Both routes exist; their builder
 # branches are not written yet.
 catalog_id: T12
-catalogue_version: 2
+catalogue_version: 3
 title: A root stalls (a founder resigns below the margin) and recovers by a conferred human
 serves: [CSD-105]
 promises: [root.standing.Stalled, root.liveness.stalled, root.liveness.live, seat.identity_type.human]
