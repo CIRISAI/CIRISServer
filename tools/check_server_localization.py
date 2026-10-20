@@ -851,6 +851,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "add_device.owner_route_pending",
     # The 2-of-3 AMEND (CC 5.3.4, the steward's ruling on CIRISConstitution#172):
     # carried bytes changed, below quorum, input refused, nothing planned.
+    # The canonical's transit row for the amend (GET /v1/trust-root/transit-row).
+    "trust_root.no_transit_row",
+    "trust_root.not_a_serve_node",
+    "trust_root.store_unavailable",
     "final_genesis.amend_already_planned",
     "final_genesis.amend_carried_bytes_changed",
     "final_genesis.amend_input_refused",

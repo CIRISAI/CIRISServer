@@ -612,11 +612,76 @@ async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
     .into_response()
 }
 
+/// `GET /v1/trust-root/transit-row` — THIS node's signed `transport_destination`
+/// row WITH its transit KEX pair, for the bundle v4 amend (CC 5.3.4): the
+/// re-mint seeds each seated canonical's row, and a ceremony run on another
+/// node takes it from here (`serve_transport_destinations`). Served only by a
+/// node the bundle it carries SEATS as a serve node — a canonical's route is
+/// public by construction; any other node's is not this door's to hand out
+/// (an unannounced node's rows stay on its owner's nodes, CIRISEdge#682).
+async fn serve_transit_row(State(st): State<TrustRootState>) -> Response {
+    let bundle = ciris_persist::federation::genesis::canonical_genesis_bundle();
+    let mut candidates = vec![st.node_key_id.clone()];
+    if let Some(w) = crate::node_key::wire_identity() {
+        if w != st.node_key_id {
+            candidates.push(w.to_owned());
+        }
+    }
+    let Some(me) = candidates
+        .into_iter()
+        .find(|k| bundle.serve_nodes.iter().any(|n| &n.record.key_id == k))
+    else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "trust_root.not_a_serve_node",
+            "this node is not a serve node of the bundle it carries, so it serves no transit row",
+        );
+    };
+    let rows = match st
+        .engine
+        .federation_directory()
+        .list_signed_transport_destinations_for(&me)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "trust_root.store_unavailable",
+                format!("list_signed_transport_destinations_for({me}): {e:#}"),
+            )
+        }
+    };
+    match rows
+        .into_iter()
+        .filter(|r| r.transport_destination.retired_at.is_none())
+        .filter(|r| matches!(r.transit_kex_pair(), Ok(Some(_))))
+        .max_by_key(|r| {
+            (
+                r.transport_destination.epoch,
+                r.transport_destination.asserted_at,
+            )
+        }) {
+        Some(row) => Json(row).into_response(),
+        None => err(
+            StatusCode::NOT_FOUND,
+            "trust_root.no_transit_row",
+            "this node has published no signed route row with a transit KEX pair yet — it needs \
+             a sealed-transport release (edge v43+) running its transport",
+        ),
+    }
+}
+
 /// The PUBLIC trust-root read: the bundle (signed public rows, served to any
-/// peer or client — the registry serves the same shape).
+/// peer or client — the registry serves the same shape) and, from a seated
+/// canonical, its transit row for the amend.
 pub fn public_router(engine: Arc<Engine>, node_key_id: String) -> Router {
     Router::new()
         .route("/v1/trust-root/bundle", axum::routing::get(serve_bundle))
+        .route(
+            "/v1/trust-root/transit-row",
+            axum::routing::get(serve_transit_row),
+        )
         .with_state(TrustRootState {
             engine,
             node_key_id,
