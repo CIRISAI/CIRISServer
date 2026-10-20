@@ -80,6 +80,8 @@ fn transport_node_flag_maps_into_reticulum_config() {
         // `false` would make a node point-to-point only.
         control_channel_capacity: Some(4096),
         federation_visible: true,
+        // edge v43 (CIRISEdge#805 item 8), as compose.rs: inert by default.
+        direct_links: Default::default(),
     };
 
     assert!(

@@ -289,6 +289,15 @@ struct PlanRequest {
     /// Replace a ceremony already planned on this node.
     #[serde(default)]
     replace: bool,
+    /// CC 5.3.4 (bundle v4, CIRISPersist#1106) — each seated serve node's
+    /// CURRENT signed `transport_destination` row WITH its transit KEX pair,
+    /// emitted offline on that canonical's own host (edge's
+    /// `emit_transport_destination`, which signs from custody and refuses a
+    /// row with no pair). One per serve node; persist's bundle verification
+    /// decides admissibility (`genesis_serve_transport_destination_invalid`).
+    #[serde(default)]
+    serve_transport_destinations:
+        Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
 }
 
 /// Is this host's clock NTP-synchronized? `Some(answer)` where it can be read
@@ -506,6 +515,19 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
     if let Err(r) = check_recovery_keys(&recovery_keys) {
         return r;
     }
+    let transit_rows = match gather_serve_transport_destinations(
+        &st.engine,
+        &serve_nodes,
+        req.serve_transport_destinations,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(r) => return r,
+    };
+    if let Err(r) = check_serve_transport_destinations(&serve_nodes, &transit_rows) {
+        return r;
+    }
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
         consensus_protocol: ciris_verify_core::accord_genesis::ACCORD_CONSENSUS_PROTOCOL.to_owned(),
@@ -534,6 +556,10 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             }),
         },
         produced_at,
+        serve_transport_destinations: transit_rows,
+        // `None` = persist's GENESIS_BUNDLE_VERSION (4): the rows are inside
+        // the authorization digest.
+        bundle_version: None,
     };
     let state = match CeremonyState::plan(inputs) {
         Ok(s) => s,
@@ -549,6 +575,105 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
          genesis records and the authorization)"
     );
     status_body(&state).into_response()
+}
+
+/// Each serve node's current signed row: the one the request carries, else
+/// the newest row this directory holds for it that carries a transit pair. A
+/// running node's route row is edge's (its self-route producer signs it WITH
+/// the pair, CIRISEdge#406/#805), so the canonical hosting the ceremony — and
+/// any serve node whose row has replicated here — needs nothing passed.
+async fn gather_serve_transport_destinations(
+    engine: &Engine,
+    serve_nodes: &[ServeNodeInput],
+    supplied: Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+) -> Result<Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>, Response> {
+    let mut rows = supplied;
+    let dir = engine.federation_directory();
+    for node in serve_nodes {
+        if rows
+            .iter()
+            .any(|r| r.transport_destination.occurrence_key_id == node.key_id)
+        {
+            continue;
+        }
+        let held = dir
+            .list_signed_transport_destinations_for(&node.key_id)
+            .await
+            .map_err(|e| {
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "final_genesis.store",
+                    format!(
+                        "list_signed_transport_destinations_for({}): {e:#}",
+                        node.key_id
+                    ),
+                )
+            })?;
+        if let Some(row) = held
+            .iter()
+            .filter(|r| r.transport_destination.retired_at.is_none())
+            .filter(|r| matches!(r.transit_kex_pair(), Ok(Some(_))))
+            .max_by_key(|r| {
+                (
+                    r.transport_destination.epoch,
+                    r.transport_destination.asserted_at,
+                )
+            })
+        {
+            rows.push(row.clone());
+        }
+    }
+    Ok(rows)
+}
+
+/// CC 5.3.4 — a bundle that seats a canonical with no transit pair seeds
+/// nothing, and under the sealed transport (CC 5.3.3.5 E1) a fresh node then
+/// reaches no one. So every seated serve node must come with exactly its own
+/// row carrying a pair; anything else refuses the plan BY NAME rather than
+/// minting that bundle. The row's signature and the separation rule are
+/// persist's to judge (at `plan` and again at `finish`).
+fn check_serve_transport_destinations(
+    serve_nodes: &[ServeNodeInput],
+    rows: &[ciris_persist::federation::self_at_login::SignedTransportDestination],
+) -> Result<(), Response> {
+    let about = |r: &ciris_persist::federation::self_at_login::SignedTransportDestination| {
+        r.transport_destination.occurrence_key_id.clone()
+    };
+    let missing: Vec<&str> = serve_nodes
+        .iter()
+        .filter(|n| {
+            !rows
+                .iter()
+                .any(|r| about(r) == n.key_id && matches!(r.transit_kex_pair(), Ok(Some(_))))
+        })
+        .map(|n| n.key_id.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.serve_node_without_transit_pair",
+            format!(
+                "no signed transport_destination row with a transit KEX pair for {missing:?}, \
+                 passed or held here — run each canonical on a sealed-transport release so it \
+                 publishes its row (or emit it offline on its host) and pass it in \
+                 serve_transport_destinations; a bundle that seats a canonical without a pair \
+                 seeds nothing (CC 5.3.4)"
+            ),
+        ));
+    }
+    let stray: Vec<String> = rows
+        .iter()
+        .map(about)
+        .filter(|k| !serve_nodes.iter().any(|n| &n.key_id == k))
+        .collect();
+    if !stray.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.transit_row_not_a_serve_node",
+            format!("serve_transport_destinations carries rows for {stray:?}, which this genesis does not seat"),
+        ));
+    }
+    Ok(())
 }
 
 // ─── recovery keys ─────────────────────────────────────────────────────────

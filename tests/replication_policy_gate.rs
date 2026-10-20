@@ -247,8 +247,15 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// first-contact transport carve, and every ceremony stage also reaches the
 /// group's membership-plane audience. A Rooted keyless `ciris-canonical` is
 /// served to every peer.
+///
+/// `68c5298b…` → `ead63aac…` with edge v43.0.0 / persist v59 (the sealed
+/// transport, CC 5.3.3.5 E1): the key plane travels as its ROWS
+/// (`key:record:v1`, `identity:occurrence:v1`, withdraws) on its own planes,
+/// framed Key / Revocation / IdentityOccurrence objects are refused, and
+/// first contact carries the `key_record_row`. Equal to edge's published
+/// `SERVE_ADVERTISE_POLICY_HASH` at the v43.0.0 tag.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "68c5298b4bb48bbf8ffdb7ef881b71386b3db6ba8c6026b8bb61ec454ebe3850";
+    "ead63aac63f6736b12084a07278557b7b273e6a98c9d52b77504f512d9fc5439";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

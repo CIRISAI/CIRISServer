@@ -2408,10 +2408,13 @@ async fn read_admission_standing(
         additional_scrubs: Vec::new(),
     };
     let directory = engine.federation_directory();
+    // persist v56 (#934): the receipt instant is an input, not a clock read
+    // inside the gate — this probe judges "now", as the gate did before.
     match ciris_persist::federation::admission::check_peer_deadmission(
         directory.as_ref(),
         &probe,
         node_key_id,
+        chrono::Utc::now(),
     )
     .await
     {

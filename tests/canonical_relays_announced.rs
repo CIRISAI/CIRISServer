@@ -159,31 +159,49 @@ fn hash_of<T: serde::Serialize>(row: &T) -> [u8; 32] {
 }
 
 /// The content hash edge advertises for `key_id`'s key record on `engine`.
+/// persist v59 / edge v43: the Key plane carries the `key:record:v1` ROW,
+/// hashed as the attestation it is (edge `subject_holdings`).
 async fn key_hash(engine: &Engine, key_id: &str) -> [u8; 32] {
-    let served = engine
+    let rows = engine
         .federation_directory()
-        .list_signed_key_records_since(None, 10_000)
+        .list_attestations_for(key_id)
         .await
-        .expect("key records");
-    let rec = served
+        .expect("rows about the key");
+    let row = rows
         .into_iter()
-        .find(|s| s.record.key_id == key_id)
-        .unwrap_or_else(|| panic!("{key_id} is held here"));
-    hash_of(&SignedKeyRecord { record: rec.record })
+        .filter(|r| {
+            r.attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                == Some(ciris_persist::federation::key_plane::KEY_RECORD_DIMENSION)
+        })
+        .max_by_key(|r| r.asserted_at)
+        .unwrap_or_else(|| panic!("{key_id}'s key:record:v1 row is held here"));
+    hash_of(&row)
 }
 
-/// The content hash edge advertises for the occurrence `occurrence` on `engine`.
+/// The content hash edge advertises for the occurrence `occurrence` on
+/// `engine`: its `identity:occurrence:v1` row, about the identity.
 async fn occurrence_hash(engine: &Engine, occurrence: &str) -> [u8; 32] {
-    let served = engine
-        .federation_directory()
-        .list_signed_identity_occurrences_since(None, 10_000)
+    let dir = engine.federation_directory();
+    let identity = dir
+        .lookup_identity_for_occurrence(occurrence)
         .await
-        .expect("occurrences");
-    let row = served
+        .expect("lookup the identity")
+        .unwrap_or_else(|| panic!("occurrence {occurrence} is bound here"))
+        .identity_key_id;
+    let row = dir
+        .list_attestations_for(&identity)
+        .await
+        .expect("rows about the identity")
         .into_iter()
-        .find(|s| s.occurrence.identity_occurrence.occurrence_key_id == occurrence)
-        .unwrap_or_else(|| panic!("occurrence {occurrence} is held here"));
-    hash_of(&row.occurrence)
+        .filter(|r| {
+            ciris_persist::federation::key_plane::occurrence_of_row(r)
+                .is_some_and(|o| o.identity_occurrence.occurrence_key_id == occurrence)
+        })
+        .max_by_key(|r| r.asserted_at)
+        .unwrap_or_else(|| panic!("occurrence {occurrence}'s row is held here"));
+    hash_of(&row)
 }
 
 async fn offered(

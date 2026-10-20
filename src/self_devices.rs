@@ -234,12 +234,17 @@ pub struct EvictionReport {
     /// One entry per withdrawn owner-binding:
     /// `{node_key_id, binding, withdraws, cohort_scope}`.
     pub withdrawn: Vec<serde_json::Value>,
-    /// One entry per SIGNED occurrence revocation written:
-    /// `{occurrence_key_id, attesting_key_id, effective_at}`.
+    /// One entry per occurrence `withdraws` that LANDED:
+    /// `{occurrence_key_id, attesting_key_id, row, withdraws}`.
     pub occurrences_revoked: Vec<serde_json::Value>,
     /// Occurrences of the owner the eviction named that were already out of the
     /// active roster — nothing to sign for them.
     pub occurrences_already_revoked: Vec<String>,
+    /// persist v59: evictions the self roster's door HELD as proposals (CC
+    /// 3.3.6.3 — from two keys an eviction lands by the quorum or the lone
+    /// path): `{occurrence_key_id, door}`. Held is not failed; the occurrence
+    /// stays active until the proposal lands.
+    pub occurrences_held: Vec<serde_json::Value>,
     /// Every part that did not complete, by name. Empty on a full eviction.
     pub failed: Vec<EvictFailure>,
     /// `true` when a replication round was kicked NOW; `false` when this
@@ -263,65 +268,70 @@ impl EvictionReport {
     }
 }
 
-/// Build and sign ONE occurrence revocation as the owner, for persist's SIGNED
-/// door (`put_identity_occurrence_revocation`, CIRISPersist#421).
+/// persist v59 (CIRISPersist#991 / the sealed-transport floor): an occurrence
+/// is revoked by the owner's signed `withdraws` of its `identity:occurrence:v1`
+/// row — the framed revocation door is gone. The row is re-derived from the
+/// held SIGNED occurrence (`key_plane::occurrence_row`, the same pure function
+/// the store used), so its `attestation_id` is the one every node holds.
 ///
-/// The envelope carries exactly the members the gate reads back
-/// (`identity_key_id`, `occurrence_key_id`, `revoked_at`, `effective_at`) plus
-/// the witness set and reason, so what is signed is what is stored. It is
-/// canonicalized with persist's OWN canonicalizer — the bytes its gate
-/// re-canonicalizes — and signed with the owner's pen, which is the identity
-/// the occurrence belongs to: `signer_acts_for(owner, owner)` holds by
-/// construction, and no other key has the mandate (a node key signing its
-/// owner's revocation is the infrastructure-authors-the-human's-act class,
-/// CC 3.3.6).
-///
-/// The instant is NOT truncated. The fold revokes only when
-/// `effective_at >= occurrence.asserted_at`, occurrences are asserted at
-/// nanosecond precision, and RFC-3339 with nanoseconds round-trips exactly
-/// through the gate's `ts_field` comparison, so a millisecond cut would only
-/// open a window in which the revocation revokes nothing.
-async fn signed_occurrence_revocation(
+/// Since persist v59 the self roster's door (CC 3.3.6.3, `self_roster::gate`)
+/// judges an eviction: at one key it lands at once; from two it is a PROPOSAL
+/// that lands by the quorum or the lone path (CIRISServer#794) and the door
+/// answers `federation_self_roster_not_landed` with the proposal. That is not a
+/// failure — the eviction is held, by the constitution's own rule — so it is
+/// returned as [`OccurrenceWithdrawal::Held`] with the door's words.
+async fn withdraw_occurrence(
+    engine: &Engine,
     capsule: &OwnerSignerCapsule,
     owner: &str,
     occurrence: &str,
-    reason: Option<&str>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<ciris_persist::federation::SignedIdentityOccurrenceRevocation, String> {
-    let at = now.to_rfc3339();
-    let mut envelope = serde_json::json!({
-        "identity_key_id": owner,
-        "occurrence_key_id": occurrence,
-        "revoked_at": at,
-        "effective_at": at,
-        "witness_set": [capsule.key_id()],
-    });
-    if let Some(r) = reason {
-        envelope["reason"] = serde_json::Value::String(r.to_owned());
-    }
-    let bytes = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
-        .map_err(|e| format!("canonicalize the revocation envelope: {e:#}"))?;
-    let sig = capsule.sign_hybrid(&bytes).await?;
-    Ok(
-        ciris_persist::federation::SignedIdentityOccurrenceRevocation {
-            identity_occurrence_revocation:
-                ciris_persist::federation::types::IdentityOccurrenceRevocation {
-                    identity_key_id: owner.to_owned(),
-                    occurrence_key_id: occurrence.to_owned(),
-                    revoked_at: now,
-                    effective_at: now,
-                    reason: reason.map(str::to_owned),
-                    witness_set: vec![capsule.key_id().to_owned()],
-                    persist_row_hash: String::new(),
-                },
-            attesting_key_id: capsule.key_id().to_owned(),
-            signed_envelope: envelope,
-            signature: ciris_verify_core::transport_binding::TransportBindingSignature {
-                ed25519_signature_base64: B64.encode(&sig.classical_signature),
-                mldsa65_signature_base64: Some(B64.encode(&sig.pqc_signature)),
-            },
-        },
+) -> Result<OccurrenceWithdrawal, String> {
+    let dir = engine.federation_directory();
+    let held = dir
+        .list_signed_identity_occurrences_for(owner)
+        .await
+        .map_err(|e| format!("list_signed_identity_occurrences_for({owner}): {e:#}"))?;
+    let Some(signed) = held
+        .iter()
+        .filter(|o| o.identity_occurrence.occurrence_key_id == occurrence)
+        .max_by_key(|o| o.identity_occurrence.asserted_at)
+    else {
+        return Err(format!(
+            "{occurrence} is active under {owner} but no SIGNED occurrence row of it is held \
+             here — a trusted-local occurrence is this node's own write and has no plane row \
+             to withdraw"
+        ));
+    };
+    let row = ciris_persist::federation::key_plane::occurrence_row(signed)
+        .map_err(|e| format!("re-derive {occurrence}'s identity:occurrence:v1 row: {e:#}"))?;
+    let spec = crate::attest::Spec::new(
+        attestation_type::WITHDRAWS,
+        row.cohort_scope.clone(),
+        ciris_persist::federation::withdraws_attestation_envelope(
+            &row.attestation_id,
+            &row.attestation_type,
+        ),
     )
+    .about(owner);
+    match emit_as_owner(engine, capsule, spec).await {
+        Ok(id) => Ok(OccurrenceWithdrawal::Landed {
+            withdraws: id,
+            row: row.attestation_id,
+        }),
+        Err(e) if e.contains("federation_self_roster_not_landed") => {
+            Ok(OccurrenceWithdrawal::Held { door: e })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// What [`withdraw_occurrence`] did.
+enum OccurrenceWithdrawal {
+    /// The `withdraws` landed: the occurrence leaves the active roster.
+    Landed { withdraws: String, row: String },
+    /// The self roster's door HELD it as a proposal (CC 3.3.6.3); `door` is
+    /// persist's own answer, naming the proposal and what it needs.
+    Held { door: String },
 }
 
 /// **Evict a device from its owner's self — ONE act** (CSD-037, the
@@ -348,11 +358,12 @@ async fn signed_occurrence_revocation(
 ///    — the owner's signed `withdraws`, at the binding's own audience (a
 ///    federation binding is withdrawn where peers see it, a self one where the
 ///    owner's devices do).
-/// 2. **Revoke** each of `occurrences` that is still active, through persist's
-///    SIGNED door, signed by the owner's pen
-///    ([`signed_occurrence_revocation`]). A signed revocation is what the
-///    `IdentityOccurrenceRevocation` replication plane carries (`compose.rs`,
-///    CIRISServer#646); an unsigned one never leaves this store.
+/// 2. **Revoke** each of `occurrences` that is still active: the owner's
+///    signed `withdraws` of its `identity:occurrence:v1` row
+///    ([`withdraw_occurrence`]; persist v59 retired the framed revocation). It
+///    replicates as a row. From two roster keys persist's roster door may HOLD
+///    it as a proposal (CC 3.3.6.3) — reported in `occurrences_held`, not as a
+///    failure.
 /// 3. **Kick** replication so both ride this round, not the next cadence.
 /// 4. **Witness** each half from persist's own projections rather than from our
 ///    writes: `nodes_owned_by(owner)` must no longer list the nodes, and
@@ -440,26 +451,22 @@ pub(crate) async fn evict_device(
                 report.occurrences_already_revoked.push(occ.clone());
                 continue;
             }
-            let now = chrono::Utc::now();
-            let signed = match signed_occurrence_revocation(capsule, owner, occ, reason, now).await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    report.fail("occurrence_revocation", occ, e);
-                    continue;
+            match withdraw_occurrence(engine, capsule, owner, occ).await {
+                Ok(OccurrenceWithdrawal::Landed { withdraws, row }) => {
+                    report.occurrences_revoked.push(serde_json::json!({
+                        "occurrence_key_id": occ,
+                        "attesting_key_id": capsule.key_id(),
+                        "row": row,
+                        "withdraws": withdraws,
+                    }))
                 }
-            };
-            match dir.put_identity_occurrence_revocation(signed).await {
-                Ok(()) => report.occurrences_revoked.push(serde_json::json!({
-                    "occurrence_key_id": occ,
-                    "attesting_key_id": capsule.key_id(),
-                    "effective_at": now.to_rfc3339(),
-                })),
-                Err(e) => report.fail(
-                    "occurrence_revocation",
-                    occ,
-                    format!("put_identity_occurrence_revocation: {e:#}"),
-                ),
+                Ok(OccurrenceWithdrawal::Held { door }) => {
+                    report.occurrences_held.push(serde_json::json!({
+                        "occurrence_key_id": occ,
+                        "door": door,
+                    }))
+                }
+                Err(e) => report.fail("occurrence_revocation", occ, e),
             }
         }
     }
@@ -492,7 +499,15 @@ pub(crate) async fn evict_device(
     if !occurrences.is_empty() {
         match dir.list_identity_occurrences_active(owner).await {
             Ok(v) => {
+                let held: Vec<String> = report
+                    .occurrences_held
+                    .iter()
+                    .filter_map(|h| h["occurrence_key_id"].as_str().map(str::to_owned))
+                    .collect();
                 for occ in occurrences {
+                    if held.contains(occ) {
+                        continue; // held by the roster door: active until it lands
+                    }
                     if v.iter().any(|o| &o.occurrence_key_id == occ) {
                         report.fail(
                             "occurrence_witness",
@@ -513,8 +528,12 @@ pub(crate) async fn evict_device(
         owner = %owner,
         nodes = ?nodes,
         occurrences = ?occurrences,
+        // persist v59: a `withdraws` carries no reason member (the framed
+        // revocation that did is retired), so the owner's words live here.
+        reason = ?reason,
         withdrawn = report.withdrawn.len(),
         revoked = report.occurrences_revoked.len(),
+        held = report.occurrences_held.len(),
         failed = report.failed.len(),
         replication_kicked = report.replication_kicked,
         "self: device EVICTED — owner-binding(s) withdrawn and occurrence(s) revoked as ONE \

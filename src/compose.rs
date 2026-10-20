@@ -992,23 +992,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (dest_hash + transport-tier Ed25519) into the federation directory, so a
     // peer can `prime_peer`-root this node even though a v7.0.0 explicit-hash
     // destination CANNOT announce (Leviculum `ExplicitHashCannotAnnounce`).
-    // CIRISServer#205 gap #2 / CIRISPersist#397: the baked/self-signed record
-    // carries only the identity-tier Ed25519 + the IP hint; the transport
-    // identity is edge-runtime-derived (unknown at genesis-bake), so the node
-    // asserts it here at boot — the same self-authenticating basis (its own
-    // key_id, its own edge-owned transport identity) as an attested announce.
-    // Best-effort; a node with no Reticulum transport is a no-op. This is why
-    // delivery converges with ZERO operator action: restarting the node IS the
-    // publish (the directory row replicates, peers resolve + prime it).
-    // The WIRE identity, not `cfg.key_id`. Under `use_node_identity` edge announces
-    // on the NODE key's destination; publishing a route that names the actor would
-    // hand every peer a signed binding whose key is not the one it is talking to —
-    // CIRISEdge#393 item 2 fails, and the route never roots (the exact defect
-    // CIRISEdge#541's review found on the edge side).
-    let wire_id = crate::node_key::wire_identity()
-        .unwrap_or(&cfg.key_id)
-        .to_owned();
-    publish_self_transport_destination(&engine, &edge, &wire_id).await;
+    // CIRISServer#376 (retired with edge v43): this node no longer publishes
+    // its own route row. Edge's self-route producer (CIRISEdge#406) signs it as
+    // the wire identity WITH the transit KEX pair; the server's copy carried no
+    // pair and, asserted later at the same epoch, superseded edge's — so every
+    // peer read "publishes no usable transit KEX pair" and refused to seal a
+    // link (CC 5.3.3.5 E1).
 
     // ── Sealability twin (#227 S1): publish this node's SIGNED identity occurrence
     // (content-enc pubkeys from sealed custody) so peers can resolve + SEAL to it —
@@ -2609,142 +2598,6 @@ async fn enrich_read_api_bind_error(err: anyhow::Error, port: u16) -> anyhow::Er
     ))
 }
 
-/// Self-publish this node's **reticulum transport-tier binding** (dest-hash +
-/// transport Ed25519) into the federation directory so any peer can
-/// [`prime_peer`]-root it — the durable close of CIRISServer#205 gap #2.
-///
-/// A v7.0.0 explicit-hash canonical (e.g. `ciris-canonical-1`, baked with an IP
-/// hint) **cannot announce** (Leviculum `ExplicitHashCannotAnnounce`), so the only
-/// rooting path is out-of-band `prime_peer(key_id, dest_hash, transport_ed25519)`.
-/// That transport-tier Ed25519 is edge-owned and **not** in the (genesis-baked)
-/// identity record — so the node asserts it here at boot, for its OWN key_id, from
-/// its OWN live edge (`local_dest_hash` / `local_transport_pubkey`). Same
-/// self-authenticating basis as an attested announce; no accord quorum needed for
-/// a node to declare its own reachability. Once written it replicates, and a
-/// consuming node's `start_federation_delivery` resolves + primes it.
-///
-/// Best-effort: a node without a Reticulum transport (relay-off / non-reticulum
-/// build) is a silent no-op, and a directory-write failure is logged, never fatal.
-pub(crate) async fn publish_self_transport_destination(
-    engine: &Arc<Engine>,
-    edge: &Edge,
-    key_id: &str,
-) {
-    use base64::Engine as _;
-    use ciris_verify_core::self_at_login::SelfSigner;
-    use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
-    // The destination MUST be the EXACT hash edge announces on — `edge.local_named_dest_hash()`
-    // — because THAT is the value a peer stores as `RootedPeer.dest_hash` from our announce,
-    // and it is the key the peer's #393 item-2 gate (`hybrid_transport_binding_exists`) looks
-    // our signed route up by. Taking it straight from edge (NOT recomputing via
-    // `compute_destination_hash`) makes publish-key == lookup-key byte-identical by
-    // construction — closing the binding-lookup mismatch (CIRISEdge#406 final inch): a
-    // recompute could diverge from edge's own `Destination::new(...).hash()` by a byte and
-    // the gate would silently miss an admitted route.
-    let (Some(transport_pubkey), Some(named_dest_hash)) =
-        (edge.local_transport_pubkey(), edge.local_named_dest_hash())
-    else {
-        tracing::debug!(
-            key_id,
-            "no Reticulum transport identity / named dest — skipping self transport-destination publish"
-        );
-        return;
-    };
-    // The transport identity is X25519(0..32) ‖ Ed25519(32..64): the Ed25519 half is
-    // rooting/addressing, the X25519 half is the transport-tier KEX pubkey a peer needs
-    // to SEAL to this node (CIRISPersist#411 / CIRISEdge#299). Persist BOTH.
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let transport_x25519_b64 = b64.encode(&transport_pubkey[0..32]);
-    let transport_ed25519_b64 = b64.encode(&transport_pubkey[32..64]);
-    let dest_hex = hex::encode(named_dest_hash);
-    // CIRISEdge#406 (server half) — publish this as a SIGNED transport-destination so a
-    // peer can PQ-attribute inbound frames (the #393 item-2 gate requires a stored
-    // `SignedTransportDestination` carrying an ML-DSA-65 signature; an unsigned announce-
-    // derived row never satisfies it). Build the route row FIRST, then sign its EXACT
-    // serde serialization (`serde_json::to_value(&record)`) — persist's own proven
-    // round-trip pattern (`list_signed_transport_destinations_since_507c`): the signature
-    // covers precisely the stored shape and `verify_signed_transport_destination` parses
-    // byte-identical fields, so producer/verifier coherence holds by construction rather
-    // than by a hand-mirrored envelope (the contract-drift class we've been closing).
-    let record = ciris_persist::federation::TransportDestination {
-        occurrence_key_id: key_id.to_string(),
-        transport_kind: "reticulum".to_string(),
-        destination: dest_hex.clone(),
-        asserted_at: chrono::Utc::now(),
-        last_seen_at: None,
-        transport_ed25519_pubkey_base64: Some(transport_ed25519_b64),
-        transport_x25519_pubkey_base64: Some(transport_x25519_b64),
-        binding_provenance: ciris_persist::federation::self_at_login::BindingProvenance::Rooted,
-        epoch: 0,
-        retired_at: None,
-    };
-    let envelope = match serde_json::to_value(&record) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(key_id, error = %e,
-                "could not serialize the transport-destination envelope — skipping");
-            return;
-        }
-    };
-    // Sign with the ENGINE identity — `attesting_key_id`'s REGISTERED pubkeys ARE the
-    // engine signer's by construction (CIRISServer#315: cfg.key_id == local_derived_key_id());
-    // NOT `federation_signer`, whose re-opened seed can diverge in the fold (the phantom-key
-    // class #315 closed). signer_acts_for is satisfied: attesting == occurrence (self).
-    // WHO SIGNS is WHO THE BINDING IS FOR (CIRISServer#632). On an actor/node split
-    // the wire identity — `key_id` here — is the NODE key, while the engine signs as
-    // the ACTOR; persist refused every boot's binding ("signer <actor> is neither
-    // identity <node> …"), so no peer could attribute this node's link until the
-    // transport-destination plane carried a binding on the round cadence — the 70 s
-    // before the owner's consent reached the canonical on the production-shaped
-    // ladder. The node binding is signed by the held node pen under its registered
-    // id; every other case keeps the engine signer.
-    let signer: Box<dyn SelfSigner> = match node_pen_signer_for(key_id, engine).await {
-        Some(node) => Box::new(node),
-        None => match EngineSelfSigner::new(engine).await {
-            Ok(s) => Box::new(s),
-            Err(e) => {
-                tracing::warn!(key_id, error = %e,
-                    "could not build the engine self-signer for the signed transport-destination — skipping");
-                return;
-            }
-        },
-    };
-    let (signed_envelope, signature) =
-        match produce_signed_identity_occurrence(signer.as_ref(), envelope).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(key_id, error = %e,
-                    "could not hybrid-sign the transport-destination envelope — skipping");
-                return;
-            }
-        };
-    let signed = ciris_persist::federation::self_at_login::SignedTransportDestination {
-        transport_destination: record,
-        attesting_key_id: signer.key_id().to_string(),
-        signed_envelope,
-        signature,
-    };
-    match engine
-        .federation_directory()
-        .put_signed_transport_destination(&signed)
-        .await
-    {
-        Ok(outcome) => tracing::info!(
-            key_id,
-            dest_hash = %dest_hex,
-            ?outcome,
-            "published SIGNED self reticulum transport-tier binding — hybrid-verified, \
-             satisfies the #393 item-2 PQ attribution gate (CIRISEdge#406 server half)"
-        ),
-        Err(e) => tracing::warn!(
-            key_id,
-            error = %e,
-            "could not publish SIGNED self transport-destination — peers cannot PQ-attribute \
-             this node until it is asserted"
-        ),
-    }
-}
-
 /// Truncate an instant to whole milliseconds — the precision every signed
 /// `asserted_at` in this file is rendered at, and the precision persist's
 /// signed identity-occurrence door requires of the TYPED value too.
@@ -4106,70 +3959,6 @@ impl ciris_verify_core::self_at_login::SelfSigner for EngineSelfSigner {
     }
 }
 
-/// A [`SelfSigner`](ciris_verify_core::self_at_login::SelfSigner) over the held
-/// NODE pen, named by the node key's REGISTERED id (the pen's `derived_key_id()`;
-/// its `key_id()` is a bare alias registered nowhere). `Some` only when `key_id`
-/// IS that node key and it differs from the engine's — i.e. on a split install,
-/// for the node's own records.
-struct NodePenSelfSigner {
-    pen: Arc<ciris_persist::prelude::LocalSigner>,
-    key_id: String,
-    ed_pub: Vec<u8>,
-    pqc_pub: Vec<u8>,
-}
-
-async fn node_pen_signer_for(key_id: &str, engine: &Arc<Engine>) -> Option<NodePenSelfSigner> {
-    let pen = crate::node_key::held_node_signer()?;
-    let node = pen.derived_key_id();
-    if node != key_id {
-        return None;
-    }
-    if engine.local_derived_key_id().await.ok().as_deref() == Some(key_id) {
-        return None;
-    }
-    let probe = match pen.sign_hybrid(b"ciris:self-signer:pubkey-probe:v1").await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(key_id, error = %e, "node pen probe-sign failed — falling back to the engine signer");
-            return None;
-        }
-    };
-    Some(NodePenSelfSigner {
-        pen,
-        key_id: node,
-        ed_pub: probe.classical.public_key,
-        pqc_pub: probe.pqc.public_key,
-    })
-}
-
-#[async_trait::async_trait]
-impl ciris_verify_core::self_at_login::SelfSigner for NodePenSelfSigner {
-    fn key_id(&self) -> &str {
-        &self.key_id
-    }
-    async fn ed25519_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
-        Ok(self.ed_pub.clone())
-    }
-    async fn mldsa65_public_key(&self) -> Result<Vec<u8>, ciris_verify_core::VerifyError> {
-        Ok(self.pqc_pub.clone())
-    }
-    async fn sign_bound(
-        &self,
-        bytes: &[u8],
-    ) -> Result<(String, String), ciris_verify_core::VerifyError> {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-        let sig = self.pen.sign_hybrid(bytes).await.map_err(|e| {
-            ciris_verify_core::VerifyError::IntegrityError {
-                message: format!("NodePenSelfSigner sign_hybrid: {e}"),
-            }
-        })?;
-        Ok((
-            B64.encode(&sig.classical.signature),
-            B64.encode(&sig.pqc.signature),
-        ))
-    }
-}
-
 pub(crate) async fn build_self_key_record(
     engine: &Arc<Engine>,
     _cfg: &ServerConfig,
@@ -5382,6 +5171,10 @@ async fn build_edge(
         // Transport-node mode; this is the legacy path's relay posture. Two axes,
         // not one knob spelled twice.
         transit: None,
+        // CIRISEdge#805 item 8 (edge v43): direct links through NAT. The default
+        // is inert — no facilitator, none served, every peer's request refused —
+        // so a re-pin does not move this node's network posture.
+        direct_links: Default::default(),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The

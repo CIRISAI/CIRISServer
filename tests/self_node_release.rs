@@ -599,18 +599,28 @@ async fn releasing_a_node_also_revokes_its_occurrence_signed() {
         "{v}"
     );
     assert!(!active_occurrences(&alice).await.contains(&n2));
-    let signed = alice
+    // persist v59: the revocation is the owner's signed `withdraws` of the
+    // occurrence's `identity:occurrence:v1` row — a row, so it replicates.
+    let withdraws_id = revoked[0]["withdraws"].as_str().expect("withdraws id");
+    let row = alice
         .engine
         .federation_directory()
-        .list_signed_identity_occurrence_revocations_for(alice.key())
+        .get_attestation(withdraws_id)
         .await
-        .expect("signed revocations");
-    assert!(
-        signed
-            .iter()
-            .any(|r| r.identity_occurrence_revocation.occurrence_key_id == n2
-                && r.attesting_key_id == alice.key()),
-        "the node's revocation is SIGNED (replicable), by the owner: {signed:?}"
+        .expect("read the withdraws")
+        .expect("the withdraws row is held");
+    assert_eq!(row.attestation_type, "withdraws", "{row:?}");
+    assert_eq!(
+        row.attesting_key_id,
+        alice.key(),
+        "signed by the owner: {row:?}"
+    );
+    assert_eq!(
+        row.attestation_envelope
+            .get("references_attestation_id")
+            .and_then(|w| w.as_str()),
+        revoked[0]["row"].as_str(),
+        "it withdraws the occurrence's own row: {row:?}"
     );
 }
 

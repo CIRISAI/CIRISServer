@@ -192,14 +192,6 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     // also missed the #501 floor on a small one. One builder, every runtime.
     let rt = crate::node_runtime::build("ciris-fed-delivery")
         .context("build federation-delivery runtime")?;
-    // #393 item 2 / #406: publish THIS node's SIGNED transport destination
-    // before delivery rounds begin. compose::serve does this for served nodes;
-    // the BARE embedded topology (agent fold pre-serve, mesh-repro harness
-    // agent) reaches delivery only through here — without it the peer's PQ
-    // attribution gate refuses every non-bootstrap frame from us
-    // ("no hybrid-verified TransportDestination binds this transport
-    // identity") and traces can never ship. Same producer, every topology.
-    let node_key_id = edge.signer_key_id().to_string();
     // ── Waiting for claim ─────────────────────────────────────────────────────
     //
     // An agent-carrying node that nobody owns must not join the mesh. Held BEFORE
@@ -225,11 +217,8 @@ pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Re
     }
     WAITING_FOR_CLAIM.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    rt.block_on(crate::compose::publish_self_transport_destination(
-        &engine,
-        &edge,
-        &node_key_id,
-    ));
+    // CIRISServer#376: the route row is edge's (signed WITH the transit pair by
+    // its self-route producer); the server no longer publishes its own copy.
     // STAGE 1 on the DELIVERY path too. The embedded agent never runs
     // serve_with_adapter, so wiring this only in compose would leave every agent
     // node without a trust root while the composed node looked fine — the same

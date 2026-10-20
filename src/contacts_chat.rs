@@ -1367,20 +1367,19 @@ pub(crate) async fn welcomed_for_current_add(
         return Ok(false);
     };
     let added_ms = added.timestamp_millis();
-    Ok(ciris_edge::chat::rows_in_room(dir, from, room)
-        .await?
-        .iter()
-        .any(|a| {
-            let env = &a.attestation_envelope;
-            env.get(ciris_persist::federation::envelope::paths::DIMENSION)
-                .and_then(serde_json::Value::as_str)
-                == Some(ciris_edge::chat::WELCOME_DIMENSION)
-                && env
-                    .get(STOPGAP_FIELD_MLS_FOR)
+    // edge v43 (persist v56 #1001): the dimension is pushed into the read.
+    Ok(
+        ciris_edge::chat::rows_in_room(dir, from, room, ciris_edge::chat::WELCOME_DIMENSION)
+            .await?
+            .iter()
+            .any(|a| {
+                let env = &a.attestation_envelope;
+                env.get(STOPGAP_FIELD_MLS_FOR)
                     .and_then(serde_json::Value::as_str)
                     == Some(member)
-                && a.asserted_at.timestamp_millis() >= added_ms
-        }))
+                    && a.asserted_at.timestamp_millis() >= added_ms
+            }),
+    )
 }
 
 /// The creator's half of an N-member room: make the MLS group's members equal

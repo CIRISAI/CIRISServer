@@ -361,10 +361,9 @@ async fn the_owner_revokes_a_device_with_a_signed_replicating_revocation() {
     let kept = phone_of(&alice, 0x53).await;
     let dir = alice.engine.federation_directory();
     assert!(
-        dir.list_signed_identity_occurrence_revocations_for(alice.key())
+        active_roster(&alice.engine, alice.key())
             .await
-            .expect("signed revocations")
-            .is_empty(),
+            .contains(&phone),
         "precondition: nothing revoked"
     );
 
@@ -395,19 +394,21 @@ async fn the_owner_revokes_a_device_with_a_signed_replicating_revocation() {
         "the answer says what eviction does NOT do: {v}"
     );
 
-    // THE SIGNED ROW, read back the way a replicator re-publishes it.
-    let signed = dir
-        .list_signed_identity_occurrence_revocations_for(alice.key())
+    // THE SIGNED ROW (persist v59): the owner's `withdraws` of the
+    // occurrence's `identity:occurrence:v1` row — a row, so it replicates.
+    let revoked = &v["occurrences_revoked"][0];
+    let row = dir
+        .get_attestation(revoked["withdraws"].as_str().expect("withdraws id"))
         .await
-        .expect("signed revocations");
-    let row = signed
-        .iter()
-        .find(|r| r.identity_occurrence_revocation.occurrence_key_id == phone)
-        .expect("the revocation is on the SIGNED surface — not the local door");
+        .expect("read the withdraws")
+        .expect("the withdraws row is held");
+    assert_eq!(row.attestation_type, "withdraws", "{row:?}");
     assert_eq!(row.attesting_key_id, alice.key(), "the owner signed it");
-    assert_eq!(row.signed_envelope["occurrence_key_id"], phone.as_str());
-    assert_eq!(row.signed_envelope["reason"], "phone stolen");
-    assert!(row.signature.mldsa65_signature_base64.is_some(), "hybrid");
+    assert_eq!(
+        row.attestation_envelope["references_attestation_id"], revoked["row"],
+        "it withdraws the phone's occurrence row: {row:?}"
+    );
+    assert!(row.scrub_signature_pqc.is_some(), "hybrid");
 
     // The device is out of the self; the other one is not.
     assert!(!signer_acts_for(&alice.engine, &phone, alice.key()).await);

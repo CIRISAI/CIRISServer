@@ -131,15 +131,6 @@ pub const RELAY_REFRESH: Duration = Duration::from_secs(60);
 /// [`RELAY_REFRESH`] pass, carries the change.
 pub const NUDGE_FLOOR: Duration = Duration::from_secs(15);
 
-/// Page size for the occurrence enumeration. The same default the bridge's
-/// since-cursor sweeps use.
-const OCCURRENCE_PAGE: u32 = 1024;
-
-/// Hard stop on the enumeration — 4096 pages × 1024 rows, far above any real
-/// corpus and far below "forever" (the same bound edge puts on a `Full`
-/// drain, CIRISEdge#531). Hitting it truncates the relay for one pass, loudly.
-const MAX_OCCURRENCE_PAGES: usize = 4096;
-
 /// The relay sets, computed off the hot path. Sorted and deduplicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelaySets {
@@ -305,50 +296,39 @@ pub async fn serves_infrastructure(engine: &Engine, own_key_ids: &[String]) -> b
 /// relay built from half a corpus would silently drop people.
 pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> {
     let dir = engine.federation_directory();
+    // persist v59 retired the framed occurrence listing this paged through
+    // (`list_signed_identity_occurrences_since`, the sealed-transport floor).
+    // ONLY A PERSON ANNOUNCES (below), so the candidates are the `user`-typed
+    // keys, each kept only when it holds a SIGNED occurrence here — the same
+    // set the occurrence plane named, read from the key table (small) instead
+    // of the attestation log (orders of magnitude larger on a canonical).
+    let users = dir
+        .list_keys_by_identity_type(identity_type::USER)
+        .await
+        .map_err(|e| format!("list_keys_by_identity_type(user): {e:#}"))?;
     let mut identities: BTreeSet<String> = BTreeSet::new();
-    let mut since: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
-    let mut pages = 0usize;
-    loop {
-        let page = dir
-            .list_signed_identity_occurrences_since(since.clone(), OCCURRENCE_PAGE)
+    for user in users {
+        let signed = dir
+            .list_signed_identity_occurrences_for(&user.key_id)
             .await
-            .map_err(|e| format!("list_signed_identity_occurrences_since: {e:#}"))?;
-        let short = page.len() < OCCURRENCE_PAGE as usize;
-        for row in &page {
-            identities.insert(row.occurrence.identity_occurrence.identity_key_id.clone());
+            .map_err(|e| {
+                format!(
+                    "list_signed_identity_occurrences_for({}): {e:#}",
+                    user.key_id
+                )
+            })?;
+        if !signed.is_empty() {
+            identities.insert(user.key_id);
         }
-        let next = page
-            .last()
-            .map(ciris_persist::federation::ServedIdentityOccurrence::resume_pair);
-        pages += 1;
-        if short || next.is_none() || next == since {
-            break;
-        }
-        if pages >= MAX_OCCURRENCE_PAGES {
-            tracing::warn!(
-                pages,
-                "announced relay: occurrence enumeration hit its page bound — the relay set \
-                 for this pass is TRUNCATED (history: CIRISEdge#531 bound)"
-            );
-            break;
-        }
-        since = next;
     }
     let mut nodes: BTreeSet<String> = BTreeSet::new();
     let mut owners: BTreeSet<String> = BTreeSet::new();
     for identity in identities {
-        // ONLY A PERSON ANNOUNCES. An owner-binding is user → node, so an
-        // identity whose key is not `user`-typed owns nothing to relay. This
-        // gate is the pass's cost: `announced_nodes_of` reads every row the
-        // identity ever AUTHORED, and agents author by far the most rows. On
-        // the production canonical (2026-10-02) ~400 agent identities made each
-        // pass take 8–86 s and pinned a core reading the store at ~600 MB/s.
-        // A read failure or an unknown key is skipped, never guessed: a key
-        // with no record here has no roster row here to relay either.
-        match dir.lookup_public_key(&identity).await {
-            Ok(Some(rec)) if rec.identity_type == identity_type::USER => {}
-            _ => continue,
-        }
+        // ONLY A PERSON ANNOUNCES — applied at enumeration above: an
+        // owner-binding is user → node, and `announced_nodes_of` reads every
+        // row the identity ever AUTHORED, which for agents is by far the most
+        // (production canonical 2026-10-02: ~400 agents made each pass take
+        // 8–86 s, pinning a core at ~600 MB/s).
         let announced = crate::auth::ownership::announced_nodes_of(engine, &identity).await?;
         if announced.is_empty() {
             continue;

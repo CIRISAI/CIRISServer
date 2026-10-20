@@ -826,6 +826,7 @@ pub fn produce_genesis(
         attestations,
         roster_records: Vec::new(),
         authorizations,
+        serve_transport_destinations: Vec::new(),
         produced_at: now_rfc3339.to_string(),
     };
     // Structure only: a freshly proposed bundle legitimately carries one
@@ -1981,6 +1982,7 @@ mod tests {
             attestations: Vec::new(),
             roster_records: Vec::new(),
             authorizations: Vec::new(),
+            serve_transport_destinations: Vec::new(),
             produced_at: "2026-07-21T00:00:00Z".into(),
         };
         assert!(matches!(
@@ -2207,6 +2209,7 @@ mod v2_tests {
             attestations,
             roster_records: Vec::new(),
             authorizations: Vec::new(),
+            serve_transport_destinations: Vec::new(),
             produced_at: "2026-07-22T00:00:00Z".to_string(),
         }
     }
