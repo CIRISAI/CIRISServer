@@ -1,0 +1,31 @@
+# T13 — a witnessed lineage (CC 3.2 T4a/T6, 3.4.7.1; catalogue v2): a head
+# whose newest counted cosignature is older than attach_window is STALE and
+# refuses an attach; a fresh head admits; a node-bearing key offered as a seat
+# never counts. The lineage-head cosign route is CIRISServer#693 (known red);
+# a node-bearing seat needs a successor family head, which one root per mesh
+# cannot give (refused, as T9).
+catalog_id: T13
+catalogue_version: 2
+title: A witnessed lineage — a stale head refuses attach; a node-bearing seat never counts
+serves: [CSD-105]
+promises: [root.head.stale, seat.identity_type.node_bearing]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C], accepts: HA, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: HA}
+  relations:
+    - {rel: peered, between: [A, C]}
+    - {rel: lineage_head, root: HA, head: stale, node: A, known_red: "CIRISServer#693"}
+    - {rel: seat_node_bearing, root: HA, node: A}
+  actor: {person: alice, device: A}
+  negatives: []

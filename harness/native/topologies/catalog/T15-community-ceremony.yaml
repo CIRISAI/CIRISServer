@@ -1,0 +1,82 @@
+# T15 — a community's ceremony (CC 3.1.3.2, 4.5.4, 4.5.13; catalogue v2).
+# Majority protocol, as T5: bob is seated by alice alone; erin and frank each by
+# a quorum change bob co-signs. carol is INVITED (proposed) and accepts while
+# the group's quorum is outstanding; dave declines; erin is removed; frank
+# resigns. bob is appointed moderator; his duty lapses (the community then
+# cannot federate), the room fails secure, and a member is promoted on merit —
+# the lapse and the promotion have no route (CIRISServer#795, known red).
+# Membership's door (steward 2026-10-18, CIRISConstitution#180): no single vote
+# admits by silence at any size — invitations run the two-path policy with an
+# approval floor, and a proposal holding one approval and no objections through
+# its window ends DECLINED. No step here admits by silence: carol ACCEPTS while
+# the group's quorum is outstanding, and dave declines in his own voice. gus is
+# the ruling's own test: one approval (alice's proposal), no objections, the
+# window ends below the floor → declined (CIRISServer#796 ships the window).
+catalog_id: T15
+catalogue_version: 2
+title: A community's ceremony — decline, removal, resignation; a moderator lapses, the room fails secure
+serves: [CSD-102, CSD-103, CSD-128]
+promises: [member.stage.proposed, member.stage.accepted_awaiting_group, member.stage.declined,
+           member.stage.removed, member.stage.resigned, group.moderator.lapsed, group.moderator.merit_promoted,
+           group.moderator.fail_secure, group.federating.no]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A,  dials: [C],    accepts: R, announced: true}
+    - {id: B,  dials: [C, A], accepts: R, announced: true}
+    - {id: CA, dials: [C, A], accepts: R, announced: true}
+    - {id: D,  dials: [C, A], accepts: R, announced: true}
+    - {id: E,  dials: [C, A], accepts: R, announced: true}
+    - {id: F,  dials: [C, A], accepts: R, announced: true}
+    - {id: G,  dials: [C, A], accepts: R, announced: true}
+  persons:
+    - {id: alice, owns: [A],  accepts: R}
+    - {id: bob,   owns: [B],  accepts: R}
+    - {id: carol, owns: [CA], accepts: R}
+    - {id: dave,  owns: [D],  accepts: R}
+    - {id: erin,  owns: [E],  accepts: R}
+    - {id: frank, owns: [F],  accepts: R}
+    - {id: gus,   owns: [G],  accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: peered, between: [A, CA]}
+    - {rel: peered, between: [A, D]}
+    - {rel: peered, between: [A, E]}
+    - {rel: peered, between: [A, F]}
+    - {rel: peered, between: [A, G]}
+    - {rel: reachable, node: A, person: bob, min: 1}
+    - {rel: reachable, node: A, person: carol, min: 1}
+    - {rel: reachable, node: A, person: dave, min: 1}
+    - {rel: reachable, node: A, person: erin, min: 1}
+    - {rel: reachable, node: A, person: frank, min: 1}
+    - {rel: reachable, node: A, person: gus, min: 1}
+    - {rel: community, id: K, founder: alice, protocol: majority, name: Ceremony}
+    - {rel: member, community: K, invitee: bob}
+    - {rel: quorum_change, id: add-erin, community: K, by: alice, invitee: erin, quorum: 2, cosigns: 1}
+    - {rel: cosign, change: add-erin, community: K, by: bob}
+    - {rel: quorum_change, id: add-frank, community: K, by: alice, invitee: frank, quorum: 2, cosigns: 1}
+    - {rel: cosign, change: add-frank, community: K, by: bob}
+    - {rel: invite, community: K, by: alice, invitee: carol}
+    - {rel: accept, community: K, invitee: carol}
+    - {rel: invite, community: K, by: alice, invitee: dave}
+    - {rel: decline, community: K, invitee: dave}
+    - {rel: remove, community: K, member: erin, by: alice}
+    - {rel: invite, community: K, by: alice, invitee: gus}
+    # Seated now: alice, bob, frank (roster 3). The verdict is the published
+    # vector, not a paragraph: governance_policy_vectors.json community_invite,
+    # roster 3, base 3, approvals 1, objections 0, elapsed_secs 259200 → cancelled
+    # ("window closed below the floor: silence alone never admits"). At base 3
+    # the floor is 2 by the count minimum max(2, ceil(base/3)), not 1 by the
+    # fraction — one approval is below it.
+    - {rel: invite_window, community: K, invitee: gus, approvals: 1, objections: 0, elapsed_secs: 259200,
+       known_red: "CIRISServer#796"}
+    - {rel: leave, community: K, member: frank}
+    - {rel: moderator, community: K, to: bob}
+    - {rel: moderator_lapse, community: K, moderator: bob, known_red: "CIRISServer#795"}
+    - {rel: fail_secure, community: K, by: alice}
+    - {rel: merit_promote, community: K, known_red: "CIRISServer#795"}
+  actor: {person: alice, device: A}
+  negatives: []

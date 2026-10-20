@@ -306,6 +306,21 @@ jobs:
         # 48 -> 49 (CIRISServer#632): the NODE key's own trust-root acceptance on a split install
         # (mesh_genesis::accept_trust_root_as_node_key) — edge's serve gate (leg B) reads the wire key.
         run: python3 tools/audit_cohort_scope_callers.py --max-federation 49
+      # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
+      #
+      # The topology catalogue is LOCKED: ten entries, a closed vocabulary of
+      # states, and the requirements each CSD tests at. `evaluate` fails on a
+      # broken promise, an unknown atom, an unrealizable entry or a requirement
+      # no entry reaches; the unit tests hold the planner (earliest checkpoint,
+      # cheapest cover) and that every relation is built or refused by name.
+      # No binary: the model computes each entry's states from its steps.
+      - name: CSD/4 catalogue model (evaluate + unit tests)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 -m pip install --quiet pyyaml pytest
+          python3 -m harness.native evaluate
+          python3 -m pytest -q harness/native/test_model.py
       # The NOISE FLOOR proof (CIRISServer#14, CEG §19.7 / §19.3 N5) — provable
       # individual-unrecoverability for erasure compliance, run explicitly so the
       # MEASURED residual-fidelity numbers land in the CI log (Linux only — one

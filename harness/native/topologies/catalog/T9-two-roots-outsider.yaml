@@ -1,0 +1,34 @@
+# T9 — two roots and a party outside both (CIRISClient#179 §2; 6e, 4d,
+# CSD-127). One canonical per root; zed's node accepts neither. The harness
+# mints ONE root per mesh today (mint_accord_root rewrites the mesh's base
+# env), so the builder stops before the second canonical, by name.
+catalog_id: T9
+catalogue_version: 2
+title: Two roots and a party outside both
+serves: [CSD-127]
+derives: [6e, 4d, 4e]
+promises: [root.two, root.key, root.infrastructure, party.outside_roots]
+topology:
+  roots:
+    - {id: R1, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+    - id: R2
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C1, holds: R1, serves: [infra:serve, infra:attest]}
+    - {id: C2, holds: R2, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C1], accepts: R1, announced: true}
+    - {id: B, dials: [C2], accepts: R2, announced: true}
+    - {id: Z, dials: [C1], announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: R1}
+    - {id: bob,   owns: [B], accepts: R2}
+    - {id: zed,   owns: [Z]}
+  relations:
+    - {rel: reachable, node: A, person: zed, min: 1}
+  actor: {person: zed, device: Z}
+  negatives: []

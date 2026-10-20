@@ -1,0 +1,36 @@
+# T17 — a takedown and a steward purge (CC 2.1, 2.3.3, 4.5.3, 5.2; catalogue
+# v2): a self-scope file is admitted, family- and community-scope files are
+# written to a household and a community, the first is withdrawn (tombstoned by
+# digest), and a steward purges its blob after the dwell — the purge surface is
+# CIRISServer#756 (known red).
+catalog_id: T17
+catalogue_version: 2
+title: A takedown and a steward purge — tombstone, dwell, purge; family and community scope
+serves: [CSD-108, CSD-107]
+promises: [row.standing.admitted, row.standing.tombstoned, blob.custody.purged, row.scope.family,
+           row.scope.community]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C],    accepts: R, announced: true}
+    - {id: B, dials: [C, A], accepts: R, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: R}
+    - {id: bob,   owns: [B], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: reachable, node: A, person: bob, min: 1}
+    - {rel: household, id: H, founder: alice, name: Home}
+    - {rel: member, household: H, invitee: bob}
+    - {rel: community, id: K, founder: alice, protocol: majority, name: Street}
+    - {rel: member, community: K, invitee: bob}
+    - {rel: file, person: alice, device: A, size: 4096, name: notice.bin}
+    - {rel: scoped_file, person: alice, device: A, scope: family, household: H, size: 4096, name: family.bin}
+    - {rel: scoped_file, person: alice, device: A, scope: community, community: K, size: 4096, name: street.bin}
+    - {rel: withdraw, person: alice, device: A, file: notice.bin}
+    - {rel: purge, file: notice.bin, by: steward, known_red: "CIRISServer#756"}
+  actor: {person: alice, device: A}
+  negatives: []

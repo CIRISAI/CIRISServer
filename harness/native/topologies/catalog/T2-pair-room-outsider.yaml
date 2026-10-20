@@ -1,0 +1,35 @@
+# T2 — two people, a pair room, one outsider (CIRISClient#179 §2; seeded from
+# csd-091-user-chat.yaml). B dials A: bodies are one-hop (CC 5.4.6). eve is
+# claimed and unannounced and appears in no relation — the outsider the
+# negative is proved against.
+catalog_id: T2
+catalogue_version: 2
+title: Two people, pair room, one outsider
+serves: [CSD-091]
+promises: [contact.reachable, contact.added, room.pair.keyed, message.delivered, person.outsider,
+           node.unannounced, negatives.held]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C],    accepts: R, announced: true}
+    - {id: B, dials: [C, A], accepts: R, announced: true}
+    - {id: X, dials: [C],    accepts: R, announced: false}
+  persons:
+    - {id: alice, owns: [A], accepts: R}
+    - {id: bob,   owns: [B], accepts: R}
+    - {id: eve,   owns: [X], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: rooted_with, between: [alice, bob], require: false}   # observed: the room keys without it today
+    - {rel: reachable, node: A, person: bob, min: 1}               # CIRISServer#699
+    - {rel: reachable, node: B, person: alice, min: 1}
+    - {rel: contact, from: alice, to: bob, via: owner}
+    - {rel: contact, from: bob, to: alice, via: owner}
+    - {rel: room, id: pair, kind: pair, members: [alice, bob], keyed: true}
+    - {rel: message, from: bob, to: alice, room: pair, text: "hello from bob"}
+  actor: {person: alice, device: A}
+  negatives:
+    - {check: cannot_list_room, person: eve, room: pair}

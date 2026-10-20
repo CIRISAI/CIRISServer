@@ -1,0 +1,25 @@
+# T7 — an agent under a steward with a Wise Authority (CIRISClient#179 §2;
+# CSD-111–117, 5a–5g, 7c, 8b). The agent layer has no builder in this repo: an
+# agent is a CIRISAgent process (halt_agent drives an EXTERNAL one). The
+# builder stands up the steward's claimed node and stops before the agent.
+catalog_id: T7
+catalogue_version: 2
+title: An agent under a steward with a Wise Authority
+serves: [CSD-111, CSD-112, CSD-113, CSD-114, CSD-115, CSD-116, CSD-117]
+derives: [5a, 5b, 5c, 5d, 5e, 5f, 5g, 7c, 8b]
+promises: [agent.bound, steward.bonded, wa.present]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: N, dials: [C], accepts: R, announced: true}
+  persons:
+    - {id: steward, owns: [N], accepts: R}
+  relations:
+    - {rel: agent, node: N}
+    - {rel: steward, person: steward, node: N}
+    - {rel: wise_authority, node: N}
+  actor: {person: steward, device: N}
+  negatives: []

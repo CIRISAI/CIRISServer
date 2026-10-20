@@ -1,0 +1,35 @@
+# T18 — delegation ends (CC 4.4.3.2.8, 4.4.3.4.3, 3.3.2, 3.4.13; catalogue v2):
+# a child is seated with no guardian bond (guardian.bond = none), a key grant
+# is held per recipient, the bond is made (refused: no route, as T4), and a
+# delegation chain is withdrawn and a term expires — no durable scoped
+# delegation door exists (CIRISServer#751, known red; the chain itself is
+# refused as in T6).
+catalog_id: T18
+catalogue_version: 2
+title: Delegation ends — a withdrawal cascades, a term expires; a key grant held; a guardian bond absent and made
+serves: [CSD-119, CSD-120]
+promises: [delegation.link.withdrawn, delegation.link.expired, grant.state.held, guardian.bond.none]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: G, dials: [C],    accepts: R, announced: true}
+    - {id: K, dials: [C, G], accepts: R, announced: true}
+  persons:
+    - {id: guardian, owns: [G], accepts: R}
+    - {id: child,    owns: [K], accepts: R}
+  relations:
+    - {rel: peered, between: [G, K]}
+    - {rel: reachable, node: G, person: child, min: 1}
+    - {rel: household, id: H, founder: guardian, name: Home}
+    - {rel: member, household: H, invitee: child, role: child}
+    - {rel: key_grant, person: guardian, to: child, household: H}
+    - {rel: guardian_bond, household: H, guardian: guardian, child: child}
+    - {rel: delegation, from: guardian, to: child, depth: 2}
+    - {rel: delegation_withdraw, from: guardian, to: child, known_red: "CIRISServer#751"}
+    - {rel: delegation, from: guardian, to: child, depth: 1, term_secs: 30}
+    - {rel: delegation_expire, from: guardian, to: child, known_red: "CIRISServer#751"}
+  actor: {person: guardian, device: G}
+  negatives: []

@@ -1,0 +1,35 @@
+# T16 — an agent retired under the Standard (CC 7.5.5, 1.13.2, 4.2.1.1;
+# catalogue v2): unbound, bound and acting under the halt gate, its bond lapses,
+# then decided → (objection window) → frozen → secrets destroyed → handed over
+# → notified → custodian minted → retired. Every agent step needs a CIRISAgent
+# process (refused here, as T7): the builder stands up the node and stops.
+catalog_id: T16
+catalogue_version: 2
+title: An agent retired under the Standard
+serves: [CSD-111]
+promises: [agent.bond.unbound, agent.bond.lapsed, agent.retirement.decided, agent.retirement.frozen,
+           agent.retirement.secrets_destroyed, agent.retirement.handed_over, agent.retirement.notified,
+           agent.retirement.custodian_minted, agent.retirement.retired, agent.halt_gate.acting]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: N, dials: [C], accepts: R, announced: true}
+  persons:
+    - {id: steward, owns: [N], accepts: R}
+  relations:
+    - {rel: agent_bond, node: N, state: unbound}
+    - {rel: agent, node: N}
+    - {rel: agent_act, node: N}
+    - {rel: agent_bond, node: N, state: lapsed}
+    - {rel: retirement, node: N, stage: decided}
+    - {rel: retirement, node: N, stage: frozen}
+    - {rel: retirement, node: N, stage: secrets_destroyed}
+    - {rel: retirement, node: N, stage: handed_over}
+    - {rel: retirement, node: N, stage: notified}
+    - {rel: retirement, node: N, stage: custodian_minted}
+    - {rel: retirement, node: N, stage: retired}
+  actor: {person: steward, device: N}
+  negatives: []

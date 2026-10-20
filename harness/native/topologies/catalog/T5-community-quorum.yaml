@@ -1,0 +1,37 @@
+# T5 — a community with a held quorum change and a moderator duty
+# (CIRISClient#179 §2; CSD-102/103/065, 6c/6d/3d, CSD-128). Majority protocol:
+# bob is seated 1-of-1, so adding carol needs 2-of-2 — alice's signature alone
+# is HELD (assemble answers 409 community.quorum_pending), bob's co-signature
+# applies it. `quorum_change.held` is TRANSIENT: tested before `cosign`. The
+# moderator is appointed last, so a refusal there costs no earlier state.
+catalog_id: T5
+catalogue_version: 2
+title: A community — a held quorum change, a moderator duty
+serves: [CSD-102, CSD-103, CSD-065, CSD-128]
+derives: [6c, 6d, 3d, 2d]
+promises: [community.formed, community.member, quorum_change.held, quorum_change.applied, moderator.named]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A,  dials: [C],    accepts: R, announced: true}
+    - {id: B,  dials: [C, A], accepts: R, announced: true}
+    - {id: CA, dials: [C, A], accepts: R, announced: true}
+  persons:
+    - {id: alice, owns: [A],  accepts: R}
+    - {id: bob,   owns: [B],  accepts: R}
+    - {id: carol, owns: [CA], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: peered, between: [A, CA]}
+    - {rel: reachable, node: A, person: bob, min: 1}
+    - {rel: reachable, node: A, person: carol, min: 1}
+    - {rel: community, id: K, founder: alice, protocol: majority, name: Neighbours}
+    - {rel: member, community: K, invitee: bob}
+    - {rel: quorum_change, id: add-carol, community: K, by: alice, invitee: carol, quorum: 2, cosigns: 1}
+    - {rel: cosign, change: add-carol, community: K, by: bob}
+    - {rel: moderator, community: K, to: bob}
+  actor: {person: alice, device: A}
+  negatives: []

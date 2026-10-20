@@ -1,0 +1,44 @@
+# T19 — holders under coercion and censorship (CC 4.2.6, 2.4.1.1, 5.4.6;
+# catalogue v2). On T8's accord: holder 0 halts honestly; holder 1 is COERCED
+# (signs as told — an invocation the standing rule must refuse); holder 2 is
+# CENSORED (signs, its rows withheld past the window) and then LOST (never signs
+# again). CC's ruling 2026-10-18: these stagings ARE the model's dispositions
+# (formal/accord_roster `c` and `s`). The standing rule holds throughout. A node
+# de-admits a key with a history bound (revoked_after), then without (revoked_all).
+catalog_id: T19
+catalogue_version: 2
+title: Holders under coercion and censorship — the standing rule holds; an announced node; revoked_after
+serves: [CSD-129, CSD-105]
+promises: [root.holder_disposition.honest, root.holder_disposition.coerced, root.holder_disposition.censored,
+           root.holder_disposition.lost, node.announce.announced, key.revocation.revoked_after,
+           key.revocation.revoked_all, key.revocation.none]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      charter: {halt_fuse_secs: 86400}
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C], accepts: HA, announced: true}
+    - {id: B, dials: [C], accepts: HA, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: HA}
+    - {id: bob,   owns: [B], accepts: HA}
+  relations:
+    - {rel: peered, between: [A, C]}
+    - {rel: peered, between: [B, C]}
+    - {rel: peered, between: [A, B]}
+    - {rel: rooted_with, between: [alice, bob], wait: 120, require: true}
+    - {rel: holder, holder: 0, disposition: honest}
+    - {rel: holder, holder: 1, disposition: coerced}
+    - {rel: holder, holder: 2, disposition: censored}
+    - {rel: holder, holder: 2, disposition: lost}
+    - {rel: deadmit, node: A, person: bob, after: true}
+    - {rel: deadmit, node: A, person: bob}
+  actor: {person: alice, device: A}
+  negatives: []

@@ -1,0 +1,22 @@
+# T0 — Just me, offline: one person, one node, no root (CIRISClient#179 §2).
+# The first-run wizard and the N-rules (FSD/CSD4.md §4). No canonical exists
+# anywhere: the node dials nothing and holds no served root, so every state a
+# setup screen reads is reachable without the network. `node.unclaimed` is
+# TRANSIENT — it holds between boot and the claim, so the wizard's screens are
+# tested at the `nodes` checkpoint, before `person:me` destroys it.
+catalog_id: T0
+catalogue_version: 2
+title: Just me, offline — one person, one node, no root
+serves: [CSD-118]
+derives: [9c]
+promises: [root.none, node.unclaimed, node.claimed, node.unannounced, values.ready]
+topology:
+  roots: []
+  canonicals: []
+  nodes:
+    - {id: N, dials: [], announced: false}
+  persons:
+    - {id: me, owns: [N]}
+  relations: []
+  actor: {person: me, device: N}
+  negatives: []

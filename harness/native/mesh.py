@@ -312,7 +312,12 @@ class Node:
         """Edge's own verdict on this pair, from the log: True once `rooted_with`
         found a valid root in common with `other`, False if it last said none,
         None if it has not been asked yet."""
-        lines = self.grep(rf"rooted_with: .*peer={re.escape(other.key_id)}")
+        # The peer is named by its WIRE key: the alias (`native-B`) under the
+        # synthetic anchor, the derived node key (`native-b-<fp>`) on a node
+        # booted on a ceremony bundle — matching only the alias read every
+        # T8 pair as "never asked" while edge logged it Rooted (2026-10-18).
+        names = "|".join(re.escape(k) for k in {other.key_id, other.node_key_id} if k)
+        lines = self.grep(rf"rooted_with: .*peer=({names})\b")
         if not lines:
             return None
         return "a valid root in common" in lines[-1]
@@ -547,22 +552,29 @@ class Mesh:
         self.nodes["canonical"] = n
         return n
 
-    def add(self, name: str, start: bool = True, dial: Optional[List["Node"]] = None) -> Node:
+    def add(self, name: str, start: bool = True, dial: Optional[List["Node"]] = None,
+            canonical: bool = True) -> Node:
         """A node that dials the canonical and, with `dial`, those nodes too —
         DIRECT neighbours. Matters: a derived (scope-native) address answers
         only a directly-attached neighbour (CC 5.4, CIRISEdge#499), so two
         nodes that reach each other only through the canonical cannot fetch
-        each other's chat bodies or files."""
-        if self.canonical is None:
-            self.start_canonical()
-        assert self.canonical is not None
+        each other's chat bodies or files.
+
+        `canonical=False` is the catalogue's T0 (FSD/CSD4.md): a node with NO
+        canonical anywhere — it dials only `dial`, and the mesh boots none."""
+        env = {"CIRIS_TEST_BLESS_CANONICAL": "false", "CIRIS_DEVICE_CLASS": "laptop"}
+        upstream: List[str] = []
+        if canonical:
+            if self.canonical is None:
+                self.start_canonical()
+            assert self.canonical is not None
+            env["CIRIS_TEST_CANONICAL_DIAL"] = self.canonical.transport
+            upstream = [self.canonical.transport]
         # A person's own device. Under persist v53 S1 only a personal class
         # (laptop / phone) receives its owner's self and family content; the
         # real apps declare it the same way (desktop launcher, client, agent).
-        n = self._node(name, {"CIRIS_TEST_BLESS_CANONICAL": "false",
-                              "CIRIS_TEST_CANONICAL_DIAL": self.canonical.transport,
-                              "CIRIS_DEVICE_CLASS": "laptop"})
-        n.configure(dial=[self.canonical.transport] + [d.transport for d in (dial or [])])
+        n = self._node(name, env)
+        n.configure(dial=upstream + [d.transport for d in (dial or [])])
         self.nodes[name] = n
         if start:
             n.start()

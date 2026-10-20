@@ -8,6 +8,11 @@
 # with CIRIS_TEST_HALT_FUSE_SECS (test anchor only) because a ladder cannot
 # wait a day to watch a lone halt lapse.
 catalog_id: T8
+catalogue_version: 2
+title: A trust root with M-of-N holders — halt, confirm, resume
+serves: [CSD-067, CSD-068, CSD-069, CSD-105, CSD-129]
+derives: [4a, 4b, 4c, 4d]
+promises: [root.infrastructure, root.rooted, pair.rooted, root.halted, root.halt_confirmed, root.resumed]
 topology:
   roots:
     - id: HA
@@ -29,7 +34,12 @@ topology:
     - {rel: peered, between: [A, C]}
     - {rel: peered, between: [B, C]}
     - {rel: peered, between: [A, B]}
-    - {rel: rooted_with, between: [alice, bob], wait: 120}
+    - {rel: rooted_with, between: [alice, bob], wait: 120, require: true}
+    # CSD-129's lifecycle, one relation per state: the halted and confirmed
+    # states are TRANSIENT (resume ends them), so their screens test before it.
+    - {rel: halt, id: halt-1, from: A}
+    - {rel: confirm, halt: halt-1}
+    - {rel: resume, halt: halt-1}
   # The scenarios' actor is a seated HOLDER (anchor["holders"][i]), not a person
   # on a screen; the person/device pair here is what the generic build layer
   # drives and what CSD-003 / CSD-105 render the halt state on.

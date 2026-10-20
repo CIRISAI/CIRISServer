@@ -11,6 +11,7 @@ naming the first layer that does not hold).
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import sys
 import time
@@ -38,12 +39,86 @@ BUILDABLE_ACCORD_ROOT = {"kind": "infrastructure", "custody": "software_test",
 def _is_accord_root(r: Decl) -> bool:
     return all(r.get(k) == v for k, v in BUILDABLE_ACCORD_ROOT.items())
 
+# What the builder states it CANNOT build, by name (FSD/CSD4.md §5). The
+# model (harness/native/model.py) reads this map, never a copy of it, so a
+# catalogue entry carrying one of these relations is built up to it and no
+# further — every requirement whose states hold before it is still tested.
+REFUSED_RELATIONS: Dict[str, str] = {
+    "guardian_bond": "the guardian bond (CC 3.4.13): no server route writes it — family roles are free words "
+                     "(src/family_api.rs), CSD-119 drives the route",
+    "age_assurance": "POST /v1/safety/age-assurance is authorized by the x-ciris-* HYBRID request signature "
+                     "(src/auth/verify.rs), which this harness has no signer for",
+    "authority": "a licensing authority affiliation (CSD-120–126, the Registry fold): no server route",
+    "delegation": "a delegates_to CHAIN between persons (CC 4.4.3.2.8): POST /v1/auth/device/delegate writes "
+                  "owner→actor only, and sub-delegation is the delegate's own act",
+    "agent": "a CIRISAgent process hard-bound to the node: the server serves no agent routes without one "
+             "(src/py_adapter.rs proxy_routes); halt_agent drives an EXTERNAL agent",
+    "steward": "the agent's steward bond (CSD-115): no route yet",
+    "wise_authority": "a Wise Authority (CIRISAgent `wa`): no server route",
+    # Catalogue v2 (CC topology vocabulary version 2).
+    "consent_decay": "the agent's consent decay (identity_severed → patterns_anonymized → complete, CC 3.3.1) "
+                     "is a self-report of a CIRISAgent process; no agent runs in this harness",
+    "agent_bond": "the agent's bond to its node (CC 1.13.2): needs a CIRISAgent process",
+    "agent_act": "the agent's halt gate (CC 4.2.1.1): needs a CIRISAgent process",
+    "retirement": "retirement under the Standard (CC 7.5.5): the agent's own ladder; needs a CIRISAgent process",
+    "seat_node_bearing": "a node-bearing seat on a SUCCESSOR family head: the anchor mints one family per mesh, "
+                         "so there is no successor head to seat it on (one root per mesh, as T9)",
+}
+# Relations whose route the PRODUCT is missing, each with its open issue. The
+# catalogue marks every such step `known_red: <the same issue>` (model.evaluate
+# checks they agree), so a plan reports which states wait on which issue; the
+# builder raises on them, naming the issue, when asked to build through.
+AWAITING_ROUTE: Dict[str, str] = {
+    "evict_propose": "CIRISServer#794",   # CC 3.3.6.3 quorum path (persist half: CIRISPersist#1099)
+    "evict_cosign": "CIRISServer#794",
+    "evict_lone": "CIRISServer#794",      # lone path over W_self, no clock override
+    "moderator_lapse": "CIRISServer#795",
+    "merit_promote": "CIRISServer#795",
+    "invite_window": "CIRISServer#796",   # CC 4.5.13 two-path invitation: window + approval floor
+    "consent_grant": "CIRISServer#182",   # consent:state lifecycle; /v1/auth/consent wants a hybrid request signature
+    "consent_revoke": "CIRISServer#182",
+    "consent_expire": "CIRISServer#182",
+    "community_trust": "CIRISServer#790",
+    "community_trust_bound": "CIRISServer#790",
+    "lineage_head": "CIRISServer#693",    # lineage-head cosign route; a stale head needs one
+    "purge": "CIRISServer#756",           # the steward purge surface
+    "delegation_withdraw": "CIRISServer#751",
+    "delegation_expire": "CIRISServer#751",
+}
+# Relations whose route EXISTS and whose builder branch is not written yet —
+# harness work, not a product defect. Named with the route a branch will drive.
+PENDING_BUILDER: Dict[str, str] = {
+    "resign": "POST /v1/accord/family/supersede + /cosign (a founder leaves the seated roster); the witness is "
+              "persist's hard_case:community_liveness_stalled row, not /v1/trust-root's posture string",
+    "confer": "POST /v1/accord/family/supersede + /cosign (a conferred human widens the roster: T7 recovery)",
+    "holder": "the T8 accord machinery: honest signs, lost never signs, coerced signs an invocation the "
+              "standing rule refuses, censored signs but its rows are withheld past the window",
+    "deadmit": "POST /v1/admin/deadmit (preview/commit; `after` = revoked_after, omitted = revoked_all)",
+    "invite": "POST /v1/communities/{id}/invites (a proposal, not yet accepted)",
+    "accept": "the invitee's acceptance while the group's quorum is pending",
+    "decline": "POST /v1/self/invites/{proposal_id}/decline",
+    "remove": "DELETE /v1/communities/{id}/members/{key_id}",
+    "leave": "POST /v1/communities/{id}/leave",
+    "fail_secure": "POST /v1/safety/moderation with no resolving moderator chain (absence never admits)",
+    "scoped_file": "POST /v1/files to a family or community cohort (src/drive.rs)",
+    "key_grant": "persist emits key_grant:content:v1 per recipient on a sealed share; no read witnesses it yet",
+}
+# One root per mesh: `mint_accord_root` rewrites the mesh's base env (every
+# later node boots on its bundle with no ceremony of its own), so a second
+# canonical holding a DIFFERENT root cannot share the mesh with the first.
+MAX_CANONICALS = 1
+
 LAYERS = ["roots", "canonicals", "nodes", "persons", "relations", "actor", "negatives"]
 LAST_STEPS: Any = None  # the running build's Steps, so a failure can name its first failing layer
 
 
 class Unrealizable(ValueError):
     """The declaration cannot hold, by rule number (FSD/TOPOLOGY.md §3)."""
+
+
+class StopBuild(Exception):
+    """The runner asked the build to stop before a step (the first one the
+    builder refuses): what was built so far stands, and is reported."""
 
 
 # ── load + rules ────────────────────────────────────────────────────────────
@@ -97,6 +172,9 @@ def check(t: Decl) -> List[str]:
         for k, v in BUILDABLE_ROOT.items():
             if r.get(k, v) != v:
                 not_yet.append(f"root {r['id']}: {k}={r.get(k)!r} (the anchor mints {v!r})")
+    if len(canon) > MAX_CANONICALS:
+        not_yet.append(f"canonicals: {len(canon)} declared, the builder stands up {MAX_CANONICALS} per mesh "
+                       "(one root per mesh)")
     for c in canon.values():
         if c["holds"] not in roots:
             raise Unrealizable(f"canonical {c['id']} holds unknown root {c['holds']}")
@@ -112,9 +190,20 @@ def check(t: Decl) -> List[str]:
                 raise Unrealizable(f"person {p['id']} owns unknown node {nid}")
             if p.get("accepts") and nodes[nid].get("accepts") != p["accepts"]:
                 raise Unrealizable(f"rule 2: {p['id']} accepts {p['accepts']} but owns {nid} which does not")
+    for p in persons.values():
+        stray = [j for j in p.get("joins", []) if j not in p["owns"]]
+        if stray:
+            raise Unrealizable(f"person {p['id']} joins {stray}, which it does not own")
+        if p.get("joins") and p["owns"][0] in p["joins"]:
+            raise Unrealizable(f"person {p['id']}: the first owned node is claimed with a fresh identity; "
+                               "only a LATER device can join by approval")
     owner_of = {nid: p["id"] for p in persons.values() for nid in p["owns"]}
     for rel in t["relations"]:
         kind = rel["rel"]
+        if kind in ("halt", "confirm", "resume", "join_request") and not any(
+                _is_accord_root(r) for r in roots.values()):
+            raise Unrealizable(f"relation {kind} needs the infrastructure root (the ceremony's holders sign it; "
+                               "a fresh device's record stays self-signed only under CIRIS_TEST_NO_CEREMONY)")
         if kind == "rooted_with":
             a, b = (persons[x] for x in rel["between"])
             if not (a.get("accepts") and a.get("accepts") == b.get("accepts")):
@@ -227,9 +316,12 @@ def export_rows(mesh: Mesh) -> Decl:
     return out
 
 
-def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
+def build(mesh: Mesh, t: Decl, args: Any, checkpoint: Any = None, stop_before: Optional[str] = None) -> Decl:
+    """Stand `t` up. `checkpoint(step_id, ctx)` runs after every step, with the
+    step ids `model.steps(t)` names (the runner tests there); `stop_before` ends
+    the build, as a PASS of what was built, before that step."""
     try:
-        return _build(mesh, t, args)
+        return _build(mesh, t, args, checkpoint, stop_before)
     except MeshError as e:
         ff = getattr(LAST_STEPS, "first_failure", None) if LAST_STEPS else None
         raise MeshError(json.dumps({"error": str(e), "first_failing_layer": ff})) from e
@@ -242,10 +334,88 @@ def build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             print(json.dumps({"step": "rows_export_failed", "error": str(e)[:200]}), flush=True)
 
 
-def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
+class Ctx:
+    """What a checkpoint sees: the live nodes by declared id, and what the
+    relations produced so far."""
+
+    def __init__(self, mesh: Mesh, t: Decl) -> None:
+        self.mesh, self.t = mesh, t
+        self.N: Dict[str, Node] = {}
+        self.values: Dict[str, str] = {}
+        self.rooms: Dict[str, str] = {}
+        self.groups: Dict[str, Dict[str, Any]] = {}
+        self.joins: Dict[str, Dict[str, Any]] = {}
+        self.changes: Dict[str, Dict[str, Any]] = {}
+        self.halts: Dict[str, str] = {}
+        self.files: Dict[str, Dict[str, Any]] = {}
+        self.done: List[str] = []
+
+
+def _build(mesh: Mesh, t: Decl, args: Any, checkpoint: Any = None, stop_before: Optional[str] = None) -> Decl:
+    from . import model
     d = derive(t)
-    if d["not_buildable_yet"]:
+    if d["not_buildable_yet"] and stop_before is None:
         raise MeshError("declared but not buildable yet: " + "; ".join(d["not_buildable_yet"]))
+    expected = [s.id for s in model.steps(t)]
+    ctx = Ctx(mesh, t)
+
+    def gate(step_id: str) -> None:
+        if step_id == stop_before:
+            raise StopBuild(step_id)
+
+    def progress(step_id: str) -> None:
+        """A step finished: compare against the model's trace, then test."""
+        ctx.done.append(step_id)
+        want = expected[len(ctx.done) - 1] if len(ctx.done) <= len(expected) else None
+        if want != step_id:
+            raise MeshError(f"builder/model drift: the builder finished {step_id!r} where model.steps "
+                            f"names {want!r} — the checkpoints would test the wrong state")
+        if checkpoint is not None:
+            checkpoint(step_id, ctx)
+
+    try:
+        return _build_steps(mesh, t, args, d, ctx, gate, progress)
+    except MeshError as e:
+        # A failure at a step declared `known_red` names its issue: the
+        # defect is filed, this is its reproduction, not a new regression.
+        failing = expected[len(ctx.done)] if len(ctx.done) < len(expected) else None
+        m = re.match(r"rel\[(\d+)\]:", failing or "")
+        red = t["relations"][int(m.group(1))].get("known_red") if m else None
+        if red:
+            raise MeshError(f"KNOWN RED ({red}) at {failing}: {e}") from e
+        raise
+    except StopBuild as stop:
+        return {"verdict": "PASS", "partial": True, "stopped_before": str(stop), "built": ctx.done,
+                "steps": LAST_STEPS.log if LAST_STEPS else [], "derived": d, "values": ctx.values,
+                "notes": (LAST_STEPS.notes if LAST_STEPS else []) + [f"stopped before {stop}: the builder refuses it"]}
+
+
+def _invite_and_accept(host: Node, guest: Node, path: str, role: Optional[str], wait: float) -> str:
+    """Membership needs the invitee's consent (FSD/MEMBERSHIP_INVITES.md): the
+    host proposes, the proposal reaches the guest's node, the GUEST accepts."""
+    body: Dict[str, Any] = {"key_id": guest.owner_key_id}
+    if role:
+        body["role"] = role
+    got = host.must("POST", path, body, ok=(202,))
+    pid = got["proposal_id"]
+
+    def arrived() -> Optional[bool]:
+        st_, inv = guest.api("GET", "/v1/self/invites")
+        listed = (inv or {}).get("invites", []) if st_ == 200 and isinstance(inv, dict) else []
+        return True if any(i.get("proposal_id") == pid for i in listed) else None
+    wait_for(f"the invitation {pid[:24]} to reach {guest.name}", arrived, wait, every=3)
+    guest.must("POST", f"/v1/self/invites/{pid}/accept", {})
+    return pid
+
+
+def _seated(host: Node, path: str, key_id: str) -> bool:
+    st_, room = host.api("GET", path)
+    if st_ != 200 or not isinstance(room, dict):
+        return False
+    return any((m.get("key_id") if isinstance(m, dict) else m) == key_id for m in room.get("members", []))
+
+
+def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, progress: Any) -> Decl:
     persons = _ids(t, "persons")
     owner_of = t["_owner_of"]
     plan = "\n".join(
@@ -256,13 +426,15 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     step = Steps(plan)
     global LAST_STEPS
     LAST_STEPS = step
-    N: Dict[str, Node] = {}
+    N: Dict[str, Node] = ctx.N
+    joining = {nid for p in persons.values() for nid in p.get("joins", [])}
 
     # 1–2. roots + canonicals: the synthetic anchor's ceremony, one canonical —
     #      or, for an infrastructure root (T8), the 0.5.220 ceremony over the
     #      routes with three software holders, and the canonical rebooted on it.
     roots_by_id = _ids(t, "roots")
     for c in t["canonicals"]:
+        gate(f"canonical:{c['id']}")
         root = roots_by_id[c["holds"]]
         if _is_accord_root(root):
             fuse = (root.get("charter") or {}).get("halt_fuse_secs")
@@ -272,13 +444,17 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             step("root+canonical", layer="roots/canonicals", canonical=c["id"], holds=c["holds"],
                  proves="the ceremony minted the accord root; the canonical boots on the bundle, claimed and announced",
                  holders=[h["key_id"] for h in anchor["holders"]])
+            progress(f"canonical:{c['id']}")
             continue
         N[c["id"]] = mesh.start_canonical()
         step("root+canonical", layer="roots/canonicals", canonical=c["id"], holds=c["holds"],
              proves="the anchor's ceremony ran: charter root→root, grant root→node, trust edge node→root",
              evidence=N[c["id"]].grep(r"TEST-ANCHOR ceremony: trust_root_valid GREEN")[-1:])
+        progress(f"canonical:{c['id']}")
 
-    # 3. nodes, in an order that lets `dials` resolve.
+    # 3. nodes, in an order that lets `dials` resolve. With no canonical (T0)
+    #    the mesh boots none: the node dials only what it declares.
+    gate("nodes")
     pending = [n for n in t["nodes"]]
     while pending:
         progressed = False
@@ -286,16 +462,21 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             deps = [x for x in n.get("dials", []) if x not in N]
             if deps:
                 continue
-            N[n["id"]] = mesh.add(n["id"], dial=[N[x] for x in n.get("dials", []) if x in _ids(t, "nodes")])
+            N[n["id"]] = mesh.add(n["id"], dial=[N[x] for x in n.get("dials", []) if x in _ids(t, "nodes")],
+                                  canonical=bool(t["canonicals"]))
             pending.remove(n)
             progressed = True
         if not progressed:
             raise MeshError(f"nodes dial each other in a cycle: {[n['id'] for n in pending]}")
     step("nodes", layer="nodes", up={n: N[n].url for n in _ids(t, "nodes")})
+    progress("nodes")
 
-    # 4. persons: first node claimed with a minted identity; the rest carried.
+    # 4. persons: first node claimed with a minted identity; the rest carried —
+    #    except a device the person `joins` by approval (FSD/ADD_DEVICE.md),
+    #    which stays UNOWNED until its join_complete relation.
     for p in t["persons"]:
-        first, *rest = p["owns"]
+        gate(f"person:{p['id']}")
+        first, *rest = [x for x in p["owns"] if x not in joining]
         alias = f"{p['id']}-person"
         N[first].claim(alias)
         for nid in rest:
@@ -304,16 +485,22 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             n.carry_owner_from(N[first], alias)
             n.start()
             n.claim(alias)
-        owners = {nid: N[nid].owner_key_id for nid in p["owns"]}
+        owners = {nid: N[nid].owner_key_id for nid in p["owns"] if nid not in joining}
         if len(set(owners.values())) != 1:
             raise MeshError(f"{p['id']}'s devices claimed different owners: {owners}")
         step(f"person:{p['id']}", layer="persons", owner=N[first].owner_key_id, devices=p["owns"],
-             proves="one owner key across every declared device")
+             joins=p.get("joins", []), proves="one owner key across every declared device")
+        progress(f"person:{p['id']}")
+    gate("announced")
     for n in t["nodes"]:
+        if n["id"] in joining:
+            N[n["id"]].self_record()  # unowned: nothing to announce until it joins
+            continue
         if n.get("announced"):
             N[n["id"]].announce()
         N[n["id"]].self_record()
-    step("announced", layer="nodes", announced=[n["id"] for n in t["nodes"] if n.get("announced")])
+    step("announced", layer="nodes", announced=[n["id"] for n in t["nodes"] if n.get("announced") and n["id"] not in joining])
+    progress("announced")
     # A claimed node that dials a canonical also PEERS with it — the owner's
     # HTTP act in production (`POST /v1/federation/peering` with the canonical's
     # record, traceflow_prod.sh step 7, after claim + announce; the baked seed
@@ -324,26 +511,45 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     # distributes nothing (edge's v34.3.0 run: the canonical's keys.jsonl held
     # only its own key; every relation rode the direct links).
     peered_canonicals = []
-    for n in t["nodes"]:
-        for c in n.get("dials", []):
-            if c in _ids(t, "canonicals"):
-                N[n["id"]].peer_with(N[c])
-                peered_canonicals.append((n["id"], c))
-    step("canonical_peered", layer="nodes", pairs=peered_canonicals,
-         proves="every claimed node holds the record of the canonical it dials, as the owner's peering act leaves it in production")
+    if any(c in _ids(t, "canonicals") for n in t["nodes"] for c in n.get("dials", [])):
+        gate("canonical_peered")
+        for n in t["nodes"]:
+            if n["id"] in joining:
+                continue  # an unowned node peers nobody; join_complete peers it
+            for c in n.get("dials", []):
+                if c in _ids(t, "canonicals"):
+                    N[n["id"]].peer_with(N[c])
+                    peered_canonicals.append((n["id"], c))
+        step("canonical_peered", layer="nodes", pairs=peered_canonicals,
+             proves="every claimed node holds the record of the canonical it dials, as the owner's peering act leaves it in production")
+        progress("canonical_peered")
 
     # 5. relations, in declared order.
-    values: Dict[str, str] = {}
-    rooms: Dict[str, str] = {}
+    values: Dict[str, str] = ctx.values
+    rooms: Dict[str, str] = ctx.rooms
     added: set = set()  # (host node id, guest person) pairs already POSTed by a `reachable` gate
     # Files the relations wrote, for a later `custody` relation: `last` is the
     # most recent `file` (or the last file a `corpus` wrote); a corpus file is
     # also named by its manifest name (`large`, `inline_over`, ...). Each entry
     # records the device it was written on — the AUTHOR device, the one whose
     # store admits every delivery receipt.
-    files_written: Dict[str, Dict[str, Any]] = {}
-    for rel in t["relations"]:
+    files_written: Dict[str, Dict[str, Any]] = ctx.files
+    canon = N[t["canonicals"][0]["id"]] if t["canonicals"] else None
+    prev: Optional[str] = None
+    for ri, rel in enumerate(t["relations"]):
+        if prev:
+            progress(prev)
         k = rel["rel"]
+        prev = f"rel[{ri}]:{k}"
+        gate(prev)
+        if k in REFUSED_RELATIONS:
+            raise MeshError(f"relation {k!r}: the builder refuses it — {REFUSED_RELATIONS[k]}")
+        if k in AWAITING_ROUTE:
+            raise MeshError(f"relation {k!r}: the product has no route yet — {AWAITING_ROUTE[k]}")
+        if k in PENDING_BUILDER:
+            raise MeshError(f"relation {k!r}: route exists, builder branch not written — {PENDING_BUILDER[k]}")
+        if rel.get("known_red"):
+            step.notes.append(f"{prev}: building through a KNOWN RED step ({rel['known_red']})")
         if k == "peered":
             a, b = rel["between"]
             N[a].peer_with(N[b], rel.get("prefixes"))
@@ -935,11 +1141,277 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
                 step(f"session:{p}", layer="relations", device=src.name, exchanges=len(one),
                      handlers=sorted({h for h in one.values()}),
                      proves="every device of the person names the same handler for each exchange")
+        elif k == "join_request":
+            # FSD/ADD_DEVICE.md §1: the new, UNOWNED device asks its person's
+            # existing device over first contact; the owner opened the window.
+            p = persons[rel["person"]]
+            new = N[rel["device"]]
+            host = N[rel.get("via") or p["owns"][0]]
+            host.must("POST", "/v1/self/device-requests/open", {"seconds": 600})
+            code_link = host.contact_code()
+            pin = (new.home / "claim_pin").read_text(encoding="utf-8").strip()
+            last: Any = None
+
+            def asked() -> Optional[Tuple[int, Any]]:
+                nonlocal last
+                last = new.api("POST", "/v1/setup/add-device",
+                               {"contact": code_link, "label": rel.get("label", rel["device"])})
+                return last if last[0] == 202 else None
+            try:
+                wait_for(f"{rel['device']} to reach {host.name} with its join request", asked,
+                         float(rel.get("wait", 180)), every=5)
+            except MeshError:
+                step.fail(f"join_NOT_requested:{rel['device']}", "the join request was never held by the existing device",
+                          [host, new], r"device-join|add-device", layer="relations", rel="join_request",
+                          cc="FSD/ADD_DEVICE.md §1", got=str(last)[:300])
+                raise
+            match = (last[1] or {}).get("match_code")
+            listed = host.must("GET", "/v1/self/device-requests").get("requests", [])
+            row = next((r for r in listed if r.get("node_key_id") == new.node_key_id), None)
+            if not row or row.get("match_code") != match:
+                raise MeshError(f"the owner's list does not show {rel['device']}'s request with the code it shows: {listed}")
+            ctx.joins[rel["device"]] = {"host": host, "row": row, "pin": pin}
+            step(f"join_request:{rel['device']}", layer="relations", match_code=match,
+                 proves="the request is held on the existing device with the code the new device shows")
+        elif k == "join_approve":
+            j = ctx.joins[rel["device"]]
+            new = N[rel["device"]]
+            approved = j["host"].must("POST", f"/v1/self/device-requests/{j['row']['request_id']}/approve")
+            j["occurrence"] = approved.get("occurrence_key_id")
+
+            def held() -> Optional[Dict[str, Any]]:
+                st_ = new.must("GET", "/v1/setup/add-device")
+                return st_ if st_.get("state") in ("approved", "applied", "failed", "denied", "expired") else None
+            got = wait_for(f"{rel['device']} to verify and hold the approval", held, float(rel.get("wait", 180)), every=2)
+            if got.get("state") != "approved" or got.get("owner_key_id") != j["host"].owner_key_id:
+                step.fail(f"join_NOT_held:{rel['device']}", "the new device must verify the approval offline and HOLD it",
+                          [j["host"], new], r"add-device", layer="relations", rel="join_approve",
+                          cc="FSD/ADD_DEVICE.md §2.1", state=got)
+                raise MeshError("join approval not held")
+            step(f"join_approve:{rel['device']}", layer="relations", occurrence=j["occurrence"],
+                 proves="approved on the existing device; verified and held, unapplied, on the new one")
+        elif k == "join_complete":
+            j = ctx.joins[rel["device"]]
+            new = N[rel["device"]]
+            code_c, final = new.api("POST", "/v1/setup/add-device/complete", {})
+            if code_c != 200 or (final or {}).get("state") != "applied":
+                step.fail(f"join_NOT_applied:{rel['device']}", "the end of first run must apply the held approval",
+                          [j["host"], new], r"add-device|setup/root|occurrence", layer="relations",
+                          rel="join_complete", cc="FSD/ADD_DEVICE.md §2.1", status=code_c, got=final)
+                raise MeshError("join not applied")
+            code_s, sess = new.api("POST", "/v1/setup/claimed-session", {"claim_pin": j["pin"]})
+            if code_s != 200 or not (sess or {}).get("access_token"):
+                raise MeshError(f"{rel['device']}: claimed-session after the join answered {code_s}: {str(sess)[:300]}")
+            new.token, new.owner_key_id = sess["access_token"], j["host"].owner_key_id
+            decl = _ids(t, "nodes")[rel["device"]]
+            if decl.get("announced"):
+                new.announce()
+            new.self_record()
+            # Its peerings (the canonical's included) are declared as `peered`
+            # relations after this one: each is an owner act on the new device
+            # (CIRISServer#793), and a refusal there must name its own step.
+            step(f"join_complete:{rel['device']}", layer="relations", owner=new.owner_key_id,
+                 proves="the held claim applied; the new device is owned by the existing ID, with its own session")
+        elif k in ("halt", "confirm", "resume"):
+            # CSD-129 (CC 4.2.1.1 / 4.2.1.3) on the catalogue's T8: the rows the
+            # `halt` scenario signs, one relation per lifecycle state so a test
+            # can run while the root is halted and before it resumes.
+            from .scenarios import _inv
+            holders = getattr(mesh, "accord_holders", None)
+            if not holders or canon is None:
+                raise MeshError(f"relation {k}: no ceremony holders in this mesh (needs the infrastructure root)")
+            live = [n for n in N.values() if n.token]
+
+            def sign(h: Dict[str, Any]) -> Dict[str, Any]:
+                return {"key_id": h["key_id"], "test_holder_seed_b64": h["seed_b64"]}
+
+            def deliver(obj: Dict[str, Any], skip: Node) -> None:
+                for n in live:
+                    if n is not skip:
+                        n.must("POST", "/v1/accord/message", obj)
+
+            def latched(expect: bool) -> Optional[bool]:
+                return True if all(bool(n.must("GET", "/v1/accord/halt-status")["halted"]) is expect for n in live) else None
+            hid = rel.get("halt", rel.get("id", "halt-1"))
+            if k == "halt":
+                src = N[rel.get("from") or t["actor"]["device"]]
+                r = src.must("POST", "/v1/accord/halt", {"invocation": _inv("constitutional", hid, hid.encode()),
+                                                        **sign(holders[0])})
+                deliver(r.get("invocation") or r, src)
+                wait_for("the halt to latch on every node", lambda: latched(True), float(rel.get("wait", 60)), every=1)
+                ctx.halts[hid] = "latched"
+                step(f"halt:{hid}", layer="relations", proves="one holder's row latched on every node (CC 4.2.1.1)")
+            else:
+                kind = "lifecycle:confirmed" if k == "confirm" else "lifecycle:active"
+                binding = {"confirms_halt_id": hid} if k == "confirm" else {"resumes_halt_id": hid}
+                iid = f"{hid}-{k}"
+                canon.must("POST", "/v1/accord/invocation",
+                           {"invocation": _inv(kind, iid, iid.encode(), **binding), **sign(holders[1])})
+                r = canon.must("POST", "/v1/accord/invocation/concur",
+                               {"invocation_kind": kind, "invocation_id": iid, **sign(holders[2])})
+                deliver(r.get("invocation") or r, canon)
+                if k == "confirm":
+                    def confirmed() -> Optional[bool]:
+                        st_ = [n.must("GET", "/v1/accord/halt-status") for n in live]
+                        return True if all(s.get("halted") is True and (s.get("halt") or {}).get("lapses_at") is None
+                                           for s in st_) else None
+                    wait_for("the confirmation on every node", confirmed, float(rel.get("wait", 60)), every=1)
+                    step(f"confirm:{hid}", layer="relations", proves="a strict majority keeps the halt past its fuse (CC 4.2.1.3)")
+                else:
+                    wait_for("the resume on every node", lambda: latched(False), float(rel.get("wait", 60)), every=1)
+                    ctx.halts[hid] = "resumed"
+                    step(f"resume:{hid}", layer="relations", proves="a strict majority naming the halt ends it everywhere")
+        elif k in ("community", "household"):
+            founder = N[persons[rel["founder"]]["owns"][0]]
+            if k == "community":
+                got = founder.must("POST", "/v1/communities", {
+                    "name": rel.get("name", rel["id"]), "members": [], "tier": rel.get("tier", "community"),
+                    "consensus_protocol": rel.get("protocol", "founder_only")}, ok=(200, 201))
+                gid, base = got["community_id"], f"/v1/communities/{got['community_id']}"
+            else:
+                got = founder.must("POST", "/v1/families", {
+                    "name": rel.get("name", rel["id"]), "members": [],
+                    "consensus_protocol": rel.get("protocol", "founder_only")}, ok=(200, 201))
+                gid, base = got["family_id"], f"/v1/families/{got['family_id']}"
+            ctx.groups[rel["id"]] = {"id": gid, "base": base, "founder": founder,
+                                     "protocol": rel.get("protocol", "founder_only")}
+            values[f"GROUP_{rel['id'].upper()}_ID"] = gid
+            step(f"{k}:{rel['id']}", layer="relations", group_id=gid, protocol=rel.get("protocol", "founder_only"))
+        elif k == "member":
+            g = ctx.groups[rel.get("community") or rel["household"]]
+            host = g["founder"]
+            guest = N[persons[rel["invitee"]]["owns"][0]]
+            role = rel.get("role")
+            _invite_and_accept(host, guest, f"{g['base']}/invites", role, float(rel.get("wait", 180)))
+            last: Any = None
+
+            def seated() -> Optional[bool]:
+                nonlocal last
+                if _seated(host, g["base"], guest.owner_key_id):
+                    return True
+                if g["protocol"] == "founder_only":
+                    last = host.api("GET", f"{g['base']}/invites")  # the founder's read seats an accepted invite
+                else:
+                    # A quorum room seats by an `add` change; with the founder
+                    # alone it is 1 of 1. Persist admits the widening only once
+                    # the invitee's acceptance has reached this node
+                    # (`membership.awaiting_acceptance` until then), so retry.
+                    env = host.must("POST", f"{g['base']}/changes/envelope",
+                                    {"op": "add", "key_id": guest.owner_key_id, **({"role": role} if role else {})})
+                    last = host.api("POST", f"{g['base']}/changes/assemble",
+                                    {"change_envelope": env["change_envelope"], "signatures": env["signatures"]})
+                return True if _seated(host, g["base"], guest.owner_key_id) else None
+            try:
+                wait_for(f"{rel['invitee']} seated in {rel.get('community') or rel['household']}", seated,
+                         float(rel.get("wait", 180)), every=3)
+            except MeshError:
+                step.fail(f"member_NOT_seated:{rel['invitee']}", "an invited person who accepted was never seated",
+                          [host, guest], r"invite|widening|membership|seat", layer="relations", rel="member",
+                          cc="FSD/MEMBERSHIP_INVITES.md", last=str(last)[:400])
+                raise
+            step(f"member:{rel['invitee']}", layer="relations", role=role,
+                 proves="invited, accepted by the invitee on their own node, seated")
+        elif k == "quorum_change":
+            g = ctx.groups[rel["community"]]
+            by = N[persons[rel["by"]]["owns"][0]]
+            guest = N[persons[rel["invitee"]]["owns"][0]]
+            _invite_and_accept(g["founder"], guest, f"{g['base']}/invites", None, float(rel.get("wait", 180)))
+            env = by.must("POST", f"{g['base']}/changes/envelope", {"op": "add", "key_id": guest.owner_key_id})
+            if env.get("valid", 0) >= env.get("required", 1):
+                raise MeshError(f"the change met quorum on one signature ({env.get('valid')}/{env.get('required')}): "
+                                "nothing is held — the community needs more members or a stricter protocol")
+            st_, refused = by.api("POST", f"{g['base']}/changes/assemble",
+                                  {"change_envelope": env["change_envelope"], "signatures": env["signatures"]})
+            if st_ != 409 or (refused or {}).get("reason_id") != "community.quorum_pending":
+                raise MeshError(f"assembling below quorum must answer 409 community.quorum_pending, got {st_}: {str(refused)[:300]}")
+            ctx.changes[rel.get("id", "change")] = {"group": g, "env": env, "by": by, "guest": guest}
+            step(f"quorum_change:{rel.get('id', 'change')}", layer="relations", valid=env.get("valid"),
+                 required=env.get("required"), proves="the change is held below quorum; assembling it now is refused")
+        elif k == "cosign":
+            c_ = ctx.changes[rel.get("change", "change")]
+            g, signer = c_["group"], N[persons[rel["by"]]["owns"][0]]
+            sig: Dict[str, Any] = {}
+
+            def cosigned() -> Optional[bool]:
+                st_, got = signer.api("POST", f"{g['base']}/changes/cosign",
+                                      {"change_envelope": c_["env"]["change_envelope"]})
+                if st_ == 200:
+                    sig.update(got)
+                    return True
+                return None
+            wait_for(f"{rel['by']}'s node to fold the room and co-sign", cosigned, float(rel.get("wait", 120)), every=3)
+            done: Dict[str, Any] = {}
+
+            def assembled() -> Optional[bool]:
+                st_, got = c_["by"].api("POST", f"{g['base']}/changes/assemble",
+                                        {"change_envelope": c_["env"]["change_envelope"],
+                                         "signatures": c_["env"]["signatures"] + [sig["signature"]]})
+                done.update({"status": st_, "body": got})
+                # 409 membership.awaiting_acceptance: the joiner's acceptance has
+                # not reached this node yet — the quorum is met, the door waits.
+                return True if st_ == 200 else None
+            try:
+                wait_for("the co-signed change to apply", assembled, float(rel.get("wait", 120)), every=3)
+            except MeshError:
+                raise MeshError(f"the co-signed change did not apply: {str(done)[:400]}")
+            if not _seated(c_["by"], g["base"], c_["guest"].owner_key_id):
+                raise MeshError(f"applied, but {rel['by']}'s node does not seat the invitee: {str(done)[:300]}")
+            step(f"cosign:{rel.get('change', 'change')}", layer="relations", by=rel["by"],
+                 proves="the second signature met quorum; the held change applied")
+        elif k == "moderator":
+            # The moderate duty is a delegates_to chain from a founder
+            # (persist appointed_moderators_of), read back on the room.
+            g = ctx.groups[rel["community"]]
+            guest = N[persons[rel["to"]]["owns"][0]]
+            g["founder"].must("POST", "/v1/auth/device/delegate",
+                              {"mode": "existing", "existing_key_id": guest.owner_key_id, "scope": ["moderate"]})
+
+            def appointed() -> Optional[bool]:
+                st_, room = g["founder"].api("GET", g["base"])
+                return True if st_ == 200 and guest.owner_key_id in (room or {}).get("moderators", []) else None
+            try:
+                wait_for(f"{rel['to']} listed as an appointed moderator", appointed, float(rel.get("wait", 60)), every=3)
+            except MeshError:
+                st_, room = g["founder"].api("GET", g["base"])
+                step.fail(f"moderator_NOT_appointed:{rel['to']}", "a moderate-scoped delegation from the founder is not "
+                          "read back as an appointed moderator on the room", [g["founder"]], r"delegat|moderat",
+                          layer="relations", rel="moderator", cc="CC 4.5 / CIRISPersist#591",
+                          moderators=(room or {}).get("moderators"))
+                raise
+            step(f"moderator:{rel['to']}", layer="relations", proves="the founder's moderate delegation names an appointed moderator")
+        elif k == "replication_withdraw":
+            # CC 3.3.7: each side withdraws the consent:replication grant it
+            # authored for the other. Re-posting the peering is idempotent and
+            # answers the live grant's attestation_id.
+            a, b = rel["between"]
+            for x, y in ((a, b), (b, a)):
+                got = N[x].peer_with(N[y], rel.get("prefixes"))
+                att = (got or {}).get("grant_attestation_id")
+                if not att:
+                    raise MeshError(f"replication_withdraw: {x}'s peering with {y} names no grant_attestation_id: {str(got)[:300]}")
+                N[x].must("POST", "/v1/federation/peering/revoke", {"attestation_id": att})
+            step(f"replication_withdraw:{a}-{b}", layer="relations",
+                 proves="both consent:replication grants withdrawn (CC 3.3.7: replication = none)")
+        elif k == "steal":
+            # A staging (CC formal/roster `thief`): the device keeps its live
+            # roster key, and from here the model reads it as held by a thief.
+            # Nothing on the wire changes — which is the point of the state.
+            step(f"steal:{rel['device']}", layer="relations",
+                 proves="the device's roster key is from here held by the thief (a staging, CC 3.3.6.3)")
+        elif k == "lose":
+            # Lost for good: the device's process stops and never returns.
+            N[rel["device"]].stop()
+            step(f"lose:{rel['device']}", layer="relations", proves="the device is unreachable for good (CC 3.3.6.3)")
         else:
             raise MeshError(f"relation {k!r}: declared, no builder yet")
+    if prev:
+        progress(prev)
 
     # 6. negatives.
-    for neg in t.get("negatives", []):
+    for ni, neg in enumerate(t.get("negatives", [])):
+        if ni:
+            progress(f"neg[{ni - 1}]:{t['negatives'][ni - 1]['check']}")
+        gate(f"neg[{ni}]:{neg['check']}")
         if neg["check"] == "cannot_list_room":
             n = N[persons[neg["person"]]["owns"][0]]
             st, _ = n.api("GET", f"/v1/chat/{rooms[neg.get('room', 'pair')]}/messages")
@@ -982,6 +1454,11 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
             step(f"negative:no_wider_self_rows:{neg['person']}", layer="negatives", devices=persons[neg["person"]]["owns"],
                  proves="every self-plane row on the person's devices is at cohort_scope self")
 
+    if t.get("negatives"):
+        progress(f"neg[{len(t['negatives']) - 1}]:{t['negatives'][-1]['check']}")
+    gate("negatives")
+    progress("negatives")
+
     # the actor's view, in the client fixture's shape — KEYED BY DECLARED ID
     # (CIRISClient#134 §1): `PERSON_<id>_OWNER_KEY_ID`, `NODE_<id>_URL`, …;
     # the positional PEER_* names stay as aliases for the first non-actor
@@ -1008,4 +1485,6 @@ def _build(mesh: Mesh, t: Decl, args: Any) -> Decl:
     for want in ("ROOM_ID", "MESSAGE_ATTESTATION_ID", "PEER_CONTACT_CODE"):
         if want not in values:
             step.notes.append(f"no {want}: the declaration has no relation that produces it")
-    return {"verdict": "PASS", "steps": step.log, "derived": d, "values": values, "notes": step.notes}
+    gate("actor")
+    progress("actor")
+    return {"verdict": "PASS", "steps": step.log, "derived": d, "values": values, "notes": step.notes, "built": ctx.done}

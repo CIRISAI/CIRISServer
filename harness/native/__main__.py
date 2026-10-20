@@ -1,6 +1,10 @@
-"""Run a native-mesh scenario.
+"""Run a native-mesh scenario, or the CSD/4 catalogue (FSD/CSD4.md).
 
     python -m harness.native <scenario> --binary target/debug/ciris-server [--keep]
+    python -m harness.native evaluate [--json]          # the catalogue model; no binary
+    python -m harness.native plan [--csd CSD-091,...]   # which entries, which checkpoints; no binary
+    python -m harness.native run --binary ... [--csd ...] [--at-state-cmd '...']
+    python -m harness.native build --topology T3 --binary ...   # a catalogue id or a yaml path
 
 `--binary` is any `ciris-server` built with `--features test-anchor` (the
 synthetic trust root is only honoured there). `--keep` leaves every node
@@ -21,9 +25,18 @@ from .scenarios import SCENARIOS
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["build", "derive", "down"])
-    ap.add_argument("--topology", type=Path, help="build/derive: a FSD/TOPOLOGY.md declaration")
-    ap.add_argument("--binary", type=Path, required=True)
+    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["build", "derive", "down", "evaluate", "plan", "run"])
+    ap.add_argument("--topology", type=str, help="build/derive: a catalogue id (T0–T9) or a FSD/TOPOLOGY.md declaration")
+    ap.add_argument("--binary", type=Path, help="a test-anchor ciris-server (every verb but evaluate/plan/down)")
+    ap.add_argument("--csd", default="", help="plan/run: comma-separated CSD ids (default: every requirement)")
+    ap.add_argument("--requirements", type=Path, default=None, help="plan/run: requirements.yaml (default: the catalogue's)")
+    ap.add_argument("--at-state-cmd", default="", help="run: a command run at each test's checkpoint "
+                    "(${CSD} ${TEST} ${STEP} ${ENTRY} ${VALUES} substituted and in the environment)")
+    ap.add_argument("--cmd-timeout", type=float, default=900)
+    ap.add_argument("--snapshot-all", action="store_true", help="run: write a checkpoint snapshot after EVERY step")
+    ap.add_argument("--json", action="store_true", help="evaluate/plan: print JSON instead of the table")
+    ap.add_argument("--include-known-red", action="store_true",
+                    help="plan/run: build THROUGH steps marked known_red (a filed defect) to see whether it is fixed")
     ap.add_argument("--work", type=Path, default=Path("/tmp/ciris-native-mesh"))
     ap.add_argument("--keep", action="store_true", help="leave the nodes running")
     ap.add_argument("--owner-wait", type=float, default=90)
@@ -41,6 +54,42 @@ def main() -> int:
     ap.add_argument("--direct", action="store_true",
                     help="chat: the second node also dials the first (direct neighbours)")
     args = ap.parse_args()
+    if args.include_known_red:
+        from . import model
+        model.INCLUDE_KNOWN_RED = True
+    if args.scenario in ("evaluate", "plan"):
+        from . import model
+        if args.scenario == "evaluate":
+            rep = model.evaluate(reqs=model.load_requirements(args.requirements or model.REQUIREMENTS))
+            print(json.dumps(rep, indent=1, default=str) if args.json else model.summary(rep))
+            return 0 if rep["ok"] else 1
+        from .runner import select
+        reqs = select(model.load_requirements(args.requirements or model.REQUIREMENTS), args.csd)
+        p = model.plan(reqs, model.catalogue())
+        print(json.dumps(p.as_dict(), indent=1))
+        return 0
+    if args.binary is None and args.scenario != "down":
+        ap.error("--binary is required for " + args.scenario)
+    if args.scenario == "run":
+        from .runner import run
+        from . import model
+        args.requirements = args.requirements or model.REQUIREMENTS
+        if args.work == Path("/tmp/ciris-native-mesh"):
+            args.work = Path("/tmp/ciris-native-csd4")
+        return run(args)
+    if args.topology and not args.topology.endswith((".yaml", ".yml")):
+        from . import model
+        cat = model.catalogue()
+        if args.topology not in cat:
+            print(json.dumps({"verdict": "UNREALIZABLE", "error": f"no catalogue entry {args.topology}"}))
+            return 2
+        # A catalogue id builds its BUILDABLE PREFIX: it stops, as a PASS of
+        # what stands, before the first step the builder refuses (FSD/CSD4.md §5).
+        entry = cat[args.topology]
+        n = model.buildable_prefix(entry.topology)
+        all_steps = model.steps(entry.topology)
+        args.stop_before = all_steps[n].id if n < len(all_steps) else None
+        args.topology = str(entry.path)
     if args.scenario == "down":
         print(json.dumps({"stopped": Mesh.down(args.work)}))
         return 0
@@ -54,7 +103,7 @@ def main() -> int:
         if args.scenario == "derive":
             print(json.dumps(topo.derive(decl), indent=1, default=str))
             return 0
-        SCENARIOS["build"] = lambda mesh, a: topo.build(mesh, decl, a)
+        SCENARIOS["build"] = lambda mesh, a: topo.build(mesh, decl, a, stop_before=getattr(a, "stop_before", None))
 
     mesh = Mesh(args.binary, args.work, keep=args.keep, rust_log=args.rust_log)
     code = 0
