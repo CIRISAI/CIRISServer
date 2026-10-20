@@ -34,12 +34,19 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 const NODE_ALIAS: &str = "a-node-that-consents-to-analysis";
-const PEER: &str = "the-node-that-scores";
+const PEER_ALIAS: &str = "the-node-that-scores";
 
 fn seed(label: &str, n: u8) -> [u8; 32] {
     let mut s = [0u8; 32];
     s.copy_from_slice(&Sha256::digest(format!("{label}:{n}").as_bytes())[..32]);
     s
+}
+
+/// The peer's registered id: `<alias>-<fp>` of its own Ed25519 key — persist
+/// v59 (CIRISPersist#1103) refuses any other shape at registration.
+fn peer_id() -> String {
+    let ed = SigningKey::from_bytes(&seed(PEER_ALIAS, 1));
+    ciris_verify_core::fedcode::derive_key_id(PEER_ALIAS, ed.verifying_key().as_bytes())
 }
 
 fn signer_for(alias: &str) -> LocalSigner {
@@ -111,11 +118,17 @@ async fn node() -> (Arc<Engine>, String) {
     );
     let me = engine.local_derived_key_id().await.expect("derived id");
     register(&engine, &signer_for(NODE_ALIAS), &me, identity_type::NODE).await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
+    register(
+        &engine,
+        &signer_for(PEER_ALIAS),
+        &peer_id(),
+        identity_type::NODE,
+    )
+    .await;
     (engine, me)
 }
 
-/// The types of every analyze grant `me` authored toward [`PEER`].
+/// The types of every analyze grant `me` authored toward [`PEER_ALIAS`].
 async fn grant_types(engine: &Engine, me: &str) -> Vec<String> {
     let granted = format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX);
     let mut types: Vec<String> = engine
@@ -125,7 +138,7 @@ async fn grant_types(engine: &Engine, me: &str) -> Vec<String> {
         .expect("list")
         .into_iter()
         .filter(|a| {
-            a.attested_key_id == PEER
+            a.attested_key_id == peer_id()
                 && a.attestation_envelope
                     .get(paths::DIMENSION)
                     .and_then(|v| v.as_str())
@@ -140,7 +153,7 @@ async fn grant_types(engine: &Engine, me: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_fresh_analyze_consent_is_a_scores_row() {
     let (engine, me) = node().await;
-    let id = ciris_server::peer::emit_analyze_consent(&engine, &me, PEER)
+    let id = ciris_server::peer::emit_analyze_consent(&engine, &me, &peer_id())
         .await
         .expect("emit");
     assert!(id.is_some(), "the first call authors the grant");
@@ -150,7 +163,7 @@ async fn a_fresh_analyze_consent_is_a_scores_row() {
         "the grant's row type is the claim primitive, never a type of its own (CC 2.4)"
     );
     assert_eq!(
-        ciris_server::peer::emit_analyze_consent(&engine, &me, PEER)
+        ciris_server::peer::emit_analyze_consent(&engine, &me, &peer_id())
             .await
             .expect("second emit"),
         None,
@@ -172,7 +185,7 @@ async fn a_grant_held_only_under_the_old_type_is_written_again_as_scores() {
         EnvelopeCore::from_value(envelope).expect("envelope"),
         cohort_scope::FEDERATION,
     );
-    legacy.attested_key_id = Some(PEER.to_string());
+    legacy.attested_key_id = Some(peer_id());
     engine
         .emit_attestation_self(legacy)
         .await
@@ -183,7 +196,7 @@ async fn a_grant_held_only_under_the_old_type_is_written_again_as_scores() {
         "premise: the node holds its grant under the old type only"
     );
 
-    let id = ciris_server::peer::emit_analyze_consent(&engine, &me, PEER)
+    let id = ciris_server::peer::emit_analyze_consent(&engine, &me, &peer_id())
         .await
         .expect("emit over a legacy grant");
     assert!(
@@ -200,7 +213,7 @@ async fn a_grant_held_only_under_the_old_type_is_written_again_as_scores() {
         "the old row stays as history; the new one is the claim primitive"
     );
     assert_eq!(
-        ciris_server::peer::emit_analyze_consent(&engine, &me, PEER)
+        ciris_server::peer::emit_analyze_consent(&engine, &me, &peer_id())
             .await
             .expect("third emit"),
         None,

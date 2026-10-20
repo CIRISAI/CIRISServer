@@ -53,6 +53,7 @@ use ciris_verify_core::transport_binding::{
     compute_destination_hash, produce_signed_identity_occurrence,
 };
 
+/// Aliases. A registered id is [`id_for`] of the alias and the key's own seed.
 const NODE_A_KEY_ID: &str = "kex-node-a";
 const NODE_B_KEY_ID: &str = "kex-node-b";
 const MALLORY_KEY_ID: &str = "kex-mallory";
@@ -63,6 +64,13 @@ const NODE_B_ED_SEED: [u8; 32] = [0xB0; 32];
 const NODE_B_ML_SEED: [u8; 32] = [0xB1; 32];
 const MALLORY_ED_SEED: [u8; 32] = [0xE1; 32];
 const MALLORY_ML_SEED: [u8; 32] = [0xE2; 32];
+
+/// `<alias>-<fp>` of the Ed25519 key `ed_seed` makes — persist v59
+/// (CIRISPersist#1103) refuses any other key_id shape at registration.
+fn id_for(alias: &str, ed_seed: &[u8; 32]) -> String {
+    let ed = SigningKey::from_bytes(ed_seed);
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
 
 async fn engine(key_id: &str, ed_seed: [u8; 32], ml_seed: [u8; 32]) -> Arc<Engine> {
     let pqc = Arc::new(
@@ -216,9 +224,11 @@ async fn signed_occurrence_custody_replication_and_seal() {
     //    registered on both (the gate resolves the ATTESTING key from the directory).
     let engine_a = engine(NODE_A_KEY_ID, [0xA0; 32], [0xA2; 32]).await;
     let engine_b = engine(NODE_B_KEY_ID, NODE_B_ED_SEED, NODE_B_ML_SEED).await;
+    let node_b = id_for(NODE_B_KEY_ID, &NODE_B_ED_SEED);
+    let mallory = id_for(MALLORY_KEY_ID, &MALLORY_ED_SEED);
     for (key_id, ed_seed, ml_seed) in [
-        (NODE_B_KEY_ID, &NODE_B_ED_SEED, &NODE_B_ML_SEED),
-        (MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED),
+        (node_b.as_str(), &NODE_B_ED_SEED, &NODE_B_ML_SEED),
+        (mallory.as_str(), &MALLORY_ED_SEED, &MALLORY_ML_SEED),
     ] {
         register_node(&engine_b, key_id, ed_seed, ml_seed).await;
         register_node(&engine_a, key_id, ed_seed, ml_seed).await;
@@ -246,10 +256,10 @@ async fn signed_occurrence_custody_replication_and_seal() {
 
     // ── (2) SIGNED SELF-PUBLISH on B (what compose::publish_self_identity_occurrence
     //    does at boot), through the ONE fail-secure gate.
-    let b_signer = hybrid_identity(NODE_B_KEY_ID, &NODE_B_ED_SEED, &NODE_B_ML_SEED);
+    let b_signer = hybrid_identity(&node_b, &NODE_B_ED_SEED, &NODE_B_ML_SEED);
     let t0 = chrono::Utc::now();
     let b_occ =
-        signed_self_occurrence(NODE_B_KEY_ID, &b_signer, &b_enc, [0x02; 32], [0x01; 32], t0).await;
+        signed_self_occurrence(&node_b, &b_signer, &b_enc, [0x02; 32], [0x01; 32], t0).await;
     dir_b
         .put_identity_occurrence(b_occ)
         .await
@@ -258,7 +268,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     // ── (3) ADVERSARIAL: Mallory (registered, unrelated — a compromised consented
     //    peer) signs an occurrence claiming B's identity with HER enc keys → the gate
     //    MUST reject (signer_acts_for). This is the content-MITM the arc closes.
-    let mallory_signer = hybrid_identity(MALLORY_KEY_ID, &MALLORY_ED_SEED, &MALLORY_ML_SEED);
+    let mallory_signer = hybrid_identity(&mallory, &MALLORY_ED_SEED, &MALLORY_ML_SEED);
     let mallory_enc = ciris_server::identity::derive_self_enc_pubkeys(&MALLORY_ED_SEED)
         .expect("mallory enc keys");
     // Mallory signs under her OWN key id (inside the envelope and out) — an
@@ -266,7 +276,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     // B as the attester instead would be refused as a self-inconsistent envelope
     // and would never reach `signer_acts_for`, which is the check under test.
     let forged = signed_self_occurrence(
-        NODE_B_KEY_ID,   // claims B's identity...
+        &node_b,         // claims B's identity...
         &mallory_signer, // ...but Mallory signs
         &mallory_enc,
         [0x04; 32],
@@ -281,7 +291,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     );
     // Tampered envelope (signature over different bytes) → rejected as inauthentic.
     let mut tampered = signed_self_occurrence(
-        NODE_B_KEY_ID,
+        &node_b,
         &b_signer,
         &b_enc,
         [0x02; 32],
@@ -302,7 +312,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
     //    anti-entropy hop carries it to A, and A's gate RE-VERIFIES the signature.
     let bridge_b =
         FederationDirectoryReplicationBridge::new(Arc::clone(&dir_b), Arc::new(Vec::new))
-            .with_self_provider(Some(selector(NODE_B_KEY_ID)));
+            .with_self_provider(Some(selector(&node_b)));
     let refs = bridge_b
         .list_envelope_refs(EnvelopeKind::IdentityOccurrence)
         .await;
@@ -325,7 +335,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
         "A verifies + admits B's replicated SIGNED occurrence (got {outcome:?})"
     );
     let resolved = dir_a
-        .resolve_encryption_keys(NODE_B_KEY_ID)
+        .resolve_encryption_keys(&node_b)
         .await
         .expect("resolve ok")
         .expect("B's enc keys resolve on A after signed replication");
@@ -336,8 +346,8 @@ async fn signed_occurrence_custody_replication_and_seal() {
     // B is invisible to the signed re-read the wire uses.
     dir_b
         .put_identity_occurrence_local(IdentityOccurrence {
-            identity_key_id: NODE_B_KEY_ID.to_string(),
-            occurrence_key_id: MALLORY_KEY_ID.to_string(), // any bound device key
+            identity_key_id: node_b.clone(),
+            occurrence_key_id: mallory.clone(), // any bound device key
             device_class: "laptop".to_string(),
             hardware_attestation: None,
             asserted_at: chrono::Utc::now(),
@@ -362,21 +372,14 @@ async fn signed_occurrence_custody_replication_and_seal() {
     let b_enc2 = ciris_server::identity::derive_self_enc_pubkeys(&[0xB2; 32])
         .expect("rotated enc keys (fixture)");
     let t1 = t0 + chrono::Duration::seconds(5);
-    let b_occ2 = signed_self_occurrence(
-        NODE_B_KEY_ID,
-        &b_signer,
-        &b_enc2,
-        [0x02; 32],
-        [0x01; 32],
-        t1,
-    )
-    .await;
+    let b_occ2 =
+        signed_self_occurrence(&node_b, &b_signer, &b_enc2, [0x02; 32], [0x01; 32], t1).await;
     dir_a
         .put_identity_occurrence(b_occ2)
         .await
         .expect("rotated re-assert admitted (last-signed-wins)");
     let after_rotate = dir_a
-        .resolve_encryption_keys(NODE_B_KEY_ID)
+        .resolve_encryption_keys(&node_b)
         .await
         .expect("resolve ok")
         .expect("still resolvable");
@@ -389,7 +392,7 @@ async fn signed_occurrence_custody_replication_and_seal() {
         .apply_envelope_bytes(EnvelopeKind::IdentityOccurrence, &bytes, None)
         .await;
     let after_replay = dir_a
-        .resolve_encryption_keys(NODE_B_KEY_ID)
+        .resolve_encryption_keys(&node_b)
         .await
         .expect("resolve ok")
         .expect("still resolvable");

@@ -51,7 +51,25 @@ fn to_persist(v: &VerifySignedKeyRecord) -> SignedKeyRecord {
 }
 
 const NODE_A_KEY_ID: &str = "ciris-server";
-const PEER_KEY_ID: &str = "ciris-status";
+/// The peer's alias; its registered id is [`peer_key_id`].
+const PEER_ALIAS: &str = "ciris-status";
+const PEER_ED_SEED: [u8; 32] = [0xB0; 32];
+
+/// The peer's registered id: `<alias>-<fp>` of its own Ed25519 key — persist v59
+/// (CIRISPersist#1103) refuses any other key_id shape at registration.
+fn peer_key_id() -> String {
+    let ed = SigningKey::from_bytes(&PEER_ED_SEED);
+    ciris_verify_core::fedcode::derive_key_id(PEER_ALIAS, ed.verifying_key().as_bytes())
+}
+
+/// A fresh software hybrid identity named `<label>-<fp>` of its own Ed25519 key
+/// (persist v59 #1103) — `HybridSigningIdentity::generate(label)` names it `label`.
+fn generate(label: &str) -> HybridSigningIdentity {
+    let ed = ciris_crypto::Ed25519Signer::random().expect("ed25519 signer");
+    let key_id = ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes());
+    let mldsa = ciris_crypto::MlDsa65Signer::new().expect("ML-DSA-65 signer");
+    HybridSigningIdentity::new(key_id, ed, mldsa)
+}
 
 /// This node's deterministic Ed25519 / ML-DSA-65 seeds. Named because
 /// [`self_key_record_json`] must mint the SAME identity the engine signs under —
@@ -242,9 +260,10 @@ async fn self_key_record_json(engine: &Engine) -> String {
 /// bound over `canonical || ed_sig` (what `verify_hybrid` checks). Mirrors
 /// `tests/peer_replication.rs::NodeB`.
 async fn peer_signed_key_record() -> SignedKeyRecord {
-    let ed = SigningKey::from_bytes(&[0xB0; 32]);
-    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{PEER_KEY_ID}-pqc"))
+    let ed = SigningKey::from_bytes(&PEER_ED_SEED);
+    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{PEER_ALIAS}-pqc"))
         .expect("peer ML-DSA-65 seed");
+    let peer_key_id = peer_key_id();
 
     let now = chrono::Utc::now();
     let ed_pub = BASE64.encode(ed.verifying_key().to_bytes());
@@ -255,10 +274,10 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
     // (CIRISPersist#659). Bound by persist's OWN binder, the one
     // `attest::register_key` calls; the door itself is not usable here because
     // this is the record a REMOTE peer produces and the owner POSTs.
-    let mut envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    let mut envelope = serde_json::json!({ "key_id": peer_key_id });
     ciris_persist::federation::admission::bind_subject_into_envelope(
         &mut envelope,
-        PEER_KEY_ID,
+        &peer_key_id,
         identity_type::WITNESS,
         &ed_pub,
         Some(&pqc_pub),
@@ -275,19 +294,19 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
     let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign peer reg");
 
     let record = KeyRecord {
-        key_id: PEER_KEY_ID.to_string(),
+        key_id: peer_key_id.clone(),
         pubkey_ed25519_base64: ed_pub,
         pubkey_ml_dsa_65_base64: Some(pqc_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::WITNESS.into(),
-        identity_ref: PEER_KEY_ID.to_string(),
+        identity_ref: peer_key_id.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash,
         scrub_signature_classical: BASE64.encode(ed_sig),
         scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-        scrub_key_id: PEER_KEY_ID.to_string(),
+        scrub_key_id: peer_key_id,
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -368,7 +387,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
     // Caller-supplied prefixes deliberately UNSORTED + with a duplicate + an empty
     // entry, to prove the handler normalizes (sorts / dedupes / drops empty).
     let body = serde_json::json!({
-        "peer_key_id": PEER_KEY_ID,
+        "peer_key_id": peer_key_id(),
         "peer_key_record": peer_record,
         "attestation_prefixes": ["health:", "capacity:", "capacity:", "  "],
     });
@@ -382,7 +401,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
         .expect("POST peering");
     assert_eq!(resp.status(), 200, "owner peering must succeed");
     let json: serde_json::Value = resp.json().await.expect("peering response json");
-    assert_eq!(json["peer_key_id"], PEER_KEY_ID);
+    assert_eq!(json["peer_key_id"], peer_key_id());
     assert_eq!(json["freshly_emitted"], true);
     assert!(
         json["grant_attestation_id"].as_str().is_some(),
@@ -401,7 +420,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
     // ── The peer key is ADMITTED into this node's federation directory ────────
     let peer_key = engine
         .federation_directory()
-        .lookup_public_key(PEER_KEY_ID)
+        .lookup_public_key(&peer_key_id())
         .await
         .expect("lookup peer key")
         .expect("peer key present after peering");
@@ -424,7 +443,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
         .expect("node must have a consent:replication:v1 grant");
     assert_eq!(grant.attestation_type, attestation_type::SCORES);
     assert_eq!(grant.attesting_key_id, node_a_key_id(&engine).await);
-    assert_eq!(grant.subject_key_ids, vec![PEER_KEY_ID.to_string()]);
+    assert_eq!(grant.subject_key_ids, vec![peer_key_id()]);
     let prefixes: Vec<String> = grant.attestation_envelope["payload"]["attestation_prefixes"]
         .as_array()
         .expect("prefixes array")
@@ -472,7 +491,7 @@ async fn unauthorized_caller_is_rejected_and_authors_no_grant() {
 
     let peer_record = peer_signed_key_record().await;
     let body = serde_json::json!({
-        "peer_key_id": PEER_KEY_ID,
+        "peer_key_id": peer_key_id(),
         "peer_key_record": peer_record,
         "attestation_prefixes": ["capacity:"],
     });
@@ -500,7 +519,7 @@ async fn unauthorized_caller_is_rejected_and_authors_no_grant() {
     assert!(
         engine
             .federation_directory()
-            .lookup_public_key(PEER_KEY_ID)
+            .lookup_public_key(&peer_key_id())
             .await
             .expect("lookup peer key")
             .is_none(),
@@ -597,7 +616,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
 
     let peer_record = peer_signed_key_record().await;
     let body = serde_json::json!({
-        "peer_key_id": PEER_KEY_ID,
+        "peer_key_id": peer_key_id(),
         "peer_key_record": peer_record,
         "attestation_prefixes": ["capacity:"],
     });
@@ -619,7 +638,7 @@ async fn unowned_node_refuses_peering_even_for_system_admin() {
     assert!(
         engine
             .federation_directory()
-            .lookup_public_key(PEER_KEY_ID)
+            .lookup_public_key(&peer_key_id())
             .await
             .expect("lookup peer")
             .is_none(),
@@ -665,7 +684,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
     let now = chrono::Utc::now().to_rfc3339();
 
     // Seed the A1 accord anchor (persist v12.0.2 first-boot-seeds this in prod).
-    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let a1 = generate("humanity-accord-a1-test");
     let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
@@ -684,7 +703,8 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         .expect("seed A1 anchor");
 
     // A target node's boot-time SELF-signed own row (the row to be upgraded).
-    let target = HybridSigningIdentity::generate("adopt-target-test").expect("gen target");
+    let target = generate("adopt-target-test");
+    let target_id = target.key_id().to_string();
     let t_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
@@ -703,7 +723,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
     let scrubbed = produce_scrubbed_key_record(
         &a1,
         ScrubTarget {
-            key_id: "adopt-target-test".to_string(),
+            key_id: target_id.clone(),
             pubkey_ed25519_base64: t_ed.clone(),
             pubkey_ml_dsa_65_base64: t_mldsa,
             identity_type: "node".to_string(),
@@ -722,7 +742,7 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
     // Precondition: the self-signed row does NOT root.
     assert!(
         !matches!(
-            root_binding_anchored(backend.as_ref(), "adopt-target-test", &t_ed, &anchor_set).await,
+            root_binding_anchored(backend.as_ref(), &target_id, &t_ed, &anchor_set).await,
             RootingVerdict::Confirmed { .. }
         ),
         "precondition: self-signed row must not root"
@@ -757,13 +777,13 @@ async fn adopt_scrubbed_upgrades_a_self_signed_row_and_roots() {
         .expect("POST adopt-scrubbed (owner)");
     assert_eq!(ok.status(), 200, "owner adopt must succeed");
     let j: serde_json::Value = ok.json().await.expect("adopt response json");
-    assert_eq!(j["key_id"], "adopt-target-test");
+    assert_eq!(j["key_id"], target_id);
     assert_eq!(j["outcome"], "upgraded", "first adopt upgrades the row");
 
     // The target row now ROOTS at the accord anchor.
     assert!(
         matches!(
-            root_binding_anchored(backend.as_ref(), "adopt-target-test", &t_ed, &anchor_set).await,
+            root_binding_anchored(backend.as_ref(), &target_id, &t_ed, &anchor_set).await,
             RootingVerdict::Confirmed { .. }
         ),
         "after adopt-scrubbed the row must ROOT at the anchor"
@@ -815,7 +835,7 @@ fn accord_test_evidence() -> serde_json::Value {
 // setup wizard calls (post owner-claim) when the owner opts into sharing. Unlike
 // peering it does NOT register a key: the peer must already be admitted.
 
-/// Admit `PEER_KEY_ID` directly (its self-signed PoP record) so the consent
+/// Admit [`peer_key_id`] directly (its self-signed PoP record) so the consent
 /// route — which authors consent but never registers keys — has a peer to
 /// consent to. In production the canonical is admitted via the baked seed.
 async fn admit_peer(engine: &Engine) {
@@ -839,7 +859,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     // Explicit scope, deliberately UNSORTED + duplicate + empty entry — proves the
     // handler normalizes (sorts / dedupes / drops empty), like peering.
     let body = serde_json::json!({
-        "peer_key_id": PEER_KEY_ID,
+        "peer_key_id": peer_key_id(),
         "attestation_prefixes": ["trace:", "capacity:", "capacity:", "  "],
     });
     let resp = client
@@ -856,7 +876,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     );
     let json: serde_json::Value = resp.json().await.expect("consent response json");
     assert_eq!(json["consented"], true);
-    assert_eq!(json["peer_key_id"], PEER_KEY_ID);
+    assert_eq!(json["peer_key_id"], peer_key_id());
     assert_eq!(json["freshly_emitted"], true);
     assert_eq!(
         json["attestation_prefixes"],
@@ -881,7 +901,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
         .expect("node authored a consent:replication:v1 grant");
     assert_eq!(grant.attestation_type, attestation_type::SCORES);
     assert!(
-        grant.subject_key_ids.iter().any(|s| s == PEER_KEY_ID),
+        grant.subject_key_ids.iter().any(|s| *s == peer_key_id()),
         "the grant is directed at the peer"
     );
 }
@@ -902,7 +922,7 @@ async fn consent_with_empty_scope_is_refused() {
     let resp = client
         .post(format!("{base}/v1/federation/consent"))
         .bearer_auth(&owner)
-        .json(&serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": [] }))
+        .json(&serde_json::json!({ "peer_key_id": peer_key_id(), "attestation_prefixes": [] }))
         .send()
         .await
         .expect("POST consent");
@@ -930,7 +950,7 @@ async fn consent_to_unadmitted_peer_is_refused() {
         .post(format!("{base}/v1/federation/consent"))
         .bearer_auth(&owner)
         .json(
-            &serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": ["capacity:"] }),
+            &serde_json::json!({ "peer_key_id": peer_key_id(), "attestation_prefixes": ["capacity:"] }),
         )
         .send()
         .await
@@ -959,7 +979,7 @@ async fn consent_on_unowned_node_is_refused() {
         .post(format!("{base}/v1/federation/consent"))
         .bearer_auth(&owner)
         .json(
-            &serde_json::json!({ "peer_key_id": PEER_KEY_ID, "attestation_prefixes": ["capacity:"] }),
+            &serde_json::json!({ "peer_key_id": peer_key_id(), "attestation_prefixes": ["capacity:"] }),
         )
         .send()
         .await

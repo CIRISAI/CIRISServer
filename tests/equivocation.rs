@@ -469,18 +469,21 @@ async fn a_later_revision_records_nothing() {
     assert!(hard_cases(&engine).await.is_empty());
 }
 
-/// **The baked genesis rows are a floor, not noise** (persist v31.1.0).
+/// **The rows an `Engine` holds at construction are a floor, not noise**
+/// (persist v31.1.0). The baked ceremony root installs live federation-tier
+/// attestations — `genesis-charter`, `genesis-grant:<canonical>`,
+/// `genesis-lifecycle` — and since persist v59 every registered key also holds
+/// its own `key:record:v1` row. So `rows_scanned == 0` is not expressible.
 ///
-/// Since the ceremony root was baked, every `Engine` installs three live
-/// federation-tier attestations at construction — `genesis-charter`,
-/// `genesis-grant:<canonical>` and `genesis-lifecycle`, all attested by A1. A
-/// detector that reads live federation rows therefore sees THREE before this
-/// test seeds anything, and `rows_scanned == 0` stopped being expressible.
-///
-/// The counts below subtract that floor rather than hard-coding 3, so a future
-/// bundle with a different row count does not silently re-break these tests —
-/// and so a reader is not left wondering where the number came from.
-const GENESIS_FLOOR: usize = 3;
+/// The floor is MEASURED (a pass before anything is seeded), never hard-coded:
+/// it was 3 until persist v59 made it 7, and each hard-coded value re-broke
+/// these tests on the next substrate.
+async fn genesis_floor(engine: &Arc<Engine>, node_key_id: &str) -> usize {
+    equivocation::run_pass(engine, node_key_id, &DetectorConfig::default())
+        .await
+        .expect("detector pass over the construction floor")
+        .rows_scanned
+}
 
 /// **The read narrows on validity, in the query.** An expired pair is not a
 /// live contradiction; the `valid_at` pushdown is what makes that true, and it
@@ -488,6 +491,7 @@ const GENESIS_FLOOR: usize = 3;
 #[tokio::test]
 async fn an_expired_pair_is_outside_the_live_read() {
     let (engine, node_key_id) = fixture().await;
+    let floor = genesis_floor(&engine, &node_key_id).await;
     seed(
         &engine,
         &peer_key_id(),
@@ -511,7 +515,7 @@ async fn an_expired_pair_is_outside_the_live_read() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, GENESIS_FLOOR,
+        report.rows_scanned, floor,
         "expired rows reached the comparison — the read is not bounded by validity, so this \
          pass scans the whole corpus forever and reports dead contradictions as live. Only the \
          baked genesis rows should be in scope here; anything above that floor is the seeded \
@@ -532,6 +536,7 @@ async fn an_expired_pair_is_outside_the_live_read() {
 #[tokio::test]
 async fn an_unpublished_local_draft_is_not_evidence() {
     let (engine, node_key_id) = fixture().await;
+    let floor = genesis_floor(&engine, &node_key_id).await;
     seed_local(
         &engine,
         &peer_key_id(),
@@ -555,7 +560,7 @@ async fn an_unpublished_local_draft_is_not_evidence() {
         .await
         .expect("detector pass");
     assert_eq!(
-        report.rows_scanned, GENESIS_FLOOR,
+        report.rows_scanned, floor,
         "an unpromoted local-tier draft reached the comparison — a row the attester never \
          published cannot be evidence that it told two peers different things. Only the baked \
          genesis rows should be in scope here; anything above that floor is a local draft that \

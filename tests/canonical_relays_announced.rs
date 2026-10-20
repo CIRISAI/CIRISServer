@@ -102,12 +102,31 @@ async fn bind_unannounced(engine: &Engine, owner: &OwnerIdentity, node: &str) {
 }
 
 /// Register the owner's user key alone — `bind_owner` without the binding.
+/// SELF-SIGNED by the owner (persist v59: a key's registration is its
+/// `key:record:v1` row, so it must verify; an unsigned record has no row and
+/// cannot travel the key plane).
 async fn register_owner_key(engine: &Engine, owner: &OwnerIdentity) {
+    use base64::Engine as _;
     use ciris_persist::federation::types::{algorithm, KeyRecord};
-    let now = chrono::Utc::now();
-    let envelope = serde_json::json!({ "key_id": owner.key_id });
+    let signer = owner.signer().await;
+    let mut envelope = serde_json::json!({ "key_id": owner.key_id });
+    ciris_persist::federation::admission::bind_subject_into_envelope(
+        &mut envelope,
+        &owner.key_id,
+        identity_type::USER,
+        &owner.pubkey_ed25519_base64,
+        Some(&owner.pubkey_ml_dsa_65_base64),
+        None,
+    )
+    .expect("bind the subject into the registration (#659)");
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
         .expect("canonicalize owner envelope");
+    let sig = signer
+        .sign_hybrid(&canonical)
+        .await
+        .expect("owner signs its registration");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let now = chrono::Utc::now();
     let record = KeyRecord {
         key_id: owner.key_id.clone(),
         pubkey_ed25519_base64: owner.pubkey_ed25519_base64.clone(),
@@ -119,8 +138,8 @@ async fn register_owner_key(engine: &Engine, owner: &OwnerIdentity) {
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
-        scrub_signature_classical: String::new(),
-        scrub_signature_pqc: None,
+        scrub_signature_classical: b64.encode(&sig.classical.signature),
+        scrub_signature_pqc: Some(b64.encode(&sig.pqc.signature)),
         scrub_key_id: owner.key_id.clone(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
@@ -131,8 +150,7 @@ async fn register_owner_key(engine: &Engine, owner: &OwnerIdentity) {
         additional_scrubs: Vec::new(),
     };
     engine
-        .federation_directory()
-        .put_public_key(SignedKeyRecord { record })
+        .register_federation_key(SignedKeyRecord { record })
         .await
         .expect("register the owner's user key");
 }
@@ -156,6 +174,25 @@ async fn signed_occurrence_of(
 
 fn hash_of<T: serde::Serialize>(row: &T) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(row).expect("serialize row")).into()
+}
+
+/// Apply `key_id`'s own `key:record:v1` row from `from` onto `to` — the key
+/// plane as rows (persist v59).
+async fn replicate_key_row(from: &Engine, to: &Engine, key_id: &str) {
+    let row = from
+        .federation_directory()
+        .list_attestations_for(key_id)
+        .await
+        .expect("rows about the key")
+        .into_iter()
+        .filter(|r| ciris_persist::federation::key_plane::key_record_of_row(r).is_some())
+        .max_by_key(|r| r.asserted_at)
+        .unwrap_or_else(|| panic!("{key_id}'s key:record:v1 row is held on its own node"));
+    to.apply_replicated_attestation(ciris_persist::federation::SignedAttestation {
+        attestation: row,
+    })
+    .await
+    .unwrap_or_else(|e| panic!("apply {key_id}'s key row: {e}"));
 }
 
 /// The content hash edge advertises for `key_id`'s key record on `engine`.
@@ -246,9 +283,24 @@ async fn the_canonical_offers_an_announced_device_to_a_stranger_and_never_an_una
     // signed occurrences.
     let c = node_engine().await;
     let c_key = register_self(&c).await;
-    seed_key(&c, &d2_key, 0xD1, 0xD2, identity_type::NODE).await;
-    seed_key(&c, &d3_key, 0xE1, 0xE2, identity_type::NODE).await;
-    bind_owner(&c, &one, &d2_key).await; // owner key + the ANNOUNCED binding
+    // persist v59: C learns each device's key as that device's own
+    // `key:record:v1` ROW, the way replication carries it (a bare record seeded
+    // into the table has no row, so there is nothing to relay).
+    replicate_key_row(&d2, &c, &d2_key).await;
+    replicate_key_row(&d3, &c, &d3_key).await;
+    // The owner's key ROW first, as the key plane carries it (d3 registered it
+    // self-signed above) — before `bind_owner` seeds an unsigned record of the
+    // same key, which the row would then conflict with (KeyPlaneRefused).
+    replicate_key_row(&d3, &c, &one.key_id).await;
+    // The ANNOUNCED binding alone (`bind_owner` would re-register the key).
+    ciris_server::auth::ownership::emit_steward_binding(
+        &c,
+        &one.signer().await,
+        &d2_key,
+        &infra_scopes(),
+    )
+    .await
+    .expect("emit owner-binding delegates_to(user -> node)");
     bind_unannounced(&c, &one, &d3_key).await;
     for (dev, occ) in [(&d2, &d2_occ), (&d3, &d3_occ)] {
         c.federation_directory()
@@ -367,8 +419,13 @@ async fn only_a_node_holding_infra_serve_from_a_trusted_root_relays() {
     )
     .await
     .expect("root-side trust legs: delegates_to(root -> C, infra:serve)");
+    // The labelled acceptance every production writer emits (`trust:accepts:v1`,
+    // persist's own envelope): an unlabelled C → root delegates_to beside
+    // root → C is a delegation CYCLE to persist v59, not an acceptance.
     let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(
-        serde_json::json!({ "scope": ["infra:attest", "infra:serve"] }),
+        c.trust_acceptance_envelope(root, &["infra:attest", "infra:serve"])
+            .await
+            .expect("the acceptance envelope"),
     )
     .expect("trust edge envelope");
     let mut accept = ciris_persist::federation::EmitAttestationInput::with_envelope(

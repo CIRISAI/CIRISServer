@@ -364,6 +364,7 @@ fn no_producer_writes_the_signed_instant_unbucketed() {
 
 // ─── Mutational: the properties are load bearing ────────────────────────────
 
+/// Aliases, not ids: the registered id is [`id_for`] of each.
 const NODE: &str = "author-node";
 const USER: &str = "author-user";
 
@@ -374,10 +375,19 @@ fn seed(tag: &str, salt: u8) -> [u8; 32] {
     s
 }
 
-fn signer_for(key_id: &str) -> LocalSigner {
-    let ed = SigningKey::from_bytes(&seed(key_id, 1));
+/// The registered id for `alias`: `<alias>-<fp>` of the key [`signer_for`] holds —
+/// persist v59 (CIRISPersist#1103) refuses any other key_id shape at registration.
+fn id_for(alias: &str) -> String {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
+
+/// A signer for `alias` whose `key_id()` is its registered id ([`id_for`]).
+fn signer_for(alias: &str) -> LocalSigner {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    let key_id = id_for(alias);
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&seed(key_id, 2), format!("{key_id}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&seed(alias, 2), format!("{key_id}-pqc"))
             .expect("ML-DSA-65 seed"),
     );
     LocalSigner::from_parts(
@@ -449,9 +459,9 @@ async fn fixture() -> (Arc<Engine>, LocalSigner) {
             .await
             .expect("Engine::with_signer(sqlite::memory:)"),
     );
-    register(&engine, &node_signer, NODE, "node").await;
+    register(&engine, &node_signer, &id_for(NODE), "node").await;
     let user_signer = signer_for(USER);
-    register(&engine, &user_signer, USER, identity_type::USER).await;
+    register(&engine, &user_signer, &id_for(USER), identity_type::USER).await;
     (engine, user_signer)
 }
 
@@ -466,12 +476,12 @@ async fn fresh_row(user: &LocalSigner) -> Attestation {
             cohort_scope::SELF,
             serde_json::json!({
                 "kind": "delegates_to",
-                "attesting_key_id": USER,
-                "node_key_id": NODE,
+                "attesting_key_id": id_for(USER),
+                "node_key_id": id_for(NODE),
                 "scope": ["infra:serve"],
             }),
         )
-        .about(NODE),
+        .about(&id_for(NODE)),
     )
     .expect("stamp")
     .sign_and_assemble(ciris_server::attest::KeySigner::Local(user))
@@ -520,18 +530,18 @@ async fn every_mirrored_column_is_load_bearing() {
             r.attestation_id = uuid::Uuid::new_v4().to_string();
         }),
         ("attesting_key_id", |r| {
-            r.attesting_key_id = NODE.to_string();
+            r.attesting_key_id = id_for(NODE);
         }),
         ("attestation_type", |r| {
             r.attestation_type = attestation_type::SCORES.to_string();
         }),
         ("attested_key_id", |r| {
-            r.attested_key_id = USER.to_string();
+            r.attested_key_id = id_for(USER);
         }),
         ("subject_key_ids", |r| {
             // The #658 authority-injection shape: APPEND a key in transit and it
             // gains revocation authority over someone else's row.
-            r.subject_key_ids.push(USER.to_string());
+            r.subject_key_ids.push(id_for(USER));
         }),
         ("cohort_scope", |r| {
             // The audience widened in transit — `self` published to the federation.
@@ -630,26 +640,28 @@ async fn an_unbound_registration_envelope_is_refused() {
     let pqc_pub = B64.encode(&probe.pqc.public_key);
 
     // The PRE-#659 envelope: a bare key_id, naming neither the identity type nor
-    // either pubkey leg.
-    let envelope = serde_json::json!({ "key_id": USER });
+    // either pubkey leg. The id itself is well-formed (persist v59 #1103), so the
+    // only defect left for the gate to refuse is the unbound envelope.
+    let user = id_for(USER);
+    let envelope = serde_json::json!({ "key_id": user });
     let canonical = ciris_persist::verify::canonical::ceg_produce_canonicalize(&envelope)
         .expect("canonicalize");
     let sig = signer.sign_hybrid(&canonical).await.expect("sign");
     let now = chrono::Utc::now();
     let record = KeyRecord {
-        key_id: USER.to_string(),
+        key_id: user.clone(),
         pubkey_ed25519_base64: ed_pub,
         pubkey_ml_dsa_65_base64: Some(pqc_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::USER.to_string(),
-        identity_ref: USER.to_string(),
+        identity_ref: user.clone(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash: hex::encode(Sha256::digest(&canonical)),
         scrub_signature_classical: B64.encode(&sig.classical.signature),
         scrub_signature_pqc: Some(B64.encode(&sig.pqc.signature)),
-        scrub_key_id: USER.to_string(),
+        scrub_key_id: user,
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),

@@ -32,6 +32,27 @@ use ciris_server::auth::bootstrap::{
 use ciris_server::auth::roles::UserRole;
 use ciris_server::auth::store;
 
+/// A node key id for `label` under `node()`'s `[0xA1;32]` key, and a user key
+/// id under `user_signer`'s `[0xF1;32]` key — persist v59 (#1103, CC 2.6.8)
+/// refuses registering a key whose id is not `<label>-<fingerprint of its own
+/// Ed25519 key>`.
+fn node_id(label: &str) -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        label,
+        SigningKey::from_bytes(&[0xA1; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
+fn user_id(label: &str) -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        label,
+        SigningKey::from_bytes(&[0xF1; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
+
 /// An in-memory substrate keyed by a HYBRID node-identity signer (so `sign_hybrid`
 /// works for the setup/root signature path). `key_id` is the node's federation id.
 async fn node(key_id: &str) -> Arc<Engine> {
@@ -279,8 +300,8 @@ async fn post_claim(
 
 #[tokio::test]
 async fn first_run_setup_root_claims_then_rejects_second_claim() {
-    let node_key_id = "ciris-founder-node";
-    let user_key_id = "ciris-fresh-user";
+    let node_key_id: &str = &node_id("ciris-founder-node");
+    let user_key_id: &str = &user_id("ciris-fresh-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     assert!(
@@ -334,8 +355,8 @@ async fn first_run_setup_root_claims_then_rejects_second_claim() {
 /// A claim whose owner-binding signature is TAMPERED is rejected (401), no ROOT.
 #[tokio::test]
 async fn first_run_setup_root_rejects_tampered_signature() {
-    let node_key_id = "ciris-tamper-node";
-    let user_key_id = "ciris-tamper-user";
+    let node_key_id: &str = &node_id("ciris-tamper-node");
+    let user_key_id: &str = &user_id("ciris-tamper-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
@@ -382,8 +403,8 @@ async fn first_run_setup_root_rejects_tampered_signature() {
 /// A claim whose NodeCode pins a DIFFERENT node is rejected (400), no ROOT.
 #[tokio::test]
 async fn first_run_setup_root_rejects_wrong_node_pin() {
-    let key_id = "ciris-target-node";
-    let user_key_id = "ciris-wrongpin-user";
+    let key_id: &str = &node_id("ciris-target-node");
+    let user_key_id: &str = &user_id("ciris-wrongpin-user");
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
@@ -430,7 +451,7 @@ async fn first_run_setup_root_rejects_wrong_node_pin() {
 /// A claim with NO NodeCode pin is rejected (400) — the pin is mandatory.
 #[tokio::test]
 async fn first_run_setup_root_requires_a_pin() {
-    let key_id = "ciris-pinless-node";
+    let key_id: &str = &node_id("ciris-pinless-node");
     let engine = node(key_id).await;
     register_self(&engine, key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), key_id).await;
@@ -451,8 +472,8 @@ async fn first_run_setup_root_requires_a_pin() {
 /// the same correct PIN) is 409-closed.
 #[tokio::test]
 async fn claim_pin_is_consumed_after_successful_claim() {
-    let node_key_id = "ciris-pin-consume-node";
-    let user_key_id = "ciris-pin-consume-user";
+    let node_key_id: &str = &node_id("ciris-pin-consume-node");
+    let user_key_id: &str = &user_id("ciris-pin-consume-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
@@ -490,8 +511,8 @@ async fn claim_pin_is_consumed_after_successful_claim() {
 /// A WRONG PIN → 401, NO ROOT minted, user not registered.
 #[tokio::test]
 async fn claim_with_wrong_pin_is_rejected() {
-    let node_key_id = "ciris-wrongpin2-node";
-    let user_key_id = "ciris-wrongpin2-user";
+    let node_key_id: &str = &node_id("ciris-wrongpin2-node");
+    let user_key_id: &str = &user_id("ciris-wrongpin2-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
@@ -516,8 +537,8 @@ async fn claim_with_wrong_pin_is_rejected() {
 /// A MISSING PIN → 401, NO ROOT minted.
 #[tokio::test]
 async fn claim_with_missing_pin_is_rejected() {
-    let node_key_id = "ciris-nopin-node";
-    let user_key_id = "ciris-nopin-user";
+    let node_key_id: &str = &node_id("ciris-nopin-node");
+    let user_key_id: &str = &user_id("ciris-nopin-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve(Arc::clone(&engine), node_key_id).await;
@@ -537,8 +558,8 @@ async fn claim_with_missing_pin_is_rejected() {
 /// 401 — the PIN gate fails closed when no PIN is armed.
 #[tokio::test]
 async fn unarmed_node_rejects_claims() {
-    let node_key_id = "ciris-unarmed-node";
-    let user_key_id = "ciris-unarmed-user";
+    let node_key_id: &str = &node_id("ciris-unarmed-node");
+    let user_key_id: &str = &user_id("ciris-unarmed-user");
     let engine = node(node_key_id).await;
     register_self(&engine, node_key_id).await;
     let (base, _h) = serve_with_pin(Arc::clone(&engine), node_key_id, None).await;

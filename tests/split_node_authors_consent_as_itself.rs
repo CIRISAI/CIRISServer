@@ -140,9 +140,26 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         identity_type::AGENT,
     )
     .await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
-    register(&engine, &signer_for(PEER_2), PEER_2, identity_type::NODE).await;
-    register(&engine, &signer_for(PEER_3), PEER_3, identity_type::NODE).await;
+    // Each peer registers under `<alias>-<fp>` of its own key — persist v59
+    // (#1103, CC 2.6.8) refuses the bare alias.
+    let peer_id = signer_for(PEER).derived_key_id();
+    register(&engine, &signer_for(PEER), &peer_id, identity_type::NODE).await;
+    let peer_2_id = signer_for(PEER_2).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_2),
+        &peer_2_id,
+        identity_type::NODE,
+    )
+    .await;
+    let peer_3_id = signer_for(PEER_3).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_3),
+        &peer_3_id,
+        identity_type::NODE,
+    )
+    .await;
 
     // ── Before the split: the wizard peers with the canonical. The engine is the
     //    only pen, so the grant is the ACTOR'S — the state every agent-hosted node
@@ -150,7 +167,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     ciris_server::peer::emit_replication_consent(
         &engine,
         &actor,
-        PEER,
+        &peer_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -208,7 +225,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
             .expect("read as the actor — the production read"),
-        vec![PEER.to_string()],
+        vec![peer_id.clone()],
         "the pre-split grant stays where the reads look"
     );
     assert!(
@@ -222,7 +239,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     ciris_server::peer::emit_replication_consent(
         &engine,
         &node,
-        PEER_2,
+        &peer_2_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -231,20 +248,20 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         ciris_server::peer::replication_peers_from_consent(&engine, &node)
             .await
             .expect("read as the node"),
-        vec![PEER_2.to_string()]
+        vec![peer_2_id.clone()]
     );
     assert!(
         !ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
             .expect("read as the actor")
-            .contains(&PEER_2.to_string()),
+            .contains(&peer_2_id),
         "a row the NODE authored is the node's, not the agent's — no cross-machine blanket"
     );
     // Naming the ACTOR authors as the actor — the engine's own key.
     ciris_server::peer::emit_replication_consent(
         &engine,
         &actor,
-        PEER_3,
+        &peer_3_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -253,7 +270,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         !ciris_server::peer::replication_peers_from_consent(&engine, &node)
             .await
             .expect("read as the node")
-            .contains(&PEER_3.to_string()),
+            .contains(&peer_3_id),
         "the actor's grant is not the node's (0.5.211: no redirect, no blanket)"
     );
     // "Did not land under the actor" is a statement about the ROW's author, so
@@ -266,14 +283,14 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .await
             .expect("grants by the actor")
             .iter()
-            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_3)),
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer_3_id.as_str())),
         "and it IS authored under the actor — the key every read uses"
     );
     assert!(
         ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
             .expect("read as the actor — the production read")
-            .contains(&PEER_3.to_string()),
+            .contains(&peer_3_id),
         "and the production read (engine key) resolves it (#599 / #601)"
     );
 
@@ -291,7 +308,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     let coverage = ciris_server::peer::ensure_replication_consent_covers(
         &engine,
         &actor,
-        PEER,
+        &peer_id,
         std::slice::from_ref(&extra),
     )
     .await
@@ -329,7 +346,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         ciris_server::peer::replication_peers_from_consent(&engine, &actor)
             .await
             .expect("read as the actor")
-            .contains(&PEER.to_string()),
+            .contains(&peer_id),
         "consent to the peer is never momentarily absent across the widening"
     );
 
@@ -337,13 +354,13 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     //    (the machine named, signed by the machine named — no redirect), and it
     //    must RESOLVE through the by-principals fold keyed by the actor, which
     //    is what the canonical's scorer asks (Codex P1 on #564, 0.5.211 reading).
-    let analyze = ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
+    let analyze = ciris_server::peer::emit_analyze_consent(&engine, &actor, &peer_id)
         .await
         .expect("the analyze grant authors as the actor and resolves");
     assert!(analyze.is_some(), "a fresh analyze grant was written");
     let resolved = engine
         .resolve_scoped_consent_by_principals(
-            PEER,
+            &peer_id,
             &actor,
             ciris_persist::federation::admission::ANALYZE_CONSENT_SCOPE,
             None,
@@ -359,7 +376,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         "the peer may now score THIS AGENT (the actor — the key the scorer is handed): {resolved:?}"
     );
     assert!(
-        ciris_server::peer::emit_analyze_consent(&engine, &actor, PEER)
+        ciris_server::peer::emit_analyze_consent(&engine, &actor, &peer_id)
             .await
             .expect("idempotent")
             .is_none(),
@@ -436,11 +453,18 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     // reads the ENGINE key, found no grant — `offerable=0`. The covering door
     // anchors first, so consent FOR the agent is written on every claim path.
     const PEER_0: &str = "a-peer-covered-before-anyone-anchored-the-agent";
-    register(&engine, &signer_for(PEER_0), PEER_0, identity_type::NODE).await;
+    let peer_0_id = signer_for(PEER_0).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_0),
+        &peer_0_id,
+        identity_type::NODE,
+    )
+    .await;
     ciris_server::peer::ensure_replication_consent_covers(
         &engine,
         &node,
-        PEER_0,
+        &peer_0_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -458,7 +482,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .consent_peers_by_principals(&actor)
             .await
             .expect("by-principals for the agent")
-            .contains(&PEER_0.to_string()),
+            .contains(&peer_0_id),
         "and wrote the human's grant FOR the agent — the row persist's sweep reads"
     );
     assert!(
@@ -470,11 +494,18 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     );
     // The human consents FOR THIS AGENT, and the agent's own read finds it.
     const PEER_4: &str = "a-peer-consented-by-the-human-for-the-agent";
-    register(&engine, &signer_for(PEER_4), PEER_4, identity_type::NODE).await;
+    let peer_4_id = signer_for(PEER_4).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_4),
+        &peer_4_id,
+        identity_type::NODE,
+    )
+    .await;
     ciris_server::peer::emit_replication_consent(
         &engine,
         &actor,
-        PEER_4,
+        &peer_4_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -486,7 +517,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .expect("grants by the owner");
     let row = by_owner
         .iter()
-        .find(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_4))
+        .find(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer_4_id.as_str()))
         .expect("the grant is the HUMAN's");
     assert_eq!(
         ciris_persist::federation::consent_by_humans::for_key_id_of(&row.attestation_envelope),
@@ -498,7 +529,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .consent_peers_by_principals(&actor)
             .await
             .expect("by-principals read for the agent")
-            .contains(&PEER_4.to_string()),
+            .contains(&peer_4_id),
         "the read every runtime path uses (keyed by the agent) resolves the human's grant"
     );
     assert!(
@@ -506,7 +537,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .consent_peers_by_principals(&node)
             .await
             .expect("by-principals read for the node")
-            .contains(&PEER_4.to_string()),
+            .contains(&peer_4_id),
         "a grant FOR the agent is not the node's consent — no blanket across the human's machines"
     );
     // CIRISServer#632 — the COVERING door (what `POST /v1/federation/peering`
@@ -515,11 +546,18 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     // (persist's promotion sweep reads the engine's key). One call, two grants,
     // each read by the plane that needs it; neither a blanket.
     const PEER_5: &str = "a-peer-covered-for-both-of-the-humans-machine-keys";
-    register(&engine, &signer_for(PEER_5), PEER_5, identity_type::NODE).await;
+    let peer_5_id = signer_for(PEER_5).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_5),
+        &peer_5_id,
+        identity_type::NODE,
+    )
+    .await;
     ciris_server::peer::ensure_replication_consent_covers(
         &engine,
         &node,
-        PEER_5,
+        &peer_5_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -529,7 +567,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .consent_peers_by_principals(&node)
             .await
             .expect("by-principals for the node")
-            .contains(&PEER_5.to_string()),
+            .contains(&peer_5_id),
         "the NODE's plane (edge send-set / Rooted) sees the peer"
     );
     assert!(
@@ -537,7 +575,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
             .consent_peers_by_principals(&actor)
             .await
             .expect("by-principals for the agent")
-            .contains(&PEER_5.to_string()),
+            .contains(&peer_5_id),
         "the AGENT's plane (persist's promotion sweep reads the engine key) sees the peer"
     );
     let rows_for_5: Vec<(String, Option<String>)> = engine
@@ -546,7 +584,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .await
         .expect("grants by the owner")
         .iter()
-        .filter(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_5))
+        .filter(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer_5_id.as_str()))
         .map(|g| {
             (
                 g.attesting_key_id.clone(),
@@ -559,7 +597,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .collect();
     let all_for_5: Vec<(String, Option<String>)> = engine
         .federation_directory()
-        .list_attestations_for(PEER_5)
+        .list_attestations_for(&peer_5_id)
         .await
         .map(|rows| {
             rows.iter()
@@ -613,11 +651,18 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     // ladder read `offerable=0` on persist v48.0.0 because only the covering
     // door did this, and production's canonical grant never goes through it.
     const PEER_6: &str = "a-peer-consented-through-the-direct-emitter";
-    register(&engine, &signer_for(PEER_6), PEER_6, identity_type::NODE).await;
+    let peer_6_id = signer_for(PEER_6).derived_key_id();
+    register(
+        &engine,
+        &signer_for(PEER_6),
+        &peer_6_id,
+        identity_type::NODE,
+    )
+    .await;
     ciris_server::peer::emit_replication_consent(
         &engine,
         &node,
-        PEER_6,
+        &peer_6_id,
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -628,7 +673,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
                 .consent_peers_by_principals(key)
                 .await
                 .expect("by-principals read")
-                .contains(&PEER_6.to_string()),
+                .contains(&peer_6_id),
             "the {plane} plane sees the peer consented through the direct emitter"
         );
     }

@@ -813,7 +813,13 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 32 -> 19 for 0.5.232: `ciris-client` 0.5.229 (CIRISClient#189, #194)
     /// carries all thirteen `add_device.*` ids; the floor in pyproject.toml rose
     /// to 0.5.229 with it.
-    const MAX_UNCOVERED: usize = 19;
+    /// 19 -> 23 for 0.5.232 (edge v43 / persist v59): the final-genesis plan's
+    /// `final_genesis.{serve_node_without_transit_pair,store,
+    /// transit_row_not_a_serve_node}` (bundle v4) and add-device's
+    /// `add_device.roster_change_held` (a third device's addition is a held
+    /// self-roster proposal, CC 3.3.6.3) — same reason, same list, queued for
+    /// the client bundle with their English.
+    const MAX_UNCOVERED: usize = 23;
 
     let en = load_en();
     let ids = scraped_server_ids();

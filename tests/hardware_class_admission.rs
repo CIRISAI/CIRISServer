@@ -66,17 +66,22 @@ struct Device {
 }
 
 impl Device {
-    fn new(key_id: &str, seed_byte: u8) -> Self {
+    fn new(label: &str, seed_byte: u8) -> Self {
         let seed = [seed_byte; 32];
+        let ed = SigningKey::from_bytes(&seed);
+        // `<label>-<fp>` of its own Ed25519 key — persist v59 (CIRISPersist#1103)
+        // refuses any other key_id shape at registration.
+        let key_id =
+            ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes());
         Self {
-            key_id: key_id.to_string(),
-            seed,
-            ed: SigningKey::from_bytes(&seed),
             mldsa: MlDsa65SoftwareSigner::from_seed_bytes(
                 &[seed_byte ^ 0xFF; 32],
                 format!("{key_id}-pqc"),
             )
             .expect("device ML-DSA-65 seed"),
+            key_id,
+            seed,
+            ed,
         }
     }
 
@@ -466,7 +471,7 @@ async fn refused_claim_leaves_no_federation_key_row() {
     assert!(
         engine
             .federation_directory()
-            .lookup_public_key("impostor-node")
+            .lookup_public_key(&impostor.key_id)
             .await
             .expect("directory lookup")
             .is_none(),
@@ -486,7 +491,7 @@ async fn unclaimed_key_still_registers_through_the_chokepoint() {
     assert!(
         engine
             .federation_directory()
-            .lookup_public_key("plain-software-node")
+            .lookup_public_key(&dev.key_id)
             .await
             .expect("directory lookup")
             .is_some(),

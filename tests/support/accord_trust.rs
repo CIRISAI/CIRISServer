@@ -59,7 +59,7 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
     ];
     let committed_successors: Vec<_> = successors.iter().map(|s| committed(s)).collect();
     let commitment = pre_rotation_commitment(&committed_successors).expect("pre-rotation commitment");
-    put_signed_by_many(
+    let charter_id = put_signed_by_many(
         e,
         &[&hs[0], &hs[1]],
         "humanity-accord",
@@ -69,9 +69,33 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
             "dimension": ciris_persist::federation::trust_root::TRUST_CHARTER_DIMENSION,
             "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
             "pre_rotation_commitment": commitment,
+            // persist v59 (CC 4.2.6, I432): the accord's charter commits every
+            // standing holder's pre-committed recovery key.
+            "recovery_commitments":
+                ciris_persist::federation::trust_root::test_accord_recovery_commitments(
+                    &hs.iter().map(|h| h.key_id.as_str()).collect::<Vec<_>>(),
+                ),
         }),
     )
     .await;
+
+    // persist v53+ (CC 3.2 T6): the charter in force is the one the family's
+    // head NAMES, so a new family version names this charter's stored digest
+    // (persist's own test door, authorized by the seated roster).
+    let held = e
+        .federation_directory()
+        .get_attestation(&charter_id)
+        .await
+        .expect("read the charter")
+        .expect("the charter is stored");
+    ciris_persist::federation::operational::test_support::version_family_naming_charter(
+        e.federation_directory().as_ref(),
+        "humanity-accord",
+        &held.persist_row_hash,
+        &hs.iter().map(|h| h.key_id.clone()).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("a family version names the charter");
 
     // (2) The freshness heartbeat ABOUT the family, from a seated holder.
     put_signed_by_many(
@@ -90,15 +114,19 @@ pub async fn seed_accord_trust(e: &Engine, node: &Identity, hs: &[Identity]) {
     // `edge_exists = false`, and the accord may have signed while this node has
     // never said it trusts the accord. A real node emits this with its own
     // signer; canonical-server-1 carries exactly this row.
+    // persist v59 (CC 3.2 T4a): the edge names the head it attaches on — built
+    // by persist's own `trust_acceptance_envelope`, as every production writer
+    // does (`mesh_genesis::acceptance_envelope`).
+    let accepts = e
+        .trust_acceptance_envelope("humanity-accord", &[INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE])
+        .await
+        .expect("the acceptance envelope names the head this node holds");
     put_signed_by_many(
         e,
         &[node],
         "humanity-accord",
         attestation_type::DELEGATES_TO,
-        serde_json::json!({
-            "dimension": ciris_persist::federation::trust_root::TRUST_ACCEPTS_DIMENSION,
-            "scope": [INFRA_ATTEST_SCOPE, INFRA_SERVE_SCOPE],
-        }),
+        accepts,
     )
     .await;
 }
@@ -110,7 +138,7 @@ pub async fn put_signed_by_many(
     attested: &str,
     ty: &str,
     mut envelope: serde_json::Value,
-) {
+) -> String {
     let who = signers[0];
     use sha2::{Digest, Sha256};
     let id = hex::encode(Sha256::digest(
@@ -172,6 +200,7 @@ pub async fn put_signed_by_many(
             who.key_id
         )
     });
+    id
 }
 
 /// Register `key_id` as a user identity on this node.

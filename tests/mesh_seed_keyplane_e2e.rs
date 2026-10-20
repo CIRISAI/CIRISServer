@@ -63,6 +63,16 @@ async fn engine(seed: u8, alias: &str) -> Arc<Engine> {
     )
 }
 
+/// A fresh software hybrid identity named `<label>-<fp>` of its own Ed25519 key —
+/// persist v59 (CIRISPersist#1103) refuses any other key_id at registration, so
+/// `HybridSigningIdentity::generate(label)` (which names it `label`) no longer admits.
+fn generate(label: &str) -> HybridSigningIdentity {
+    let ed = ciris_crypto::Ed25519Signer::random().expect("ed25519 signer");
+    let key_id = ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes());
+    let mldsa = ciris_crypto::MlDsa65Signer::new().expect("ML-DSA-65 signer");
+    HybridSigningIdentity::new(key_id, ed, mldsa)
+}
+
 fn to_persist(v: &SignedKeyRecord) -> PersistSignedKeyRecord {
     serde_json::from_value(serde_json::to_value(v).expect("serialize verify record"))
         .expect("deserialize into persist record")
@@ -93,7 +103,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     let now = chrono::Utc::now().to_rfc3339();
 
     // (1) SEED — A1, the baked HUMANITY_ACCORD anchor, present on BOTH nodes.
-    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let a1 = generate("humanity-accord-a1-test");
     let a1_anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
@@ -110,7 +120,9 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
 
     // Node A's identity + its BOOT-time SELF-signed own row (what register_self_key
     // writes) in A's directory.
-    let node_a = HybridSigningIdentity::generate(node_a_key).expect("gen node A");
+    let node_a = generate(node_a_key);
+    // A's registered id (the engine alias stays the bare label).
+    let node_a_id = node_a.key_id().to_string();
     let a_self = produce_self_key_record(&node_a, "node", &now, None, &[])
         .await
         .expect("A self record");
@@ -131,7 +143,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     assert!(
         !roots(
             engine_b.sqlite_backend().unwrap().as_ref(),
-            node_a_key,
+            &node_a_id,
             &a_ed_b64,
             &anchor_set
         )
@@ -143,7 +155,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     let a_scrubbed = produce_scrubbed_key_record(
         &a1,
         ScrubTarget {
-            key_id: node_a_key.to_string(),
+            key_id: node_a_id.clone(),
             pubkey_ed25519_base64: a_ed_b64.clone(),
             pubkey_ml_dsa_65_base64: a_mldsa_b64,
             identity_type: "node".to_string(),
@@ -164,7 +176,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     assert!(
         roots(
             engine_a.sqlite_backend().unwrap().as_ref(),
-            node_a_key,
+            &node_a_id,
             &a_ed_b64,
             &anchor_set
         )
@@ -175,7 +187,10 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     // (3) PUBLISH-OWN — A's bridge with the Key-plane selector = A's own key_id.
     let a_dir: Arc<dyn FederationDirectory> = engine_a.federation_directory();
     let cohort_a: CohortProvider = Arc::new(move || vec![node_b_key.to_string()]);
-    let key_sel: CohortProvider = Arc::new(move || vec![node_a_key.to_string()]);
+    let key_sel: CohortProvider = {
+        let id = node_a_id.clone();
+        Arc::new(move || vec![id.clone()])
+    };
     let a_bridge =
         FederationDirectoryReplicationBridge::with_config(a_dir, cohort_a, BridgeConfig::default())
             .with_self_provider(Some(key_sel));
@@ -205,7 +220,10 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     let b_dir: Arc<dyn FederationDirectory> = engine_b.federation_directory();
     let b_bridge = FederationDirectoryReplicationBridge::with_config(
         b_dir,
-        Arc::new(move || vec![node_a_key.to_string()]),
+        {
+            let id = node_a_id.clone();
+            Arc::new(move || vec![id.clone()])
+        },
         BridgeConfig::default(),
     );
     // CIRISEdge#425 — `ApplyOutcome`, not a bool: a refusal now carries WHY, so a
@@ -224,7 +242,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     assert!(
         roots(
             engine_b.sqlite_backend().unwrap().as_ref(),
-            node_a_key,
+            &node_a_id,
             &a_ed_b64,
             &anchor_set
         )
@@ -236,7 +254,7 @@ async fn admit_node_seed_replicates_and_peer_roots_end_to_end() {
     assert!(
         !roots(
             engine_b.sqlite_backend().unwrap().as_ref(),
-            node_a_key,
+            &node_a_id,
             &a_ed_b64,
             &[[0x11u8; 32]]
         )

@@ -1321,8 +1321,11 @@ async fn coordinator_driven_attestation_round_terminates() {
 /// so a fix can be demonstrated against it rather than argued about.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversize_deliver_silently_dropped_reproduces_932() {
-    // 1 KiB: comfortably above every control frame, far below the Deliver.
-    let (converged, sizes) = drive_coordinator_round(Some(1024), "mdu").await;
+    // 4 KiB: above every control frame, far below the Deliver. (It was 1 KiB
+    // until persist v59 put the key plane on the Attestation plane as rows: the
+    // opening advertise now lists those row hashes too, ~1.1 KB, against a
+    // Deliver of ~145 KB.)
+    let (converged, sizes) = drive_coordinator_round(Some(4096), "mdu").await;
     let max = sizes.iter().copied().max().unwrap_or(0);
     eprintln!("MDU-LIMITED ROUND FRAME SIZES: {sizes:?} (max {max} bytes)");
     assert!(

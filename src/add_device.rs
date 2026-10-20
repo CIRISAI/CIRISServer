@@ -1314,6 +1314,9 @@ async fn approve(
             )
                 .into_response()
         }
+        Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
+            refuse(StatusCode::CONFLICT, "add_device.roster_change_held", e)
+        }
         Err(e) => refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "add_device.approve_failed",
@@ -1321,6 +1324,10 @@ async fn approve(
         ),
     }
 }
+
+/// The marker [`sign_and_record`] puts on an addition the self roster's door
+/// held (CC 3.3.6.3), so the approval answers it by name.
+const ROSTER_CHANGE_HELD: &str = "the self roster holds this addition as a proposal";
 
 /// Sign the owner-binding to B's node and B's occurrence under the owner's self
 /// with the OWNER's pen; record both here; re-wrap the self DEKs to B.
@@ -1423,7 +1430,17 @@ async fn sign_and_record(
     directory
         .put_identity_occurrence(occurrence.clone())
         .await
-        .map_err(|e| format!("record the occurrence: {e}"))?;
+        .map_err(|e| {
+            // persist v59 (CC 3.3.6.3): from a roster of two keys an addition
+            // is a PROPOSAL the self roster's door holds — it lands by the
+            // quorum or the lone path, whose routes are CIRISServer#794. The
+            // owner-binding above stands (owning a node is not a roster change).
+            if e.kind() == "federation_self_roster_not_landed" {
+                format!("{ROSTER_CHANGE_HELD}: {e}")
+            } else {
+                format!("record the occurrence: {e}")
+            }
+        })?;
 
     // (3) The self DEKs, re-wrapped to B's occurrence (the owner's act).
     let granted = match st

@@ -60,6 +60,16 @@ fn to_persist(v: &SignedKeyRecord) -> PersistSignedKeyRecord {
         .expect("deserialize into persist record")
 }
 
+/// A fresh software hybrid identity named `<label>-<fp>` of its own Ed25519
+/// key — persist v59 (CIRISPersist#1103) refuses any other key_id at
+/// registration, so `HybridSigningIdentity::generate(label)` no longer admits.
+fn derived_identity(label: &str) -> HybridSigningIdentity {
+    let ed = ciris_crypto::Ed25519Signer::random().expect("ed25519 signer");
+    let key_id = ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes());
+    let mldsa = ciris_crypto::MlDsa65Signer::new().expect("ML-DSA-65 signer");
+    HybridSigningIdentity::new(key_id, ed, mldsa)
+}
+
 fn ed32(b64: &str) -> [u8; 32] {
     base64::engine::general_purpose::STANDARD
         .decode(b64)
@@ -74,7 +84,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
     let now = chrono::Utc::now().to_rfc3339();
 
     // A1 — a software stand-in for the portable YubiKey+USB holder (a `SelfSigner`).
-    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let a1 = derived_identity("humanity-accord-a1-test");
 
     // (1) A1's self-signed `steward,accord_holder` anchor → register (the rooting
     //     terminus persist bakes; here we admit it through the strict gate).
@@ -93,7 +103,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
 
     // The target node identity (its published hybrid pubkeys — what the operator
     // hands the holder from the node's self-key-record).
-    let target = HybridSigningIdentity::generate("canonical-server-1-test").expect("gen target");
+    let target = derived_identity("canonical-server-1-test");
     let target_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
@@ -108,7 +118,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
     let scrubbed = produce_scrubbed_key_record(
         &a1,
         ScrubTarget {
-            key_id: "canonical-server-1-test".to_string(),
+            key_id: target.key_id().to_string(),
             pubkey_ed25519_base64: target_ed_b64.clone(),
             pubkey_ml_dsa_65_base64: target_mldsa_b64,
             identity_type: "node".to_string(),
@@ -122,7 +132,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
     .expect("A1 scrub-signs the target");
 
     // The record's identity is the TARGET's; the scrub is the HOLDER's.
-    assert_eq!(scrubbed.record.key_id, "canonical-server-1-test");
+    assert_eq!(scrubbed.record.key_id, target.key_id());
     assert_eq!(
         scrubbed.record.scrub_key_id,
         a1.key_id(),
@@ -136,12 +146,12 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
         .await
         .expect("register scrubbed node (strict gate — proves byte-safety)");
 
-    // (3) The node ROOTS: chain `canonical-server-1-test → A1`, A1 ∈ the anchor.
+    // (3) The node ROOTS: chain `canonical-server-1-test-<fp> → A1`, A1 ∈ the anchor.
     let backend = engine.sqlite_backend().expect("sqlite backend");
     let anchor_set = [ed32(&a1_ed_b64)];
     let verdict = root_binding_anchored(
         backend.as_ref(),
-        "canonical-server-1-test",
+        target.key_id(),
         &target_ed_b64,
         &anchor_set,
     )
@@ -156,7 +166,7 @@ async fn admit_node_scrubbed_record_roots_at_accord_anchor() {
     let wrong_anchor = [[0x11u8; 32]];
     let verdict_wrong = root_binding_anchored(
         backend.as_ref(),
-        "canonical-server-1-test",
+        target.key_id(),
         &target_ed_b64,
         &wrong_anchor,
     )
@@ -181,7 +191,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
     let engine = node().await;
     let now = chrono::Utc::now().to_rfc3339();
 
-    let a1 = HybridSigningIdentity::generate("humanity-accord-a1-test").expect("gen A1");
+    let a1 = derived_identity("humanity-accord-a1-test");
     let anchor = produce_self_key_record(&a1, "steward,accord_holder", &now, None, &[])
         .await
         .expect("A1 anchor");
@@ -196,7 +206,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
         .expect("register A1 anchor");
 
     // The node's boot-time state: its OWN row, SELF-signed.
-    let target = HybridSigningIdentity::generate("canonical-server-1-test").expect("gen target");
+    let target = derived_identity("canonical-server-1-test");
     let target_self = produce_self_key_record(&target, "node", &now, None, &[])
         .await
         .expect("target self record");
@@ -218,7 +228,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
         !matches!(
             root_binding_anchored(
                 backend.as_ref(),
-                "canonical-server-1-test",
+                target.key_id(),
                 &target_ed_b64,
                 &anchor_set
             )
@@ -232,7 +242,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
     let scrubbed = produce_scrubbed_key_record(
         &a1,
         ScrubTarget {
-            key_id: "canonical-server-1-test".to_string(),
+            key_id: target.key_id().to_string(),
             pubkey_ed25519_base64: target_ed_b64.clone(),
             pubkey_ml_dsa_65_base64: target_mldsa_b64,
             identity_type: "node".to_string(),
@@ -259,7 +269,7 @@ async fn adopt_scrub_upgrade_promotes_self_signed_own_row_and_roots() {
         matches!(
             root_binding_anchored(
                 backend.as_ref(),
-                "canonical-server-1-test",
+                target.key_id(),
                 &target_ed_b64,
                 &anchor_set
             )

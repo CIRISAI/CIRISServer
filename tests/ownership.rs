@@ -39,7 +39,31 @@ use ciris_server::auth::store;
 
 // ─── shared helpers (mirror tests/root_bootstrap.rs) ────────────────────────
 
-const NODE_KEY_ID: &str = "ciris-own-node";
+/// The shared node's federation key id (see [`node_id`]).
+fn node_key_id() -> String {
+    node_id("ciris-own-node")
+}
+
+/// A node key id for `label` under the node steward's `[0xA1;32]` key, and a
+/// user key id under the responsible user's `[0xF1;32]` key — persist v59
+/// (#1103, CC 2.6.8) refuses registering a key whose id is not
+/// `<label>-<fingerprint of its own Ed25519 key>`.
+fn node_id(label: &str) -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        label,
+        SigningKey::from_bytes(&[0xA1; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
+fn user_id(label: &str) -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        label,
+        SigningKey::from_bytes(&[0xF1; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
 
 /// An in-memory substrate keyed by a HYBRID node-identity signer.
 async fn node(key_id: &str) -> Arc<Engine> {
@@ -205,14 +229,14 @@ fn scopes_are_infra_only_accepts_infra_rejects_agency_and_legacy() {
 
 #[tokio::test]
 async fn emit_steward_binding_refuses_agency_scopes() {
-    let engine = node(NODE_KEY_ID).await;
-    register_node(&engine, NODE_KEY_ID).await;
+    let engine = node(&node_key_id()).await;
+    register_node(&engine, &node_key_id()).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
     let err = emit_steward_binding(
         &engine,
         &owner,
-        NODE_KEY_ID,
+        &node_key_id(),
         &["agency:act_on_behalf".to_string()],
     )
     .await
@@ -220,28 +244,28 @@ async fn emit_steward_binding_refuses_agency_scopes() {
     assert!(matches!(err, OwnershipError::AgencyScopeRefused));
 
     // And it persisted nothing → still unowned.
-    assert!(is_steward_bound(&engine, NODE_KEY_ID).await.is_none());
+    assert!(is_steward_bound(&engine, &node_key_id()).await.is_none());
 }
 
 // ─── (3) is_steward_bound: true / false / revoked / non-user granter ──────────
 
 #[tokio::test]
 async fn is_steward_bound_true_after_user_infra_delegation() {
-    let engine = node(NODE_KEY_ID).await;
-    register_node(&engine, NODE_KEY_ID).await;
+    let engine = node(&node_key_id()).await;
+    register_node(&engine, &node_key_id()).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
 
     assert!(
-        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, &node_key_id()).await.is_none(),
         "unbound before any delegation"
     );
 
-    emit_steward_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &owner, &node_key_id(), &infra_scopes())
         .await
         .expect("emit infra-only owner-binding");
 
     assert_eq!(
-        is_steward_bound(&engine, NODE_KEY_ID).await.as_deref(),
+        is_steward_bound(&engine, &node_key_id()).await.as_deref(),
         Some("owner-user"),
         "bound to the responsible user after a live user → node infra delegation"
     );
@@ -249,36 +273,36 @@ async fn is_steward_bound_true_after_user_infra_delegation() {
 
 #[tokio::test]
 async fn is_steward_bound_false_when_granter_is_not_user_role() {
-    let engine = node(NODE_KEY_ID).await;
-    register_node(&engine, NODE_KEY_ID).await;
+    let engine = node(&node_key_id()).await;
+    register_node(&engine, &node_key_id()).await;
     // The granter is a NODE-role key, NOT a user — ownership must NOT root in it.
     let other_node = register_party_signed(&engine, "other-node", identity_type::NODE).await;
 
-    emit_steward_binding(&engine, &other_node, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &other_node, &node_key_id(), &infra_scopes())
         .await
         .expect("emit (granter is node-role)");
 
     assert!(
-        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, &node_key_id()).await.is_none(),
         "a node-role granter does not confer ownership (CC 3.2: must be a user)"
     );
 }
 
 #[tokio::test]
 async fn is_steward_bound_false_when_revoked() {
-    let engine = node(NODE_KEY_ID).await;
-    register_node(&engine, NODE_KEY_ID).await;
+    let engine = node(&node_key_id()).await;
+    register_node(&engine, &node_key_id()).await;
     let owner = register_party_signed(&engine, "owner-user", identity_type::USER).await;
-    emit_steward_binding(&engine, &owner, NODE_KEY_ID, &infra_scopes())
+    emit_steward_binding(&engine, &owner, &node_key_id(), &infra_scopes())
         .await
         .expect("emit owner-binding");
-    assert!(is_steward_bound(&engine, NODE_KEY_ID).await.is_some());
+    assert!(is_steward_bound(&engine, &node_key_id()).await.is_some());
 
     // The granter withdraws the binding against the node → ownership ends.
-    emit_withdraws(&engine, &owner, NODE_KEY_ID).await;
+    emit_withdraws(&engine, &owner, &node_key_id()).await;
 
     assert!(
-        is_steward_bound(&engine, NODE_KEY_ID).await.is_none(),
+        is_steward_bound(&engine, &node_key_id()).await.is_none(),
         "a withdrawn owner-binding no longer confers ownership"
     );
 }
@@ -391,8 +415,8 @@ async fn one_phase_claim_body(
 
 #[tokio::test]
 async fn claim_establishes_owner_binding_cohort_and_system_admin() {
-    let node_key_id = "ciris-claim-node";
-    let user_key_id = "ciris-responsible-user";
+    let node_key_id: &str = &node_id("ciris-claim-node");
+    let user_key_id: &str = &user_id("ciris-responsible-user");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
@@ -541,8 +565,8 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
 ///   (a) an agency scope, (b) attested != node, (c) a wrong/forged signature.
 #[tokio::test]
 async fn claim_rejects_tampered_binding_and_signature() {
-    let node_key_id = "ciris-tamper-node";
-    let user_key_id = "ciris-tamper-user";
+    let node_key_id: &str = &node_id("ciris-tamper-node");
+    let user_key_id: &str = &user_id("ciris-tamper-user");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
@@ -661,8 +685,8 @@ async fn claim_with_agency_scope_built_is_refused_by_builder() {
 
 #[tokio::test]
 async fn claim_without_cohort_scope_is_rejected() {
-    let node_key_id = "ciris-nocohort-node";
-    let user_key_id = "ciris-nocohort-user";
+    let node_key_id: &str = &node_id("ciris-nocohort-node");
+    let user_key_id: &str = &user_id("ciris-nocohort-user");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
@@ -699,8 +723,8 @@ async fn claim_without_cohort_scope_is_rejected() {
 
 #[tokio::test]
 async fn claim_with_wrong_pin_is_rejected() {
-    let node_key_id = "ciris-pin-node";
-    let user_key_id = "ciris-pin-user";
+    let node_key_id: &str = &node_id("ciris-pin-node");
+    let user_key_id: &str = &user_id("ciris-pin-user");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let (base, _h) = serve_setup(Arc::clone(&engine), node_key_id).await;
@@ -742,8 +766,8 @@ async fn claim_with_wrong_pin_is_rejected() {
 async fn promote_owner_binding_self_to_federation_is_idempotent() {
     use ciris_persist::federation::types::cohort_scope;
 
-    let node_key_id = "ciris-promote-node";
-    let user_key_id = "ciris-promote-user";
+    let node_key_id: &str = &node_id("ciris-promote-node");
+    let user_key_id: &str = &user_id("ciris-promote-user");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
 
@@ -838,7 +862,7 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
 /// not hold).
 #[tokio::test]
 async fn promote_unowned_node_is_refused() {
-    let node_key_id = "ciris-promote-unowned";
+    let node_key_id: &str = &node_id("ciris-promote-unowned");
     let engine = node(node_key_id).await;
     register_node(&engine, node_key_id).await;
     let e = ciris_server::auth::ownership::promote_owner_binding_to_federation(

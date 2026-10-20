@@ -34,20 +34,38 @@ use ciris_server::auth::ownership::{
 };
 use ciris_server::auth::store;
 
-const NODE_KEY_ID: &str = "ciris-lockout-node";
-const USER_KEY_ID: &str = "ciris-lockout-owner";
+/// The node's federation key id, `<label>-<fingerprint>` of its own Ed25519
+/// key — persist v59 (#1103, CC 2.6.8) refuses a hand-written id.
+fn node_key_id() -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        "ciris-lockout-node",
+        SigningKey::from_bytes(&[0xC1; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
+/// `ciris-lockout-owner`'s federation key id: `<label>-<fingerprint>` of its own Ed25519 key
+/// (persist v59 #1103, CC 2.6.8 refuses a hand-written id).
+fn user_key_id() -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        "ciris-lockout-owner",
+        SigningKey::from_bytes(&[0xC3; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
 
 /// The node's in-memory substrate — the `tests/claim_remote.rs` fixture.
 async fn node() -> Arc<Engine> {
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&[0xC2; 32], format!("{NODE_KEY_ID}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xC2; 32], format!("{}-pqc", node_key_id()))
             .expect("node ML-DSA-65 seed"),
     );
     let signer = Arc::new(LocalSigner::from_parts(
         SigningKey::from_bytes(&[0xC1; 32]),
-        NODE_KEY_ID.to_string(),
+        node_key_id(),
         Some(pqc),
-        Some(format!("{NODE_KEY_ID}-pqc")),
+        Some(format!("{}-pqc", node_key_id())),
     ));
     Arc::new(
         Engine::with_signer(signer, "sqlite::memory:")
@@ -59,14 +77,14 @@ async fn node() -> Arc<Engine> {
 /// The responsible USER's signer (distinct keypair).
 fn user_signer() -> LocalSigner {
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&[0xC4; 32], format!("{USER_KEY_ID}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xC4; 32], format!("{}-pqc", user_key_id()))
             .expect("user ML-DSA-65 seed"),
     );
     LocalSigner::from_parts(
         SigningKey::from_bytes(&[0xC3; 32]),
-        USER_KEY_ID.to_string(),
+        user_key_id(),
         Some(pqc),
-        Some(format!("{USER_KEY_ID}-pqc")),
+        Some(format!("{}-pqc", user_key_id())),
     )
 }
 
@@ -76,7 +94,7 @@ async fn bind_owner(engine: &Engine) {
     ciris_server::attest::register_key(
         engine,
         ciris_server::attest::KeySigner::Engine(engine),
-        NODE_KEY_ID,
+        &node_key_id(),
         "node",
         serde_json::Value::Null,
     )
@@ -88,12 +106,12 @@ async fn bind_owner(engine: &Engine) {
         .map(|s| s.to_string())
         .collect();
     let binding =
-        build_signed_owner_binding(&user_signer(), NODE_KEY_ID, &scopes, cohort_scope::SELF)
+        build_signed_owner_binding(&user_signer(), &node_key_id(), &scopes, cohort_scope::SELF)
             .await
             .expect("user signs the owner-binding");
     apply_signed_owner_binding(
         engine,
-        NODE_KEY_ID,
+        &node_key_id(),
         cohort_scope::SELF,
         HybridPolicy::Strict,
         &binding,
@@ -101,23 +119,23 @@ async fn bind_owner(engine: &Engine) {
     .await
     .expect("node applies the owner-binding");
     assert_eq!(
-        is_steward_bound(engine, NODE_KEY_ID).await.as_deref(),
-        Some(USER_KEY_ID),
+        is_steward_bound(engine, &node_key_id()).await.as_deref(),
+        Some(user_key_id().as_str()),
         "fixture: the CEG owner-binding must stand before the lockout is staged"
     );
 }
 
 /// The owner ROOT the claim mints, under the DERIVED id the heal looks up.
 async fn owner_root(engine: &Engine) -> String {
-    let wa_id = bootstrap::test_support_root_wa_id(USER_KEY_ID);
+    let wa_id = bootstrap::test_support_root_wa_id(&user_key_id());
     let now = chrono::Utc::now();
     store::upsert(
         engine,
         WaCert {
             wa_id: wa_id.clone(),
-            name: format!("root:{USER_KEY_ID}"),
+            name: format!("root:{}", user_key_id()),
             role: WaRole::Root,
-            pubkey: USER_KEY_ID.to_string(),
+            pubkey: user_key_id(),
             jwt_kid: format!("{wa_id}-jwt"),
             password_hash: None,
             api_key_hash: None,
@@ -165,7 +183,7 @@ async fn a_deactivated_owner_root_is_reactivated_at_boot_when_the_binding_stands
         "fixture: zero ACTIVE roots — the locked-out state"
     );
 
-    let outcome = bootstrap::bootstrap_if_needed(&e, NODE_KEY_ID)
+    let outcome = bootstrap::bootstrap_if_needed(&e, &node_key_id())
         .await
         .expect("bootstrap");
     assert_eq!(
@@ -187,7 +205,7 @@ async fn a_deactivated_owner_root_is_reactivated_at_boot_when_the_binding_stands
 #[tokio::test]
 async fn a_fresh_node_still_reports_no_seed_and_gets_no_false_heal() {
     let e = node().await;
-    let outcome = bootstrap::bootstrap_if_needed(&e, NODE_KEY_ID)
+    let outcome = bootstrap::bootstrap_if_needed(&e, &node_key_id())
         .await
         .expect("bootstrap");
     assert_eq!(
@@ -208,7 +226,7 @@ async fn a_binding_with_no_root_row_does_not_fabricate_one() {
     let e = node().await;
     bind_owner(&e).await;
 
-    let outcome = bootstrap::bootstrap_if_needed(&e, NODE_KEY_ID)
+    let outcome = bootstrap::bootstrap_if_needed(&e, &node_key_id())
         .await
         .expect("bootstrap");
     assert_eq!(
@@ -217,7 +235,7 @@ async fn a_binding_with_no_root_row_does_not_fabricate_one() {
         "no row ⇒ nothing to reactivate — the heal must never MINT a cert"
     );
     assert!(
-        store::get(&e, &bootstrap::test_support_root_wa_id(USER_KEY_ID))
+        store::get(&e, &bootstrap::test_support_root_wa_id(&user_key_id()))
             .await
             .expect("store")
             .is_none(),

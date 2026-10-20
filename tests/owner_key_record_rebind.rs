@@ -172,18 +172,33 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
     assert_eq!(healed.scrub_key_id, owner_id, "self-signed by the holder");
 
     // ── 3. the rebound record admits on the peer ──────────────────────────
+    // persist v59: a key replicates as its `key:record:v1` ROW (the framed
+    // record door is retired, `federation_envelope_kind_retired`) — the row the
+    // node now holds for the rebound record, applied on the peer.
+    let row = node
+        .federation_directory()
+        .list_attestations_for(&owner_id)
+        .await
+        .expect("rows about the owner key")
+        .into_iter()
+        .filter(|r| {
+            ciris_persist::federation::key_plane::key_record_of_row(r)
+                .is_some_and(|k| k.original_content_hash == healed.original_content_hash)
+        })
+        .max_by_key(|r| r.asserted_at)
+        .expect("the rebound record's key:record:v1 row is held on the node");
     let admitted = peer
-        .apply_replicated_key_record(SignedKeyRecord {
-            record: healed.clone(),
+        .apply_replicated_attestation(ciris_persist::federation::SignedAttestation {
+            attestation: row,
         })
         .await
         .expect("peer applies");
     assert!(
         matches!(
             admitted,
-            ciris_persist::federation::register::ReplicatedKeyOutcome::Inserted
+            ciris_persist::federation::attestation_apply::ReplicatedAttestationOutcome::Inserted
         ),
-        "a verify v15.2.0 peer admits the rebound record: {admitted:?}"
+        "a peer admits the rebound record's row: {admitted:?}"
     );
 
     // ── 4. idempotent; a bound-from-birth record is Bound on the first call ─

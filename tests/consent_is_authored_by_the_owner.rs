@@ -34,6 +34,13 @@ fn seed(label: &str, n: u8) -> [u8; 32] {
     s
 }
 
+/// `alias`'s registered id: `<alias>-<fp>` of its own Ed25519 key — persist
+/// v59 (CIRISPersist#1103) refuses any other shape at registration.
+fn derived_id(alias: &str) -> String {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
+
 fn signer_for(alias: &str) -> LocalSigner {
     let ed = SigningKey::from_bytes(&seed(alias, 1));
     let pqc = Arc::new(
@@ -96,8 +103,8 @@ async fn register(engine: &Engine, signer: &LocalSigner, key_id: &str, ident: &s
 }
 
 const NODE: &str = "ciris-node-for-the-owner-consent-test";
-const PEER_PRE: &str = "ciris-canonical-peered-before-the-claim";
-const PEER: &str = "ciris-canonical-peered-after-the-claim";
+const PEER_PRE_ALIAS: &str = "ciris-canonical-peered-before-the-claim";
+const PEER_ALIAS: &str = "ciris-canonical-peered-after-the-claim";
 const PREFIXES: &[&str] = &["trace:", "capacity:"];
 
 fn scratch_seed_dir(tag: &str) -> std::path::PathBuf {
@@ -119,6 +126,10 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     // The owner path is gated off in production until the pinned edge reads
     // steward-authored grants (CIRISEdge#609); this test pins the path itself.
     ciris_server::peer::set_owner_authored_consent(true);
+    let peer_pre = derived_id(PEER_PRE_ALIAS);
+    let peer_pre = peer_pre.as_str();
+    let peer = derived_id(PEER_ALIAS);
+    let peer = peer.as_str();
     let node_signer = Arc::new(signer_for(NODE));
     let engine = Arc::new(
         Engine::with_signer(node_signer.clone(), "sqlite::memory:")
@@ -132,12 +143,12 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     register(&engine, &node_signer, &node, identity_type::NODE).await;
     register(
         &engine,
-        &signer_for(PEER_PRE),
-        PEER_PRE,
+        &signer_for(PEER_PRE_ALIAS),
+        peer_pre,
         identity_type::NODE,
     )
     .await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
+    register(&engine, &signer_for(PEER_ALIAS), peer, identity_type::NODE).await;
 
     // ── 1. UNOWNED: provisional, authored as the node itself ──────────────
     // Narrowed AND time-boxed, so the migration below is proven to carry the
@@ -146,7 +157,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     let pre = ciris_server::peer::emit_replication_consent_with_policy(
         &engine,
         &node,
-        PEER_PRE,
+        peer_pre,
         PREFIXES,
         &ciris_server::peer::ConsentGrantOptions {
             valid_until: Some(pre_expiry),
@@ -164,7 +175,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     assert!(
         by_node
             .iter()
-            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_PRE)),
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer_pre)),
         "before the claim there is no human to author as: the grant is the node's, provisionally"
     );
 
@@ -224,7 +235,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
         pen.signer.is_some(),
         "the engine does not sign as the owner; the pen does"
     );
-    let grant = ciris_server::peer::emit_replication_consent(&engine, &node, PEER, PREFIXES)
+    let grant = ciris_server::peer::emit_replication_consent(&engine, &node, peer, PREFIXES)
         .await
         .expect("consent authored as the owner");
     assert!(grant.freshly_emitted);
@@ -236,7 +247,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     assert!(
         by_owner
             .iter()
-            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER)),
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer)),
         "the grant is attested by the OWNER's fedID: consent is by humans"
     );
     let by_node = engine
@@ -247,11 +258,11 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     assert!(
         !by_node
             .iter()
-            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER)),
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer)),
         "an owned node does NOT sign consent as itself"
     );
     // Idempotent: a second request finds the owner's standing grant.
-    let again = ciris_server::peer::emit_replication_consent(&engine, &node, PEER, PREFIXES)
+    let again = ciris_server::peer::emit_replication_consent(&engine, &node, peer, PREFIXES)
         .await
         .expect("standing grant");
     assert!(!again.freshly_emitted);
@@ -269,7 +280,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
             .await
             .expect("consent peers"),
         {
-            let mut v = vec![PEER.to_string(), PEER_PRE.to_string()];
+            let mut v = vec![peer.to_string(), peer_pre.to_string()];
             v.sort();
             v
         },
@@ -282,7 +293,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     // is this node's coverage. The chat ladder found the one reader that did
     // not (CIRISServer#601: "not a contact" right after POST /v1/contacts).
     assert_eq!(
-        ciris_server::peer::live_grant_prefixes(&engine, &node, PEER)
+        ciris_server::peer::live_grant_prefixes(&engine, &node, peer)
             .await
             .expect("prefix read")
             .map(|mut p| {
@@ -301,7 +312,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
             .await
             .expect("grant list")
             .iter()
-            .any(|(peer, _)| peer == PEER),
+            .any(|(p, _)| p == peer),
         "and it lists as one of this node's contacts-grade grants"
     );
 
@@ -309,7 +320,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     let moved = ciris_server::node_key::migrate_consent_to_owner(&engine)
         .await
         .expect("re-sign as the owner");
-    assert_eq!(moved, vec![PEER_PRE.to_string()]);
+    assert_eq!(moved, vec![peer_pre.to_string()]);
     let by_owner = engine
         .federation_directory()
         .list_live_consent_grants_by(&owner)
@@ -317,7 +328,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
         .expect("grants by the owner");
     let re_signed = by_owner
         .iter()
-        .find(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER_PRE))
+        .find(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer_pre))
         .expect("the owner now holds the pre-claim peer's grant");
     let prefixes = re_signed.attestation_envelope["payload"]["attestation_prefixes"]
         .as_array()
@@ -356,14 +367,14 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     );
 
     // ── 5. The CC#46 analyze grant is the owner's; the steward-first read finds it ──
-    let analyze = ciris_server::peer::emit_analyze_consent(&engine, &node, PEER)
+    let analyze = ciris_server::peer::emit_analyze_consent(&engine, &node, peer)
         .await
         .expect("analyze consent");
     assert!(analyze.is_some(), "freshly authored");
     let stance = engine
         .federation_directory()
         .resolve_scoped_consent(
-            PEER,
+            peer,
             &owner,
             ANALYZE_CONSENT_SCOPE,
             None,
@@ -386,7 +397,7 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
     );
 
     // ── 6. Nobody signs as a key this process does not hold ───────────────
-    match ciris_server::peer::consent_author(&engine, PEER, None).await {
+    match ciris_server::peer::consent_author(&engine, peer, None).await {
         Ok(author) => panic!(
             "a foreign key must be refused, got author {}",
             author.key_id

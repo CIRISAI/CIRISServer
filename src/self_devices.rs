@@ -751,12 +751,14 @@ async fn release_node(
         "self: node RELEASED — the owner withdrew every owner-binding on it and revoked its \
          content occurrence"
     );
-    let released = report.failed.is_empty();
+    let held = !report.occurrences_held.is_empty();
+    let released = report.failed.is_empty() && !held;
     eviction_response(
         &report,
         serde_json::json!({
             "node_key_id": node_key_id,
             "released": released,
+            "held": held,
             "released_self": is_this_node,
         }),
     )
@@ -874,13 +876,17 @@ async fn revoke_occurrence(
         req.reason.as_deref(),
     )
     .await;
-    let revoked = report.failed.is_empty();
+    // Held by the self roster's door (CC 3.3.6.3) is not revoked: the device
+    // stays in the self until the proposal lands.
+    let held = !report.occurrences_held.is_empty();
+    let revoked = report.failed.is_empty() && !held;
     eviction_response(
         &report,
         serde_json::json!({
             "identity_key_id": req.identity_key_id,
             "occurrence_key_id": req.occurrence_key_id,
             "revoked": revoked,
+            "held": held,
             "revoked_by": capsule.key_id(),
             "released_self": is_this_node,
         }),

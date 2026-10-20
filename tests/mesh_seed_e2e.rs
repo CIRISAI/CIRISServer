@@ -59,8 +59,9 @@
 //! So the runbook test shadows the two consts with each engine's genuine derived
 //! key_id (the same move `tests/peer_replication.rs` makes via
 //! `local_derived_key_id`). Every assertion LINE is unchanged; the ids simply
-//! become real. The payoff test keeps the raw consts (its B is a registered
-//! peer record, not an emitting engine).
+//! become real. The payoff test's B is a registered peer record, not an
+//! emitting engine; its id is `<label>-<fp>` of B's own key too, because persist
+//! v59 (CIRISPersist#1103) refuses any other key_id shape at registration.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -108,8 +109,9 @@ const MESH_RELAY_PATH: &str = "/v1/mesh/relay";
 /// the runbook test binds `NODE_A_KEY_ID`/`NODE_B_KEY_ID` locals to each engine's
 /// GENUINE `<label>-<fp>` derived key_id (the documented harness impossibility —
 /// a real consent emit's attester is derived from the actual pubkey, so it cannot
-/// equal a pre-baked const). The payoff test's registered-peer record keeps the
-/// raw label (no derived-consistency check on record admission).
+/// equal a pre-baked const). The payoff test's registered-peer record is named
+/// `<label>-<fp>` of its own key ([`PeerNodeB::key_id`]) — persist v59
+/// (CIRISPersist#1103) refuses any other key_id shape on record admission.
 const NODE_A_KEY_LABEL: &str = "ciris-canonical-1-a0a0a0a0a0";
 const NODE_B_KEY_LABEL: &str = "ciris-status-1-b0b0b0b0b0";
 
@@ -511,14 +513,21 @@ fn loopback_mesh(nodes: Vec<(String, Arc<MeshControlResponder>)>) -> MeshRequest
 /// Node B's published hybrid identity (the peer A registers). Real keys so
 /// `register_peer_key`'s fail-secure verify passes.
 struct PeerNodeB {
+    /// `<NODE_B_KEY_LABEL>-<fp>` of `ed` — persist v59 (CIRISPersist#1103).
+    key_id: String,
     ed: SigningKey,
     mldsa: MlDsa65SoftwareSigner,
 }
 
 impl PeerNodeB {
     fn new() -> Self {
+        let ed = SigningKey::from_bytes(&[0xB0; 32]);
         PeerNodeB {
-            ed: SigningKey::from_bytes(&[0xB0; 32]),
+            key_id: ciris_verify_core::fedcode::derive_key_id(
+                NODE_B_KEY_LABEL,
+                ed.verifying_key().as_bytes(),
+            ),
+            ed,
             mldsa: MlDsa65SoftwareSigner::from_seed_bytes(
                 &[0xB1; 32],
                 format!("{NODE_B_KEY_LABEL}-pqc"),
@@ -539,10 +548,10 @@ impl PeerNodeB {
         // by persist's OWN binder, the one `attest::register_key` calls; the door
         // itself is not usable here because this is the record a REMOTE peer
         // produces and hands to A.
-        let mut envelope = serde_json::json!({ "key_id": NODE_B_KEY_LABEL });
+        let mut envelope = serde_json::json!({ "key_id": self.key_id });
         ciris_persist::federation::admission::bind_subject_into_envelope(
             &mut envelope,
-            NODE_B_KEY_LABEL,
+            &self.key_id,
             // NODE, not WITNESS: this key IS a mesh node, and since the #472
             // arc the coordinator set is transport-role filtered — a witness
             // gets consent but no dialer.
@@ -562,19 +571,19 @@ impl PeerNodeB {
         bound.extend_from_slice(&ed_sig);
         let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign B reg");
         let record = KeyRecord {
-            key_id: NODE_B_KEY_LABEL.to_string(),
+            key_id: self.key_id.clone(),
             pubkey_ed25519_base64: ed_pub,
             pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             identity_type: identity_type::NODE.into(),
-            identity_ref: NODE_B_KEY_LABEL.to_string(),
+            identity_ref: self.key_id.clone(),
             valid_from: now,
             valid_until: None,
             registration_envelope: envelope,
             original_content_hash: hex::encode(Sha256::digest(&canonical)),
             scrub_signature_classical: BASE64.encode(ed_sig),
             scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-            scrub_key_id: NODE_B_KEY_LABEL.to_string(),
+            scrub_key_id: self.key_id.clone(),
             scrub_timestamp: now,
             pqc_completed_at: Some(now),
             persist_row_hash: String::new(),
@@ -584,7 +593,7 @@ impl PeerNodeB {
             additional_scrubs: Vec::new(),
         };
         PeerB {
-            key_id: NODE_B_KEY_LABEL.to_string(),
+            key_id: self.key_id.clone(),
             key_record: SignedKeyRecord { record },
         }
     }
@@ -1035,7 +1044,7 @@ async fn peering_consent_covers_traces_and_trace_syncs_a_to_b() {
     // (b) The SEED peering emits a consent whose prefixes cover BOTH capacity: and
     //     traces. Emit it (the exact row POST /v1/federation/peering writes).
     let seed_prefixes = [CAPACITY_PREFIX, TRACE_PREFIX];
-    let grant = peer::emit_replication_consent(&node_a, &nk_a, NODE_B_KEY_LABEL, &seed_prefixes)
+    let grant = peer::emit_replication_consent(&node_a, &nk_a, &peer_b.key_id, &seed_prefixes)
         .await
         .expect("emit trace-covering consent");
     assert!(grant.freshly_emitted, "first emit writes a fresh grant");
@@ -1045,7 +1054,7 @@ async fn peering_consent_covers_traces_and_trace_syncs_a_to_b() {
         .await
         .expect("A consent peers");
     assert!(
-        peers.iter().any(|p| p == NODE_B_KEY_LABEL),
+        peers.contains(&peer_b.key_id),
         "A's consent names B as a replication peer"
     );
 

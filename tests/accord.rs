@@ -125,15 +125,20 @@ struct Holder {
 }
 
 impl Holder {
-    fn new(key_id: &str, seed: u8) -> Self {
+    /// The holder's key_id is `<label>-<fp>` of its own Ed25519 key — persist
+    /// v59 (CIRISPersist#1103) refuses any other shape at registration.
+    fn new(label: &str, seed: u8) -> Self {
+        let ed = SigningKey::from_bytes(&[seed; 32]);
+        let key_id =
+            ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes());
         Holder {
-            key_id: key_id.to_string(),
-            ed: SigningKey::from_bytes(&[seed; 32]),
+            ed,
             mldsa: MlDsa65SoftwareSigner::from_seed_bytes(
                 &[seed ^ 0xFF; 32],
                 format!("{key_id}-pqc"),
             )
             .expect("holder ML-DSA-65 seed"),
+            key_id,
         }
     }
 
@@ -720,10 +725,10 @@ async fn accord_holder_with_bogus_custody_attestation_is_rejected() {
     let bogus_custody = serde_json::json!({
         "schema": "ciris.ceg.signed-object.v1",
         "kind": "accord_holder_custody_attestation",
-        "key_id": "accord-holder-bogus-custody",
+        "key_id": holder.key_id,
         "created_at": "2026-06-20T00:00:00.000Z",
         "body": {
-            "holder_key_id": "accord-holder-bogus-custody",
+            "holder_key_id": holder.key_id,
             "custody_tier": "portable_2fa",
             "yubikey_attestation_chain_hex": ["30820100"]
         },
@@ -765,7 +770,7 @@ async fn accord_holder_with_bogus_custody_attestation_is_rejected() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|h| h["key_id"] == "accord-holder-bogus-custody"),
+            .any(|h| h["key_id"] == holder.key_id.as_str()),
         "a custody-rejected holder must not be in the roster"
     );
 }
@@ -817,7 +822,7 @@ async fn holder_without_custody_attestation_is_rejected() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|h| h["key_id"] == "accord-holder-no-custody"),
+            .any(|h| h["key_id"] == holder.key_id.as_str()),
         "an unattested holder must not be registered"
     );
 }
@@ -881,7 +886,7 @@ async fn genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder()
         body["error"]
             .as_str()
             .unwrap_or("")
-            .contains("outsider-not-a-holder"),
+            .contains(outsider.key_id.as_str()),
         "rejection must name the non-holder member; got {body}"
     );
 
@@ -899,9 +904,9 @@ async fn genesis_refuses_a_member_that_is_not_a_custody_verified_accord_holder()
         .await
         .unwrap();
     let seats = roster["holders"].as_array().expect("holders array");
-    for member in ["seat-a", "seat-b", "outsider-not-a-holder"] {
+    for member in [&a.key_id, &b.key_id, &outsider.key_id] {
         assert!(
-            !seats.iter().any(|h| h["key_id"] == member),
+            !seats.iter().any(|h| h["key_id"] == member.as_str()),
             "a rejected genesis must not entrench member {member}; got {roster}"
         );
     }
@@ -1158,7 +1163,7 @@ async fn offline_release_token_round_trips_against_a_real_halt_latch() {
         !baked
             .roster
             .iter()
-            .any(|m| m.member_id == "accord-holder-a"),
+            .any(|m| m.member_id == holders[0].key_id),
         "the test seats must not be in the baked roster — otherwise (1) proves nothing"
     );
 
@@ -1402,13 +1407,13 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
     // membership rather than an exact `registered_total`, which now baselines +3.)
     let registered = roster["registered"].as_array().expect("registered array");
     for kid in [
-        "accord-holder-a",
-        "accord-holder-b",
-        "accord-holder-c",
-        "accord-holder-a-spare",
+        &holders[0].key_id,
+        &holders[1].key_id,
+        &holders[2].key_id,
+        &a_spare.key_id,
     ] {
         assert!(
-            registered.iter().any(|h| h["key_id"] == kid),
+            registered.iter().any(|h| h["key_id"] == kid.as_str()),
             "the 3 seats + spare must all be registered; missing {kid}; got {roster}"
         );
     }
@@ -1417,7 +1422,7 @@ async fn registered_spare_is_not_a_seat_and_cannot_help_reach_quorum() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|h| h["key_id"] == "accord-holder-a-spare"),
+            .any(|h| h["key_id"] == a_spare.key_id.as_str()),
         "the spare must NOT be a seat"
     );
 
@@ -1595,11 +1600,11 @@ async fn family_supersede_replaces_a_seat_under_2of3_and_rejects_sub_quorum() {
         .map(|h| h["key_id"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        seats.contains(&"accord-holder-a".to_string()),
+        seats.contains(&holders[0].key_id),
         "A is STILL a seat — the refused supersede changed nothing: {seats:?}"
     );
     assert!(
-        !seats.contains(&"accord-holder-d".to_string()),
+        !seats.contains(&spare.key_id),
         "spare D was NOT seated by a refused supersede: {seats:?}"
     );
 }
@@ -1647,14 +1652,22 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
     // that does not name its subject stands for any record it is pasted onto
     // (CIRISPersist#659). Unlike a holder's record this one carries no hardware
     // evidence and is never put on the wire, so the door fits it exactly.
+    //
+    // The id is `<label>-<fp>` of its own Ed25519 key: persist v59
+    // (CIRISPersist#1103) refuses any other shape at registration.
+    let canonical_ed = SigningKey::from_bytes(&[0x77; 32]);
+    let canonical_key_id = ciris_verify_core::fedcode::derive_key_id(
+        "canonical-server-1",
+        canonical_ed.verifying_key().as_bytes(),
+    );
     {
-        let key_id = "canonical-server-1";
+        let key_id = canonical_key_id.as_str();
         let pqc = Arc::new(
             MlDsa65SoftwareSigner::from_seed_bytes(&[0x77 ^ 0xFF; 32], format!("{key_id}-pqc"))
                 .expect("canonical ML-DSA-65 seed"),
         );
         let signer = LocalSigner::from_parts(
-            SigningKey::from_bytes(&[0x77; 32]),
+            canonical_ed,
             key_id.to_string(),
             Some(pqc),
             Some(format!("{key_id}-pqc")),
@@ -1672,7 +1685,7 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
 
     let update = serde_json::json!({
         "op": "canonical:address",
-        "canonical_key_id": "canonical-server-1",
+        "canonical_key_id": canonical_key_id,
         "transport_kind": "reticulum",
         "destination": "203.0.113.9:4242",
         "invocation_id": "addr-upd-1",
@@ -1701,7 +1714,7 @@ async fn canonical_address_update_is_1_of_n_and_binds_transport_destination() {
     // The transport_destination is now bound in the directory.
     let dests = engine
         .federation_directory()
-        .list_transport_destinations_for("canonical-server-1")
+        .list_transport_destinations_for(&canonical_key_id)
         .await
         .expect("list transport destinations");
     assert!(

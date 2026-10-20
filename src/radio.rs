@@ -409,6 +409,7 @@ impl DirectoryResolver {
 }
 
 impl PacketRadioResolver for DirectoryResolver {
+    #[allow(clippy::result_large_err)] // persist v59 grew its FederationError; the closure only passes it through
     fn resolve(&self, key_id: &str) -> Option<Vec<u8>> {
         // `resolve` is sync but the directory lookup is async. Bridge by running
         // the lookup on the current runtime from a blocking section.

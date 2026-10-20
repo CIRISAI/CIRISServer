@@ -191,6 +191,10 @@ async fn register_party(engine: &Engine, key_id: &str, id_type: &str) -> LocalSi
 /// instant `signed_at` — which is now the envelope's signed `asserted_at` and the
 /// row column alike (see this module's header).
 #[allow(clippy::too_many_arguments)]
+/// `score` stays inside the dimension's declared polarity: since persist v59
+/// (CC rc8, `score_outside_declared_polarity`) `trust:community_standing:v1` is
+/// positive-only, so the post-bound row is told apart by VALUE (+0.2 vs +0.9),
+/// not by sign.
 async fn seed_score(
     engine: &Engine,
     attester: &LocalSigner,
@@ -255,7 +259,7 @@ async fn compose_refuses_a_post_bound_score_and_keeps_the_pre_bound_one() {
 
     // Two claims by ONE key about ONE subject, straddling the bound.
     seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(48), 0.9, 1.0).await;
-    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), -0.9, 1.0).await;
+    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), 0.2, 1.0).await;
 
     revoke(
         &engine,
@@ -298,7 +302,7 @@ async fn compose_refuses_a_post_bound_score_and_keeps_the_pre_bound_one() {
     assert_eq!(verdict.decision, Decision::Affirm);
     assert!(
         verdict.value > 0.0,
-        "the surviving contribution is the +0.9 pre-bound claim, not the -0.9 post-bound one \
+        "the surviving contribution is the +0.9 pre-bound claim, not the +0.2 post-bound one \
          (value={})",
         verdict.value
     );
@@ -313,7 +317,7 @@ async fn compose_admits_both_scores_when_no_revocation_is_held() {
     let attester = register_party(&engine, ATTESTER_KEY_ID, identity_type::NODE).await;
     register_party(&engine, SUBJECT_KEY_ID, identity_type::AGENT).await;
     seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(48), 0.9, 1.0).await;
-    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), -0.9, 1.0).await;
+    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), 0.2, 1.0).await;
 
     let mut trust = TrustSet::new();
     trust.pin(ATTESTER_KEY_ID);
@@ -349,7 +353,7 @@ async fn an_unbounded_revocation_refuses_every_score_including_the_oldest() {
     let attester = register_party(&engine, ATTESTER_KEY_ID, identity_type::NODE).await;
     register_party(&engine, SUBJECT_KEY_ID, identity_type::AGENT).await;
     seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(48), 0.9, 1.0).await;
-    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), -0.9, 1.0).await;
+    seed_score(&engine, &attester, SUBJECT_KEY_ID, hours_ago(2), 0.2, 1.0).await;
 
     revoke(&engine, &node_signer, ATTESTER_KEY_ID, Utc::now(), None).await;
 

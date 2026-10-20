@@ -94,15 +94,18 @@ async fn publish_transport(p: &Person, node: &str, tag: u8) -> String {
 /// Another machine `p` owns, owner-bound at FEDERATION (`announced`) or at
 /// `self` (not announced).
 async fn another_node(p: &Person, tag: u8, announced: bool) -> String {
-    let key_id = format!("{}-node-{tag}", p.name);
+    let alias = format!("{}-node-{tag}", p.name);
+    let ed = SigningKey::from_bytes(&[tag; 32]);
+    // persist v59 (CIRISPersist#1103): the registered id is `<alias>-<fp>`.
+    let key_id = ciris_verify_core::fedcode::derive_key_id(&alias, ed.verifying_key().as_bytes());
     let pqc =
-        MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{alias}-pqc"))
             .expect("ML-DSA seed");
     let signer = LocalSigner::from_parts(
-        SigningKey::from_bytes(&[tag; 32]),
-        key_id.clone(),
+        ed,
+        alias.clone(),
         Some(Arc::new(pqc) as Arc<dyn ciris_keyring::PqcSigner>),
-        Some(format!("{key_id}-pqc")),
+        Some(format!("{alias}-pqc")),
     );
     ciris_server::attest::register_key(
         &p.engine,

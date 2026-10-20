@@ -36,9 +36,23 @@ use ciris_server::auth::store;
 use ciris_server::claim_remote;
 use ciris_server::nodecode::NodeCode;
 
-const T_NODE_KEY_ID: &str = "ciris-target-node";
-const L_USER_KEY_ID: &str = "ciris-local-user";
+const T_NODE_ALIAS: &str = "ciris-target-node";
+const L_USER_ALIAS: &str = "ciris-local-user";
 const TEST_CLAIM_PIN: &str = "TEST-PIN1";
+
+/// T's registered node id: `<alias>-<fp>` of `target_node`'s Ed25519 key —
+/// persist v59 (CIRISPersist#1103) refuses any other shape at registration.
+fn t_node_key_id() -> String {
+    let ed = SigningKey::from_bytes(&[0xA1; 32]);
+    ciris_verify_core::fedcode::derive_key_id(T_NODE_ALIAS, ed.verifying_key().as_bytes())
+}
+
+/// The responsible user's registered id, derived the same way from
+/// `local_user_signer`'s key; the signer is named by it (the production pen).
+fn l_user_key_id() -> String {
+    let ed = SigningKey::from_bytes(&[0xF1; 32]);
+    ciris_verify_core::fedcode::derive_key_id(L_USER_ALIAS, ed.verifying_key().as_bytes())
+}
 
 /// Target node T's in-memory substrate, keyed by its node-steward signer.
 async fn target_node(key_id: &str) -> Arc<Engine> {
@@ -114,7 +128,7 @@ fn infra_scopes() -> Vec<String> {
 /// reach it over HTTP).
 fn target_node_code(base: &str) -> String {
     let nc = NodeCode {
-        key_id: T_NODE_KEY_ID.to_string(),
+        key_id: t_node_key_id(),
         pubkey_ed25519_base64: t_node_pubkey_b64(),
         transport_hint: Some(base.to_string()),
         alias_hint: None,
@@ -127,7 +141,7 @@ async fn serve_target(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<(
     let app = bootstrap::router(
         engine,
         HybridPolicy::Strict,
-        T_NODE_KEY_ID.to_string(),
+        t_node_key_id(),
         t_node_pubkey_b64(),
         Some(TEST_CLAIM_PIN.to_string()),
         None,
@@ -146,44 +160,44 @@ async fn serve_target(engine: Arc<Engine>) -> (String, tokio::task::JoinHandle<(
 
 #[tokio::test]
 async fn l_builds_and_t_applies_owner_binding_directly() {
-    let t = target_node(T_NODE_KEY_ID).await;
-    register_target(&t, T_NODE_KEY_ID).await;
-    let user = local_user_signer(L_USER_KEY_ID);
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
+    let user = local_user_signer(&l_user_key_id());
 
     // L builds + substrate-signs the owner-binding (the responsible USER's key).
     let binding = build_signed_owner_binding(
         &user,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         &infra_scopes(),
         ciris_persist::federation::types::cohort_scope::SELF,
     )
     .await
     .expect("L builds signed owner-binding");
-    assert_eq!(binding.attesting_key_id, L_USER_KEY_ID);
+    assert_eq!(binding.attesting_key_id, l_user_key_id());
 
     // T applies it: verify + register user + persist the user-signed delegates_to.
     // CIRISServer#125: claimed self-scoped (the default, structurally-invisible).
     let applied = apply_signed_owner_binding(
         &t,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         cohort_scope::SELF,
         HybridPolicy::Strict,
         &binding,
     )
     .await
     .expect("T applies the owner-binding");
-    assert_eq!(applied.responsible_user_key_id, L_USER_KEY_ID);
+    assert_eq!(applied.responsible_user_key_id, l_user_key_id());
 
     // T now reads a user-signed owner edge.
     assert_eq!(
-        is_steward_bound(&t, T_NODE_KEY_ID).await.as_deref(),
-        Some(L_USER_KEY_ID)
+        is_steward_bound(&t, &t_node_key_id()).await.as_deref(),
+        Some(l_user_key_id().as_str())
     );
 
     // The user is registered as identity_type "user".
     let uk = t
         .federation_directory()
-        .lookup_public_key(L_USER_KEY_ID)
+        .lookup_public_key(&l_user_key_id())
         .await
         .unwrap()
         .expect("user registered");
@@ -192,14 +206,14 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
     // The persisted delegates_to is genuinely USER-signed.
     let edges = t
         .federation_directory()
-        .list_attestations_for(T_NODE_KEY_ID)
+        .list_attestations_for(&t_node_key_id())
         .await
         .unwrap();
     let row = edges
         .iter()
         .find(|e| e.attestation_type == attestation_type::DELEGATES_TO)
         .expect("a delegates_to exists");
-    assert_eq!(row.scrub_key_id, L_USER_KEY_ID);
+    assert_eq!(row.scrub_key_id, l_user_key_id());
     // CIRISServer#125: the binding is stamped with the CLAIMED cohort (self),
     // not a hardcoded FEDERATION; tier stays federation (genuinely hybrid-signed).
     assert_eq!(row.cohort_scope, cohort_scope::SELF);
@@ -224,10 +238,10 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
 
 #[tokio::test]
 async fn claim_remote_http_round_trip_binds_root_to_user() {
-    let t = target_node(T_NODE_KEY_ID).await;
-    register_target(&t, T_NODE_KEY_ID).await;
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
     let (base, _h) = serve_target(Arc::clone(&t)).await;
-    let user = local_user_signer(L_USER_KEY_ID);
+    let user = local_user_signer(&l_user_key_id());
 
     let http = reqwest::Client::new();
     let result = claim_remote::claim_remote(
@@ -249,19 +263,19 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
     .await
     .expect("L claims T over HTTP");
 
-    assert_eq!(result["identity_key_id"], L_USER_KEY_ID);
+    assert_eq!(result["identity_key_id"], l_user_key_id());
     assert_eq!(result["cohort_scope"], "self");
     assert_eq!(result["role"], "SYSTEM_ADMIN");
 
     // T bound ROOT to the user.
     let roots = store::list_by_role(&t, WaRole::Root, 10).await.unwrap();
     assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].pubkey, L_USER_KEY_ID);
+    assert_eq!(roots[0].pubkey, l_user_key_id());
 
     // is_steward_bound(T) == the user.
     assert_eq!(
-        is_steward_bound(&t, T_NODE_KEY_ID).await.as_deref(),
-        Some(L_USER_KEY_ID)
+        is_steward_bound(&t, &t_node_key_id()).await.as_deref(),
+        Some(l_user_key_id().as_str())
     );
 }
 
@@ -269,12 +283,12 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
 
 #[tokio::test]
 async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
-    let t = target_node(T_NODE_KEY_ID).await;
-    register_target(&t, T_NODE_KEY_ID).await;
-    let user = local_user_signer(L_USER_KEY_ID);
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
+    let user = local_user_signer(&l_user_key_id());
     let good = build_signed_owner_binding(
         &user,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         &infra_scopes(),
         ciris_persist::federation::types::cohort_scope::SELF,
     )
@@ -286,7 +300,7 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     agency.envelope["scope"] = serde_json::json!(["agency:reason"]);
     assert!(apply_signed_owner_binding(
         &t,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         cohort_scope::SELF,
         HybridPolicy::Strict,
         &agency
@@ -299,7 +313,7 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     wrong_node.envelope["node_key_id"] = "another-node".into();
     assert!(apply_signed_owner_binding(
         &t,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         cohort_scope::SELF,
         HybridPolicy::Strict,
         &wrong_node
@@ -331,7 +345,7 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
     wrong_sig.ml_dsa_65_sig_b64 = BASE64.encode(&bad.pqc.signature);
     assert!(apply_signed_owner_binding(
         &t,
-        T_NODE_KEY_ID,
+        &t_node_key_id(),
         cohort_scope::SELF,
         HybridPolicy::Strict,
         &wrong_sig
@@ -344,7 +358,7 @@ async fn apply_rejects_agency_attested_mismatch_and_wrong_sig() {
         .await
         .unwrap()
         .is_empty());
-    assert!(is_steward_bound(&t, T_NODE_KEY_ID).await.is_none());
+    assert!(is_steward_bound(&t, &t_node_key_id()).await.is_none());
 }
 
 /// **CIRISServer#384 — an OAuth owner can obtain the owner session.**
@@ -366,10 +380,10 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
     use ciris_server::auth::oauth::{resolve_oauth_user, OAuthIdentity};
     use ciris_server::auth::roles::UserRole;
 
-    let t = target_node(T_NODE_KEY_ID).await;
-    register_target(&t, T_NODE_KEY_ID).await;
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
     let (base, _h) = serve_target(Arc::clone(&t)).await;
-    let user = local_user_signer(L_USER_KEY_ID);
+    let user = local_user_signer(&l_user_key_id());
 
     let ident = OAuthIdentity {
         provider: "google".to_string(),
@@ -479,7 +493,7 @@ async fn serve_target_with_loopback(engine: Arc<Engine>) -> String {
     let app = bootstrap::router(
         engine,
         HybridPolicy::Strict,
-        T_NODE_KEY_ID.to_string(),
+        t_node_key_id(),
         t_node_pubkey_b64(),
         Some(TEST_CLAIM_PIN.to_string()),
         None,
@@ -505,10 +519,10 @@ async fn serve_target_with_loopback(engine: Arc<Engine>) -> String {
 /// collection is refused by name.
 #[tokio::test]
 async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
-    let t = target_node(T_NODE_KEY_ID).await;
-    register_target(&t, T_NODE_KEY_ID).await;
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
     let base = serve_target_with_loopback(Arc::clone(&t)).await;
-    let user = local_user_signer(L_USER_KEY_ID);
+    let user = local_user_signer(&l_user_key_id());
     let claimer = claimer_record("ciris-approving-device");
 
     let http = reqwest::Client::new();
@@ -527,7 +541,7 @@ async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
     .await
     .expect("the approving device claims T");
 
-    assert_eq!(result["identity_key_id"], L_USER_KEY_ID);
+    assert_eq!(result["identity_key_id"], l_user_key_id());
     assert!(
         result.get("access_token").is_none(),
         "the new device's owner session crossed to the approving device: {result}"

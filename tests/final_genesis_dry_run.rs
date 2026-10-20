@@ -168,15 +168,33 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         n["registration_envelope"]["transport_hints"] =
             serde_json::json!([{ "kind": "ip", "destination": "127.0.0.1:4242" }]);
     }
+    // Bundle v4 (CC 5.3.4): a seated canonical with no signed transit row
+    // (neither passed nor held here) refuses the plan by name — a bundle that
+    // seats it would seed nothing.
+    let (s, refused) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/plan",
+        serde_json::json!({ "serve_nodes": serve_nodes, "clock_checked": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["reason_id"], "final_genesis.serve_node_without_transit_pair",
+        "{refused}"
+    );
     let (s, planned) = call(
         &app,
         "POST",
         "/v1/accord/final-genesis/plan",
         // No successor set named either: it defaults to the recovery keys
-        // (the maintainer: the successor set is the three spares).
+        // (the maintainer: the successor set is the three spares). The serve
+        // node's signed transit row is persist's test row (emitted on the
+        // canonical's own host in the real ceremony).
         serde_json::json!({
             "serve_nodes": serve_nodes,
             "clock_checked": true,
+            "serve_transport_destinations": inputs.serve_transport_destinations,
         }),
     )
     .await;
@@ -282,12 +300,21 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         );
     }
 
-    // (5) The one artifact parses as a v3 bundle carrying both genesis records
-    // and installs as a node's baked genesis.
+    // (5) The one artifact parses as a v4 bundle carrying both genesis records
+    // and every seated canonical's transit row, and installs as a node's baked
+    // genesis.
     let bundle: serde_json::Value = serde_json::from_str(&bundle_json).unwrap();
     assert_eq!(
-        bundle["version"], 3,
-        "bundle v3 (genesis heads inside attestations)"
+        bundle["version"], 4,
+        "bundle v4 (genesis heads inside attestations; the serve nodes' transit pairs seeded, CC 5.3.4)"
+    );
+    let seeded = bundle["serve_transport_destinations"]
+        .as_array()
+        .expect("serve_transport_destinations");
+    assert_eq!(
+        seeded.len(),
+        bundle["serve_nodes"].as_array().map_or(0, Vec::len),
+        "one signed transit row per seated canonical: {seeded:?}"
     );
     let atts = bundle["attestations"].as_array().expect("attestations");
     assert!(

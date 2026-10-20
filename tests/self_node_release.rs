@@ -35,7 +35,13 @@ async fn owned(p: &Person) -> Vec<String> {
 /// A second machine the same person owns: a registered NODE key and the
 /// owner-binding `delegates_to(owner → node)` signed with the owner's pen.
 async fn second_node(p: &Person, tag: u8) -> String {
-    let key_id = format!("second-node-{tag}");
+    // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+    let key_id = ciris_verify_core::fedcode::derive_key_id(
+        &format!("second-node-{tag}"),
+        SigningKey::from_bytes(&[tag; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
     let pqc =
         MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
             .expect("ML-DSA seed");
@@ -395,7 +401,13 @@ async fn provision_node_occurrence(p: &Person) -> String {
 /// A second machine `p` owns that `p` did NOT announce: a registered node key,
 /// a SELF-scoped owner-binding, and an occurrence of `p`'s self under it.
 async fn unannounced_second_node(p: &Person, tag: u8) -> String {
-    let key_id = format!("quiet-node-{tag}");
+    // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+    let key_id = ciris_verify_core::fedcode::derive_key_id(
+        &format!("quiet-node-{tag}"),
+        SigningKey::from_bytes(&[tag; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
     let pqc =
         MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
             .expect("ML-DSA seed");
@@ -532,23 +544,57 @@ async fn only_the_announced_nodes_are_public() {
 
 /// The content-KEM occurrence a claimed machine provisions for its owner,
 /// under its node key, with real enc keys (so it is a wrap recipient).
+///
+/// SIGNED by the owner, the way `add_device` records one: since persist v59 an
+/// eviction is the owner's `withdraws` of the occurrence's
+/// `identity:occurrence:v1` row, and a trusted-local occurrence has no row to
+/// withdraw.
 async fn node_occurrence(p: &Person, node_key_id: &str, tag: u8) {
+    let owner = p.owner.signer().await;
+    let enc = ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys");
+    let asserted_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .expect("now, to the millisecond");
+    let envelope = json!({
+        "attesting_key_id": p.key(),
+        "identity_key_id": p.key(),
+        "occurrence_key_id": node_key_id,
+        // A person's own device (persist v53 S1: a server is not in its
+        // owner's self audience).
+        "device_class": "laptop",
+        "encryption_pubkeys": {
+            "x25519_base64": enc.x25519_base64,
+            "ml_kem_768_base64": enc.ml_kem_768_base64,
+        },
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": serde_json::Value::Null,
+        "hardware_attestation": serde_json::Value::Null,
+    });
+    let (signed_envelope, signature) =
+        ciris_verify_core::transport_binding::produce_signed_identity_occurrence(
+            &ciris_persist::signing::LocalSelfSigner::new(&owner),
+            envelope,
+        )
+        .await
+        .expect("the owner signs the occurrence");
     p.engine
         .federation_directory()
-        .put_identity_occurrence_local(IdentityOccurrence {
-            identity_key_id: p.key().to_owned(),
-            occurrence_key_id: node_key_id.to_owned(),
-            // A person's own device (persist v53 S1: a server is not in its
-            // owner's self audience).
-            device_class: "laptop".to_owned(),
-            hardware_attestation: None,
-            asserted_at: chrono::Utc::now(),
-            valid_until: None,
-            encryption_pubkeys: Some(
-                ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
-            ),
-            transport_binding: None,
-            persist_row_hash: String::new(),
+        .put_identity_occurrence(ciris_persist::federation::SignedIdentityOccurrence {
+            identity_occurrence: IdentityOccurrence {
+                identity_key_id: p.key().to_owned(),
+                occurrence_key_id: node_key_id.to_owned(),
+                device_class: "laptop".to_owned(),
+                hardware_attestation: None,
+                asserted_at,
+                valid_until: None,
+                encryption_pubkeys: Some(enc),
+                transport_binding: None,
+                persist_row_hash: String::new(),
+            },
+            attesting_key_id: p.key().to_owned(),
+            signed_envelope,
+            signature,
         })
         .await
         .expect("the node's content occurrence");

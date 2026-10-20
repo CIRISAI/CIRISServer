@@ -838,6 +838,17 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # Queued for the client bundle with their English.
     # ADD A DEVICE (0.5.228, `FSD/ADD_DEVICE.md` §4.1): PAID AT CLIENT 0.5.229
     # (CIRISClient#189) — its bundle carries all thirteen `add_device.*` ids.
+    # BUNDLE v4 (CC 5.3.4, persist v59 #1106): the final-genesis plan refuses a
+    # seated canonical with no signed transit row, a row for a node it does not
+    # seat, and a store read failure while gathering them. Queued for the
+    # client bundle with their English (the FinalGenesisSheet plan step).
+    # A THIRD DEVICE (persist v59, CC 3.3.6.3): from a roster of two keys the
+    # approval's occurrence is a proposal the self roster holds (lands by the
+    # quorum or lone path, CIRISServer#794). Queued for the client bundle.
+    "add_device.roster_change_held",
+    "final_genesis.serve_node_without_transit_pair",
+    "final_genesis.store",
+    "final_genesis.transit_row_not_a_serve_node",
     "accord.duty.assemble",
     "accord.duty.holder_identity_mismatch",
     "accord.duty.no_duty",
