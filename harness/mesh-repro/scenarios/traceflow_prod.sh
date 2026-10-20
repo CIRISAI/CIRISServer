@@ -18,7 +18,12 @@
 # CIRISPersist#905 in v48.0.0. `score` is measured, not yet required.
 source "$(dirname "${BASH_SOURCE[0]}")/traceflow.sh"
 SCENARIO_NAME="traceflow_prod — production-shaped agent (split, owned, Advisory-admitted, genesis-imported)"
-COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.prod.yml"
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis-v4.yml -f docker-compose.prod.yml"
+# Bundle v4 (CIRISServer#801), layered BEFORE the prod overlay so its agent
+# settings stay last.
+GENESIS_V4=1
+GENESIS_CLAIM_CANONICAL=1
+GENESIS_SERVE_DIAL="172.29.78.10:4242"
 SUCCESS_STAGE="arrive"
 SUCCESS_MESSAGE="production-shaped agent's TRACES reached the canonical: owned, split, Advisory-admitted, Rooted as a pair, promoted by its HUMAN's consent (CIRISPersist#905, persist v48.0.0) and admitted by the canonical. Read the run timeline below for where the wall clock went."
 # seal/trace_att lag the bootstrap rounds by CIRIS_HARNESS_SEAL_DELAY_SECS; requiring them

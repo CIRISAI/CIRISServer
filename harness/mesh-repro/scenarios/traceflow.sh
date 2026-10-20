@@ -21,7 +21,12 @@
 # end state.
 
 SCENARIO_NAME="traceflow"
-COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml"
+COMPOSE_FILES="-f docker-compose.yml -f docker-compose.traceflow.yml -f docker-compose.genesis-v4.yml"
+# Bundle v4 (CIRISServer#801): the mesh boots on a ceremony-minted genesis, and
+# the operator owns and announces the canonical, as in production.
+GENESIS_V4=1
+GENESIS_CLAIM_CANONICAL=1
+GENESIS_SERVE_DIAL="172.29.78.10:4242"
 SUCCESS_STAGE="score"
 SUCCESS_MESSAGE="full chain — trace sealed, consented, shipped, arrived, materialized, summarized, and SCORED by a distinct identity."
 

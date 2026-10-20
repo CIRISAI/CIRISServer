@@ -461,10 +461,18 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                  holders=[h["key_id"] for h in anchor["holders"]])
             progress(f"canonical:{c['id']}")
             continue
-        N[c["id"]] = mesh.start_canonical()
+        # A `key` root under the SEALED transport (edge v43, CC 5.3.3.5 E1): a
+        # node reaches a canonical only holding its transit pair, which only a
+        # bundle v4 seeds (CC 5.3.4). The synthetic anchor's blessed canonical
+        # carries no bundle, so nothing could reach it (CIRISServer#801 — every
+        # key-root entry stopped at its first relayed step). Production has no
+        # unbundled canonical either; the key root is realized as the bundle the
+        # ceremony mints, which is the only root a v43 mesh can stand on.
+        N[c["id"]], anchor, _done = mint_accord_root(mesh, args, step)
         step("root+canonical", layer="roots/canonicals", canonical=c["id"], holds=c["holds"],
-             proves="the anchor's ceremony ran: charter root→root, grant root→node, trust edge node→root",
-             evidence=N[c["id"]].grep(r"TEST-ANCHOR ceremony: trust_root_valid GREEN")[-1:])
+             proves="the key root realized as a ceremony-minted bundle v4 (the sealed transport needs the "
+                    "canonical's transit pair); the canonical boots on it, claimed and announced",
+             holders=[h["key_id"] for h in anchor["holders"]])
         progress(f"canonical:{c['id']}")
 
     # 3. nodes, in an order that lets `dials` resolve. With no canonical (T0)

@@ -60,8 +60,11 @@ trap harness_cleanup EXIT
 
 harness_build_wheel
 export CIRIS_SERVER_VERSION="local"
+# GENESIS_V4=1 scenarios mint a bundle v4 on the canonical first (CIRISServer#801).
+harness_genesis_v4 || { echo "→ genesis ceremony failed"; exit 3; }
 harness_up || { echo "→ stack failed to come up"; exit 3; }
 harness_wait_healthy "${HEALTH_SERVICE:-canonical}"
+harness_genesis_v4_after_up || { echo "→ the mesh is not on the minted bundle"; exit 3; }
 # Before ANY stage runs: is the code under test the code in the tree? A ladder
 # that measures a stale image is not a weaker signal, it is a false one.
 for _svc in $(compose ps --services 2>/dev/null); do

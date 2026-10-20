@@ -3510,8 +3510,11 @@ async fn register_substrate_key(
 /// replaces); harmless.
 #[cfg(feature = "test-anchor")]
 pub(crate) fn install_test_genesis_bundle() -> Result<()> {
-    let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") else {
-        return Ok(());
+    // EMPTY is unset: the Docker mesh passes `${CIRIS_TEST_GENESIS_BUNDLE:-}`
+    // to every node, so its ceremony host boots before any bundle exists.
+    let path = match std::env::var("CIRIS_TEST_GENESIS_BUNDLE") {
+        Ok(p) if !p.trim().is_empty() => p,
+        _ => return Ok(()),
     };
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         anyhow::bail!("CIRIS_TEST_GENESIS_BUNDLE is set but CIRIS_TESTING_MODE is not true");

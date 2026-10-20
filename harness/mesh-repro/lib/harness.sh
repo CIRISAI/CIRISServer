@@ -79,6 +79,13 @@ harness_build_wheel() {
 }
 
 harness_up() {
+  # The genesis phase (below) already built the images and booted the ceremony
+  # host; tearing down here would throw away the canonical whose identity the
+  # bundle seats. `up -d` recreates it with the bundle in its environment.
+  if [ "${HARNESS_GENESIS_READY:-0}" = "1" ]; then
+    compose up -d
+    return
+  fi
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 
   # A FAILED BUILD USED TO BE INVISIBLE. `compose build` ran unchecked and
@@ -100,6 +107,124 @@ harness_up() {
     return 3
   fi
   compose up -d
+}
+
+# ── genesis: the mesh boots on a ceremony-minted bundle v4 (CIRISServer#801) ──
+#
+# Under edge v43 every link is SEALED (CC 5.3.3.5 E1): a node reaches the
+# canonical only holding its transit pair, which a bundle v4 seeds at first open
+# (CC 5.3.4). The synthetic anchor seeds none, so every ladder stopped at
+# stage 6 (`served=0`). This is the production path, in the shape the native
+# harness runs it (`harness/native/scenarios.py::mint_accord_root`):
+#
+#   1. the three-holder test anchor (`test_ceremony_anchor`, fixed seeds) arms
+#      every node; `CIRIS_TEST_NO_CEREMONY=true` — nobody self-blesses;
+#   2. the canonical boots ALONE, on no genesis, its home on the host
+#      (`$CIRIS_GENESIS_DIR/canonical-home`) so its identity outlives the
+#      container;
+#   3. plan / sign ×2 rounds / finish over its routes (lib/genesis_ceremony.py)
+#      — the plan gathers its own signed transport row, transit pair included;
+#   4. its database is wiped (identity kept — the bundle seats that identity)
+#      and `CIRIS_TEST_GENESIS_BUNDLE=/genesis/canonical_seed.json` is exported,
+#      so `harness_up` brings EVERY node up on the bundle.
+#
+# Opt in per scenario with GENESIS_V4=1 and a docker-compose.*genesis-v4.yml
+# overlay in COMPOSE_FILES; GENESIS_SERVE_DIAL is the bundle's dial hint (must
+# parse as host:port the nodes reach).
+harness_genesis_v4() {
+  [ "${GENESIS_V4:-0}" = "1" ] || return 0
+  local repo anchor_bin out key_id
+  repo="$(cd "$HARNESS_DIR/../.." && pwd)"
+  anchor_bin="$repo/target/release/examples/test_ceremony_anchor"
+  if [ ! -x "$anchor_bin" ]; then
+    echo "── building test_ceremony_anchor (the three-holder test anchor) ──"
+    ( cd "$repo" && cargo build --release --features test-anchor,python --example test_ceremony_anchor 2>&1 | tail -2 )
+  fi
+  [ -x "$anchor_bin" ] || { echo "  ✗ no $anchor_bin"; return 3; }
+
+  export CIRIS_GENESIS_DIR="$HARNESS_DIR/genesis/$PROJECT"
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
+  # A previous run's canonical home is owned by the container user (1000):
+  # remove it from a container, not the host.
+  if [ -d "$CIRIS_GENESIS_DIR" ]; then
+    docker run --rm -v "$HARNESS_DIR/genesis:/g" python:3.12-slim rm -rf "/g/$PROJECT" >/dev/null 2>&1 \
+      || rm -rf "$CIRIS_GENESIS_DIR"
+  fi
+  mkdir -p "$CIRIS_GENESIS_DIR/canonical-home"
+  chmod 1777 "$CIRIS_GENESIS_DIR" "$CIRIS_GENESIS_DIR/canonical-home"
+  "$anchor_bin" > "$CIRIS_GENESIS_DIR/anchor.json"
+  chmod 644 "$CIRIS_GENESIS_DIR/anchor.json"
+  eval "$(python3 - "$CIRIS_GENESIS_DIR/anchor.json" <<'PY'
+import json, shlex, sys
+for k, v in json.load(open(sys.argv[1]))["env"].items():
+    print(f"export {k}={shlex.quote(v)}")
+PY
+)"
+  export CIRIS_TEST_GENESIS_BUNDLE=""
+
+  if ! compose build; then
+    echo "  ✗ IMAGE BUILD FAILED — refusing to run the ceremony against stale images."
+    return 3
+  fi
+  echo "═══ genesis: the canonical boots alone and runs the final-genesis ceremony ═══"
+  compose up -d --no-deps canonical
+  harness_wait_healthy canonical
+  out="$(compose exec -T canonical python - "${GENESIS_SERVE_DIAL:-canonical:4242}" < "$HARNESS_DIR/lib/genesis_ceremony.py")" || {
+    echo "  ✗ the ceremony failed:"; echo "$out" | tail -5 | sed 's/^/      /'
+    compose logs canonical 2>/dev/null | grep -E "final_genesis|final-genesis" | tail -5 | sed 's/^/      /'
+    return 3
+  }
+  key_id="$(printf '%s\n' "$out" | tail -1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["key_id"])')"
+  echo "  ✓ bundle minted for serve node $key_id — $(printf '%s\n' "$out" | tail -1)"
+  cp "$CIRIS_GENESIS_DIR/canonical-home/final-genesis/canonical_seed.json" "$CIRIS_GENESIS_DIR/canonical_seed.json" || {
+    echo "  ✗ no canonical_seed.json under the canonical's home"; return 3; }
+  chmod 644 "$CIRIS_GENESIS_DIR/canonical_seed.json"
+
+  # A FRESH database under the same keys, as the native harness does: the
+  # ceremony host's first boot seeded a family under a different roster, and an
+  # unrelated family is rightly never succeeded.
+  compose stop canonical >/dev/null 2>&1
+  compose run --rm --no-deps -T canonical sh -c 'rm -f /var/lib/ciris/data/ciris_engine.db*' >/dev/null 2>&1 || {
+    echo "  ✗ could not wipe the ceremony host's database"; return 3; }
+  export CIRIS_TEST_GENESIS_BUNDLE=/genesis/canonical_seed.json
+  export HARNESS_GENESIS_READY=1
+}
+
+# After `harness_up`: the canonical really booted on the bundle — the one log
+# line the test-anchor install prints — then, where the scenario asks
+# (GENESIS_CLAIM_CANONICAL=1), the operator claims and announces it, as the
+# production canonical is owned (an unowned node refuses federation peering).
+harness_genesis_v4_after_up() {
+  [ "${GENESIS_V4:-0}" = "1" ] || return 0
+  if [ "$(compose logs canonical 2>/dev/null | grep -c 'booting on a ceremony-minted genesis bundle' || true)" -eq 0 ]; then
+    echo "  ✗ the canonical did NOT boot on the minted bundle — the ladder would measure the synthetic anchor"
+    return 3
+  fi
+  echo "  ✓ canonical booted on the ceremony-minted bundle v4"
+  [ "${GENESIS_CLAIM_CANONICAL:-0}" = "1" ] || return 0
+  local console="/opt/harness/ciris-server-bin" alias="operator-person" pin="" code="" claim token waited=0
+  while [ "$waited" -lt 120 ]; do
+    pin="$(compose exec -T canonical sh -c 'cat /var/lib/ciris/claim_pin 2>/dev/null' 2>/dev/null | tr -d '\r\n')"
+    [ -n "$pin" ] && break; sleep 3; waited=$((waited+3))
+  done
+  [ -z "$pin" ] && { echo "  ✗ the canonical armed no claim PIN"; return 3; }
+  code="$(compose exec -T canonical python -c 'import json,urllib.request;print(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/federation/node-code",timeout=10))["code"])' 2>/dev/null | tr -d '\r\n')"
+  compose exec -T canonical "$console" identity create --backend software --home /var/lib/ciris --key-id "$alias" >/dev/null 2>&1 || true
+  claim="$(compose exec -T canonical "$console" claim --backend software --home /var/lib/ciris --key-id "$alias" \
+             --node-code "$code" --claim-pin "$pin" --cohort-scope self --target-url http://127.0.0.1:4243 2>/dev/null)"
+  token="$(printf '%s\n' "$claim" | sed -n '/^{/,$p' | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("access_token") or "")
+except Exception: print("")')"
+  [ -z "$token" ] && { echo "  ✗ the operator's claim of the canonical yielded no session"; return 3; }
+  compose exec -T canonical python - "$token" <<'PY' | sed 's/^/  /'
+import sys, urllib.request
+req = urllib.request.Request("http://127.0.0.1:4243/v1/federation/announce", method="POST",
+    headers={"Authorization": "Bearer " + sys.argv[1], "Content-Type": "application/json"}, data=b"{}")
+try:
+    urllib.request.urlopen(req, timeout=30); print("✓ canonical claimed by the operator and announced")
+except Exception as e:
+    print("✗ canonical announce failed:", e); sys.exit(1)
+PY
 }
 
 # ── the image actually contains the tree ─────────────────────────────────────

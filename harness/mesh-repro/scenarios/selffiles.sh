@@ -57,7 +57,10 @@ SCENARIO_NAME="selffiles"
 # The same three-node compose the chat ladder uses; node-c lives behind the
 # `scale` profile there, and this scenario needs it — two nodes for ONE person
 # is the whole topology.
-COMPOSE_FILES="-f docker-compose.chat.yml"
+COMPOSE_FILES="-f docker-compose.chat.yml -f docker-compose.chat.genesis-v4.yml"
+# Bundle v4 (CIRISServer#801), as chat.
+GENESIS_V4=1
+GENESIS_SERVE_DIAL="172.29.77.10:4242"
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-scale}"
 PROJECT="${PROJECT:-ciris-selffiles}"
 # `opened_on_b` — the BYTES on the second device — is the claim of this ladder
