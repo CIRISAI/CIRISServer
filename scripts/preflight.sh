@@ -166,6 +166,10 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # inside it, on the one platform where nothing in CI ever loads the
      # artifact (CIRISServer#532).
      "ios-wheel-tags"      "python3 tools/check_ios_wheel.py --self-test"
+     # The CSD/4 catalogue model (FSD/CSD4.md §7), as ci.yml runs it: no binary.
+     "csd4-deps"           "python3 -m pip install --quiet pyyaml pytest"
+     "csd4-evaluate"       "python3 -m harness.native evaluate"
+     "csd4-model"          "python3 -m pytest -q harness/native/test_model.py"
      "release-gates"       "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates"
      # The boundary gates are `#[ignore]`d — correctly, since they reach the
      # network — so `cargo test` skips them and nothing ran them until CI grew a
