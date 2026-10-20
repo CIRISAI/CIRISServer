@@ -846,6 +846,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # approval's occurrence is a proposal the self roster holds (lands by the
     # quorum or lone path, CIRISServer#794). Queued for the client bundle.
     "add_device.roster_change_held",
+    # Edge v43 (sealed links): the new device waits for its other device's
+    # route through the canonical; not there yet answers 503, retryable.
+    "add_device.owner_route_pending",
     "final_genesis.serve_node_without_transit_pair",
     "final_genesis.store",
     "final_genesis.transit_row_not_a_serve_node",

@@ -1006,13 +1006,16 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
 
     code_link = a.contact_code()
     # (1) window closed → refused, not queued.
-    # Retry past "unreachable" (no route yet this soon after boot) to a DEFINITIVE answer.
+    # Retry past "not reachable yet" to a DEFINITIVE answer: 502 (no route, the
+    # pre-seal shape) and 503 add_device.owner_route_pending (edge v43: the other
+    # device's sealed route is still on its way through the canonical, answered
+    # with Retry-After — a client retries it).
     closed: Any = None
 
     def closed_answer() -> Optional[Tuple[int, Any]]:
         nonlocal closed
         closed = c.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": "stranger"})
-        return closed if closed[0] != 502 else None
+        return closed if closed[0] not in (502, 503) else None
     try:
         code, body = wait_for("C to get a definitive answer while A's window is closed", closed_answer,
                               args.owner_wait, every=5)
@@ -1171,7 +1174,19 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
                            if r.get("node_key_id") == e.node_key_id), None)
     occ_e = None
     if e_row:
-        occ_e = a.must("POST", f"/v1/self/device-requests/{e_row['request_id']}/approve").get("occurrence_key_id")
+        # CC 3.3.6.3 (persist v59): alice's roster now holds two keys (genesis +
+        # B), so a third device's addition is a PROPOSAL the self roster holds —
+        # it lands by the quorum or the lone path (routes: CIRISServer#794). The
+        # approval answers 409 add_device.roster_change_held, naming it.
+        st_e, body_e = a.api("POST", f"/v1/self/device-requests/{e_row['request_id']}/approve")
+        if st_e == 409 and (body_e or {}).get("reason_id") == "add_device.roster_change_held":
+            e.api("DELETE", "/v1/setup/add-device")
+            step("third_device_held", status=st_e, reason_id=body_e.get("reason_id"),
+                 proves="from a roster of two, an addition is held as a proposal (CC 3.3.6.3)")
+            return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        if st_e not in (200, 201):
+            raise MeshError(f"alice: approve E answered {st_e}: {str(body_e)[:400]}")
+        occ_e = (body_e or {}).get("occurrence_key_id")
         try:
             wait_for("E to verify and hold", lambda: (lambda st: st if st.get("state") == "approved" else None)(
                 e.must("GET", "/v1/setup/add-device")), args.arrive_wait, every=2)

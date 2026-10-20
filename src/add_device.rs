@@ -536,6 +536,16 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
     }));
+    // 3a. Wait, bounded, for the other device's ROUTE (edge v43, CC 5.3.3.5 E1):
+    // every link is sealed, so B can reach A only once it holds A's signed
+    // route row with A's transit pair. An ANNOUNCED node's identity rows reach
+    // everyone on their bootstrap planes, so the canonical B already dials
+    // (sealed to the pair the bundle seeded) serves A's row; B asks for a
+    // round now rather than waiting the cadence. Not here yet is RETRYABLE
+    // (503 + Retry-After), never a refusal: a 502 means A refused.
+    if let Err(r) = await_owner_route(&st.engine, &target).await {
+        return r;
+    }
     // 3. Ask — a first contact: the request carries this node's own key record.
     let exchange = match edge
         .send_opaque_request_introducing(
@@ -1322,6 +1332,66 @@ async fn approve(
             "add_device.approve_failed",
             e,
         ),
+    }
+}
+
+/// How long the join waits for the other device's route before answering
+/// "try again" (the canonical's next bootstrap-plane round carries it).
+const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait until this node holds `target`'s signed route WITH its transit pair
+/// (`transit_kex_pair_for`, Rooted), kicking a replication round toward the
+/// canonical every few seconds. `Err` is the 503 to answer: retryable, and it
+/// names the case the online path cannot serve — an UNANNOUNCED device's rows
+/// never leave its owner's nodes, so only the pairing QR / LAN reaches it
+/// (CC 3.2 (f)).
+async fn await_owner_route(
+    engine: &ciris_persist::prelude::Engine,
+    target: &str,
+) -> Result<(), Response> {
+    let dir = engine.federation_directory();
+    let deadline = std::time::Instant::now() + OWNER_ROUTE_WAIT;
+    let mut kicked_at: Option<std::time::Instant> = None;
+    loop {
+        if let Ok(Some(_)) =
+            ciris_persist::federation::self_at_login::transit_kex_pair_for(dir.as_ref(), target)
+                .await
+        {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            let mut r = refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "add_device.owner_route_pending",
+                "your other device's address has not reached this one yet — try again in a moment. \
+                 If your other device is not announced, it cannot be reached this way: use the \
+                 pairing QR or the same local network",
+            );
+            r.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("10"),
+            );
+            return Err(r);
+        }
+        if kicked_at.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(5)) {
+            crate::compose::kick_replication("add_device:owner_route");
+            // An UNCLAIMED device has no consent peers, so its rounds run with
+            // nobody: ask each canonical (sealed to the pair the bundle seeded)
+            // for the records bearing on the other device — its route among
+            // them (CIRISEdge#462's subject Pull, the receive axis's verb).
+            if let Some(runtime) = crate::compose::held_replication_runtime() {
+                let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
+                for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
+                    if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
+                        tracing::debug!(canonical = %canonical, target, error = %e,
+                            "add-device: subject Pull for the other device's route not sent yet");
+                    }
+                }
+            }
+            kicked_at = Some(now);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 

@@ -817,9 +817,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `final_genesis.{serve_node_without_transit_pair,store,
     /// transit_row_not_a_serve_node}` (bundle v4) and add-device's
     /// `add_device.roster_change_held` (a third device's addition is a held
-    /// self-roster proposal, CC 3.3.6.3) — same reason, same list, queued for
-    /// the client bundle with their English.
-    const MAX_UNCOVERED: usize = 23;
+    /// self-roster proposal, CC 3.3.6.3), and `add_device.owner_route_pending`
+    /// (the new device waits for the other device's sealed route, 503) — same
+    /// reason, same list, queued for the client bundle with their English.
+    const MAX_UNCOVERED: usize = 24;
 
     let en = load_en();
     let ids = scraped_server_ids();
