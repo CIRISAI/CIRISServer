@@ -849,6 +849,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # Edge v43 (sealed links): the new device waits for its other device's
     # route through the canonical; not there yet answers 503, retryable.
     "add_device.owner_route_pending",
+    # The 2-of-3 AMEND (CC 5.3.4, the steward's ruling on CIRISConstitution#172):
+    # carried bytes changed, below quorum, input refused, nothing planned.
+    "final_genesis.amend_already_planned",
+    "final_genesis.amend_carried_bytes_changed",
+    "final_genesis.amend_input_refused",
+    "final_genesis.amend_not_planned",
+    "final_genesis.amend_quorum_not_met",
     "final_genesis.serve_node_without_transit_pair",
     "final_genesis.store",
     "final_genesis.transit_row_not_a_serve_node",
