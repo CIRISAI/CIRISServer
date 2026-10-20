@@ -16,6 +16,7 @@
 //! the N_eff derivation is exercised on real ingested feature vectors read back
 //! through persist's `TraceSummary` surface, not on synthetic in-memory vectors.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -443,7 +444,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     assert_eq!(emitted, 0, "below the row gate nothing is authored");
     assert!(
         node.federation_directory()
-            .list_attestations_for(&agent_key_id)
+            .attestations_to_all(&agent_key_id)
             .await
             .expect("list attestations")
             .is_empty(),
@@ -459,7 +460,7 @@ async fn capacity_scorer_emits_n_eff_derived_attestation_end_to_end() {
     //    attested=agent, federation tier, plausible N_eff-derived score. ───────
     let attestations = node
         .federation_directory()
-        .list_attestations_for(&agent_key_id)
+        .attestations_to_all(&agent_key_id)
         .await
         .expect("list attestations for the agent");
     assert_eq!(
@@ -622,7 +623,7 @@ async fn a_post_bound_capacity_row_stops_suppressing_the_scorer() {
     // what a bound is compared against.
     let standing = node
         .federation_directory()
-        .list_attestations_for(&agent_key_id)
+        .attestations_to_all(&agent_key_id)
         .await
         .expect("read the standing capacity row")
         .into_iter()
@@ -938,7 +939,7 @@ async fn capacity_rows(engine: &Engine) -> usize {
     let (_, agent_key_id) = agent_identity();
     engine
         .federation_directory()
-        .list_attestations_for(&agent_key_id)
+        .attestations_to_all(&agent_key_id)
         .await
         .expect("read the agent's attestations")
         .into_iter()

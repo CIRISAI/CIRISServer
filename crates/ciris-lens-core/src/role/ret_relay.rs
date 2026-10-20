@@ -184,6 +184,10 @@ impl LensCore {
             // stopgap #492 exists to REPLACE. It becomes correct once we consume
             // the grant surface, and that is its own cut.
             ifac: None,
+            // CIRISEdge#805 item 8 (edge v43): direct links through NAT. The
+            // default is inert (never proposes, serves none, refuses every
+            // peer's request) — a re-pin must not move a relay's posture.
+            direct_links: Default::default(),
             // `transit: Some(false)` — a DECLARED leaf port. Relay transport is
             // limited to CIRIS peers as of this release, and a lens relay is not
             // the CIRIS fabric node: it terminates traffic for its own role and

@@ -289,6 +289,15 @@ struct PlanRequest {
     /// Replace a ceremony already planned on this node.
     #[serde(default)]
     replace: bool,
+    /// CC 5.3.4 (bundle v4, CIRISPersist#1106) — each seated serve node's
+    /// CURRENT signed `transport_destination` row WITH its transit KEX pair,
+    /// emitted offline on that canonical's own host (edge's
+    /// `emit_transport_destination`, which signs from custody and refuses a
+    /// row with no pair). One per serve node; persist's bundle verification
+    /// decides admissibility (`genesis_serve_transport_destination_invalid`).
+    #[serde(default)]
+    serve_transport_destinations:
+        Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
 }
 
 /// Is this host's clock NTP-synchronized? `Some(answer)` where it can be read
@@ -506,6 +515,20 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
     if let Err(r) = check_recovery_keys(&recovery_keys) {
         return r;
     }
+    let serve_keys: Vec<String> = serve_nodes.iter().map(|n| n.key_id.clone()).collect();
+    let transit_rows = match gather_serve_transport_destinations(
+        &st.engine,
+        &serve_keys,
+        req.serve_transport_destinations,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(r) => return r,
+    };
+    if let Err(r) = check_serve_transport_destinations(&serve_keys, &transit_rows) {
+        return r;
+    }
     let inputs = CeremonyInputs {
         family_key_id: ciris_verify_core::accord_genesis::HUMANITY_ACCORD_FAMILY_KEY_ID.to_owned(),
         consensus_protocol: ciris_verify_core::accord_genesis::ACCORD_CONSENSUS_PROTOCOL.to_owned(),
@@ -534,6 +557,10 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
             }),
         },
         produced_at,
+        serve_transport_destinations: transit_rows,
+        // `None` = persist's GENESIS_BUNDLE_VERSION (4): the rows are inside
+        // the authorization digest.
+        bundle_version: None,
     };
     let state = match CeremonyState::plan(inputs) {
         Ok(s) => s,
@@ -549,6 +576,102 @@ async fn plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> R
          genesis records and the authorization)"
     );
     status_body(&state).into_response()
+}
+
+/// Each serve node's current signed row: the one the request carries, else
+/// the newest row this directory holds for it that carries a transit pair. A
+/// running node's route row is edge's (its self-route producer signs it WITH
+/// the pair, CIRISEdge#406/#805), so the canonical hosting the ceremony — and
+/// any serve node whose row has replicated here — needs nothing passed.
+async fn gather_serve_transport_destinations(
+    engine: &Engine,
+    serve_keys: &[String],
+    supplied: Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+) -> Result<Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>, Response> {
+    let mut rows = supplied;
+    let dir = engine.federation_directory();
+    for key in serve_keys {
+        if rows
+            .iter()
+            .any(|r| &r.transport_destination.occurrence_key_id == key)
+        {
+            continue;
+        }
+        let held = dir
+            .list_signed_transport_destinations_for(key)
+            .await
+            .map_err(|e| {
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "final_genesis.store",
+                    format!("list_signed_transport_destinations_for({key}): {e:#}"),
+                )
+            })?;
+        if let Some(row) = held
+            .iter()
+            .filter(|r| r.transport_destination.retired_at.is_none())
+            .filter(|r| matches!(r.transit_kex_pair(), Ok(Some(_))))
+            .max_by_key(|r| {
+                (
+                    r.transport_destination.epoch,
+                    r.transport_destination.asserted_at,
+                )
+            })
+        {
+            rows.push(row.clone());
+        }
+    }
+    Ok(rows)
+}
+
+/// CC 5.3.4 — a bundle that seats a canonical with no transit pair seeds
+/// nothing, and under the sealed transport (CC 5.3.3.5 E1) a fresh node then
+/// reaches no one. So every seated serve node must come with exactly its own
+/// row carrying a pair; anything else refuses the plan BY NAME rather than
+/// minting that bundle. The row's signature and the separation rule are
+/// persist's to judge (at `plan` and again at `finish`).
+fn check_serve_transport_destinations(
+    serve_keys: &[String],
+    rows: &[ciris_persist::federation::self_at_login::SignedTransportDestination],
+) -> Result<(), Response> {
+    let about = |r: &ciris_persist::federation::self_at_login::SignedTransportDestination| {
+        r.transport_destination.occurrence_key_id.clone()
+    };
+    let missing: Vec<&str> = serve_keys
+        .iter()
+        .filter(|k| {
+            !rows
+                .iter()
+                .any(|r| &about(r) == *k && matches!(r.transit_kex_pair(), Ok(Some(_))))
+        })
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.serve_node_without_transit_pair",
+            format!(
+                "no signed transport_destination row with a transit KEX pair for {missing:?}, \
+                 passed or held here — run each canonical on a sealed-transport release so it \
+                 publishes its row (or emit it offline on its host) and pass it in \
+                 serve_transport_destinations; a bundle that seats a canonical without a pair \
+                 seeds nothing (CC 5.3.4)"
+            ),
+        ));
+    }
+    let stray: Vec<String> = rows
+        .iter()
+        .map(about)
+        .filter(|k| !serve_keys.contains(k))
+        .collect();
+    if !stray.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.transit_row_not_a_serve_node",
+            format!("serve_transport_destinations carries rows for {stray:?}, which this genesis does not seat"),
+        ));
+    }
+    Ok(())
 }
 
 // ─── recovery keys ─────────────────────────────────────────────────────────
@@ -1061,6 +1184,412 @@ async fn recovery_keys(State(st): State<FinalGenesisState>) -> Response {
     Json(serde_json::json!({ "complete": complete, "recovery_keys": rows })).into_response()
 }
 
+// ─── amend (CC 5.3.4, persist v59 #1106) ────────────────────────────────────
+//
+// The steward's ruling (2026-10-18, CIRISConstitution#172): the bundle v4
+// re-mint is an AMEND, not a second genesis. It carries the pinned bundle's
+// charter, grants, roster and heads BYTE FOR BYTE, adds only each seated
+// canonical's signed transit row, and needs only the charter's quorum of
+// holder authorizations over the new digest (2 of 3 today). Anything else
+// changing is persist's `genesis_amend_carried_bytes_changed` — that is a full
+// ceremony. No recovery-key reads: the commitments are carried.
+
+fn amend_path(home: &std::path::Path) -> std::path::PathBuf {
+    dir(home).join("amend.json")
+}
+
+/// What an amend in progress keeps between requests (persist's `AmendState`
+/// is rebuilt from it on every call — the same inputs give the same bytes).
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+struct AmendStored {
+    pinned_json: String,
+    serve_transport_destinations:
+        Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+    authorizations: Vec<ciris_persist::federation::genesis::GenesisAuthorization>,
+}
+
+fn amend_refusal(e: &ciris_persist::federation::genesis::amend::AmendRefused) -> Response {
+    use ciris_persist::federation::genesis::amend as a;
+    // Each id spelled at its call, so the localization guard sees all three.
+    if e.token == a::AMEND_CARRIED_BYTES_CHANGED {
+        refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.amend_carried_bytes_changed",
+            e.to_string(),
+        )
+    } else if e.token == a::AMEND_QUORUM_NOT_MET {
+        refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.amend_quorum_not_met",
+            e.to_string(),
+        )
+    } else {
+        refuse(
+            StatusCode::BAD_REQUEST,
+            "final_genesis.amend_input_refused",
+            e.to_string(),
+        )
+    }
+}
+
+fn amend_load(home: &std::path::Path) -> Result<AmendStored, Response> {
+    let text = std::fs::read_to_string(amend_path(home)).map_err(|_| {
+        refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.amend_not_planned",
+            "no amend is planned on this node — POST /v1/accord/final-genesis/amend/plan",
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|e| {
+        refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "final_genesis.store_failed",
+            e.to_string(),
+        )
+    })
+}
+
+fn amend_store(home: &std::path::Path, stored: &AmendStored) -> Result<(), Response> {
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(dir(home))?;
+        std::fs::write(amend_path(home), serde_json::to_vec_pretty(stored)?)
+    };
+    write().map_err(|e| {
+        refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "final_genesis.store_failed",
+            e.to_string(),
+        )
+    })
+}
+
+/// persist's `AmendState` over `stored`: re-planned (the pinned input
+/// re-verified) and every stored authorization re-added.
+async fn amend_state(
+    stored: &AmendStored,
+) -> Result<ciris_persist::federation::genesis::amend::AmendState, Response> {
+    let mut state = ciris_persist::federation::genesis::amend::AmendState::plan(
+        &stored.pinned_json,
+        stored.serve_transport_destinations.clone(),
+    )
+    .await
+    .map_err(|e| amend_refusal(&e))?;
+    for auth in &stored.authorizations {
+        state
+            .add_authorization(auth.clone())
+            .map_err(|e| amend_refusal(&e))?;
+    }
+    Ok(state)
+}
+
+fn amend_status_body(
+    state: &ciris_persist::federation::genesis::amend::AmendState,
+) -> serde_json::Value {
+    let mut signed: Vec<String> = state
+        .authorizations
+        .iter()
+        .map(|a| a.holder_key_id.clone())
+        .collect();
+    signed.sort();
+    signed.dedup();
+    let needed = state.needed();
+    serde_json::json!({
+        "mode": "amend",
+        "needed": needed,
+        "signed": signed,
+        "status": format!("{} of {needed}", signed.len()),
+        "complete": signed.len() >= needed,
+        "serve_transport_destinations": state
+            .serve_transport_destinations
+            .iter()
+            .map(|r| r.transport_destination.occurrence_key_id.clone())
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct AmendPlanRequest {
+    /// The pinned bundle to amend, as the JSON a node bakes. Omitted: the
+    /// bundle this node runs on (`canonical_genesis_bundle`).
+    #[serde(default)]
+    pinned_bundle: Option<String>,
+    /// Each seated canonical's signed transit row; any not passed is read
+    /// from this directory (as the full plan does).
+    #[serde(default)]
+    serve_transport_destinations:
+        Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+    /// Replace an amend already planned on this node.
+    #[serde(default)]
+    replace: bool,
+}
+
+/// `POST /v1/accord/final-genesis/amend/plan`.
+async fn amend_plan(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
+    let req: AmendPlanRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.bad_request",
+                e.to_string(),
+            )
+        }
+    };
+    if amend_path(&st.home).exists() && !req.replace {
+        return refuse(
+            StatusCode::CONFLICT,
+            "final_genesis.amend_already_planned",
+            "an amend is already planned on this node; pass \"replace\": true to discard it",
+        );
+    }
+    let pinned_json = match req.pinned_bundle {
+        Some(j) => j,
+        None => match serde_json::to_string(
+            ciris_persist::federation::genesis::canonical_genesis_bundle(),
+        ) {
+            Ok(j) => j,
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "final_genesis.store_failed",
+                    e.to_string(),
+                )
+            }
+        },
+    };
+    let base = match ciris_persist::federation::genesis::parse_genesis_bundle(&pinned_json) {
+        Ok(b) => b,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.amend_input_refused",
+                format!("the pinned bundle: {e}"),
+            )
+        }
+    };
+    let serve_keys: Vec<String> = base
+        .serve_nodes
+        .iter()
+        .map(|n| n.record.key_id.clone())
+        .collect();
+    let rows = match gather_serve_transport_destinations(
+        &st.engine,
+        &serve_keys,
+        req.serve_transport_destinations,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(r) = check_serve_transport_destinations(&serve_keys, &rows) {
+        return r;
+    }
+    let stored = AmendStored {
+        pinned_json,
+        serve_transport_destinations: rows,
+        authorizations: Vec::new(),
+    };
+    let state = match amend_state(&stored).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(r) = amend_store(&st.home, &stored) {
+        return r;
+    }
+    tracing::warn!(needed = state.needed(), serve_nodes = ?serve_keys,
+        "FINAL GENESIS AMEND planned — the pinned bundle carried byte for byte, each canonical's \
+         transit row added; any holders up to the charter's quorum authorize the new digest");
+    Json(amend_status_body(&state)).into_response()
+}
+
+/// `GET /v1/accord/final-genesis/amend`.
+async fn amend_status(State(st): State<FinalGenesisState>) -> Response {
+    let stored = match amend_load(&st.home) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match amend_state(&stored).await {
+        Ok(state) => Json(amend_status_body(&state)).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// `POST /v1/accord/final-genesis/amend/sign` — one holder authorizes the
+/// amended bundle's digest (the amend's only signing item).
+async fn amend_sign(State(st): State<FinalGenesisState>, body: axum::body::Bytes) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
+    let req: SignRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "final_genesis.bad_request",
+                e.to_string(),
+            )
+        }
+    };
+    let mut stored = match amend_load(&st.home) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let mut state = match amend_state(&stored).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let bytes = match state.authz_bytes() {
+        Ok(b) => b,
+        Err(e) => return amend_refusal(&e),
+    };
+    let holder = req.key_id.trim().to_string();
+    let (classical, pqc) = match sign_amend_bytes(&req, &bytes).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let auth = ciris_persist::federation::genesis::GenesisAuthorization {
+        holder_key_id: holder.clone(),
+        signature_classical: classical,
+        signature_pqc: pqc,
+    };
+    if let Err(e) = state.add_authorization(auth.clone()) {
+        return amend_refusal(&e);
+    }
+    stored.authorizations.push(auth);
+    if let Err(r) = amend_store(&st.home, &stored) {
+        return r;
+    }
+    tracing::warn!(holder = %holder, "FINAL GENESIS AMEND: a holder authorized");
+    Json(amend_status_body(&state)).into_response()
+}
+
+/// The amend's one signature, by the holder `req` names: the YubiKey + USB
+/// pair, or (test anchor, `CIRIS_TESTING_MODE`) a software holder seed.
+async fn sign_amend_bytes(req: &SignRequest, bytes: &[u8]) -> Result<(String, String), Response> {
+    #[cfg(feature = "test-anchor")]
+    if let Some(seed_b64) = req.test_holder_seed_b64.as_deref() {
+        use base64::Engine as _;
+        use ciris_persist::federation::accord_test_support::Identity;
+        use ciris_persist::federation::genesis::test_anchor_mldsa_seed;
+        if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
+            return Err(refuse(
+                StatusCode::FORBIDDEN,
+                "final_genesis.not_testing_mode",
+                "a software holder seed is accepted only with CIRIS_TESTING_MODE=true (the dry run)",
+            ));
+        }
+        let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(seed_b64.trim())
+            .ok()
+            .and_then(|v| <[u8; 32]>::try_from(v).ok())
+            .ok_or_else(|| {
+                refuse(
+                    StatusCode::BAD_REQUEST,
+                    "final_genesis.bad_request",
+                    "test_holder_seed_b64 must be base64 of exactly 32 bytes",
+                )
+            })?;
+        let identity =
+            Identity::from_seeds(req.key_id.trim(), &seed, &test_anchor_mldsa_seed(&seed))
+                .map_err(|e| {
+                    refuse(
+                        StatusCode::BAD_REQUEST,
+                        "final_genesis.signer_unavailable",
+                        format!("{e}"),
+                    )
+                })?;
+        return Ok(identity.sign_bytes(bytes));
+    }
+    sign_amend_hardware(req, bytes).await
+}
+
+#[cfg(not(feature = "pkcs11"))]
+async fn sign_amend_hardware(
+    _req: &SignRequest,
+    _bytes: &[u8],
+) -> Result<(String, String), Response> {
+    Err(refuse(
+        StatusCode::NOT_IMPLEMENTED,
+        "final_genesis.no_hardware_signer",
+        "signing needs the `pkcs11` feature (the holder's YubiKey + USB ML-DSA signer)",
+    ))
+}
+
+#[cfg(feature = "pkcs11")]
+async fn sign_amend_hardware(
+    req: &SignRequest,
+    bytes: &[u8],
+) -> Result<(String, String), Response> {
+    use ciris_verify_core::self_at_login::SelfSigner;
+    let identity = crate::accord_provision::open_holder_identity(
+        req.key_id.trim(),
+        req.mldsa_usb_path.trim(),
+        &req.pkcs11,
+    )
+    .await
+    .map_err(|(code, msg)| refuse(code, "final_genesis.signer_unavailable", msg))?;
+    identity.sign_bound(bytes).await.map_err(|e| {
+        refuse(
+            StatusCode::BAD_GATEWAY,
+            "final_genesis.sign_failed",
+            format!("authorize the amend: {e}"),
+        )
+    })
+}
+
+/// `POST /v1/accord/final-genesis/amend/finish` — assemble at the quorum,
+/// verify with the doors a booting node runs, write the v4 bundle.
+async fn amend_finish(State(st): State<FinalGenesisState>) -> Response {
+    let _ceremony = CEREMONY_LOCK.lock().await;
+    let stored = match amend_load(&st.home) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let state = match amend_state(&stored).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let done = match state.finish().await {
+        Ok(d) => d,
+        Err(e) => return amend_refusal(&e),
+    };
+    let path = bundle_path(&st.home);
+    if let Err(e) = std::fs::write(&path, &done.bundle_json) {
+        return refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "final_genesis.store_failed",
+            format!("write {}: {e}", path.display()),
+        );
+    }
+    let fingerprint = {
+        use sha2::{Digest, Sha256};
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(done.bundle_json.as_bytes()))
+        )
+    };
+    tracing::warn!(bundle = %path.display(), %fingerprint,
+        "FINAL GENESIS AMEND complete and verified — the v4 bundle seeds every canonical's transit pair");
+    Json(serde_json::json!({
+        "mode": "amend",
+        "complete": true,
+        "version": done.bundle.version,
+        "bundle_path": path.display().to_string(),
+        "bundle_sha256": fingerprint,
+        "bundle_json": done.bundle_json,
+        "serve_transport_destinations": done.bundle.serve_transport_destinations.iter()
+            .map(|r| r.transport_destination.occurrence_key_id.clone()).collect::<Vec<_>>(),
+        "verified": {
+            "quorum_verified": done.verified.quorum_verified,
+            "serve_nodes": done.verified.serve_nodes,
+            "attestations": done.verified.attestations,
+            "community_key_id": done.verified.community_key_id,
+            "founders": done.verified.founders,
+        },
+    }))
+    .into_response()
+}
+
 /// The routes, loopback-only (merged into the accord router's loopback half).
 pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
     Router::new()
@@ -1078,6 +1607,22 @@ pub fn router(engine: Arc<Engine>, home: std::path::PathBuf) -> Router {
         .route(
             "/v1/accord/final-genesis/finish",
             axum::routing::post(finish),
+        )
+        .route(
+            "/v1/accord/final-genesis/amend",
+            axum::routing::get(amend_status),
+        )
+        .route(
+            "/v1/accord/final-genesis/amend/plan",
+            axum::routing::post(amend_plan),
+        )
+        .route(
+            "/v1/accord/final-genesis/amend/sign",
+            axum::routing::post(amend_sign),
+        )
+        .route(
+            "/v1/accord/final-genesis/amend/finish",
+            axum::routing::post(amend_finish),
         )
         .with_state(FinalGenesisState { engine, home })
 }

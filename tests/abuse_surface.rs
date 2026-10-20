@@ -39,6 +39,7 @@
 //! the test went RED, and the break was reverted. A check that cannot fail is
 //! how this repo has been fooled five times.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -88,20 +89,29 @@ fn party_pqc_seed(key_id: &str) -> [u8; 32] {
     s
 }
 
-fn party_signer(key_id: &str) -> LocalSigner {
+/// The party `label`'s registered key_id: `<label>-<fp>` of its own Ed25519
+/// key — persist v59 (CIRISPersist#1103) refuses any other shape at registration.
+fn id(label: &str) -> String {
+    let ed = SigningKey::from_bytes(&party_ed_seed(label));
+    ciris_verify_core::fedcode::derive_key_id(label, ed.verifying_key().as_bytes())
+}
+
+/// The party `label`'s signer, named by its registered id ([`id`]).
+fn party_signer(label: &str) -> LocalSigner {
+    let key_id = id(label);
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&party_pqc_seed(key_id), format!("{key_id}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&party_pqc_seed(label), format!("{key_id}-pqc"))
             .expect("party ML-DSA-65 seed"),
     );
     LocalSigner::from_parts(
-        SigningKey::from_bytes(&party_ed_seed(key_id)),
-        key_id.to_string(),
+        SigningKey::from_bytes(&party_ed_seed(label)),
+        key_id.clone(),
         Some(pqc),
         Some(format!("{key_id}-pqc")),
     )
 }
 
-/// **The public bootstrap door.** Register `key_id` claiming `id_type` through
+/// **The public bootstrap door.** Register party `label` (under [`id`]) claiming `id_type` through
 /// [`Engine::register_federation_key`] — the canonical admission gate, which
 /// proves key CUSTODY (a self-signed hybrid proof-of-possession) and whatever
 /// else persist chooses to demand of the claimed `identity_type`.
@@ -111,10 +121,12 @@ fn party_signer(key_id: &str) -> LocalSigner {
 /// the raw store call answers a different one.
 async fn self_register(
     engine: &Engine,
-    key_id: &str,
+    label: &str,
     id_type: &str,
 ) -> Result<LocalSigner, ciris_server::attest::Error> {
-    let signer = party_signer(key_id);
+    let signer = party_signer(label);
+    let key_id = id(label);
+    let key_id = key_id.as_str();
     // Through the ONE door (CIRISServer#402): the registration envelope now BINDS
     // ITS SUBJECT. The hand-rolled `{"key_id": …}` shape named neither the
     // identity type nor either pubkey, and persist v31 refuses it — an envelope
@@ -257,8 +269,8 @@ async fn a_self_asserted_witness_can_no_longer_forge_age_assurance_about_a_third
         &abuser,
         "forged-age-assurance",
         attestation_type::SCORES,
-        "abuse-victim",
-        scores_envelope("age_assurance:provider:adult:v1", "abuse-victim", 1.0),
+        &id("abuse-victim"),
+        scores_envelope("age_assurance:provider:adult:v1", &id("abuse-victim"), 1.0),
         Utc::now(),
     )
     .await;
@@ -273,13 +285,13 @@ async fn a_self_asserted_witness_can_no_longer_forge_age_assurance_about_a_third
     // And nothing reads back as a witness-attested level.
     let rows = engine
         .federation_directory()
-        .list_attestations_for("abuse-victim")
+        .attestations_to_all(&id("abuse-victim"))
         .await
         .expect("read the victim's rows");
     assert!(
         !rows
             .iter()
-            .any(|r| r.attesting_key_id == "abuse-fake-witness"),
+            .any(|r| r.attesting_key_id == id("abuse-fake-witness")),
         "the refused age-assurance row must not read back"
     );
 }
@@ -330,8 +342,12 @@ async fn a_self_asserted_detector_can_forge_detection_rows_about_a_third_party_t
         &abuser,
         "forged-detection",
         attestation_type::SCORES,
-        "abuse-victim-detect",
-        scores_envelope("detection:correlated_action:v1", "abuse-victim-detect", 1.0),
+        &id("abuse-victim-detect"),
+        scores_envelope(
+            "detection:correlated_action:v1",
+            &id("abuse-victim-detect"),
+            1.0,
+        ),
         Utc::now(),
     )
     .await;
@@ -391,7 +407,7 @@ async fn a_self_asserted_substrate_persist_cannot_author_hard_case_rows() {
         &abuser,
         "forged-hard-case",
         "hard_case:admin_action:v1",
-        "abuse-victim-2",
+        &id("abuse-victim-2"),
         serde_json::json!({
             "dimension": "hard_case:admin_action:v1",
             "op": "deadmit",
@@ -554,8 +570,8 @@ async fn any_admitted_key_scores_any_third_party_today() {
         &abuser,
         "unconsented-judgement",
         attestation_type::SCORES,
-        "abuse-victim-3",
-        scores_envelope("health:liveness:v1", "abuse-victim-3", 0.0),
+        &id("abuse-victim-3"),
+        scores_envelope("health:liveness:v1", &id("abuse-victim-3"), 0.0),
         Utc::now(),
     )
     .await;
@@ -566,11 +582,12 @@ async fn any_admitted_key_scores_any_third_party_today() {
 
     let rows = engine
         .federation_directory()
-        .list_attestations_for("abuse-victim-3")
+        .attestations_to_all(&id("abuse-victim-3"))
         .await
         .expect("read the victim's rows");
     assert!(
-        rows.iter().any(|r| r.attesting_key_id == "abuse-stranger"),
+        rows.iter()
+            .any(|r| r.attesting_key_id == id("abuse-stranger")),
         "and it is readable as a fact about the victim, under the victim's own key"
     );
 }
@@ -605,8 +622,8 @@ async fn capacity_self_inflation_is_refused_at_every_door() {
         &abuser,
         "capacity-self-fed",
         attestation_type::SCORES,
-        "abuse-capacity-self",
-        scores_envelope("capacity:composite:v1", "abuse-capacity-self", 1.0),
+        &id("abuse-capacity-self"),
+        scores_envelope("capacity:composite:v1", &id("abuse-capacity-self"), 1.0),
         Utc::now(),
     )
     .await;
@@ -622,13 +639,13 @@ async fn capacity_self_inflation_is_refused_at_every_door() {
     // (b) local tier, self-attested — the door #589/AV-83 found open.
     let local = ciris_persist::federation::types::LocalAttestationInput {
         attestation_id: None,
-        attesting_key_id: "abuse-capacity-self".into(),
-        attested_key_id: Some("abuse-capacity-self".into()),
+        attesting_key_id: id("abuse-capacity-self"),
+        attested_key_id: Some(id("abuse-capacity-self")),
         attestation_type: attestation_type::SCORES.into(),
         weight: None,
         expires_at: None,
         attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            scores_envelope("capacity:composite:v1", "abuse-capacity-self", 1.0),
+            scores_envelope("capacity:composite:v1", &id("abuse-capacity-self"), 1.0),
         )
         .expect("envelope"),
         subject_key_ids: Vec::new(),
@@ -653,8 +670,8 @@ async fn capacity_self_inflation_is_refused_at_every_door() {
         &scorer,
         "capacity-third-party-unconsented",
         attestation_type::SCORES,
-        "abuse-capacity-self",
-        scores_envelope("capacity:composite:v1", "abuse-capacity-self", 1.0),
+        &id("abuse-capacity-self"),
+        scores_envelope("capacity:composite:v1", &id("abuse-capacity-self"), 1.0),
         Utc::now(),
     )
     .await;
@@ -695,7 +712,7 @@ async fn a_two_key_sybil_still_inflates_its_own_capacity() {
         &subject,
         "sybil-analyze-grant",
         attestation_type::SCORES,
-        "sybil-scorer",
+        &id("sybil-scorer"),
         serde_json::json!({
             "dimension": "consent:state:granted:v1",
             "score": 1.0,
@@ -704,7 +721,7 @@ async fn a_two_key_sybil_still_inflates_its_own_capacity() {
             "witness_relation": "self",
             "stake": "reputational",
             "scope": ["analyze"],
-            "attested_key_id": "sybil-scorer",
+            "attested_key_id": &id("sybil-scorer"),
         }),
         Utc::now() - Duration::seconds(60),
     )
@@ -717,8 +734,8 @@ async fn a_two_key_sybil_still_inflates_its_own_capacity() {
         &scorer,
         "sybil-self-inflation",
         attestation_type::SCORES,
-        "sybil-subject",
-        scores_envelope("capacity:composite:v1", "sybil-subject", 1.0),
+        &id("sybil-subject"),
+        scores_envelope("capacity:composite:v1", &id("sybil-subject"), 1.0),
         Utc::now(),
     )
     .await;
@@ -814,8 +831,8 @@ async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
         &abuser,
         "av77-before",
         attestation_type::SCORES,
-        "av77-victim",
-        scores_envelope("health:liveness:v1", "av77-victim", 1.0),
+        &id("av77-victim"),
+        scores_envelope("health:liveness:v1", &id("av77-victim"), 1.0),
         Utc::now(),
     )
     .await;
@@ -827,7 +844,7 @@ async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
     let deadmit = node_signed_row(
         &engine,
         "av77-deadmission",
-        "av77-abuser",
+        &id("av77-abuser"),
         serde_json::json!({
             "dimension": "revocation:peer_admission:v1",
             "score": -1.0,
@@ -835,7 +852,7 @@ async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
             "epistemic_mode": "direct",
             "witness_relation": "external",
             "stake": "reputational",
-            "attested_key_id": "av77-abuser",
+            "attested_key_id": &id("av77-abuser"),
         }),
     )
     .await;
@@ -848,8 +865,8 @@ async fn av77_deadmission_stops_the_writes_and_admin_ops_emits_it() {
         &abuser,
         "av77-after",
         attestation_type::SCORES,
-        "av77-victim",
-        scores_envelope("health:liveness:v1", "av77-victim", 1.0),
+        &id("av77-victim"),
+        scores_envelope("health:liveness:v1", &id("av77-victim"), 1.0),
         Utc::now(),
     )
     .await;
@@ -932,7 +949,7 @@ async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
     let deadmit = node_signed_row(
         &engine,
         "av77-deadmission-2",
-        "av77-abuser-2",
+        &id("av77-abuser-2"),
         serde_json::json!({
             "dimension": "revocation:peer_admission:v1",
             "score": -1.0,
@@ -940,7 +957,7 @@ async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
             "epistemic_mode": "direct",
             "witness_relation": "external",
             "stake": "reputational",
-            "attested_key_id": "av77-abuser-2",
+            "attested_key_id": &id("av77-abuser-2"),
         }),
     )
     .await;
@@ -951,7 +968,7 @@ async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
         &abuser,
         "av77-retaliation",
         attestation_type::SCORES,
-        "av77-bystander",
+        &id("av77-bystander"),
         serde_json::json!({
             "dimension": "revocation:peer_admission:v1",
             "score": -1.0,
@@ -959,7 +976,7 @@ async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
             "epistemic_mode": "direct",
             "witness_relation": "external",
             "stake": "reputational",
-            "attested_key_id": "av77-bystander",
+            "attested_key_id": &id("av77-bystander"),
         }),
         Utc::now(),
     )
@@ -971,7 +988,8 @@ async fn a_deadmitted_key_cannot_write_deadmission_rows_either() {
          that sanctions others.",
     );
     assert!(
-        format!("{err:?}").contains("de-admitted") && format!("{err:?}").contains("av77-abuser-2"),
+        format!("{err:?}").contains("de-admitted")
+            && format!("{err:?}").contains(&id("av77-abuser-2")),
         "the refusal must be AV-77 naming the sanctioned author, not some incidental Err — \
          otherwise this test passes while the exemption it guards has stopped being checked. \
          Got: {err:?}"
@@ -1056,8 +1074,8 @@ async fn the_peer_write_quota_refuses_a_flood_and_nothing_here_counts_it() {
             &flooder,
             &format!("flood-{i}"),
             attestation_type::SCORES,
-            "quota-victim",
-            scores_envelope("health:liveness:v1", "quota-victim", 1.0),
+            &id("quota-victim"),
+            scores_envelope("health:liveness:v1", &id("quota-victim"), 1.0),
             now + Duration::milliseconds(i as i64),
         )
         .await;

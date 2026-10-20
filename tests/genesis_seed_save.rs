@@ -47,6 +47,7 @@ fn bundle() -> GenesisBundle {
         family_key_id: "fam-test".to_string(),
         holders: Vec::new(),
         serve_nodes: Vec::new(),
+        serve_transport_destinations: Vec::new(),
         consensus_protocol: "quorum:2/3".to_string(),
         attestations: Vec::new(),
         roster_records: Vec::new(),

@@ -17,6 +17,7 @@
 //! Harness (engine + hybrid signers + key registration) mirrors
 //! `tests/peer_replication.rs`.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
@@ -89,7 +90,14 @@ struct Attester {
 }
 
 impl Attester {
-    fn new(key_id: &str, seed: u8) -> Self {
+    fn new(label: &str, seed: u8) -> Self {
+        // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+        let key_id = &ciris_verify_core::fedcode::derive_key_id(
+            label,
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
         let pqc = Arc::new(
             MlDsa65SoftwareSigner::from_seed_bytes(&[seed ^ 0xFF; 32], format!("{key_id}-pqc"))
                 .expect("attester ML-DSA-65 seed"),
@@ -321,11 +329,22 @@ async fn spray_and_retract_arbitrage_is_refused() {
 
     // (1) The SUBSTRATE admitted every row — the countermeasure is NOT a wire
     //     refusal (CC 2.4.1.1 MUST-admit / CC 4.1.2 "no new wire primitives").
-    let rows = engine
+    //     persist v59: registration also wrote the attester's own `key:record:v1`
+    //     row (the Key plane carries the record as a row); it is not part of the
+    //     spray, so it is left out of the count.
+    let rows: Vec<_> = engine
         .federation_directory()
-        .list_attestations_by(&bad.key_id)
+        .attestations_by_all(&bad.key_id)
         .await
-        .expect("read the arbitrager's rows");
+        .expect("read the arbitrager's rows")
+        .into_iter()
+        .filter(|r| {
+            r.attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                != Some(ciris_persist::federation::key_plane::KEY_RECORD_DIMENSION)
+        })
+        .collect();
     assert_eq!(
         rows.len(),
         30 + 26 + 2,

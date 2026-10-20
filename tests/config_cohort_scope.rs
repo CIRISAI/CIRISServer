@@ -28,6 +28,7 @@
 //!
 //! Engine setup mirrors `tests/graph_config.rs` (an in-memory hybrid-signed node).
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
@@ -95,7 +96,7 @@ async fn latest_config_row(engine: &Arc<Engine>, key: &str) -> Attestation {
     let nk = node_key_id(engine).await;
     let rows = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list attestations by node");
     rows.into_iter()

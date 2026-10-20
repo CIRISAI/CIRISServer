@@ -10,6 +10,7 @@
 //! read it the way `add_members` does. Every intermediate state is printed, so
 //! a red names the step.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -74,7 +75,7 @@ async fn a_shared_self_room_key_package_is_found_by_the_creators_lookup() {
     .await;
     eprintln!("SHARE: {crossing:?}");
 
-    for a in dir.list_attestations_by(&node).await.expect("list") {
+    for a in dir.attestations_by_all(&node).await.expect("list") {
         eprintln!(
             "ROW id={} scope={} tier={} refs={:?} target={:?} has_bytes={}",
             a.attestation_id,

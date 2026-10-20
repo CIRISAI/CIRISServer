@@ -23,6 +23,7 @@
 //! `tests/federation_admin.rs`; the assertions here are entirely about the two new
 //! gates in front of it.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -45,7 +46,14 @@ use ciris_server::graph_config::{set_config, ConfigScope, ConfigValue};
 use ciris_server::peer::CONSENT_DIMENSION;
 
 const NODE_A_KEY_ID: &str = "ciris-server";
-const PEER_KEY_ID: &str = "ciris-status";
+const PEER_ALIAS: &str = "ciris-status";
+
+/// The peer's key id, derived from its own Ed25519 key (persist v59 #1103:
+/// registration refuses an id that is not `<label>-<fingerprint>`).
+fn peer_key_id() -> String {
+    let ed = SigningKey::from_bytes(&[0xB0; 32]);
+    ciris_verify_core::fedcode::derive_key_id(PEER_ALIAS, ed.verifying_key().as_bytes())
+}
 const OWNER_USER_KEY_ID: &str = "ciris-owner-user";
 const OWNER_ED_SEED: [u8; 32] = [0xF1; 32];
 const OWNER_PQC_SEED: [u8; 32] = [0xF2; 32];
@@ -231,15 +239,15 @@ async fn self_key_record_json(engine: &Engine) -> String {
 /// any record it is pasted onto (CIRISPersist#659).
 async fn peer_signed_key_record() -> SignedKeyRecord {
     let ed = SigningKey::from_bytes(&[0xB0; 32]);
-    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{PEER_KEY_ID}-pqc"))
+    let mldsa = MlDsa65SoftwareSigner::from_seed_bytes(&[0xB1; 32], format!("{PEER_ALIAS}-pqc"))
         .expect("peer ML-DSA-65 seed");
     let now = chrono::Utc::now();
     let ed_pub = BASE64.encode(ed.verifying_key().to_bytes());
     let pqc_pub = BASE64.encode(mldsa.public_key().await.expect("ml-dsa pk"));
-    let mut envelope = serde_json::json!({ "key_id": PEER_KEY_ID });
+    let mut envelope = serde_json::json!({ "key_id": peer_key_id() });
     ciris_persist::federation::admission::bind_subject_into_envelope(
         &mut envelope,
-        PEER_KEY_ID,
+        &peer_key_id(),
         identity_type::WITNESS,
         &ed_pub,
         Some(&pqc_pub),
@@ -254,19 +262,19 @@ async fn peer_signed_key_record() -> SignedKeyRecord {
     bound.extend_from_slice(&ed_sig);
     let pqc_sig = mldsa.sign(&bound).await.expect("ml-dsa sign peer reg");
     let record = KeyRecord {
-        key_id: PEER_KEY_ID.to_string(),
+        key_id: peer_key_id(),
         pubkey_ed25519_base64: ed_pub,
         pubkey_ml_dsa_65_base64: Some(pqc_pub),
         algorithm: algorithm::HYBRID.into(),
         identity_type: identity_type::WITNESS.into(),
-        identity_ref: PEER_KEY_ID.to_string(),
+        identity_ref: peer_key_id(),
         valid_from: now,
         valid_until: None,
         registration_envelope: envelope,
         original_content_hash,
         scrub_signature_classical: BASE64.encode(ed_sig),
         scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
-        scrub_key_id: PEER_KEY_ID.to_string(),
+        scrub_key_id: peer_key_id(),
         scrub_timestamp: now,
         pqc_completed_at: Some(now),
         persist_row_hash: String::new(),
@@ -359,7 +367,7 @@ async fn authored_grant(engine: &Arc<Engine>) -> bool {
     let key_id = node_key_id(engine).await;
     engine
         .federation_directory()
-        .list_attestations_by(&key_id)
+        .attestations_by_all(&key_id)
         .await
         .expect("list attestations by node")
         .iter()
@@ -374,7 +382,7 @@ async fn authored_grant(engine: &Arc<Engine>) -> bool {
 async fn peer_admitted(engine: &Arc<Engine>) -> bool {
     engine
         .federation_directory()
-        .lookup_public_key(PEER_KEY_ID)
+        .lookup_public_key(&peer_key_id())
         .await
         .expect("lookup peer key")
         .is_some()
@@ -384,7 +392,7 @@ async fn peer_admitted(engine: &Arc<Engine>) -> bool {
 /// announcement).
 async fn peering_body(wire: serde_json::Value) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "peer_key_id": PEER_KEY_ID,
+        "peer_key_id": peer_key_id(),
         "peer_key_record": peer_signed_key_record().await,
         "attestation_prefixes": ["capacity:"],
     });

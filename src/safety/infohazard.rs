@@ -64,6 +64,7 @@
 //! impossible: the fabric never returns `allow` for a flagged item until the
 //! viewer's signed consent is on the graph.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -419,7 +420,7 @@ pub async fn subject_flag(
 ) -> Result<Option<ContentFlag>, String> {
     let directory = engine.federation_directory();
     let rows = directory
-        .list_attestations_for(subject_key_id)
+        .attestations_to_all(subject_key_id)
         .await
         .map_err(|e| format!("list flags for subject: {e}"))?;
     let now = Utc::now();

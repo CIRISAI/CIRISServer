@@ -1754,6 +1754,11 @@ mod tests {
         );
         // The storage CHECKs want real-length signature bytes.
         event.canonical_bytes = b"canon".to_vec();
+        // persist v59 refuses a detection row whose signer is not a registered
+        // federation key (`federation_attester_key_unknown`), so the fixture's
+        // signer is seeded first, straight into the directory, as the detector
+        // identity a `detection:` row requires.
+        register_fixture_signer(&engine, &event.signing_key_id).await;
         engine
             .sqlite_backend()
             .expect("sqlite backend")
@@ -1761,6 +1766,43 @@ mod tests {
             .await
             .expect("seed one detection event");
         Arc::new(engine)
+    }
+
+    async fn register_fixture_signer(engine: &ciris_persist::prelude::Engine, key_id: &str) {
+        use base64::Engine as _;
+        use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord};
+        let now = chrono::Utc::now();
+        let record = KeyRecord {
+            key_id: key_id.to_owned(),
+            pubkey_ed25519_base64: base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[0x5Bu8; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+            pubkey_ml_dsa_65_base64: None,
+            algorithm: algorithm::HYBRID.into(),
+            identity_type: identity_type::LENSCORE_DETECTOR.into(),
+            identity_ref: key_id.to_owned(),
+            valid_from: now,
+            valid_until: None,
+            registration_envelope: serde_json::json!({ "key_id": key_id }),
+            original_content_hash: String::new(),
+            scrub_signature_classical: String::new(),
+            scrub_signature_pqc: None,
+            scrub_key_id: key_id.to_owned(),
+            scrub_timestamp: now,
+            pqc_completed_at: None,
+            persist_row_hash: String::new(),
+            capability_roles: Vec::new(),
+            attestation_evidence: None,
+            consent_role: None,
+            additional_scrubs: Vec::new(),
+        };
+        engine
+            .federation_directory()
+            .put_public_key(ciris_persist::federation::SignedKeyRecord { record })
+            .await
+            .expect("seed the fixture signer's key");
     }
 
     fn state_at(engine: Arc<ciris_persist::prelude::Engine>, fidelity: RowFidelity) -> NodeState {

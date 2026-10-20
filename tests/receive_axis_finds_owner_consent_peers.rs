@@ -117,7 +117,10 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
         .await
         .expect("the node's derived key_id");
     register(&engine, &node_signer, &node, identity_type::NODE).await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
+    // The peer's REGISTERED id is `<alias>-<fp>` of its own key — persist v59
+    // (#1103, CC 2.6.8) refuses the bare alias.
+    let peer = signer_for(PEER).derived_key_id();
+    register(&engine, &signer_for(PEER), &peer, identity_type::NODE).await;
 
     // Unclaimed: nothing to pull FOR, and nothing to ask.
     let own = ciris_server::receive_axis::own_keys(&node);
@@ -159,7 +162,7 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
         .expect("the owner claims the node");
 
     // ── consent, authored by the OWNER (the claimed shape) ──
-    ciris_server::peer::emit_replication_consent(&engine, &node, PEER, PREFIXES)
+    ciris_server::peer::emit_replication_consent(&engine, &node, &peer, PREFIXES)
         .await
         .expect("consent authored as the owner");
     let by_owner = engine
@@ -170,7 +173,7 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
     assert!(
         by_owner
             .iter()
-            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(PEER)),
+            .any(|g| g.subject_key_ids.first().map(String::as_str) == Some(peer.as_str())),
         "precondition: the grant is the OWNER's, not the machine's"
     );
 
@@ -182,7 +185,7 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
         .await
         .expect("machine-authored consent peers");
     assert!(
-        !machine_only.iter().any(|p| p == PEER),
+        !machine_only.contains(&peer),
         "the old read must not find the owner's grant, or this test pins nothing: \
          {machine_only:?}"
     );
@@ -197,7 +200,7 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
     );
     assert_eq!(
         ciris_server::receive_axis::peers_to_ask(&engine, &own).await,
-        vec![PEER.to_string()],
+        vec![peer.clone()],
         "a claimed node finds the peer its owner consented to (CIRISServer#601)"
     );
 
@@ -214,7 +217,7 @@ async fn a_claimed_node_finds_the_peers_its_owner_consented_to() {
     );
     assert_eq!(
         ciris_server::receive_axis::peers_to_ask(&engine, &split).await,
-        vec![PEER.to_string()],
+        vec![peer.clone()],
         "the peer is found through the node key when the caller names the actor"
     );
     assert_eq!(

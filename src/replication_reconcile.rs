@@ -28,6 +28,7 @@
 //! The loop is robust: a directory read error logs + skips the tick and never
 //! panics the controller.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ciris_edge::replication::{ReplicationPeer, ReplicationRuntime};
@@ -101,7 +102,7 @@ async fn explain_awaiting_actor(engine: &Engine, node_key_id: &str, awaiting: u6
         // The owner-binding. Is there a federation-scope `delegates_to` by the
         // same owner onto the same node — i.e. has the owner announced?
         let announced = dir
-            .list_attestations_for(&row.attested_key_id)
+            .attestations_to_all(&row.attested_key_id)
             .await
             .unwrap_or_default()
             .iter()

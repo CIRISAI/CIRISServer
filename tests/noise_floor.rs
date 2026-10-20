@@ -323,7 +323,7 @@ async fn signed_agg_inputs(
     source_corpus: &str,
 ) -> (AggregationMetaVerifyInputsV1, String) {
     let (ed_sk, _ed_pk_b64, mldsa) = producer_keys();
-    let commitment = member_commitment(member_ids);
+    let commitment = member_commitment(member_ids).expect("distinct source ids");
     let commitment_hex = hex_lower(&commitment);
     // §19.7.1.3 (verify v10 / CIRISVerify#191, CC 6.1.2.1.2 R9): the mass Merkle
     // root is over `(member_id, mass)` leaves. This fixture is a BALANCED fold —
@@ -991,7 +991,7 @@ async fn dominance_and_multiplicity_are_rejected_on_v3() {
         source_count: src,
         n_eff,
         max_source_multiplicity: multiplicity,
-        member_commitment: member_commitment(&member_ids),
+        member_commitment: member_commitment(&member_ids).expect("distinct source ids"),
         noise_floor_descriptor: "mean+stddev".to_owned(),
         mass_commitment: mass_root(masses),
     };
@@ -1145,4 +1145,97 @@ async fn measured_noise_floor_numbers() {
             sum_fid / TRIALS as f64
         );
     }
+}
+
+/// **CC 6.1.1: a repeated member id is refused before hashing**
+/// (CIRISVerify#314, CIRISPersist#1102, `CLM-member-commitment-unique`).
+///
+/// The WholenessWitness Merkle duplicates an odd last node, so with a repeated
+/// leaf `{a,b,c,c}` hashes to the same root as `{a,b,c}`: a padded source list
+/// would pass descent against an honest three-member tier while claiming four
+/// sources. persist v59 refuses the repeat at both doors, before anything is
+/// read or hashed: `member_commitment` and the descent
+/// (`federation_malformed_row` / `aggregate_source_duplicate`).
+#[tokio::test]
+async fn a_repeated_member_id_is_refused_before_hashing() {
+    let backend = migrated_sqlite().await;
+    let source_corpus = "trace";
+    let composite_corpus = aggregate_corpus_kind(source_corpus);
+    let member_ids: Vec<String> = ["nf-dup-a", "nf-dup-b", "nf-dup-c"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    for (i, mid) in member_ids.iter().enumerate() {
+        let (m, p, _c) = encode_and_manifest(mid, source_corpus, &payload_for(40 + i as u8)).await;
+        backend
+            .put_fountain_content(&m, &p)
+            .await
+            .expect("admit member");
+    }
+    // An HONEST tier over {a,b,c}.
+    let composite_cid = "nf-dup-composite";
+    let (cmanifest, csyms, _cc) =
+        encode_and_manifest(composite_cid, &composite_corpus, &payload_for(220)).await;
+    let (verif, commitment_hex) =
+        signed_agg_inputs(&member_ids, composite_cid, source_corpus).await;
+    let agg = AggregationMetaV1 {
+        aggregate_content_id: composite_cid.to_owned(),
+        source_corpus_kind: source_corpus.to_owned(),
+        aggregation_level: 1,
+        fan_in: member_ids.len() as u64,
+        member_commitment: commitment_hex,
+        aggregation_meta: vec![0x19, 0x07],
+        verification: verif,
+    };
+    backend
+        .put_aggregated_tier(&cmanifest, &csyms, &agg, 1_000)
+        .await
+        .expect("admit the honest tier");
+
+    let mut padded = member_ids.clone();
+    padded.push("nf-dup-c".to_owned());
+
+    // 1. The commitment door.
+    assert!(
+        member_commitment(&member_ids).is_ok(),
+        "distinct ids commit"
+    );
+    let refused = member_commitment(&padded).expect_err("a repeated id never reaches the hash");
+    assert_eq!(refused.kind(), "federation_malformed_row", "{refused:#}");
+    assert!(
+        matches!(
+            &refused,
+            ciris_persist::federation::Error::MalformedRow { reason, .. }
+                if *reason == ciris_persist::federation::malformed_row::AGGREGATE_SOURCE_DUPLICATE
+        ),
+        "refused aggregate_source_duplicate: {refused:?}"
+    );
+
+    // 2. The descent door, against the honest tier.
+    let sources: Vec<(String, String)> = padded
+        .iter()
+        .map(|id| (id.clone(), source_corpus.to_owned()))
+        .collect();
+    let err = ciris_persist::fountain::descend_aggregated_sources_on_backend(
+        &backend,
+        composite_cid,
+        &sources,
+        ciris_verify_core::holonomic::ConsentState::Active,
+        false,
+        None,
+    )
+    .await
+    .expect_err("a padded source list never descends");
+    assert!(
+        matches!(
+            &err,
+            ciris_persist::store::Error::MalformedRow(inner)
+                if matches!(
+                    inner.as_ref(),
+                    ciris_persist::federation::Error::MalformedRow { reason, .. }
+                        if *reason == ciris_persist::federation::malformed_row::AGGREGATE_SOURCE_DUPLICATE
+                )
+        ),
+        "refused federation_malformed_row / aggregate_source_duplicate before any read: {err:?}"
+    );
 }

@@ -232,6 +232,9 @@ pub enum Error {
     Sign(String),
     /// The store refused or was unavailable.
     Persist(String),
+    /// persist v59 (CC 3.3.6.3): the self roster's door HELD the change as a
+    /// proposal — not a refusal; it lands by the quorum or the lone path.
+    SelfRosterHeld(String),
 }
 
 impl std::fmt::Display for Error {
@@ -242,6 +245,10 @@ impl std::fmt::Display for Error {
             Self::Signature(e) => write!(f, "attestation signature: {e}"),
             Self::Sign(e) => write!(f, "attestation signing: {e}"),
             Self::Persist(e) => write!(f, "attestation store: {e}"),
+            Self::SelfRosterHeld(e) => write!(
+                f,
+                "attestation held by the self roster (federation_self_roster_not_landed): {e}"
+            ),
         }
     }
 }
@@ -516,7 +523,13 @@ pub async fn put(engine: &Engine, row: Attestation) -> Result<String, Error> {
         .federation_directory()
         .put_attestation_authored(SignedAttestation { attestation: row })
         .await
-        .map_err(|e| Error::Persist(e.to_string()))?;
+        .map_err(|e| {
+            if e.kind() == "federation_self_roster_not_landed" {
+                Error::SelfRosterHeld(e.to_string())
+            } else {
+                Error::Persist(e.to_string())
+            }
+        })?;
     // A config row written through this door, or a withdraw / recant that may
     // retire one: the config snapshot folds all of that at scan time, so the
     // next read must scan (CIRISServer#557).

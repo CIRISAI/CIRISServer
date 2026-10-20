@@ -28,6 +28,7 @@
 //! `put_attestation` admit surface the routed coordinator ultimately calls — so
 //! the Node-A logic is proven without standing up the transport.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -46,7 +47,16 @@ use ciris_server::peer::{self, CONSENT_DIMENSION};
 use ciris_server::PeerB;
 
 const NODE_A_KEY_ID: &str = "ciris-server";
-const NODE_B_KEY_ID: &str = "ciris-status";
+/// `ciris-status`'s federation key id: `<label>-<fingerprint>` of its own Ed25519 key
+/// (persist v59 #1103, CC 2.6.8 refuses a hand-written id).
+fn node_b_key_id() -> String {
+    ciris_verify_core::fedcode::derive_key_id(
+        "ciris-status",
+        SigningKey::from_bytes(&[0xB0; 32])
+            .verifying_key()
+            .as_bytes(),
+    )
+}
 
 /// Stand up Node A: in-memory substrate keyed by a HYBRID node-identity signer
 /// (Ed25519 + ML-DSA-65 software seed) so `sign_hybrid` (the consent emit) works.
@@ -83,7 +93,7 @@ impl NodeB {
             ed: SigningKey::from_bytes(&[0xB0; 32]),
             mldsa: MlDsa65SoftwareSigner::from_seed_bytes(
                 &[0xB1; 32],
-                format!("{NODE_B_KEY_ID}-pqc"),
+                format!("{}-pqc", node_b_key_id()),
             )
             .expect("node-b ML-DSA-65 seed"),
         }
@@ -109,10 +119,10 @@ impl NodeB {
         // Bound by persist's OWN binder — the one `attest::register_key` calls —
         // because this record is a WIRE artifact A receives from B, not something
         // this node mints.
-        let mut envelope = serde_json::json!({ "key_id": NODE_B_KEY_ID });
+        let mut envelope = serde_json::json!({ "key_id": node_b_key_id() });
         ciris_persist::federation::admission::bind_subject_into_envelope(
             &mut envelope,
-            NODE_B_KEY_ID,
+            &node_b_key_id(),
             identity_type::WITNESS,
             &ed_pub,
             Some(&pqc_pub),
@@ -130,13 +140,13 @@ impl NodeB {
         let pqc_sig = self.mldsa.sign(&bound).await.expect("ml-dsa sign B reg");
 
         let record = KeyRecord {
-            key_id: NODE_B_KEY_ID.to_string(),
+            key_id: node_b_key_id(),
             pubkey_ed25519_base64: ed_pub,
             pubkey_ml_dsa_65_base64: Some(pqc_pub),
             algorithm: algorithm::HYBRID.into(),
             // B (ciris-status) speaks ABOUT services as an external witness.
             identity_type: identity_type::WITNESS.into(),
-            identity_ref: NODE_B_KEY_ID.to_string(),
+            identity_ref: node_b_key_id(),
             valid_from: now,
             valid_until: None,
             registration_envelope: envelope,
@@ -144,7 +154,7 @@ impl NodeB {
             scrub_signature_classical: BASE64.encode(ed_sig),
             scrub_signature_pqc: Some(BASE64.encode(&pqc_sig)),
             // Self-signed proof-of-possession: scrub_key_id == key_id.
-            scrub_key_id: NODE_B_KEY_ID.to_string(),
+            scrub_key_id: node_b_key_id(),
             scrub_timestamp: now,
             pqc_completed_at: Some(now),
             persist_row_hash: String::new(),
@@ -159,7 +169,7 @@ impl NodeB {
     /// The peer-config A registers B from (v8.8.0: B's self-signed record).
     async fn peer_config(&self) -> PeerB {
         PeerB {
-            key_id: NODE_B_KEY_ID.to_string(),
+            key_id: node_b_key_id(),
             key_record: self.signed_key_record().await,
         }
     }
@@ -188,7 +198,7 @@ impl NodeB {
         // (canonical || ed_sig) — exactly what the federation-tier ingest gate
         // (CC 5.3.2.4.3.1) re-derives and Strict-hybrid-verifies.
         let stamped = ciris_server::attest::Emit::stamp(
-            NODE_B_KEY_ID,
+            &node_b_key_id(),
             ciris_server::attest::Spec::new(
                 attestation_type::SCORES,
                 cohort_scope::FEDERATION,
@@ -274,7 +284,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
 
     let b_key = engine
         .federation_directory()
-        .lookup_public_key(NODE_B_KEY_ID)
+        .lookup_public_key(&node_b_key_id())
         .await
         .expect("lookup B key")
         .expect("B key present after registration");
@@ -292,11 +302,22 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
         .await
         .expect("B-signed health:liveness must be admitted into A's corpus");
 
-    let by_b = engine
+    // persist v59: registering B's key also writes B's own `key:record:v1`
+    // row (the Key plane carries the record as a row); that is not a
+    // replicated corpus row, so it is left out of the count.
+    let by_b: Vec<_> = engine
         .federation_directory()
-        .list_attestations_by(NODE_B_KEY_ID)
+        .attestations_by_all(&node_b_key_id())
         .await
-        .expect("list attestations by B");
+        .expect("list attestations by B")
+        .into_iter()
+        .filter(|r| {
+            r.attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                != Some(ciris_persist::federation::key_plane::KEY_RECORD_DIMENSION)
+        })
+        .collect();
     assert_eq!(by_b.len(), 1, "exactly one B-attested row admitted");
     assert_eq!(
         by_b[0]
@@ -311,7 +332,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     let emitted = peer::emit_replication_consent(
         &engine,
         &nk,
-        NODE_B_KEY_ID,
+        &node_b_key_id(),
         &peer::default_attestation_prefixes(),
     )
     .await
@@ -324,7 +345,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     // The directed consent row exists: scores, subject = [B], federation tier.
     let by_a = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list attestations by A");
     let grant = by_a
@@ -340,7 +361,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     assert_eq!(grant.attesting_key_id, nk);
     assert_eq!(
         grant.subject_key_ids,
-        vec![NODE_B_KEY_ID.to_string()],
+        vec![node_b_key_id()],
         "consent must be DIRECTED at the SINGLE recipient B (subject_key_ids = [B])"
     );
     assert_eq!(grant.tier, attestation_tier::FEDERATION);
@@ -413,7 +434,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     let again = peer::emit_replication_consent(
         &engine,
         &nk,
-        NODE_B_KEY_ID,
+        &node_b_key_id(),
         &peer::default_attestation_prefixes(),
     )
     .await
@@ -425,7 +446,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     );
     let grants = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("re-list attestations by A")
         .into_iter()
@@ -468,7 +489,7 @@ async fn unregistered_peer_liveness_is_rejected() {
     );
     if msg.contains("AttesterKeyUnknown") {
         assert!(
-            msg.contains("\"ciris-status\""),
+            msg.contains(&format!("\"{}\"", node_b_key_id())),
             "the refusal names the unknown attester: {msg}"
         );
     }
@@ -492,7 +513,7 @@ async fn forged_peer_record_is_rejected_and_not_stored() {
     // the NEW envelope so the failure surfaces as the (stronger) signature-
     // mismatch guard, not just the hash cross-check.
     peer.key_record.record.registration_envelope = serde_json::json!({
-        "key_id": NODE_B_KEY_ID,
+        "key_id": node_b_key_id(),
         "purpose": "FORGED",
     });
     let new_canonical = ceg_produce_canonicalize(&peer.key_record.record.registration_envelope)
@@ -511,7 +532,7 @@ async fn forged_peer_record_is_rejected_and_not_stored() {
     // Fail-secure: the forged key is NOT in the directory.
     let looked_up = engine
         .federation_directory()
-        .lookup_public_key(NODE_B_KEY_ID)
+        .lookup_public_key(&node_b_key_id())
         .await
         .expect("lookup B key");
     assert!(
@@ -552,7 +573,7 @@ async fn consent_grant_states_its_whole_tuple() {
     let grant = peer::emit_replication_consent(
         &engine,
         &nk,
-        NODE_B_KEY_ID,
+        &node_b_key_id(),
         &peer::default_attestation_prefixes(),
     )
     .await
@@ -560,7 +581,7 @@ async fn consent_grant_states_its_whole_tuple() {
 
     let by_a = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list A's attestations");
     let row = by_a

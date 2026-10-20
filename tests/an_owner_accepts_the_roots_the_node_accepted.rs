@@ -18,6 +18,7 @@
 //!    v47.3.0's holder-hardware conjunct — is reported by name for the baked
 //!    production root, whose three accord holders carry real custody evidence.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -198,7 +199,7 @@ async fn the_owner_accepts_the_baked_root_the_node_accepted() {
         "persist's own reader — the walk's roots_of(owner) — lists the root: {owner_roots:?}"
     );
     let rows = dir
-        .list_attestations_by(&owner)
+        .attestations_by_all(&owner)
         .await
         .expect("rows by the owner");
     let edge = rows

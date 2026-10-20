@@ -125,7 +125,7 @@ async fn fixture() -> Arc<Engine> {
     // the two and refused every real re-author (CIRISServer#563); this fixture
     // was the reason the test did not see it.
     register(&engine, &signer_for(NODE), &node_id(), identity_type::NODE).await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
+    register(&engine, &signer_for(PEER), &peer_id(), identity_type::NODE).await;
     engine
 }
 
@@ -133,6 +133,12 @@ async fn fixture() -> Arc<Engine> {
 /// `node_key::register_node_key` registers it in production.
 fn node_id() -> String {
     signer_for(NODE).derived_key_id()
+}
+
+/// The peer's REGISTERED id, derived the same way — persist v59
+/// (CIRISPersist#1103) refuses a key_id that is not `<label>-<fp>`.
+fn peer_id() -> String {
+    signer_for(PEER).derived_key_id()
 }
 
 /// **The #312 regression, demonstrated — and the constraint that shapes the cure.**
@@ -151,7 +157,7 @@ async fn reading_consent_by_another_id_finds_nothing_the_engine_authored() {
     ciris_server::peer::emit_replication_consent(
         &engine,
         &author,
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -161,7 +167,7 @@ async fn reading_consent_by_another_id_finds_nothing_the_engine_authored() {
         ciris_server::peer::replication_peers_from_consent(&engine, &author)
             .await
             .expect("read as the author"),
-        vec![PEER.to_string()],
+        vec![peer_id()],
         "sanity: the author sees its own grant"
     );
 
@@ -197,7 +203,7 @@ async fn a_grant_cannot_be_authored_for_a_key_the_engine_does_not_sign_as() {
     let err = ciris_server::peer::emit_replication_consent(
         &engine,
         &node_id(), // NOT the engine's identity
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -231,12 +237,12 @@ async fn an_engine_signing_as_the_node_authors_and_reads_its_own_topology() {
     );
     let author = engine.local_derived_key_id().await.expect("derived id");
     register(&engine, &signer_for(NODE), &author, identity_type::NODE).await;
-    register(&engine, &signer_for(PEER), PEER, identity_type::NODE).await;
+    register(&engine, &signer_for(PEER), &peer_id(), identity_type::NODE).await;
 
     ciris_server::peer::emit_replication_consent(
         &engine,
         &author,
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await
@@ -246,7 +252,7 @@ async fn an_engine_signing_as_the_node_authors_and_reads_its_own_topology() {
         ciris_server::peer::replication_peers_from_consent(&engine, &author)
             .await
             .expect("read"),
-        vec![PEER.to_string()],
+        vec![peer_id()],
         "post-swap the node is the consent author AND the reader — the #312 identity \
          is one identity again, and it is the node's"
     );
@@ -279,7 +285,7 @@ async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
     ciris_server::peer::emit_replication_consent_with_policy(
         &engine,
         &node_id(),
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
         &opts,
     )
@@ -290,7 +296,7 @@ async fn the_node_authors_its_topology_while_the_engine_signs_as_the_actor() {
         ciris_server::peer::replication_peers_from_consent(&engine, &node_id())
             .await
             .expect("read as the node"),
-        vec![PEER.to_string()],
+        vec![peer_id()],
         "THE POINT: the node reads a live topology it authored, with the engine still \
          signing as the actor. No engine swap, no second writer, no #312."
     );
@@ -317,7 +323,7 @@ async fn an_author_signer_for_a_different_key_is_still_refused() {
     let err = ciris_server::peer::emit_replication_consent_with_policy(
         &engine,
         &node_id(),
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
         &opts,
     )
@@ -348,7 +354,7 @@ async fn an_unreproducible_payload_member_refuses_rather_than_dropping_it() {
     ciris_server::peer::emit_replication_consent(
         &engine,
         &author,
-        PEER,
+        &peer_id(),
         &ciris_server::peer::default_attestation_prefixes(),
     )
     .await

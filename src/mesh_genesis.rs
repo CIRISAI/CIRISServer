@@ -31,6 +31,7 @@
 //! deletable, nuclear-revocable act (`FSD/TRUST_ROOT_CAPABILITY_GATE.md` §1). The
 //! operator *chooses* a trust root; a bundle never assigns one.
 
+use crate::attestation_reads::AllAttestations as _;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::{
     pre_rotation_commitment, ACCORD_HEARTBEAT_DIMENSION, CHARTER_PRE_ROTATION_FIELD,
@@ -826,6 +827,7 @@ pub fn produce_genesis(
         attestations,
         roster_records: Vec::new(),
         authorizations,
+        serve_transport_destinations: Vec::new(),
         produced_at: now_rfc3339.to_string(),
     };
     // Structure only: a freshly proposed bundle legitimately carries one
@@ -1218,7 +1220,7 @@ pub async fn allegiance_facts(
     }
     for k in &identities {
         let rows = dir
-            .list_attestations_by(k)
+            .attestations_by_all(k)
             .await
             .map_err(|e| GenesisError::Directory(format!("list_attestations_by({k}): {e}")))?;
         for a in rows {
@@ -1477,7 +1479,7 @@ async fn live_acceptance_ids(
 ) -> Result<Vec<String>, GenesisError> {
     let rows = engine
         .federation_directory()
-        .list_attestations_by(node_key_id)
+        .attestations_by_all(node_key_id)
         .await
         .map_err(|e| GenesisError::Directory(format!("read acceptances: {e}")))?;
     // persist's ONE retraction fold, so "live" here is what `trusted_roots_of`
@@ -1555,7 +1557,7 @@ pub(crate) async fn holds_labelled_acceptance(
     }
     let rows = engine
         .federation_directory()
-        .list_attestations_by(author_key_id)
+        .attestations_by_all(author_key_id)
         .await
         .map_err(|e| {
             GenesisError::Directory(format!("list_attestations_by({author_key_id}): {e}"))
@@ -1981,6 +1983,7 @@ mod tests {
             attestations: Vec::new(),
             roster_records: Vec::new(),
             authorizations: Vec::new(),
+            serve_transport_destinations: Vec::new(),
             produced_at: "2026-07-21T00:00:00Z".into(),
         };
         assert!(matches!(
@@ -2207,6 +2210,7 @@ mod v2_tests {
             attestations,
             roster_records: Vec::new(),
             authorizations: Vec::new(),
+            serve_transport_destinations: Vec::new(),
             produced_at: "2026-07-22T00:00:00Z".to_string(),
         }
     }

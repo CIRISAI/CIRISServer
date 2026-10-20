@@ -10,6 +10,7 @@
 #[path = "support/owned_node.rs"]
 mod owned_node;
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -35,7 +36,13 @@ async fn owned(p: &Person) -> Vec<String> {
 /// A second machine the same person owns: a registered NODE key and the
 /// owner-binding `delegates_to(owner → node)` signed with the owner's pen.
 async fn second_node(p: &Person, tag: u8) -> String {
-    let key_id = format!("second-node-{tag}");
+    // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+    let key_id = ciris_verify_core::fedcode::derive_key_id(
+        &format!("second-node-{tag}"),
+        SigningKey::from_bytes(&[tag; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
     let pqc =
         MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
             .expect("ML-DSA seed");
@@ -104,7 +111,7 @@ async fn the_owner_releases_another_of_their_nodes() {
     let row = alice
         .engine
         .federation_directory()
-        .list_attestations_by(alice.key())
+        .attestations_by_all(alice.key())
         .await
         .expect("rows")
         .into_iter()
@@ -395,7 +402,13 @@ async fn provision_node_occurrence(p: &Person) -> String {
 /// A second machine `p` owns that `p` did NOT announce: a registered node key,
 /// a SELF-scoped owner-binding, and an occurrence of `p`'s self under it.
 async fn unannounced_second_node(p: &Person, tag: u8) -> String {
-    let key_id = format!("quiet-node-{tag}");
+    // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+    let key_id = ciris_verify_core::fedcode::derive_key_id(
+        &format!("quiet-node-{tag}"),
+        SigningKey::from_bytes(&[tag; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
     let pqc =
         MlDsa65SoftwareSigner::from_seed_bytes(&[tag.wrapping_add(1); 32], format!("{key_id}-pqc"))
             .expect("ML-DSA seed");
@@ -532,23 +545,57 @@ async fn only_the_announced_nodes_are_public() {
 
 /// The content-KEM occurrence a claimed machine provisions for its owner,
 /// under its node key, with real enc keys (so it is a wrap recipient).
+///
+/// SIGNED by the owner, the way `add_device` records one: since persist v59 an
+/// eviction is the owner's `withdraws` of the occurrence's
+/// `identity:occurrence:v1` row, and a trusted-local occurrence has no row to
+/// withdraw.
 async fn node_occurrence(p: &Person, node_key_id: &str, tag: u8) {
+    let owner = p.owner.signer().await;
+    let enc = ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys");
+    let asserted_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .expect("now, to the millisecond");
+    let envelope = json!({
+        "attesting_key_id": p.key(),
+        "identity_key_id": p.key(),
+        "occurrence_key_id": node_key_id,
+        // A person's own device (persist v53 S1: a server is not in its
+        // owner's self audience).
+        "device_class": "laptop",
+        "encryption_pubkeys": {
+            "x25519_base64": enc.x25519_base64,
+            "ml_kem_768_base64": enc.ml_kem_768_base64,
+        },
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": serde_json::Value::Null,
+        "hardware_attestation": serde_json::Value::Null,
+    });
+    let (signed_envelope, signature) =
+        ciris_verify_core::transport_binding::produce_signed_identity_occurrence(
+            &ciris_persist::signing::LocalSelfSigner::new(&owner),
+            envelope,
+        )
+        .await
+        .expect("the owner signs the occurrence");
     p.engine
         .federation_directory()
-        .put_identity_occurrence_local(IdentityOccurrence {
-            identity_key_id: p.key().to_owned(),
-            occurrence_key_id: node_key_id.to_owned(),
-            // A person's own device (persist v53 S1: a server is not in its
-            // owner's self audience).
-            device_class: "laptop".to_owned(),
-            hardware_attestation: None,
-            asserted_at: chrono::Utc::now(),
-            valid_until: None,
-            encryption_pubkeys: Some(
-                ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
-            ),
-            transport_binding: None,
-            persist_row_hash: String::new(),
+        .put_identity_occurrence(ciris_persist::federation::SignedIdentityOccurrence {
+            identity_occurrence: IdentityOccurrence {
+                identity_key_id: p.key().to_owned(),
+                occurrence_key_id: node_key_id.to_owned(),
+                device_class: "laptop".to_owned(),
+                hardware_attestation: None,
+                asserted_at,
+                valid_until: None,
+                encryption_pubkeys: Some(enc),
+                transport_binding: None,
+                persist_row_hash: String::new(),
+            },
+            attesting_key_id: p.key().to_owned(),
+            signed_envelope,
+            signature,
         })
         .await
         .expect("the node's content occurrence");
@@ -599,18 +646,28 @@ async fn releasing_a_node_also_revokes_its_occurrence_signed() {
         "{v}"
     );
     assert!(!active_occurrences(&alice).await.contains(&n2));
-    let signed = alice
+    // persist v59: the revocation is the owner's signed `withdraws` of the
+    // occurrence's `identity:occurrence:v1` row — a row, so it replicates.
+    let withdraws_id = revoked[0]["withdraws"].as_str().expect("withdraws id");
+    let row = alice
         .engine
         .federation_directory()
-        .list_signed_identity_occurrence_revocations_for(alice.key())
+        .get_attestation(withdraws_id)
         .await
-        .expect("signed revocations");
-    assert!(
-        signed
-            .iter()
-            .any(|r| r.identity_occurrence_revocation.occurrence_key_id == n2
-                && r.attesting_key_id == alice.key()),
-        "the node's revocation is SIGNED (replicable), by the owner: {signed:?}"
+        .expect("read the withdraws")
+        .expect("the withdraws row is held");
+    assert_eq!(row.attestation_type, "withdraws", "{row:?}");
+    assert_eq!(
+        row.attesting_key_id,
+        alice.key(),
+        "signed by the owner: {row:?}"
+    );
+    assert_eq!(
+        row.attestation_envelope
+            .get("references_attestation_id")
+            .and_then(|w| w.as_str()),
+        revoked[0]["row"].as_str(),
+        "it withdraws the occurrence's own row: {row:?}"
     );
 }
 

@@ -109,8 +109,15 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(key_id: &str, ed_seed: u8, ml_seed: u8) -> Self {
+    fn new(label: &str, ed_seed: u8, ml_seed: u8) -> Self {
         use ciris_crypto::{Ed25519Signer, MlDsa65Signer};
+        // persist v59 (#1103, CC 2.6.8): the id is `<label>-<fp>` of its own key.
+        let key_id = &ciris_verify_core::fedcode::derive_key_id(
+            label,
+            SigningKey::from_bytes(&[ed_seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        );
         Peer {
             key_id: key_id.to_string(),
             identity: HybridSigningIdentity::new(
@@ -284,7 +291,7 @@ async fn consent_peers_are_the_subjects_and_other_attestations_are_ignored() {
         .expect("read consent peers back");
     assert_eq!(
         peers,
-        vec!["peer-x".to_string(), "peer-y".to_string()],
+        vec![peer_x.key_id.clone(), peer_y.key_id.clone()],
         "exactly the consent:replication subjects (sorted/deduped), ignoring other scores rows"
     );
 }
@@ -347,7 +354,7 @@ async fn reconcile_registers_new_and_deregisters_gone() {
     let runtime = runtime_for(&engine, vec![&peer_stale.key_id]).await;
     assert_eq!(
         attestation_keys(&runtime).await,
-        vec!["peer-stale".to_string()],
+        vec![peer_stale.key_id.clone()],
         "precondition: runtime starts tracking peer-stale only"
     );
 
@@ -371,14 +378,14 @@ async fn reconcile_registers_new_and_deregisters_gone() {
     // set_peers, no restart.
     assert_eq!(
         attestation_keys(&runtime).await,
-        vec!["peer-new".to_string()],
+        vec![peer_new.key_id.clone()],
         "after reconcile: peer-new is a live Initiator, peer-stale removed"
     );
     // #144: the Key plane converges to the SAME consent-peer set as Attestation —
     // each admitted consent peer gets both an Attestation and a Key coordinator.
     assert_eq!(
         key_keys(&runtime).await,
-        vec!["peer-new".to_string()],
+        vec![peer_new.key_id.clone()],
         "after reconcile: the Key plane tracks peer-new too (KERI publish-own)"
     );
 
@@ -388,7 +395,7 @@ async fn reconcile_registers_new_and_deregisters_gone() {
         .expect("second reconcile must not error");
     assert_eq!(
         attestation_keys(&runtime).await,
-        vec!["peer-new".to_string()],
+        vec![peer_new.key_id.clone()],
         "reconcile is idempotent on a steady CEG state"
     );
 }
@@ -422,7 +429,7 @@ async fn reconcile_only_registers_admitted_consent_subjects() {
         .expect("reconcile_once must not error");
     assert_eq!(
         attestation_keys(&runtime).await,
-        vec!["peer-ok".to_string()],
+        vec![peer_ok.key_id.clone()],
         "an admitted consent subject becomes a live Initiator at runtime"
     );
 }

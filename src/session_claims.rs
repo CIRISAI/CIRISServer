@@ -136,6 +136,7 @@
 //! horizon, and until the horizon is in the row, one constant is how it gets
 //! one.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -928,7 +929,7 @@ async fn claimed_exchanges(engine: &Engine, owner: &str) -> Result<Vec<(String, 
     let mut seen = std::collections::BTreeSet::new();
     for occ in occurrences {
         let rows = dir
-            .list_attestations_for(&occ)
+            .attestations_to_all(&occ)
             .await
             .map_err(|e| format!("list_attestations_for({occ}): {e}"))?;
         for row in rows {

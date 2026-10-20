@@ -48,6 +48,7 @@
 //! are marked CONSUMER POLICY below. The invariants (what must never be
 //! downweighted, and the ordering) are normative and are not configurable.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
@@ -628,7 +629,7 @@ impl Composer {
     ) -> Result<Composition> {
         let dir = engine.federation_directory();
         let rows = dir
-            .list_attestations_for(attested_key_id)
+            .attestations_to_all(attested_key_id)
             .await
             .map_err(|e| anyhow::anyhow!("list_attestations_for({attested_key_id}): {e}"))?;
 

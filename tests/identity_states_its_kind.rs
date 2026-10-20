@@ -51,6 +51,13 @@ fn signer_for(key_id: &str) -> LocalSigner {
     )
 }
 
+/// The registered id for `alias`: `<alias>-<fp>` of the key [`signer_for`] holds —
+/// persist v59 (CIRISPersist#1103) refuses any other key_id shape at registration.
+fn id_for(alias: &str) -> String {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
+
 async fn register(engine: &Engine, signer: &LocalSigner, key_id: &str, ident: &str) {
     let mut envelope = serde_json::json!({ "key_id": key_id });
     let probe = signer.sign_hybrid(b"probe").await.expect("probe");
@@ -128,13 +135,14 @@ async fn payload(
 async fn the_key_id_is_the_nodes_address() {
     const ACTOR: &str = "split-actor";
     const NODE: &str = "split-node";
+    let (actor, node) = (id_for(ACTOR), id_for(NODE));
     let engine = engine_for(ACTOR).await;
-    register(&engine, &signer_for(ACTOR), ACTOR, identity_type::AGENT).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(ACTOR), &actor, identity_type::AGENT).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
-    let v = payload(&engine, NODE, Some(ACTOR)).await;
+    let v = payload(&engine, &node, Some(&actor)).await;
     assert_eq!(
-        v["key_id"], NODE,
+        v["key_id"], node,
         "peers reach this node by key_id; it must be the NODE key"
     );
 }
@@ -150,11 +158,12 @@ async fn the_key_id_is_the_nodes_address() {
 async fn whose_key_material_this_is_must_be_stated() {
     const ACTOR: &str = "split-actor-km";
     const NODE: &str = "split-node-km";
+    let (actor, node) = (id_for(ACTOR), id_for(NODE));
     let engine = engine_for(ACTOR).await;
-    register(&engine, &signer_for(ACTOR), ACTOR, identity_type::AGENT).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(ACTOR), &actor, identity_type::AGENT).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
-    let v = payload(&engine, NODE, Some(ACTOR)).await;
+    let v = payload(&engine, &node, Some(&actor)).await;
     let engine_derived = engine
         .local_derived_key_id()
         .await
@@ -176,13 +185,14 @@ async fn whose_key_material_this_is_must_be_stated() {
 async fn the_node_key_is_its_own_field() {
     const ACTOR: &str = "split-actor-2";
     const NODE: &str = "split-node-2";
+    let (actor, node) = (id_for(ACTOR), id_for(NODE));
     let engine = engine_for(ACTOR).await;
-    register(&engine, &signer_for(ACTOR), ACTOR, identity_type::AGENT).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(ACTOR), &actor, identity_type::AGENT).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
-    let v = payload(&engine, NODE, Some(ACTOR)).await;
-    assert_eq!(v["node_key_id"], NODE);
-    assert_eq!(v["actor_key_id"], ACTOR);
+    let v = payload(&engine, &node, Some(&actor)).await;
+    assert_eq!(v["node_key_id"], node);
+    assert_eq!(v["actor_key_id"], actor);
     assert_ne!(
         v["node_key_id"], v["actor_key_id"],
         "on a split node these are different keys and both must be readable"
@@ -196,10 +206,11 @@ async fn the_kind_is_read_from_the_directory_not_the_name() {
     // Agent-SHAPED name, registered as a node: a name-based guess gets this
     // backwards, which is why the field exists.
     const NODE: &str = "ciris-agent-bootstrap-abc123";
+    let node = id_for(NODE);
     let engine = engine_for("host").await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
-    let v = payload(&engine, NODE, None).await;
+    let v = payload(&engine, &node, None).await;
     assert_eq!(
         v["identity_type"],
         identity_type::NODE,
@@ -225,10 +236,11 @@ async fn an_unresolvable_kind_is_null_and_not_defaulted() {
 #[tokio::test]
 async fn a_node_with_no_agent_says_null_rather_than_omitting() {
     const NODE: &str = "plain-node";
+    let node = id_for(NODE);
     let engine = engine_for(NODE).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
-    let v = payload(&engine, NODE, None).await;
+    let v = payload(&engine, &node, None).await;
     assert!(
         v.as_object().expect("object").contains_key("actor_key_id"),
         "the field must always be present"
@@ -251,14 +263,15 @@ async fn a_node_with_no_agent_says_null_rather_than_omitting() {
 #[tokio::test]
 async fn the_conformance_capability_set_is_read_from_cache_not_the_database() {
     const NODE: &str = "conformance-cache-node";
+    let node = id_for(NODE);
     let engine = engine_for(NODE).await;
-    register(&engine, &signer_for(NODE), NODE, identity_type::NODE).await;
+    register(&engine, &signer_for(NODE), &node, identity_type::NODE).await;
 
     // The production path: composition sets the wire identity to the NODE key
     // before anything resolves capabilities. Without this the resolver falls back
     // to `engine.local_derived_key_id()` — a different subject — which is a real
     // sharp edge tracked separately, not what this test is pinning.
-    ciris_server::node_key::set_wire_identity(NODE);
+    ciris_server::node_key::set_wire_identity(&node);
 
     // Unprimed: `null`, even though the key IS in the directory. A per-request
     // lookup would find it — so `null` here proves the cache is the source.

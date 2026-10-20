@@ -36,6 +36,7 @@
 //!   ledger that could not be consulted is [`MeritUnreadable`], never a `0` that
 //!   a ranking can mistake for a measurement.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -298,7 +299,7 @@ pub async fn read_track_record(
 ) -> Result<u64, MeritUnreadable> {
     let directory = engine.federation_directory();
     let rows = directory
-        .list_attestations_by(member_key_id)
+        .attestations_by_all(member_key_id)
         .await
         .map_err(|e| MeritUnreadable::LedgerReadFailed {
             detail: e.to_string(),

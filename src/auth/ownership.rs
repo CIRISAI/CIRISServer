@@ -85,6 +85,7 @@
 //! internal emit sites that already hold the user's signer; the CLAIM path uses
 //! the 1-phase [`build_signed_owner_binding`] / [`apply_signed_owner_binding`].
 
+use crate::attestation_reads::AllAttestations as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use ciris_persist::federation::envelope::paths;
@@ -1348,7 +1349,7 @@ async fn owner_binding_stands(engine: &Engine, node_key_id: &str, owner: &str) -
 
     let rows = match engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
     {
         Ok(rows) => rows,
@@ -1473,7 +1474,7 @@ pub struct PromotedOwnerBinding {
 pub async fn owner_binding_is_federation_scoped(engine: &Engine, node_key_id: &str) -> bool {
     let Ok(rows) = engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
     else {
         // Unknown is not "private": a directory read failure must not be
@@ -1574,7 +1575,7 @@ pub async fn promote_owner_binding_to_federation(
     // owner-binding purpose.
     let rows = engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
         .map_err(|e| OwnershipError::Persist(e.to_string()))?;
 
@@ -1750,7 +1751,7 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
 
     // The owner→node binding: the widest scope held.
     let inbound = dir
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
         .unwrap_or_default();
     let binding = widest_owner_binding(&inbound, owner);
@@ -1782,7 +1783,7 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
     let at_widest = |scope: &str| scope == cohort_scope::FEDERATION;
     let mut agents_by_key: std::collections::BTreeMap<String, Attestation> =
         std::collections::BTreeMap::new();
-    if let Ok(authored) = dir.list_attestations_by(owner).await {
+    if let Ok(authored) = dir.attestations_by_all(owner).await {
         for a in authored
             .into_iter()
             .filter(|a| a.attestation_type == attestation_type::DELEGATES_TO)
@@ -1927,7 +1928,7 @@ pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<Stri
     let mut announced = Vec::new();
     for node in nodes {
         let inbound = dir
-            .list_attestations_for(&node)
+            .attestations_to_all(&node)
             .await
             .map_err(|e| format!("list_attestations_for({node}): {e:#}"))?;
         if widest_owner_binding(&inbound, owner).is_some_and(|a| is_federation_placed(&a)) {

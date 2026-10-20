@@ -126,16 +126,19 @@ fn spec_with_dimension(node: &str, dimension: &str) -> ciris_server::attest::Spe
 /// stops enforcing the rule rather than silently becoming a no-op.
 #[tokio::test]
 async fn persist_really_refuses_an_unversioned_dimension() {
-    const NODE: &str = "dimension-gate-node";
+    const NODE_ALIAS: &str = "dimension-gate-node";
     let engine = Arc::new(
-        Engine::with_signer(Arc::new(signer_for(NODE)), "sqlite::memory:")
+        Engine::with_signer(Arc::new(signer_for(NODE_ALIAS)), "sqlite::memory:")
             .await
             .expect("engine"),
     );
-    register(&engine, &signer_for(NODE), NODE).await;
+    // The registered id is `<alias>-<fp>` of the node's own key — persist v59
+    // (CIRISPersist#1103) refuses a hand-written id at registration.
+    let node = engine.local_derived_key_id().await.expect("derived id");
+    register(&engine, &signer_for(NODE_ALIAS), &node).await;
 
     // Versioned: admitted.
-    let ok = ciris_server::attest::Emit::stamp(NODE, spec_with_dimension(NODE, "config:load:v1"))
+    let ok = ciris_server::attest::Emit::stamp(&node, spec_with_dimension(&node, "config:load:v1"))
         .expect("stamp")
         .sign_and_assemble(ciris_server::attest::KeySigner::Engine(&engine))
         .await
@@ -145,7 +148,7 @@ async fn persist_really_refuses_an_unversioned_dimension() {
         .expect("a VERSIONED dimension must be admitted — if this fails the gate below is moot");
 
     // Same row, version stripped: refused.
-    let bad = ciris_server::attest::Emit::stamp(NODE, spec_with_dimension(NODE, "config:load"))
+    let bad = ciris_server::attest::Emit::stamp(&node, spec_with_dimension(&node, "config:load"))
         .expect("stamp")
         .sign_and_assemble(ciris_server::attest::KeySigner::Engine(&engine))
         .await

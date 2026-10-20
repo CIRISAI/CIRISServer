@@ -115,6 +115,7 @@
 //! even when they are this node's own owner. Authority over the node is not
 //! membership in a cohort, and that is the whole point of the tier.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1367,20 +1368,19 @@ pub(crate) async fn welcomed_for_current_add(
         return Ok(false);
     };
     let added_ms = added.timestamp_millis();
-    Ok(ciris_edge::chat::rows_in_room(dir, from, room)
-        .await?
-        .iter()
-        .any(|a| {
-            let env = &a.attestation_envelope;
-            env.get(ciris_persist::federation::envelope::paths::DIMENSION)
-                .and_then(serde_json::Value::as_str)
-                == Some(ciris_edge::chat::WELCOME_DIMENSION)
-                && env
-                    .get(STOPGAP_FIELD_MLS_FOR)
+    // edge v43 (persist v56 #1001): the dimension is pushed into the read.
+    Ok(
+        ciris_edge::chat::rows_in_room(dir, from, room, ciris_edge::chat::WELCOME_DIMENSION)
+            .await?
+            .iter()
+            .any(|a| {
+                let env = &a.attestation_envelope;
+                env.get(STOPGAP_FIELD_MLS_FOR)
                     .and_then(serde_json::Value::as_str)
                     == Some(member)
-                && a.asserted_at.timestamp_millis() >= added_ms
-        }))
+                    && a.asserted_at.timestamp_millis() >= added_ms
+            }),
+    )
 }
 
 /// The creator's half of an N-member room: make the MLS group's members equal
@@ -3356,7 +3356,7 @@ async fn start_chat(
         None => PAIR_STATE_OPEN,
         Some(proposal) => {
             let invitee_accepted = directory
-                .list_attestations_for(&key_id)
+                .attestations_to_all(&key_id)
                 .await
                 .map(|rows| {
                     rows.into_iter().find(|r| {
@@ -4214,7 +4214,7 @@ async fn collect_messages(
     let mut rows: Vec<Attestation> = Vec::new();
     for member in &members {
         let mut by = directory
-            .list_attestations_by(&member.key_id)
+            .attestations_by_all(&member.key_id)
             .await
             .map_err(|e| format!("list_attestations_by({}): {e}", member.key_id))?;
         rows.append(&mut by);

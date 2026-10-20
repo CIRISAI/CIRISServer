@@ -76,6 +76,7 @@ pub mod admin_ops;
 /// the defect class this module retires; `tests/one_author_per_row.rs` enforces
 /// it.
 pub mod attest;
+pub mod attestation_reads;
 
 /// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
 /// Key and IdentityOccurrence rows of every announced device and its owner,

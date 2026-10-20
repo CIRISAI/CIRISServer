@@ -21,6 +21,7 @@
 //! 6. The re-wrap of old self files — a real ACT site — runs only on the
 //!    device the fold names.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -138,7 +139,7 @@ impl Person {
 /// The session-claim rows `from_key` authored on `from` — self-reports.
 async fn claims_by(from: &Engine, from_key: &str) -> Vec<SignedAttestation> {
     from.federation_directory()
-        .list_attestations_for(from_key)
+        .attestations_to_all(from_key)
         .await
         .expect("rows about the occurrence")
         .into_iter()

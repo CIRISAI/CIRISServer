@@ -168,15 +168,33 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         n["registration_envelope"]["transport_hints"] =
             serde_json::json!([{ "kind": "ip", "destination": "127.0.0.1:4242" }]);
     }
+    // Bundle v4 (CC 5.3.4): a seated canonical with no signed transit row
+    // (neither passed nor held here) refuses the plan by name — a bundle that
+    // seats it would seed nothing.
+    let (s, refused) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/plan",
+        serde_json::json!({ "serve_nodes": serve_nodes, "clock_checked": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["reason_id"], "final_genesis.serve_node_without_transit_pair",
+        "{refused}"
+    );
     let (s, planned) = call(
         &app,
         "POST",
         "/v1/accord/final-genesis/plan",
         // No successor set named either: it defaults to the recovery keys
-        // (the maintainer: the successor set is the three spares).
+        // (the maintainer: the successor set is the three spares). The serve
+        // node's signed transit row is persist's test row (emitted on the
+        // canonical's own host in the real ceremony).
         serde_json::json!({
             "serve_nodes": serve_nodes,
             "clock_checked": true,
+            "serve_transport_destinations": inputs.serve_transport_destinations,
         }),
     )
     .await;
@@ -282,12 +300,21 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
         );
     }
 
-    // (5) The one artifact parses as a v3 bundle carrying both genesis records
-    // and installs as a node's baked genesis.
+    // (5) The one artifact parses as a v4 bundle carrying both genesis records
+    // and every seated canonical's transit row, and installs as a node's baked
+    // genesis.
     let bundle: serde_json::Value = serde_json::from_str(&bundle_json).unwrap();
     assert_eq!(
-        bundle["version"], 3,
-        "bundle v3 (genesis heads inside attestations)"
+        bundle["version"], 4,
+        "bundle v4 (genesis heads inside attestations; the serve nodes' transit pairs seeded, CC 5.3.4)"
+    );
+    let seeded = bundle["serve_transport_destinations"]
+        .as_array()
+        .expect("serve_transport_destinations");
+    assert_eq!(
+        seeded.len(),
+        bundle["serve_nodes"].as_array().map_or(0, Vec::len),
+        "one signed transit row per seated canonical: {seeded:?}"
     );
     let atts = bundle["attestations"].as_array().expect("attestations");
     assert!(
@@ -419,5 +446,161 @@ async fn three_software_holders_mint_the_final_genesis_through_the_routes() {
     ciris_persist::federation::genesis::install_test_ceremony_outputs_json(&bundle_json)
         .expect("the bundle installs as the baked genesis");
 
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// **The bundle v4 AMEND** (CC 5.3.4; the steward's ruling on
+/// CIRISConstitution#172): a pinned v3 bundle, carried byte for byte, gains
+/// each seated canonical's signed transit row and needs only the charter's
+/// quorum of holder authorizations — two of three, not unanimity.
+#[tokio::test]
+async fn two_of_three_holders_amend_the_pinned_bundle_with_the_transit_rows() {
+    let produced_at = chrono::Utc::now();
+    let pinned = ciris_persist::federation::genesis::mint_test_ceremony_versioned(
+        &seeds(),
+        &[0x44; 32],
+        produced_at,
+        None,
+        Some(3),
+    )
+    .expect("persist's software ceremony, as a v3 pinned bundle");
+    for (k, v) in pinned.block.env_pairs() {
+        std::env::set_var(k, v);
+    }
+    std::env::set_var("CIRIS_TESTING_MODE", "true");
+    assert_eq!(pinned.bundle.version, 3, "premise: the pinned input is v3");
+    let holders = ciris_persist::federation::genesis::test_ceremony_holders(&seeds())
+        .expect("the three software holders");
+    let row = ciris_persist::federation::genesis::test_serve_transport_destination(
+        &[0x44; 32],
+        produced_at,
+        0x71,
+        0x72,
+    )
+    .expect("the canonical's signed transit row");
+
+    let engine = Arc::new(
+        Engine::with_signer(
+            Arc::new(LocalSigner::from_parts(
+                SigningKey::from_bytes(&[0x56; 32]),
+                "final-genesis-amend".to_string(),
+                None,
+                None,
+            )),
+            "sqlite::memory:",
+        )
+        .await
+        .expect("engine"),
+    );
+    let home = std::env::temp_dir().join(format!(
+        "ciris-final-genesis-amend-{}-{}",
+        std::process::id(),
+        produced_at.timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let app = ciris_server::accord_provision::router(engine, home.clone());
+    let pinned_json = pinned.bundle_json().expect("pinned json");
+
+    // Without the canonical's transit row the amend refuses by name.
+    let (s, refused) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/amend/plan",
+        serde_json::json!({ "pinned_bundle": pinned_json }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["reason_id"],
+        "final_genesis.serve_node_without_transit_pair"
+    );
+
+    let (s, planned) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/amend/plan",
+        serde_json::json!({
+            "pinned_bundle": pinned_json,
+            "serve_transport_destinations": [row],
+        }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "amend plan: {planned}");
+    assert_eq!(planned["mode"], "amend");
+    assert_eq!(planned["needed"], 2, "the charter's quorum: {planned}");
+    assert_eq!(planned["complete"], false);
+
+    let sign = |i: usize| {
+        let app = app.clone();
+        let key_id = holders[i].key_id.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/v1/accord/final-genesis/amend/sign",
+                serde_json::json!({
+                    "key_id": key_id,
+                    "mldsa_usb_path": "/unused/in/the/dry/run",
+                    "test_holder_seed_b64":
+                        base64::engine::general_purpose::STANDARD.encode(seeds()[i]),
+                }),
+            )
+            .await
+        }
+    };
+    // One holder is below the quorum: finish refuses by name.
+    let (s, one) = sign(0).await;
+    assert_eq!(s, StatusCode::OK, "{one}");
+    assert_eq!(one["status"], "1 of 2", "{one}");
+    let (s, early) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/amend/finish",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{early}");
+    assert_eq!(
+        early["reason_id"], "final_genesis.amend_quorum_not_met",
+        "{early}"
+    );
+
+    // The second holder reaches it; the third is never asked.
+    let (s, two) = sign(2).await;
+    assert_eq!(s, StatusCode::OK, "{two}");
+    assert_eq!(two["complete"], true, "{two}");
+    let (s, done) = call(
+        &app,
+        "POST",
+        "/v1/accord/final-genesis/amend/finish",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "amend finish: {done}");
+    assert_eq!(done["version"], 4, "{done}");
+    let bundle: serde_json::Value =
+        serde_json::from_str(done["bundle_json"].as_str().expect("bundle_json")).unwrap();
+    assert_eq!(bundle["version"], 4);
+    assert_eq!(
+        bundle["serve_transport_destinations"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the canonical's transit row is seeded"
+    );
+    let original: serde_json::Value = serde_json::from_str(&pinned_json).unwrap();
+    for carried in [
+        "family_key_id",
+        "holders",
+        "serve_nodes",
+        "consensus_protocol",
+        "attestations",
+        "produced_at",
+    ] {
+        assert_eq!(
+            bundle[carried], original[carried],
+            "`{carried}` is carried byte for byte"
+        );
+    }
     let _ = std::fs::remove_dir_all(&home);
 }

@@ -234,6 +234,7 @@ pub fn server_policy() -> HardwareAttestationPolicy {
 /// `AttestationEvidenceStale` / `AccordHolderRequiresAttestationEvidence` for a
 /// malformed body) for Layer A, or `InvalidArgument` for a Layer-B binding
 /// failure (broken/forged chain, or an attestation bound to a different key).
+#[allow(clippy::result_large_err)] // persist v59 grew its own FederationError (SelfRosterNotLanded); it is passed through, not built here
 pub fn admit_hardware_class(
     record: &KeyRecord,
     now: DateTime<Utc>,
@@ -252,6 +253,7 @@ pub fn admit_hardware_class(
 /// # Errors
 ///
 /// See [`admit_hardware_class`].
+#[allow(clippy::result_large_err)] // persist v59 grew its own FederationError (SelfRosterNotLanded); it is passed through, not built here
 pub fn admit_hardware_class_against_root(
     record: &KeyRecord,
     now: DateTime<Utc>,
@@ -440,6 +442,7 @@ pub fn admit_hardware_class_against_root(
 /// set, so any variant reaching the `_` arm is a policy/verifier skew — a class
 /// was added to the accepted set without a verifier. That is a REJECT, never a
 /// pass: an unverifiable claim must fail closed (CC 4.2.2.1).
+#[allow(clippy::result_large_err)] // persist v59 grew its own FederationError (SelfRosterNotLanded); it is passed through, not built here
 fn verify_class_binding(
     record: &KeyRecord,
     attestation: &PlatformAttestation,
@@ -487,6 +490,7 @@ fn verify_class_binding(
 
 /// Decode a record's base64 Ed25519 pubkey to the 32 raw bytes the attestation
 /// certificate's SubjectPublicKeyInfo is compared against.
+#[allow(clippy::result_large_err)] // persist v59 grew its own FederationError (SelfRosterNotLanded); it is passed through, not built here
 fn base64_decode_ed25519(b64: &str, key_id: &str) -> Result<Vec<u8>, FederationError> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;

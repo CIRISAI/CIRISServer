@@ -330,42 +330,96 @@ async fn phone_of(p: &Person, tag: u8) -> String {
     let key_id = format!("{}-phone-{tag}", p.owner.alias);
     let dev = Device::new(&key_id, tag);
     register_key(&p.engine, &dev, "user").await;
-    p.engine
-        .federation_directory()
-        .put_identity_occurrence_local(ciris_persist::federation::IdentityOccurrence {
-            identity_key_id: p.key().to_owned(),
-            occurrence_key_id: key_id.clone(),
-            device_class: "phone".into(),
-            hardware_attestation: None,
-            asserted_at: chrono::Utc::now(),
-            valid_until: None,
-            encryption_pubkeys: Some(
-                ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
-            ),
-            transport_binding: None,
-            persist_row_hash: String::new(),
-        })
-        .await
-        .expect("bind the phone");
+    let pen = p.owner.signer().await;
+    bind_signed_occurrence(
+        p,
+        &pen,
+        p.key(),
+        &key_id,
+        "phone",
+        ciris_server::identity::derive_self_enc_pubkeys(&[tag; 32]).expect("enc keys"),
+    )
+    .await
+    .expect("bind the phone");
     key_id
 }
 
-/// **(i) The revoke writes a SIGNED revocation** — readable through persist's
-/// byte-exact re-read (`list_signed_identity_occurrence_revocations_for`,
-/// which omits the unsigned local rows), attested by the OWNER — and every
-/// answer says what eviction does not do.
+/// `attesting` signs `occurrence` into the owner's self — the production shape
+/// (the add-device approval's, `src/add_device.rs`, or a node publishing its
+/// own): a SIGNED occurrence, so it has an `identity:occurrence:v1` row that
+/// replicates and that an eviction can withdraw (persist v59 retired the
+/// framed revocation of a local one).
+async fn bind_signed_occurrence(
+    p: &Person,
+    pen: &ciris_persist::prelude::LocalSigner,
+    attesting: &str,
+    occurrence: &str,
+    device_class: &str,
+    enc: ciris_persist::federation::EncryptionPubkeys,
+) -> Result<(), String> {
+    let owner = p.key().to_owned();
+    let asserted_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .expect("now in ms");
+    let envelope = serde_json::json!({
+        "attesting_key_id": attesting,
+        "identity_key_id": owner,
+        "occurrence_key_id": occurrence,
+        "device_class": device_class,
+        "encryption_pubkeys": {
+            "x25519_base64": enc.x25519_base64,
+            "ml_kem_768_base64": enc.ml_kem_768_base64,
+        },
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": serde_json::Value::Null,
+        "hardware_attestation": serde_json::Value::Null,
+    });
+    let (signed_envelope, signature) =
+        ciris_verify_core::transport_binding::produce_signed_identity_occurrence(
+            &ciris_persist::signing::LocalSelfSigner::new(pen),
+            envelope,
+        )
+        .await
+        .map_err(|e| format!("sign the occurrence: {e}"))?;
+    p.engine
+        .federation_directory()
+        .put_identity_occurrence(ciris_persist::federation::SignedIdentityOccurrence {
+            identity_occurrence: ciris_persist::federation::IdentityOccurrence {
+                identity_key_id: owner.clone(),
+                occurrence_key_id: occurrence.to_owned(),
+                device_class: device_class.to_owned(),
+                hardware_attestation: None,
+                asserted_at,
+                valid_until: None,
+                encryption_pubkeys: Some(enc),
+                transport_binding: None,
+                persist_row_hash: String::new(),
+            },
+            attesting_key_id: attesting.to_owned(),
+            signed_envelope,
+            signature,
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// **(i) Evicting a device from a roster of two is HELD** (CC 3.3.6.3, persist
+/// v59 `self_roster::gate`): with the genesis key and one phone, an eviction is
+/// the LONE path — it lands after `W_self` unless a live key objects — so the
+/// owner's signed `withdraws` is held as a proposal, the answer says so
+/// (`held`, `occurrences_held` naming the proposal), the phone stays in the
+/// self, and the answer still says what eviction does not do. The quorum and
+/// lone-path routes that land it are CIRISServer#794.
 #[tokio::test]
-async fn the_owner_revokes_a_device_with_a_signed_replicating_revocation() {
+async fn evicting_a_device_from_a_roster_of_two_is_held_by_the_lone_path() {
     let alice = Person::new("occ-rev").await;
     let phone = phone_of(&alice, 0x51).await;
-    let kept = phone_of(&alice, 0x53).await;
-    let dir = alice.engine.federation_directory();
     assert!(
-        dir.list_signed_identity_occurrence_revocations_for(alice.key())
+        active_roster(&alice.engine, alice.key())
             .await
-            .expect("signed revocations")
-            .is_empty(),
-        "precondition: nothing revoked"
+            .contains(&phone),
+        "precondition: the phone is in the self"
     );
 
     let (st, v) = alice
@@ -379,13 +433,18 @@ async fn the_owner_revokes_a_device_with_a_signed_replicating_revocation() {
             })),
         )
         .await;
-    assert_eq!(st.as_u16(), 200, "{v}");
-    assert_eq!(v["revoked"], true, "{v}");
+    assert_eq!(st.as_u16(), 200, "held is not a failure: {v}");
+    assert_eq!(v["revoked"], false, "{v}");
+    assert_eq!(v["held"], true, "{v}");
     assert_eq!(v["revoked_by"], alice.key());
-    assert_eq!(
-        v["occurrences_revoked"].as_array().map(Vec::len),
-        Some(1),
-        "{v}"
+    let held = v["occurrences_held"].as_array().expect("occurrences_held");
+    assert_eq!(held.len(), 1, "{v}");
+    assert_eq!(held[0]["occurrence_key_id"], phone.as_str());
+    assert!(
+        held[0]["door"]
+            .as_str()
+            .is_some_and(|d| d.contains("federation_self_roster_not_landed")),
+        "the door's own answer names the held proposal: {v}"
     );
     assert!(v["failed"].as_array().is_some_and(Vec::is_empty), "{v}");
     assert!(
@@ -395,42 +454,11 @@ async fn the_owner_revokes_a_device_with_a_signed_replicating_revocation() {
         "the answer says what eviction does NOT do: {v}"
     );
 
-    // THE SIGNED ROW, read back the way a replicator re-publishes it.
-    let signed = dir
-        .list_signed_identity_occurrence_revocations_for(alice.key())
+    // Not landed: the phone still acts for the self.
+    assert!(signer_acts_for(&alice.engine, &phone, alice.key()).await);
+    assert!(active_roster(&alice.engine, alice.key())
         .await
-        .expect("signed revocations");
-    let row = signed
-        .iter()
-        .find(|r| r.identity_occurrence_revocation.occurrence_key_id == phone)
-        .expect("the revocation is on the SIGNED surface — not the local door");
-    assert_eq!(row.attesting_key_id, alice.key(), "the owner signed it");
-    assert_eq!(row.signed_envelope["occurrence_key_id"], phone.as_str());
-    assert_eq!(row.signed_envelope["reason"], "phone stolen");
-    assert!(row.signature.mldsa65_signature_base64.is_some(), "hybrid");
-
-    // The device is out of the self; the other one is not.
-    assert!(!signer_acts_for(&alice.engine, &phone, alice.key()).await);
-    assert!(signer_acts_for(&alice.engine, &kept, alice.key()).await);
-    let active = active_roster(&alice.engine, alice.key()).await;
-    assert!(
-        !active.contains(&phone) && active.contains(&kept),
-        "{active:?}"
-    );
-
-    // Again: already revoked — nothing to sign, and said so.
-    let (st, v) = alice
-        .as_owner(
-            "POST",
-            "/v1/self/occurrence/revoke",
-            Some(serde_json::json!({
-                "identity_key_id": alice.key(),
-                "occurrence_key_id": phone,
-            })),
-        )
-        .await;
-    assert_eq!(st.as_u16(), 200, "{v}");
-    assert_eq!(v["occurrences_already_revoked"], serde_json::json!([phone]));
+        .contains(&phone));
 }
 
 /// The revoke's gate: the owner's session, never a delegate, and only the
@@ -504,22 +532,27 @@ async fn revoking_a_node_occurrence_also_releases_the_node() {
     )
     .await
     .expect("owner-bind the second node");
-    alice
-        .engine
-        .federation_directory()
-        .put_identity_occurrence_local(ciris_persist::federation::IdentityOccurrence {
-            identity_key_id: alice.key().to_owned(),
-            occurrence_key_id: node.clone(),
-            device_class: "server".into(),
-            hardware_attestation: None,
-            asserted_at: chrono::Utc::now(),
-            valid_until: None,
-            encryption_pubkeys: None,
-            transport_binding: None,
-            persist_row_hash: String::new(),
-        })
-        .await
-        .expect("the node's content occurrence");
+    // The node publishes its OWN occurrence, signed by the node key — a node
+    // key is not a roster key (CC 3.3.6.3), so its eviction lands at once.
+    let node_pen = ciris_persist::prelude::LocalSigner::from_parts(
+        dev.ed.clone(),
+        node.clone(),
+        Some(Arc::new(
+            MlDsa65SoftwareSigner::from_seed_bytes(&[0x71 ^ 0xFF; 32], format!("{node}-pqc"))
+                .expect("node ML-DSA-65 seed"),
+        )),
+        Some(format!("{node}-pqc")),
+    );
+    bind_signed_occurrence(
+        &alice,
+        &node_pen,
+        &node,
+        &node,
+        "server",
+        ciris_server::identity::derive_self_enc_pubkeys(&[0x71; 32]).expect("enc keys"),
+    )
+    .await
+    .expect("the node's content occurrence");
     let owned = |e: Arc<Engine>, k: String| async move {
         nodes_owned_by(e.federation_directory().as_ref(), &k)
             .await

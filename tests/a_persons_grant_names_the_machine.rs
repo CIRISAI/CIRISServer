@@ -40,13 +40,20 @@ use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
 const NODE_ALIAS: &str = "ciris-node-a-for-the-persons-grant-test";
-const PERSON: &str = "ciris-node-b-user-the-other-person";
-const NODE_PEER: &str = "ciris-node-b-the-other-persons-node";
+const PERSON_ALIAS: &str = "ciris-node-b-user-the-other-person";
+const NODE_PEER_ALIAS: &str = "ciris-node-b-the-other-persons-node";
 
 fn seed(label: &str, n: u8) -> [u8; 32] {
     let mut s = [0u8; 32];
     s.copy_from_slice(&Sha256::digest(format!("{label}:{n}").as_bytes())[..32]);
     s
+}
+
+/// `alias`'s registered id: `<alias>-<fp>` of its own Ed25519 key — persist
+/// v59 (CIRISPersist#1103) refuses any other shape at registration.
+fn derived_id(alias: &str) -> String {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
 }
 
 fn signer_for(alias: &str) -> LocalSigner {
@@ -117,6 +124,10 @@ fn for_key_id_of(engine_row: &ciris_persist::federation::types::Attestation) -> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
+    let person = derived_id(PERSON_ALIAS);
+    let person = person.as_str();
+    let node_peer = derived_id(NODE_PEER_ALIAS);
+    let node_peer = node_peer.as_str();
     // ── an UNSPLIT owned node: engine key == node key (the chat ladder's shape) ──
     let engine = Arc::new(
         Engine::with_signer(Arc::new(signer_for(NODE_ALIAS)), "sqlite::memory:")
@@ -128,11 +139,17 @@ async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
         .await
         .expect("node derived id");
     register(&engine, &signer_for(NODE_ALIAS), &node, identity_type::NODE).await;
-    register(&engine, &signer_for(PERSON), PERSON, identity_type::USER).await;
     register(
         &engine,
-        &signer_for(NODE_PEER),
-        NODE_PEER,
+        &signer_for(PERSON_ALIAS),
+        person,
+        identity_type::USER,
+    )
+    .await;
+    register(
+        &engine,
+        &signer_for(NODE_PEER_ALIAS),
+        node_peer,
         identity_type::NODE,
     )
     .await;
@@ -198,7 +215,7 @@ async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
     // ── 1. POST /v1/contacts' door, then POST /v1/chat's read ─────────────────
     let prefixes = ["capacity:", "chat:", "self:delegates_to:", "trace:"];
     let (coverage, subjects) =
-        ciris_server::peer::ensure_contact_consent_covers(&engine, &node, PERSON, &prefixes)
+        ciris_server::peer::ensure_contact_consent_covers(&engine, &node, person, &prefixes)
             .await
             .expect("the human's contact grant is authored");
     assert!(
@@ -207,10 +224,10 @@ async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
     );
     assert_eq!(
         subjects,
-        vec![PERSON.to_string()],
+        vec![person.to_string()],
         "no bound nodes yet: the person is the subject"
     );
-    let read = ciris_server::peer::contact_grant_prefixes(&engine, &node, PERSON)
+    let read = ciris_server::peer::contact_grant_prefixes(&engine, &node, person)
         .await
         .expect("the room-create read runs")
         .expect(
@@ -230,7 +247,7 @@ async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
         .expect("grants by the owner");
     let row = by_owner
         .iter()
-        .find(|g| g.subject_key_ids.iter().any(|s| s == PERSON))
+        .find(|g| g.subject_key_ids.iter().any(|s| s == person))
         .expect("the person-contact grant is the human's");
     assert_eq!(
         for_key_id_of(row).as_deref(),
@@ -267,15 +284,15 @@ async fn a_persons_contact_grant_names_the_node_and_the_node_can_read_it() {
         .await
         .expect("by-principals read for the node");
     assert!(
-        peers.contains(&PERSON.to_string()),
+        peers.contains(&person.to_string()),
         "the node's consent peers: {peers:?}"
     );
 
     // A node peer still gets the same answer (the path that never broke).
-    ciris_server::peer::ensure_contact_consent_covers(&engine, &node, NODE_PEER, &prefixes)
+    ciris_server::peer::ensure_contact_consent_covers(&engine, &node, node_peer, &prefixes)
         .await
         .expect("node-peer grant");
-    let read = ciris_server::peer::contact_grant_prefixes(&engine, &node, NODE_PEER)
+    let read = ciris_server::peer::contact_grant_prefixes(&engine, &node, node_peer)
         .await
         .expect("read")
         .expect("found");

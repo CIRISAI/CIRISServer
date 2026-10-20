@@ -43,10 +43,29 @@ fn seed(label: &str, n: u8) -> [u8; 32] {
     s
 }
 
-fn signer_for(key_id: &str) -> LocalSigner {
-    let ed = SigningKey::from_bytes(&seed(key_id, 1));
+/// The registered id for `alias`: `<alias>-<fp>` of the key [`signer_for`] holds —
+/// persist v59 (CIRISPersist#1103) refuses any other key_id shape at registration.
+fn id_for(alias: &str) -> String {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
+
+/// The key for `alias`, named by its alias (the engine-signer shape: the engine
+/// derives its own id from it).
+fn signer_for(alias: &str) -> LocalSigner {
+    signer_as(alias, alias)
+}
+
+/// The key for `alias`, named by its REGISTERED id — for a party whose
+/// `key_id()` is read back as the author of what it signs.
+fn id_signer(alias: &str) -> LocalSigner {
+    signer_as(alias, &id_for(alias))
+}
+
+fn signer_as(alias: &str, key_id: &str) -> LocalSigner {
+    let ed = SigningKey::from_bytes(&seed(alias, 1));
     let pqc = Arc::new(
-        MlDsa65SoftwareSigner::from_seed_bytes(&seed(key_id, 2), format!("{key_id}-pqc"))
+        MlDsa65SoftwareSigner::from_seed_bytes(&seed(alias, 2), format!("{key_id}-pqc"))
             .expect("ML-DSA-65 seed"),
     );
     LocalSigner::from_parts(
@@ -163,6 +182,7 @@ async fn engine_for(key_id: &str) -> Arc<Engine> {
     )
 }
 
+/// The actor's alias; its registered id is [`id_for`] of it.
 const AGENT_KEY: &str = "ciris-agent-bootstrap-mplbdbzbed";
 
 /// **The production defect, reproduced.** persist refuses the re-registration
@@ -174,12 +194,13 @@ const AGENT_KEY: &str = "ciris-agent-bootstrap-mplbdbzbed";
 /// differing row rather than reporting success.
 #[tokio::test]
 async fn re_registering_an_actor_key_as_node_is_refused_and_changes_nothing() {
+    let agent = id_for(AGENT_KEY);
     let engine = engine_for(AGENT_KEY).await;
     let signer = signer_for(AGENT_KEY);
-    register(&engine, &signer, AGENT_KEY, identity_type::AGENT).await;
+    register(&engine, &signer, &agent, identity_type::AGENT).await;
 
     // Exactly what `register_self_key` does: same id, asserting `node`.
-    let outcome = try_register(&engine, &signer, AGENT_KEY, identity_type::NODE).await;
+    let outcome = try_register(&engine, &signer, &agent, identity_type::NODE).await;
     let err = outcome.expect_err(
         "persist must REFUSE a differing row for an occupied key_id — if this ever \
          succeeds, re-registration became destructive and the actor key's history \
@@ -193,7 +214,7 @@ async fn re_registering_an_actor_key_as_node_is_refused_and_changes_nothing() {
 
     let dir = engine.federation_directory();
     let row = dir
-        .lookup_public_key(AGENT_KEY)
+        .lookup_public_key(&agent)
         .await
         .expect("directory read")
         .expect("row present");
@@ -206,7 +227,7 @@ async fn re_registering_an_actor_key_as_node_is_refused_and_changes_nothing() {
          re-registration semantics and `resolve_node_identity` should be revisited."
     );
     assert_eq!(
-        classify(dir.as_ref(), AGENT_KEY).await.expect("classify"),
+        classify(dir.as_ref(), &agent).await.expect("classify"),
         IdentityVerdict::Actor {
             roles: vec![identity_type::AGENT.to_string()]
         },
@@ -219,15 +240,10 @@ async fn re_registering_an_actor_key_as_node_is_refused_and_changes_nothing() {
 #[tokio::test]
 async fn a_node_only_key_is_usable_as_the_node_identity() {
     const NODE_KEY: &str = "ciris-server-node-only";
+    let node = id_for(NODE_KEY);
     let engine = engine_for(NODE_KEY).await;
-    register(
-        &engine,
-        &signer_for(NODE_KEY),
-        NODE_KEY,
-        identity_type::NODE,
-    )
-    .await;
-    let v = classify(engine.federation_directory().as_ref(), NODE_KEY)
+    register(&engine, &signer_for(NODE_KEY), &node, identity_type::NODE).await;
+    let v = classify(engine.federation_directory().as_ref(), &node)
         .await
         .expect("classify");
     assert_eq!(v, IdentityVerdict::SubstrateOnly);
@@ -244,8 +260,10 @@ async fn a_node_only_key_is_usable_as_the_node_identity() {
 #[tokio::test]
 async fn a_fused_node_agent_key_is_refused_at_registration() {
     const FUSED: &str = "fused-node-agent";
+    // A well-formed id (persist v59 #1103), so the only defect left is the fusion.
+    let fused = id_for(FUSED);
     let engine = engine_for(FUSED).await;
-    let refused = try_register(&engine, &signer_for(FUSED), FUSED, "node,agent").await;
+    let refused = try_register(&engine, &signer_for(FUSED), &fused, "node,agent").await;
     let err = refused.expect_err(
         "persist admitted a `{node,agent}` key — the Clause A door is gone, and the \
          server's classifier is again the only thing refusing it",
@@ -254,7 +272,7 @@ async fn a_fused_node_agent_key_is_refused_at_registration() {
         err.to_string().contains("Clause A"),
         "refused, but not by the Clause A rule: {err}"
     );
-    let v = classify(engine.federation_directory().as_ref(), FUSED)
+    let v = classify(engine.federation_directory().as_ref(), &fused)
         .await
         .expect("classify");
     assert_eq!(v, IdentityVerdict::Unregistered, "nothing was written");
@@ -309,14 +327,15 @@ fn the_node_alias_is_distinct_from_the_actor_alias() {
 /// unclaimed node is an ordinary state, not a failure.
 #[tokio::test]
 async fn nothing_to_move_when_the_actor_key_is_unowned() {
+    let agent = id_for(AGENT_KEY);
     let engine = engine_for(AGENT_KEY).await;
     let signer = signer_for(AGENT_KEY);
-    register(&engine, &signer, AGENT_KEY, identity_type::AGENT).await;
+    register(&engine, &signer, &agent, identity_type::AGENT).await;
 
     let moved = ciris_server::node_key::move_owner_binding_to_node_key(
         &engine,
         &signer,
-        AGENT_KEY,
+        &agent,
         "some-node-key",
     )
     .await
@@ -332,20 +351,27 @@ async fn nothing_to_move_when_the_actor_key_is_unowned() {
 async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
     const OWNER: &str = "the-real-owner";
     const IMPOSTOR: &str = "some-other-user";
+    let agent = id_for(AGENT_KEY);
     let engine = engine_for(AGENT_KEY).await;
 
     register(
         &engine,
         &signer_for(AGENT_KEY),
-        AGENT_KEY,
+        &agent,
         identity_type::AGENT,
     )
     .await;
-    register(&engine, &signer_for(OWNER), OWNER, identity_type::USER).await;
     register(
         &engine,
-        &signer_for(IMPOSTOR),
-        IMPOSTOR,
+        &id_signer(OWNER),
+        &id_for(OWNER),
+        identity_type::USER,
+    )
+    .await;
+    register(
+        &engine,
+        &id_signer(IMPOSTOR),
+        &id_for(IMPOSTOR),
         identity_type::USER,
     )
     .await;
@@ -357,8 +383,8 @@ async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
         .collect();
     let cohort = ciris_persist::federation::types::cohort_scope::SELF;
     let binding = ciris_server::auth::ownership::build_signed_owner_binding(
-        &signer_for(OWNER),
-        AGENT_KEY,
+        &id_signer(OWNER),
+        &agent,
         &scopes,
         cohort,
     )
@@ -366,7 +392,7 @@ async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
     .expect("build the original owner-binding");
     ciris_server::auth::ownership::apply_signed_owner_binding(
         &engine,
-        AGENT_KEY,
+        &agent,
         cohort,
         ciris_persist::prelude::HybridPolicy::Strict,
         &binding,
@@ -377,8 +403,8 @@ async fn refuses_to_move_a_binding_it_cannot_legitimately_author() {
     // Now attempt the move holding the WRONG signer.
     let err = ciris_server::node_key::move_owner_binding_to_node_key(
         &engine,
-        &signer_for(IMPOSTOR),
-        AGENT_KEY,
+        &id_signer(IMPOSTOR),
+        &agent,
         "node-key-for-this-node",
     )
     .await
@@ -436,16 +462,17 @@ async fn a_keys_kind_comes_from_the_directory_not_from_its_name() {
     // Deliberately agent-SHAPED name, registered as a node. A name-based guess
     // gets this exactly backwards, which is the footgun.
     const AGENT_SHAPED_NAME: &str = "ciris-agent-bootstrap-abc123";
+    let key = id_for(AGENT_SHAPED_NAME);
     register(
         &engine,
         &signer_for(AGENT_SHAPED_NAME),
-        AGENT_SHAPED_NAME,
+        &key,
         identity_type::NODE,
     )
     .await;
 
     assert_eq!(
-        ciris_server::node_key::identity_type_of(&engine, AGENT_SHAPED_NAME).await,
+        ciris_server::node_key::identity_type_of(&engine, &key).await,
         Some(identity_type::NODE.to_string()),
         "the registered kind governs, not the alias the host happened to pick"
     );
@@ -574,19 +601,20 @@ async fn an_agent_occurrence_is_its_own_self_by_default() {
 async fn a_multi_occurrence_agent_acts_for_its_shared_root() {
     let engine = engine_for("scoutcarrier").await;
     const ROOT: &str = "scout-root-identity";
-    register(&engine, &signer_for(ROOT), ROOT, "agent").await;
+    let root = id_for(ROOT);
+    register(&engine, &signer_for(ROOT), &root, "agent").await;
 
     let derived = ciris_server::attest::KeySigner::Engine(&engine)
         .key_id()
         .await
         .expect("derive");
 
-    ciris_server::node_key::register_actor_occurrence(&engine, &derived, Some(ROOT))
+    ciris_server::node_key::register_actor_occurrence(&engine, &derived, Some(&root))
         .await
         .expect("bind this occurrence under the shared root");
 
     assert!(
-        ciris_server::auth::verify::signer_acts_for(&engine, &derived, ROOT).await,
+        ciris_server::auth::verify::signer_acts_for(&engine, &derived, &root).await,
         "an occurrence bound under a root must act for that root — this is the whole \
          point of the multi-occurrence path"
     );
@@ -599,11 +627,12 @@ async fn an_actor_that_is_not_an_actor_is_refused() {
     let tmp = std::env::temp_dir().join(format!("ciris-prov-fused-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     const NOT_AN_ACTOR: &str = "claims-to-be-the-brain-but-is-a-node";
+    let not_an_actor = id_for(NOT_AN_ACTOR);
     let engine = engine_for("carrier2").await;
     register(
         &engine,
         &signer_for(NOT_AN_ACTOR),
-        NOT_AN_ACTOR,
+        &not_an_actor,
         identity_type::NODE,
     )
     .await;
@@ -612,7 +641,7 @@ async fn an_actor_that_is_not_an_actor_is_refused() {
         &engine,
         "prov-carrier2",
         &tmp,
-        Some(NOT_AN_ACTOR),
+        Some(&not_an_actor),
     )
     .await
     .expect_err("a node-typed 'actor' must refuse");
@@ -731,10 +760,11 @@ async fn provisioning_records_the_wire_identity() {
 #[tokio::test]
 async fn a_non_actor_infrastructure_role_is_neither_actor_nor_substrate() {
     const W: &str = "a-witness-not-a-brain";
+    let w = id_for(W);
     let engine = engine_for("witness-host").await;
-    register(&engine, &signer_for(W), W, "witness").await;
+    register(&engine, &signer_for(W), &w, "witness").await;
 
-    let v = classify(engine.federation_directory().as_ref(), W)
+    let v = classify(engine.federation_directory().as_ref(), &w)
         .await
         .expect("classify");
     assert!(
@@ -751,11 +781,12 @@ async fn provisioning_refuses_a_witness_as_the_brains_actor() {
     const W: &str = "witness-claiming-to-be-a-brain";
     let tmp = std::env::temp_dir().join(format!("ciris-witness-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
+    let w = id_for(W);
     let engine = engine_for("witness-carrier").await;
-    register(&engine, &signer_for(W), W, "witness").await;
+    register(&engine, &signer_for(W), &w, "witness").await;
 
     let err =
-        ciris_server::node_key::provision_node_identity(&engine, "prov-witness", &tmp, Some(W))
+        ciris_server::node_key::provision_node_identity(&engine, "prov-witness", &tmp, Some(&w))
             .await
             .expect_err("a witness key must not be accepted as the brain's actor identity");
     assert!(

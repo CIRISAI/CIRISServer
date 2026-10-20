@@ -162,6 +162,7 @@
 //! [`SelfAct::enforcement`] for what each self-directed act does and does not
 //! reach, stated in the response rather than left to be assumed.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -2408,10 +2409,13 @@ async fn read_admission_standing(
         additional_scrubs: Vec::new(),
     };
     let directory = engine.federation_directory();
+    // persist v56 (#934): the receipt instant is an input, not a clock read
+    // inside the gate — this probe judges "now", as the gate did before.
     match ciris_persist::federation::admission::check_peer_deadmission(
         directory.as_ref(),
         &probe,
         node_key_id,
+        chrono::Utc::now(),
     )
     .await
     {
@@ -3507,7 +3511,7 @@ async fn owner_serve_delegations(
             continue;
         };
         let inbound = dir
-            .list_attestations_for(&k)
+            .attestations_to_all(&k)
             .await
             .map_err(|e| format!("list_attestations_for({k}): {e:#}"))?;
         for row in inbound {
@@ -3874,7 +3878,7 @@ async fn judgements_about(
 ) -> Result<Vec<Attestation>, String> {
     let rows = engine
         .federation_directory()
-        .list_attestations_for(subject_key_id)
+        .attestations_to_all(subject_key_id)
         .await
         .map_err(|e| format!("list judgements: {e}"))?;
     Ok(rows

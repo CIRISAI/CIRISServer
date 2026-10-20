@@ -51,6 +51,7 @@
 //!   `membership_widener`, and why [`widen_held_acceptances`] takes the
 //!   caller's capsule, never the node signer.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -396,7 +397,7 @@ async fn replies_to(
     let mut accepted = None;
     let mut declined = None;
     for r in dir
-        .list_attestations_for(invitee)
+        .attestations_to_all(invitee)
         .await
         .map_err(|e| format!("list_attestations_for({invitee}): {e:#}"))?
     {
@@ -562,7 +563,7 @@ pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &st
     let now = chrono::Utc::now();
     let mut proposals = Vec::new();
     for author in [capsule.key_id().to_owned(), node_key_id.to_owned()] {
-        match dir.list_attestations_by(&author).await {
+        match dir.attestations_by_all(&author).await {
             Ok(rows) => proposals.extend(rows.into_iter().filter(|p| {
                 dimension_of(p) == Some(PROPOSAL_DIMENSION) && p.expires_at.is_none_or(|t| t > now)
             })),
