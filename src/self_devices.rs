@@ -650,11 +650,13 @@ async fn live_bindings(
                 .map(str::to_owned)
         })
         .collect();
+    // CC 3.3.6.3: a binding a roster key signed is the owner's (#793).
+    let owner_keys = crate::auth::ownership::owner_signing_keys(engine, owner).await;
     Ok(inbound
         .into_iter()
         .filter(|a| {
             a.attestation_type == attestation_type::DELEGATES_TO
-                && a.attesting_key_id == owner
+                && owner_keys.contains(&a.attesting_key_id)
                 && is_owner_binding_envelope(&a.attestation_envelope)
                 && !withdrawn.contains(&a.attestation_id)
         })

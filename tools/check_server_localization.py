@@ -849,6 +849,8 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # Edge v43 (sealed links): the new device waits for its other device's
     # route through the canonical; not there yet answers 503, retryable.
     "add_device.owner_route_pending",
+    # A held approval names an earlier ask's key; a second ask is refused.
+    "add_device.approval_held",
     # The 2-of-3 AMEND (CC 5.3.4, the steward's ruling on CIRISConstitution#172):
     # carried bytes changed, below quorum, input refused, nothing planned.
     # The canonical's transit row for the amend (GET /v1/trust-root/transit-row).

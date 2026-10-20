@@ -1106,6 +1106,24 @@ pub async fn mint_local_device_occurrence_with(
 ) -> Result<PortableSoftwareKeyset> {
     use ciris_keyring::sealed_mldsa65::SealedMlDsa65Signer;
 
+    // NEVER OVER A LIVE ALIAS. `SealedMlDsa65Signer::open_or_create` OPENS a
+    // sealed half already kept under `alias` and ignores the seed it is handed,
+    // while the raw Ed25519 seed below is simply overwritten — so a second mint
+    // under one alias returned a key record whose ML-DSA-65 half is not the one
+    // the signer re-opens, and every hybrid row that key signed was refused at
+    // the ingest gate (an add-device retried after its 503 did exactly this,
+    // CIRISServer#793). The caller retires the old keys first, or picks another
+    // alias.
+    if seed_dir.join(portable_ed_seed_name(alias)).exists()
+        || sealed_half_present(&home_keys_dir(seed_dir), alias)
+    {
+        anyhow::bail!(
+            "{alias} already holds key material in {} — a device key is minted once per \
+             alias; retire the old keys before minting again",
+            seed_dir.display()
+        );
+    }
+
     let mut keyset = mint_portable_software_occurrence(seed_dir, alias).await?;
     let mut sealed_hardware_type: Option<ciris_keyring::HardwareType> = None;
 
@@ -1119,7 +1137,12 @@ pub async fn mint_local_device_occurrence_with(
             anyhow::anyhow!("freshly-minted ML-DSA-65 seed is not 32 bytes — refusing to seal")
         })?);
 
-    let keys_dir = sealed_keys_dir_for(seed_dir, alias);
+    // THIS HOME's store, never the legacy global fallback `sealed_keys_dir_for`
+    // can answer: a fresh key has no legacy half to honour, and a stale one kept
+    // there under the same alias (another home, an earlier run) is what
+    // `open_or_create` would open in place of this seed. Re-opens resolve
+    // home-first, so they find it here.
+    let keys_dir = home_keys_dir(seed_dir);
     std::fs::create_dir_all(&keys_dir)
         .with_context(|| format!("create keys_dir {}", keys_dir.display()))?;
     SealedMlDsa65Signer::open_or_create(alias, &keys_dir, Some(&*seed32))

@@ -100,13 +100,9 @@ def test_the_planner_picks_the_cheapest_entry_that_reaches_the_states(cat):
 def test_the_planner_keeps_a_hint_that_is_already_chosen(cat):
     reqs = [model.Requirement("CSD-A", "a", frozenset({"device.joined"})),
             model.Requirement("CSD-B", "b", frozenset({"room.self.keyed"}), topology="T3")]
-    p = model.plan(reqs, cat, buildable_only=False)
+    p = model.plan(reqs, cat)
     assert p.entries == ["T3"]  # T3 alone covers both: one build, not two
     assert not p.reselected
-    # …while T3's self room sits past its known-red step (CIRISServer#793),
-    # the buildable plan adds the cheapest entry that reaches it (T1), and the
-    # joined device comes from the cheapest entry that joins one (T10).
-    assert model.plan(reqs, cat).entries == ["T1", "T10"]
 
 
 def test_states_that_never_hold_together_are_uncovered_by_name(cat):
@@ -165,14 +161,19 @@ def test_every_atom_is_documented_in_the_standard():
 
 
 def test_a_known_red_step_blocks_by_its_issue_unless_built_through(cat):
-    t3 = cat["T3"].topology
-    n = model.buildable_prefix(t3)
-    assert model.steps(t3)[n].id == "rel[8]:peered"
+    red = copy.deepcopy(cat)
+    t3 = red["T3"].topology
+    i = next(i for i, r in enumerate(t3["relations"]) if r["rel"] == "join_complete") + 1
+    t3["relations"][i]["known_red"] = "CIRISServer#0000"
+    assert model.steps(t3)[model.buildable_prefix(t3)].id == f"rel[{i}]:{t3['relations'][i]['rel']}"
     r = model.Requirement("CSD-094", "joined", frozenset({"device.joined", "file.held"}))
-    assert "CIRISServer#793" in model.plan([r], cat).uncovered["CSD-094/joined"]
+    p = model.plan([r], red)
+    assert "CIRISServer#0000" in p.uncovered["CSD-094/joined"]
+    # …and the cheapest other entry is NOT chosen for a state only T3 reaches.
+    assert p.entries == []
     model.INCLUDE_KNOWN_RED = True
     try:
-        assert not model.plan([r], cat).uncovered
+        assert not model.plan([r], red).uncovered
     finally:
         model.INCLUDE_KNOWN_RED = False
 

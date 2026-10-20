@@ -1369,11 +1369,12 @@ async fn owner_binding_stands(engine: &Engine, node_key_id: &str, owner: &str) -
     // `owner_of` and the single-owner admission gate both key on. Re-deriving
     // "what an owner-binding IS" here would put this check and the resolver on
     // two definitions of one relation.
+    let owner_keys = owner_signing_keys(engine, owner).await;
     let now = now_micros();
     let bindings: Vec<&Attestation> = rows
         .iter()
         .filter(|a| {
-            a.attesting_key_id == owner
+            owner_keys.contains(&a.attesting_key_id)
                 && a.attestation_type == attestation_type::DELEGATES_TO
                 && is_owner_binding_envelope(&a.attestation_envelope)
         })
@@ -1579,9 +1580,10 @@ pub async fn promote_owner_binding_to_federation(
         .await
         .map_err(|e| OwnershipError::Persist(e.to_string()))?;
 
+    let owner_keys = owner_signing_keys(engine, &owner).await;
     let is_owner_binding = |a: &Attestation| -> bool {
         a.attestation_type == attestation_type::DELEGATES_TO
-            && a.attesting_key_id == owner
+            && owner_keys.contains(&a.attesting_key_id)
             && a.attestation_envelope
                 .get("delegation_purpose")
                 .and_then(|v| v.as_str())
@@ -1754,7 +1756,8 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
         .attestations_to_all(node_key_id)
         .await
         .unwrap_or_default();
-    let binding = widest_owner_binding(&inbound, owner);
+    let owner_keys = owner_signing_keys(engine, owner).await;
+    let binding = widest_owner_binding(&inbound, &owner_keys);
     rows.push(AnnouncedRow {
         role: "owner_binding",
         key_id: node_key_id.to_string(),
@@ -1879,10 +1882,45 @@ pub async fn announce_bundle(engine: &Engine, owner: &str, node_key_id: &str) ->
 
 /// The owner-binding (owner → node) held at the WIDEST cohort scope, federation
 /// preferred, from this node's inbound `delegates_to` rows.
-fn widest_owner_binding(inbound: &[Attestation], owner: &str) -> Option<Attestation> {
+/// **The keys that sign as `owner`** (CC 3.3.6.3, CIRISServer#793): the fedID's
+/// own key and every LIVE roster key of it — a user-role occurrence key that
+/// persist's `signer_acts_for` resolves to the fedID. A device added by
+/// approval signs its owner-binding and its announce with its roster key, so
+/// every read of "the owner's binding" must accept that key as the owner. A
+/// node key is never a roster key (it may publish its own occurrence, it does
+/// not sign as the person), so only user-role keys are taken.
+pub(crate) async fn owner_signing_keys(
+    engine: &Engine,
+    owner: &str,
+) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::from([owner.to_owned()]);
+    let dir = engine.federation_directory();
+    let Ok(active) = dir.list_identity_occurrences_for(owner).await else {
+        return keys;
+    };
+    for occ in active {
+        let k = occ.occurrence_key_id;
+        if keys.contains(&k) {
+            continue;
+        }
+        let is_user = matches!(
+            dir.lookup_public_key(&k).await,
+            Ok(Some(rec)) if rec.identity_type == identity_type::USER
+        );
+        if is_user && crate::auth::verify::signer_acts_for(engine, &k, owner).await {
+            keys.insert(k);
+        }
+    }
+    keys
+}
+
+fn widest_owner_binding(
+    inbound: &[Attestation],
+    owner_keys: &std::collections::HashSet<String>,
+) -> Option<Attestation> {
     let is_binding = |a: &&Attestation| {
         a.attestation_type == attestation_type::DELEGATES_TO
-            && a.attesting_key_id == owner
+            && owner_keys.contains(&a.attesting_key_id)
             && a.attestation_envelope
                 .get("delegation_purpose")
                 .and_then(|v| v.as_str())
@@ -1923,6 +1961,38 @@ pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<Stri
     let mut nodes = ciris_persist::federation::admission::nodes_owned_by(dir.as_ref(), owner)
         .await
         .map_err(|e| format!("nodes_owned_by({owner}): {e:#}"))?;
+    let owner_keys = owner_signing_keys(engine, owner).await;
+    // persist's `nodes_owned_by` seeks candidates among the rows the fedID's
+    // OWN key signed. A device joined by approval announces itself with its
+    // roster key (CC 3.3.6.3), and an outsider that never held the fedID-signed
+    // `self` binding holds only that one — so the roster keys' bindings are
+    // candidates too. `owner_of` already names a roster granter as its self
+    // (persist v59 `self_of_at`), so the verdict below is unchanged.
+    for k in owner_keys.iter().filter(|k| k.as_str() != owner) {
+        let rows = dir
+            .attestations_by_all(k)
+            .await
+            .map_err(|e| format!("attestations_by({k}): {e:#}"))?;
+        for row in rows {
+            if row.attestation_type != attestation_type::DELEGATES_TO
+                || row.attested_key_id.is_empty()
+                || !ciris_persist::federation::admission::is_owner_binding_envelope(
+                    &row.attestation_envelope,
+                )
+                || nodes.contains(&row.attested_key_id)
+            {
+                continue;
+            }
+            if let Ok(Some(o)) =
+                ciris_persist::federation::admission::owner_of(dir.as_ref(), &row.attested_key_id)
+                    .await
+            {
+                if o == owner {
+                    nodes.push(row.attested_key_id);
+                }
+            }
+        }
+    }
     nodes.sort();
     nodes.dedup();
     let mut announced = Vec::new();
@@ -1931,7 +2001,7 @@ pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<Stri
             .attestations_to_all(&node)
             .await
             .map_err(|e| format!("list_attestations_for({node}): {e:#}"))?;
-        if widest_owner_binding(&inbound, owner).is_some_and(|a| is_federation_placed(&a)) {
+        if widest_owner_binding(&inbound, &owner_keys).is_some_and(|a| is_federation_placed(&a)) {
             announced.push(node);
         }
     }

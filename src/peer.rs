@@ -1046,6 +1046,13 @@ async fn bound_own_key_for(
             if stewards.iter().any(|st| st == author) {
                 return Some(k);
             }
+            // …or a live roster key of one of them: the fedID's other keypair
+            // is the fedID (CC 3.3.6.3, tracked: CIRISServer#793).
+            for st in &stewards {
+                if crate::auth::verify::signer_acts_for(engine, author, st).await {
+                    return Some(k);
+                }
+            }
         }
     }
     None
@@ -1269,6 +1276,30 @@ pub async fn owner_consent_pen(
             signer: Some(signer),
             for_key_id: None,
         })),
+        // A LIVE ROSTER KEY of the owner's fedID signs as the fedID for every
+        // owner act (CC 3.3.6.3, `CLM-self-roster-authority`): a device added by
+        // approval holds its OWN key under the same fedID (`<fedID>-<fp>`),
+        // never the genesis key, and the row is authored under that roster key
+        // — its registered id — for persist's steward gate to resolve to the
+        // fedID at the row's asserted_at (CIRISPersist#1099). The owner capsule
+        // has accepted a roster key since CIRISServer#391; this was the one
+        // owner door still asking for the genesis key (tracked: CIRISServer#793).
+        Some(signer)
+            if crate::auth::verify::signer_acts_for(engine, signer.key_id(), &owner).await =>
+        {
+            tracing::info!(
+                owner_key_id = %owner,
+                roster_key_id = %signer.key_id(),
+                node_key_id = %node_key_id,
+                "owner act signed by a live ROSTER KEY of the owner's fedID — CC 3.3.6.3 \
+                 (tracked: CIRISServer#793)"
+            );
+            Ok(Some(ConsentAuthor {
+                key_id: signer.key_id().to_owned(),
+                signer: Some(signer),
+                for_key_id: None,
+            }))
+        }
         Some(signer) => anyhow::bail!(
             "consent refused: node {node_key_id} is owned by {owner}, but the user seed at \
              alias {alias:?} derives {:?} — a different person; not signing consent as anyone \
