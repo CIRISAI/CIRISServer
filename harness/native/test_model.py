@@ -197,3 +197,15 @@ def test_another_catalogue_version_of_the_vocabulary_is_refused(tmp_path):
     bumped.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(ValueError, match="catalogue_version 4"):
         model._load_vocabulary(bumped)
+
+
+def test_the_release_trace_asset_has_the_shape_the_client_pins():
+    # `csd4-traces.json` (release.yml) is what CIRISClient's CSD/4 checker
+    # vendors per release; its keys are that checker's contract.
+    d = model.traces()
+    assert d["_meta"]["catalogue_version"] == model.CATALOGUE_VERSION
+    assert d["_meta"]["catalog_ids"] == model.CATALOG_IDS
+    assert set(d["entries"]) == set(model.CATALOG_IDS)
+    for e in d["entries"].values():
+        assert set(e) == {"file", "title", "promises", "initial", "steps", "buildable_prefix", "refused"}
+        assert all(set(s) == {"id", "atoms"} for s in e["steps"])

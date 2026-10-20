@@ -25,7 +25,7 @@ from .scenarios import SCENARIOS
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["build", "derive", "down", "evaluate", "plan", "run"])
+    ap.add_argument("scenario", choices=sorted(SCENARIOS) + ["build", "derive", "down", "evaluate", "plan", "run", "trace"])
     ap.add_argument("--topology", type=str, help="build/derive: a catalogue id (T0–T9) or a FSD/TOPOLOGY.md declaration")
     ap.add_argument("--binary", type=Path, help="a test-anchor ciris-server (every verb but evaluate/plan/down)")
     ap.add_argument("--csd", default="", help="plan/run: comma-separated CSD ids (default: every requirement)")
@@ -57,6 +57,10 @@ def main() -> int:
     if args.include_known_red:
         from . import model
         model.INCLUDE_KNOWN_RED = True
+    if args.scenario == "trace":
+        from . import model
+        print(json.dumps(model.traces(), indent=1, sort_keys=True))
+        return 0
     if args.scenario in ("evaluate", "plan"):
         from . import model
         if args.scenario == "evaluate":

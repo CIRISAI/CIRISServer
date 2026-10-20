@@ -753,3 +753,39 @@ def summary(rep: Decl) -> str:
     if rep["problems"]:
         lines += ["", "problems:"] + [f"  - {p}" for p in rep["problems"]]
     return "\n".join(lines)
+
+
+def traces() -> Dict[str, Any]:
+    """**The catalogue as a release asset** (`csd4-traces.json`): every entry's
+    steps with the atoms holding after each, its buildable prefix and refused
+    steps, under the catalogue version and the sha256 of each entry file. The
+    shape CIRISClient's `packaging/vendor_csd4.py` produced by running this
+    model itself; published per release so the client's CSD/4 checker needs no
+    server code and pins bytes that cannot change under it."""
+    import hashlib
+    cat = catalogue()
+    rep = evaluate(cat)
+    if not rep.get("ok"):
+        raise ValueError(f"the catalogue does not evaluate clean: {rep.get('problems')!r}")
+    entries = {}
+    for cid, e in sorted(cat.items(), key=lambda kv: int(kv[0][1:])):
+        t = e.topology
+        entries[cid] = {
+            "file": e.path.name,
+            "title": e.title,
+            "promises": list(e.promises),
+            "initial": [] if t.get("canonicals") else ["root.none"],
+            "steps": [{"id": s.id, "atoms": sorted(st)} for s, st in trace(t)],
+            "buildable_prefix": buildable_prefix(t),
+            "refused": refused_steps(t),
+        }
+    return {
+        "_meta": {
+            "catalogue_version": CATALOGUE_VERSION,
+            "catalog_ids": CATALOG_IDS,
+            "sources": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in sorted(CATALOG_DIR.glob("T*.yaml"))},
+            "generator": "python -m harness.native trace (harness.native.model.traces)",
+        },
+        "entries": entries,
+    }

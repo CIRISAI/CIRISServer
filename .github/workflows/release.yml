@@ -491,9 +491,20 @@ jobs:
           # literal under bash and would fail the step on a release that
           # legitimately has no wheels (the iOS lane red, everything else fine)
           # — turning a partial release into no release at all.
+          # THE CSD/4 CATALOGUE as release assets (FSD/CSD4.md): the
+          # requirements, the Constitution's vocabulary and its pin byte for
+          # byte, and the model's trace of T0–T19. CIRISClient's CSD/4 checker
+          # pins these per release, so it needs no server code and its copy
+          # cannot change under it. `trace` refuses a catalogue that does not
+          # evaluate clean, which fails the release rather than publishing it.
+          python3 -m pip install --quiet pyyaml
+          cp harness/native/topologies/catalog/requirements.yaml release/csd4-requirements.yaml
+          cp harness/native/topologies/catalog/topology_vocabulary.json release/csd4-topology_vocabulary.json
+          cp harness/native/topologies/catalog/topology_vocabulary.pin release/csd4-topology_vocabulary.pin
+          python3 -m harness.native trace > release/csd4-traces.json
           cd release
           # shellcheck disable=SC2012
-          sha256sum $(ls *.tar.gz *.whl 2>/dev/null) > SHA256SUMS
+          sha256sum $(ls *.tar.gz *.whl csd4-* 2>/dev/null) > SHA256SUMS
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
       - name: Sign artifacts (Sigstore keyless)
@@ -501,7 +512,7 @@ jobs:
           cd release
           # Same guard as the hashing step: `*.whl` must not become a literal
           # argument when the iOS wheel lane produced nothing.
-          for f in $(ls *.tar.gz *.whl 2>/dev/null) SHA256SUMS; do
+          for f in $(ls *.tar.gz *.whl csd4-* 2>/dev/null) SHA256SUMS; do
             cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
           done
       - name: Create GitHub Release
@@ -514,6 +525,7 @@ jobs:
             release/*.whl
             release/*.whl.sig
             release/*.whl.pem
+            release/csd4-*
             release/SHA256SUMS
             release/SHA256SUMS.sig
             release/SHA256SUMS.pem
