@@ -1049,30 +1049,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     }
 
     // ── Canonical bootstrap boot prime (CIRISServer#238) ──────────────────────
-    // `prime_trusted_peers` primes from Rooted `transport_destination` ROWS — but
-    // the baked canonical seed carries only a KeyRecord (+ an IP dial hint), no
-    // such row, so the canonical was NEVER boot-primed and rooted only via its
-    // slow/unreliable announce (~130-200s, or never). We prime the ROOTING
-    // (trust) directory here from `(dest_hash, ed25519)` derivable from the baked
-    // fed Ed25519: `dest_hash = reticulum_destination_for_pubkey(fed_ed25519) =
-    // sha256(fed_ed25519)[..16]`; the link signing key IS that same fed Ed25519
-    // (transport and federation share the Ed25519 half; the v10.1.0 split was in
-    // the unused X25519).
-    //
-    // ⚠️ ROOTING ≠ ROUTING — the sealed root cause of the CIRISServer#238 /
-    // CIRISEdge#336 saga. `sha256(fed_ed25519)` is an EXPLICIT-HASH dest. It is
-    // the right key to ROOT under (trust, announce-independent — #238's whole
-    // point), but it is NOT the dest the canonical is REACHABLE on: edge announces
-    // and serves links on its RNS NAMED dest, `sha256(name_hash("ciris","edge") ‖
-    // identity_hash)[..16]` (a DIFFERENT derivation — sharing the key does not make
-    // the hashes coincide, which an earlier version of this comment wrongly
-    // asserted). Explicit-hash dests categorically cannot be announced, so a peer
-    // can never self-learn a route to `sha256(fed_ed25519)`; a replication send
-    // aimed there gets no path and a silent 30 s transport timeout. Routing to the
-    // canonical is HEALED from its (v12-transmitting) announce, which carries the
-    // transport identity → the routable named dest. See CIRISEdge#336 for the
-    // announce-heal of the peer's routing dest + the LINK_REQUEST_TX-with-no-path
-    // guard that turns any future recurrence into a loud immediate error.
+    // The canonical's route row comes with the bundle (v4 seeds it at first
+    // open); prime it from that binding's named destination and TRANSPORT
+    // Ed25519 — the same entry `prime_trusted_peers` writes. Never the
+    // federation key: the canonical's RNS identity is keystore-backed, and a
+    // federation-key prime fails every link proof (InvalidProof — the edge v43
+    // two-joiner race, 2026-10-20). See `prime_canonical_bootstrap_peers`.
     prime_canonical_bootstrap_peers(&engine, &edge).await;
     // The first-contact carry for a server-shaped node (CIRISServer#632 / CIRISEdge#671).
     crate::mesh_genesis::carry_allegiance_from_canonicals(&engine, &[]).await;
@@ -3018,23 +3000,17 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
     );
 }
 
-/// Boot-prime the canonical bootstrap peer(s) as explicit-hash Reticulum
-/// destinations, derived purely from the baked KeyRecord — CIRISServer#238.
+/// Boot-prime the canonical bootstrap peer(s) — CIRISServer#238.
 ///
-/// The canonical seed carries a `KeyRecord` (with `pubkey_ed25519_base64`) and an
-/// IP dial hint, but NO `transport_destination` row, so [`prime_trusted_peers`]
-/// (which primes from Rooted rows) never touches it and the canonical roots only
-/// via its slow announce. But an explicit-hash peer (edge v7.0.0) needs only
-/// `(dest_hash, ed25519)`, and both come from the fed Ed25519 pubkey:
-///   - `dest_hash = reticulum_destination_for_pubkey(fed_ed25519) = sha256(fed)[..16]`
-///   - `signing_key = fed_ed25519` — transport and federation share the Ed25519
-///     signing half (the split is in the X25519 half, which priming doesn't use).
-///
-/// So we look up the canonical's KeyRecord, derive both, and inject a Rooted peer.
-/// Deterministic, no announce dependency, no seed change. Runs in BOTH the
-/// standalone node and the agent fold.
+/// A canonical's route arrives with the bundle (v4 seeds the serve nodes'
+/// signed `transport_destination` rows at first open), so it is primed from
+/// that published binding: its NAMED destination and its TRANSPORT Ed25519
+/// (`resolve_reticulum_prime_binding`). Never the KeyRecord's federation key —
+/// the canonical's RNS identity is keystore-backed and proves links with its
+/// transport key, so a federation-key prime fails every link proof. A canonical
+/// with no published binding is not primed. Runs in BOTH the standalone node and
+/// the agent fold.
 async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
-    use base64::Engine as _;
     let Some(transport) = edge.reticulum_transport() else {
         tracing::debug!("canonical prime: no Reticulum transport on this build — skipping");
         return;
@@ -3062,108 +3038,57 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
             );
             continue;
         }
-        let rec = match engine
-            .federation_directory()
-            .lookup_public_key(key_id)
-            .await
-        {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                tracing::warn!(
-                    canonical = %key_id,
-                    "canonical prime: no KeyRecord for canonical key_id — cannot derive explicit-hash binding, will fall back to announce"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(canonical = %key_id, error = %e, "canonical prime: lookup_public_key failed — skip");
-                continue;
-            }
-        };
-        let ed_bytes = match base64::engine::general_purpose::STANDARD
-            .decode(rec.pubkey_ed25519_base64.as_bytes())
-        {
-            Ok(b) if b.len() == 32 => b,
-            Ok(b) => {
-                tracing::warn!(
-                    canonical = %key_id,
-                    len = b.len(),
-                    "canonical prime: pubkey_ed25519_base64 is not 32 bytes — skip"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(canonical = %key_id, error = %e, "canonical prime: pubkey_ed25519_base64 not base64 — skip");
-                continue;
-            }
-        };
-        let mut fed_ed = [0u8; 32];
-        fed_ed.copy_from_slice(&ed_bytes);
-
-        // THE DESTINATION MUST BE THE NAMED HASH, AND WE CANNOT DERIVE IT.
+        // THE LINK KEY IS THE PEER'S TRANSPORT ED25519, NEVER ITS FEDERATION KEY.
         //
-        // This used to inject `reticulum_destination_for_pubkey(&fed_ed)` — the
-        // BASE hash, `sha256(fed_pubkey)[..16]`. compose.rs's own publish-side
-        // comment says exactly why that is wrong: the address a peer must use is
-        // `local_named_dest_hash()`, computed over the node's TRANSPORT keypair,
-        // "NOT `local_dest_hash()` … that mismatches the gate's recompute
-        // (DestinationHashMismatch) and blocks inbound sealing". CIRISEdge#406
-        // fixed the publish side; this consume side kept deriving the base hash.
+        // This used to inject the KeyRecord's federation Ed25519 as the link-proof
+        // key, on the old premise that transport and federation share the Ed25519
+        // half. They have not since RNS identities became keystore-backed: the
+        // canonical proves links with its keystore transport identity, so a peer
+        // primed with the federation key fails EVERY link proof (InvalidProof).
+        // Dormant while this branch found no published binding; bundle v4 seeds
+        // the canonical's route row at first open (edge v43), and it raced
+        // `prime_trusted_peers` for the same peers-map entry — last writer won,
+        // so one of two simultaneous joiners never reached the canonical
+        // (CIRISEdge, 2026-10-20).
         //
-        // Measured on the live canonical (CIRISServer#335):
-        //     listening   dest       = 1fc232535ada89fb20a5fbd52d2ced12   (base)
-        //                 named_dest = 81cabcf78a6ee16f197ba7e530a2f6db   (named)
-        //     published signed binding = 81cabcf78a…                      (named)
-        //     canonical boot prime     = 1fc232535a…                      (WRONG)
-        //
-        // Every node primed the canonical at an address it does not serve
-        // federation traffic on, then reported knows_peer=true, provenance=Rooted,
-        // primed=1, refused=0. All green, peer unaddressable, and ZERO traces ever
-        // reached the canonical from anyone.
-        //
-        // Worse than useless: the false rooting is what PREVENTS recovery. The
-        // announce carries the real named dest, but the node already believes it
-        // knows this peer, so it never learns the right address.
-        //
-        // The named hash is over the TRANSPORT keypair, which a KeyRecord does not
-        // carry — so it cannot be derived here, only looked up. Prime from the
-        // peer's published transport binding when we have one; otherwise DO NOT
-        // PRIME. Waiting one announce interval for a correct address beats rooting
-        // a wrong one forever.
-        let published = engine
+        // The named destination AND the transport key both come from the peer's
+        // published binding (`resolve_reticulum_prime_binding`, the one
+        // `prime_trusted_peers` uses), so the two writers now write the same
+        // entry. No binding → NOT primed: the destination is computed over the
+        // TRANSPORT keypair, which a KeyRecord does not carry (CIRISServer#335),
+        // and waiting one announce beats rooting a wrong key.
+        let live: Vec<ciris_persist::federation::TransportDestination> = engine
             .federation_directory()
             .list_transport_destinations_for(key_id)
             .await
             .unwrap_or_default()
             .into_iter()
-            .find(|d| d.transport_kind == "reticulum" && d.retired_at.is_none());
-        let dest_hash = match published {
-            Some(b) => match hex::decode(b.destination.trim()) {
-                Ok(raw) if raw.len() == 16 => {
-                    let mut h = [0u8; 16];
-                    h.copy_from_slice(&raw);
-                    h
-                }
-                _ => {
-                    tracing::warn!(
+            .filter(|d| d.retired_at.is_none())
+            .collect();
+        let (dest_hash, transport_ed) =
+            match crate::federation_delivery::resolve_reticulum_prime_binding(&live) {
+                Ok(Some(binding)) => binding,
+                Ok(None) => {
+                    tracing::info!(
                         canonical = %key_id,
-                        destination = %b.destination,
-                        "canonical prime: published reticulum binding is not a 16-byte hex destination — NOT priming (a wrong address blocks announce-rooting)"
+                        "canonical prime: no published reticulum transport binding yet — NOT \
+                         priming; this node waits for the peer's announce (CIRISServer#335)"
                     );
                     continue;
                 }
-            },
-            None => {
-                tracing::info!(
-                    canonical = %key_id,
-                    "canonical prime: no published reticulum transport binding yet — NOT priming. The named destination is computed over the peer's TRANSPORT keypair and cannot be derived from its KeyRecord, so this node waits for the peer's announce rather than rooting a derived base hash it cannot reach. See CIRISServer#335."
-                );
-                continue;
-            }
-        };
+                Err(e) => {
+                    tracing::warn!(
+                        canonical = %key_id,
+                        error = %format!("{e:#}"),
+                        "canonical prime: the published reticulum binding is malformed — NOT \
+                         priming (a wrong key or address blocks announce-rooting)"
+                    );
+                    continue;
+                }
+            };
         let before = transport.knows_peer(key_id).await;
         transport
-            .inject_rooted_peer_for_test(key_id, dest_hash, fed_ed)
+            .inject_rooted_peer_for_test(key_id, dest_hash, transport_ed)
             .await;
         let after = transport.knows_peer(key_id).await;
         primed += 1;
@@ -3172,7 +3097,7 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
             dest_hash = %hex::encode(dest_hash),
             knows_peer_before = before,
             knows_peer_after = after,
-            "canonical boot prime: rooted {key_id} from baked KeyRecord (explicit-hash, no announce)"
+            "canonical boot prime: rooted {key_id} from its published transport binding (no announce)"
         );
     }
     tracing::info!(
