@@ -102,8 +102,16 @@ def _subst(s: str, values: Dict[str, str]) -> str:
 
 
 def _dig(obj: Any, path: str) -> Any:
+    """A dotted path into a JSON body; a numeric part indexes a list
+    (`proposals.0.proposal.kind`). Anything absent reads as None, so
+    `expect: {proposals.0: null}` asserts an empty list."""
     for part in path.split("."):
-        obj = obj.get(part) if isinstance(obj, dict) else None
+        if isinstance(obj, dict):
+            obj = obj.get(part)
+        elif isinstance(obj, list) and part.isdigit():
+            obj = obj[int(part)] if int(part) < len(obj) else None
+        else:
+            obj = None
     return obj
 
 

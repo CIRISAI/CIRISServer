@@ -1258,6 +1258,18 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                 if not prop:
                     raise MeshError(f"{rel['by']} lists no held eviction of {target}: {listed}")
                 ctx.joins[rel["target"]]["evict_proposal"] = prop["proposal"]["id"]
+                # The state is the SELF's, not the proposer's: it holds once the
+                # person's other devices hold the proposal and can answer it.
+                pid_ = prop["proposal"]["id"]
+                for d in persons[p_]["owns"]:
+                    other = N[d]
+                    if other is by or not other.token:
+                        continue
+
+                    def holds(n: "Node" = other) -> Optional[bool]:
+                        props = n.must("GET", "/v1/self/roster/proposals").get("proposals", [])
+                        return True if any(x["proposal"]["id"] == pid_ for x in props) else None
+                    wait_for(f"{d} to hold the eviction proposal", holds, float(rel.get("wait", 60)), every=1)
                 step(f"evict_propose:{rel['target']}", layer="relations", by=rel["by"], proposal=prop["proposal"]["id"],
                      proves="the eviction is a held proposal (CC 3.3.6.3)")
             else:

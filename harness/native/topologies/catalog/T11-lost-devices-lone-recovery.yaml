@@ -7,7 +7,7 @@
 catalog_id: T11
 catalogue_version: 2
 title: Two lost devices — recovery by the lone path over the window
-serves: [CSD-037]
+serves: [CSD-037, CSD-095]
 promises: [key.holder.lost, key.membership.evicted, self.roster_size.one]
 topology:
   roots:

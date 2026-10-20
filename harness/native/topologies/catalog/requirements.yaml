@@ -35,11 +35,36 @@ CSD-037:
   tests:
     roster:
       at: [roster.visible, device.joined]
-CSD-095:
+# One device handles each exchange while its person is on it (CC 3.1.3.1, the
+# session claims). No client card yet: CSD-096 is reserved for it (it was
+# CSD-095 here until the client's self-key roster card took that number).
+CSD-096:
   topology: T1
   tests:
     one_handler:
       at: [session.unified, note.synced]
+# Changes to your devices — the self roster's held changes (CC 3.3.6.3,
+# CIRISServer#794; the client's self-key roster card, CIRISClient#218).
+CSD-095:
+  topology: T10
+  tests:
+    # From three keys an eviction is a proposal another device answers; it
+    # lands by the quorum path.
+    evict_held:
+      at: [key.membership.proposed_evict, key.holder.thief, self.roster_size.three_more]
+      probe:
+        node: A2
+        path: /v1/self/roster/proposals
+        status: 200
+        expect: {proposals.0.proposal.kind: evict, proposals.0.decision.outcome: pending}
+    evicted_by_quorum:
+      at: [key.membership.evicted, key.holder.thief]
+      probe: {node: A2, path: /v1/self/roster/proposals, status: 200, expect: {proposals.0: null}}
+    # NOT YET: the lone path (T11: two devices lost, recovered alone after
+    # W_self) and the held ADDITION. One card names one topology (CSD/4 §1) and
+    # T10 reaches neither; the lone path waits on persist's test-anchor W_self
+    # seam (CIRISPersist#1111), the held addition on a vocabulary atom for it
+    # (asked of CIRISConstitution).
 CSD-091:
   topology: T2
   tests:
