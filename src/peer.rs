@@ -23,6 +23,7 @@
 //! "federation"`, FEDERATION tier, hybrid-signed by the granting node's steward
 //! key, payload recording the grant intent.
 
+use crate::attestation_reads::AllAttestations as _;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
@@ -53,7 +54,7 @@ async fn only_legacy_typed_grant(engine: &Engine, author: &str, attester: &str) 
     let granted = format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX);
     let Ok(rows) = engine
         .federation_directory()
-        .list_attestations_by(author)
+        .attestations_by_all(author)
         .await
     else {
         return false;

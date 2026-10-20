@@ -22,6 +22,7 @@
 #[path = "support/owned_node.rs"]
 mod owned_node;
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -151,7 +152,7 @@ async fn carry_announce(from: &Person, to: &Person) {
         .await
         .expect("carry the node key");
     let rows = src
-        .list_attestations_by(from.key())
+        .attestations_by_all(from.key())
         .await
         .expect("the owner's rows");
     let mut carried = 0;
@@ -486,7 +487,7 @@ async fn un_contacting_withdraws_the_owners_grant_with_the_owners_pen() {
     let row = alice
         .engine
         .federation_directory()
-        .list_attestations_by(alice.key())
+        .attestations_by_all(alice.key())
         .await
         .expect("rows")
         .into_iter()

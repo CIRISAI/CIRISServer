@@ -41,6 +41,7 @@
 //! Both are the same lesson as the control above, one rung down: a fixture that
 //! only looks like the other party keys no room and signs no words.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -1456,7 +1457,7 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     // while leaking to every peer that ever replicates it.
     let stored = engine
         .federation_directory()
-        .list_attestations_by(&owner_id.key_id)
+        .attestations_by_all(&owner_id.key_id)
         .await
         .expect("list the owner's rows")
         .into_iter()
@@ -2471,7 +2472,7 @@ async fn a_chat_message_verifies_at_the_persist_boundary() {
     // statement of the same property, not a weaker one.
     let directory = engine.federation_directory();
     let row = directory
-        .list_attestations_by(&owner_id.key_id)
+        .attestations_by_all(&owner_id.key_id)
         .await
         .expect("list_attestations_by")
         .into_iter()
@@ -2523,7 +2524,7 @@ async fn the_message_names_its_human_author_inside_the_signed_envelope() {
     let node = node_key_id(&engine).await;
     let directory = engine.federation_directory();
     let row = directory
-        .list_attestations_by(&owner_id.key_id)
+        .attestations_by_all(&owner_id.key_id)
         .await
         .expect("list_attestations_by")
         .into_iter()
@@ -3684,7 +3685,7 @@ async fn a_joiner_who_asks_first_is_seated_across_a_restart_and_nothing_else_is_
 
     // Aaron's node seats the owner on the acceptance.
     let acceptance = dir
-        .list_attestations_for(&owner_id.key_id)
+        .attestations_to_all(&owner_id.key_id)
         .await
         .expect("replies")
         .into_iter()
@@ -3849,7 +3850,7 @@ async fn a_joiner_who_asks_once_converges_with_nobody_reading_the_room() {
 
     // Aaron's node seats the owner on the acceptance.
     let acceptance = dir
-        .list_attestations_for(&owner_id.key_id)
+        .attestations_to_all(&owner_id.key_id)
         .await
         .expect("replies")
         .into_iter()

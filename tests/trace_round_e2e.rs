@@ -72,6 +72,7 @@
 //! was minted with `roles = None`.
 #![cfg(feature = "test-anchor")]
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -360,7 +361,7 @@ async fn accept_shared_root(nodes: &[&Node], root: &str, serve_node_key_id: &str
         let mine: Vec<_> = n
             .engine
             .federation_directory()
-            .list_attestations_by(&n.key_id)
+            .attestations_by_all(&n.key_id)
             .await
             .expect("own rows")
             .into_iter()
@@ -783,7 +784,7 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
         let mine = agent
             .engine
             .federation_directory()
-            .list_attestations_by(&agent.key_id)
+            .attestations_by_all(&agent.key_id)
             .await
             .expect("the agent's own corpus");
         let mut checked = 0usize;
@@ -889,7 +890,7 @@ async fn agent_trace_reaches_canonical_over_a_real_round() {
     let landed = canonical
         .engine
         .federation_directory()
-        .list_attestations_by(&agent.key_id)
+        .attestations_by_all(&agent.key_id)
         .await
         .expect("read the canonical's corpus");
     let traces: Vec<_> = landed

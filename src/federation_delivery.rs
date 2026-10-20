@@ -608,8 +608,9 @@ async fn gather_delivery_status(
                     let mut by_projection: std::collections::BTreeMap<String, usize> =
                         std::collections::BTreeMap::new();
                     if !grants.is_empty() {
+                        use crate::attestation_reads::AllAttestations as _;
                         if let Ok(mine) =
-                            eng.federation_directory().list_attestations_by(&node).await
+                            eng.federation_directory().attestations_by_all(&node).await
                         {
                             for a in &mine {
                                 let dim = a

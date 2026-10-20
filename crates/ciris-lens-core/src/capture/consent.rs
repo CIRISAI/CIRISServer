@@ -237,7 +237,7 @@ pub fn resolve_consent(grant: GrantState, config: &ConsentConfig) -> ConsentReso
 ///
 /// Uses `FederationDirectory::list_attestations_by` (the `by`-issuer API on
 /// the `FederationDirectory` trait) with in-memory dimension filtering in
-/// [`resolve_grant`], because `list_attestations_by` is available on the
+/// [`resolve_grant`], because the bounded `AttestationQuery` read runs on the
 /// object-safe `Arc<dyn FederationDirectory>` returned by
 /// `Engine::federation_directory()`, while the filtered
 /// `ReadEngine::list_attestations` lives on backend-specific impls and
@@ -257,11 +257,19 @@ pub async fn resolve_consent_via_engine(
     attesting_key_id: &str,
     config: &ConsentConfig,
 ) -> Result<ConsentResolution, ConsentError> {
+    use ciris_persist::federation::attestation_query::{AttestationQuery, FOLD_PAGE};
     let dir = engine.federation_directory();
-    let rows = dir
-        .list_attestations_by(attesting_key_id)
+    // persist v56 (#1001) demoted `list_attestations_by` to test builds; this is
+    // the same read — every page of the bounded query by this key.
+    let mut rows = Vec::new();
+    let mut pages = AttestationQuery::by(attesting_key_id, FOLD_PAGE).pages();
+    while let Some(page) = pages
+        .next(dir.as_ref())
         .await
-        .map_err(|e| ConsentError::Directory(e.to_string()))?;
+        .map_err(|e| ConsentError::Directory(e.to_string()))?
+    {
+        rows.extend(page);
+    }
     let grant = resolve_grant(&rows);
     Ok(resolve_consent(grant, config))
 }

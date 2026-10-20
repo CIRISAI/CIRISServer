@@ -20,6 +20,7 @@
 //!    push-down (it changes the selection and the hash) and it bounds the
 //!    judgement.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1607,7 +1608,7 @@ async fn refuse_writes_says_what_it_does_not_reach_and_that_is_checkable() {
     let before: Vec<String> = f
         .engine
         .federation_directory()
-        .list_attestations_by(TARGET)
+        .attestations_by_all(TARGET)
         .await
         .expect("list TARGET's rows")
         .into_iter()
@@ -1631,7 +1632,7 @@ async fn refuse_writes_says_what_it_does_not_reach_and_that_is_checkable() {
     let after: Vec<String> = f
         .engine
         .federation_directory()
-        .list_attestations_by(TARGET)
+        .attestations_by_all(TARGET)
         .await
         .expect("list TARGET's rows")
         .into_iter()

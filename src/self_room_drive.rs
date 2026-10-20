@@ -35,6 +35,7 @@
 //! `Abandon`s in its favour — convergent, but churn. Durable group state is
 //! CIRISServer#623 and belongs to every room at once, not to this one.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ciris_edge::identity::LocalSigner;
@@ -857,7 +858,7 @@ async fn note_unmatched_key_packages(
     node: &str,
     room: &str,
 ) {
-    let rows = match dir.list_attestations_by(node).await {
+    let rows = match dir.attestations_by_all(node).await {
         Ok(r) => r,
         Err(_) => return,
     };

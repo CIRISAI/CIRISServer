@@ -63,6 +63,7 @@
 //! emitting engine; its id is `<label>-<fp>` of B's own key too, because persist
 //! v59 (CIRISPersist#1103) refuses any other key_id shape at registration.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -1061,7 +1062,7 @@ async fn peering_consent_covers_traces_and_trace_syncs_a_to_b() {
     // Read the stored grant's attestation_prefixes back out and assert coverage.
     let rows = node_a
         .federation_directory()
-        .list_attestations_by(&nk_a)
+        .attestations_by_all(&nk_a)
         .await
         .expect("list A attestations");
     let stored_prefixes: Vec<String> = rows

@@ -30,6 +30,7 @@ use ciris_keyring::MlDsa65SoftwareSigner;
 use ciris_persist::federation::types::{algorithm, identity_type, KeyRecord};
 use ciris_persist::federation::SignedKeyRecord;
 use ciris_persist::prelude::{Engine, LocalSigner};
+use ciris_server::attestation_reads::AllAttestations as _;
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -320,7 +321,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
     );
     let rows = engine
         .federation_directory()
-        .list_attestations_by(&actor)
+        .attestations_by_all(&actor)
         .await
         .expect("the actor's rows");
     let supersedes: Vec<_> = rows
@@ -597,7 +598,7 @@ async fn the_split_node_reauthors_at_boot_and_authors_at_runtime_as_itself() {
         .collect();
     let all_for_5: Vec<(String, Option<String>)> = engine
         .federation_directory()
-        .list_attestations_for(&peer_5_id)
+        .attestations_to_all(&peer_5_id)
         .await
         .map(|rows| {
             rows.iter()

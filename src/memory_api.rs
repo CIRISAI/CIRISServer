@@ -64,6 +64,7 @@
 //! - `GraphEdge.attributes.created_at` / `.context` — mapped from the raw row's
 //!   `created_at` / empty respectively.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -567,7 +568,7 @@ pub async fn seed_ceg_graph(engine: &std::sync::Arc<Engine>) {
     // ── Authored attestations (delegations, consent, structural, scores) ──────
     match engine
         .federation_directory()
-        .list_attestations_by(node_key_id)
+        .attestations_by_all(node_key_id)
         .await
     {
         Ok(atts) => {

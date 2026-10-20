@@ -111,6 +111,7 @@
 //! a config row must not silently disable the countermeasure — nor, in the other
 //! direction, brick every peer).
 
+use crate::attestation_reads::AllAttestations as _;
 use std::fmt;
 use std::sync::Arc;
 
@@ -312,7 +313,7 @@ pub async fn assess(
 ) -> Result<AttesterLedger, Refusal> {
     let rows = engine
         .federation_directory()
-        .list_attestations_by(attester_key_id)
+        .attestations_by_all(attester_key_id)
         .await
         .map_err(|e| Refusal::LedgerUnavailable {
             attester_key_id: attester_key_id.to_owned(),

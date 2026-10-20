@@ -7,6 +7,7 @@
 //! Production roster (the baked genesis is what the node accepts).
 #![cfg(not(feature = "test-anchor"))]
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
@@ -87,7 +88,7 @@ async fn two_live_acceptances_one_withdrawal_none_left() {
         .expect("a second live acceptance");
     let live = engine
         .federation_directory()
-        .list_attestations_by(&node)
+        .attestations_by_all(&node)
         .await
         .unwrap()
         .into_iter()

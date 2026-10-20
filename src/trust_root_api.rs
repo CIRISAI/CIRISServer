@@ -27,6 +27,7 @@
 //! These routes sit behind the same loopback guard as the first-run claim reads —
 //! the operator's own machine, not the network.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -217,7 +218,7 @@ async fn candidate_roots(st: &TrustRootState) -> Vec<String> {
     match st
         .engine
         .federation_directory()
-        .list_attestations_by(&st.node_key_id)
+        .attestations_by_all(&st.node_key_id)
         .await
     {
         Ok(rows) => {

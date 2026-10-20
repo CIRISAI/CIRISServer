@@ -17,6 +17,7 @@
 //!    start is `Bound` on the first call;
 //! 5. a pen that does not hold the owner's pubkeys is refused before any write.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -177,7 +178,7 @@ async fn an_unbound_owner_record_is_rebound_in_place_and_then_admits_on_a_peer()
     // node now holds for the rebound record, applied on the peer.
     let row = node
         .federation_directory()
-        .list_attestations_for(&owner_id)
+        .attestations_to_all(&owner_id)
         .await
         .expect("rows about the owner key")
         .into_iter()

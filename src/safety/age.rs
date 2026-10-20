@@ -43,6 +43,7 @@
 //!   default is *protective* (deny adult content to anything below `adult`),
 //!   never permissive.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -388,7 +389,7 @@ pub async fn read_age_level(engine: &Engine, subject_key_id: &str) -> Option<Age
     let directory = engine.federation_directory();
     // Both the subject's own (`by`) and subject-targeted (`for`) rows; an
     // age-assurance row is self-attested so `by` is the primary source.
-    let rows = directory.list_attestations_by(subject_key_id).await.ok()?;
+    let rows = directory.attestations_by_all(subject_key_id).await.ok()?;
     let mut best: Option<AgeAssurance> = None;
     for row in rows {
         if row.attestation_type != attestation_type::SCORES {

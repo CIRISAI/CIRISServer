@@ -33,6 +33,7 @@
 //! `multi_thread` is load-bearing: `DirectoryStateAdapter` bridges edge's sync
 //! trait to persist via `block_in_place`.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -181,7 +182,7 @@ fn hash_of<T: serde::Serialize>(row: &T) -> [u8; 32] {
 async fn replicate_key_row(from: &Engine, to: &Engine, key_id: &str) {
     let row = from
         .federation_directory()
-        .list_attestations_for(key_id)
+        .attestations_to_all(key_id)
         .await
         .expect("rows about the key")
         .into_iter()
@@ -201,7 +202,7 @@ async fn replicate_key_row(from: &Engine, to: &Engine, key_id: &str) {
 async fn key_hash(engine: &Engine, key_id: &str) -> [u8; 32] {
     let rows = engine
         .federation_directory()
-        .list_attestations_for(key_id)
+        .attestations_to_all(key_id)
         .await
         .expect("rows about the key");
     let row = rows
@@ -228,7 +229,7 @@ async fn occurrence_hash(engine: &Engine, occurrence: &str) -> [u8; 32] {
         .unwrap_or_else(|| panic!("occurrence {occurrence} is bound here"))
         .identity_key_id;
     let row = dir
-        .list_attestations_for(&identity)
+        .attestations_to_all(&identity)
         .await
         .expect("rows about the identity")
         .into_iter()

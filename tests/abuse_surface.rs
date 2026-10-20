@@ -39,6 +39,7 @@
 //! the test went RED, and the break was reverted. A check that cannot fail is
 //! how this repo has been fooled five times.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -284,7 +285,7 @@ async fn a_self_asserted_witness_can_no_longer_forge_age_assurance_about_a_third
     // And nothing reads back as a witness-attested level.
     let rows = engine
         .federation_directory()
-        .list_attestations_for(&id("abuse-victim"))
+        .attestations_to_all(&id("abuse-victim"))
         .await
         .expect("read the victim's rows");
     assert!(
@@ -581,7 +582,7 @@ async fn any_admitted_key_scores_any_third_party_today() {
 
     let rows = engine
         .federation_directory()
-        .list_attestations_for(&id("abuse-victim-3"))
+        .attestations_to_all(&id("abuse-victim-3"))
         .await
         .expect("read the victim's rows");
     assert!(

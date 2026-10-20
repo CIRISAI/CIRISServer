@@ -29,6 +29,7 @@ use ciris_persist::federation::types::{
 };
 use ciris_persist::federation::{EmitAttestationInput, SignedKeyRecord};
 use ciris_persist::prelude::{Engine, LocalSigner};
+use ciris_server::attestation_reads::AllAttestations as _;
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -133,7 +134,7 @@ async fn grant_types(engine: &Engine, me: &str) -> Vec<String> {
     let granted = format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX);
     let mut types: Vec<String> = engine
         .federation_directory()
-        .list_attestations_by(me)
+        .attestations_by_all(me)
         .await
         .expect("list")
         .into_iter()

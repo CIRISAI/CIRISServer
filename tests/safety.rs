@@ -17,6 +17,7 @@
 //!     global), and the publish hook is opt-in (OFF ⇒ admit; ON ⇒ deferred to the
 //!     NodeCore matcher, never a faked match).
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -29,7 +30,6 @@ use ciris_persist::federation::types::{
     algorithm, attestation_type, identity_type, Community, CommunityMember, KeyRecord,
     SignedCommunity, SignedKeyRecord,
 };
-use ciris_persist::federation::FederationDirectory;
 use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ciris_persist::verify::canonical::ceg_produce_canonicalize;
 
@@ -624,7 +624,7 @@ async fn age_assurance_emit_read_roundtrip_and_misdeclaration_does_not_slash() {
     let rows = engine
         .sqlite_backend()
         .unwrap()
-        .list_attestations_by(subject)
+        .attestations_by_all(subject)
         .await
         .unwrap();
     assert!(
@@ -2015,7 +2015,7 @@ async fn flag_endpoint_makes_the_reveal_gate_fire() {
     );
     let rows = engine
         .federation_directory()
-        .list_attestations_for(subject)
+        .attestations_to_all(subject)
         .await
         .unwrap();
     let flag_row = rows

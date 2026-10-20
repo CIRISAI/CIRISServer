@@ -15,6 +15,7 @@
 //! Both the directory-level pieces (build on L, apply on T directly) AND the full
 //! L→T HTTP round-trip are exercised in-process.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -206,7 +207,7 @@ async fn l_builds_and_t_applies_owner_binding_directly() {
     // The persisted delegates_to is genuinely USER-signed.
     let edges = t
         .federation_directory()
-        .list_attestations_for(&t_node_key_id())
+        .attestations_to_all(&t_node_key_id())
         .await
         .unwrap();
     let row = edges

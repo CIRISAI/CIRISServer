@@ -44,6 +44,7 @@
 //! Refusals are `{error, reason_id, detail}` with stable ids, like the family
 //! surface ([`crate::family_api`]), whose owner gate this shares.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -633,11 +634,11 @@ async fn live_bindings(
 ) -> Result<Vec<Attestation>, String> {
     let dir = engine.federation_directory();
     let inbound = dir
-        .list_attestations_for(node)
+        .attestations_to_all(node)
         .await
         .map_err(|e| format!("list_attestations_for({node}): {e:#}"))?;
     let withdrawn: std::collections::HashSet<String> = dir
-        .list_attestations_by(owner)
+        .attestations_by_all(owner)
         .await
         .map_err(|e| format!("list_attestations_by({owner}): {e:#}"))?
         .into_iter()
@@ -996,7 +997,7 @@ struct LabelRequest {
 async fn label_heads(engine: &Engine, owner: &str) -> Result<HashMap<String, Attestation>, String> {
     let rows = engine
         .federation_directory()
-        .list_attestations_by(owner)
+        .attestations_by_all(owner)
         .await
         .map_err(|e| format!("list_attestations_by({owner}): {e:#}"))?;
     let mut heads: HashMap<String, Attestation> = HashMap::new();

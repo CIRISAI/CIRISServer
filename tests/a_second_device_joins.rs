@@ -20,6 +20,7 @@
 //!    at `federation`; idempotent; a node that is not the caller's is refused
 //!    by name.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -208,7 +209,7 @@ async fn the_owners_other_device_is_linked_without_a_grant_and_unlinked_on_relea
     // RELEASE: the owner withdraws the binding; the next pass unlinks.
     let binding = engine
         .federation_directory()
-        .list_attestations_for(second)
+        .attestations_to_all(second)
         .await
         .expect("rows about the second device")
         .into_iter()
@@ -459,7 +460,7 @@ async fn the_pen_holder_announces_another_device_and_refuses_a_node_not_its_own(
     let federation_bindings = || async {
         engine
             .federation_directory()
-            .list_attestations_for(second)
+            .attestations_to_all(second)
             .await
             .expect("rows about the second device")
             .into_iter()

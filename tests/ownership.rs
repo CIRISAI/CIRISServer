@@ -14,6 +14,7 @@
 //!     responsible user; and an `agency:*` scope in the claim is rejected;
 //!   - the node self-registers as `identity_type "node"` (not "steward").
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -501,7 +502,7 @@ async fn claim_establishes_owner_binding_cohort_and_system_admin() {
     // user and its signature verifies against the USER's pubkeys, NOT the node's.
     let edges = engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
         .expect("inbound edges");
     let binding_row = edges
@@ -795,7 +796,7 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
     // Precondition: exactly one owner-binding, cohort_scope=self.
     let before = engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
         .expect("inbound edges");
     let self_bindings: Vec<_> = before
@@ -830,7 +831,7 @@ async fn promote_owner_binding_self_to_federation_is_idempotent() {
     );
     let after = engine
         .federation_directory()
-        .list_attestations_for(node_key_id)
+        .attestations_to_all(node_key_id)
         .await
         .expect("inbound edges after promote");
     assert!(

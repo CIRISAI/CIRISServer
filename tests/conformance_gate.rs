@@ -23,6 +23,7 @@
 //! `tests/federation_admin.rs`; the assertions here are entirely about the two new
 //! gates in front of it.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -366,7 +367,7 @@ async fn authored_grant(engine: &Arc<Engine>) -> bool {
     let key_id = node_key_id(engine).await;
     engine
         .federation_directory()
-        .list_attestations_by(&key_id)
+        .attestations_by_all(&key_id)
         .await
         .expect("list attestations by node")
         .iter()

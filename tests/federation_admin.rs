@@ -18,6 +18,7 @@
 //!      through `register_federation_key` on a FRESH engine (it really is an
 //!      admissible self-signed key record).
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -429,7 +430,7 @@ async fn owner_peering_admits_peer_and_authors_directed_consent() {
     // ── This node authored a directed consent:replication:v1 grant at the peer ─
     let by_node = engine
         .federation_directory()
-        .list_attestations_by(&node_a_key_id(&engine).await)
+        .attestations_by_all(&node_a_key_id(&engine).await)
         .await
         .expect("list attestations by node");
     let grant = by_node
@@ -527,7 +528,7 @@ async fn unauthorized_caller_is_rejected_and_authors_no_grant() {
     );
     let grants = engine
         .federation_directory()
-        .list_attestations_by(&node_a_key_id(&engine).await)
+        .attestations_by_all(&node_a_key_id(&engine).await)
         .await
         .expect("list attestations by node")
         .into_iter()
@@ -887,7 +888,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     // The node authored a directed consent:replication:v1 grant AT the peer.
     let by_node = engine
         .federation_directory()
-        .list_attestations_by(&node_a_key_id(&engine).await)
+        .attestations_by_all(&node_a_key_id(&engine).await)
         .await
         .expect("list attestations by node");
     let grant = by_node

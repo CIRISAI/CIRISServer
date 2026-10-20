@@ -10,6 +10,7 @@
 #[path = "support/owned_node.rs"]
 mod owned_node;
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -110,7 +111,7 @@ async fn the_owner_releases_another_of_their_nodes() {
     let row = alice
         .engine
         .federation_directory()
-        .list_attestations_by(alice.key())
+        .attestations_by_all(alice.key())
         .await
         .expect("rows")
         .into_iter()

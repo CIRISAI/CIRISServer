@@ -17,6 +17,7 @@
 //! Harness (engine + hybrid signers + key registration) mirrors
 //! `tests/peer_replication.rs`.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
@@ -333,7 +334,7 @@ async fn spray_and_retract_arbitrage_is_refused() {
     //     spray, so it is left out of the count.
     let rows: Vec<_> = engine
         .federation_directory()
-        .list_attestations_by(&bad.key_id)
+        .attestations_by_all(&bad.key_id)
         .await
         .expect("read the arbitrager's rows")
         .into_iter()

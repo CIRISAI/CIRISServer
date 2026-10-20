@@ -49,6 +49,7 @@
 //! - The **§2258A NCMEC report is the operator's duty**, not the fabric's — the
 //!   fabric emits evidence; the operator reports.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -314,7 +315,7 @@ pub async fn watchlist_enables_for_group(
     group_key_id: &str,
 ) -> Vec<WatchlistEnable> {
     let directory = engine.federation_directory();
-    let Ok(rows) = directory.list_attestations_for(group_key_id).await else {
+    let Ok(rows) = directory.attestations_to_all(group_key_id).await else {
         return Vec::new();
     };
     // Collect enables and the set of withdrawn watchlist_ids.

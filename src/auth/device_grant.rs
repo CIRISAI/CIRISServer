@@ -39,6 +39,7 @@
 //!   `attested_key_id` of the edge (the put-time FK), so an agent registers its
 //!   fed-ID before requesting a code.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1180,7 +1181,7 @@ struct GrantSummary {
 async fn live_delegations(engine: &Engine, owner_fed_id: &str) -> Vec<(String, String, String)> {
     let dir = engine.federation_directory();
     let rows = dir
-        .list_attestations_by(owner_fed_id)
+        .attestations_by_all(owner_fed_id)
         .await
         .unwrap_or_default();
     let mut out = Vec::new();

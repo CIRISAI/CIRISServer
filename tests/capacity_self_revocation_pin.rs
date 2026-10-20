@@ -35,6 +35,7 @@
 //! When it fails, the fixer should REPLACE the `assert`s here with the corrected
 //! expectation (subject self-revocation DENIED for a capacity row).
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -407,7 +408,7 @@ async fn scored_agent_is_refused_self_revocation_of_its_capacity_score() {
 
     let dir = node.sqlite_backend().expect("sqlite backend present");
     let attestations = dir
-        .list_attestations_for(&agent_key_id)
+        .attestations_to_all(&agent_key_id)
         .await
         .expect("list attestations for the agent");
     assert_eq!(attestations.len(), 1, "exactly one capacity row");

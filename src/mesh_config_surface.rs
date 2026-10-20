@@ -92,6 +92,7 @@
 //! the ceiling every incoming row is clamped against, which is an expansion
 //! caused by a read error.
 
+use crate::attestation_reads::AllAttestations as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -796,7 +797,7 @@ async fn snapshot(
     let mut rows: Vec<Attestation> = Vec::new();
     let mut unreadable_roots: BTreeMap<String, String> = BTreeMap::new();
     for root in &roots {
-        match directory.list_attestations_for(root).await {
+        match directory.attestations_to_all(root).await {
             Ok(found) => rows.extend(found.into_iter().filter(|r| {
                 r.attestation_envelope
                     .get(paths::DIMENSION)

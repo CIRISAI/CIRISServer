@@ -28,6 +28,7 @@
 //! `put_attestation` admit surface the routed coordinator ultimately calls — so
 //! the Node-A logic is proven without standing up the transport.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -306,7 +307,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     // replicated corpus row, so it is left out of the count.
     let by_b: Vec<_> = engine
         .federation_directory()
-        .list_attestations_by(&node_b_key_id())
+        .attestations_by_all(&node_b_key_id())
         .await
         .expect("list attestations by B")
         .into_iter()
@@ -344,7 +345,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     // The directed consent row exists: scores, subject = [B], federation tier.
     let by_a = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list attestations by A");
     let grant = by_a
@@ -445,7 +446,7 @@ async fn peer_b_registered_admits_b_liveness_and_a_emits_directed_consent() {
     );
     let grants = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("re-list attestations by A")
         .into_iter()
@@ -580,7 +581,7 @@ async fn consent_grant_states_its_whole_tuple() {
 
     let by_a = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list A's attestations");
     let row = by_a

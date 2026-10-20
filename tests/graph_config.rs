@@ -4,6 +4,7 @@
 //! the round-trip, version-chaining, latest-wins, prefix-listing, and
 //! revoke-reads-as-absent behaviors.
 
+use ciris_server::attestation_reads::AllAttestations as _;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
@@ -314,7 +315,7 @@ async fn written_row_id(engine: &Arc<Engine>, key: &str) -> String {
     let nk = node_key_id(engine).await;
     let rows = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list attestations by node");
     rows.into_iter()
@@ -515,7 +516,7 @@ async fn config_rows(
     let leaf = graph_config::config_dimension(key);
     let mut rows: Vec<_> = engine
         .federation_directory()
-        .list_attestations_by(&nk)
+        .attestations_by_all(&nk)
         .await
         .expect("list attestations by node")
         .into_iter()

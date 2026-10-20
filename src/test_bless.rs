@@ -13,6 +13,7 @@
 //! two halves of one throwaway SW root — so the node roots exactly as a production
 //! canonical roots under an A1-scrubbed record, but with no hardware holder.
 
+use crate::attestation_reads::AllAttestations as _;
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -799,7 +800,7 @@ async fn has_live_charter(engine: &std::sync::Arc<Engine>, root_key_id: &str) ->
     use ciris_persist::federation::envelope::paths;
     let rows = engine
         .federation_directory()
-        .list_attestations_by(root_key_id)
+        .attestations_by_all(root_key_id)
         .await
         .map_err(|e| anyhow!("ceremony has_live_charter: {e}"))?;
     Ok(rows.iter().any(|a| {
@@ -824,7 +825,7 @@ async fn has_accord_heartbeat(engine: &std::sync::Arc<Engine>, root_key_id: &str
     use ciris_persist::federation::trust_root::ACCORD_HEARTBEAT_DIMENSION;
     let rows = engine
         .federation_directory()
-        .list_attestations_for(root_key_id)
+        .attestations_to_all(root_key_id)
         .await
         .map_err(|e| anyhow!("ceremony heartbeat probe: {e}"))?;
     // PRESENCE only — no freshness window. persist v23 (CIRISPersist#551 item 4)
@@ -851,7 +852,7 @@ async fn has_capability_grant(
     use ciris_persist::federation::trust_root::INFRA_SERVE_SCOPE;
     let rows = engine
         .federation_directory()
-        .list_attestations_for(subject_key_id)
+        .attestations_to_all(subject_key_id)
         .await
         .map_err(|e| anyhow!("ceremony has_capability_grant: {e}"))?;
     Ok(rows.iter().any(|a| {
