@@ -23,7 +23,7 @@ topology:
     - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
   nodes:
     - {id: A1, dials: [C],     accepts: HA, announced: true}
-    # Joined devices cannot announce until CIRISPersist#1099 (CIRISServer#793).
+    # Unannounced: the self roster is decided on alice's own devices.
     - {id: A2, dials: [C, A1], accepts: HA, announced: false}
     - {id: A3, dials: [C, A1], accepts: HA, announced: false}
   persons:

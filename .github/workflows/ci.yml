@@ -308,7 +308,7 @@ jobs:
         run: python3 tools/audit_cohort_scope_callers.py --max-federation 49
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
-      # The topology catalogue is LOCKED: ten entries, a closed vocabulary of
+      # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of
       # states, and the requirements each CSD tests at. `evaluate` fails on a
       # broken promise, an unknown atom, an unrealizable entry or a requirement
       # no entry reaches; the unit tests hold the planner (earliest checkpoint,

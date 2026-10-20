@@ -1,6 +1,6 @@
 # CSD/4 — the topology catalogue, locked
 
-**Status:** LOCKED at catalogue version 2 (2026-10-18; version 1 the same day, bumped when the steward ruled the push waits on exhaustiveness over CC's formally defined states). **Owner:** CIRISServer (the
+**Status:** LOCKED at catalogue version 2 (2026-10-18; version 1 the same day, bumped when the steward ruled the push waits on exhaustiveness over CC's formally defined states). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `9c739427`. **Owner:** CIRISServer (the
 catalogue, the model, the builder). **Consumers:** CIRISClient's CSD cards and
 `check_csd_v3`, the native harness, CC's `tools/topology_to_cfg.py`.
 **Source of the ruling:** the steward on CIRISClient#179 §2: *do not give CSD authors
@@ -52,8 +52,8 @@ model verifies) and the `topology` block typed by `FSD/TOPOLOGY.md`.
 | T7 | an agent under a steward with a Wise Authority | `agent.bound`, `steward.bonded`, `wa.present` | up to `agent` |
 | T8 | an M-of-N infrastructure root: halt, confirm, resume | `pair.rooted`, `root.halted` → `root.halt_confirmed` → `root.resumed` | whole |
 | T9 | two roots and a party outside both | `root.two`, `party.outside_roots` | up to the second canonical |
-| T10 | a stolen device evicted by the quorum path (three roster keys) | `key.holder.thief`, `key.membership.proposed_evict` → `evicted`, `self.roster_size.three_more` | up to `evict_propose` (CIRISServer#794) |
-| T11 | two lost devices, recovery by the lone path | `key.holder.lost`, `key.membership.evicted`, `self.roster_size.one` | up to `evict_lone` (CIRISServer#794) |
+| T10 | a stolen device evicted by the quorum path (three roster keys) | `key.holder.thief`, `key.membership.proposed_evict` → `evicted`, `self.roster_size.three_more` | whole (CIRISServer#794 quorum path; a held third-device approval assented in) |
+| T11 | two lost devices, recovery by the lone path | `key.holder.lost`, `key.membership.evicted`, `self.roster_size.one` | up to `evict_lone` (the test-anchor `W_self` seam, CIRISPersist#1111) |
 | T12 | a root stalls (a founder resigns) and recovers by a conferred human | `root.standing.Stalled`, `root.liveness.stalled` → `root.liveness.live` | up to `resign` (branch pending) |
 | T13 | a witnessed lineage: stale head, node-bearing seat | `root.head.stale`, `seat.identity_type.node_bearing` | up to `lineage_head` (CIRISServer#693) |
 | T14 | consent end to end | `consent.state.*`, `consent.decay.*`, `consent.community_trust.*`, `consent.replication.none` | up to `community_trust` (CIRISServer#790) |
