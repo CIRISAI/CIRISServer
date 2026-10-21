@@ -294,7 +294,7 @@ except Exception: print("")')"
   # same shape the `chat:` entry in that constant is commented for.
   echo "── selffiles: peering the two devices ──"
   local a b rec pair peered=0
-  for svc in $SELF_NODES $SELF_BYSTANDER; do
+  for svc in $SELF_NODES $SELF_BYSTANDER canonical; do
     compose exec -T "$svc" python -c 'import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/federation/test-blessed-self-record",timeout=20))))' \
       >"$SELF_STATE/record-$svc.json" 2>/dev/null || true
     [ -s "$SELF_STATE/record-$svc.json" ] || echo "  ! $svc: no blessed self record"
@@ -304,6 +304,13 @@ except Exception: print("")')"
   local pairs="" x y
   for x in $SELF_NODES; do for y in $SELF_NODES; do [ "$x" = "$y" ] || pairs="$pairs $x:$y"; done; done
   if [ -n "$SELF_BYSTANDER" ]; then pairs="$pairs $SELF_PRIMARY:$SELF_BYSTANDER $SELF_BYSTANDER:$SELF_PRIMARY"; fi
+  # Every claimed node consents to its CANONICAL, as the native harness's
+  # `canonical_peered` does. Under the sealed transport (edge v43.1.1) the
+  # canonical relays each node's signed route row, and that row is what the
+  # other device seals its first link to (CC 3.3.6.2); with no grant naming
+  # the canonical a node's rows never reach it, and the two devices stay
+  # "no transit pair yet" forever (CIRISServer#801).
+  for x in $SELF_NODES $SELF_BYSTANDER; do pairs="$pairs $x:canonical"; done
   for pair in $pairs; do
     a="${pair%%:*}"; b="${pair#*:}"
     {
