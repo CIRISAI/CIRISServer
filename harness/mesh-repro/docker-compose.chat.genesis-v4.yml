@@ -1,0 +1,56 @@
+# Bundle v4 overlay for the chat topology (canonical + node-a/b/c).
+#
+# Bundle v4 overlay (CIRISServer#801) — the mesh boots on a ceremony-minted
+# genesis bundle, as production does under the sealed transport (CC 5.3.4):
+# lib/harness.sh `harness_genesis_v4` runs the final-genesis ceremony on the
+# canonical alone, then exports CIRIS_TEST_GENESIS_BUNDLE and brings every node
+# up on it. Every value below is interpolated from what that phase exports:
+#
+#   CIRIS_TEST_TRUST_ROOT*        the THREE-holder test anchor (test_ceremony_anchor,
+#                                 fixed seeds) the ceremony signs under
+#   CIRIS_TEST_GENESIS_BUNDLE     empty while the canonical runs the ceremony,
+#                                 then /genesis/canonical_seed.json
+#   CIRIS_GENESIS_DIR             the run's host directory: the bundle, the
+#                                 anchor, and the canonical's home (its identity
+#                                 must outlive the ceremony container — the
+#                                 bundle seats it)
+#
+# Nobody self-blesses (CIRIS_TEST_NO_CEREMONY): the bundle is the only root.
+x-genesis-v4-env: &genesis-v4-env
+  CIRIS_TEST_TRUST_ROOT: "${CIRIS_TEST_TRUST_ROOT:-}"
+  CIRIS_TEST_TRUST_ROOT_PQC: "${CIRIS_TEST_TRUST_ROOT_PQC:-}"
+  CIRIS_TEST_TRUST_ROOT_SCRUB: "${CIRIS_TEST_TRUST_ROOT_SCRUB:-}"
+  CIRIS_TEST_TRUST_ROOT_SCRUB_PQC: "${CIRIS_TEST_TRUST_ROOT_SCRUB_PQC:-}"
+  CIRIS_TEST_TRUST_ROOT_SEED: "${CIRIS_TEST_TRUST_ROOT_SEED:-}"
+  CIRIS_TEST_TRUST_ROOT_MINTED_BY: "${CIRIS_TEST_TRUST_ROOT_MINTED_BY:-}"
+  CIRIS_TEST_NO_CEREMONY: "true"
+  CIRIS_TEST_GENESIS_BUNDLE: "${CIRIS_TEST_GENESIS_BUNDLE:-}"
+
+services:
+  canonical:
+    environment:
+      <<: *genesis-v4-env
+      CIRIS_TEST_BLESS_CANONICAL: "false"
+    # Its home on the host, not a tmpfs: a tmpfs dies with the container, and
+    # with it the identity the bundle seats.
+    tmpfs: !reset []
+    volumes:
+      - ${CIRIS_GENESIS_DIR:-./genesis/none}:/genesis:ro
+      - ${CIRIS_GENESIS_DIR:-./genesis/none}/canonical-home:/var/lib/ciris
+      # The console binary: the operator claims the canonical (src/main.rs only).
+      - ../../target/release/ciris-server:/opt/harness/ciris-server-bin:ro
+  node-a:
+    environment:
+      <<: *genesis-v4-env
+    volumes:
+      - ${CIRIS_GENESIS_DIR:-./genesis/none}:/genesis:ro
+  node-b:
+    environment:
+      <<: *genesis-v4-env
+    volumes:
+      - ${CIRIS_GENESIS_DIR:-./genesis/none}:/genesis:ro
+  node-c:
+    environment:
+      <<: *genesis-v4-env
+    volumes:
+      - ${CIRIS_GENESIS_DIR:-./genesis/none}:/genesis:ro

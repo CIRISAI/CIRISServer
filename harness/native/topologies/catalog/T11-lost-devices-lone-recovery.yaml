@@ -1,0 +1,48 @@
+# T11 — two lost devices: recovery by the lone path over the window (CC
+# 3.3.6.3; catalogue v2). alice's roster holds three keys; A2 and A3 are lost
+# for good (their processes stop). From A1 alone she evicts each by the lone
+# path — the proposal applies after W_self (86400 s) unless a live key objects —
+# leaving the genesis key only. No lone-path route exists and the server has no
+# clock override for W_self, so both evictions are known red.
+catalog_id: T11
+catalogue_version: 3
+title: Two lost devices — recovery by the lone path over the window
+serves: [CSD-037, CSD-095]
+promises: [key.membership.proposed_add, key.holder.lost, key.membership.evicted, self.roster_size.one]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A1, dials: [C],     accepts: HA, announced: true}
+    - {id: A2, dials: [C, A1], accepts: HA, announced: false}
+    - {id: A3, dials: [C, A1], accepts: HA, announced: false}
+  persons:
+    - {id: alice, owns: [A1, A2, A3], joins: [A2, A3], accepts: HA}
+  relations:
+    - {rel: peered, between: [A1, C]}
+    - {rel: join_request, person: alice, device: A2, label: "Laptop"}
+    - {rel: join_approve, person: alice, device: A2}
+    - {rel: join_complete, person: alice, device: A2}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A2, C]}
+    - {rel: peered, between: [A1, A2]}
+    - {rel: join_request, person: alice, device: A3, label: "Phone"}
+    - {rel: join_approve, person: alice, device: A3, held: true}   # from two roster keys: a proposal (CC 3.3.6.3)
+    - {rel: join_assent, person: alice, device: A3, by: A2}
+    - {rel: join_complete, person: alice, device: A3}
+    # The joined device's peerings are owner acts on it (as T3; CIRISServer#793).
+    - {rel: peered, between: [A3, C]}
+    - {rel: peered, between: [A1, A3]}
+    - {rel: lose, person: alice, device: A2}
+    - {rel: lose, person: alice, device: A3}
+    - {rel: evict_lone, person: alice, target: A2, by: A1, known_red: "CIRISServer#794"}   # waits on persist's test-anchor W_self seam
+    - {rel: evict_lone, person: alice, target: A3, by: A1, known_red: "CIRISServer#794"}   # waits on persist's test-anchor W_self seam
+  actor: {person: alice, device: A1}
+  negatives: []

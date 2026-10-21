@@ -162,6 +162,16 @@ struct Held {
     req: JoinRequest,
     code: String,
     at: Instant,
+    /// Approved by the owner but HELD by the self roster (CC 3.3.6.3): set
+    /// when the approval became a proposal, so the undecided-request TTL does
+    /// not drop it while the roster decides ([`HELD_TTL`]).
+    held_since: Option<Instant>,
+}
+
+/// How long an approval the self roster holds stays resumable: the lone
+/// path's window and an hour's margin for the sweep that lands it.
+fn held_ttl() -> Duration {
+    Duration::from_secs(ciris_persist::federation::self_roster::W_SELF_SECS as u64 + 3600)
 }
 
 enum Decision {
@@ -192,8 +202,10 @@ impl Host {
     fn sweep(&mut self) {
         let now = Instant::now();
         let before = self.pending.len();
-        self.pending
-            .retain(|h| now.duration_since(h.at) < REQUEST_TTL);
+        self.pending.retain(|h| match h.held_since {
+            Some(since) => now.duration_since(since) < held_ttl(),
+            None => now.duration_since(h.at) < REQUEST_TTL,
+        });
         if self.pending.len() != before {
             tracing::info!(
                 expired = before - self.pending.len(),
@@ -270,6 +282,7 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
                 req: *req,
                 code: code.clone(),
                 at: Instant::now(),
+                held_since: None,
             });
             opaque(
                 202,
@@ -464,13 +477,46 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             "that code names no device to ask — open Share my ID on your other device and use its QR or long form",
         );
     };
-    // 2. Mint B's own device occurrence keys (public halves travel; N6).
+    // 1a. Wait, bounded, for the other device's ROUTE (edge v43, CC 5.3.3.5 E1):
+    // every link is sealed, so B can reach A only once it holds A's signed
+    // route row with A's transit pair. An ANNOUNCED node's identity rows reach
+    // everyone on their bootstrap planes, so the canonical B already dials
+    // (sealed to the pair the bundle seeded) serves A's row; B asks for a
+    // round now rather than waiting the cadence. Not here yet is RETRYABLE
+    // (503 + Retry-After), never a refusal: a 502 means A refused. BEFORE the
+    // mint, so a retry after the 503 has nothing of its own to collide with.
+    if let Err(r) = await_owner_route(&st.engine, &target).await {
+        return r;
+    }
+    // 1b. An approval already held names the key an earlier ask minted; minting
+    //     again would strand it. Complete first run, or cancel and ask again.
+    if pending().lock().map(|g| g.is_some()).unwrap_or(false) {
+        return refuse(
+            StatusCode::CONFLICT,
+            "add_device.approval_held",
+            "this device already holds your other device's approval — finish setting it up, or cancel and ask again",
+        );
+    }
+    // 2. Mint B's own ROSTER KEY for the person's fedID (public halves travel;
+    //    N6). New key material, the SAME fedID: the key is named
+    //    `<fedID>-<fingerprint of its own Ed25519 key>` (CC 3.3.6.3,
+    //    `CLM-self-roster-key-id`) — the whole fedID as the CC 2.6.8 label, so
+    //    the alias IS the fedID and `derive_key_id` appends the key's own
+    //    fingerprint. Never a device name: the device name (`label`) belongs to
+    //    the NODE key, and `device-<hex>-<fp>` is refused (tracked: CIRISServer#793).
     let label = req.label.unwrap_or_else(|| "new device".into());
-    let alias = format!(
-        "device-{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..12]
-    );
+    let alias = subject.fed_id.clone();
     let occurrence_dir = st.identity_dir.join("user");
+    // An earlier ask from this device (unanswered, or failed after its mint)
+    // left never-approved keys under this alias; this ask supersedes it. The
+    // mint refuses a live alias, so they are retired first, as `cancel` does.
+    GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _ = current().lock().map(|mut c| c.take());
+    remove_alias_files(
+        &crate::identity::sealed_keys_dir_for(&occurrence_dir, &alias),
+        &alias,
+    );
+    remove_alias_files(&occurrence_dir, &alias);
     let keyset = match crate::identity::mint_local_device_occurrence(&occurrence_dir, &alias).await
     {
         Ok(k) => k,
@@ -536,16 +582,6 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
     }));
-    // 3a. Wait, bounded, for the other device's ROUTE (edge v43, CC 5.3.3.5 E1):
-    // every link is sealed, so B can reach A only once it holds A's signed
-    // route row with A's transit pair. An ANNOUNCED node's identity rows reach
-    // everyone on their bootstrap planes, so the canonical B already dials
-    // (sealed to the pair the bundle seeded) serves A's row; B asks for a
-    // round now rather than waiting the cadence. Not here yet is RETRYABLE
-    // (503 + Retry-After), never a refusal: a 502 means A refused.
-    if let Err(r) = await_owner_route(&st.engine, &target).await {
-        return r;
-    }
     // 3. Ask — a first contact: the request carries this node's own key record.
     let exchange = match edge
         .send_opaque_request_introducing(
@@ -1117,6 +1153,29 @@ async fn owner_code(st: &AddDeviceState, owner: &str) -> Result<String, String> 
     fedcode::encode(&fc).map_err(|e| format!("encode the owner's code: {e}"))
 }
 
+/// **Is `record` a roster key of `fed_id`, named the way CC 3.3.6.3 names one?**
+/// (`CLM-self-roster-key-id`, tracked: CIRISServer#793) A roster key other than
+/// the genesis key is `<fedID>-<fingerprint of its own Ed25519 key>`: the whole
+/// fedID string as the CC 2.6.8 label, then the key's own fingerprint. A device
+/// name (`device-<hex>-<fp>`, what 0.5.231 minted) or a fedID label with a
+/// foreign fingerprint is refused — a key named under another identity, or
+/// under nothing, is never signed into this fedID's roster.
+pub fn roster_key_named_under(fed_id: &str, record: &SignedKeyRecord) -> Result<(), String> {
+    use base64::Engine as _;
+    let ed = base64::engine::general_purpose::STANDARD
+        .decode(&record.record.pubkey_ed25519_base64)
+        .map_err(|e| format!("the roster key's Ed25519 key is not base64: {e}"))?;
+    let want = ciris_verify_core::fedcode::derive_key_id(fed_id, &ed);
+    if record.record.key_id != want {
+        return Err(format!(
+            "a roster key of {fed_id} must be named {want:?} (the fedID, then its own Ed25519 \
+             fingerprint — CC 3.3.6.3); this request names {:?}",
+            record.record.key_id
+        ));
+    }
+    Ok(())
+}
+
 /// Apply the owner's approval on B: the binding through B's OWN setup/root with
 /// B's own claim PIN (local presence), then the owner-signed occurrence.
 async fn apply(st: &AddDeviceState, a: Approval, alias: &str) -> Result<(), String> {
@@ -1291,47 +1350,146 @@ async fn approve(
         }
     };
     match sign_and_record(&st, &sender, &req).await {
-        Ok((approval, intro, granted)) => {
-            let occurrence_key_id = approval
-                .occurrence
-                .identity_occurrence
-                .occurrence_key_id
-                .clone();
-            let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
-            h.pending.retain(|p| p.id != id); // N3
-            h.decided.insert(
+        Ok(signed) => record_approved(&id, &sender, &req, &code, signed).into_response(),
+        Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
+            // CC 3.3.6.3: from a roster of two or more keys the addition is a
+            // PROPOSAL. Hold the request (the new device keeps polling and sees
+            // it pending) and resume it the moment the roster lands the key.
+            let occ_key = req.occurrence_key_record.record.key_id.clone();
+            {
+                let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(p) = h.pending.iter_mut().find(|p| p.id == id) {
+                    p.held_since.get_or_insert_with(Instant::now);
+                }
+            }
+            let owner = crate::auth::ownership::is_steward_bound(&st.engine, &st.node_key_id)
+                .await
+                .unwrap_or_default();
+            let proposal_id = st
+                .engine
+                .self_roster_standing(&owner)
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.into_iter()
+                        .find(|s| s.proposal.target == occ_key)
+                        .map(|s| s.proposal.id)
+                });
+            tokio::spawn(resume_when_landed(
+                st.clone(),
                 id.clone(),
-                Decided {
-                    sender: sender.clone(),
-                    challenge: req.challenge.clone(),
-                    decision: Decision::Approved(Box::new(approval), intro),
-                    at: Instant::now(),
-                },
-            );
+                owner,
+                occ_key.clone(),
+            ));
             tracing::info!(
-                request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
-                "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
+                request_id = %id, node = %sender, occurrence = %occ_key, proposal = ?proposal_id,
+                "device-join: approval HELD by the self roster — resumes when the roster lands the key (CC 3.3.6.3)"
             );
             (
-                StatusCode::OK,
+                StatusCode::ACCEPTED,
                 Json(serde_json::json!({
-                    "approved": true,
+                    "approved": false,
+                    "held": true,
                     "match_code": code,
                     "node_key_id": sender,
-                    "occurrence_key_id": occurrence_key_id,
-                    "self_dek_granted": granted,
+                    "occurrence_key_id": occ_key,
+                    "proposal_id": proposal_id,
+                    "detail": e,
                 })),
             )
                 .into_response()
-        }
-        Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
-            refuse(StatusCode::CONFLICT, "add_device.roster_change_held", e)
         }
         Err(e) => refuse(
             StatusCode::INTERNAL_SERVER_ERROR,
             "add_device.approve_failed",
             e,
         ),
+    }
+}
+
+/// Move an approved request to `decided`, where the new device's next poll
+/// collects it. One body for the approval made at once and the one resumed.
+fn record_approved(
+    id: &str,
+    sender: &str,
+    req: &JoinRequest,
+    code: &str,
+    (approval, intro, granted): (Approval, ciris_edge::Introductions, usize),
+) -> (StatusCode, Json<serde_json::Value>) {
+    let occurrence_key_id = approval
+        .occurrence
+        .identity_occurrence
+        .occurrence_key_id
+        .clone();
+    let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+    h.pending.retain(|p| p.id != id); // N3
+    h.decided.insert(
+        id.to_owned(),
+        Decided {
+            sender: sender.to_owned(),
+            challenge: req.challenge.clone(),
+            decision: Decision::Approved(Box::new(approval), intro),
+            at: Instant::now(),
+        },
+    );
+    tracing::info!(
+        request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
+        "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "approved": true,
+            "match_code": code,
+            "node_key_id": sender,
+            "occurrence_key_id": occurrence_key_id,
+            "self_dek_granted": granted,
+        })),
+    )
+}
+
+/// How often a held approval re-reads the roster.
+const HELD_RECHECK: Duration = Duration::from_secs(5);
+
+/// **Resume a held approval** once the self roster lands its key (a quorum of
+/// the other devices assented, or the lone path's window closed). The signing
+/// is re-run whole: the key is now on the roster, so the re-signed occurrence
+/// is a re-assertion, not a roster change, and lands at once — and the
+/// approval the new device collects is the ordinary one. Ends when the request
+/// leaves `pending` (denied, withdrawn, expired) or is approved.
+async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_key: String) {
+    let dir = st.engine.federation_directory();
+    loop {
+        tokio::time::sleep(HELD_RECHECK).await;
+        let held = {
+            let mut h = host().lock().unwrap_or_else(|p| p.into_inner());
+            h.sweep();
+            h.pending
+                .iter()
+                .find(|p| p.id == id && p.held_since.is_some())
+                .map(|p| (p.sender.clone(), p.req.clone(), p.code.clone()))
+        };
+        let Some((sender, req, code)) = held else {
+            return;
+        };
+        match ciris_persist::federation::self_roster::roster_now(dir.as_ref(), &owner).await {
+            Ok(r) if r.contains(&occ_key) => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(error = %format!("{e:#}"), "device-join: roster read for a held approval");
+                continue;
+            }
+        }
+        match sign_and_record(&st, &sender, &req).await {
+            Ok(signed) => {
+                let _ = record_approved(&id, &sender, &req, &code, signed);
+                tracing::info!(request_id = %id, occurrence = %occ_key, "device-join: the self roster LANDED the key — the held approval is delivered");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(request_id = %id, error = %e, "device-join: the roster landed the key but re-signing the approval failed — retrying");
+            }
+        }
     }
 }
 
@@ -1420,6 +1578,9 @@ async fn sign_and_record(
     // `<alias>-<fp>-<fp>` that is registered nowhere (pen-named-by-derived-id).
     let owner = pen.key_id().to_string();
     let cohort = "self".to_string();
+    // The roster key the owner is asked to sign in must be named under THIS
+    // fedID, checked before anything is signed or recorded (CC 3.3.6.3).
+    roster_key_named_under(&owner, &req.occurrence_key_record)?;
 
     // (1) The owner-binding owner → B-node, pinned to B's NodeCode.
     let (nc, owner_binding) =

@@ -845,10 +845,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // registers it would then refuse every node-signed row as an unknown
     // attester. The record served is the one for the key that signs this
     // node's rows — the held node key record (CIRISServer#563, Codex on #564).
-    let self_key_record_json = match crate::node_key::held_node_key_record_json() {
+    let minted_self_record = match crate::node_key::held_node_key_record_json() {
         Some(node_record) => node_record,
         None => self_key_record_json(&engine, &cfg).await?,
     };
+    // SERVE THE REGISTERED RECORD, not a fresh mint. `build_self_key_record`
+    // stamps `valid_from = now` on every call, and registration is first-seen:
+    // a reboot (or the seconds between the register and this line) leaves the
+    // directory holding one version while the route handed peers another. A
+    // peer that admitted the served copy then refused the canonical's relay of
+    // the registered one as `conflicting_version` (terminal) — every peering
+    // forked the record the rest of the mesh carries (CIRISEdge, 2026-10-21).
+    let self_key_record_json = registered_self_record_json(&engine, &minted_self_record)
+        .await
+        .unwrap_or(minted_self_record);
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -2103,6 +2113,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // torn-down engine while the next serve starts a second one, and two
         // drivers would contend over the same person's room (Codex,
         // CIRISServer#628).
+        let engine_for_roster = Arc::clone(&engine);
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
@@ -2133,6 +2144,24 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // guarded per member (`mls_guard`: the package is poisoned and
                 // skipped, so it can't panic every tick); this outer catch is
                 // the backstop for anything else in the tick.
+                // THE SELF-ROSTER SWEEP (CIRISServer#794, CC 3.3.6.3): a held
+                // roster change lands by the lone path only when SOMETHING asks
+                // after its window closes — persist executes on an answer's
+                // arrival, never on the clock. Every node holding a self decides
+                // it, so every node sweeps; one indexed read when nothing is open.
+                // Here rather than a loop of its own: the self plane's tick, and
+                // `loop_cadence::LOOPS` is full at the shortest cadence.
+                match engine_for_roster.execute_self_roster_due().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        landed = n,
+                        "self roster: held change(s) LANDED (CC 3.3.6.3 two-path)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "self roster: the sweep could not run — held changes wait for the next tick"
+                    ),
+                }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
                 ));
@@ -2819,7 +2848,7 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
 }
 
 /// **CEG-native trusted-peer boot prime.** Root — via edge's out-of-band
-/// `prime_peer` (`inject_rooted_peer_for_test`) — every peer the persisted CEG
+/// `prime_peer` (edge v43.1.0's production prime) — every peer the persisted CEG
 /// state marks TRUSTED, i.e. every `transport_destinations` row with
 /// [`BindingProvenance::Rooted`](ciris_persist::federation::self_at_login::BindingProvenance::Rooted).
 ///
@@ -2964,10 +2993,15 @@ async fn prime_trusted_peers(engine: &Engine, edge: &Edge) {
             }
         }
         match crate::federation_delivery::resolve_reticulum_prime_binding(peer_dests) {
-            Ok(Some((dest_hash, ed25519))) => {
-                transport
-                    .inject_rooted_peer_for_test(key_id, dest_hash, ed25519)
-                    .await;
+            Ok(Some((dest_hash, identity))) => {
+                if let Err(e) = transport.prime_peer(key_id, dest_hash, identity).await {
+                    // edge v43.1.0: the identity does not reproduce the
+                    // destination (peer_binding_prime_refused) — never root it.
+                    tracing::warn!(peer = %key_id, error = %e,
+                        "trusted-peer prime: edge REFUSED the binding — skip");
+                    refused += 1;
+                    continue;
+                }
                 primed += 1;
                 // DEBUG, not INFO, and one transport call rather than three. The
                 // pair of `knows_peer` probes existed only to fill two log fields,
@@ -3065,7 +3099,7 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
             .into_iter()
             .filter(|d| d.retired_at.is_none())
             .collect();
-        let (dest_hash, transport_ed) =
+        let (dest_hash, identity) =
             match crate::federation_delivery::resolve_reticulum_prime_binding(&live) {
                 Ok(Some(binding)) => binding,
                 Ok(None) => {
@@ -3087,9 +3121,15 @@ async fn prime_canonical_bootstrap_peers(engine: &Engine, edge: &Edge) {
                 }
             };
         let before = transport.knows_peer(key_id).await;
-        transport
-            .inject_rooted_peer_for_test(key_id, dest_hash, transport_ed)
-            .await;
+        if let Err(e) = transport.prime_peer(key_id, dest_hash, identity).await {
+            tracing::warn!(
+                canonical = %key_id,
+                error = %e,
+                "canonical prime: edge REFUSED the published binding — the identity does not \
+                 reproduce its destination (peer_binding_prime_refused); NOT primed"
+            );
+            continue;
+        }
         let after = transport.knows_peer(key_id).await;
         primed += 1;
         tracing::info!(
@@ -3480,8 +3520,11 @@ async fn register_substrate_key(
 /// replaces); harmless.
 #[cfg(feature = "test-anchor")]
 pub(crate) fn install_test_genesis_bundle() -> Result<()> {
-    let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") else {
-        return Ok(());
+    // EMPTY is unset: the Docker mesh passes `${CIRIS_TEST_GENESIS_BUNDLE:-}`
+    // to every node, so its ceremony host boots before any bundle exists.
+    let path = match std::env::var("CIRIS_TEST_GENESIS_BUNDLE") {
+        Ok(p) if !p.trim().is_empty() => p,
+        _ => return Ok(()),
     };
     if std::env::var("CIRIS_TESTING_MODE").ok().as_deref() != Some("true") {
         anyhow::bail!("CIRIS_TEST_GENESIS_BUNDLE is set but CIRIS_TESTING_MODE is not true");
@@ -3757,6 +3800,30 @@ async fn register_self_key(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<(
 /// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
 /// uses, so the GET output round-trips byte-identically through a peer's
 /// `register_federation_key`.
+/// The directory's REGISTERED record for the key `minted_json` names, as the
+/// `SignedKeyRecord` JSON the self-key-record route serves — `None` when the key
+/// is not (yet) registered or the read fails, so the caller keeps the mint.
+async fn registered_self_record_json(engine: &Arc<Engine>, minted_json: &str) -> Option<String> {
+    use ciris_persist::federation::SignedKeyRecord;
+    let key_id = serde_json::from_str::<SignedKeyRecord>(minted_json)
+        .ok()?
+        .record
+        .key_id;
+    match engine
+        .federation_directory()
+        .lookup_public_key(&key_id)
+        .await
+    {
+        Ok(Some(record)) => serde_json::to_string(&SignedKeyRecord { record }).ok(),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(key_id = %key_id, error = %format!("{e:#}"),
+                "self-key-record: could not read the registered record — serving the fresh mint");
+            None
+        }
+    }
+}
+
 async fn self_key_record_json(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<String> {
     use ciris_persist::federation::SignedKeyRecord;
     let record = build_self_key_record(engine, cfg).await?;

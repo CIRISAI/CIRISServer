@@ -1,0 +1,36 @@
+# T4 — a household: a guardian on two devices and one child (CIRISClient#179
+# §2; CSD-100/101, 3c, CSD-119). The family is a founder_only room; the child
+# is invited and ACCEPTS on their own node (membership needs the invitee's
+# consent). The guardian bond (CC 3.4.13) and the child's age assurance have
+# no route the harness can drive yet — the builder stops before them, by name,
+# and everything up to the seated child is tested.
+catalog_id: T4
+catalogue_version: 3
+title: A household — guardian on two devices, one child
+serves: [CSD-100, CSD-101, CSD-119]
+derives: [3c]
+promises: [household.formed, household.member, child.member, guardian.bound, age.assured, person.multi_device,
+           room.self.keyed]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: G1, dials: [C],     accepts: R, announced: true}
+    - {id: G2, dials: [C, G1], accepts: R, announced: true}
+    - {id: K,  dials: [C, G1], accepts: R, announced: true}
+  persons:
+    - {id: guardian, owns: [G1, G2], accepts: R}
+    - {id: child,    owns: [K],      accepts: R}
+  relations:
+    - {rel: peered, between: [G1, G2]}
+    - {rel: peered, between: [G1, K]}
+    - {rel: reachable, node: G1, person: child, min: 1}
+    - {rel: room, kind: self, person: guardian}
+    - {rel: household, id: H, founder: guardian, name: Home}
+    - {rel: member, household: H, invitee: child, role: child}
+    - {rel: guardian_bond, household: H, guardian: guardian, child: child}
+    - {rel: age_assurance, person: child, band: minor}
+  actor: {person: guardian, device: G2}
+  negatives: []

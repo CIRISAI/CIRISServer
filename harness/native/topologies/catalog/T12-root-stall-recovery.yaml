@@ -1,0 +1,37 @@
+# T12 — a root stalls and recovers (CC 3.2 T7; catalogue v2). The accord's
+# three seated human founders at quorum 2 (M = 2) keep it live (≥ M+1 active).
+# One resigns by a supersede the other two co-sign: two active ≤ M, the root
+# STALLS — witnessed by persist's hard_case:community_liveness_stalled row, not
+# by /v1/trust-root's posture string (CC's ruling 2026-10-18). A conferred human
+# widens the roster back (T7 recovery). Both routes exist; their builder
+# branches are not written yet.
+catalog_id: T12
+catalogue_version: 3
+title: A root stalls (a founder resigns below the margin) and recovers by a conferred human
+serves: [CSD-105]
+promises: [root.standing.Stalled, root.liveness.stalled, root.liveness.live, seat.identity_type.human]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C], accepts: HA, announced: true}
+    - {id: B, dials: [C], accepts: HA, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: HA}
+    - {id: bob,   owns: [B], accepts: HA}
+  relations:
+    - {rel: peered, between: [A, C]}
+    - {rel: peered, between: [B, C]}
+    - {rel: peered, between: [A, B]}
+    - {rel: rooted_with, between: [alice, bob], wait: 120, require: true}
+    - {rel: resign, root: HA, holder: 0, stalls: true}
+    - {rel: confer, root: HA, seat: human}
+  actor: {person: alice, device: A}
+  negatives: []

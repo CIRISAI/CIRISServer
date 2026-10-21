@@ -1,0 +1,172 @@
+# What each CSD tests, and AT WHICH STATE (FSD/CSD4.md §6). One entry per CSD:
+#
+#   CSD-nnn:
+#     topology: Tn             # the catalogue entry the card names (a hint: the
+#                              # planner may pick another that reaches the states)
+#     tests:
+#       <name>:
+#         at: [atoms]          # hold AT THE SAME INSTANT when the test runs
+#         probe:               # optional: one HTTP read the runner makes there
+#           node: <node id>    # default: the entry's actor device (NOT `on:` — YAML reads it as true)
+#           path: /v1/...      # ${VALUE} from the build's values.json
+#           status: 200
+#           expect: {dotted.json.path: value}
+#
+# The client's flow runner reads the same file (`--at-state-cmd`): it runs the
+# CSD's screens at the checkpoint the planner chose, against values.json as it
+# stands THERE — not at the end, after a later step has destroyed the state.
+CSD-118:
+  topology: T0
+  tests:
+    first_run:
+      at: [root.none, node.unclaimed]
+      probe: {path: /v1/setup/status, status: 200}
+    declared:
+      at: [root.none, node.claimed]
+CSD-107:
+  topology: T1
+  tests:
+    custody:
+      at: [file.custody_received, file.large]
+    withdrawn:
+      at: [file.withdrawn]
+CSD-037:
+  topology: T3
+  tests:
+    roster:
+      at: [roster.visible, device.joined]
+# One device handles each exchange while its person is on it (CC 3.1.3.1, the
+# session claims). No client card yet: CSD-096 is reserved for it (it was
+# CSD-095 here until the client's self-key roster card took that number).
+CSD-096:
+  topology: T1
+  tests:
+    one_handler:
+      at: [session.unified, note.synced]
+# Changes to your devices — the self roster's held changes (CC 3.3.6.3,
+# CIRISServer#794; the client's self-key roster card, CIRISClient#218).
+CSD-095:
+  topology: T10
+  tests:
+    # From two keys an addition (a third device's approval) is a proposal
+    # another device answers.
+    add_held:
+      at: [key.membership.proposed_add, device.join_requested]
+      probe:
+        node: A2
+        path: /v1/self/roster/proposals
+        status: 200
+        expect: {proposals.0.proposal.kind: add, proposals.0.decision.outcome: pending}
+    # From three keys an eviction is a proposal another device answers; it
+    # lands by the quorum path.
+    evict_held:
+      at: [key.membership.proposed_evict, key.holder.thief, self.roster_size.three_more]
+      probe:
+        node: A2
+        path: /v1/self/roster/proposals
+        status: 200
+        expect: {proposals.0.proposal.kind: evict, proposals.0.decision.outcome: pending}
+    evicted_by_quorum:
+      at: [key.membership.evicted, key.holder.thief]
+      probe: {node: A2, path: /v1/self/roster/proposals, status: 200, expect: {proposals.0: null}}
+    # NOT YET: the lone path (T11: two devices lost, recovered alone after
+    # W_self). One card names one topology (CSD/4 §1) and T10 does not reach
+    # it; it also waits on persist's test-anchor W_self seam (CIRISPersist#1111).
+CSD-091:
+  topology: T2
+  tests:
+    conversation:
+      at: [room.pair.keyed, message.delivered]
+      probe: {path: "/v1/chat/${ROOM_ID}/messages", status: 200}
+    outsider:
+      at: [person.outsider, room.pair.keyed, negatives.held]
+CSD-092:
+  topology: T3
+  tests:
+    contact_by_code:
+      at: [contact.via_code]
+CSD-094:
+  topology: T3
+  tests:
+    owner_sees_request:
+      at: [device.join_requested]
+      probe: {node: A1, path: /v1/self/device-requests, status: 200}
+    new_device_holds:
+      at: [device.join_approved, node.unclaimed]
+      probe: {node: A2, path: /v1/setup/add-device, status: 200, expect: {state: approved}}
+    applied:
+      at: [device.joined]
+    joined:
+      at: [device.joined, file.held]
+CSD-100:
+  topology: T4
+  tests:
+    household:
+      at: [household.formed, household.member]
+CSD-101:
+  topology: T4
+  tests:
+    child_seated:
+      at: [child.member]
+CSD-119:
+  topology: T4
+  tests:
+    guardian_bond:
+      at: [guardian.bound, child.member]
+    age_band:
+      at: [age.assured]
+CSD-102:
+  topology: T5
+  tests:
+    held_change:
+      at: [quorum_change.held, community.member]
+CSD-103:
+  topology: T5
+  tests:
+    applied_change:
+      at: [quorum_change.applied]
+CSD-128:
+  topology: T5
+  tests:
+    protected_reporter:
+      at: [moderator.named, community.member]
+CSD-120:
+  topology: T6
+  tests:
+    affiliation:
+      at: [community.formed, community.member]
+    licensing:
+      at: [authority.licensing, community.member]
+    chain:
+      at: [delegation.chain]
+CSD-111:
+  topology: T7
+  tests:
+    shutdown_dialogue:
+      at: [agent.bound, steward.bonded]
+CSD-117:
+  topology: T7
+  tests:
+    judges_judged:
+      at: [wa.present, agent.bound]
+CSD-129:
+  topology: T8
+  tests:
+    halted:
+      at: [root.halted]
+      probe: {path: /v1/accord/halt-status, status: 200, expect: {halted: true}}
+    confirmed:
+      at: [root.halt_confirmed, root.halted]
+    resumed:
+      at: [root.resumed]
+      probe: {path: /v1/accord/halt-status, status: 200, expect: {halted: false}}
+CSD-105:
+  topology: T8
+  tests:
+    rooted_pair:
+      at: [root.infrastructure, pair.rooted]
+CSD-127:
+  topology: T9
+  tests:
+    first_contact:
+      at: [root.two, party.outside_roots]

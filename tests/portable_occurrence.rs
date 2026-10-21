@@ -230,7 +230,9 @@ async fn portable_software_keyset_becomes_a_primary_authorized_occurrence_of_the
     );
 
     // Device 2 mints its OWN key.
-    let device2_seed = tmp("device2-seed");
+    // `<home>/identity/user`-shaped: the sealed half goes to the seed dir's
+    // sibling `keys/`, which must be this test's own, not a shared `/tmp/keys`.
+    let device2_seed = tmp("device2-home").join("user");
     let device2_alias = format!("{portable_alias}-device-2");
     let device2 =
         ciris_server::identity::mint_local_device_occurrence(&device2_seed, &device2_alias)

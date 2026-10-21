@@ -159,7 +159,7 @@ module targets 0.5.226.
   stands (same answer as with no latch); `no_data_door_reads_the_latch` source-scans
   `src/` and lens-core for any reader outside `halt_gate.rs` / `compose.rs`; compose
   installs the predicate; lens-core carries no hook.
-- `harness/native`: catalogue entry **T8** (`topologies/t8-accord-halt.yaml`, built by
+- `harness/native`: catalogue entry **T8** (`topologies/catalog/T8-accord-halt.yaml`, built by
   the 0.5.220 ceremony with three software holders) and the **`halt`** scenario =
   CSD-129 "Drill, halt, announce: end to end" (federation → safety): drill, announce,
   fire from one node and hand out of band to the others, every node latched and still

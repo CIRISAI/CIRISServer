@@ -57,7 +57,10 @@ SCENARIO_NAME="selffiles"
 # The same three-node compose the chat ladder uses; node-c lives behind the
 # `scale` profile there, and this scenario needs it — two nodes for ONE person
 # is the whole topology.
-COMPOSE_FILES="-f docker-compose.chat.yml"
+COMPOSE_FILES="-f docker-compose.chat.yml -f docker-compose.chat.genesis-v4.yml"
+# Bundle v4 (CIRISServer#801), as chat.
+GENESIS_V4=1
+GENESIS_SERVE_DIAL="172.29.77.10:4242"
 export COMPOSE_PROFILES="${COMPOSE_PROFILES:-scale}"
 PROJECT="${PROJECT:-ciris-selffiles}"
 # `opened_on_b` — the BYTES on the second device — is the claim of this ladder
@@ -291,7 +294,7 @@ except Exception: print("")')"
   # same shape the `chat:` entry in that constant is commented for.
   echo "── selffiles: peering the two devices ──"
   local a b rec pair peered=0
-  for svc in $SELF_NODES $SELF_BYSTANDER; do
+  for svc in $SELF_NODES $SELF_BYSTANDER canonical; do
     compose exec -T "$svc" python -c 'import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen("http://127.0.0.1:4243/v1/federation/test-blessed-self-record",timeout=20))))' \
       >"$SELF_STATE/record-$svc.json" 2>/dev/null || true
     [ -s "$SELF_STATE/record-$svc.json" ] || echo "  ! $svc: no blessed self record"
@@ -301,6 +304,13 @@ except Exception: print("")')"
   local pairs="" x y
   for x in $SELF_NODES; do for y in $SELF_NODES; do [ "$x" = "$y" ] || pairs="$pairs $x:$y"; done; done
   if [ -n "$SELF_BYSTANDER" ]; then pairs="$pairs $SELF_PRIMARY:$SELF_BYSTANDER $SELF_BYSTANDER:$SELF_PRIMARY"; fi
+  # Every claimed node consents to its CANONICAL, as the native harness's
+  # `canonical_peered` does. Under the sealed transport (edge v43.1.1) the
+  # canonical relays each node's signed route row, and that row is what the
+  # other device seals its first link to (CC 3.3.6.2); with no grant naming
+  # the canonical a node's rows never reach it, and the two devices stay
+  # "no transit pair yet" forever (CIRISServer#801).
+  for x in $SELF_NODES $SELF_BYSTANDER; do pairs="$pairs $x:canonical"; done
   for pair in $pairs; do
     a="${pair%%:*}"; b="${pair#*:}"
     {

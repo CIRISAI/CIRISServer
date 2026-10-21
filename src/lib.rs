@@ -3358,7 +3358,10 @@ mod python {
         #[cfg(feature = "test-anchor")]
         {
             crate::compose::install_test_genesis_bundle().map_err(py_err)?;
-            if let Ok(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE") {
+            if let Some(path) = std::env::var("CIRIS_TEST_GENESIS_BUNDLE")
+                .ok()
+                .filter(|p| !p.trim().is_empty())
+            {
                 eprintln!(
                     "ciris_server: TEST-ANCHOR: ceremony-minted genesis bundle installed at import path={path}"
                 );

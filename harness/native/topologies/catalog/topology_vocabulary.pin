@@ -1,0 +1,9 @@
+# The atom vocabulary is the CONSTITUTION's (steward decision 2026-10-18).
+# topology_vocabulary.json beside this file is a byte copy of CIRISConstitution
+# manifests/topology_vocabulary.json at the commit below. A new atom or a changed
+# meaning lands there first, then this pin moves. harness/native/test_model.py
+# fails if the copy and the pin disagree.
+repo=CIRISAI/CIRISConstitution
+commit=01b47e75b2250742d8f603dae0142ce58cc86c40
+path=manifests/topology_vocabulary.json
+sha256=b0b220507d08424a8ced6f5390fc2a01a9987123530b0cf620be2d34bfc69afc

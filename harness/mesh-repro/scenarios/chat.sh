@@ -165,7 +165,11 @@
 # room's own `chat.state.ready`. The one-sided window is unchanged.
 
 SCENARIO_NAME="chat"
-COMPOSE_FILES="-f docker-compose.chat.yml"
+COMPOSE_FILES="-f docker-compose.chat.yml -f docker-compose.chat.genesis-v4.yml"
+# Bundle v4 (CIRISServer#801). The scenario claims the canonical itself
+# (CHAT_SERVICES), so the genesis phase does not.
+GENESIS_V4=1
+GENESIS_SERVE_DIAL="172.29.77.10:4242"
 SUCCESS_STAGE="comm_file_on_b"
 SUCCESS_MESSAGE="cross-node chat AND community files PROVEN — two nodes converged on one derived room with no coordination, A's bytes landed in B's transcript with their CEG identity intact (attester the owner, node co-scrubbed, author converged on the attester, verified on the real receive path), the canonical that carries the mesh cannot read the room, and a FILE published into that community at tier=CommunityDek crossed and OPENED on the other person's node."
 

@@ -1,0 +1,30 @@
+# T6 — an affiliation with a licensing authority and a delegation chain
+# (CIRISClient#179 §2; CSD-120–126, 2f). The affiliation is a community at the
+# `affiliations` tier (buildable); the licensing authority and a person-to-
+# person delegates_to chain have no route — the builder stops before them.
+catalog_id: T6
+catalogue_version: 3
+title: An affiliation — licensing authority, delegation chain
+serves: [CSD-120, CSD-121, CSD-122, CSD-123, CSD-124, CSD-125, CSD-126]
+derives: [2f]
+promises: [community.formed, community.member, authority.licensing, delegation.chain]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: L, dials: [C],    accepts: R, announced: true}    # the licensing authority's node
+    - {id: P, dials: [C, L], accepts: R, announced: true}    # a licensed practitioner
+  persons:
+    - {id: authority,    owns: [L], accepts: R}
+    - {id: practitioner, owns: [P], accepts: R}
+  relations:
+    - {rel: peered, between: [L, P]}
+    - {rel: reachable, node: L, person: practitioner, min: 1}
+    - {rel: community, id: AFF, founder: authority, tier: affiliations, name: Guild}
+    - {rel: member, community: AFF, invitee: practitioner}
+    - {rel: authority, community: AFF, by: authority}
+    - {rel: delegation, from: authority, to: practitioner, depth: 2}
+  actor: {person: practitioner, device: P}
+  negatives: []

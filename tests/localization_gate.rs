@@ -826,8 +826,14 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// input_refused,not_planned,quorum_not_met}` (CC 5.3.4) — same reason,
     /// same list. 29 -> 32: `GET /v1/trust-root/transit-row`'s
     /// `trust_root.{no_transit_row,not_a_serve_node,store_unavailable}` (the
-    /// canonical's row for a local amend) — same reason, same list.
-    const MAX_UNCOVERED: usize = 32;
+    /// canonical's row for a local amend) — same reason, same list. 32 -> 33:
+    /// `add_device.approval_held` (a second ask while an approval is held
+    /// would strand the key it names, CIRISServer#793) — same reason, same list.
+    /// 33 -> 35: `self.roster_{proposal_unknown,own_proposal}` (the self
+    /// roster's held changes, CIRISServer#794) — same reason, same list.
+    /// 35 -> 34: `add_device.roster_change_held` retired — a held approval now
+    /// answers 202 `held: true` and resumes when the roster lands the key.
+    const MAX_UNCOVERED: usize = 34;
 
     let en = load_en();
     let ids = scraped_server_ids();

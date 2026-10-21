@@ -1,0 +1,32 @@
+# T1 — one person, two devices, the self room (CIRISClient#179 §2; seeded from
+# selffiles.yaml and csd-107-file-custody.yaml). The second device is CARRIED
+# (the owner's portable keyset, `POST /v1/self/associate`'s shape); the
+# by-approval path is T3. `file.held` is TRANSIENT: `withdraw` ends it, so the
+# custody and drive screens test before the withdraw step.
+catalog_id: T1
+catalogue_version: 3
+title: One person, two devices, self room
+serves: [CSD-107, CSD-096]
+promises: [canonical.peered, node.announced, peer.direct, person.multi_device, room.self.keyed, note.synced, session.unified, file.held, file.large,
+           file.custody_received, file.withdrawn]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: D1, dials: [C],     accepts: R, announced: true}
+    - {id: D2, dials: [C, D1], accepts: R, announced: true}   # one-hop bodies (CC 5.4.6)
+  persons:
+    - {id: one, owns: [D1, D2], accepts: R}
+  relations:
+    - {rel: peered, between: [D1, D2]}
+    - {rel: room, kind: self, person: one}
+    - {rel: note, person: one, device: D1}
+    - {rel: session, person: one, device: D1}
+    - {rel: file, person: one, device: D1, size: 25165824, name: custody-24MiB.bin}
+    - {rel: custody, person: one, device: D1, file: last}
+    - {rel: withdraw, person: one, device: D1, file: last}
+  actor: {person: one, device: D2}
+  negatives:
+    - {check: no_wider_self_rows, person: one}

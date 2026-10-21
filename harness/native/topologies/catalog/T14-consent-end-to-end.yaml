@@ -1,0 +1,41 @@
+# T14 — consent end to end (CC 3.3.1, 3.3.7; catalogue v2). The replication
+# grant two peered nodes hold is withdrawn (consent.replication = none). The
+# node's community_trust grant and its boundary (CIRISServer#790, known red);
+# a subject's consent:state granted → revoked, granted again → expired
+# (CIRISServer#182, known red: /v1/auth/consent also wants a hybrid request
+# signature); the agent's decay ladder to complete (refused: an agent process).
+catalog_id: T14
+catalogue_version: 3
+title: Consent end to end — grant, revoke, expiry, decay; replication grant and its withdrawal
+serves: [CSD-053]
+promises: [consent.state.granted, consent.state.revoked, consent.state.expired, consent.decay.identity_severed,
+           consent.decay.patterns_anonymized, consent.decay.complete, consent.community_trust.granted,
+           consent.community_trust.bounded, consent.replication.none]
+topology:
+  roots:
+    - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
+  canonicals:
+    - {id: C, holds: R, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C],    accepts: R, announced: true}
+    - {id: B, dials: [C, A], accepts: R, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: R}
+    - {id: bob,   owns: [B], accepts: R}
+  relations:
+    - {rel: peered, between: [A, B]}
+    - {rel: reachable, node: A, person: bob, min: 1}
+    - {rel: community, id: K, founder: alice, protocol: majority, name: Circle}
+    - {rel: member, community: K, invitee: bob}
+    - {rel: replication_withdraw, between: [A, B]}
+    - {rel: community_trust, node: A, community: K, known_red: "CIRISServer#790"}
+    - {rel: community_trust_bound, node: A, community: K, known_red: "CIRISServer#790"}
+    - {rel: consent_grant, from: alice, to: bob, known_red: "CIRISServer#182"}
+    - {rel: consent_revoke, from: alice, to: bob, known_red: "CIRISServer#182"}
+    - {rel: consent_grant, from: alice, to: bob, valid_secs: 30, known_red: "CIRISServer#182"}
+    - {rel: consent_expire, from: alice, to: bob, known_red: "CIRISServer#182"}
+    - {rel: consent_decay, person: alice, stage: identity_severed}
+    - {rel: consent_decay, person: alice, stage: patterns_anonymized}
+    - {rel: consent_decay, person: alice, stage: complete}
+  actor: {person: alice, device: A}
+  negatives: []

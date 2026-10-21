@@ -17,6 +17,14 @@ node's one permitted message is a device-join request); recommendations adopted 
 
 B is never a second identity: the fedID on B is the same identity as on A, with a different keypair (Eric, 2026-10-16). No key material crosses the wire in either direction.
 
+**B's keypair is a ROSTER KEY of that fedID** (CC 3.3.6.3, ruled 2026-10-18, CIRISConstitution#178):
+- **One fedID string.** The fedID, UID included, is the same string on every device.
+- **Each roster key has its own id.** B's key is named `<fedID>-<fingerprint of its own Ed25519 key>` (`CLM-self-roster-key-id`). The genesis key is roster key one, nothing more.
+- **The device name is the node key's.** The roster key never carries it; 0.5.231's `device-<hex>-<fp>` is refused. A's approval checks the name before it signs anything (`add_device::roster_key_named_under`).
+- **Any live roster key signs as the fedID** for every owner act: consent, the owner-binding and its widening, root acceptance, self room, contacts, and approving the next device (`CLM-self-roster-authority`). On the server that is `auth::verify::signer_acts_for`, used by the owner capsule and by `peer::owner_consent_pen` (CIRISServer#793). Persist's steward gate resolves a roster key to the fedID at the row's `asserted_at` (CIRISPersist#1099). Until that lands, B cannot announce itself.
+- **One roster key per node**, separate from the node key (`CLM-self-roster-one-key-per-node`).
+- **Adding and evicting keys** follows the CC 3.3.6.3 policy: unilateral at one key (this approval), the lone path at two, quorum or lone path from three (CIRISPersist#1099).
+
 ## 2. The exchange
 
 Peer to peer on edge's first-contact opaque plane — **CIRISEdge#683**, `FSD/FIRST_CONTACT.md`
@@ -170,9 +178,8 @@ JSON payloads, `op` discriminated: `join`, `status` and `withdraw` (B → A); an
 ## 6. Not in this cut
 
 - B's key custody is the default device custody: the Ed25519 half as a seed file, the ML-DSA-65
-  half sealed in B's key store (`identity::mint_local_device_occurrence`). B's owner pen opens
-  as the occurrence; the owner capsule accepts an active occurrence of the owner
-  (`signer_acts_for`). Owner-pen flows that need the identity's **root** key (minting a new
-  identity-level record) stay on the device holding it.
+  half sealed in B's key store (`identity::mint_local_device_occurrence`, alias = the fedID).
+  B's owner pen opens as its roster key, and nothing is reserved to the genesis key
+  (CC 3.3.6.3).
 - Policy after a device is owned (who may evict, quorum fast path, reverse-quorum window):
   CIRISConstitution's `formal/self_roster`.

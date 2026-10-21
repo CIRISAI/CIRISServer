@@ -1,0 +1,57 @@
+# T3 — two people, a contact by code, and a SECOND DEVICE BY APPROVAL
+# (CIRISClient#179 §2; csd-092 + csd-094; FSD/ADD_DEVICE.md). A2 boots UNOWNED
+# with the others (late-booted joiners are unreachable on first contact today,
+# CIRISServer#792), asks A1, is approved, holds the approval UNAPPLIED, then
+# applies it at the end of first run. Three transient states —
+# device.join_requested, device.join_approved, node.unclaimed — each tested at
+# its own checkpoint. The infrastructure root (ceremony + CIRIS_TEST_NO_CEREMONY)
+# keeps an unowned device's record self-signed, which first contact requires.
+catalog_id: T3
+catalogue_version: 3
+title: Two people, contact by code, second device by approval
+serves: [CSD-092, CSD-093, CSD-094, CSD-037]
+promises: [contact.via_code, device.join_requested, device.join_approved, device.joined, person.multi_device,
+           room.self.keyed, file.held, roster.visible, negatives.held]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A1, dials: [C],     accepts: HA, announced: true}
+    # A2 joins alice by approval, minting a ROSTER KEY of alice's fedID
+    # (`<fedID>-<fp>`, CC 3.3.6.3), and announces itself: persist v59's steward
+    # gate resolves a roster key to the fedID (CIRISPersist#1099).
+    - {id: A2, dials: [C, A1], accepts: HA, announced: true}
+    - {id: B,  dials: [C, A1], accepts: HA, announced: true}
+    - {id: X,  dials: [C, A1], accepts: HA, announced: true}    # eve: alice's contact, holds none of her self plane
+  persons:
+    - {id: alice, owns: [A1, A2], joins: [A2], accepts: HA}
+    - {id: bob,   owns: [B], accepts: HA}
+    - {id: eve,   owns: [X], accepts: HA}
+  relations:
+    - {rel: peered, between: [A1, C]}
+    - {rel: peered, between: [B, C]}
+    - {rel: peered, between: [A1, B]}
+    - {rel: reachable, node: A1, person: bob, min: 1}
+    - {rel: contact, from: alice, to: bob, via: code, nodes: all}
+    - {rel: join_request, person: alice, device: A2, label: "2023 Laptop"}
+    - {rel: join_approve, person: alice, device: A2}
+    - {rel: join_complete, person: alice, device: A2}
+    # The joined device's first owner act: consent signed by its roster key as
+    # the fedID (CC 3.3.6.3, CIRISServer#793).
+    - {rel: peered, between: [A2, C]}
+    - {rel: peered, between: [A1, A2]}
+    - {rel: roster, person: alice, visible_from: [B], visible_from_complete: true}   # CSD-037: alice's devices list each other; bob lists the ANNOUNCED ones
+    - {rel: room, kind: self, person: alice}
+    - {rel: file, person: alice, device: A1, size: 4096, name: small.bin}
+    - {rel: peered, between: [A1, X]}
+    - {rel: reachable, node: A1, person: eve, min: 1}   # alice adds eve: the negative's control (eve holds alice's PUBLIC rows)
+  actor: {person: alice, device: A2}
+  negatives:
+    - {check: holds_no_row, node: X, dimension: "file:v1", person: alice}

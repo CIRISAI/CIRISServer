@@ -1,7 +1,9 @@
 # TOPOLOGY — the trust topology a use case requires, from the root(s) down
 
-**Owner:** CIRISServer (the state lives here). **Consumers:** CIRISClient's CSD/4
-`topology:` block, `harness/native build`, the CSD checker.
+**Owner:** CIRISServer (the state lives here). **Consumers:** the CSD/4 catalogue
+(`FSD/CSD4.md` — LOCKED; a CSD names a catalogue id, never a block in this
+vocabulary), `harness/native build`, the CSD checker. This document is the TYPING
+of a catalogue entry.
 
 ## 1. Why this exists
 
@@ -77,10 +79,13 @@ link, today, multi-fragment frames stall (CIRISEdge#716).
 
 ### 2.4 `persons`
 
-`{id, owns: [<node ids>], accepts: <root>}`. The first owned node is claimed
-with a freshly minted identity; further owned nodes are that person's other
-DEVICES (the owner's key material carried, then claimed — what
-`POST /v1/self/associate` does with a portable keyset). `accepts` on the PERSON
+`{id, owns: [<node ids>], joins?: [<node ids>], accepts: <root>}`. The first owned
+node is claimed with a freshly minted identity; further owned nodes are that
+person's other DEVICES (the owner's key material carried, then claimed — what
+`POST /v1/self/associate` does with a portable keyset). A device listed in `joins`
+is NOT carried: it boots unowned and joins by approval through the
+`join_request` / `join_approve` / `join_complete` relations (FSD/ADD_DEVICE.md);
+it is never the first owned node. `accepts` on the PERSON
 is the acceptance `rooted_with` walks (CIRISEdge#659, CIRISServer#632): a node
 that accepted a root whose owner did not is Attributed, never Rooted.
 
@@ -97,7 +102,16 @@ that accepted a root whose owner did not is Attributed, never Rooted.
 | `file(person, device, size, cohort)` | written on `device`; byte-identical on every other device of `person` |
 | `custody(person, file: last\|<corpus name>, device?, cohort?)` | `GET /v1/files/{id}/custody` on the AUTHOR device (the one the `file`/`corpus` relation wrote on, unless `device` names another) names every other device of `person` with `holds: received` (a delivery receipt, CC 5.3.3.6) and `devices_total` = the person's device count; `last` = the most recent `file`, or the last file a `corpus` wrote; an inline (≤ 1 MiB) file fails by name (`receipts_supported: false`). `FSD/FILE_CUSTODY.md` |
 | `session(person, device, require?)` | the person active on `device` (owner-bearer requests); `GET /v1/self/sessions` on EVERY device of `person` names the same handler for each listed exchange, and at least one is listed (CC 3.1.3.1, FSD/SESSION_CLAIMS.md) |
-| `member(p, community, role)`, `quorum_change(...)` | declared; builder refuses until the community/household scenarios exist |
+| `join_request(person, device, label?)` | the unowned `device` asks the person's first device (window opened, contact code); held there with the code it shows (FSD/ADD_DEVICE.md §1) |
+| `join_approve(person, device)` | the owner approves; the new device verifies the approval offline and HOLDS it, `state: approved`, unapplied (§2.1) |
+| `join_complete(person, device)` | `POST /v1/setup/add-device/complete` applies it, `claimed-session` collects the session; announced and peered as declared |
+| `halt(id, from)`, `confirm(halt)`, `resume(halt)` | CSD-129's rows under the infrastructure root's ceremony holders, delivered to every node; latched / kept past the fuse / released everywhere (CC 4.2.1.1, 4.2.1.3) |
+| `community(id, founder, protocol?, tier?)`, `household(id, founder, protocol?)` | `POST /v1/communities` / `POST /v1/families` by the founder, alone (founding members are refused) |
+| `member(community\|household, invitee, role?)` | invited by the founder, ACCEPTED by the invitee on their own node (`/v1/self/invites/{id}/accept`), seated — founder_only by the founder's read, a quorum room by a 1-of-1 `add` change |
+| `quorum_change(id, community, by, invitee)` | the invitee accepts; `by`'s `add` envelope is below quorum and assembling it answers 409 `community.quorum_pending` (held) |
+| `cosign(change, community, by)` | `by` co-signs on their own node; the assembled change applies |
+| `moderator(community, to)` | a `moderate`-scoped delegation from the founder, read back as an appointed moderator on the room |
+| `guardian_bond`, `age_assurance`, `authority`, `delegation`, `agent`, `steward`, `wise_authority` | typed; the builder REFUSES each by name (`topology.REFUSED_RELATIONS`, FSD/CSD4.md §5) |
 
 ### 2.6 `actor` and `negatives`
 
@@ -156,6 +170,9 @@ flow may not advance to `testable` while its fixture's topology is smaller than
 its CSD's on any layer.
 
 ## 5. The proving set
+
+The catalogue (`topologies/catalog/T0…T9`, FSD/CSD4.md) supersedes this list for
+CSD testing; these stay as regression fixtures.
 
 `harness/native/topologies/csd-091-user-chat.yaml`,
 `csd-092-share-contact-code.yaml`, `csd-094-approve-new-device.yaml` (CSD-094's

@@ -1058,8 +1058,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-edge"
-version = "43.0.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v43.0.0#1d538837a6f7561eea54978374b9650bb2f2177f"
+version = "43.1.1"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v43.1.1#d44e1c57935637ab60a60e38917390fa18e83449"
 dependencies = [
  "async-trait",
  "axum",
@@ -1183,8 +1183,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "59.0.0"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v59.0.0#bb59ea874ea77251bd8d70ab93ad565476651b07"
+version = "59.1.0"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v59.1.0#32512f52766ce2261869a0df1ac6fade75c08662"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3455,7 +3455,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -6180,7 +6180,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -6378,9 +6378,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -8291,14 +8291,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
