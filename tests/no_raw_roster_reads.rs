@@ -94,19 +94,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
          record), deliberately not today's fold",
     ),
     (
-        "src/quorum.rs",
-        "verify_canonical_quorum",
-        "community",
-        "not a persist Community: verify's `InfrastructureCommunity` founder set, \
-         which has no widening or revocation plane",
-    ),
-    (
-        "src/compose_policy.rs",
-        "pin_founder_quorum",
-        "community",
-        "not a persist Community: verify's `InfrastructureCommunity` founder set",
-    ),
-    (
         "src/communities.rs",
         "create_community",
         "req",

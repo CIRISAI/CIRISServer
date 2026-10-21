@@ -72,8 +72,7 @@ async fn node(node_seed: u8, node_key_id: &str) -> Arc<Engine> {
 /// Cross-register a peer's Ed25519 verifying key into this node's federation
 /// directory so `VerifyMode::Full` can resolve a trace signed under `key_id`.
 /// This is the "cross-registered keys" precondition for cross-region trust
-/// (the founder-quorum admission door publishes these in production —
-/// `src/quorum.rs`).
+/// (the genesis bundle's serve-node records publish these in production).
 async fn cross_register(engine: &Engine, key_id: &str, agent_sk: &SigningKey) {
     let pubkey_b64 = BASE64.encode(agent_sk.verifying_key().to_bytes());
     let now = Utc::now();
@@ -249,7 +248,7 @@ async fn signed_batch_replicates_and_verifies_across_independent_nodes() {
     // On the v6.8.1 triple, VerifyMode::Full rejects an unknown-key trace outright
     // (Err UnknownKey) rather than persisting it unverified — a stronger gate. A
     // node only replicates corpus signed under a key its directory trusts (in
-    // prod: admitted via the founder-quorum door, src/quorum.rs).
+    // prod: admitted by the genesis bundle the accord holders sign).
     let c = node_c.receive_and_persist(&bytes, &NullScrubber).await;
     let err = c.expect_err("peer C must REJECT a trace signed under an unregistered key");
     let msg = format!("{err:?}");

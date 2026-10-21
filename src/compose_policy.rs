@@ -58,7 +58,6 @@ use ciris_persist::federation::precedence::precedence_winner;
 use ciris_persist::federation::types::{attestation_type, identity_type, Attestation};
 use ciris_persist::federation::KeyStatementStanding;
 use ciris_persist::prelude::Engine;
-use ciris_verify_core::infrastructure_community::InfrastructureCommunity;
 use serde::Serialize;
 
 use crate::key_standing::{self, HeldRevocations};
@@ -269,17 +268,6 @@ impl TrustSet {
         let key_id = key_id.into();
         self.pinned.insert(key_id.clone());
         self.co_stewards.insert(key_id, class);
-        self
-    }
-
-    /// Pin the `ciris-canonical` founder-quorum roster (`src/quorum.rs`) — the
-    /// entrenched 2-of-3 M-of-N that REPLACED the single vaulted steward key.
-    /// Its founder `member_id`s are federation `key_id`s, so they are canonical
-    /// bootstraps in the CC 4.4.3.8 sense.
-    pub fn pin_founder_quorum(&mut self, community: &InfrastructureCommunity) -> &mut Self {
-        for m in &community.members {
-            self.pinned.insert(m.member_id.clone());
-        }
         self
     }
 

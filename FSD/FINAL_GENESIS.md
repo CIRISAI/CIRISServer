@@ -86,7 +86,8 @@ two files and refuses to report success if it fails.
    bundle_fingerprint, charter_root_key_id, served_by}`, no wrapper signature,
    `community: null` when not baked (registry serves the same shape).
 9. **test_bless** labels its rows (single key root, no head).
-10. Delete `src/quorum.rs` (dead, wrong model); reconcile the two
+10. ~~Delete `src/quorum.rs` (dead, wrong model)~~ (done 0.5.233, on the
+    steward's ruling that the founders are the holders); reconcile the two
     `family_quorum_m` fallbacks.
 11. Client: the re-mint sheet becomes 3-of-3 over two objects (ask to
     CIRISClient; CSD-067 §3, and CSD-105's "3 of 3 witnesses" corrected to
