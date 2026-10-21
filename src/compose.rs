@@ -845,10 +845,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // registers it would then refuse every node-signed row as an unknown
     // attester. The record served is the one for the key that signs this
     // node's rows — the held node key record (CIRISServer#563, Codex on #564).
-    let self_key_record_json = match crate::node_key::held_node_key_record_json() {
+    let minted_self_record = match crate::node_key::held_node_key_record_json() {
         Some(node_record) => node_record,
         None => self_key_record_json(&engine, &cfg).await?,
     };
+    // SERVE THE REGISTERED RECORD, not a fresh mint. `build_self_key_record`
+    // stamps `valid_from = now` on every call, and registration is first-seen:
+    // a reboot (or the seconds between the register and this line) leaves the
+    // directory holding one version while the route handed peers another. A
+    // peer that admitted the served copy then refused the canonical's relay of
+    // the registered one as `conflicting_version` (terminal) — every peering
+    // forked the record the rest of the mesh carries (CIRISEdge, 2026-10-21).
+    let self_key_record_json = registered_self_record_json(&engine, &minted_self_record)
+        .await
+        .unwrap_or(minted_self_record);
 
     // THIS node's own NodeCode (the QR-able federation-key bootstrap handle, CEG
     // §0.10) — built ONCE at boot from the node's steward key_id + the raw Ed25519
@@ -3790,6 +3800,30 @@ async fn register_self_key(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<(
 /// Built from the SAME [`build_self_key_record`] assembly `register_self_key`
 /// uses, so the GET output round-trips byte-identically through a peer's
 /// `register_federation_key`.
+/// The directory's REGISTERED record for the key `minted_json` names, as the
+/// `SignedKeyRecord` JSON the self-key-record route serves — `None` when the key
+/// is not (yet) registered or the read fails, so the caller keeps the mint.
+async fn registered_self_record_json(engine: &Arc<Engine>, minted_json: &str) -> Option<String> {
+    use ciris_persist::federation::SignedKeyRecord;
+    let key_id = serde_json::from_str::<SignedKeyRecord>(minted_json)
+        .ok()?
+        .record
+        .key_id;
+    match engine
+        .federation_directory()
+        .lookup_public_key(&key_id)
+        .await
+    {
+        Ok(Some(record)) => serde_json::to_string(&SignedKeyRecord { record }).ok(),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(key_id = %key_id, error = %format!("{e:#}"),
+                "self-key-record: could not read the registered record — serving the fresh mint");
+            None
+        }
+    }
+}
+
 async fn self_key_record_json(engine: &Arc<Engine>, cfg: &ServerConfig) -> Result<String> {
     use ciris_persist::federation::SignedKeyRecord;
     let record = build_self_key_record(engine, cfg).await?;
