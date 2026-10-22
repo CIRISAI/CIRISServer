@@ -598,27 +598,35 @@ pub struct DeclaredGap {
 /// symbol-level evidence, cited as though it were that evidence. Each row below
 /// is a claim whose server-side symbol does not exist.
 pub const SERVER_DECLARED_GAPS: &[DeclaredGap] = &[
+    // The durability tier (CC rc10 §6.1.5, steward 2026-10-22): an owner's
+    // per-item durable mark, replicated by the blob swarm to a target holder
+    // count over the live cohort. These three replace the fountain-form gaps
+    // (CLM-noise-classify / -ejection / -descent) this table carried at #239;
+    // the noise-floor aggregation claims stay established on their conformance
+    // tests and were never this repo's to substantiate.
     DeclaredGap {
-        cc: "6.1.2",
-        clm: "CLM-noise-classify",
-        tracked_at: "CIRISServer#239",
-        reason: "no noise-floor classifier ships in src/ or ciris-lens-core — the only \
-                 noise_floor code in this repo is tests/noise_floor.rs, which is test-tier and \
-                 cannot substantiate an impl-tier claim",
+        cc: "6.1.5",
+        clm: "CLM-durable-item",
+        tracked_at: "CIRISServer#809",
+        reason: "no per-item durable mark on any publish route, no replication of an item's \
+                 encrypted chunks to a target holder count, no repair at the floor and no \
+                 recovery route — the swarm runtime compose installs holds no durable items",
     },
     DeclaredGap {
-        cc: "6.1.2.3",
-        clm: "CLM-noise-ejection",
-        tracked_at: "CIRISServer#239",
-        reason: "EjectionVerdict routing exists only in tests/noise_floor_verdicts.rs; no \
-                 production symbol routes Keep/EjectToTier/AggregatedTierOnly/HardDelete",
+        cc: "6.1.5",
+        clm: "CLM-durable-descent",
+        tracked_at: "CIRISServer#809",
+        reason: "no un-mark or withdrawal of a durable mark exists, so nothing drops holders \
+                 back to normal retention",
     },
     DeclaredGap {
-        cc: "6.1.2",
-        clm: "CLM-noise-descent",
-        tracked_at: "CIRISServer#239",
-        reason: "the retirement operator (revocation/eviction/aging as pressure-driven descent) \
-                 has no production implementation here",
+        cc: "6.1.5.1",
+        clm: "CLM-registry-replication",
+        tracked_at: "CIRISServer#809",
+        reason: "no per-item replication target: holonomic::install_swarm_runtime starts \
+                 SwarmRuntimeConfig::default() over a boot snapshot of the cohort, and the \
+                 mesh_config redundancy keys are unconsumed (mesh_config_effect.rs) because \
+                 the runtime's config cannot change after start",
     },
     DeclaredGap {
         cc: "4.2.6",

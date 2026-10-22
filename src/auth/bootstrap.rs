@@ -720,6 +720,32 @@ struct SetupRootRequest {
     /// owner-binding or a consent names it.
     #[serde(default)]
     claimer_key_record: Option<ciris_persist::federation::types::SignedKeyRecord>,
+    /// OPTIONAL — the fedID behind a roster-key signer (CIRISServer#806): its key
+    /// record and the occurrence row(s) naming the binding's signer under it.
+    /// Admitted only for THAT signer and only after the PIN, each through
+    /// persist's own verifying gate, so `owner_of` resolves the binding to the
+    /// fedID at claim time instead of to the roster key.
+    #[serde(default)]
+    owner_roster_proof: Option<crate::claim_remote::RosterProof>,
+}
+
+/// The part of a [`crate::claim_remote::RosterProof`] that speaks for `signer`:
+/// a USER record, and only the occurrence rows naming `signer` under it. `None`
+/// when nothing in the proof is about this binding's signer.
+fn roster_proof_for_signer<'a>(
+    proof: &'a crate::claim_remote::RosterProof,
+    signer: &str,
+) -> Option<&'a crate::claim_remote::RosterProof> {
+    let identity = &proof.identity_key_record.record;
+    let about_signer = |o: &ciris_persist::federation::types::SignedIdentityOccurrence| {
+        o.identity_occurrence.occurrence_key_id == signer
+            && o.identity_occurrence.identity_key_id == identity.key_id
+    };
+    (identity.identity_type == ciris_persist::federation::types::identity_type::USER
+        && identity.key_id != signer
+        && !proof.occurrences.is_empty()
+        && proof.occurrences.iter().all(about_signer))
+    .then_some(proof)
 }
 
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
@@ -1106,6 +1132,29 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
         );
     };
 
+    // (4a) The fedID behind a roster-key signer (CIRISServer#806): its record goes
+    //      in BEFORE the binding, the occurrence rows after it (they name the
+    //      signer's key, which the binding registers). Only rows about THIS
+    //      binding's signer are taken: setup/root is not a door for other rows.
+    let roster_proof = req
+        .owner_roster_proof
+        .as_ref()
+        .and_then(|p| roster_proof_for_signer(p, &owner_binding.attesting_key_id));
+    if let Some(p) = roster_proof {
+        if let Err(e) = st
+            .engine
+            .register_federation_key(p.identity_key_record.clone())
+            .await
+        {
+            tracing::warn!(
+                identity = %p.identity_key_record.record.key_id,
+                error = %format!("{e:#}"),
+                "setup/root: the claimer's fedID record was not admitted (already held, or refused) \
+                 — the owner may resolve to the roster key until the roster replicates (history: CIRISServer#806)"
+            );
+        }
+    }
+
     // Validate + verify (Strict hybrid against the user's supplied pubkeys) +
     // register the user as identity_type "user" + persist the GENUINELY USER-SIGNED
     // delegates_to(user -> THIS node, infra:*). All crypto in the substrate.
@@ -1138,6 +1187,25 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             );
         }
     };
+
+    if let Some(p) = roster_proof {
+        for occ in &p.occurrences {
+            if let Err(e) = st
+                .engine
+                .federation_directory()
+                .put_identity_occurrence(occ.clone())
+                .await
+            {
+                tracing::warn!(
+                    identity = %p.identity_key_record.record.key_id,
+                    occurrence = %occ.identity_occurrence.occurrence_key_id,
+                    error = %format!("{e:#}"),
+                    "setup/root: the claimer's roster occurrence was refused — the owner \
+                     resolves to the roster key until the roster replicates (history: CIRISServer#806)"
+                );
+            }
+        }
+    }
 
     // (5) Bind this responsible user as ROOT (race-narrowed: re-check + claim).
     if let Ok(v) = store::list_by_role(&st.engine, WaRole::Root, 1).await {

@@ -280,6 +280,48 @@ fn scan(dir: &Path, depth: usize, found: &mut (bool, bool)) {
 /// home keeps TPM custody for new keys; a home with live TPM keys is untouched.
 /// A deliberate software→TPM migration is a separate, explicit act (adopt).
 pub fn pin_process_tier(home: &Path) -> HomeTier {
+    undo_import_pin_for_another_home(home);
+    pin_tier_for(home)
+}
+
+/// What [`pin_process_tier_at_import`] changed: the home it scanned and the
+/// `CIRIS_TPM_PLUGIN` value it replaced. `None` when it changed nothing.
+type ImportPin = Option<(std::path::PathBuf, Option<String>)>;
+static IMPORT_PIN: std::sync::Mutex<ImportPin> = std::sync::Mutex::new(None);
+
+/// **The served home's pin is the one that counts** (CIRISServer#807). The
+/// import-time pin can only guess the home (`CIRIS_HOME`, else `~/ciris`); a
+/// node served from a different `--home` must not inherit a software-tier pin
+/// made against that guess. When the import pin changed the environment for
+/// another home, restore what it replaced before this home decides.
+fn undo_import_pin_for_another_home(home: &Path) {
+    let mut pin = IMPORT_PIN.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((scanned, prior)) = pin.as_ref() else {
+        return;
+    };
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    if same(scanned, home) {
+        return;
+    }
+    // SAFETY: as in `pin_tier_for` — the first boot step, before any thread
+    // this crate spawns reads the environment.
+    match prior {
+        Some(v) => unsafe { std::env::set_var("CIRIS_TPM_PLUGIN", v) },
+        None => unsafe { std::env::remove_var("CIRIS_TPM_PLUGIN") },
+    }
+    tracing::warn!(
+        import_home = %scanned.display(),
+        served_home = %home.display(),
+        "keyring tier: the import-time pin was made for another home — undone; the served \
+         home decides its own tier (tracked: CIRISServer#807)"
+    );
+    *pin = None;
+}
+
+fn pin_tier_for(home: &Path) -> HomeTier {
     let mut found = (false, false); // (software master, plugin blob)
     for sub in ["identity", "keys"] {
         scan(&home.join(sub), 2, &mut found);
@@ -326,7 +368,11 @@ pub fn pin_process_tier(home: &Path) -> HomeTier {
 pub fn pin_process_tier_at_import() {
     if let Some(h) = import_home(std::env::var_os("CIRIS_HOME"), std::env::var_os("HOME")) {
         if h.is_dir() {
-            pin_process_tier(&h);
+            let before = std::env::var("CIRIS_TPM_PLUGIN").ok();
+            pin_tier_for(&h);
+            if std::env::var("CIRIS_TPM_PLUGIN").ok() != before {
+                *IMPORT_PIN.lock().unwrap_or_else(|p| p.into_inner()) = Some((h, before));
+            }
         }
     }
 }

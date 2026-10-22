@@ -113,7 +113,10 @@ fn every_gated_act_calls_the_session_gate_first() {
 /// boot): the device doing its own binding, never a reaction to a sibling's
 /// row (FSD §2.2 / §2.3). A third, also §2.3: `add_device`'s `approve`, the
 /// owner consenting on THIS device to a new device's occurrence
-/// (`FSD/ADD_DEVICE.md`).
+/// (`FSD/ADD_DEVICE.md`). A fourth, the same §2.3 act: `portable_occurrence`'s
+/// associate, which since CIRISServer#805 records the device's roster row signed
+/// by the identity it opened on THIS device and re-wraps there itself, rather
+/// than through `bind_occurrence_core`'s unsigned local bind.
 #[test]
 fn the_rewrap_door_has_no_ungated_loop_caller() {
     let mut callers = Vec::new();
@@ -144,6 +147,7 @@ fn the_rewrap_door_has_no_ungated_loop_caller() {
             !c.starts_with("self_rewrap.rs:")
                 && !c.starts_with("occurrence.rs:")
                 && !c.starts_with("add_device.rs:")
+                && !c.starts_with("portable_occurrence.rs:")
         })
         .collect();
     assert!(

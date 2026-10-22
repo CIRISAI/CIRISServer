@@ -81,6 +81,9 @@ requires-python = ">=3.10"
 # `chat.unsupported_content_type` — CIRISClient#36). 0.5.201 defines none of
 # them; below it a fresh install renders those states as raw ids. The
 # `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
+# FLOOR 0.5.230 (2026-10-22): the client localizing the fifteen ids 0.5.232
+# queued (bundle v4 plan, the 2-of-3 amend, the transit row, the held
+# approval, the self roster's proposals) and the roster card (CIRISClient#218).
 # FLOOR 0.5.229 (2026-10-19): the client carrying the add-device plane
 # (CIRISClient#189, every `add_device.*` id) and the reworded contacts copy
 # (CIRISServer#776, CIRISClient#194); release gate green on five platforms
@@ -98,7 +101,7 @@ requires-python = ">=3.10"
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
 dependencies = [
-    "ciris-client>=0.5.229,<0.6",
+    "ciris-client>=0.5.230,<0.6",
 ]
 
 [project.urls]

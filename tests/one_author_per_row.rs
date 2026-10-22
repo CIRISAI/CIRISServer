@@ -317,6 +317,12 @@ fn no_producer_writes_the_signed_instant_unbucketed() {
              produce_signed_identity_occurrence, never put_attestation. The instant is built \
              from_timestamp_millis, so both halves carry the same millisecond value.",
         ),
+        (
+            "src/auth/portable_occurrence.rs",
+            "associate signs the device's roster OCCURRENCE with the identity it opened \
+             (CIRISServer#805), add-device's shape: verify's produce_signed_identity_occurrence, \
+             never put_attestation; the instant is built from_timestamp_millis.",
+        ),
     ];
 
     let mut offenders = Vec::new();

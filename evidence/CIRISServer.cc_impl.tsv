@@ -10,14 +10,14 @@
 #
 # ─── RESOLVED ──────────────────────────────────────────────────────────────────
 decimal_id	claim_id	repo	path#symbol	crate@version
-3.1	CLM-nsproc-dimension	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.232
-4.4.2	CLM-nsproc-aggregation-policy	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.232
-4.4.3.4.3	CLM-nsproc-cohort-scope	CIRISServer	src/graph_config.rs#set_config	ciris-server@v0.5.232
-4.2.2.1	CLM-nsproc-attestation-evidence	CIRISServer	src/hardware_attestation.rs#admit_hardware_class_against_root	ciris-server@v0.5.232
-2.6.6.1	CLM-location	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.232
-2.6.6	CLM-canonicalization-cell	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.232
-3.4.5	CLM-capacity-score	CIRISServer	src/scorer.rs#score_and_emit	ciris-server@v0.5.232
-3.3.7	CLM-consent-directed	CIRISServer	src/peer.rs#emit_replication_consent	ciris-server@v0.5.232
+3.1	CLM-nsproc-dimension	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.233
+4.4.2	CLM-nsproc-aggregation-policy	CIRISServer	src/compose_policy.rs#polarity_for	ciris-server@v0.5.233
+4.4.3.4.3	CLM-nsproc-cohort-scope	CIRISServer	src/graph_config.rs#set_config	ciris-server@v0.5.233
+4.2.2.1	CLM-nsproc-attestation-evidence	CIRISServer	src/hardware_attestation.rs#admit_hardware_class_against_root	ciris-server@v0.5.233
+2.6.6.1	CLM-location	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.233
+2.6.6	CLM-canonicalization-cell	CIRISServer	src/location.rs#mint_location_proof	ciris-server@v0.5.233
+3.4.5	CLM-capacity-score	CIRISServer	src/scorer.rs#score_and_emit	ciris-server@v0.5.233
+3.3.7	CLM-consent-directed	CIRISServer	src/peer.rs#emit_replication_consent	ciris-server@v0.5.233
 #
 # ─── DECLARED GAPS ─────────────────────────────────────────────────────────────
 # Controls the Constitution attributes to this repo that are NOT enforced here.
@@ -31,9 +31,9 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 # issue that asked for symbol-level evidence, cited as though it were that
 # evidence. A pointer at an issue and a pointer at a symbol are not the same
 # kind of object, and only one of them goes stale silently.
-6.1.2	CLM-noise-classify	CIRISServer	CIRISServer#239	open
-6.1.2.3	CLM-noise-ejection	CIRISServer	CIRISServer#239	open
-6.1.2	CLM-noise-descent	CIRISServer	CIRISServer#239	open
+6.1.5	CLM-durable-item	CIRISServer	CIRISServer#809	open
+6.1.5	CLM-durable-descent	CIRISServer	CIRISServer#809	open
+6.1.5.1	CLM-registry-replication	CIRISServer	CIRISServer#809	open
 4.2.6	CLM-accord-livequorum	CIRISServer	CIRISServer#122	open
 #
 # ─── VERIFIED POINTERS AWAITING A CLAIM ID ─────────────────────────────────────

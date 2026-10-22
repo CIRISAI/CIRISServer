@@ -180,6 +180,61 @@ struct RemoteSetupRootRequest {
     /// claimer behind NAT publishes no address.
     #[serde(skip_serializing_if = "Option::is_none")]
     claimer_key_record: Option<ciris_persist::federation::types::SignedKeyRecord>,
+    /// OPTIONAL — the proof that the binding's signer is a ROSTER KEY of a self
+    /// (CIRISServer#806). Since #793 the binding is signed by the device's own
+    /// roster key, not the fedID; without this the target resolves its owner to
+    /// that roster key until the occurrence row reaches it by replication, which
+    /// needs a peering the claim has not made yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_roster_proof: Option<RosterProof>,
+}
+
+/// **The fedID behind a roster-key signer** (CIRISServer#806): the self's key
+/// record and the occurrence row(s) that make the signer one of its roster keys.
+/// The target admits both through persist's own gates (`register_federation_key`
+/// re-verifies the record's scrub signatures, `put_identity_occurrence` the
+/// row's), so `owner_of` names the fedID the moment the claim lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RosterProof {
+    /// The self's (fedID's) registered key record.
+    pub identity_key_record: ciris_persist::federation::types::SignedKeyRecord,
+    /// The signed `identity:occurrence:v1` rows naming the signer under that self.
+    pub occurrences: Vec<ciris_persist::federation::types::SignedIdentityOccurrence>,
+}
+
+/// The [`RosterProof`] for `signer_key_id`, read from THIS node's directory —
+/// `None` when the signer IS its own self (a genesis key signs as the fedID, so
+/// there is nothing to prove) or this node holds no occurrence row for it.
+pub async fn roster_proof_for(
+    engine: &ciris_persist::prelude::Engine,
+    signer_key_id: &str,
+) -> Option<RosterProof> {
+    let dir = engine.federation_directory();
+    let me = ciris_persist::federation::self_roster::self_of_at(
+        dir.as_ref(),
+        signer_key_id,
+        chrono::Utc::now(),
+    )
+    .await
+    .ok()?;
+    if me == signer_key_id {
+        return None;
+    }
+    let record = dir.lookup_public_key(&me).await.ok()??;
+    let occurrences: Vec<_> = dir
+        .list_signed_identity_occurrences_for(&me)
+        .await
+        .ok()?
+        .into_iter()
+        .filter(|o| o.identity_occurrence.occurrence_key_id == signer_key_id)
+        .collect();
+    if occurrences.is_empty() {
+        return None;
+    }
+    Some(RosterProof {
+        identity_key_record: ciris_persist::federation::types::SignedKeyRecord { record },
+        occurrences,
+    })
 }
 
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
@@ -243,6 +298,8 @@ pub async fn claim_remote(
     // THIS node's self-signed key record, handed to the target so it knows the
     // device that claimed it (CIRISServer#678). `None` sends nothing.
     claimer_key_record: Option<&ciris_persist::federation::types::SignedKeyRecord>,
+    // The fedID behind a roster-key signer (CIRISServer#806). `None` sends nothing.
+    owner_roster_proof: Option<&RosterProof>,
 ) -> Result<serde_json::Value, ClaimRemoteError> {
     let cohort = validate_cohort_scope(cohort_scope)?;
     let (nc, owner_binding) =
@@ -274,6 +331,7 @@ pub async fn claim_remote(
         owner_oauth_provider: owner_oauth.map(|(p, _)| p.to_owned()),
         owner_oauth_external_id: owner_oauth.map(|(_, e)| e.to_owned()),
         claimer_key_record: claimer_key_record.cloned(),
+        owner_roster_proof: owner_roster_proof.cloned(),
     };
 
     let resp = http
@@ -522,6 +580,7 @@ async fn claim_remote_handler(
              signs in there with their federation ID",
         );
     }
+    let roster_proof = roster_proof_for(&st.engine, user_signer.key_id()).await;
     match claim_remote(
         &st.http,
         &user_signer,
@@ -544,6 +603,7 @@ async fn claim_remote_handler(
                     .filter(|s| !s.is_empty()),
             ),
         st.self_key_record.as_ref(),
+        roster_proof.as_ref(),
     )
     .await
     {

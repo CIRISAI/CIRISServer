@@ -388,3 +388,39 @@ async fn portable_keyset_derives_self_enc_pubkeys_and_enters_the_dek_cascade() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// CIRISServer#805: the key `POST /v1/self/associate` mints is a ROSTER KEY of
+/// the identity — minted under alias = the fedID, so it is named
+/// `<fedID>-<its own fingerprint>` and the roster gate add-device uses accepts
+/// it. The old `<slug>-device-<unique>` alias minted a key that gate refuses.
+#[tokio::test]
+async fn associate_mints_a_key_the_roster_gate_accepts() {
+    let usb = tmp("roster-usb");
+    let identity =
+        ciris_server::identity::mint_portable_software_occurrence(&usb, "owner-portable-805")
+            .await
+            .expect("mint the portable identity");
+    let fed_id = identity.key_id.clone();
+
+    let seed = tmp("roster-device").join("user");
+    let device = ciris_server::identity::mint_local_device_occurrence(&seed, &fed_id)
+        .await
+        .expect("mint the device's roster key under alias = fedID");
+    ciris_server::add_device::roster_key_named_under(&fed_id, &device.key_record)
+        .expect("an alias = fedID key is a roster key of that fedID");
+    assert!(
+        ciris_server::identity::device_alias_holds_keys(&seed, &fed_id),
+        "a second associate of the same identity on this node is refused by name"
+    );
+
+    let old = ciris_server::identity::mint_local_device_occurrence(
+        &tmp("roster-old").join("user"),
+        &format!("{fed_id}-device-1"),
+    )
+    .await
+    .expect("mint the pre-#805 device-named key");
+    assert!(
+        ciris_server::add_device::roster_key_named_under(&fed_id, &old.key_record).is_err(),
+        "a device-named key is not a roster key"
+    );
+}

@@ -572,6 +572,8 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
         None,
         // The CLI is not a node: it has no key record of its own to introduce.
         None,
+        // Nor a directory to read a roster proof from (CIRISServer#806).
+        None,
     )
     .await?;
     println!("✅ claim accepted by {target_url}");
