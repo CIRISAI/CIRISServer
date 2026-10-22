@@ -154,6 +154,17 @@ struct PeeringRequest {
     /// (`ceg_wire_version` / `wire_vocabulary_sha256`).
     #[serde(default, flatten)]
     wire: crate::conformance::PeerWireAnnouncement,
+    /// OPTIONAL — the peer's OWN signed `transport_destination` row carrying its
+    /// transit KEX pair (CIRISServer#808), as its
+    /// `GET /v1/federation/self-transport-destination` serves it. Under the
+    /// sealed transport (CC 5.3.3.5 E1) a link is sealed only to a pair
+    /// authenticated to the dialed node, and the node's own hybrid-signed route
+    /// row is one (CC rc9 c8f0d12): with it two directly peered nodes link with
+    /// no canonical to relay the row. Admitted through persist's signed route
+    /// gate, and only for `peer_key_id`.
+    #[serde(default)]
+    peer_transport_destination:
+        Option<ciris_persist::federation::self_at_login::SignedTransportDestination>,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,6 +191,10 @@ struct PeeringResponse {
     /// SYMMETRIC: the requester can refuse US if our declaration does not claim the
     /// profiles it needs from a replication peer.
     conformance: crate::conformance::DeclaredConformance,
+    /// What became of the request's `peer_transport_destination`
+    /// (CIRISServer#808): `admitted`, `absent` (none sent — the link then needs
+    /// the row from a canonical or another relay), or `refused: <why>`.
+    peer_transit_route: String,
 }
 
 async fn peering(
@@ -318,6 +333,11 @@ async fn peering(
         );
     }
 
+    // ── (a2) The peer's own signed route row (CIRISServer#808): the transit pair
+    //    a sealed link to it needs, with no canonical in between. ─────────────
+    let peer_transit_route =
+        admit_peer_transit_route(&st.engine, &peer.key_id, req.peer_transport_destination).await;
+
     // ── (b) Consent: emit THIS node's directed consent:replication:v1 grant at
     //    the peer, carrying the caller-supplied prefixes (idempotent). ──────────
     let grant = match crate::peer::emit_replication_consent(
@@ -361,9 +381,96 @@ async fn peering(
                 .to_owned(),
             negotiated_ceg_wire_version: negotiated.to_string(),
             conformance: crate::conformance::declared(&st.engine).await,
+            peer_transit_route,
         }),
     )
         .into_response()
+}
+
+/// Admit `row` as `peer`'s route row: it must name `peer` and carry a transit
+/// pair, and persist's signed gate verifies it against `peer`'s pinned keys
+/// before any write. Answers the `peer_transit_route` word.
+async fn admit_peer_transit_route(
+    engine: &Engine,
+    peer: &str,
+    row: Option<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+) -> String {
+    let Some(row) = row else {
+        return "absent".to_owned();
+    };
+    if row.transport_destination.occurrence_key_id != peer {
+        return format!(
+            "refused: the row names {}, not the peer {peer}",
+            row.transport_destination.occurrence_key_id
+        );
+    }
+    if !matches!(row.transit_kex_pair(), Ok(Some(_))) {
+        return "refused: the row carries no transit KEX pair".to_owned();
+    }
+    match engine
+        .federation_directory()
+        .put_signed_transport_destination(&row)
+        .await
+    {
+        Ok(outcome) => {
+            tracing::info!(peer = %peer, outcome = ?outcome,
+                "peering: admitted the peer's signed transit route — a sealed link to it needs no canonical (CIRISServer#808)");
+            "admitted".to_owned()
+        }
+        Err(e) => {
+            tracing::warn!(peer = %peer, error = %format!("{e:#}"),
+                "peering: the peer's transit route was refused");
+            format!("refused: {e}")
+        }
+    }
+}
+
+/// **This node's current transit route** (CIRISServer#808): its newest live
+/// signed `transport_destination` row that carries a transit KEX pair — the
+/// row a peer must hold to seal a link to `key_id`. `None` before edge has
+/// published one.
+pub async fn current_transit_route(
+    engine: &Engine,
+    key_id: &str,
+) -> Result<
+    Option<ciris_persist::federation::self_at_login::SignedTransportDestination>,
+    ciris_persist::federation::Error,
+> {
+    let held = engine
+        .federation_directory()
+        .list_signed_transport_destinations_for(key_id)
+        .await?;
+    Ok(held
+        .into_iter()
+        .filter(|r| r.transport_destination.retired_at.is_none())
+        .filter(|r| matches!(r.transit_kex_pair(), Ok(Some(_))))
+        .max_by_key(|r| {
+            (
+                r.transport_destination.epoch,
+                r.transport_destination.asserted_at,
+            )
+        }))
+}
+
+// ─── GET /v1/federation/self-transport-destination (unauthenticated) ─────────
+
+/// This node's own signed route row with its transit pair — the companion of
+/// `self-key-record` a peer passes as `peer_transport_destination` on
+/// `POST /v1/federation/peering` (CIRISServer#808). Public by construction: the
+/// row is signed for replication and carries only public keys. 204 before edge
+/// has published one.
+async fn self_transport_destination(State(st): State<FederationAdminState>) -> Response {
+    let me = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_else(|| st.node_key_id.clone());
+    match current_transit_route(&st.engine, &me).await {
+        Ok(Some(row)) => (StatusCode::OK, Json(row)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("list_signed_transport_destinations_for({me}): {e}"),
+        ),
+    }
 }
 
 // ─── POST /v1/federation/consent (owner-gated; the explicit consent act) ──────
@@ -899,6 +1006,10 @@ pub fn router(
         .route(
             "/v1/federation/self-key-record",
             axum::routing::get(self_key_record),
+        )
+        .route(
+            "/v1/federation/self-transport-destination",
+            axum::routing::get(self_transport_destination),
         )
         .route("/v1/federation/peering", axum::routing::post(peering))
         // The explicit consent act — author a consent:replication grant at an

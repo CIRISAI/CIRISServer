@@ -194,6 +194,48 @@ _BODY = (r"no route to peer|has_path=|derived destination|holder retired|outcome
          r"transcript is empty|not_fetched|NoHolders")
 
 
+# ── two people peered directly, NO canonical (CIRISServer#808) ──────────────
+
+
+def peer_pair(mesh: Mesh, args: Any) -> Record:
+    """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
+    announced and peered both ways over the production routes. Under the sealed
+    transport the link needs each side's transit pair; peering carries it."""
+    step = Steps("""
+PEER PAIR — two people's nodes peered DIRECTLY, no canonical (CIRISServer#808).
+  routes:  claim, announce, self-key-record + self-transport-destination + /v1/federation/peering.
+  proves:  peering admits the peer's signed transit route → a sealed link forms → each owner's
+           key reaches the other node with no relay.""")
+    a = mesh.add("alice", canonical=False)
+    b = mesh.add("bob", dial=[a], canonical=False)
+    step("booted", alice=a.url, bob=b.url, canonical=None)
+    a.claim("alice-person")
+    b.claim("bob-person")
+    for n in (a, b):
+        n.announce()
+        n.self_record()
+    step("claimed_and_announced", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
+    got_ab = a.peer_with(b)
+    got_ba = b.peer_with(a)
+    step("peered", alice_admitted=got_ab.get("peer_transit_route"),
+         bob_admitted=got_ba.get("peer_transit_route"))
+    if got_ab.get("peer_transit_route") != "admitted" or got_ba.get("peer_transit_route") != "admitted":
+        step.fail("transit_route_NOT_admitted", "peering refused the peer's signed transit route",
+                  [a, b], r"transit route|transit_route|transport_destination")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    for host, guest in ((a, b), (b, a)):
+        try:
+            wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                     lambda: host.knows(guest.owner_key_id), args.owner_wait)
+            step(f"owner_key_crossed:{host.name}<-{guest.name}")
+        except MeshError:
+            step.fail(f"owner_key_NOT_crossed:{host.name}<-{guest.name}",
+                      "no sealed link formed between two directly peered nodes",
+                      [host, guest], r"link_seal_refused|transit seal|no usable transit|un-routable")
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 # ── one person, two devices, the transfer corpus (the ≥1 MiB question) ──────
 
 
@@ -1637,4 +1679,5 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "owner_key_tpm_appears": owner_key_tpm_appears,
     "chat": chat,
     "corpus": corpus,
+    "peer_pair": peer_pair,
 }

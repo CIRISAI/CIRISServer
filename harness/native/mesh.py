@@ -294,14 +294,25 @@ class Node:
 
     # -- peering / contacts / chat --
 
+    def transit_route(self) -> Optional[Any]:
+        """This node's own signed route row with its transit pair, or None
+        before edge has published one (204) — CIRISServer#808."""
+        code, body = http("GET", f"{self.url}/v1/federation/self-transport-destination")
+        return body if code == 200 else None
+
     def peer_with(self, other: "Node", prefixes: Optional[List[str]] = None) -> Any:
-        """PRODUCTION peering: the other node's self-key-record, admitted here."""
+        """PRODUCTION peering: the other node's self-key-record AND its signed
+        transit route (CIRISServer#808), admitted here — what a sealed link to it
+        needs when no canonical relays the route row."""
         if other.record is None:
             other.self_record()
-        return self.must("POST", "/v1/federation/peering", {
+        body = {
             "peer_key_id": other.record["record"]["key_id"],
             "peer_key_record": other.record,
-            "attestation_prefixes": prefixes or DEFAULT_PREFIXES})
+            "attestation_prefixes": prefixes or DEFAULT_PREFIXES}
+        route = wait_for(f"{other.name} to publish its transit route", other.transit_route, 60)
+        body["peer_transport_destination"] = route
+        return self.must("POST", "/v1/federation/peering", body)
 
     def test_admit(self, other: "Node") -> Any:
         """The ladders' SHORTCUT (test-anchor only). Opt-in; see the module note."""

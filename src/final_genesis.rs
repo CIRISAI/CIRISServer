@@ -589,7 +589,6 @@ async fn gather_serve_transport_destinations(
     supplied: Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>,
 ) -> Result<Vec<ciris_persist::federation::self_at_login::SignedTransportDestination>, Response> {
     let mut rows = supplied;
-    let dir = engine.federation_directory();
     for key in serve_keys {
         if rows
             .iter()
@@ -597,8 +596,7 @@ async fn gather_serve_transport_destinations(
         {
             continue;
         }
-        let held = dir
-            .list_signed_transport_destinations_for(key)
+        let held = crate::federation_admin::current_transit_route(engine, key)
             .await
             .map_err(|e| {
                 refuse(
@@ -607,18 +605,8 @@ async fn gather_serve_transport_destinations(
                     format!("list_signed_transport_destinations_for({key}): {e:#}"),
                 )
             })?;
-        if let Some(row) = held
-            .iter()
-            .filter(|r| r.transport_destination.retired_at.is_none())
-            .filter(|r| matches!(r.transit_kex_pair(), Ok(Some(_))))
-            .max_by_key(|r| {
-                (
-                    r.transport_destination.epoch,
-                    r.transport_destination.asserted_at,
-                )
-            })
-        {
-            rows.push(row.clone());
+        if let Some(row) = held {
+            rows.push(row);
         }
     }
     Ok(rows)
