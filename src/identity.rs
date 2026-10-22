@@ -1093,6 +1093,14 @@ pub fn hardware_sealed_storage_probe() -> std::result::Result<String, String> {
     out
 }
 
+/// Does `alias` already hold device key material under `seed_dir` (either
+/// half)? The mint below refuses such an alias; callers ask first to refuse by
+/// name.
+pub fn device_alias_holds_keys(seed_dir: &std::path::Path, alias: &str) -> bool {
+    seed_dir.join(portable_ed_seed_name(alias)).exists()
+        || sealed_half_present(&home_keys_dir(seed_dir), alias)
+}
+
 /// [`mint_local_device_occurrence`] with an explicit custody for the classical
 /// half.
 ///
@@ -1114,9 +1122,7 @@ pub async fn mint_local_device_occurrence_with(
     // the ingest gate (an add-device retried after its 503 did exactly this,
     // CIRISServer#793). The caller retires the old keys first, or picks another
     // alias.
-    if seed_dir.join(portable_ed_seed_name(alias)).exists()
-        || sealed_half_present(&home_keys_dir(seed_dir), alias)
-    {
+    if device_alias_holds_keys(seed_dir, alias) {
         anyhow::bail!(
             "{alias} already holds key material in {} — a device key is minted once per \
              alias; retire the old keys before minting again",

@@ -1030,12 +1030,24 @@ async fn associate_handler(
     //     the key the device will sign as, and the only device that will ever hold
     //     it — which is what makes revoking this one device possible.
     let dest_dir = crate::user_seed_dir(&st.cfg);
-    // Named after the IDENTITY, not the source artifact: the directory arm used
-    // the USB folder's alias, which the token arm has no equivalent of (a token
-    // names slots, not aliases). `slug` of the identity's key_id is stable across
-    // both custodies and is what a second device under the same identity reads
-    // as, which is the point of the name.
-    let device_alias = format!("{}-device-{}", slug(&supplied_key_id), short_unique());
+    // A ROSTER KEY of the identity, named the way CC 3.3.6.3 names one and the
+    // way add-device mints it (CIRISServer#805, `CLM-self-roster-key-id`): the
+    // alias IS the fedID, so `derive_key_id` names the key `<fedID>-<its own
+    // fingerprint>` and `add_device::roster_key_named_under` accepts it. The old
+    // `<slug>-device-<unique>` alias minted a key no roster gate would sign in.
+    let device_alias = identity_key_id.clone();
+    // One roster key per identity per node: the mint refuses a live alias (it
+    // would re-open the old ML-DSA half under a new Ed25519 key), so say so here
+    // instead of answering 500 after the source custody was opened.
+    if crate::identity::device_alias_holds_keys(&dest_dir, &device_alias) {
+        return http_err(
+            StatusCode::CONFLICT,
+            format!(
+                "this node already holds a roster key of {identity_key_id} — revoke that \
+                 occurrence and retire its keys before associating the identity again"
+            ),
+        );
+    }
     let keyset = match crate::identity::mint_local_device_occurrence_with(
         &dest_dir,
         &device_alias,
@@ -1052,33 +1064,39 @@ async fn associate_handler(
         }
     };
 
-    // (5) BIND it as an active occurrence of the identity — the three persist
-    //     effects (register + put_identity_occurrence + self-DEK cascade). After
-    //     this, `signer_acts_for(device_key, identity) == true`, so this device
-    //     holds the identity's full privileges.
-    if let Err(e) = crate::auth::occurrence::bind_occurrence_core(
-        &st.engine,
-        &identity_key_id,
-        &keyset.key_id,
-        // `laptop`, from persist's CLOSED set (§5.6.8.8:
-        // phone|laptop|server|embedded|agent|service). This passed
-        // `"portable_software"` — not in the set — so `check_device_class`
-        // refused and the route answered 500 AFTER minting and registering the
-        // occurrence key, leaving an orphan. Latent on main and untested end to
-        // end; the response object next to it had already been corrected to
-        // `laptop` and the bind was left behind (Codex review on PR #620).
-        crate::auth::occurrence::DEVICE_CLASS_LAPTOP,
-        None,
-        keyset.encryption_pubkeys.clone(),
-        Some(keyset.key_record.clone()),
-    )
-    .await
-    {
-        return http_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("bind this device as an occurrence of {identity_key_id}: {e}"),
-        );
-    }
+    // (5) THE ROSTER ROW, signed by the identity it names (CIRISServer#806). The
+    //     identity's own custody is open right now (the authorizer), so the
+    //     occurrence goes through persist's SIGNED gate exactly as add-device's
+    //     does: a signed row replicates, so every other node — a target this
+    //     device claims, the owner's other devices — learns that this key speaks
+    //     for the fedID. The old trusted-local bind stored NULL signature columns,
+    //     which persist never replicates: the device acted for the fedID here and
+    //     nowhere else. From a roster of two or more keys the addition is a
+    //     PROPOSAL the self roster holds (CC 3.3.6.3); the owner's other devices
+    //     answer it at /v1/self/roster/proposals and it lands then.
+    let held_proposal =
+        match record_signed_roster_occurrence(&st.engine, &*authorizer, &identity_key_id, &keyset)
+            .await
+        {
+            Ok(()) => None,
+            Err(RosterRowError::Held) => Some(
+                st.engine
+                    .self_roster_standing(&identity_key_id)
+                    .await
+                    .ok()
+                    .and_then(|v| {
+                        v.into_iter()
+                            .find(|s| s.proposal.target == keyset.key_id)
+                            .map(|s| s.proposal.id)
+                    }),
+            ),
+            Err(RosterRowError::Refused(e)) => {
+                return http_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("bind this device as an occurrence of {identity_key_id}: {e}"),
+                );
+            }
+        };
 
     // (6) Point this device's active user alias at ITS OWN keyset, so claim-remote
     //     / upgrade-owner / set-age (all resolve the alias at request time) operate
@@ -1099,9 +1117,18 @@ async fn associate_handler(
          self, this device does NOT inherit the parent's standing — the parent binding is not \
          carried in the artifact and cannot be proven here (CIRISServer#401)"
     );
+    let status = if held_proposal.is_some() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
     (
-        StatusCode::OK,
+        status,
         Json(serde_json::json!({
+            // CC 3.3.6.3: `held` = the self roster holds this key as a proposal;
+            // it acts for the identity once the owner's other devices assent.
+            "held": held_proposal.is_some(),
+            "proposal_id": held_proposal.flatten(),
             "alias": device_alias,
             "identity_key_id": identity_key_id,
             // Stated explicitly so a caller cannot read "enrolled" as "inherited
@@ -1143,6 +1170,99 @@ async fn associate_handler(
 /// Slugify a human label into an alias-safe token (`[a-z0-9-]`), so a portable
 /// keyset's seed filenames are filesystem-safe and the `key_id` derivation is
 /// stable. Empty when the label has no usable chars.
+/// Why [`record_signed_roster_occurrence`] did not land the row.
+pub enum RosterRowError {
+    /// The self roster holds the addition as a proposal (CC 3.3.6.3).
+    Held,
+    /// Anything else, named.
+    Refused(String),
+}
+
+/// Register `keyset`'s key, then record it as an occurrence of `identity` with
+/// a row the IDENTITY signs (`authorizer` is its open custody) through persist's
+/// signed gate, then re-wrap the self DEKs to it — add-device's
+/// `sign_and_record`, with the identity's own key as the pen.
+pub async fn record_signed_roster_occurrence(
+    engine: &Engine,
+    authorizer: &dyn ciris_verify_core::self_at_login::SelfSigner,
+    identity: &str,
+    keyset: &crate::identity::PortableSoftwareKeyset,
+) -> Result<(), RosterRowError> {
+    let occ_key = keyset.key_id.clone();
+    let directory = engine.federation_directory();
+    let known = directory
+        .lookup_public_key(&occ_key)
+        .await
+        .map_err(|e| RosterRowError::Refused(format!("directory: {e}")))?
+        .is_some();
+    if !known {
+        crate::hardware_attestation::register_attested_federation_key(
+            engine,
+            keyset.key_record.clone(),
+        )
+        .await
+        .map_err(|e| RosterRowError::Refused(format!("register this device's key: {e}")))?;
+    }
+    let asserted_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .unwrap_or_else(chrono::Utc::now);
+    let device_class = crate::auth::occurrence::DEVICE_CLASS_LAPTOP;
+    let envelope = serde_json::json!({
+        "attesting_key_id": identity,
+        "identity_key_id": identity,
+        "occurrence_key_id": occ_key,
+        "device_class": device_class,
+        "encryption_pubkeys": keyset.encryption_pubkeys.as_ref().map(|k| serde_json::json!({
+            "x25519_base64": k.x25519_base64,
+            "ml_kem_768_base64": k.ml_kem_768_base64,
+        })),
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": serde_json::Value::Null,
+        "hardware_attestation": serde_json::Value::Null,
+    });
+    let (signed_envelope, signature) =
+        ciris_verify_core::transport_binding::produce_signed_identity_occurrence(
+            authorizer, envelope,
+        )
+        .await
+        .map_err(|e| RosterRowError::Refused(format!("sign the occurrence: {e}")))?;
+    let occurrence = ciris_persist::federation::SignedIdentityOccurrence {
+        identity_occurrence: ciris_persist::federation::IdentityOccurrence {
+            identity_key_id: identity.to_owned(),
+            occurrence_key_id: occ_key.clone(),
+            device_class: device_class.to_owned(),
+            hardware_attestation: None,
+            asserted_at,
+            valid_until: None,
+            encryption_pubkeys: keyset.encryption_pubkeys.clone(),
+            transport_binding: None,
+            persist_row_hash: String::new(),
+        },
+        attesting_key_id: identity.to_owned(),
+        signed_envelope,
+        signature,
+    };
+    match directory.put_identity_occurrence(occurrence).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == "federation_self_roster_not_landed" => {
+            return Err(RosterRowError::Held)
+        }
+        Err(e) => {
+            return Err(RosterRowError::Refused(format!(
+                "record the occurrence: {e}"
+            )))
+        }
+    }
+    if let Err(e) = engine
+        .rekey_self_occurrence_add(identity, std::slice::from_ref(&occ_key))
+        .await
+    {
+        tracing::warn!(error = %e, "associate: self-DEK re-wrap to the new occurrence failed (retried by self_rewrap)");
+    }
+    Ok(())
+}
+
 fn slug(label: &str) -> String {
     let mut out = String::with_capacity(label.len());
     let mut last_dash = false;

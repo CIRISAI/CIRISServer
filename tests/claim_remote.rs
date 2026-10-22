@@ -260,6 +260,7 @@ async fn claim_remote_http_round_trip_binds_root_to_user() {
         None, // no owner username
         None, // no OAuth identity (password/OAuth session paths are exercised below)
         None, // no claimer key record (see the second-device test below)
+        None, // no roster proof (the signer is its own self here; CIRISServer#806)
     )
     .await
     .expect("L claims T over HTTP");
@@ -407,6 +408,7 @@ async fn oauth_owner_claim_yields_the_owner_session_not_a_fresh_user() {
         None,
         Some((ident.provider.as_str(), ident.external_id.as_str())),
         None,
+        None, // no roster proof (the signer is its own self here; CIRISServer#806)
     )
     .await
     .expect("L claims T over HTTP");
@@ -538,6 +540,7 @@ async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
         None,
         None,
         Some(&claimer),
+        None, // no roster proof (the signer is its own self here; CIRISServer#806)
     )
     .await
     .expect("the approving device claims T");
@@ -597,6 +600,7 @@ async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
         None,
         None,
         Some(&claimer),
+        None, // no roster proof (the signer is its own self here; CIRISServer#806)
     )
     .await
     .expect_err("a claimed node refuses a second claim");
@@ -614,4 +618,87 @@ async fn a_device_claimed_by_another_keeps_its_session_for_its_own_wizard() {
         }
         other => panic!("expected the target's refusal, got {other}"),
     }
+}
+
+// ─── CIRISServer#806: a roster-key claim names the fedID on the target ───────
+
+/// The manager's case: the claim is signed by a ROSTER KEY of the owner's
+/// fedID (#793), not the fedID itself. With the roster proof in the claim the
+/// target resolves its owner to the fedID at claim time; without it the owner is
+/// the bare roster key until the roster replicates.
+#[tokio::test]
+async fn a_roster_key_claim_names_the_fedid_on_the_target() {
+    let root = std::env::temp_dir().join(format!(
+        "ciris-806-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let usb = root.join("usb");
+    std::fs::create_dir_all(&usb).unwrap();
+    let identity =
+        ciris_server::identity::mint_portable_software_occurrence(&usb, "owner-portable-806")
+            .await
+            .expect("mint the fedID");
+    let fed_id = identity.key_id.clone();
+    let authorizer =
+        ciris_server::identity::open_portable_identity_transiently(&usb, "owner-portable-806")
+            .expect("open the fedID's custody");
+
+    // The claiming node L: the fedID's record, then this device's roster key
+    // recorded with a row the fedID signs (what associate now does).
+    let l = target_node("ciris-local-claimer").await;
+    l.register_federation_key(identity.key_record.clone())
+        .await
+        .expect("L admits the fedID's record");
+    let seed = root.join("home").join("identity").join("user");
+    let device = ciris_server::identity::mint_local_device_occurrence(&seed, &fed_id)
+        .await
+        .expect("mint the roster key");
+    assert!(
+        ciris_server::auth::portable_occurrence::record_signed_roster_occurrence(
+            &l,
+            &authorizer,
+            &fed_id,
+            &device,
+        )
+        .await
+        .is_ok(),
+        "the fedID signs this device into its roster"
+    );
+    let proof = claim_remote::roster_proof_for(&l, &device.key_id)
+        .await
+        .expect("L holds a signed roster row for its key");
+    let roster_signer = ciris_server::identity::hardware_user_local_signer(
+        ciris_server::identity::UserIdentityBackend::Software,
+        &fed_id,
+        seed.clone(),
+    )
+    .await
+    .expect("open the roster key as the node does");
+
+    let t = target_node(T_NODE_ALIAS).await;
+    register_target(&t, &t_node_key_id()).await;
+    let base = serve_target_with_loopback(Arc::clone(&t)).await;
+    claim_remote::claim_remote(
+        &reqwest::Client::new(),
+        &roster_signer,
+        &target_node_code(&base),
+        TEST_CLAIM_PIN,
+        "self",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&proof),
+    )
+    .await
+    .expect("the roster key claims T");
+
+    assert_eq!(
+        is_steward_bound(&t, &t_node_key_id()).await.as_deref(),
+        Some(fed_id.as_str()),
+        "T's owner is the fedID, not the roster key that signed the binding"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
