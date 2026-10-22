@@ -833,7 +833,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// roster's held changes, CIRISServer#794) — same reason, same list.
     /// 35 -> 34: `add_device.roster_change_held` retired — a held approval now
     /// answers 202 `held: true` and resumes when the roster lands the key.
-    const MAX_UNCOVERED: usize = 34;
+    /// 34 -> 19 for 0.5.233: `ciris-client` 0.5.230 carries the fifteen queued
+    /// above (bundle v4, the amend, the transit row, the held approval, the
+    /// self roster); the floor in pyproject.toml rose to 0.5.230 with it.
+    const MAX_UNCOVERED: usize = 19;
 
     let en = load_en();
     let ids = scraped_server_ids();
