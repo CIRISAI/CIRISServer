@@ -1150,7 +1150,7 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                 identity = %p.identity_key_record.record.key_id,
                 error = %format!("{e:#}"),
                 "setup/root: the claimer's fedID record was not admitted (already held, or refused) \
-                 — the owner may resolve to the roster key until the roster replicates (CIRISServer#806)"
+                 — the owner may resolve to the roster key until the roster replicates (history: CIRISServer#806)"
             );
         }
     }
@@ -1201,7 +1201,7 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
                     occurrence = %occ.identity_occurrence.occurrence_key_id,
                     error = %format!("{e:#}"),
                     "setup/root: the claimer's roster occurrence was refused — the owner \
-                     resolves to the roster key until the roster replicates (CIRISServer#806)"
+                     resolves to the roster key until the roster replicates (history: CIRISServer#806)"
                 );
             }
         }

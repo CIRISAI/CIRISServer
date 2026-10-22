@@ -108,6 +108,7 @@ fn associate_enrols_an_occurrence() {
         "async fn associate_handler",
         "fn open_directory_authorizer",
         "fn open_hardware_authorizer",
+        "async fn record_signed_roster_occurrence",
     ]
     .iter()
     .map(|needle| {
@@ -121,7 +122,10 @@ fn associate_enrols_an_occurrence() {
     .join("\n");
     let body = window.as_str();
     assert!(
-        body.contains("bind_occurrence_core"),
+        // Since CIRISServer#805 the bind is the SIGNED one: the identity signs the
+        // device's roster row and persist's signed gate stores it.
+        body.contains("put_identity_occurrence(")
+            && body.contains("produce_signed_identity_occurrence"),
         "associate must BIND the device as an occurrence — that is what gives it the identity's \
          privileges without holding the identity's key:\n{body}"
     );
