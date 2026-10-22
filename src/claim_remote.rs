@@ -237,6 +237,23 @@ pub async fn roster_proof_for(
     })
 }
 
+/// The part of a [`RosterProof`] that speaks for `signer`: a USER record, and
+/// only the occurrence rows naming `signer` under it. `None` when nothing in the
+/// proof is about that signer. Every door that admits a proof (setup/root,
+/// upgrade-owner) filters through this one function.
+pub fn roster_proof_about<'a>(proof: &'a RosterProof, signer: &str) -> Option<&'a RosterProof> {
+    let identity = &proof.identity_key_record.record;
+    let about_signer = |o: &ciris_persist::federation::types::SignedIdentityOccurrence| {
+        o.identity_occurrence.occurrence_key_id == signer
+            && o.identity_occurrence.identity_key_id == identity.key_id
+    };
+    (identity.identity_type == ciris_persist::federation::types::identity_type::USER
+        && identity.key_id != signer
+        && !proof.occurrences.is_empty()
+        && proof.occurrences.iter().all(about_signer))
+    .then_some(proof)
+}
+
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
 /// the target NodeCode, then build + JCS-canonicalize + hybrid-sign the
 /// `delegates_to(LOCAL USER → target node, infra:*)` owner-binding with the
@@ -1092,11 +1109,53 @@ fn with_local_flag(target_result: serde_json::Value, updated: bool) -> serde_jso
 ///
 /// Flow: client logs in as the existing admin → mints the fed-ID
 /// (`POST /v1/self/identity`, owner-gated) → calls this. Loopback + owner-gated.
-async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: HeaderMap) -> Response {
+///
+/// **Or with a STAGED binding** (CIRISServer#811): a body of
+/// [`StagedOwnerBinding`] — what `POST /v1/setup/sign-owner-binding` returned on
+/// the OWNER's own device — is applied instead of resolving a pen from this
+/// node's disk. For a node whose owner's fed-ID was never on it: a managed
+/// agent owned only by its legacy `admin` ROOT, or a node claimed remotely on
+/// ≤0.5.188 whose binding stayed on the actor key across the split. The
+/// existing admin's session authorizes it; the binding is the owner's own
+/// signature over THIS node key; only an unowned node key takes one.
+async fn upgrade_owner_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
     // ALWAYS owner-session-gated: a node must already be owned to upgrade how its
     // ownership is rooted. The existing admin's session authorizes the fed-ID bind.
     if let Err(resp) = require_owner(&st, &headers).await {
         return resp;
+    }
+    if !body.iter().all(u8::is_ascii_whitespace) {
+        return match serde_json::from_slice::<StagedOwnerBinding>(&body) {
+            Ok(staged) => {
+                match apply_staged_owner_binding(&st.engine, &st.node_key_id, st.policy, &staged)
+                    .await
+                {
+                    Ok(applied) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "owner": applied.responsible_user_key_id,
+                            "node_key_id": st.node_key_id,
+                            "owner_binding_attestation_id": applied.attestation_id,
+                            "staged": true,
+                        })),
+                    )
+                        .into_response(),
+                    Err(refusal) => refusal.into_response(),
+                }
+            }
+            Err(e) => crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "upgrade_owner.bad_request",
+                format!(
+                    "a body must be the staged binding POST /v1/setup/sign-owner-binding \
+                     returned (or send none to use this node's own fed-ID): {e}"
+                ),
+            ),
+        };
     }
     // Resolve the fed-ID signer the client just minted (POST /v1/self/identity).
     let user_signer = match crate::compose::resolve_user_signer(
@@ -1198,6 +1257,306 @@ async fn upgrade_owner_handler(State(st): State<ClaimRemoteState>, headers: Head
             err(code, format!("upgrade-owner failed: {e}"))
         }
     }
+}
+
+/// **An owner-binding signed on the owner's device, for a node that never held
+/// their fed-ID** (CIRISServer#811). `POST /v1/setup/sign-owner-binding` returns
+/// it; `POST /v1/self/upgrade-owner` on the target takes it unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedOwnerBinding {
+    /// The node key the binding attests (the target's `node_key_id` from
+    /// `GET /v1/identity`). Informational: the binding itself names it and the
+    /// target refuses a binding for any other key.
+    pub node_key_id: String,
+    /// The cohort the owner signed (`self` / `family` / `community`).
+    pub cohort_scope: String,
+    /// `delegates_to(owner → node_key_id, infra:*)`, owner-signed.
+    pub owner_binding: SignedOwnerBinding,
+    /// The fedID behind a roster-key signer (CIRISServer#806).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_roster_proof: Option<RosterProof>,
+}
+
+/// Why a [`StagedOwnerBinding`] was refused. Each maps to one literal reason id
+/// in [`StagedRefusal::into_response`] (the localization guard reads them there).
+#[derive(Debug)]
+pub enum StagedRefusal {
+    /// The node key already has an owner; a staged binding never re-points one.
+    AlreadyOwned(String),
+    /// `cohort_scope` is outside the closed set.
+    CohortInvalid(String),
+    /// The binding does not verify, or attests another node key.
+    BindingRejected(String),
+    /// The roster proof's occurrence row was refused by persist.
+    RosterProofRefused(String),
+    /// The directory read failed.
+    Directory(String),
+}
+
+impl StagedRefusal {
+    /// The door's answer.
+    #[must_use]
+    pub fn into_response(self) -> Response {
+        use crate::auth::refusal::refuse;
+        match self {
+            Self::AlreadyOwned(m) => refuse(StatusCode::CONFLICT, "upgrade_owner.already_owned", m),
+            Self::CohortInvalid(m) => {
+                refuse(StatusCode::BAD_REQUEST, "upgrade_owner.cohort_invalid", m)
+            }
+            Self::BindingRejected(m) => {
+                refuse(StatusCode::BAD_REQUEST, "upgrade_owner.binding_rejected", m)
+            }
+            Self::RosterProofRefused(m) => refuse(
+                StatusCode::BAD_REQUEST,
+                "upgrade_owner.roster_proof_refused",
+                m,
+            ),
+            Self::Directory(m) => refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upgrade_owner.directory",
+                m,
+            ),
+        }
+    }
+}
+
+/// **Apply a [`StagedOwnerBinding`] on THIS node** (the target; CIRISServer#811).
+/// The caller's admin session is the authority and is checked by the handler;
+/// this checks the binding: an unowned node key only, the owner's signature over
+/// THIS node key, the roster proof through persist's own gates.
+pub async fn apply_staged_owner_binding(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    policy: HybridPolicy,
+    staged: &StagedOwnerBinding,
+) -> Result<ownership::AppliedOwnerBinding, StagedRefusal> {
+    let dir = engine.federation_directory();
+    match ciris_persist::federation::admission::owner_of(dir.as_ref(), node_key_id).await {
+        Ok(None) => {}
+        Ok(Some(owner)) => {
+            return Err(StagedRefusal::AlreadyOwned(format!(
+                "this node key is already owned by {owner:?} — a staged binding never re-points an owned node"
+            )))
+        }
+        Err(e) => return Err(StagedRefusal::Directory(format!("owner_of({node_key_id}): {e:#}"))),
+    }
+    let binding = &staged.owner_binding;
+    let cohort = validate_cohort_scope(&staged.cohort_scope)
+        .map_err(|e| StagedRefusal::CohortInvalid(e.to_string()))?;
+    // Signature and subject before any write: a binding for another node key (a
+    // load-balanced sibling, say) is refused here and nothing is stored.
+    ownership::verify_signed_owner_binding(node_key_id, policy, binding).map_err(|e| {
+        StagedRefusal::BindingRejected(format!(
+            "staged owner-binding rejected for node key {node_key_id}: {e}"
+        ))
+    })?;
+    // The roster proof, through persist's own gates, before the binding: the
+    // owner then resolves to the fedID, not the roster key that signed.
+    if let Some(p) = staged
+        .owner_roster_proof
+        .as_ref()
+        .and_then(|p| roster_proof_about(p, &binding.attesting_key_id))
+    {
+        // Already held on any node the owner reached; a Conflict is benign.
+        let _ = engine
+            .register_federation_key(p.identity_key_record.clone())
+            .await;
+        ownership::register_user_key(engine, binding)
+            .await
+            .map_err(|e| {
+                StagedRefusal::BindingRejected(format!("register the signer's key: {e}"))
+            })?;
+        for occ in &p.occurrences {
+            dir.put_identity_occurrence(occ.clone())
+                .await
+                .map_err(|e| {
+                    StagedRefusal::RosterProofRefused(format!(
+                        "the roster proof's occurrence row was refused: {e:#}"
+                    ))
+                })?;
+        }
+    }
+    let applied =
+        ownership::apply_signed_owner_binding(engine, node_key_id, &cohort, policy, binding)
+            .await
+            .map_err(|e| {
+                StagedRefusal::BindingRejected(format!("staged owner-binding rejected: {e}"))
+            })?;
+    anchor_agent_after_claim(engine).await;
+    crate::compose::kick_replication("staged owner-binding applied");
+    tracing::info!(
+        responsible_user = %applied.responsible_user_key_id,
+        signer = %binding.attesting_key_id,
+        node_key_id = %node_key_id,
+        attestation_id = %applied.attestation_id,
+        "upgrade-owner: a STAGED owner-binding (signed on the owner's device) bound this \
+         node key — owner_of(node) resolves; the legacy login is preserved (history: CIRISServer#811)"
+    );
+    Ok(applied)
+}
+
+/// **Stage an owner-binding for another node** (CIRISServer#811): sign
+/// `delegates_to(owner → node_key_id, infra:*)` with `user_signer` and attach
+/// the roster proof when the signer is a roster key. Nothing is sent.
+pub async fn stage_owner_binding(
+    engine: &Engine,
+    user_signer: &LocalSigner,
+    node_key_id: &str,
+    cohort_scope: &str,
+) -> Result<StagedOwnerBinding, ownership::OwnershipError> {
+    let infra: Vec<String> = OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let owner_binding =
+        ownership::build_signed_owner_binding(user_signer, node_key_id, &infra, cohort_scope)
+            .await?;
+    Ok(StagedOwnerBinding {
+        node_key_id: node_key_id.to_owned(),
+        cohort_scope: cohort_scope.to_owned(),
+        owner_binding,
+        owner_roster_proof: roster_proof_for(engine, user_signer.key_id()).await,
+    })
+}
+
+/// `POST /v1/setup/sign-owner-binding` request.
+#[derive(Debug, Deserialize)]
+struct SignOwnerBindingRequest {
+    /// The TARGET's node key (`node_key_id` on its `GET /v1/identity`).
+    node_key_id: String,
+    /// `self` / `family` / `community` (default `self`).
+    #[serde(default)]
+    cohort_scope: Option<String>,
+}
+
+/// `POST /v1/setup/sign-owner-binding` — on the OWNER's device: sign
+/// `delegates_to(owner → node_key_id, infra:*)` with the owner's pen and return
+/// it as a [`StagedOwnerBinding`], WITHOUT sending it anywhere (CIRISServer#811).
+/// The operator carries it to the target and applies it with
+/// `POST /v1/self/upgrade-owner` under that node's admin session. Loopback +
+/// owner-gated: it wields the owner's pen, as claim-remote does.
+async fn sign_owner_binding_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use crate::auth::refusal::refuse;
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) = crate::auth::gate::require_verb(
+                &caller,
+                crate::auth::gate::CapabilityVerb::ClaimRemote,
+            ) {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+    let req: SignOwnerBindingRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "sign_owner_binding.bad_request",
+                format!("bad request: {e}"),
+            )
+        }
+    };
+    let cohort = match validate_cohort_scope(req.cohort_scope.as_deref().unwrap_or("self")) {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "sign_owner_binding.cohort_invalid",
+                e.to_string(),
+            )
+        }
+    };
+    let user_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sign_owner_binding.no_identity",
+                "no federation ID on this device — the binding is signed by the owner's fed-ID or a roster key of it",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "sign_owner_binding.signer_unavailable",
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+    let node_key_id = req.node_key_id.trim().to_owned();
+    match stage_owner_binding(&st.engine, &user_signer, &node_key_id, &cohort).await {
+        Ok(staged) => {
+            tracing::info!(
+                signer = %user_signer.key_id(),
+                node_key_id = %node_key_id,
+                roster_proof = staged.owner_roster_proof.is_some(),
+                "sign-owner-binding: staged an owner-binding for another node (not sent) — apply it \
+                 there with POST /v1/self/upgrade-owner (history: CIRISServer#811)"
+            );
+            (StatusCode::OK, Json(staged)).into_response()
+        }
+        Err(e) => refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "sign_owner_binding.build_failed",
+            format!("build owner-binding: {e}"),
+        ),
+    }
+}
+
+/// **Name an owned-but-unbound node at boot** (CIRISServer#811). A node with a
+/// ROOT (so `setup/root` is closed) whose node key has no owner-binding holds its
+/// agent as unclaimed, and nothing else says why. Two shapes, both from before
+/// owner-bindings were universal: a managed agent owned only by its legacy
+/// `admin` ROOT, and a node claimed remotely on ≤0.5.188 whose binding stayed on
+/// the actor key across the 0.5.189 split. One WARN at boot, naming the state
+/// and the remedy, so an operator who stood such agents up finds it in the log.
+pub async fn warn_if_owned_but_unbound(
+    engine: &Engine,
+    node_key_id: &str,
+    actor_key_id: Option<&str>,
+) {
+    use ciris_persist::federation::admission::owner_of;
+    if crate::auth::bootstrap::is_first_run(engine).await {
+        return; // unclaimed: the claim PIN banner already says what to do
+    }
+    let dir = engine.federation_directory();
+    if !matches!(owner_of(dir.as_ref(), node_key_id).await, Ok(None)) {
+        return;
+    }
+    let actor_owner = match actor_key_id.filter(|a| *a != node_key_id) {
+        Some(a) => owner_of(dir.as_ref(), a).await.ok().flatten(),
+        None => None,
+    };
+    let state = if actor_owner.is_some() {
+        "split_unfollowed: claimed remotely before 0.5.189; the owner-binding is on the actor key, not the node key"
+    } else {
+        "legacy_root: owned by a ROOT account (e.g. the setup `admin`) with no owner-binding at all"
+    };
+    tracing::warn!(
+        node_key_id = %node_key_id,
+        actor_key_id = actor_key_id.unwrap_or("<none>"),
+        actor_owner = actor_owner.as_deref().unwrap_or("<none>"),
+        state,
+        "OWNED BUT UNBOUND — this node has a ROOT account but no owner-binding on its node key, so \
+         owner_of(node) is empty and its agent holds as unclaimed. The owner's federation ID was \
+         never on this node, and setup/root is closed (it has a ROOT). Remedy: on the OWNER's own \
+         device, POST /v1/setup/sign-owner-binding {{\"node_key_id\": \"<this node_key_id>\"}}; then \
+         here, POST /v1/self/upgrade-owner with that JSON as the body under this node's admin \
+         session (loopback, e.g. docker exec … curl http://127.0.0.1:4243/...). (history: CIRISServer#811)"
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -1506,6 +1865,10 @@ pub fn router(
         .route(
             "/v1/self/upgrade-owner",
             axum::routing::post(upgrade_owner_handler),
+        )
+        .route(
+            "/v1/setup/sign-owner-binding",
+            axum::routing::post(sign_owner_binding_handler),
         )
         .route("/v1/self/age", axum::routing::post(set_age_self))
         .route(
