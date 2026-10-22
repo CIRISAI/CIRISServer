@@ -1004,7 +1004,7 @@ pub async fn rebind_owner_key_record(
 /// fields carry a self-attested envelope hash + the binding signatures for
 /// row-shape completeness; they are NOT re-verified by `put_public_key`.
 /// Idempotent for a matching row.
-async fn register_user_key(
+pub(crate) async fn register_user_key(
     engine: &Engine,
     binding: &SignedOwnerBinding,
 ) -> Result<(), OwnershipError> {

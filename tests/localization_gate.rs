@@ -836,7 +836,11 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 34 -> 19 for 0.5.233: `ciris-client` 0.5.230 carries the fifteen queued
     /// above (bundle v4, the amend, the transit row, the held approval, the
     /// self roster); the floor in pyproject.toml rose to 0.5.230 with it.
-    const MAX_UNCOVERED: usize = 19;
+    /// 19 -> 29 for 0.5.234: the owner re-bind's ten `owner_rebind.*` ids
+    /// (`POST /v1/setup/owner-rebind` and `/v1/setup/rebind-remote`,
+    /// CIRISServer#811) — same reason, same list, queued for the client bundle
+    /// with their English.
+    const MAX_UNCOVERED: usize = 29;
 
     let en = load_en();
     let ids = scraped_server_ids();

@@ -136,6 +136,11 @@ mod compose;
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
 pub mod mls_state;
+/// **The owner re-binds a split node from their own device** (CIRISServer#811):
+/// `POST /v1/setup/owner-rebind` on the split node, driven by
+/// `POST /v1/setup/rebind-remote` on the owner's. Public so the integration test
+/// (`tests/owner_rebind.rs`) can drive the admission directly.
+pub mod owner_rebind;
 pub mod owner_signer_capsule;
 mod roster_rows;
 

@@ -729,25 +729,6 @@ struct SetupRootRequest {
     owner_roster_proof: Option<crate::claim_remote::RosterProof>,
 }
 
-/// The part of a [`crate::claim_remote::RosterProof`] that speaks for `signer`:
-/// a USER record, and only the occurrence rows naming `signer` under it. `None`
-/// when nothing in the proof is about this binding's signer.
-fn roster_proof_for_signer<'a>(
-    proof: &'a crate::claim_remote::RosterProof,
-    signer: &str,
-) -> Option<&'a crate::claim_remote::RosterProof> {
-    let identity = &proof.identity_key_record.record;
-    let about_signer = |o: &ciris_persist::federation::types::SignedIdentityOccurrence| {
-        o.identity_occurrence.occurrence_key_id == signer
-            && o.identity_occurrence.identity_key_id == identity.key_id
-    };
-    (identity.identity_type == ciris_persist::federation::types::identity_type::USER
-        && identity.key_id != signer
-        && !proof.occurrences.is_empty()
-        && proof.occurrences.iter().all(about_signer))
-    .then_some(proof)
-}
-
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
 /// owner-binding persisted.
 #[derive(Debug, Serialize)]
@@ -1139,7 +1120,7 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     let roster_proof = req
         .owner_roster_proof
         .as_ref()
-        .and_then(|p| roster_proof_for_signer(p, &owner_binding.attesting_key_id));
+        .and_then(|p| crate::claim_remote::roster_proof_about(p, &owner_binding.attesting_key_id));
     if let Some(p) = roster_proof {
         if let Err(e) = st
             .engine
@@ -1659,6 +1640,13 @@ struct SetupStatusData {
     /// when no PIN file was configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     claim_pin_file: Option<String>,
+    /// **Whether the owner followed the node key** (CIRISServer#811): `owned`,
+    /// `unowned`, or `split_unfollowed` with the actor key and its owner — a node
+    /// claimed remotely on ≤0.5.188 whose binding stayed on the actor key. The
+    /// client and manager offer a re-bind from the owner's device for that state
+    /// instead of a generic unclaimed hold. Absent when the directory read failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_binding: Option<crate::owner_rebind::OwnerBindingState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1735,6 +1723,16 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
         "GET /v1/setup/status — the wizard reads claim_pin_file to locate the 0600 PIN file \
          instead of guessing the node's home from its OWN environment (#395)"
     );
+    let owner_binding = crate::owner_rebind::owner_binding_state(
+        &st.engine,
+        &st.node_key_id,
+        crate::node_key::actor_identity(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %format!("{e:#}"), "setup/status: owner-binding state unreadable");
+    })
+    .ok();
     (
         StatusCode::OK,
         Json(SetupStatusResponse {
@@ -1743,10 +1741,60 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
                 setup_required: first_run,
                 config_exists: !first_run,
                 claim_pin_file,
+                owner_binding,
             },
         }),
     )
         .into_response()
+}
+
+/// `POST /v1/setup/owner-rebind` — the owner re-binds this SPLIT node from their
+/// own device (CIRISServer#811; [`crate::owner_rebind`]). Not loopback-bound, like
+/// setup/root: the owner is remote by definition. No PIN — the authority is the
+/// owner's live binding on the actor key plus their fresh signature, and the
+/// door is shut once the node key is owned.
+async fn owner_rebind(State(st): State<SetupState>, body: axum::body::Bytes) -> Response {
+    let req: crate::owner_rebind::OwnerRebindRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return super::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "owner_rebind.bad_request",
+                format!("bad request: {e}"),
+            )
+        }
+    };
+    let cohort = req.cohort_scope.trim().to_ascii_lowercase();
+    if !COHORT_SCOPES.contains(&cohort.as_str()) {
+        return super::refusal::refuse(
+            StatusCode::BAD_REQUEST,
+            "owner_rebind.cohort_invalid",
+            format!("invalid cohort_scope {cohort:?} — must be one of self|family|community"),
+        );
+    }
+    match crate::owner_rebind::admit_owner_rebind(
+        &st.engine,
+        &st.node_key_id,
+        crate::node_key::actor_identity(),
+        &cohort,
+        st.policy,
+        &req.owner_binding,
+        req.owner_roster_proof.as_ref(),
+    )
+    .await
+    {
+        Ok(applied) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "node_key_id": st.node_key_id,
+                "owner_key_id": applied.responsible_user_key_id,
+                "attestation_id": applied.attestation_id,
+                "cohort_scope": cohort,
+            })),
+        )
+            .into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
 }
 
 /// The first-run setup router — merge onto the read-API listener beside the other
@@ -1792,6 +1840,7 @@ pub fn router(
     // first-run / ownership state to the network.
     let claim = Router::new()
         .route("/v1/setup/root", axum::routing::post(setup_root))
+        .route("/v1/setup/owner-rebind", axum::routing::post(owner_rebind))
         .with_state(state.clone());
     let loopback_reads = Router::new()
         .route("/v1/setup/status", axum::routing::get(setup_status))

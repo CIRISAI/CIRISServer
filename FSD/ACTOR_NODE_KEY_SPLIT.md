@@ -174,7 +174,21 @@ PARTY about itself — so the grant's signer must BE the author, and is checked.
 ## Migration — unattended, at boot
 
 Installing the app **is** claiming ownership, so a claimed node holds its owner's
-fed-ID and no operator step exists. In order:
+fed-ID and no operator step exists.
+**Except a node claimed remotely** (CIRISServer#811, 0.5.234). A Docker or
+manager agent, or a headless server claimed from a phone, was claimed through
+`claim-remote` / `setup/root`, and the owner's seed stays on the owner's device.
+On such a node step 4 finds no signer, so it warns and the node key stays
+unowned. The claim minted a ROOT WaCert, so `setup/root` refuses a second claim.
+The owner re-binds from their own device instead: `POST /v1/setup/rebind-remote`
+on the owner's node signs `delegates_to(owner → node key)` and posts it to
+`POST /v1/setup/owner-rebind` on the split node. That door admits the binding
+only while the node key is unowned, and only from the actor key's owner (the
+same key, or a roster key of that fedID with its roster proof). The split node
+reports this state on `GET /v1/setup/status` as `owner_binding.state =
+split_unfollowed` (`src/owner_rebind.rs`).
+
+In order:
 
 1. **Classify** the configured key (`node_key::classify`).
 2. `SubstrateOnly` / `Unregistered` ⇒ **stop.** Standalone CIRISServer is unchanged.

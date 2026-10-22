@@ -894,6 +894,20 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "trust_root.bundle_refused",
     "trust_root.install_failed",
     "trust_root.withdraw_failed",
+    # THE OWNER RE-BIND (CIRISServer#811 / 0.5.234): a node claimed remotely on
+    # <=0.5.188 whose owner did not follow the key split is re-bound from the
+    # owner's device. The same queue as the planes above: the ids and their
+    # English go to the client bundle; the entries come out when it ships them.
+    "owner_rebind.actor_unowned",
+    "owner_rebind.already_owned",
+    "owner_rebind.bad_request",
+    "owner_rebind.binding_rejected",
+    "owner_rebind.cohort_invalid",
+    "owner_rebind.directory",
+    "owner_rebind.no_identity",
+    "owner_rebind.no_split",
+    "owner_rebind.not_the_owner",
+    "owner_rebind.target_unreachable",
 )
 
 

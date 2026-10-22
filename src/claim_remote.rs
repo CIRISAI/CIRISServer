@@ -237,6 +237,23 @@ pub async fn roster_proof_for(
     })
 }
 
+/// The part of a [`RosterProof`] that speaks for `signer`: a USER record, and
+/// only the occurrence rows naming `signer` under it. `None` when nothing in the
+/// proof is about that signer. Every door that admits a proof (setup/root,
+/// owner-rebind) filters through this one function.
+pub fn roster_proof_about<'a>(proof: &'a RosterProof, signer: &str) -> Option<&'a RosterProof> {
+    let identity = &proof.identity_key_record.record;
+    let about_signer = |o: &ciris_persist::federation::types::SignedIdentityOccurrence| {
+        o.identity_occurrence.occurrence_key_id == signer
+            && o.identity_occurrence.identity_key_id == identity.key_id
+    };
+    (identity.identity_type == ciris_persist::federation::types::identity_type::USER
+        && identity.key_id != signer
+        && !proof.occurrences.is_empty()
+        && proof.occurrences.iter().all(about_signer))
+    .then_some(proof)
+}
+
 /// **The directory-level build step (the LOCAL node's substrate work).** Decode
 /// the target NodeCode, then build + JCS-canonicalize + hybrid-sign the
 /// `delegates_to(LOCAL USER → target node, infra:*)` owner-binding with the
@@ -644,6 +661,111 @@ async fn claim_remote_handler(
             (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => claim_refusal(&e),
+    }
+}
+
+/// `POST /v1/setup/rebind-remote` request: the split node to re-bind and the
+/// cohort to bind it under (CIRISServer#811).
+#[derive(Debug, Deserialize)]
+struct RebindRemoteRequest {
+    /// The split node's base URL (e.g. `http://203.0.113.7:4243`).
+    target_url: String,
+    /// `self` / `family` / `community`.
+    cohort_scope: String,
+}
+
+/// `POST /v1/setup/rebind-remote` — drive [`crate::owner_rebind::rebind_remote`]
+/// from THIS (the owner's) device: sign the owner-binding onto the target's node
+/// key with the owner's pen and post it to the target's
+/// `POST /v1/setup/owner-rebind` (CIRISServer#811). Owner-gated: it wields the
+/// owner's pen, so only a live owner session drives it.
+async fn rebind_remote_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) = crate::auth::gate::require_verb(
+                &caller,
+                crate::auth::gate::CapabilityVerb::ClaimRemote,
+            ) {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+    let req: RebindRemoteRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "owner_rebind.bad_request",
+                format!("bad request: {e}"),
+            )
+        }
+    };
+    let cohort = match validate_cohort_scope(&req.cohort_scope) {
+        Ok(c) => c,
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "owner_rebind.cohort_invalid",
+                e.to_string(),
+            )
+        }
+    };
+    let user_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "owner_rebind.no_identity",
+                "no responsible-user identity on this device — the re-bind is signed by \
+                 the owner's federation ID (or a roster key of it)",
+            )
+        }
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claim.signer_unavailable",
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+    let roster_proof = roster_proof_for(&st.engine, user_signer.key_id()).await;
+    match crate::owner_rebind::rebind_remote(
+        &st.http,
+        &user_signer,
+        &req.target_url,
+        &cohort,
+        roster_proof.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(crate::owner_rebind::RebindRemoteError::NotSplit) => {
+            crate::owner_rebind::RebindRefusal::NoSplit.into_response()
+        }
+        Err(crate::owner_rebind::RebindRemoteError::TargetRejected { status, body }) => {
+            // Relay the target's own answer (its reason id included).
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let json = serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|_| serde_json::json!({ "error": body }));
+            (code, Json(json)).into_response()
+        }
+        Err(e) => crate::auth::refusal::refuse(
+            StatusCode::BAD_GATEWAY,
+            "owner_rebind.target_unreachable",
+            e.to_string(),
+        ),
     }
 }
 
@@ -1506,6 +1628,10 @@ pub fn router(
         .route(
             "/v1/self/upgrade-owner",
             axum::routing::post(upgrade_owner_handler),
+        )
+        .route(
+            "/v1/setup/rebind-remote",
+            axum::routing::post(rebind_remote_handler),
         )
         .route("/v1/self/age", axum::routing::post(set_age_self))
         .route(
