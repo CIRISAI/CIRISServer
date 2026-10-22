@@ -31,9 +31,9 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 # issue that asked for symbol-level evidence, cited as though it were that
 # evidence. A pointer at an issue and a pointer at a symbol are not the same
 # kind of object, and only one of them goes stale silently.
-6.1.2	CLM-noise-classify	CIRISServer	CIRISServer#239	open
-6.1.2.3	CLM-noise-ejection	CIRISServer	CIRISServer#239	open
-6.1.2	CLM-noise-descent	CIRISServer	CIRISServer#239	open
+6.1.5	CLM-durable-item	CIRISServer	CIRISServer#809	open
+6.1.5	CLM-durable-descent	CIRISServer	CIRISServer#809	open
+6.1.5.1	CLM-registry-replication	CIRISServer	CIRISServer#809	open
 4.2.6	CLM-accord-livequorum	CIRISServer	CIRISServer#122	open
 #
 # ─── VERIFIED POINTERS AWAITING A CLAIM ID ─────────────────────────────────────
