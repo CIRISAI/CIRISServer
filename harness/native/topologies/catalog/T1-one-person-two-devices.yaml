@@ -4,7 +4,7 @@
 # by-approval path is T3. `file.held` is TRANSIENT: `withdraw` ends it, so the
 # custody and drive screens test before the withdraw step.
 catalog_id: T1
-catalogue_version: 3
+catalogue_version: 5
 title: One person, two devices, self room
 serves: [CSD-107, CSD-096]
 promises: [canonical.peered, node.announced, peer.direct, person.multi_device, room.self.keyed, note.synced, session.unified, file.held, file.large,

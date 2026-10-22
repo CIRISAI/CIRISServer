@@ -5,7 +5,7 @@
 # (CIRISServer#182, known red: /v1/auth/consent also wants a hybrid request
 # signature); the agent's decay ladder to complete (refused: an agent process).
 catalog_id: T14
-catalogue_version: 3
+catalogue_version: 5
 title: Consent end to end — grant, revoke, expiry, decay; replication grant and its withdrawal
 serves: [CSD-053]
 promises: [consent.state.granted, consent.state.revoked, consent.state.expired, consent.decay.identity_severed,

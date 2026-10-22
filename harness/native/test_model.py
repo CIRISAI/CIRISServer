@@ -186,7 +186,7 @@ def test_the_vocabulary_is_the_constitutions_pinned_copy():
     assert got == pin["sha256"], (
         f"topology_vocabulary.json is not the byte copy of {pin['repo']}@{pin['commit'][:12]} "
         f"{pin['path']} — vocabulary changes land in CIRISConstitution first, then the pin moves")
-    assert len(model.ATOMS) == 110
+    assert len(model.ATOMS) == 120
 
 
 def test_another_catalogue_version_of_the_vocabulary_is_refused(tmp_path):
@@ -195,7 +195,7 @@ def test_another_catalogue_version_of_the_vocabulary_is_refused(tmp_path):
     doc["_meta"]["catalogue_version"] = 4
     bumped = tmp_path / "topology_vocabulary.json"
     bumped.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(ValueError, match="catalogue_version 4"):
+    with pytest.raises(ValueError, match="catalogue_version 4, this model implements 5"):
         model._load_vocabulary(bumped)
 
 
@@ -207,5 +207,47 @@ def test_the_release_trace_asset_has_the_shape_the_client_pins():
     assert d["_meta"]["catalog_ids"] == model.CATALOG_IDS
     assert set(d["entries"]) == set(model.CATALOG_IDS)
     for e in d["entries"].values():
-        assert set(e) == {"file", "title", "promises", "initial", "steps", "buildable_prefix", "refused"}
+        assert set(e) == {"file", "title", "promises", "realized_by", "initial", "steps", "buildable_prefix",
+                          "refused"}
+        assert set(e["realized_by"]) <= set(e["promises"])
         assert all(set(s) == {"id", "atoms"} for s in e["steps"])
+
+
+def test_a_promise_realized_elsewhere_is_bounded_but_not_claimed(cat):
+    t7 = cat["T7"]
+    agent = {"agent.deferral.pending", "agent.deferral.approved", "agent.deferral.rejected", "agent.identity.amended"}
+    assert {a: r for a, r in t7.realized_by.items()} == {a: "CIRISAgent" for a in agent}
+    assert agent <= set(t7.promises) and not (agent & set(t7.own_promises))
+    assert not (agent & set(model.reachable(t7.topology))), "the harness builds no agent"
+    # an atom outside the vocabulary is refused whoever realizes it
+    bad = copy.deepcopy(cat)
+    bad["T7"].promises.append("agent.flies")
+    bad["T7"].realized_by["agent.flies"] = "CIRISAgent"
+    assert any("T7: promises atoms outside the vocabulary: ['agent.flies']" in p for p in model.evaluate(bad)["problems"])
+    # dropping the realizer makes the harness claim it, and its steps never reach it
+    bad = copy.deepcopy(cat)
+    del bad["T7"].realized_by["agent.identity.amended"]
+    assert any("T7: promises ['agent.identity.amended'] but its steps never reach them" in p
+               for p in model.evaluate(bad)["problems"])
+
+
+def test_a_realizer_names_another_repo(tmp_path):
+    src = (model.CATALOG_DIR / "T7-agent-steward-wa.yaml").read_text(encoding="utf-8")
+    for bad in ("CIRISServer", "someone"):
+        p = tmp_path / "T7-agent-steward-wa.yaml"
+        p.write_text(src.replace("realizer: CIRISAgent}", f"realizer: {bad}}}", 1), encoding="utf-8")
+        with pytest.raises(ValueError, match="another CIRIS repo"):
+            model.load_entry(p)
+
+
+def test_atoms_awaiting_an_entry_are_reported_not_failed(cat):
+    durable = {a for a in model.ATOMS if a.startswith("file.durable")}
+    assert len(durable) == 6 and set(model.AWAITING_ENTRY) == durable
+    rep = model.evaluate(cat)
+    assert rep["awaiting_entry"] == {a: "T20 (CIRISServer#809)" for a in durable}
+    assert "awaiting T20 (CIRISServer#809)" in model.summary(rep)
+    # once an entry promises one, the listing is stale and says so
+    bad = copy.deepcopy(cat)
+    bad["T7"].promises.append("file.durable")
+    bad["T7"].realized_by["file.durable"] = "CIRISAgent"
+    assert any("awaiting an entry that one now reaches: ['file.durable']" in p for p in model.evaluate(bad)["problems"])

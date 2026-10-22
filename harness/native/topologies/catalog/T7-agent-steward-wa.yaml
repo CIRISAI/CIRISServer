@@ -2,12 +2,25 @@
 # CSD-111–117, 5a–5g, 7c, 8b). The agent layer has no builder in this repo: an
 # agent is a CIRISAgent process (halt_agent drives an EXTERNAL one). The
 # builder stands up the steward's claimed node and stops before the agent.
+#
+# Catalogue v5 (steward, 2026-10-22): an entry is a topology; the scenarios run
+# on it are its promises, each naming its realizer. The four agent.* atoms (a
+# deferral raised, answered by the WA, and identity_amendment:v1 applied citing
+# the approval) are realized by CIRISAgent's QA against the claimed node this
+# topology builds, not by this harness.
 catalog_id: T7
-catalogue_version: 3
+catalogue_version: 5
 title: An agent under a steward with a Wise Authority
 serves: [CSD-111, CSD-112, CSD-113, CSD-114, CSD-115, CSD-116, CSD-117]
 derives: [5a, 5b, 5c, 5d, 5e, 5f, 5g, 7c, 8b]
-promises: [agent.bound, steward.bonded, wa.present]
+promises:
+  - agent.bound
+  - steward.bonded
+  - wa.present
+  - {atom: agent.deferral.pending, realizer: CIRISAgent}
+  - {atom: agent.deferral.approved, realizer: CIRISAgent}
+  - {atom: agent.deferral.rejected, realizer: CIRISAgent}
+  - {atom: agent.identity.amended, realizer: CIRISAgent}
 topology:
   roots:
     - {id: R, kind: key, holders: 1, custody: software_test, lifecycle: {recipe: {}, verdict: rooted}}
