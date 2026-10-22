@@ -5,7 +5,7 @@
 # a node-bearing seat needs a successor family head, which one root per mesh
 # cannot give (refused, as T9).
 catalog_id: T13
-catalogue_version: 3
+catalogue_version: 5
 title: A witnessed lineage — a stale head refuses attach; a node-bearing seat never counts
 serves: [CSD-105]
 promises: [root.head.stale, seat.identity_type.node_bearing]

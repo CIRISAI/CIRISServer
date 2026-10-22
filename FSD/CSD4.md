@@ -1,6 +1,6 @@
 # CSD/4 — the topology catalogue, locked
 
-**Status:** LOCKED at catalogue version 3 (2026-10-20; version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
+**Status:** LOCKED at catalogue version 5 (2026-10-22: 4 for the durability atoms, `file.durable.*`, which await T20; 5 for the agent-plane deferral and identity-amendment atoms, promised by T7 and realized by CIRISAgent; vocabulary re-pinned to CIRISConstitution rc10 @ `9f6ff75a`). Version 3 on 2026-10-20 ( version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
 catalogue, the model, the builder). **Consumers:** CIRISClient's CSD cards and
 `check_csd_v3`, the native harness, CC's `tools/topology_to_cfg.py`.
 **Source of the ruling:** the steward on CIRISClient#179 §2: *do not give CSD authors
@@ -33,12 +33,19 @@ compares the card against it. `check_csd_v3` refuses, by name:
 `topology:` is a hint. The planner may choose a cheaper entry that reaches the same
 states (§6.1) and reports the change as `reselected`.
 
-## 2. The catalogue (version 3)
+## 2. The catalogue (version 5)
 
 Twenty entries, each one checked-in yaml file in `harness/native/topologies/catalog/`,
 named `T<n>-<slug>.yaml`, carrying `catalog_id`, `catalogue_version`, `title`,
 `serves`, `derives`, `promises` (the atoms the entry guarantees to reach, which the
 model verifies) and the `topology` block typed by `FSD/TOPOLOGY.md`.
+
+An entry is a TOPOLOGY; the scenarios that run on it are its promises, and each promise
+names its realizer (steward, 2026-10-22). A bare atom is realized by this harness: the
+entry's steps must reach it. `{atom: <a>, realizer: <Repo>}` is realized by another
+repo's QA against the node the topology builds. The vocabulary still bounds it and it
+covers its atom for exhaustiveness, but the model never claims its steps reach it, and
+the release trace lists it under `realized_by`.
 
 | id | who exists | promises (abridged) | builder today |
 |---|---|---|---|
@@ -49,7 +56,7 @@ model verifies) and the `topology` block typed by `FSD/TOPOLOGY.md`.
 | T4 | a household: guardian on two devices, one child | `household.formed`, `child.member`, `guardian.bound`, `age.assured` | up to `guardian_bond` |
 | T5 | a community, a held quorum change, a moderator duty | `community.member`, `quorum_change.held` → `quorum_change.applied`, `moderator.named` | whole |
 | T6 | an affiliation, a licensing authority, a delegation chain | `community.formed` (affiliations tier), `authority.licensing`, `delegation.chain` | up to `authority` |
-| T7 | an agent under a steward with a Wise Authority | `agent.bound`, `steward.bonded`, `wa.present` | up to `agent` |
+| T7 | an agent under a steward with a Wise Authority | `agent.bound`, `steward.bonded`, `wa.present`; realized by CIRISAgent: `agent.deferral.pending` → `approved` / `rejected`, `agent.identity.amended` | up to `agent` |
 | T8 | an M-of-N infrastructure root: halt, confirm, resume | `pair.rooted`, `root.halted` → `root.halt_confirmed` → `root.resumed` | whole |
 | T9 | two roots and a party outside both | `root.two`, `party.outside_roots` | up to the second canonical |
 | T10 | a stolen device evicted by the quorum path (three roster keys) | `key.holder.thief`, `key.membership.proposed_evict` → `evicted`, `self.roster_size.three_more` | whole (CIRISServer#794 quorum path; a held third-device approval assented in) |
@@ -78,7 +85,7 @@ The pre-catalogue declarations (`topologies/csd-091…`, `csd-092…`, `csd-094�
 `csd-107…`, `selffiles`, `bigfile*`) stay as regression fixtures and are not
 catalogue entries. T1, T2 and T3 subsume their states.
 
-## 3. The vocabulary (version 3)
+## 3. The vocabulary (version 5)
 
 Closed, and **owned by the constitution** (steward decision 2026-10-18). CIRISConstitution
 publishes `manifests/topology_vocabulary.json`, which maps each atom to its plane state
@@ -215,6 +222,31 @@ One atom per modelled state no version-1 entry exercised, named `<variable>.<sta
 | atom | plane | CC | meaning |
 |---|---|---|---|
 | `key.membership.proposed_add` | self | 3.3.6.3 | roster key: membership = proposed_add — entered by an addition proposal from a roster of two or more keys (signer: a live roster key); ends when the addition lands (quorum, or after W_self: the key on the roster, `device.join_approved` on the new device) or the proposal is withdrawn or refused; distinct from `device.join_requested`, which holds before the owner's approval |
+### 3.3 Added in version 4
+
+Awaiting T20, the durability topology (CIRISServer#809). Until it lands, `model.AWAITING_ENTRY`
+names these atoms and `evaluate` reports them, rather than failing them as orphans.
+
+| atom | plane | CC | meaning |
+|---|---|---|---|
+| `file.durable.unmarked` | content | 6.1.5 | a published item carries no durable mark and is held under default retention |
+| `file.durable` | content | 6.1.5 | the owner marked the item durable on publish, family- or community-scoped, with a target holder count |
+| `file.durable.at_target` | content | 6.1.5.1 | holding claims over the item's chunks reach its target; the holonomic view shows no gap |
+| `file.durable.below_floor` | content | 6.1.5.1 | holders fell toward the floor; the swarm repairs, rarest chunk first, until the target is reached again |
+| `file.durable.descending` | content | 6.1.5 | the item was un-marked or withdrawn; holders drop to normal retention, then none |
+| `file.durable.recovered` | content | 6.1.5 | the owner's fresh device pulled the item's chunks from surviving holders, decrypted them with the recovered cohort key, and the digest matched |
+
+### 3.4 Added in version 5
+
+Promised by T7 and realized by CIRISAgent's QA against T7's claimed node: a deferral raised,
+answered by the Wise Authority, and `identity_amendment:v1` applied citing the approval.
+
+| atom | plane | CC | meaning |
+|---|---|---|---|
+| `agent.deferral.pending` | agent | 1.9 4.3 | the agent deferred one question to a Wise Authority and is inactive on it |
+| `agent.deferral.approved` | agent | 4.3 | a seated Wise Authority answered the deferral: approved |
+| `agent.deferral.rejected` | agent | 4.3 | a seated Wise Authority answered the deferral: rejected |
+| `agent.identity.amended` | agent | 3.1.5 4.3 | the agent applied the identity change its approved deferral authorised and published identity_amendment:v1 citing the response |
 
 ## 4. Change control
 
@@ -369,7 +401,10 @@ command output; and the tests not run, with the reason.
 - a relation outside the typing;
 - a promised atom that the entry's steps never reach, or that is outside the
   vocabulary;
-- a vocabulary atom that no entry reaches;
+- a vocabulary atom that no entry reaches (an atom realized elsewhere counts as
+  covered; an atom in `AWAITING_ENTRY` is reported, and listing one some entry now
+  reaches is a contradiction);
+- a promise realized elsewhere that the entry's own steps reach (drop its realizer);
 - a requirement that names an unknown entry, or an entry that never reaches its
   atoms;
 - a requirement no entry reaches.

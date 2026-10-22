@@ -4,7 +4,7 @@
 # digest), and a steward purges its blob after the dwell — the purge surface is
 # CIRISServer#756 (known red).
 catalog_id: T17
-catalogue_version: 3
+catalogue_version: 5
 title: A takedown and a steward purge — tombstone, dwell, purge; family and community scope
 serves: [CSD-108, CSD-107]
 promises: [row.standing.admitted, row.standing.tombstoned, blob.custody.purged, row.scope.family,

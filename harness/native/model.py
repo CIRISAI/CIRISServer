@@ -34,7 +34,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
-CATALOGUE_VERSION = 3
+CATALOGUE_VERSION = 5
 CATALOG_IDS = [f"T{i}" for i in range(20)]
 HERE = Path(__file__).parent
 CATALOG_DIR = HERE / "topologies" / "catalog"
@@ -75,6 +75,24 @@ def _load_vocabulary(path: Path = VOCABULARY) -> Dict[str, Decl]:
 
 VOCABULARY_ROWS: Dict[str, Decl] = _load_vocabulary()
 ATOMS: Dict[str, str] = {a: row["meaning"] for a, row in VOCABULARY_ROWS.items()}
+
+# ── who realizes a promise ──────────────────────────────────────────────────
+#
+# An entry is a TOPOLOGY; the scenarios that run on it are its promises, and
+# each promise names its realizer (steward, 2026-10-22; CC rc10 9f6ff75). A
+# bare atom is realized here: this harness's steps must reach it. A mapping
+# `{atom: <a>, realizer: <Repo>}` is realized by another repo's QA against the
+# node this topology builds: the vocabulary still bounds it and it still covers
+# its atom, but this harness never claims to reach it.
+HARNESS_REALIZER = "CIRISServer"
+
+# Vocabulary atoms whose entry has not landed: each names the entry that will
+# promise it and the issue it waits on. Reported, never failed — the same
+# honesty as `known_red`; an atom listed here that some entry reaches is stale.
+AWAITING_ENTRY: Dict[str, str] = {
+    a: "T20 (CIRISServer#809)"
+    for a in ATOMS if VOCABULARY_ROWS[a].get("added_in") == 4 and a.startswith("file.durable")
+}
 
 # ── steps and their effects ─────────────────────────────────────────────────
 
@@ -488,6 +506,13 @@ class Entry:
     serves: List[str] = field(default_factory=list)
     promises: List[str] = field(default_factory=list)
     extends: Optional[str] = None
+    # atom → the repo that realizes it, for every promise not realized here
+    realized_by: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def own_promises(self) -> List[str]:
+        """The promises this harness realizes: its steps must reach them."""
+        return [a for a in self.promises if a not in self.realized_by]
 
     @property
     def cost(self) -> int:
@@ -502,8 +527,21 @@ def load_entry(path: Path) -> Entry:
         raise ValueError(f"{path.name}: catalogue_version {doc.get('catalogue_version')!r}, this model is {CATALOGUE_VERSION}")
     t = doc["topology"]
     t.setdefault("negatives", [])
+    promises: List[str] = []
+    realized_by: Dict[str, str] = {}
+    for p in doc.get("promises", []):
+        if isinstance(p, str):
+            promises.append(p)
+            continue
+        if not isinstance(p, dict) or set(p) != {"atom", "realizer"}:
+            raise ValueError(f"{path.name}: a promise is an atom or {{atom, realizer}}, got {p!r}")
+        if not re.fullmatch(r"CIRIS[A-Za-z]+", str(p["realizer"])) or p["realizer"] == HARNESS_REALIZER:
+            raise ValueError(f"{path.name}: {p['atom']} names realizer {p['realizer']!r} — another CIRIS repo; "
+                             f"a promise this harness realizes is a bare atom")
+        promises.append(p["atom"])
+        realized_by[p["atom"]] = p["realizer"]
     return Entry(doc["catalog_id"], doc.get("title", ""), Path(path), t, doc.get("serves", []),
-                 doc.get("promises", []), doc.get("extends"))
+                 promises, doc.get("extends"), realized_by)
 
 
 def catalogue(root: Path = CATALOG_DIR) -> Dict[str, Entry]:
@@ -678,15 +716,19 @@ def evaluate(cat: Optional[Dict[str, Entry]] = None, reqs: Optional[List[Require
         bad_atoms = sorted(set(e.promises) - set(ATOMS))
         if bad_atoms:
             problems.append(f"{cid}: promises atoms outside the vocabulary: {bad_atoms}")
-        broken = sorted(a for a in e.promises if a in ATOMS and a not in first)
+        broken = sorted(a for a in e.own_promises if a in ATOMS and a not in first)
         if broken:
             problems.append(f"{cid}: promises {broken} but its steps never reach them")
+        reached_elsewhere = sorted(a for a in e.realized_by if a in first)
+        if reached_elsewhere:
+            problems.append(f"{cid}: {reached_elsewhere} are reached by its own steps — drop the realizer")
+        reached_anywhere |= set(e.realized_by) & set(ATOMS)
         if e.extends:
             parent = cat.get(e.extends)
             if parent is None:
                 problems.append(f"{cid}: extends unknown {e.extends}")
             else:
-                lost = sorted(set(parent.promises) - set(first))
+                lost = sorted(set(parent.own_promises) - set(first))
                 if lost:
                     problems.append(f"{cid}: extends {e.extends} but never reaches its {lost}")
         refused = not_buildable(t) if realizable else ["unrealizable"]
@@ -701,10 +743,14 @@ def evaluate(cat: Optional[Dict[str, Entry]] = None, reqs: Optional[List[Require
             "buildable": not refused, "refused_by": refused,
             "buildable_steps": prefix,
             "reaches_buildable": sorted(a for a in first if first[a] < prefix),
+            "realized_by": dict(e.realized_by),
         }
-    orphans = sorted(set(ATOMS) - reached_anywhere)
+    orphans = sorted(set(ATOMS) - reached_anywhere - set(AWAITING_ENTRY))
     if orphans:
         problems.append(f"vocabulary atoms no catalogue entry reaches: {orphans}")
+    stale = sorted(set(AWAITING_ENTRY) & reached_anywhere)
+    if stale:
+        problems.append(f"atoms listed as awaiting an entry that one now reaches: {stale}")
     p = plan(reqs, cat, buildable_only=False)
     for k, why in p.uncovered.items():
         problems.append(f"requirement {k}: {why}")
@@ -720,6 +766,7 @@ def evaluate(cat: Optional[Dict[str, Entry]] = None, reqs: Optional[List[Require
         "problems": problems,
         "entries": entries,
         "vocabulary": len(ATOMS),
+        "awaiting_entry": dict(AWAITING_ENTRY),
         "requirements": len(reqs),
         "plan_all": p.as_dict(),
         "plan_buildable": pb.as_dict(),
@@ -738,6 +785,8 @@ def summary(rep: Decl) -> str:
             lines.append(f"{'':27}↳ {why}")
         if e["transient"]:
             lines.append(f"{'':27}transient: " + ", ".join(f"{a}[{w[0]},{w[1]})" for a, w in e["transient"].items()))
+        for a, repo in e.get("realized_by", {}).items():
+            lines.append(f"{'':27}realized by {repo}: {a}")
     for label in ("plan_all", "plan_buildable"):
         pl = rep[label]
         lines += ["", f"{label}: build {pl['entries']} (cost {pl['cost']})"]
@@ -750,6 +799,11 @@ def summary(rep: Decl) -> str:
             lines.append(f"  UNCOVERED {k}: {why}")
         for k, how in pl["reselected"].items():
             lines.append(f"  reselected {k}: {how}")
+    awaiting: Dict[str, List[str]] = {}
+    for a, why in rep.get("awaiting_entry", {}).items():
+        awaiting.setdefault(why, []).append(a)
+    for why, atoms in awaiting.items():
+        lines += ["", f"awaiting {why}: {', '.join(sorted(atoms))}"]
     if rep["problems"]:
         lines += ["", "problems:"] + [f"  - {p}" for p in rep["problems"]]
     return "\n".join(lines)
@@ -774,6 +828,7 @@ def traces() -> Dict[str, Any]:
             "file": e.path.name,
             "title": e.title,
             "promises": list(e.promises),
+            "realized_by": dict(e.realized_by),
             "initial": [] if t.get("canonicals") else ["root.none"],
             "steps": [{"id": s.id, "atoms": sorted(st)} for s, st in trace(t)],
             "buildable_prefix": buildable_prefix(t),
