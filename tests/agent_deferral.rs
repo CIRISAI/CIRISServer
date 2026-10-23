@@ -293,3 +293,67 @@ async fn the_response_door_refuses_before_opening_any_pen() {
         .unwrap_err();
     assert_eq!(anon.reason_id(), "deferral.not_signed_in");
 }
+
+/// `owner_record` states the founding ROOT's record in the forms the agent
+/// parses: `role` is persist's `WaRole` serde form ("root"), `user_role` the
+/// session role, `auth_type` the cert's token type, and nothing is invented.
+#[tokio::test]
+async fn the_owner_record_states_the_founding_root_without_inventing_fields() {
+    use ciris_persist::wa_cert::{TokenType, WaCert, WaRole};
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    assert!(
+        ciris_server::auth::session::owner_record(&engine, &agent)
+            .await
+            .unwrap()
+            .is_none(),
+        "no ROOT, no record"
+    );
+    let created = chrono::Utc::now();
+    ciris_server::auth::store::upsert(
+        &engine,
+        WaCert {
+            wa_id: "wa-root-owner".into(),
+            name: "Owner Person".into(),
+            role: WaRole::Root,
+            pubkey: owner.key_id().into(),
+            jwt_kid: "kid-owner".into(),
+            password_hash: Some("hash".into()),
+            api_key_hash: None,
+            oauth_provider: None,
+            oauth_external_id: None,
+            oauth_links: None,
+            veilid_id: None,
+            auto_minted: false,
+            parent_wa_id: None,
+            parent_signature: None,
+            scopes: serde_json::json!([]),
+            custom_permissions: None,
+            adapter_id: None,
+            adapter_name: None,
+            adapter_metadata: None,
+            token_type: TokenType::Standard,
+            created,
+            last_login: None,
+            active: true,
+        },
+    )
+    .await
+    .unwrap();
+    let rec = ciris_server::auth::session::owner_record(&engine, &agent)
+        .await
+        .unwrap()
+        .expect("a ROOT exists");
+    assert_eq!(rec["wa_id"], "wa-root-owner");
+    assert_eq!(rec["name"], "Owner Person");
+    assert_eq!(rec["role"], "root", "persist's WaRole serde form");
+    assert_eq!(rec["user_role"], "SYSTEM_ADMIN");
+    assert_eq!(rec["auth_type"], "standard");
+    assert_eq!(rec["has_password"], true);
+    assert_eq!(rec["owner_key_id"], owner.key_id(), "owner_of(node)");
+    assert!(rec["oauth_provider"].is_null());
+    assert!(rec["created_at"]
+        .as_str()
+        .unwrap()
+        .starts_with(&created.format("%Y-%m-%d").to_string()));
+}
