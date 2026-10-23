@@ -283,7 +283,7 @@ jobs:
       # (release runs on tags, so this is restore-only here; the substrate repos' CI
       # main run does the save). Guard kept for correctness.
       - name: CIRISCache save (server layer, main only)
-        uses: CIRISAI/CIRISCache/save@v1
+        uses: CIRISAI/CIRISCache/save@v1.1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
@@ -382,7 +382,7 @@ jobs:
       # Populate the cross-repo CIRISCache blob on main under the SERVER key
       # (release runs on tags, so this is restore-only here; guard kept anyway).
       - name: CIRISCache save (server layer, main only)
-        uses: CIRISAI/CIRISCache/save@v1
+        uses: CIRISAI/CIRISCache/save@v1.1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:

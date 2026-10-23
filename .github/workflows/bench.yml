@@ -173,7 +173,7 @@ jobs:
       # Populate the cross-repo CIRISCache blob on main under the SERVER key
       # (all cargo compilation above is now cached).
       - name: CIRISCache save (server layer, main only)
-        uses: CIRISAI/CIRISCache/save@v1
+        uses: CIRISAI/CIRISCache/save@v1.1
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         with:
