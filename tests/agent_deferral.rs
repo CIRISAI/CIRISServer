@@ -114,11 +114,11 @@ async fn the_deferral_round_trip_ends_in_an_amendment_citing_the_approval() {
     let room = ciris_edge::chat::pair_community_key_id(&agent, owner.key_id());
 
     // 1. The agent defers, in its room with the owner.
-    let req_id = emit_deferral_request(&engine, &request(Some(&room)))
+    let req_id = emit_deferral_request(&engine, &agent, &request(Some(&room)))
         .await
         .expect("the agent's occurrence key signs the request");
     let req = row(&engine, &req_id).await;
-    assert_eq!(req.attestation_type, DEFERRAL_REQUEST);
+    assert_eq!(req.attestation_envelope["dimension"], DEFERRAL_REQUEST);
     assert_eq!(req.attesting_key_id, agent, "the occurrence key signs");
     assert_eq!(
         req.attested_key_id, agent,
@@ -133,7 +133,7 @@ async fn the_deferral_round_trip_ends_in_an_amendment_citing_the_approval() {
         .await
         .expect("the WA answers");
     let resp = row(&engine, &resp_id).await;
-    assert_eq!(resp.attestation_type, DEFERRAL_APPROVED);
+    assert_eq!(resp.attestation_envelope["dimension"], DEFERRAL_APPROVED);
     assert_eq!(
         resp.attesting_key_id,
         owner.key_id(),
@@ -151,11 +151,11 @@ async fn the_deferral_round_trip_ends_in_an_amendment_citing_the_approval() {
     );
 
     // 3. The agent applies the amendment, citing the approval.
-    let amend_id = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id)
+    let amend_id = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
         .await
         .expect("an approved response authorises the amendment");
     let amend = row(&engine, &amend_id).await;
-    assert_eq!(amend.attestation_type, IDENTITY_AMENDMENT);
+    assert_eq!(amend.attestation_envelope["dimension"], IDENTITY_AMENDMENT);
     assert_eq!(amend.attesting_key_id, agent);
     assert_eq!(amend.attested_key_id, agent);
     assert_eq!(amend.attestation_envelope["amendment_digest"], DIGEST);
@@ -178,17 +178,17 @@ async fn the_deferral_round_trip_ends_in_an_amendment_citing_the_approval() {
 async fn a_rejected_answer_does_not_authorise_an_amendment() {
     let owner = pen("owner-fedid", 0x33);
     let (engine, agent) = owned_agent(&owner).await;
-    let req_id = emit_deferral_request(&engine, &request(None))
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
     let resp_id = sign_deferral_response(&engine, &owner, &req_id, false)
         .await
         .unwrap();
     assert_eq!(
-        row(&engine, &resp_id).await.attestation_type,
+        row(&engine, &resp_id).await.attestation_envelope["dimension"],
         DEFERRAL_REJECTED
     );
-    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id)
+    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
         .await
         .expect_err("a rejection authorises nothing");
     assert!(matches!(err, AgentRowError::Unauthorized(_)), "{err}");
@@ -209,13 +209,13 @@ async fn an_approval_from_someone_not_seated_is_unauthorized() {
     )
     .await
     .unwrap();
-    let req_id = emit_deferral_request(&engine, &request(None))
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
     let resp_id = sign_deferral_response(&engine, &stranger, &req_id, true)
         .await
         .expect("anyone can sign a row; admission of the AMENDMENT is the gate");
-    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id)
+    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
         .await
         .expect_err("not the seated WA");
     assert!(matches!(err, AgentRowError::Unauthorized(_)), "{err}");
@@ -236,14 +236,23 @@ async fn an_approval_about_another_agent_is_unauthorized() {
     )
     .await
     .unwrap();
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
     let resp_id = attest::emit(
         &engine,
         KeySigner::Local(&owner),
-        Spec::new(DEFERRAL_APPROVED, cohort_scope::SELF, serde_json::json!({})).about(&other),
+        Spec::new(
+            "scores",
+            cohort_scope::SELF,
+            serde_json::json!({ "dimension": DEFERRAL_APPROVED, "references_attestation_id": req_id }),
+        )
+        .weighing(Some(1.0))
+        .attested_to(&other),
     )
     .await
     .expect("the owner approves something for another agent");
-    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id)
+    let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
         .await
         .expect_err("about another agent");
     assert!(matches!(err, AgentRowError::Unauthorized(_)), "{err}");
@@ -253,22 +262,24 @@ async fn an_approval_about_another_agent_is_unauthorized() {
 async fn an_unknown_response_is_unauthorized_and_inputs_are_checked() {
     let owner = pen("owner-fedid", 0x33);
     let (engine, agent) = owned_agent(&owner).await;
-    let err = emit_identity_amendment(&engine, &agent, DIGEST, "no-such-row")
+    let err = emit_identity_amendment(&engine, &agent, DIGEST, "no-such-row", "no-such-req")
         .await
         .expect_err("nothing admitted");
     assert!(matches!(err, AgentRowError::Unauthorized(_)), "{err}");
 
-    let bad = emit_identity_amendment(&engine, &agent, "ABC", "x")
+    let bad = emit_identity_amendment(&engine, &agent, "ABC", "x", "y")
         .await
         .unwrap_err();
     assert!(matches!(bad, AgentRowError::BadInput(_)), "{bad}");
     let mut r = request(None);
     r.reason_digest = "not-hex".into();
     assert!(matches!(
-        emit_deferral_request(&engine, &r).await.unwrap_err(),
+        emit_deferral_request(&engine, &agent, &r)
+            .await
+            .unwrap_err(),
         AgentRowError::BadInput(_)
     ));
-    let bad_room = emit_deferral_request(&engine, &request(Some("family:xyz")))
+    let bad_room = emit_deferral_request(&engine, &agent, &request(Some("family:xyz")))
         .await
         .unwrap_err();
     assert!(matches!(bad_room, AgentRowError::BadInput(_)), "{bad_room}");
@@ -277,7 +288,7 @@ async fn an_unknown_response_is_unauthorized_and_inputs_are_checked() {
 #[tokio::test]
 async fn the_response_door_refuses_before_opening_any_pen() {
     let owner = pen("owner-fedid", 0x33);
-    let (engine, _agent) = owned_agent(&owner).await;
+    let (engine, agent) = owned_agent(&owner).await;
     let seed = std::env::temp_dir().join("ciris-1316-no-seed");
     // Unknown deferral: refused before the session is even read.
     let unknown = emit_deferral_response(&engine, None, "u", seed.clone(), "nope", true)
@@ -285,7 +296,7 @@ async fn the_response_door_refuses_before_opening_any_pen() {
         .unwrap_err();
     assert_eq!(unknown.reason_id(), "deferral.unknown_request");
     // No session.
-    let req_id = emit_deferral_request(&engine, &request(None))
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
     let anon = emit_deferral_response(&engine, None, "u", seed, &req_id, true)
@@ -356,4 +367,89 @@ async fn the_owner_record_states_the_founding_root_without_inventing_fields() {
         .as_str()
         .unwrap()
         .starts_with(&created.format("%Y-%m-%d").to_string()));
+}
+
+#[tokio::test]
+async fn a_request_with_no_room_lands_in_the_agent_owner_pair_room() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        row(&engine, &req_id).await.attestation_envelope[ROOM_FIELD],
+        ciris_edge::chat::pair_community_key_id(&agent, owner.key_id()).as_str(),
+        "the pair room of the agent and its owner"
+    );
+}
+
+/// An approval for deferral A does not authorise an amendment asked under B,
+/// and one approval authorises one amendment.
+#[tokio::test]
+async fn an_amendment_is_bound_to_its_deferral_and_used_once() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    let req_a = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let mut b = request(None);
+    b.deferral_id = "def-2".into();
+    let req_b = emit_deferral_request(&engine, &agent, &b).await.unwrap();
+    let approves_a = sign_deferral_response(&engine, &owner, &req_a, true)
+        .await
+        .unwrap();
+
+    let crossed = emit_identity_amendment(&engine, &agent, DIGEST, &approves_a, &req_b)
+        .await
+        .expect_err("A's approval cannot authorise B's amendment");
+    assert!(
+        matches!(crossed, AgentRowError::Unauthorized(_)),
+        "{crossed}"
+    );
+
+    emit_identity_amendment(&engine, &agent, DIGEST, &approves_a, &req_a)
+        .await
+        .expect("A's approval authorises A's amendment");
+    let again = emit_identity_amendment(&engine, &agent, DIGEST, &approves_a, &req_a)
+        .await
+        .expect_err("once");
+    assert_eq!(again.reason_id(), "deferral.response_already_used");
+}
+
+#[tokio::test]
+async fn deferral_rows_reads_the_chain_back_by_id() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    let req = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let resp = sign_deferral_response(&engine, &owner, &req, true)
+        .await
+        .unwrap();
+    let amend = emit_identity_amendment(&engine, &agent, DIGEST, &resp, &req)
+        .await
+        .unwrap();
+    let rows = ciris_server::agent_deferral::deferral_rows(
+        &engine,
+        &[req.clone(), resp.clone(), amend.clone(), "missing".into()],
+    )
+    .await
+    .unwrap();
+    let types: Vec<Option<&str>> = rows
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .and_then(ciris_server::agent_deferral::dimension_of)
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            Some(DEFERRAL_REQUEST),
+            Some(DEFERRAL_APPROVED),
+            Some(IDENTITY_AMENDMENT),
+            None
+        ]
+    );
+    assert_eq!(rows[1].as_ref().unwrap().attesting_key_id, owner.key_id());
 }

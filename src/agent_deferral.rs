@@ -28,8 +28,9 @@
 //! for their own agent; that is the only pen a node can reach. A non-owner WA
 //! signing with their own key is CIRISServer#814.
 
-use ciris_persist::federation::admission::owner_of;
-use ciris_persist::federation::types::cohort_scope;
+use ciris_persist::federation::admission::{envelope_dimension, owner_of};
+use ciris_persist::federation::envelope::paths;
+use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::prelude::Engine;
 
 use crate::attest::{self, KeySigner, Spec};
@@ -42,6 +43,20 @@ pub const DEFERRAL_APPROVED: &str = "deferral:response:approved:v1";
 pub const DEFERRAL_REJECTED: &str = "deferral:response:rejected:v1";
 /// `identity_amendment:v1`.
 pub const IDENTITY_AMENDMENT: &str = "identity_amendment:v1";
+
+/// The row's namespace (`deferral:request:v1`, …) — the envelope's signed
+/// `dimension` member. The verb is always `scores` (the closed verb set); the
+/// dimension is what these rows ARE.
+#[must_use]
+pub fn dimension_of(a: &ciris_persist::federation::types::Attestation) -> Option<&str> {
+    envelope_dimension(&a.attestation_envelope)
+}
+
+/// One of these rows: `scores` under `dimension`, weight 1.0, cohort `self`.
+fn spec(dimension: &str, mut body: serde_json::Value) -> Spec {
+    body[paths::DIMENSION] = serde_json::Value::String(dimension.to_owned());
+    Spec::new(attestation_type::SCORES, cohort_scope::SELF, body).weighing(Some(1.0))
+}
 
 /// What the agent supplies when it defers.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -109,6 +124,8 @@ pub enum AgentRowError {
     ResolverHasNoKey,
     /// The owner exists but has not minted a federation ID yet.
     NoIdentity,
+    /// The approval already authorised an amendment; one response, one amendment.
+    ResponseAlreadyUsed(String),
     /// CC 3.1.5's admission rule: the cited response does not authorise this
     /// amendment. The text says which condition failed.
     Unauthorized(String),
@@ -127,6 +144,7 @@ impl AgentRowError {
             Self::Delegated => "deferral.delegated",
             Self::ResolverHasNoKey => "deferral.resolver_has_no_key",
             Self::NoIdentity => "deferral.no_identity",
+            Self::ResponseAlreadyUsed(_) => "deferral.response_already_used",
             Self::Unauthorized(_) => "identity_amendment_unauthorized",
             Self::Store(_) => "deferral.store",
         }
@@ -150,6 +168,7 @@ impl std::fmt::Display for AgentRowError {
             Self::NoIdentity => {
                 f.write_str("the owner has no federation ID yet — mint one before answering")
             }
+            Self::ResponseAlreadyUsed(m) => write!(f, "{m}"),
             Self::Unauthorized(m) => write!(f, "{m}"),
             Self::Store(m) => write!(f, "store: {m}"),
         }
@@ -179,18 +198,62 @@ fn nonempty(field: &str, v: &str) -> Result<(), AgentRowError> {
     }
 }
 
-/// This engine's occurrence key and the identity it belongs to.
+/// This engine's occurrence key and the AGENT identity it belongs to.
+///
+/// Not `active_identity_for_occurrence`: on a claimed node the agent's
+/// occurrence is also anchored under its OWNER (the login ceremony), and that
+/// resolver can return the owner — a deferral "about" the owner is a row about
+/// the wrong party. The agent's identity is the principal registered as an
+/// `agent` (a multi-occurrence agent's shared root, e.g. a scout), else the
+/// occurrence key itself (an agent occurrence is its own self by default).
 async fn occurrence_and_identity(engine: &Engine) -> Result<(String, String), AgentRowError> {
     let occurrence = engine
         .local_derived_key_id()
         .await
         .map_err(|e| AgentRowError::Store(format!("this engine's key: {e:#}")))?;
-    let identity = engine
-        .federation_directory()
-        .active_identity_for_occurrence(&occurrence)
+    let dir = engine.federation_directory();
+    let principals = dir
+        .active_identities_for_occurrence(&occurrence)
         .await
-        .map_err(|e| AgentRowError::Store(format!("identity of {occurrence}: {e:#}")))?;
-    Ok((occurrence, identity))
+        .map_err(|e| AgentRowError::Store(format!("principals of {occurrence}: {e:#}")))?;
+    for p in principals.into_iter().filter(|p| *p != occurrence) {
+        let is_agent = dir
+            .lookup_public_key(&p)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|rec| {
+                ciris_persist::federation::types::identity_type::set_contains(
+                    &rec.identity_type,
+                    ciris_persist::federation::types::identity_type::AGENT,
+                )
+            });
+        if is_agent {
+            return Ok((occurrence, p));
+        }
+    }
+    Ok((occurrence.clone(), occurrence))
+}
+
+/// The room of the agent's conversation with its owner — the pair room of the
+/// agent's identity and the owner's self — for a request that names none.
+async fn owner_pair_room(
+    engine: &Engine,
+    node_key_id: &str,
+    identity: &str,
+) -> Result<Option<String>, AgentRowError> {
+    let dir = engine.federation_directory();
+    let Some(owner) = owner_of(dir.as_ref(), node_key_id)
+        .await
+        .map_err(|e| AgentRowError::Store(format!("owner_of({node_key_id}): {e:#}")))?
+    else {
+        return Ok(None);
+    };
+    let owner_self = self_at(engine, &owner, chrono::Utc::now()).await?;
+    Ok(Some(ciris_edge::chat::pair_community_key_id(
+        identity,
+        &owner_self,
+    )))
 }
 
 async fn self_at(
@@ -209,8 +272,13 @@ async fn self_at(
 
 /// **Sign and store `deferral:request:v1`** with this engine's (occurrence) key.
 /// Returns the row's `attestation_id`, which the WA's response references.
+///
+/// `room_id` absent ⇒ the pair room of the agent and the owner of `node_key_id`
+/// (until CIRISAgent#1300 builds the agent's real room); an unowned node writes
+/// no room.
 pub async fn emit_deferral_request(
     engine: &Engine,
+    node_key_id: &str,
     req: &DeferralRequest,
 ) -> Result<String, AgentRowError> {
     nonempty("deferral_id", &req.deferral_id)?;
@@ -229,19 +297,25 @@ pub async fn emit_deferral_request(
     if let Some(d) = req.domain_hint.as_deref().filter(|d| !d.trim().is_empty()) {
         body["domain_hint"] = serde_json::Value::String(d.to_owned());
     }
-    if let Some(room) = req
+    let room = match req
         .room_id
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
     {
-        room_ok(room)?;
-        body[ROOM_FIELD] = serde_json::Value::String(room.to_owned());
+        Some(r) => {
+            room_ok(r)?;
+            Some(r.to_owned())
+        }
+        None => owner_pair_room(engine, node_key_id, &identity).await?,
+    };
+    if let Some(room) = room {
+        body[ROOM_FIELD] = serde_json::Value::String(room);
     }
     let id = attest::emit(
         engine,
         KeySigner::Engine(engine),
-        Spec::new(DEFERRAL_REQUEST, cohort_scope::SELF, body).about(&identity),
+        spec(DEFERRAL_REQUEST, body).about(&identity),
     )
     .await
     .map_err(|e| AgentRowError::Store(format!("emit {DEFERRAL_REQUEST}: {e}")))?;
@@ -294,7 +368,7 @@ async fn admitted_request(
         .get_attestation(request_id)
         .await
         .map_err(|e| AgentRowError::Store(format!("get_attestation({request_id}): {e:#}")))?
-        .filter(|r| r.attestation_type == DEFERRAL_REQUEST)
+        .filter(|r| dimension_of(r) == Some(DEFERRAL_REQUEST))
         .ok_or_else(|| {
             AgentRowError::UnknownDeferral(format!(
                 "{request_id} is not an admitted {DEFERRAL_REQUEST}"
@@ -319,7 +393,7 @@ pub async fn sign_deferral_response(
         DEFERRAL_REJECTED
     };
     let mut body = serde_json::json!({
-        ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID: request_id,
+        (paths::REFERENCES_ATTESTATION_ID): request_id,
     });
     if let Some(d) = request.attestation_envelope.get("deferral_id") {
         body["deferral_id"] = d.clone();
@@ -328,7 +402,9 @@ pub async fn sign_deferral_response(
     let id = attest::emit(
         engine,
         KeySigner::Local(wa_pen),
-        Spec::new(dimension, cohort_scope::SELF, body).about(&request.attested_key_id),
+        // `attested_to`, not `about`: the answer is ABOUT the agent, and is not
+        // the agent's to withdraw (subject_key_ids grants revocation authority).
+        spec(dimension, body).attested_to(&request.attested_key_id),
     )
     .await
     .map_err(|e| AgentRowError::Store(format!("emit {dimension}: {e}")))?;
@@ -346,14 +422,20 @@ pub async fn sign_deferral_response(
 /// **Check CC 3.1.5's rule for the response `authorized_by` names, then sign
 /// and store `identity_amendment:v1`.** `node_key_id` is the node whose owner is
 /// the seated WA (the node key on a split home, this engine's key otherwise).
+///
+/// `request_id` binds the amendment to ONE deferral: the response must answer
+/// that request (its `references_attestation_id`), and the request must be this
+/// agent's. One approval authorises one amendment.
 pub async fn emit_identity_amendment(
     engine: &Engine,
     node_key_id: &str,
     amendment_digest: &str,
     authorized_by: &str,
+    request_id: &str,
 ) -> Result<String, AgentRowError> {
     hex64("amendment_digest", amendment_digest)?;
     nonempty("authorized_by", authorized_by)?;
+    nonempty("request_id", request_id)?;
     let (occurrence, identity) = occurrence_and_identity(engine).await?;
     let dir = engine.federation_directory();
     let unauthorized = |m: String| AgentRowError::Unauthorized(m);
@@ -365,10 +447,10 @@ pub async fn emit_identity_amendment(
         .map_err(|e| AgentRowError::Store(format!("get_attestation({authorized_by}): {e:#}")))?
         .ok_or_else(|| unauthorized(format!("no admitted row {authorized_by}")))?;
     // Approved.
-    if response.attestation_type != DEFERRAL_APPROVED {
+    if dimension_of(&response) != Some(DEFERRAL_APPROVED) {
         return Err(unauthorized(format!(
             "{authorized_by} is {:?}, not {DEFERRAL_APPROVED}",
-            response.attestation_type
+            dimension_of(&response)
         )));
     }
     // About this agent.
@@ -378,6 +460,25 @@ pub async fn emit_identity_amendment(
             response.attested_key_id
         )));
     }
+    // Answers THIS deferral, which is this agent's.
+    let answers = response
+        .attestation_envelope
+        .get(paths::REFERENCES_ATTESTATION_ID)
+        .and_then(|v| v.as_str());
+    if answers != Some(request_id) {
+        return Err(unauthorized(format!(
+            "{authorized_by} answers {answers:?}, not the deferral {request_id}"
+        )));
+    }
+    dir.get_attestation(request_id)
+        .await
+        .map_err(|e| AgentRowError::Store(format!("get_attestation({request_id}): {e:#}")))?
+        .filter(|r| dimension_of(r) == Some(DEFERRAL_REQUEST) && r.attested_key_id == identity)
+        .ok_or_else(|| {
+            unauthorized(format!(
+                "{request_id} is not an admitted deferral by this agent"
+            ))
+        })?;
     // Signed by a seated WA at its asserted_at: the node's owner (or a roster key
     // of the owner's self), compared self to self at that instant.
     let owner = owner_of(dir.as_ref(), node_key_id)
@@ -394,6 +495,18 @@ pub async fn emit_identity_amendment(
         )));
     }
 
+    // One response, one amendment.
+    let prior = dir
+        .list_attestations_citing_by_dimension(IDENTITY_AMENDMENT, authorized_by)
+        .await
+        .map_err(|e| AgentRowError::Store(format!("amendments citing {authorized_by}: {e:#}")))?;
+    if let Some(p) = prior.first() {
+        return Err(AgentRowError::ResponseAlreadyUsed(format!(
+            "{authorized_by} already authorised amendment {}",
+            p.attestation_id
+        )));
+    }
+
     let mut body = serde_json::json!({
         "amendment_digest": amendment_digest,
         "authorized_by": authorized_by,
@@ -403,7 +516,7 @@ pub async fn emit_identity_amendment(
     let id = attest::emit(
         engine,
         KeySigner::Engine(engine),
-        Spec::new(IDENTITY_AMENDMENT, cohort_scope::SELF, body).about(&identity),
+        spec(IDENTITY_AMENDMENT, body).about(&identity),
     )
     .await
     .map_err(|e| AgentRowError::Store(format!("emit {IDENTITY_AMENDMENT}: {e}")))?;
@@ -416,4 +529,24 @@ pub async fn emit_identity_amendment(
         "identity_amendment:v1 signed, citing the WA's approval"
     );
     Ok(id)
+}
+
+/// **Read rows back by id** (T7's chain check): the request, response and
+/// amendment ids the three emits returned, each read from this node's own store
+/// as stored — not through a caller-scoped read, which could hide the owner's
+/// self-scoped response from the agent's key. An unknown id is `None`.
+pub async fn deferral_rows(
+    engine: &Engine,
+    ids: &[String],
+) -> Result<Vec<Option<ciris_persist::federation::types::Attestation>>, AgentRowError> {
+    let dir = engine.federation_directory();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(
+            dir.get_attestation(id)
+                .await
+                .map_err(|e| AgentRowError::Store(format!("get_attestation({id}): {e:#}")))?,
+        );
+    }
+    Ok(out)
 }

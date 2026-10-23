@@ -3206,6 +3206,7 @@ mod python {
             | E::Delegated
             | E::ResolverHasNoKey
             | E::NoIdentity
+            | E::ResponseAlreadyUsed(_)
             | E::Unauthorized(_) => pyo3::exceptions::PyPermissionError::new_err(msg),
             E::Store(_) => pyo3::exceptions::PyRuntimeError::new_err(msg),
         }
@@ -3226,7 +3227,8 @@ mod python {
     /// `ciris_server.emit_deferral_request(deferral_id, task_id, thought_id,
     /// reason_digest, domain_hint=None, room_id=None)` → the request's
     /// `attestation_id` (CIRISAgent#1316). Signs `deferral:request:v1` with the
-    /// agent's occurrence key, about its identity, in `room_id`'s room.
+    /// agent's occurrence key, about its identity, in `room_id`'s room — or, with
+    /// `room_id=None`, the pair room of the agent and this node's owner.
     #[pyo3(
         name = "emit_deferral_request",
         signature = (deferral_id, task_id, thought_id, reason_digest, domain_hint = None, room_id = None)
@@ -3242,6 +3244,7 @@ mod python {
     ) -> PyResult<String> {
         py.detach(|| {
             let (engine, rt) = agent_rows_rt("emit_deferral_request")?;
+            let node = this_node_key(rt, &engine)?;
             let req = crate::agent_deferral::DeferralRequest {
                 deferral_id,
                 task_id,
@@ -3250,8 +3253,10 @@ mod python {
                 domain_hint,
                 room_id,
             };
-            rt.block_on(crate::agent_deferral::emit_deferral_request(&engine, &req))
-                .map_err(agent_row_err)
+            rt.block_on(crate::agent_deferral::emit_deferral_request(
+                &engine, &node, &req,
+            ))
+            .map_err(agent_row_err)
         })
     }
 
@@ -3291,16 +3296,22 @@ mod python {
     }
 
     #[pyfunction]
-    /// `ciris_server.emit_identity_amendment(amendment_digest, authorized_by)` →
-    /// the amendment's `attestation_id` (CIRISAgent#1316). Checks CC 3.1.5 first:
-    /// `authorized_by` must be an admitted `deferral:response:approved:v1` about
-    /// this agent, signed by the node's owner (the seated WA); otherwise
-    /// `PermissionError("identity_amendment_unauthorized: …")`.
-    #[pyo3(name = "emit_identity_amendment", signature = (amendment_digest, authorized_by))]
+    /// `ciris_server.emit_identity_amendment(amendment_digest, authorized_by,
+    /// request_id)` → the amendment's `attestation_id` (CIRISAgent#1316). Checks
+    /// CC 3.1.5 first: `authorized_by` must be an admitted
+    /// `deferral:response:approved:v1` about this agent, ANSWERING `request_id`
+    /// (this agent's deferral), signed by the node's owner (the seated WA);
+    /// otherwise `PermissionError("identity_amendment_unauthorized: …")`. One
+    /// approval authorises one amendment (`deferral.response_already_used`).
+    #[pyo3(
+        name = "emit_identity_amendment",
+        signature = (amendment_digest, authorized_by, request_id)
+    )]
     fn py_emit_identity_amendment(
         py: Python<'_>,
         amendment_digest: String,
         authorized_by: String,
+        request_id: String,
     ) -> PyResult<String> {
         py.detach(|| {
             let (engine, rt) = agent_rows_rt("emit_identity_amendment")?;
@@ -3310,8 +3321,26 @@ mod python {
                 &node,
                 &amendment_digest,
                 &authorized_by,
+                &request_id,
             ))
             .map_err(agent_row_err)
+        })
+    }
+
+    #[pyfunction]
+    /// `ciris_server.deferral_rows(ids)` → a JSON list, one entry per id: the
+    /// stored row (`attestation_id`, `attestation_type`, `attesting_key_id`,
+    /// `attested_key_id`, `asserted_at`, `attestation_envelope`, …) or `null`
+    /// (CIRISAgent#1316, T7's chain check). Read from this node's own store, not
+    /// through a caller-scoped read.
+    #[pyo3(name = "deferral_rows", signature = (ids))]
+    fn py_deferral_rows(py: Python<'_>, ids: Vec<String>) -> PyResult<String> {
+        py.detach(|| {
+            let (engine, rt) = agent_rows_rt("deferral_rows")?;
+            let rows = rt
+                .block_on(crate::agent_deferral::deferral_rows(&engine, &ids))
+                .map_err(agent_row_err)?;
+            serde_json::to_string(&rows).map_err(py_err)
         })
     }
 
@@ -3551,6 +3580,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_emit_deferral_request, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_deferral_response, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_identity_amendment, m)?)?;
+        m.add_function(wrap_pyfunction!(py_deferral_rows, m)?)?;
         m.add_function(wrap_pyfunction!(py_owner_record, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
