@@ -83,6 +83,11 @@ pub mod attestation_reads;
 /// through edge's per-kind `SelfOwn` publish selector (CIRISEdge#678).
 pub mod announced_relay;
 
+/// **An agent's deferral and the identity amendment it authorises, as signed
+/// rows** (CIRISAgent#1316): `deferral:request:v1` and `identity_amendment:v1`
+/// with CC 3.1.5's admission rule at the authoring door. Public so the
+/// integration test (`tests/agent_deferral.rs`) drives it directly.
+pub mod agent_deferral;
 /// The v39 tier crossing (`enter_mesh` + `widen_audience`) composed in one
 /// place, replacing `attestation_promote`.
 pub mod attestation_crossing;
@@ -3168,6 +3173,165 @@ mod python {
     /// `delegates_to` edge is still live, so an owner who revokes it kills the
     /// bearer immediately rather than at TTL expiry. That is why this is a
     /// function and not a cache.
+    /// The in-process engine and runtime every #1316 function below runs on.
+    fn agent_rows_rt(
+        what: &str,
+    ) -> PyResult<(
+        std::sync::Arc<ciris_persist::prelude::Engine>,
+        &'static tokio::runtime::Runtime,
+    )> {
+        let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "{what}: no in-process persist Engine"
+            ))
+        })?;
+        let (rt, _c) = crate::federation_delivery::held().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "{what}: federation delivery not started"
+            ))
+        })?;
+        Ok((engine, rt))
+    }
+
+    /// An [`crate::agent_deferral::AgentRowError`] as a Python exception whose
+    /// message starts with its stable `reason_id` (`<reason_id>: …`):
+    /// `ValueError` for bad input, `PermissionError` for a refusal of authority,
+    /// `RuntimeError` for a store failure (an outage, not a verdict).
+    fn agent_row_err(e: crate::agent_deferral::AgentRowError) -> pyo3::PyErr {
+        use crate::agent_deferral::AgentRowError as E;
+        let msg = e.to_string();
+        match e {
+            E::BadInput(_) | E::UnknownDeferral(_) => pyo3::exceptions::PyValueError::new_err(msg),
+            E::NotSignedIn
+            | E::Delegated
+            | E::ResolverHasNoKey
+            | E::NoIdentity
+            | E::Unauthorized(_) => pyo3::exceptions::PyPermissionError::new_err(msg),
+            E::Store(_) => pyo3::exceptions::PyRuntimeError::new_err(msg),
+        }
+    }
+
+    /// This node's key: the node key on a split home, the engine's otherwise.
+    fn this_node_key(
+        rt: &tokio::runtime::Runtime,
+        engine: &ciris_persist::prelude::Engine,
+    ) -> PyResult<String> {
+        match crate::node_key::wire_identity() {
+            Some(k) => Ok(k.to_owned()),
+            None => rt.block_on(engine.local_derived_key_id()).map_err(py_err),
+        }
+    }
+
+    #[pyfunction]
+    /// `ciris_server.emit_deferral_request(deferral_id, task_id, thought_id,
+    /// reason_digest, domain_hint=None, room_id=None)` → the request's
+    /// `attestation_id` (CIRISAgent#1316). Signs `deferral:request:v1` with the
+    /// agent's occurrence key, about its identity, in `room_id`'s room.
+    #[pyo3(
+        name = "emit_deferral_request",
+        signature = (deferral_id, task_id, thought_id, reason_digest, domain_hint = None, room_id = None)
+    )]
+    fn py_emit_deferral_request(
+        py: Python<'_>,
+        deferral_id: String,
+        task_id: String,
+        thought_id: String,
+        reason_digest: String,
+        domain_hint: Option<String>,
+        room_id: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            let (engine, rt) = agent_rows_rt("emit_deferral_request")?;
+            let req = crate::agent_deferral::DeferralRequest {
+                deferral_id,
+                task_id,
+                thought_id,
+                reason_digest,
+                domain_hint,
+                room_id,
+            };
+            rt.block_on(crate::agent_deferral::emit_deferral_request(&engine, &req))
+                .map_err(agent_row_err)
+        })
+    }
+
+    #[pyfunction]
+    /// `ciris_server.emit_deferral_response(request_id, approved, bearer)` → the
+    /// response's `attestation_id` (CIRISAgent#1316). Signs
+    /// `deferral:response:{approved|rejected}:v1` with the RESOLVER's own pen:
+    /// `bearer` is the resolver's `sess:` token as it reached the agent. Only the
+    /// node's owner (not delegated) has a pen here; anyone else raises
+    /// `PermissionError("deferral.resolver_has_no_key: …")`.
+    #[pyo3(name = "emit_deferral_response", signature = (request_id, approved, bearer = None))]
+    fn py_emit_deferral_response(
+        py: Python<'_>,
+        request_id: String,
+        approved: bool,
+        bearer: Option<String>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            let (engine, rt) = agent_rows_rt("emit_deferral_response")?;
+            let (seed_dir, default_alias) =
+                crate::node_key::held_user_seed_dir().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "emit_deferral_response: this process registered no owner seed location",
+                    )
+                })?;
+            let alias = crate::active_user_alias(&seed_dir, &default_alias);
+            rt.block_on(crate::agent_deferral::emit_deferral_response(
+                &engine,
+                bearer.as_deref(),
+                &alias,
+                seed_dir,
+                &request_id,
+                approved,
+            ))
+            .map_err(agent_row_err)
+        })
+    }
+
+    #[pyfunction]
+    /// `ciris_server.emit_identity_amendment(amendment_digest, authorized_by)` →
+    /// the amendment's `attestation_id` (CIRISAgent#1316). Checks CC 3.1.5 first:
+    /// `authorized_by` must be an admitted `deferral:response:approved:v1` about
+    /// this agent, signed by the node's owner (the seated WA); otherwise
+    /// `PermissionError("identity_amendment_unauthorized: …")`.
+    #[pyo3(name = "emit_identity_amendment", signature = (amendment_digest, authorized_by))]
+    fn py_emit_identity_amendment(
+        py: Python<'_>,
+        amendment_digest: String,
+        authorized_by: String,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            let (engine, rt) = agent_rows_rt("emit_identity_amendment")?;
+            let node = this_node_key(rt, &engine)?;
+            rt.block_on(crate::agent_deferral::emit_identity_amendment(
+                &engine,
+                &node,
+                &amendment_digest,
+                &authorized_by,
+            ))
+            .map_err(agent_row_err)
+        })
+    }
+
+    #[pyfunction]
+    /// `ciris_server.owner_record()` → the node owner's record as JSON, or `None`
+    /// when the node has no ROOT: `{wa_id, name, role, created_at, owner_key_id,
+    /// oauth_provider}` from the founding ROOT WaCert (`auth::session::owner_record`).
+    /// For the agent's `GET /v1/users/{id}` on the node-claimed owner.
+    #[pyo3(name = "owner_record")]
+    fn py_owner_record(py: Python<'_>) -> PyResult<Option<String>> {
+        py.detach(|| {
+            let (engine, rt) = agent_rows_rt("owner_record")?;
+            let node = this_node_key(rt, &engine)?;
+            let rec = rt
+                .block_on(crate::auth::session::owner_record(&engine, &node))
+                .map_err(py_err)?;
+            Ok(rec.map(|v| v.to_string()))
+        })
+    }
+
     #[pyfunction]
     #[pyo3(name = "resolve_bearer", signature = (token))]
     fn py_resolve_bearer(py: Python<'_>, token: String) -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
@@ -3384,6 +3548,10 @@ mod python {
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
+        m.add_function(wrap_pyfunction!(py_emit_deferral_request, m)?)?;
+        m.add_function(wrap_pyfunction!(py_emit_deferral_response, m)?)?;
+        m.add_function(wrap_pyfunction!(py_emit_identity_amendment, m)?)?;
+        m.add_function(wrap_pyfunction!(py_owner_record, m)?)?;
         m.add_function(wrap_pyfunction!(py_first_run_claim_pin, m)?)?;
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_identity, m)?)?;
