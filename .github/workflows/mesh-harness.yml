@@ -71,36 +71,12 @@ permissions:
   contents: read
 
 jobs:
-  ladder:
-    name: ${{ matrix.scenario }} ladder
-    # TWO LADDERS, IN PARALLEL, not one after the other. They are independent
-    # stacks on independent compose projects and the release gates on both, so
-    # serializing them would add ~20 min to every PR for no isolation the
-    # separate projects do not already give. `fail-fast: false` because a red
-    # chat ladder must not cancel traceflow — the two answer different questions
-    # and "we never found out about the other one" is the worst outcome here.
-    #
-    # On workflow_dispatch the matrix collapses to the ONE scenario asked for
-    # (the input has a default, so it is never empty); on pull_request and the
-    # nightly schedule it is both. genesis_seed stays dispatch-only: it is an
-    # AUDIT of unfinished genesis, red by design, and gating PRs on it would be
-    # gating on work nobody has claimed yet.
-    strategy:
-      fail-fast: false
-      matrix:
-        # traceflow_prod is the PRODUCTION-SHAPED ladder (CIRISServer#632): a split, owned,
-        # Advisory-admitted, genesis-imported agent — the topology every production agent
-        # runs and the blessed ladders never had. Its SUCCESS_STAGE is `served` until
-        # CIRISEdge#659 lands; `arrive` is measured and expected red until then.
-        # selffiles (CIRISServer#622) is ONE person on TWO devices — the only shape
-        # a self room exists for — and its `opened_on_b` has been REQUIRED since
-        # 0.5.216; a REQUIRED rung that never runs in CI proves nothing on its own.
-        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat","traceflow_prod","selffiles"]') }}
+  # The release build every ladder runs against, ONCE (it was once per matrix
+  # job — four parallel copies of the same thin-LTO build). `lto = "thin"` +
+  # `codegen-units = 1` (CIRISServer#378) make the final link the long pole.
+  build:
+    name: test-anchor build
     runs-on: ubuntu-latest
-    # 0.5.166 raised this from 45: this ladder builds a test-anchor wheel, and
-    # `lto = "thin"` + `codegen-units = 1` (CIRISServer#378) roughly doubles the
-    # final link. (The note used to live in client-artifacts.yml, deleted with
-    # `client/` in CIRISServer#471.)
     timeout-minutes: 75
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -153,9 +129,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Read-only from PRs; main populates. Matches ci.yml's posture.
+          # Read-only from PRs; main (the nightly) populates. It holds the
+          # `harness` profile's deps, which the release-layer CIRISCache below
+          # cannot (a different profile is a different target dir).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: mesh-harness
+          key: mesh-harness-profile
 
       # This was the ONLY Rust-building workflow in the repo off the shared
       # centipede — Swatinem's GHA L1 alone, so every run recompiled the whole
@@ -198,13 +176,117 @@ jobs:
 
       - name: Build the test-anchor wheel once
         run: |
-          cargo build --release --features test-anchor,python
+          # The `harness` profile (Cargo.toml): release optimisation, no LTO,
+          # 16 codegen units. The release profile's thin-LTO serial link was the
+          # whole cost of this workflow (41 min of build for a 2-min ladder).
+          cargo build --profile harness --features test-anchor,python
           # The three-holder test anchor the bundle-v4 ceremony signs under
           # (harness_genesis_v4, CIRISServer#801). Same features, so only the
           # example links on top of the build above.
-          cargo build --release --features test-anchor,python --example test_ceremony_anchor
+          cargo build --profile harness --features test-anchor,python --example test_ceremony_anchor
+          # The compose files, pack_wheel.py and harness.sh read target/release/;
+          # place the harness build there rather than re-pathing all of them.
+          mkdir -p target/release/examples
+          cp target/harness/ciris-server target/harness/libciris_server.so target/release/
+          cp target/harness/examples/test_ceremony_anchor target/release/examples/
           python3 harness/mesh-repro/pack_wheel.py
           ls -la harness/mesh-repro/wheels/
+
+      - name: Upload the build for the ladders
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-harness-build
+          path: |
+            target/release/ciris-server
+            target/release/examples/test_ceremony_anchor
+            harness/mesh-repro/wheels/
+          if-no-files-found: error
+          retention-days: 3
+
+  ladder:
+    name: ${{ matrix.scenario }} ladder
+    # TWO LADDERS, IN PARALLEL, not one after the other. They are independent
+    # stacks on independent compose projects and the release gates on both, so
+    # serializing them would add ~20 min to every PR for no isolation the
+    # separate projects do not already give. `fail-fast: false` because a red
+    # chat ladder must not cancel traceflow — the two answer different questions
+    # and "we never found out about the other one" is the worst outcome here.
+    #
+    # On workflow_dispatch the matrix collapses to the ONE scenario asked for
+    # (the input has a default, so it is never empty); on pull_request and the
+    # nightly schedule it is both. genesis_seed stays dispatch-only: it is an
+    # AUDIT of unfinished genesis, red by design, and gating PRs on it would be
+    # gating on work nobody has claimed yet.
+    strategy:
+      fail-fast: false
+      matrix:
+        # traceflow_prod is the PRODUCTION-SHAPED ladder (CIRISServer#632): a split, owned,
+        # Advisory-admitted, genesis-imported agent — the topology every production agent
+        # runs and the blessed ladders never had. Its SUCCESS_STAGE is `served` until
+        # CIRISEdge#659 lands; `arrive` is measured and expected red until then.
+        # selffiles (CIRISServer#622) is ONE person on TWO devices — the only shape
+        # a self room exists for — and its `opened_on_b` has been REQUIRED since
+        # 0.5.216; a REQUIRED rung that never runs in CI proves nothing on its own.
+        scenario: ${{ fromJSON(inputs.scenario && format('["{0}"]', inputs.scenario) || '["traceflow","chat","traceflow_prod","selffiles"]') }}
+    needs: build
+    runs-on: ubuntu-latest
+    # The build moved to the `build` job; a ladder is docker compose plus a
+    # ~13-minute window.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # BEFORE any tool install. The release build plus two docker images is tight
+      # on a stock runner, and an ENOSPC mid-run looks exactly like a harness
+      # failure. NOTE: do NOT delete $AGENT_TOOLSDIRECTORY — that is where the
+      # rust toolchain and sccache get installed, and removing it after setup
+      # makes the build fail with a bare "could not execute process `sccache`".
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift || true
+          df -h / | tail -1
+
+      # The release wheel keeps DEFAULT features, so `pkcs11` pulls libudev-sys and
+      # the TPM path pulls tss2 — both need system libs or the build dies in a
+      # build script with a pkg-config error that looks nothing like a harness
+      # failure. Same set (and the same Microsoft-repo workaround) as ci.yml.
+      - name: System deps for the release build
+        run: |
+          # Drop the preinstalled Microsoft/azure-cli apt repo: it intermittently
+          # 403s and tanks apt-get update (its packages are not needed here).
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/azure-cli.sources
+          # Drop the AZURE UBUNTU MIRROR (CIRISServer#449) — the runner image makes
+          # it the PRIMARY mirror via /etc/apt/apt-mirrors.txt, and a stalled
+          # azure mirror wedges the whole job (68 min, 75 min, and a re-run that
+          # hung again, all on one PR).
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo find /etc/apt/sources.list.d -type f -exec \
+            sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} + 2>/dev/null || true
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
+
+      # ONE build for all four ladders (the `build` job above). Each ladder used
+      # to run this release build itself: four identical thin-LTO links in
+      # parallel, contending for the same caches, and three of four timed out
+      # in "Build the test-anchor wheel" twice on CIRISServer#816. Upload drops
+      # the execute bit, hence the chmod.
+      - name: Fetch the test-anchor build
+        uses: actions/download-artifact@v4
+        with:
+          name: mesh-harness-build
+          path: .
+      - name: Restore execute bits
+        run: |
+          chmod +x target/release/ciris-server target/release/examples/test_ceremony_anchor
+          ls -la target/release/ciris-server target/release/examples/test_ceremony_anchor harness/mesh-repro/wheels/
 
       - name: Pre-pull base image
         # Buildkit's DNS has flaked here before; a pre-pull with the daemon's
@@ -261,7 +343,7 @@ jobs:
         id: ladder
         env:
           DOCKER_BUILDKIT: "0"
-          SKIP_BUILD: "1"          # reuse the wheel built above
+          SKIP_BUILD: "1"          # the wheel the `build` job uploaded
           # Leave the stack up. The scenario tears it down on exit otherwise,
           # so the log step below read nothing and every failed ladder uploaded
           # empty node logs; the teardown step at the end of this job owns it.

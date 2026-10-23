@@ -477,7 +477,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     if node_resolution.did_split() {
         // The owner-binding named the ACTOR key. Re-subject it to the node key
         // using the owner's own signer, which a claimed node holds — installing
-        // the app IS the claim. Same owner, same infra scopes, same cohort.
+        // the app IS the claim. Same owner, same infra scopes; and an owner who had
+        // ANNOUNCED stays announced (`carry_announce_to_node_key`).
         let actor_key_id = node_resolution
             .split_from
             .clone()
@@ -496,7 +497,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         .await
         {
             Ok(Some(owner_signer)) => {
-                crate::node_key::move_owner_binding_to_node_key(
+                crate::node_key::follow_owner_across_split(
                     &engine,
                     &owner_signer,
                     &actor_key_id,
