@@ -174,7 +174,21 @@ PARTY about itself — so the grant's signer must BE the author, and is checked.
 ## Migration — unattended, at boot
 
 Installing the app **is** claiming ownership, so a claimed node holds its owner's
-fed-ID and no operator step exists. In order:
+fed-ID and no operator step exists.
+
+**Except a node claimed remotely** (CIRISServer#811, 0.5.234). A Docker or
+managed agent, or a headless server claimed from a phone, keeps the owner's seed
+on the owner's device. On such a node step 4 finds no signer, so it warns and the
+node key stays unowned, while setup/root is closed because a ROOT exists. A
+managed agent owned only by its legacy `admin` ROOT is in the same state with no
+binding at all. Boot names both as OWNED BUT UNBOUND. This is a one-time
+migration, so the remedy is staged rather than a new network door:
+`POST /v1/setup/sign-owner-binding` on the owner's device signs
+`delegates_to(owner → node key)` and returns it without sending it. The operator
+then applies it with `POST /v1/self/upgrade-owner` on the node, under its admin
+session.
+
+In order:
 
 1. **Classify** the configured key (`node_key::classify`).
 2. `SubstrateOnly` / `Unregistered` ⇒ **stop.** Standalone CIRISServer is unchanged.

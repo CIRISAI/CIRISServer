@@ -509,7 +509,8 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 "the node key was minted but no owner signer is on disk, so its \
                  owner-binding could not follow. `owner_of(node)` does not resolve and \
                  CC 3.4.7.3 Clause D is fail-closed: nothing may act through this node \
-                 until ownership is established."
+                 until ownership is established. The OWNED BUT UNBOUND warning names the \
+                 remedy when this node already has a ROOT."
             ),
             Err(e) => tracing::warn!(
                 error = %e,
@@ -525,6 +526,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // them. The owner's re-sign below (`migrate_consent_to_owner`) is the
         // migration.
     }
+    // A ROOT but no owner-binding on the node key: say so, once, with the remedy
+    // (CIRISServer#811 — legacy-admin managed agents, remote claims across the split).
+    crate::claim_remote::warn_if_owned_but_unbound(
+        &engine,
+        &node_resolution.node_key_id,
+        node_resolution.split_from.as_deref(),
+    )
+    .await;
 
     // Consent is by humans: any live grant a machine key authored (the engine key
     // before 0.5.203, the node key 0.5.203–0.5.209, or a provisional pre-claim

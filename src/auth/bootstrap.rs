@@ -729,25 +729,6 @@ struct SetupRootRequest {
     owner_roster_proof: Option<crate::claim_remote::RosterProof>,
 }
 
-/// The part of a [`crate::claim_remote::RosterProof`] that speaks for `signer`:
-/// a USER record, and only the occurrence rows naming `signer` under it. `None`
-/// when nothing in the proof is about this binding's signer.
-fn roster_proof_for_signer<'a>(
-    proof: &'a crate::claim_remote::RosterProof,
-    signer: &str,
-) -> Option<&'a crate::claim_remote::RosterProof> {
-    let identity = &proof.identity_key_record.record;
-    let about_signer = |o: &ciris_persist::federation::types::SignedIdentityOccurrence| {
-        o.identity_occurrence.occurrence_key_id == signer
-            && o.identity_occurrence.identity_key_id == identity.key_id
-    };
-    (identity.identity_type == ciris_persist::federation::types::identity_type::USER
-        && identity.key_id != signer
-        && !proof.occurrences.is_empty()
-        && proof.occurrences.iter().all(about_signer))
-    .then_some(proof)
-}
-
 /// The 1-phase `POST /v1/setup/root` response — ROOT bound + the USER-SIGNED
 /// owner-binding persisted.
 #[derive(Debug, Serialize)]
@@ -1139,7 +1120,7 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
     let roster_proof = req
         .owner_roster_proof
         .as_ref()
-        .and_then(|p| roster_proof_for_signer(p, &owner_binding.attesting_key_id));
+        .and_then(|p| crate::claim_remote::roster_proof_about(p, &owner_binding.attesting_key_id));
     if let Some(p) = roster_proof {
         if let Err(e) = st
             .engine

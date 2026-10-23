@@ -894,6 +894,22 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "trust_root.bundle_refused",
     "trust_root.install_failed",
     "trust_root.withdraw_failed",
+    # THE STAGED OWNER-BINDING (CIRISServer#811 / 0.5.234): the owner signs on
+    # their own device (sign-owner-binding) and the operator applies it with
+    # upgrade-owner, for a node their fed-ID was never on (legacy-admin managed
+    # agents; remote claims across the 0.5.189 split). The same queue as the
+    # planes above.
+    "sign_owner_binding.bad_request",
+    "sign_owner_binding.build_failed",
+    "sign_owner_binding.cohort_invalid",
+    "sign_owner_binding.no_identity",
+    "sign_owner_binding.signer_unavailable",
+    "upgrade_owner.already_owned",
+    "upgrade_owner.bad_request",
+    "upgrade_owner.binding_rejected",
+    "upgrade_owner.cohort_invalid",
+    "upgrade_owner.directory",
+    "upgrade_owner.roster_proof_refused",
 )
 
 
