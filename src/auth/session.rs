@@ -1109,6 +1109,49 @@ fn mask_email(email: &str) -> String {
     }
 }
 
+/// **The node owner's record** (CIRISAgent#1316 follow-up: the agent's
+/// `GET /v1/users/{id}` 404ed for the node-claimed owner, whose record is not in
+/// the brain's table). The founding owner is the earliest active ROOT WaCert,
+/// as [`owner_hint`] reads it; `role` is persist's `WaRole` wire form (`"root"`)
+/// and `user_role` the session role; `owner_key_id` is `owner_of(node_key_id)`, the
+/// fed-ID the node is bound to (`null` for a legacy ROOT with no binding). No
+/// field is invented: what the cert does not carry is absent. `None` when the
+/// node has no ROOT.
+pub async fn owner_record(
+    engine: &Engine,
+    node_key_id: &str,
+) -> Result<Option<serde_json::Value>, store::StoreError> {
+    let Some(founder) = store::list_by_role(engine, WaRole::Root, 1000)
+        .await?
+        .into_iter()
+        .min_by_key(|c| c.created)
+    else {
+        return Ok(None);
+    };
+    let owner_key_id = ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        node_key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    Ok(Some(serde_json::json!({
+        "wa_id": founder.wa_id,
+        "name": founder.name,
+        // persist's `WaRole` serde form (`"root"`), the agent's WARole.
+        "role": founder.role,
+        // The session role the same cert resolves to (`"SYSTEM_ADMIN"`).
+        "user_role": UserRole::from_wa_role(founder.role).as_str(),
+        "created_at": founder.created.to_rfc3339(),
+        "owner_key_id": owner_key_id,
+        // How the owner signs in, read as `owner_hint` reads it (the cert's
+        // token type), plus whether a password is set — both stated by the cert.
+        "auth_type": founder.token_type.as_sql_str(),
+        "has_password": founder.password_hash.is_some(),
+        "oauth_provider": founder.oauth_provider,
+    })))
+}
+
 async fn owner_hint(State(st): State<SessionState>) -> Response {
     // The founding owner is the earliest ROOT (SYSTEM_ADMIN) WA cert. We list
     // ROOT-role active certs (ordered created DESC) and take the oldest.
