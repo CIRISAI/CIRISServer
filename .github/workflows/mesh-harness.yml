@@ -129,9 +129,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Read-only from PRs; main populates. Matches ci.yml's posture.
+          # Read-only from PRs; main (the nightly) populates. It holds the
+          # `harness` profile's deps, which the release-layer CIRISCache below
+          # cannot (a different profile is a different target dir).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: mesh-harness
+          key: mesh-harness-profile
 
       # This was the ONLY Rust-building workflow in the repo off the shared
       # centipede — Swatinem's GHA L1 alone, so every run recompiled the whole
@@ -174,11 +176,19 @@ jobs:
 
       - name: Build the test-anchor wheel once
         run: |
-          cargo build --release --features test-anchor,python
+          # The `harness` profile (Cargo.toml): release optimisation, no LTO,
+          # 16 codegen units. The release profile's thin-LTO serial link was the
+          # whole cost of this workflow (41 min of build for a 2-min ladder).
+          cargo build --profile harness --features test-anchor,python
           # The three-holder test anchor the bundle-v4 ceremony signs under
           # (harness_genesis_v4, CIRISServer#801). Same features, so only the
           # example links on top of the build above.
-          cargo build --release --features test-anchor,python --example test_ceremony_anchor
+          cargo build --profile harness --features test-anchor,python --example test_ceremony_anchor
+          # The compose files, pack_wheel.py and harness.sh read target/release/;
+          # place the harness build there rather than re-pathing all of them.
+          mkdir -p target/release/examples
+          cp target/harness/ciris-server target/harness/libciris_server.so target/release/
+          cp target/harness/examples/test_ceremony_anchor target/release/examples/
           python3 harness/mesh-repro/pack_wheel.py
           ls -la harness/mesh-repro/wheels/
 

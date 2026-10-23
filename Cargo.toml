@@ -528,6 +528,16 @@ codegen-units = 1
 #
 # Stepping through code in a debugger? Override per-invocation, don't edit this:
 #   cargo test --config 'profile.dev.debug=2' --config 'profile.test.debug=2'
+# The mesh harness's build (CI's `mesh-harness.yml`): release optimisation
+# WITHOUT the release link. `lto = "thin"` + `codegen-units = 1` make every
+# release build serial and slow, and the ladders gain nothing from it: on a
+# green run the build took 41 min and the ladder 2. Shipped artifacts never use
+# this profile.
+[profile.harness]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [profile.dev]
 debug = "line-tables-only"
 
