@@ -748,6 +748,88 @@ pub async fn move_owner_binding_to_node_key(
     }))
 }
 
+/// Does `key` carry a FEDERATION-scope owner-binding? Strict: a directory read
+/// failure is an error, never a guess (the caller acts as the owner on a yes).
+async fn federation_scoped_owner_binding(
+    engine: &ciris_persist::prelude::Engine,
+    key: &str,
+) -> Result<bool> {
+    use crate::attestation_reads::AllAttestations as _;
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+    let rows = engine
+        .federation_directory()
+        .attestations_to_all(key)
+        .await
+        .map_err(|e| anyhow::anyhow!("attestations_to_all({key}): {e:#}"))?;
+    Ok(rows.iter().any(|a| {
+        a.attestation_type == attestation_type::DELEGATES_TO
+            && a.cohort_scope == cohort_scope::FEDERATION
+            && a.attestation_envelope
+                .get("delegation_purpose")
+                .and_then(|v| v.as_str())
+                == Some(crate::auth::ownership::OWNER_BINDING_PURPOSE)
+    }))
+}
+
+/// **The announce follows the owner across the split.** When the ACTOR key's
+/// owner-binding was announced (federation scope) and the node key's is not,
+/// re-promote the node key's binding to federation with the owner's pen.
+///
+/// [`move_owner_binding_to_node_key`] writes the moved binding at `self`, the
+/// scope every new binding is born at. On a home whose owner had ANNOUNCED, that
+/// silently un-announced it: a self-scoped binding reaches only the owner's own
+/// devices, so the canonical never rooted the node at its steward and a contact's
+/// node found "no node" for the person (Eric × Francesco, 2026-10-23: the
+/// canonical held `francesco → <agent key>` at federation and nothing naming the
+/// node key). Idempotent, and run on every boot so an already-split home heals.
+///
+/// Returns the new federation binding's id, or `None` when nothing was owed.
+pub async fn carry_announce_to_node_key(
+    engine: &ciris_persist::prelude::Engine,
+    owner_signer: &ciris_persist::prelude::LocalSigner,
+    actor_key_id: &str,
+    node_key_id: &str,
+) -> Result<Option<String>> {
+    if !federation_scoped_owner_binding(engine, actor_key_id).await?
+        || federation_scoped_owner_binding(engine, node_key_id).await?
+    {
+        return Ok(None);
+    }
+    let promoted = crate::auth::ownership::promote_owner_binding_to_federation(
+        engine,
+        owner_signer,
+        node_key_id,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("re-announce the node key: {e}"))?;
+    tracing::info!(
+        owner = %promoted.responsible_user_key_id,
+        actor_key_id = %actor_key_id,
+        node_key_id = %node_key_id,
+        attestation_id = ?promoted.attestation_id,
+        "the owner had ANNOUNCED the actor key, so the node key's owner-binding is \
+         re-announced at federation scope — peers and the canonical can now resolve this \
+         node's owner (history: the split wrote the moved binding at self)"
+    );
+    Ok(promoted.attestation_id)
+}
+
+/// **Every boot of a split home, with the owner's pen in hand**: move the
+/// owner-binding onto the node key ([`move_owner_binding_to_node_key`]), then
+/// carry an announce across ([`carry_announce_to_node_key`]).
+pub async fn follow_owner_across_split(
+    engine: &ciris_persist::prelude::Engine,
+    owner_signer: &ciris_persist::prelude::LocalSigner,
+    actor_key_id: &str,
+    node_key_id: &str,
+) -> Result<(Option<OwnerBindingMove>, Option<String>)> {
+    let moved =
+        move_owner_binding_to_node_key(engine, owner_signer, actor_key_id, node_key_id).await?;
+    let announced =
+        carry_announce_to_node_key(engine, owner_signer, actor_key_id, node_key_id).await?;
+    Ok((moved, announced))
+}
+
 /// Every payload member `emit_replication_consent_with_policy` can reproduce.
 /// A grant carrying anything else is REFUSED rather than migrated with that
 /// member dropped — see [`policy_of`].
