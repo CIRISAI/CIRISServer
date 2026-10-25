@@ -2085,6 +2085,88 @@ pub(crate) async fn incoming_contact_requests(
     owner_key_id: &str,
     node_key_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    Ok(contact_requests_split(engine, owner_key_id, node_key_id)
+        .await?
+        .0)
+}
+
+/// The dimension of an IGNORE (FSD/MEMBERSHIP_INVITES.md §8.1): the owner's
+/// local-tier `scores` row citing a request grant. Local tier, never promoted,
+/// so the requester learns nothing (CC 5.3.2.4.1); reversible by a local
+/// `withdraws` under the same dimension citing the ignore.
+pub const CONTACT_IGNORED_DIMENSION: &str = "contact:request:ignored:v1";
+
+/// The owner's live ignores: request grant id → the ignore row's id. Folds the
+/// owner's local `withdraws` (an un-ignore) over their local ignores.
+async fn live_ignores(
+    engine: &Engine,
+    owner_key_id: &str,
+) -> Result<HashMap<String, String>, String> {
+    use ciris_persist::federation::attestation_query::{AttestationQuery, QueryTier, FOLD_PAGE};
+    let dir = engine.federation_directory();
+    let mut rows: Vec<Attestation> = Vec::new();
+    let mut pages = AttestationQuery::by(owner_key_id, FOLD_PAGE)
+        .tier(QueryTier::Local)
+        .dimension(CONTACT_IGNORED_DIMENSION)
+        .pages();
+    while let Some(page) = pages
+        .next(dir.as_ref())
+        .await
+        .map_err(|e| format!("ignores by {owner_key_id}: {e:#}"))?
+    {
+        rows.extend(page);
+    }
+    let cited = |r: &Attestation| {
+        r.attestation_envelope
+            .get(ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    let withdrawn: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|r| r.attestation_type == attestation_type::WITHDRAWS)
+        .filter_map(cited)
+        .collect();
+    Ok(rows
+        .iter()
+        .filter(|r| r.attestation_type == attestation_type::SCORES)
+        .filter(|r| !withdrawn.contains(&r.attestation_id))
+        .filter_map(|r| cited(r).map(|grant| (grant, r.attestation_id.clone())))
+        .collect())
+}
+
+/// Every unanswered request, split into (pending, ignored). An ignored request
+/// carries its `ignore_id` (to un-ignore). A NEW grant from the same person is a
+/// new request: an ignore answers one grant.
+pub(crate) async fn contact_requests_split(
+    engine: &Engine,
+    owner_key_id: &str,
+    node_key_id: &str,
+) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), String> {
+    let ignores = live_ignores(engine, owner_key_id).await?;
+    let mut pending = Vec::new();
+    let mut ignored = Vec::new();
+    for mut entry in all_contact_requests(engine, owner_key_id, node_key_id).await? {
+        let grant = entry["grant_attestation_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        match ignores.get(&grant) {
+            Some(ignore_id) => {
+                entry["ignore_id"] = serde_json::json!(ignore_id);
+                ignored.push(entry);
+            }
+            None => pending.push(entry),
+        }
+    }
+    Ok((pending, ignored))
+}
+
+async fn all_contact_requests(
+    engine: &Engine,
+    owner_key_id: &str,
+    node_key_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     use ciris_persist::federation::attestation_query::{AttestationQuery, FOLD_PAGE};
     let dir = engine.federation_directory();
     let mut mine: Vec<String> = vec![owner_key_id.to_owned(), node_key_id.to_owned()];
@@ -2162,6 +2244,10 @@ pub(crate) async fn incoming_contact_requests(
                 "path": "/v1/contacts",
                 "body": { "key_id": person },
             },
+            "ignore": {
+                "method": "POST",
+                "path": format!("/v1/contacts/requests/{}/ignore", g.attestation_id),
+            },
         }));
     }
     Ok(out)
@@ -2180,12 +2266,14 @@ async fn list_contact_requests(State(st): State<ChatState>, headers: HeaderMap) 
     ) {
         return resp;
     }
-    match incoming_contact_requests(&st.engine, &owner.key_id, &owner.node_key_id).await {
-        Ok(requests) => {
+    match contact_requests_split(&st.engine, &owner.key_id, &owner.node_key_id).await {
+        Ok((requests, ignored)) => {
             let total = requests.len();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "requests": requests, "total": total })),
+                Json(
+                    serde_json::json!({ "requests": requests, "total": total, "ignored": ignored }),
+                ),
             )
                 .into_response()
         }
@@ -2195,6 +2283,178 @@ async fn list_contact_requests(State(st): State<ChatState>, headers: HeaderMap) 
             e,
         ),
     }
+}
+
+/// The owner, not a delegate: answering a request is their own act.
+#[allow(clippy::result_large_err)]
+fn owner_only(owner: &Owner) -> Result<(), Response> {
+    if owner.caller.actor.is_some() {
+        return Err(refuse(
+            StatusCode::FORBIDDEN,
+            "contacts.delegate_may_not_answer",
+            "answering a contact request is the owner's own act",
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /v1/contacts/requests/{grant_attestation_id}/ignore` — hide a pending
+/// request, privately (FSD/MEMBERSHIP_INVITES.md §8.1). The owner's local-tier
+/// `contact:request:ignored:v1` row citing the grant; never promoted, so the
+/// requester learns nothing.
+async fn ignore_contact_request(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path(grant_id): Path<String>,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Err(r) = owner_only(&owner) {
+        return r;
+    }
+    let pending = match contact_requests_split(&st.engine, &owner.key_id, &owner.node_key_id).await
+    {
+        Ok((p, _)) => p,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "contacts.store_unavailable",
+                e,
+            )
+        }
+    };
+    let Some(entry) = pending
+        .iter()
+        .find(|e| e["grant_attestation_id"].as_str() == Some(grant_id.as_str()))
+    else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "contacts.request_not_found",
+            format!("{grant_id} is not a pending contact request for this owner"),
+        );
+    };
+    let envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION): CONTACT_IGNORED_DIMENSION,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): grant_id,
+        "requester_key_id": entry["requester_key_id"],
+    });
+    match insert_local(
+        &st.engine,
+        &owner.key_id,
+        attestation_type::SCORES,
+        envelope,
+    )
+    .await
+    {
+        Ok(ignore_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "state": "ignored",
+                "grant_attestation_id": grant_id,
+                "ignore_id": ignore_id,
+            })),
+        )
+            .into_response(),
+        Err(e) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "contacts.store_unavailable",
+            e,
+        ),
+    }
+}
+
+/// `DELETE /v1/contacts/requests/{grant_attestation_id}/ignore` — un-ignore: a
+/// local `withdraws` citing the ignore, so the request is pending again.
+async fn unignore_contact_request(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path(grant_id): Path<String>,
+) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Err(r) = owner_only(&owner) {
+        return r;
+    }
+    let ignore_id = match live_ignores(&st.engine, &owner.key_id).await {
+        Ok(m) => match m.get(&grant_id) {
+            Some(id) => id.clone(),
+            None => {
+                return refuse(
+                    StatusCode::NOT_FOUND,
+                    "contacts.request_not_ignored",
+                    format!("{grant_id} is not an ignored contact request"),
+                )
+            }
+        },
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "contacts.store_unavailable",
+                e,
+            )
+        }
+    };
+    let envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION): CONTACT_IGNORED_DIMENSION,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): ignore_id,
+    });
+    match insert_local(
+        &st.engine,
+        &owner.key_id,
+        attestation_type::WITHDRAWS,
+        envelope,
+    )
+    .await
+    {
+        Ok(withdrawal_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "state": "pending",
+                "grant_attestation_id": grant_id,
+                "withdrawal_id": withdrawal_id,
+            })),
+        )
+            .into_response(),
+        Err(e) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "contacts.store_unavailable",
+            e,
+        ),
+    }
+}
+
+/// One owner-attested local-tier row (never promoted): no subject, cohort self.
+async fn insert_local(
+    engine: &Engine,
+    owner_key_id: &str,
+    attestation_type: &str,
+    envelope: serde_json::Value,
+) -> Result<String, String> {
+    let input = ciris_persist::federation::types::LocalAttestationInput {
+        attestation_id: None,
+        attesting_key_id: owner_key_id.to_owned(),
+        attested_key_id: Some(owner_key_id.to_owned()),
+        attestation_type: attestation_type.to_owned(),
+        weight: None,
+        expires_at: None,
+        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
+            envelope,
+        )
+        .map_err(|e| format!("envelope: {e}"))?,
+        subject_key_ids: Vec::new(),
+        cohort_scope: cohort_scope::SELF.to_owned(),
+        scrub_signature_classical: None,
+        scrub_signature_pqc: None,
+    };
+    engine
+        .federation_directory()
+        .attestation_insert_local(input)
+        .await
+        .map_err(|e| format!("insert {attestation_type} ({CONTACT_IGNORED_DIMENSION}): {e:#}"))
 }
 
 async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Response {
@@ -4971,6 +5231,10 @@ pub fn router_with_driver(
         .route(
             "/v1/contacts/requests",
             axum::routing::get(list_contact_requests),
+        )
+        .route(
+            "/v1/contacts/requests/{grant_id}/ignore",
+            axum::routing::post(ignore_contact_request).delete(unignore_contact_request),
         )
         .route(
             "/v1/contacts/{key_id}",

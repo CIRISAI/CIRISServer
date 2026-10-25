@@ -254,10 +254,8 @@ above; there is no separate "accepted" state to keep in step.
   Bob adding back clears it.
 
 **Not yet (named, so nobody assumes them):**
-- **Declining a contact.** No signed row answers "no" to someone else's grant.
-  The only answer today is not adding back. A dismissal that hides a request
-  needs a decision: a node-local note, or a signed `declines` the requester's
-  node could read.
+- **Declining a contact** (telling the requester): see §8.2. It waits on
+  persist's addressed placement.
 - **Requests that need a link.** A grant reaches the owner's node only by
   replication. A transport fault between the two nodes holds it back. CIRISEdge#888
   (two keys claiming one destination) was exactly that.
@@ -268,4 +266,54 @@ above; there is no separate "accepted" state to keep in step.
   A Joiner who added back must still wait for the Creator's open. The
   five-platform cross-platform chat stage (CIRISAgent, 2026-10-25) measures this
   and the request visibility above.
+
+### 8.1 Ignore: private, reversible (0.5.237)
+
+CC's read (CC 5.3.2.4.1; the steward's ruling is pending on the name):
+ignoring is the owner's own row about their own inbox. It is a local-tier
+`scores` row, dimension `contact:request:ignored:v1`, with
+`references_attestation_id` → the request grant, attester = the owner, no
+subject, cohort `self`. It is written through `attestation_insert_local`,
+unsigned, and **never promoted**, so the requester learns nothing (the same as
+silence). Un-ignore is a local `withdraws` under the same dimension citing the
+ignore. The reader folds one over the other. An ignore answers one grant: a new
+grant from the same person is a new request.
+
+| Route | Who | Answers |
+|---|---|---|
+| `POST /v1/contacts/requests/{grant_attestation_id}/ignore` | the owner (a delegate may not) | 200 `{state: "ignored", grant_attestation_id, ignore_id}`; 404 `contacts.request_not_found` when it is not a pending request |
+| `DELETE /v1/contacts/requests/{grant_attestation_id}/ignore` | the owner | 200 `{state: "pending", grant_attestation_id, withdrawal_id}`; 404 `contacts.request_not_ignored` |
+| `GET /v1/contacts/requests` | the owner | adds `ignored: [...]`, entries as `requests` plus `ignore_id` |
+
+Each request entry carries `ignore: {method: "POST", path}` beside `accept`.
+`contacts.delegate_may_not_answer` (403) refuses a delegate.
+
+Witnesses:
+- `tests/contacts_chat.rs::ignoring_a_request_hides_it_privately_and_unignoring_restores_it`.
+  It checks the row is local tier, not federation. The un-ignore fold is
+  mutation-checked.
+- `…::ignoring_something_that_is_not_a_request_is_refused`.
+
+### 8.2 Decline: the requester learns (waits on CIRISPersist#1121)
+
+CC's read: a single-signer answer, the shape of `membership:decline` (CC 3.1.3.2)
+applied to a consent grant. It is a `scores` row, dimension
+`contact:request:declined:v1`, with `references_attestation_id` → the grant,
+subject and `for_key_id` = the requester, cohort `self`, at the **addressed**
+placement (CC 6.1.9): held by the author's node and the requester's node only,
+served to the recipient only, and refused by any other holder with
+`federation_addressed_not_recipient`.
+
+It informs only. The requester's node SHOULD withdraw its grant on receipt, but
+nothing obliges it. The owner's inbox hides the request either way. A decline is
+final for that grant.
+
+The addressed placement is persist's CIRISPersist#1121 item 1, after v60. Its
+witness is this row. **Decline is not shipped at any wider audience in the
+meantime:** a `federation` decline would publish that X declined Y, and a `self`
+row never reaches the requester.
+
+Catalogue v6 (CC first, then the server re-vendors) adds `contact.request.{pending,
+accepted, ignored, declined}`. T2 promises pending → accepted and ignored.
+`declined` waits as AWAITING_ENTRY "CIRISPersist#1121" until the door lands.
 

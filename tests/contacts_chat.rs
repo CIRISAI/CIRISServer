@@ -4064,3 +4064,122 @@ async fn a_withdrawn_request_is_not_offered() {
         "a withdrawn request is gone"
     );
 }
+
+async fn call_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    owner: &str,
+) -> (u16, serde_json::Value) {
+    let resp = client
+        .request(method, url)
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("request");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **Ignore is private and reversible** (FSD/MEMBERSHIP_INVITES.md §8.1). It
+/// hides the request, lists it under `ignored`, and writes only a LOCAL row the
+/// requester can never receive; un-ignore brings it back.
+#[tokio::test]
+async fn ignoring_a_request_hides_it_privately_and_unignoring_restores_it() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    let listed = contact_requests(&client, &base, &owner).await;
+    assert_eq!(
+        listed["requests"][0]["ignore"]["path"],
+        format!("/v1/contacts/requests/{grant_id}/ignore")
+    );
+
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("ignored")), "{v}");
+    let ignore_id = v["ignore_id"].as_str().expect("ignore_id").to_owned();
+
+    let after = contact_requests(&client, &base, &owner).await;
+    assert_eq!(after["total"], 0, "hidden: {after}");
+    assert_eq!(
+        after["ignored"][0]["grant_attestation_id"],
+        grant_id.as_str()
+    );
+    assert_eq!(after["ignored"][0]["ignore_id"], ignore_id.as_str());
+
+    // Private: the ignore is a LOCAL row, never a federation row anyone can receive.
+    let stored = engine
+        .federation_directory()
+        .get_attestation(&ignore_id)
+        .await
+        .unwrap();
+    assert!(
+        stored.as_ref().is_none_or(|a| a.tier == "local"),
+        "the ignore must not be a federation-tier row: {stored:?}"
+    );
+
+    // Ignoring it again is a 404: it is no longer pending.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_found")),
+        "{v}"
+    );
+
+    // Un-ignore: pending again.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::DELETE,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("pending")), "{v}");
+    let back = contact_requests(&client, &base, &owner).await;
+    assert_eq!(back["total"], 1, "restored: {back}");
+    assert_eq!(back["ignored"], serde_json::json!([]));
+
+    // Un-ignoring what is not ignored is a 404.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::DELETE,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_ignored")),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn ignoring_something_that_is_not_a_request_is_refused() {
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/no-such-grant/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_found")),
+        "{v}"
+    );
+}

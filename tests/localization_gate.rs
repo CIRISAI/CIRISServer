@@ -839,7 +839,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 19 -> 30 for 0.5.234: the staged owner-binding's `upgrade_owner.*` and
     /// `sign_owner_binding.*` ids (CIRISServer#811) — same reason, same list,
     /// queued for the client bundle with their English.
-    const MAX_UNCOVERED: usize = 30;
+    /// 30 -> 33 for 0.5.237: the contact-request ignore routes
+    /// `contacts.{delegate_may_not_answer,request_not_found,request_not_ignored}`
+    /// (CIRISServer#818) — same reason, same list.
+    const MAX_UNCOVERED: usize = 33;
 
     let en = load_en();
     let ids = scraped_server_ids();

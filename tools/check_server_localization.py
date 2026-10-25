@@ -910,6 +910,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "upgrade_owner.cohort_invalid",
     "upgrade_owner.directory",
     "upgrade_owner.roster_proof_refused",
+    # CONTACT REQUESTS (CIRISServer#818 / 0.5.237, FSD/MEMBERSHIP_INVITES.md
+    # §8.1): ignoring and un-ignoring a request someone else signed. Queued for
+    # the client bundle with their English (CSD-107).
+    "contacts.delegate_may_not_answer",
+    "contacts.request_not_found",
+    "contacts.request_not_ignored",
 )
 
 
