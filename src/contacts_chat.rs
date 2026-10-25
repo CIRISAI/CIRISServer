@@ -5753,15 +5753,25 @@ pub(crate) mod pending_contacts {
     pub const PENDING_TTL: Duration = Duration::from_secs(24 * 3600);
     /// How often the pass looks for arrived key bodies.
     pub const PASS_EVERY: Duration = Duration::from_secs(10);
+    /// A key still missing after this long is STALLED, and the pass says so
+    /// out loud. Two anti-entropy cadences (~30 s each): one for the Pull, one
+    /// for slack. The cross-chat stage of 2026-10-25 waited minutes behind
+    /// nothing but DEBUG lines on both nodes.
+    pub const STALL_AFTER: Duration = Duration::from_secs(60);
+    /// How often a stalled key is reported again.
+    pub const STALL_REPORT_EVERY: Duration = Duration::from_secs(300);
 
     type Key = (String, String);
-    type Due = (Key, ChatState, Owner, String, Instant);
+    type Due = (Key, ChatState, Owner, String, Instant, u32);
 
     struct Pending {
         st: ChatState,
         owner: Owner,
         key_id: String,
         since: Instant,
+        /// How many times the pass re-queued the Pull.
+        asked: u32,
+        last_report: Option<Instant>,
     }
 
     fn table() -> &'static Mutex<HashMap<Key, Pending>> {
@@ -5770,21 +5780,26 @@ pub(crate) mod pending_contacts {
     }
 
     /// Hold `pasted` for the owner until `key_id`'s record arrives. Idempotent
-    /// per (owner, code): a second paste refreshes nothing but the clock.
+    /// per (owner, code): a second paste changes nothing — the clock keeps the
+    /// FIRST paste, so a stall report's `waited_secs` is the person's real wait.
     pub(crate) fn record(st: &ChatState, owner: &Owner, pasted: &str, key_id: &str) {
         let k = (owner.key_id.clone(), pasted.to_owned());
         let fresh = {
             let mut t = table().lock().expect("pending contacts lock");
             let fresh = !t.contains_key(&k);
-            t.insert(
-                k,
-                Pending {
-                    st: st.clone(),
-                    owner: owner.clone(),
-                    key_id: key_id.to_owned(),
-                    since: Instant::now(),
-                },
-            );
+            if fresh {
+                t.insert(
+                    k,
+                    Pending {
+                        st: st.clone(),
+                        owner: owner.clone(),
+                        key_id: key_id.to_owned(),
+                        since: Instant::now(),
+                        asked: 1,
+                        last_report: None,
+                    },
+                );
+            }
             fresh
         };
         if fresh {
@@ -5808,6 +5823,57 @@ pub(crate) mod pending_contacts {
         }
     }
 
+    /// Re-queue the Key Pull for `key_id` in edge's recovery queue. `false`
+    /// when there is no replication runtime or edge refused the name.
+    async fn request_key_body(st: &ChatState, key_id: &str) -> bool {
+        let Some(runtime) = crate::compose::held_replication_runtime() else {
+            return false;
+        };
+        let directory = st.engine.federation_directory();
+        let lens = ciris_edge::contact::PersistLens::new(directory.as_ref())
+            .with_replication(runtime.bridge());
+        ciris_edge::contact::DirectoryLens::request_key_body(&lens, key_id).await
+    }
+
+    /// The STALLED report: every fact this node holds about why a pasted
+    /// person's key has not arrived, and where the rest of the evidence is.
+    fn report_stall(owner: &Owner, key_id: &str, waited: Duration, asked: u32, requeued: bool) {
+        let runtime = crate::compose::held_replication_runtime();
+        let queued = runtime
+            .as_ref()
+            .map(|r| r.bridge().tracked_missing_signers());
+        let no_route: Vec<String> = runtime
+            .as_ref()
+            .map(|r| {
+                r.no_route_backoff()
+                    .into_iter()
+                    .map(|e| format!("{}({} failed probes)", e.peer_key_id, e.failed_probes))
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::warn!(
+            owner = %owner.key_id,
+            key_id,
+            waited_secs = waited.as_secs(),
+            asked,
+            requeued,
+            replication_runtime = runtime.is_some(),
+            edge_recovery_queue = ?queued,
+            peers_with_no_route = ?no_route,
+            "contacts: KEY FETCH STALLED — a pasted person's key has not arrived. This node \
+             queues a Key Pull for it every pass; the next Key round toward ANY peer sends it, \
+             and the peer answers only if it holds the key AND shares a trust root with this \
+             node. Where to look: (1) requeued=false or replication_runtime=false → this \
+             node cannot ask at all; (2) peers_with_no_route lists peers the Pull cannot \
+             reach; (3) here, `CRPL reply DROPPED … kind=Key` means the answer arrived and \
+             was discarded (CIRISEdge#634); (4) on the answering peer, `identifier lookup \
+             refused: no mutual trust root` (DEBUG) or `identifier lookup RATE LIMITED` means \
+             it declined; (5) on the peer, does it hold the key at all — `federation_keys` \
+             row for this key_id. Edge logs the Pull itself at DEBUG only \
+             (`recovery round: asked this peer`)"
+        );
+    }
+
     /// One pass: complete, discard or expire every pending contact.
     pub(crate) async fn pass() {
         let due: Vec<Due> = {
@@ -5820,11 +5886,12 @@ pub(crate) mod pending_contacts {
                         p.owner.clone(),
                         p.key_id.clone(),
                         p.since,
+                        p.asked,
                     )
                 })
                 .collect()
         };
-        for (k, st, owner, key_id, since) in due {
+        for (k, st, owner, key_id, since, asked) in due {
             if since.elapsed() > PENDING_TTL {
                 table().lock().expect("lock").remove(&k);
                 tracing::info!(owner = %owner.key_id, key_id, "contacts: pending contact expired — the key never arrived; the person can paste the code again");
@@ -5838,6 +5905,29 @@ pub(crate) mod pending_contacts {
                 Ok(Some(_))
             );
             if !held {
+                // Edge's recovery queue REMOVES a name when its Pull is sent, and
+                // nothing re-adds it if the reply never lands — so a single lost
+                // reply strands the contact until the person pastes again. Re-queue
+                // every pass (idempotent: the queue is keyed by name).
+                let requeued = request_key_body(&st, &key_id).await;
+                let report = {
+                    let mut t = table().lock().expect("lock");
+                    t.get_mut(&k).and_then(|p| {
+                        if requeued {
+                            p.asked += 1;
+                        }
+                        let due = since.elapsed() >= STALL_AFTER
+                            && p.last_report
+                                .is_none_or(|at| at.elapsed() >= STALL_REPORT_EVERY);
+                        if due {
+                            p.last_report = Some(Instant::now());
+                        }
+                        due.then_some(p.asked)
+                    })
+                };
+                if let Some(asked) = report {
+                    report_stall(&owner, &key_id, since.elapsed(), asked, requeued);
+                }
                 continue;
             }
             let resp = add_contact_for_owner(st, owner.clone(), k.1.clone()).await;
@@ -5847,7 +5937,7 @@ pub(crate) mod pending_contacts {
             }
             table().lock().expect("lock").remove(&k);
             if status.is_success() {
-                tracing::info!(owner = %owner.key_id, key_id, "contacts: pending contact COMPLETED — the key arrived and matched the code");
+                tracing::info!(owner = %owner.key_id, key_id, waited_secs = since.elapsed().as_secs(), asked, "contacts: pending contact COMPLETED — the key arrived and matched the code");
             } else {
                 tracing::warn!(owner = %owner.key_id, key_id, status = status.as_u16(), "contacts: pending contact discarded — the add path refused it once the key arrived (see the refusal logged just above)");
             }
