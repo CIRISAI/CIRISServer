@@ -2112,7 +2112,7 @@ pub(crate) async fn incoming_contact_requests(
             grants.extend(rows);
         }
     }
-    grants.sort_by(|a, b| b.asserted_at.cmp(&a.asserted_at));
+    grants.sort_by_key(|g| std::cmp::Reverse(g.asserted_at));
 
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
