@@ -4183,3 +4183,32 @@ async fn ignoring_something_that_is_not_a_request_is_refused() {
         "{v}"
     );
 }
+
+/// A request ends with the grant's own window: a time-boxed grant past its
+/// `valid_until` is not a request (CSD-109 §6 question 4).
+#[tokio::test]
+async fn a_request_lapses_with_its_grants_window() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(bob_pen()),
+        valid_until: Some(chrono::Utc::now() + chrono::Duration::seconds(2)),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        CONTACT_KEY_ID,
+        &owner_id.key_id,
+        &contact_grant_prefixes(),
+        &opts,
+    )
+    .await
+    .expect("Bob's time-boxed grant");
+    assert_eq!(contact_requests(&client, &base, &owner).await["total"], 1);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(
+        contact_requests(&client, &base, &owner).await["total"],
+        0,
+        "a lapsed grant is not a request"
+    );
+}

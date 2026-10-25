@@ -240,6 +240,21 @@ every-row scan.
 | `GET /v1/contacts/requests` | the owner (a delegate may read) | `{requests: [{kind: "contact", requester_key_id, grant_attestation_id, granted_by_key_id, granted_to_key_id, requested_at, grant, accept}], total}` |
 | `GET /v1/self/invites` | the invitee | unchanged `invites` (families/households, communities, affiliations, pair rooms) **plus** `contact_requests`, the same entries |
 
+**What an entry says about the requester** (CSD-109 review):
+- `requester_label` is the fedID's self-chosen label: a fedID key is
+  `<label>-<fingerprint>`, and the label is what the person typed at mint. It is
+  their own claim, never verified, and `null` for a key not in that form.
+- One entry per person (the newest live grant), so a client need not collapse.
+  An ignore answers one grant; a new grant is a new request.
+- A request lasts as long as its grant: withdrawn, row-expired, or past the
+  grant's own `valid_until` policy window, and it is gone. There is no separate
+  request TTL.
+
+**The requester's side.** Each `GET /v1/contacts` row carries `mutual`: whether
+that person has added this owner back, read with the same inbound reader. A
+requester sees `mutual: false` (their pending row) until the other side accepts,
+then `true`. Ignore changes nothing the requester can see.
+
 **Answering.** Accepting is adding the person back: `accept` is
 `{method: "POST", path: "/v1/contacts", body: {key_id}}`, the existing route. A
 contact has no proposal row, so it is never answered through

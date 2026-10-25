@@ -2167,6 +2167,36 @@ async fn all_contact_requests(
     owner_key_id: &str,
     node_key_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    let (contacts, _) = contact_persons(engine, owner_key_id, node_key_id).await?;
+    Ok(inbound_chat_grants(engine, owner_key_id, node_key_id)
+        .await?
+        .into_iter()
+        .filter(|(person, _)| !contacts.contains(person))
+        .map(|(_, entry)| entry)
+        .collect())
+}
+
+/// The fedID's self-chosen label: a fedID key is `<label>-<fingerprint>` (FSD-002),
+/// and the label is what the person typed at mint. Their own claim, never
+/// verified — stated so a client need not parse key ids.
+fn self_label(key_id: &str) -> Option<String> {
+    let (label, fp) = key_id.rsplit_once('-')?;
+    (fp.len() == 10
+        && fp
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+    .then(|| label.to_owned())
+}
+
+/// Every live chat-covering grant another PERSON signed naming this owner or
+/// node, one entry per person (newest grant), answered or not: the people who
+/// have added this owner. `GET /v1/contacts` reads it for `mutual`;
+/// [`all_contact_requests`] drops the people already added back.
+async fn inbound_chat_grants(
+    engine: &Engine,
+    owner_key_id: &str,
+    node_key_id: &str,
+) -> Result<Vec<(String, serde_json::Value)>, String> {
     use ciris_persist::federation::attestation_query::{AttestationQuery, FOLD_PAGE};
     let dir = engine.federation_directory();
     let mut mine: Vec<String> = vec![owner_key_id.to_owned(), node_key_id.to_owned()];
@@ -2177,7 +2207,6 @@ async fn all_contact_requests(
             }
         }
     }
-    let (contacts, _) = contact_persons(engine, owner_key_id, node_key_id).await?;
     let lens = ciris_edge::contact::PersistLens::new(&*dir);
     let now = chrono::Utc::now();
 
@@ -2203,6 +2232,15 @@ async fn all_contact_requests(
             continue;
         }
         let receipt = crate::peer::grant_receipt(&g);
+        // The grant's own policy window (`valid_until`), not only the row's
+        // expiry: a time-boxed grant past its window is not a request.
+        let lapsed = receipt["valid_until"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .is_some_and(|t| t <= now);
+        if lapsed {
+            continue;
+        }
         let covers_chat = receipt["consent_prefixes"].as_array().is_some_and(|a| {
             a.iter()
                 .any(|p| p.as_str() == Some(CHAT_ATTESTATION_PREFIX))
@@ -2227,13 +2265,14 @@ async fn all_contact_requests(
             Ok(resolved) => resolved.fed_id,
             Err(_) => g.attesting_key_id.clone(),
         };
-        if person == owner_key_id || contacts.contains(&person) || seen.contains(&person) {
+        if person == owner_key_id || seen.contains(&person) {
             continue;
         }
         seen.push(person.clone());
-        out.push(serde_json::json!({
+        let entry = serde_json::json!({
             "kind": "contact",
             "requester_key_id": person,
+            "requester_label": self_label(&person),
             "grant_attestation_id": g.attestation_id,
             "granted_by_key_id": g.attesting_key_id,
             "granted_to_key_id": g.attested_key_id,
@@ -2248,7 +2287,8 @@ async fn all_contact_requests(
                 "method": "POST",
                 "path": format!("/v1/contacts/requests/{}/ignore", g.attestation_id),
             },
-        }));
+        });
+        out.push((person, entry));
     }
     Ok(out)
 }
@@ -2481,6 +2521,17 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             }
         };
     let directory = st.engine.federation_directory();
+    let inbound: Vec<String> =
+        match inbound_chat_grants(&st.engine, &owner.key_id, &owner.node_key_id).await {
+            Ok(v) => v.into_iter().map(|(person, _)| person).collect(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    e,
+                )
+            }
+        };
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
         // The SAME projection `GET /v1/federation/peers` serves, resolved one
@@ -2519,6 +2570,13 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             .collect();
         if let Some(obj) = card.as_object_mut() {
             obj.insert("contact".into(), serde_json::json!(true));
+            // FSD/MEMBERSHIP_INVITES.md §8: whether THEY have added this owner
+            // back — `false` is the requester's "pending" row, `true` is a
+            // connection. A contact is consent each side authors.
+            obj.insert(
+                "mutual".into(),
+                serde_json::json!(inbound.contains(&key_id)),
+            );
             // CIRISServer#616 — the grant's envelope, per row: the receipt.
             obj.insert(
                 "grant".into(),

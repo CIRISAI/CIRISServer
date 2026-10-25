@@ -2004,6 +2004,31 @@ async fn a_contact_request_reaches_the_other_persons_inbox() {
     let (s, direct) = get(b, "/v1/contacts/requests").await;
     assert_eq!((s, direct["total"].as_u64()), (200, Some(1)), "{direct}");
 
+    // The requester's label is their own claim, stated so no client parses ids.
+    let label = reqs[0]["requester_label"]
+        .as_str()
+        .expect("requester_label");
+    assert!(
+        a.owner.key_id.starts_with(&format!("{label}-")),
+        "the label is the fedID's self-chosen prefix: {label} / {}",
+        a.owner.key_id
+    );
+    // The requester's own view: Bob is Alice's contact, not yet mutual.
+    let mutual_of = |list: &Value, who: &str| {
+        list["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key_id"] == json!(who))
+            .map(|c| c["mutual"].clone())
+    };
+    let (_, alice_contacts) = get(a, "/v1/contacts").await;
+    assert_eq!(
+        mutual_of(&alice_contacts, &b.owner.key_id),
+        Some(json!(false)),
+        "pending on the requester's side: {alice_contacts}"
+    );
+
     let (_, alice_inbox) = get(a, "/v1/self/invites").await;
     assert_eq!(
         alice_inbox["contact_requests"],
@@ -2014,4 +2039,10 @@ async fn a_contact_request_reaches_the_other_persons_inbox() {
     contact(b, a).await;
     let (_, after) = get(b, "/v1/self/invites").await;
     assert_eq!(after["contact_requests"], json!([]), "answered: {after}");
+    let (_, alice_contacts) = get(a, "/v1/contacts").await;
+    assert_eq!(
+        mutual_of(&alice_contacts, &b.owner.key_id),
+        Some(json!(true)),
+        "connected on the requester's side once Bob added back: {alice_contacts}"
+    );
 }
