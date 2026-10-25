@@ -5866,7 +5866,7 @@ pub(crate) mod pending_contacts {
              node. Where to look: (1) requeued=false or replication_runtime=false → this \
              node cannot ask at all; (2) peers_with_no_route lists peers the Pull cannot \
              reach; (3) here, `CRPL reply DROPPED … kind=Key` means the answer arrived and \
-             was discarded (CIRISEdge#634); (4) on the answering peer, `identifier lookup \
+             was discarded (history: CIRISEdge#634); (4) on the answering peer, `identifier lookup \
              refused: no mutual trust root` (DEBUG) or `identifier lookup RATE LIMITED` means \
              it declined; (5) on the peer, does it hold the key at all — `federation_keys` \
              row for this key_id. Edge logs the Pull itself at DEBUG only \
