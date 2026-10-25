@@ -836,9 +836,24 @@ async fn inbox(State(st): State<InboxState>, headers: HeaderMap) -> Response {
             "expires_at": p.expires_at.to_rfc3339(),
         }));
     }
+    // Contact requests ride the same inbox (FSD/MEMBERSHIP_INVITES.md §8): the
+    // people who added this owner and whom they have not added back. A contact
+    // has no proposal row, so they are a separate list, answered by adding the
+    // person back (`POST /v1/contacts`), never through `…/accept` here.
+    let contact_requests = match crate::contacts_chat::incoming_contact_requests(
+        &st.engine,
+        &caller.owner_key_id,
+        &caller.node_key_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return store_unavailable(e),
+    };
     Json(serde_json::json!({
         "invitee_key_id": caller.owner_key_id,
         "invites": invites,
+        "contact_requests": contact_requests,
     }))
     .into_response()
 }

@@ -1968,18 +1968,16 @@ pub(crate) fn bearer_of(headers: &HeaderMap) -> Option<&str> {
 /// A `Contact` is a `LocalPeerState` (the shape the client's contacts screen
 /// already binds) with four contact-only members added:
 /// `contact: true`, `chat_community_id`, `chat_started`, `occurrence_key_ids`.
-async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Response {
-    let owner = match require_owner(&st, &headers).await {
-        Ok(o) => o,
-        Err(r) => return r,
-    };
-    if let Some(resp) = require_verb(
-        &owner,
-        crate::auth::gate::CapabilityVerb::ChatRead,
-        "contacts.delegation_denied",
-    ) {
-        return resp;
-    }
+/// **This node's contacts, as PERSONS** — the people its owner's live
+/// chat-covering consent grants name, resolved through edge's contact resolver,
+/// with each person's grant receipt (CIRISServer#616). One rule for "who is
+/// already my contact", shared by `GET /v1/contacts` and the incoming-request
+/// reader, so the two can never disagree about who still awaits an answer.
+pub(crate) async fn contact_persons(
+    engine: &Engine,
+    owner_key_id: &str,
+    node_key_id: &str,
+) -> Result<(Vec<String>, HashMap<String, serde_json::Value>), String> {
     // Persist's revocation-FOLDED consent peer set, WITH what each grant covers.
     // A withdrawn grant is already gone here, so un-contacting needs no second
     // code path — and the `chat:` filter below is why this reads prefixes rather
@@ -1988,17 +1986,9 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     // contact row carries the envelope of the grant that makes it a contact,
     // so the client's receipt is sent, never inferred. Rows come back
     // `asserted_at DESC`, so the first grant naming a peer is its live one.
-    let grant_rows =
-        match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
-            Ok(g) => g,
-            Err(e) => {
-                return refuse(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "contacts.store_unavailable",
-                    format!("consent peer set: {e}"),
-                )
-            }
-        };
+    let grant_rows = crate::peer::live_consent_grants_for_machine(engine, node_key_id)
+        .await
+        .map_err(|e| format!("consent peer set: {e}"))?;
     // A CONTACT is a peer this node can actually MESSAGE, not merely one it
     // replicates to. An ordinarily-federated peer carries the default
     // `capacity:`/`trace:` grant and no `chat:`; listing them would offer the
@@ -2017,7 +2007,7 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
     // that node directly), and both directions are security-relevant. Two
     // spellings of "who owns this key" are two answers that can disagree, in
     // precisely the place where disagreement is an impersonation.
-    let directory = st.engine.federation_directory();
+    let directory = engine.federation_directory();
     let lens = ciris_edge::contact::PersistLens::new(&*directory);
     let mut peer_ids: Vec<String> = Vec::new();
     let mut receipts: std::collections::HashMap<String, serde_json::Value> =
@@ -2039,7 +2029,7 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             continue;
         }
         for subject in &grant.subject_key_ids {
-            if is_infrastructure_subject(&st.engine, subject).await {
+            if is_infrastructure_subject(engine, subject).await {
                 infra_skipped.push(subject.clone());
                 continue;
             }
@@ -2057,7 +2047,7 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
                     subject.clone()
                 }
             };
-            if person == owner.key_id {
+            if person == owner_key_id {
                 // One of the owner's own devices — never a contact of themselves.
                 continue;
             }
@@ -2074,6 +2064,163 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
              people and are not listed"
         );
     }
+    Ok((peer_ids, receipts))
+}
+
+/// **Contact requests waiting on this node's owner** — the people who added
+/// them and whom they have not added back.
+///
+/// A contact is consent each side authors: a live `consent:replication:v1`
+/// grant covering `chat:`. `GET /v1/contacts` lists the grants THIS owner signed;
+/// nothing listed the grants other people signed naming them, so a request was
+/// invisible until the owner happened to add the person themselves (the Eric ×
+/// Francesco gap). This is that reader: grants naming the owner's fedID or this
+/// node's keys, signed by someone else, live (not withdrawn, not expired),
+/// covering `chat:`, from a PERSON (not infrastructure, not the owner's own
+/// devices), and not yet answered: the person is not already a contact. One
+/// entry per person, newest grant first. Accepting is adding them back
+/// (`POST /v1/contacts {key_id}`).
+pub(crate) async fn incoming_contact_requests(
+    engine: &Engine,
+    owner_key_id: &str,
+    node_key_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    use ciris_persist::federation::attestation_query::{AttestationQuery, FOLD_PAGE};
+    let dir = engine.federation_directory();
+    let mut mine: Vec<String> = vec![owner_key_id.to_owned(), node_key_id.to_owned()];
+    if let Ok(engine_key) = engine.local_derived_key_id().await {
+        for k in crate::peer::own_keys_of_this_node(&engine_key) {
+            if !mine.contains(&k) {
+                mine.push(k);
+            }
+        }
+    }
+    let (contacts, _) = contact_persons(engine, owner_key_id, node_key_id).await?;
+    let lens = ciris_edge::contact::PersistLens::new(&*dir);
+    let now = chrono::Utc::now();
+
+    let mut grants: Vec<Attestation> = Vec::new();
+    for k in &mine {
+        let mut pages = AttestationQuery::to(k, FOLD_PAGE)
+            .dimension(crate::peer::CONSENT_DIMENSION)
+            .pages();
+        while let Some(rows) = pages
+            .next(dir.as_ref())
+            .await
+            .map_err(|e| format!("consent grants naming {k}: {e:#}"))?
+        {
+            grants.extend(rows);
+        }
+    }
+    grants.sort_by(|a, b| b.asserted_at.cmp(&a.asserted_at));
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for g in grants {
+        if mine.contains(&g.attesting_key_id) || g.expires_at.is_some_and(|t| t <= now) {
+            continue;
+        }
+        let receipt = crate::peer::grant_receipt(&g);
+        let covers_chat = receipt["consent_prefixes"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|p| p.as_str() == Some(CHAT_ATTESTATION_PREFIX))
+        });
+        if !covers_chat || is_infrastructure_subject(engine, &g.attesting_key_id).await {
+            continue;
+        }
+        let withdrawn = dir
+            .list_attestations_referencing(&g.attestation_id)
+            .await
+            .map_err(|e| format!("list_attestations_referencing({}): {e:#}", g.attestation_id))?
+            .iter()
+            .any(|r| {
+                r.attesting_key_id == g.attesting_key_id
+                    && (r.attestation_type == attestation_type::WITHDRAWS
+                        || r.attestation_type == attestation_type::RECANTS)
+            });
+        if withdrawn {
+            continue;
+        }
+        let person = match ciris_edge::contact::resolve(&lens, &g.attesting_key_id).await {
+            Ok(resolved) => resolved.fed_id,
+            Err(_) => g.attesting_key_id.clone(),
+        };
+        if person == owner_key_id || contacts.contains(&person) || seen.contains(&person) {
+            continue;
+        }
+        seen.push(person.clone());
+        out.push(serde_json::json!({
+            "kind": "contact",
+            "requester_key_id": person,
+            "grant_attestation_id": g.attestation_id,
+            "granted_by_key_id": g.attesting_key_id,
+            "granted_to_key_id": g.attested_key_id,
+            "requested_at": g.asserted_at.to_rfc3339(),
+            "grant": receipt,
+            "accept": {
+                "method": "POST",
+                "path": "/v1/contacts",
+                "body": { "key_id": person },
+            },
+        }));
+    }
+    Ok(out)
+}
+
+/// `GET /v1/contacts/requests` — [`incoming_contact_requests`] for the owner.
+async fn list_contact_requests(State(st): State<ChatState>, headers: HeaderMap) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatRead,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
+    match incoming_contact_requests(&st.engine, &owner.key_id, &owner.node_key_id).await {
+        Ok(requests) => {
+            let total = requests.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "requests": requests, "total": total })),
+            )
+                .into_response()
+        }
+        Err(e) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "contacts.store_unavailable",
+            e,
+        ),
+    }
+}
+
+async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Response {
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatRead,
+        "contacts.delegation_denied",
+    ) {
+        return resp;
+    }
+    let (peer_ids, receipts) =
+        match contact_persons(&st.engine, &owner.key_id, &owner.node_key_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "contacts.store_unavailable",
+                    e,
+                )
+            }
+        };
+    let directory = st.engine.federation_directory();
     let mut contacts = Vec::with_capacity(peer_ids.len());
     for key_id in peer_ids {
         // The SAME projection `GET /v1/federation/peers` serves, resolved one
@@ -4820,6 +4967,10 @@ pub fn router_with_driver(
         .route(
             "/v1/contacts",
             axum::routing::get(list_contacts).post(add_contact),
+        )
+        .route(
+            "/v1/contacts/requests",
+            axum::routing::get(list_contact_requests),
         )
         .route(
             "/v1/contacts/{key_id}",

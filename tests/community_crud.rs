@@ -1981,3 +1981,37 @@ async fn a_quorum_room_seats_an_accepted_invitee_by_a_cosigned_widening() {
     );
     assert!(fold(&a.engine, &room).await.contains(&d.owner.key_id));
 }
+
+/// **A contact request reaches the other person's inbox** (FSD/MEMBERSHIP_INVITES.md
+/// §8; the Eric × Francesco gap). Alice adds Bob: Bob's `/v1/self/invites` and
+/// `/v1/contacts/requests` show Alice before Bob does anything, and Alice's do
+/// not show Bob (she asked; he did not). Bob adding Alice back answers it on both
+/// sides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_contact_request_reaches_the_other_persons_inbox() {
+    let nodes = mesh(2).await;
+    let (a, b) = (&nodes[0], &nodes[1]);
+    contact(a, b).await;
+
+    let (s, inbox) = get(b, "/v1/self/invites").await;
+    assert_eq!(s, 200, "{inbox}");
+    let reqs = inbox["contact_requests"]
+        .as_array()
+        .expect("contact_requests");
+    assert_eq!(reqs.len(), 1, "Bob sees Alice's request: {inbox}");
+    assert_eq!(reqs[0]["requester_key_id"], json!(a.owner.key_id));
+    assert_eq!(reqs[0]["accept"]["body"]["key_id"], json!(a.owner.key_id));
+    let (s, direct) = get(b, "/v1/contacts/requests").await;
+    assert_eq!((s, direct["total"].as_u64()), (200, Some(1)), "{direct}");
+
+    let (_, alice_inbox) = get(a, "/v1/self/invites").await;
+    assert_eq!(
+        alice_inbox["contact_requests"],
+        json!([]),
+        "the person who asked has nothing to answer: {alice_inbox}"
+    );
+
+    contact(b, a).await;
+    let (_, after) = get(b, "/v1/self/invites").await;
+    assert_eq!(after["contact_requests"], json!([]), "answered: {after}");
+}

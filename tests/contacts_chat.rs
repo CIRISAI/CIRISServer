@@ -3958,3 +3958,109 @@ async fn a_node_that_consents_to_send_traces_lists_no_infrastructure_and_no_self
         "the canonical never appears: {ids:?}"
     );
 }
+
+// ─── Incoming contact requests (FSD/MEMBERSHIP_INVITES.md §8) ───────────────
+
+/// Bob's pen: the same seeds `fixture` registers `CONTACT_KEY_ID` under.
+fn bob_pen() -> Arc<LocalSigner> {
+    Arc::new(identity_for(CONTACT_KEY_ID, 0xB0, 0xB1).0)
+}
+
+/// Bob adds the owner: a live `consent:replication:v1` grant covering `chat:`,
+/// signed by Bob, naming the owner's fedID. Returns its attestation id.
+async fn bob_adds(engine: &Engine, owner_key_id: &str) -> String {
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(bob_pen()),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        engine,
+        CONTACT_KEY_ID,
+        owner_key_id,
+        &contact_grant_prefixes(),
+        &opts,
+    )
+    .await
+    .expect("Bob signs a chat-covering grant naming the owner")
+    .attestation_id
+}
+
+async fn contact_requests(client: &reqwest::Client, base: &str, owner: &str) -> serde_json::Value {
+    let resp = client
+        .get(format!("{base}/v1/contacts/requests"))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("GET /v1/contacts/requests");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("requests json")
+}
+
+/// The Eric × Francesco gap: someone added you, and nothing showed it until you
+/// added them yourself. Their grant naming you is a request; adding them back
+/// answers it.
+#[tokio::test]
+async fn someone_who_added_you_is_a_request_until_you_add_them_back() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+
+    let empty = contact_requests(&client, &base, &owner).await;
+    assert_eq!(empty["total"], 0, "{empty}");
+
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    let listed = contact_requests(&client, &base, &owner).await;
+    assert_eq!(listed["total"], 1, "{listed}");
+    let req = &listed["requests"][0];
+    assert_eq!(req["kind"], "contact");
+    assert_eq!(req["requester_key_id"], CONTACT_KEY_ID);
+    assert_eq!(req["grant_attestation_id"], grant_id.as_str());
+    assert_eq!(req["granted_to_key_id"], owner_id.key_id.as_str());
+    assert_eq!(req["accept"]["path"], "/v1/contacts");
+    assert_eq!(req["accept"]["body"]["key_id"], CONTACT_KEY_ID);
+
+    // Accepting is adding them back; the request is then answered.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&req["accept"]["body"])
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200);
+    let after = contact_requests(&client, &base, &owner).await;
+    assert_eq!(after["total"], 0, "answered requests are gone: {after}");
+}
+
+/// A request the requester withdrew is not offered.
+#[tokio::test]
+async fn a_withdrawn_request_is_not_offered() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    assert_eq!(contact_requests(&client, &base, &owner).await["total"], 1);
+
+    // Bob withdraws his own grant (persist rule 1: a row is withdrawn by its attester).
+    ciris_server::attest::emit(
+        &engine,
+        ciris_server::attest::KeySigner::Local(&bob_pen()),
+        ciris_server::attest::Spec {
+            attestation_type: attestation_type::WITHDRAWS.to_string(),
+            attested_key_id: Some(owner_id.key_id.clone()),
+            subject_key_ids: Vec::new(),
+            cohort_scope: cohort_scope::FEDERATION.to_string(),
+            expires_at: None,
+            weight: None,
+            envelope: ciris_persist::federation::withdraws_attestation_envelope(
+                &grant_id,
+                attestation_type::SCORES,
+            ),
+        },
+    )
+    .await
+    .expect("Bob withdraws his grant");
+    assert_eq!(
+        contact_requests(&client, &base, &owner).await["total"],
+        0,
+        "a withdrawn request is gone"
+    );
+}

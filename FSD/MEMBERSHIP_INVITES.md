@@ -103,7 +103,8 @@ founder; everyone else named in it joins by proposal → acceptance.
 - **Reverse quorum** stays the commons objection brake (`/v1/commons/*`,
   CSD-070); `reverse_quorum:` is refused as a family or community protocol.
 - **Subject take-back** (removing oneself from rows already shared) stays deferred.
-- **Pair rooms** (1:1 chat) keep their own consent: the contact grant each side authors.
+- **Pair rooms** (1:1 chat) keep their own consent: the contact grant each side authors. Seeing a contact request
+  someone else authored is §8.
 
 ## 6. Persist's contract, as the maintainer resolved it (CIRISPersist#955, 2026-09-30)
 
@@ -208,3 +209,63 @@ of a membership row). The flow's own: `membership.invite_not_found` (404),
 
 Gaps named, not built: the bridge-seated member's content re-wrap (above); a
 founding-cosign flow; the CSD for the inbox screens (CSD-100..103).
+
+## 8. Contact requests — the one inbox covers people too (0.5.237)
+
+**The gap (Eric × Francesco, 2026-10-24).** A contact is consent each side
+authors: a live `consent:replication:v1` grant covering `chat:`. `GET /v1/contacts`
+lists the grants the OWNER signed. Nothing listed the grants other people signed
+naming the owner, so being added was invisible until the owner happened to add
+the person themselves. Both people had to add each other blind.
+
+**What a request is.** A live grant that:
+- names the owner's fedID or one of this node's keys;
+- is signed by someone else, resolved to a PERSON through edge's contact resolver
+  (`contact::resolve`); infrastructure (a canonical) and the owner's own devices
+  are never requests;
+- covers `chat:`;
+- is not withdrawn or recanted by its signer, and not expired;
+- is unanswered: the person is not already the owner's contact. "Already a
+  contact" is `contacts_chat::contact_persons`, the one rule `GET /v1/contacts`
+  uses, so the two lists cannot disagree.
+
+One entry per person, newest grant first. The read is persist's bounded
+`AttestationQuery::to(key).dimension("consent:replication:v1")`, not an
+every-row scan.
+
+**Routes.**
+
+| Route | Who | Answers |
+|---|---|---|
+| `GET /v1/contacts/requests` | the owner (a delegate may read) | `{requests: [{kind: "contact", requester_key_id, grant_attestation_id, granted_by_key_id, granted_to_key_id, requested_at, grant, accept}], total}` |
+| `GET /v1/self/invites` | the invitee | unchanged `invites` (families/households, communities, affiliations, pair rooms) **plus** `contact_requests`, the same entries |
+
+**Answering.** Accepting is adding the person back: `accept` is
+`{method: "POST", path: "/v1/contacts", body: {key_id}}`, the existing route. A
+contact has no proposal row, so it is never answered through
+`/v1/self/invites/{id}/accept`. The request then leaves both lists by the rule
+above; there is no separate "accepted" state to keep in step.
+
+**Witnesses.**
+- `tests/contacts_chat.rs::someone_who_added_you_is_a_request_until_you_add_them_back`
+  and `a_withdrawn_request_is_not_offered`. Each filter is mutation-checked.
+- `tests/community_crud.rs::a_contact_request_reaches_the_other_persons_inbox`:
+  two nodes. Alice adds Bob, Bob's own inbox shows her, hers shows nothing, and
+  Bob adding back clears it.
+
+**Not yet (named, so nobody assumes them):**
+- **Declining a contact.** No signed row answers "no" to someone else's grant.
+  The only answer today is not adding back. A dismissal that hides a request
+  needs a decision: a node-local note, or a signed `declines` the requester's
+  node could read.
+- **Requests that need a link.** A grant reaches the owner's node only by
+  replication. A transport fault between the two nodes holds it back. CIRISEdge#888
+  (two keys claiming one destination) was exactly that.
+- **Requests addressed to another device.** A grant naming the owner's OTHER
+  device replicates to that device; this node lists the grants naming its own
+  keys and the fedID.
+- **The pair-room invite.** Only the person who opens the chat sends it (§7.4).
+  A Joiner who added back must still wait for the Creator's open. The
+  five-platform cross-platform chat stage (CIRISAgent, 2026-10-25) measures this
+  and the request visibility above.
+
