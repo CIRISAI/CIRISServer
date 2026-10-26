@@ -1981,3 +1981,68 @@ async fn a_quorum_room_seats_an_accepted_invitee_by_a_cosigned_widening() {
     );
     assert!(fold(&a.engine, &room).await.contains(&d.owner.key_id));
 }
+
+/// **A contact request reaches the other person's inbox** (FSD/MEMBERSHIP_INVITES.md
+/// §8; the Eric × Francesco gap). Alice adds Bob: Bob's `/v1/self/invites` and
+/// `/v1/contacts/requests` show Alice before Bob does anything, and Alice's do
+/// not show Bob (she asked; he did not). Bob adding Alice back answers it on both
+/// sides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_contact_request_reaches_the_other_persons_inbox() {
+    let nodes = mesh(2).await;
+    let (a, b) = (&nodes[0], &nodes[1]);
+    contact(a, b).await;
+
+    let (s, inbox) = get(b, "/v1/self/invites").await;
+    assert_eq!(s, 200, "{inbox}");
+    let reqs = inbox["contact_requests"]
+        .as_array()
+        .expect("contact_requests");
+    assert_eq!(reqs.len(), 1, "Bob sees Alice's request: {inbox}");
+    assert_eq!(reqs[0]["requester_key_id"], json!(a.owner.key_id));
+    assert_eq!(reqs[0]["accept"]["body"]["key_id"], json!(a.owner.key_id));
+    let (s, direct) = get(b, "/v1/contacts/requests").await;
+    assert_eq!((s, direct["total"].as_u64()), (200, Some(1)), "{direct}");
+
+    // The requester's label is their own claim, stated so no client parses ids.
+    let label = reqs[0]["requester_label"]
+        .as_str()
+        .expect("requester_label");
+    assert!(
+        a.owner.key_id.starts_with(&format!("{label}-")),
+        "the label is the fedID's self-chosen prefix: {label} / {}",
+        a.owner.key_id
+    );
+    // The requester's own view: Bob is Alice's contact, not yet mutual.
+    let mutual_of = |list: &Value, who: &str| {
+        list["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key_id"] == json!(who))
+            .map(|c| c["mutual"].clone())
+    };
+    let (_, alice_contacts) = get(a, "/v1/contacts").await;
+    assert_eq!(
+        mutual_of(&alice_contacts, &b.owner.key_id),
+        Some(json!(false)),
+        "pending on the requester's side: {alice_contacts}"
+    );
+
+    let (_, alice_inbox) = get(a, "/v1/self/invites").await;
+    assert_eq!(
+        alice_inbox["contact_requests"],
+        json!([]),
+        "the person who asked has nothing to answer: {alice_inbox}"
+    );
+
+    contact(b, a).await;
+    let (_, after) = get(b, "/v1/self/invites").await;
+    assert_eq!(after["contact_requests"], json!([]), "answered: {after}");
+    let (_, alice_contacts) = get(a, "/v1/contacts").await;
+    assert_eq!(
+        mutual_of(&alice_contacts, &b.owner.key_id),
+        Some(json!(true)),
+        "connected on the requester's side once Bob added back: {alice_contacts}"
+    );
+}

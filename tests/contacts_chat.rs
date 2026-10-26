@@ -3958,3 +3958,257 @@ async fn a_node_that_consents_to_send_traces_lists_no_infrastructure_and_no_self
         "the canonical never appears: {ids:?}"
     );
 }
+
+// ─── Incoming contact requests (FSD/MEMBERSHIP_INVITES.md §8) ───────────────
+
+/// Bob's pen: the same seeds `fixture` registers `CONTACT_KEY_ID` under.
+fn bob_pen() -> Arc<LocalSigner> {
+    Arc::new(identity_for(CONTACT_KEY_ID, 0xB0, 0xB1).0)
+}
+
+/// Bob adds the owner: a live `consent:replication:v1` grant covering `chat:`,
+/// signed by Bob, naming the owner's fedID. Returns its attestation id.
+async fn bob_adds(engine: &Engine, owner_key_id: &str) -> String {
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(bob_pen()),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        engine,
+        CONTACT_KEY_ID,
+        owner_key_id,
+        &contact_grant_prefixes(),
+        &opts,
+    )
+    .await
+    .expect("Bob signs a chat-covering grant naming the owner")
+    .attestation_id
+}
+
+async fn contact_requests(client: &reqwest::Client, base: &str, owner: &str) -> serde_json::Value {
+    let resp = client
+        .get(format!("{base}/v1/contacts/requests"))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("GET /v1/contacts/requests");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("requests json")
+}
+
+/// The Eric × Francesco gap: someone added you, and nothing showed it until you
+/// added them yourself. Their grant naming you is a request; adding them back
+/// answers it.
+#[tokio::test]
+async fn someone_who_added_you_is_a_request_until_you_add_them_back() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+
+    let empty = contact_requests(&client, &base, &owner).await;
+    assert_eq!(empty["total"], 0, "{empty}");
+
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    let listed = contact_requests(&client, &base, &owner).await;
+    assert_eq!(listed["total"], 1, "{listed}");
+    let req = &listed["requests"][0];
+    assert_eq!(req["kind"], "contact");
+    assert_eq!(req["requester_key_id"], CONTACT_KEY_ID);
+    assert_eq!(req["grant_attestation_id"], grant_id.as_str());
+    assert_eq!(req["granted_to_key_id"], owner_id.key_id.as_str());
+    assert_eq!(req["accept"]["path"], "/v1/contacts");
+    assert_eq!(req["accept"]["body"]["key_id"], CONTACT_KEY_ID);
+
+    // Accepting is adding them back; the request is then answered.
+    let resp = client
+        .post(format!("{base}/v1/contacts"))
+        .bearer_auth(&owner)
+        .json(&req["accept"]["body"])
+        .send()
+        .await
+        .expect("POST /v1/contacts");
+    assert_eq!(resp.status(), 200);
+    let after = contact_requests(&client, &base, &owner).await;
+    assert_eq!(after["total"], 0, "answered requests are gone: {after}");
+}
+
+/// A request the requester withdrew is not offered.
+#[tokio::test]
+async fn a_withdrawn_request_is_not_offered() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    assert_eq!(contact_requests(&client, &base, &owner).await["total"], 1);
+
+    // Bob withdraws his own grant (persist rule 1: a row is withdrawn by its attester).
+    ciris_server::attest::emit(
+        &engine,
+        ciris_server::attest::KeySigner::Local(&bob_pen()),
+        ciris_server::attest::Spec {
+            attestation_type: attestation_type::WITHDRAWS.to_string(),
+            attested_key_id: Some(owner_id.key_id.clone()),
+            subject_key_ids: Vec::new(),
+            cohort_scope: cohort_scope::FEDERATION.to_string(),
+            expires_at: None,
+            weight: None,
+            envelope: ciris_persist::federation::withdraws_attestation_envelope(
+                &grant_id,
+                attestation_type::SCORES,
+            ),
+        },
+    )
+    .await
+    .expect("Bob withdraws his grant");
+    assert_eq!(
+        contact_requests(&client, &base, &owner).await["total"],
+        0,
+        "a withdrawn request is gone"
+    );
+}
+
+async fn call_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    owner: &str,
+) -> (u16, serde_json::Value) {
+    let resp = client
+        .request(method, url)
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("request");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **Ignore is private and reversible** (FSD/MEMBERSHIP_INVITES.md §8.1). It
+/// hides the request, lists it under `ignored`, and writes only a LOCAL row the
+/// requester can never receive; un-ignore brings it back.
+#[tokio::test]
+async fn ignoring_a_request_hides_it_privately_and_unignoring_restores_it() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let grant_id = bob_adds(&engine, &owner_id.key_id).await;
+    let listed = contact_requests(&client, &base, &owner).await;
+    assert_eq!(
+        listed["requests"][0]["ignore"]["path"],
+        format!("/v1/contacts/requests/{grant_id}/ignore")
+    );
+
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("ignored")), "{v}");
+    let ignore_id = v["ignore_id"].as_str().expect("ignore_id").to_owned();
+
+    let after = contact_requests(&client, &base, &owner).await;
+    assert_eq!(after["total"], 0, "hidden: {after}");
+    assert_eq!(
+        after["ignored"][0]["grant_attestation_id"],
+        grant_id.as_str()
+    );
+    assert_eq!(after["ignored"][0]["ignore_id"], ignore_id.as_str());
+
+    // Private: the ignore is a LOCAL row, never a federation row anyone can receive.
+    let stored = engine
+        .federation_directory()
+        .get_attestation(&ignore_id)
+        .await
+        .unwrap();
+    assert!(
+        stored.as_ref().is_none_or(|a| a.tier == "local"),
+        "the ignore must not be a federation-tier row: {stored:?}"
+    );
+
+    // Ignoring it again is a 404: it is no longer pending.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_found")),
+        "{v}"
+    );
+
+    // Un-ignore: pending again.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::DELETE,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("pending")), "{v}");
+    let back = contact_requests(&client, &base, &owner).await;
+    assert_eq!(back["total"], 1, "restored: {back}");
+    assert_eq!(back["ignored"], serde_json::json!([]));
+
+    // Un-ignoring what is not ignored is a 404.
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::DELETE,
+        format!("{base}/v1/contacts/requests/{grant_id}/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_ignored")),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn ignoring_something_that_is_not_a_request_is_refused() {
+    let (_engine, base, owner, _owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (s, v) = call_json(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contacts/requests/no-such-grant/ignore"),
+        &owner,
+    )
+    .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (404, Some("contacts.request_not_found")),
+        "{v}"
+    );
+}
+
+/// A request ends with the grant's own window: a time-boxed grant past its
+/// `valid_until` is not a request (CSD-109 §6 question 4).
+#[tokio::test]
+async fn a_request_lapses_with_its_grants_window() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let opts = ciris_server::peer::ConsentGrantOptions {
+        author_signer: Some(bob_pen()),
+        valid_until: Some(chrono::Utc::now() + chrono::Duration::seconds(2)),
+        ..Default::default()
+    };
+    ciris_server::peer::emit_replication_consent_with_policy(
+        &engine,
+        CONTACT_KEY_ID,
+        &owner_id.key_id,
+        &contact_grant_prefixes(),
+        &opts,
+    )
+    .await
+    .expect("Bob's time-boxed grant");
+    assert_eq!(contact_requests(&client, &base, &owner).await["total"], 1);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(
+        contact_requests(&client, &base, &owner).await["total"],
+        0,
+        "a lapsed grant is not a request"
+    );
+}
