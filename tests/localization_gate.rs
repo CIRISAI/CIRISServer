@@ -842,7 +842,8 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 30 -> 33 for 0.5.237: the contact-request ignore routes
     /// `contacts.{delegate_may_not_answer,request_not_found,request_not_ignored}`
     /// (CIRISServer#818) — same reason, same list.
-    const MAX_UNCOVERED: usize = 33;
+    /// 33 -> 19 at client 0.5.232: all fourteen of those paid.
+    const MAX_UNCOVERED: usize = 19;
 
     let en = load_en();
     let ids = scraped_server_ids();
