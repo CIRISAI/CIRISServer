@@ -188,6 +188,9 @@ impl LensCore {
             // default is inert (never proposes, serves none, refuses every
             // peer's request) — a re-pin must not move a relay's posture.
             direct_links: Default::default(),
+            // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
+            // no link shaped — so a re-pin does not move this node's posture.
+            shaping: Default::default(),
             // `transit: Some(false)` — a DECLARED leaf port. Relay transport is
             // limited to CIRIS peers as of this release, and a lens relay is not
             // the CIRIS fabric node: it terminates traffic for its own role and

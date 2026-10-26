@@ -899,23 +899,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # upgrade-owner, for a node their fed-ID was never on (legacy-admin managed
     # agents; remote claims across the 0.5.189 split). The same queue as the
     # planes above.
-    "sign_owner_binding.bad_request",
-    "sign_owner_binding.build_failed",
-    "sign_owner_binding.cohort_invalid",
-    "sign_owner_binding.no_identity",
-    "sign_owner_binding.signer_unavailable",
-    "upgrade_owner.already_owned",
-    "upgrade_owner.bad_request",
-    "upgrade_owner.binding_rejected",
-    "upgrade_owner.cohort_invalid",
-    "upgrade_owner.directory",
-    "upgrade_owner.roster_proof_refused",
     # CONTACT REQUESTS (CIRISServer#818 / 0.5.237, FSD/MEMBERSHIP_INVITES.md
     # §8.1): ignoring and un-ignoring a request someone else signed. Queued for
     # the client bundle with their English (CSD-107).
-    "contacts.delegate_may_not_answer",
-    "contacts.request_not_found",
-    "contacts.request_not_ignored",
+    # ALL FOURTEEN PAID AT CLIENT 0.5.232 (2026-10-26, for 0.5.238): the staged
+    # owner-binding and the contact-request ids; the floor in pyproject.toml is
+    # 0.5.232.
 )
 
 
