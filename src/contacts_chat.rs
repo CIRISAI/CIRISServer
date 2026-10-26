@@ -5779,6 +5779,54 @@ pub(crate) mod pending_contacts {
         T.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// A contact whose person this node cannot yet resolve to a node: the
+    /// contact is added, but its directed grant has nowhere to go until the
+    /// person's announced owner-binding (`delegates_to` owner → node) is held
+    /// here. Keyed (owner, contact key).
+    struct Unresolved {
+        st: ChatState,
+        owner: Owner,
+        since: Instant,
+        asked: u32,
+        last_report: Option<Instant>,
+    }
+
+    fn unresolved() -> &'static Mutex<HashMap<Key, Unresolved>> {
+        static T: OnceLock<Mutex<HashMap<Key, Unresolved>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// The nodes `key_id`'s person announced, as this node holds them.
+    async fn nodes_of(st: &ChatState, key_id: &str) -> Vec<String> {
+        crate::auth::ownership::announced_nodes_of(&st.engine, key_id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Ask every consent peer for every record it holds about `key_id`'s person
+    /// (a subject Pull on each subject-pullable plane). The one that matters
+    /// here is the person's announced owner-binding: without it a directed
+    /// grant naming them has no node to reach. Returns (peers asked, failures).
+    async fn pull_person_records(
+        st: &ChatState,
+        owner: &Owner,
+        key_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let Some(runtime) = crate::compose::held_replication_runtime() else {
+            return (Vec::new(), Vec::new());
+        };
+        let own = crate::receive_axis::own_keys(&owner.node_key_id);
+        let peers = crate::receive_axis::peers_to_ask(&st.engine, &own).await;
+        let mut failed = Vec::new();
+        for peer in &peers {
+            if let Err(e) = runtime.pull_subject_testimony(peer, key_id).await {
+                tracing::debug!(peer = %peer, key_id, error = %format!("{e:#}"), "contacts: person-records Pull not sent to this peer");
+                failed.push(format!("{peer}: {e:#}"));
+            }
+        }
+        (peers, failed)
+    }
+
     /// Hold `pasted` for the owner until `key_id`'s record arrives. Idempotent
     /// per (owner, code): a second paste changes nothing — the clock keeps the
     /// FIRST paste, so a stall report's `waited_secs` is the person's real wait.
@@ -5930,8 +5978,107 @@ pub(crate) mod pending_contacts {
         );
     }
 
+    /// Track an added contact until their person resolves to a node here, and
+    /// ask for their records now. A no-op when they already resolve.
+    pub(crate) async fn track_until_resolved(st: &ChatState, owner: &Owner, key_id: &str) {
+        if !nodes_of(st, key_id).await.is_empty() {
+            return;
+        }
+        let k = (owner.key_id.clone(), key_id.to_owned());
+        let fresh = {
+            let mut t = unresolved().lock().expect("unresolved contacts lock");
+            let fresh = !t.contains_key(&k);
+            if fresh {
+                t.insert(
+                    k,
+                    Unresolved {
+                        st: st.clone(),
+                        owner: owner.clone(),
+                        since: Instant::now(),
+                        asked: 0,
+                        last_report: None,
+                    },
+                );
+            }
+            fresh
+        };
+        if fresh {
+            tracing::info!(owner = %owner.key_id, key_id, "contacts: added, but their person resolves to no node here yet — asking peers for their announced owner-binding until it lands (tracked: CIRISEdge#907)");
+        }
+        ensure_pass();
+    }
+
+    /// One pass over the unresolved contacts: drop the resolved and expired,
+    /// re-ask for the rest, and say so out loud when one stalls.
+    async fn resolve_pass() {
+        let due: Vec<(Key, ChatState, Owner, Instant)> = {
+            let t = unresolved().lock().expect("unresolved contacts lock");
+            t.iter()
+                .map(|(k, u)| (k.clone(), u.st.clone(), u.owner.clone(), u.since))
+                .collect()
+        };
+        for (k, st, owner, since) in due {
+            let key_id = &k.1;
+            if since.elapsed() > PENDING_TTL {
+                unresolved().lock().expect("lock").remove(&k);
+                tracing::info!(owner = %owner.key_id, key_id, "contacts: stopped asking for an unresolved contact's owner-binding after the pending TTL");
+                continue;
+            }
+            let nodes = nodes_of(&st, key_id).await;
+            if !nodes.is_empty() {
+                let asked = unresolved()
+                    .lock()
+                    .expect("lock")
+                    .remove(&k)
+                    .map_or(0, |u| u.asked);
+                tracing::info!(owner = %owner.key_id, key_id, nodes = %nodes.join(", "), waited_secs = since.elapsed().as_secs(), asked, "contacts: contact RESOLVED — their owner-binding arrived; the directed grant can now reach their node(s)");
+                // The node is not our peer yet and we hold no route to it: ask
+                // the peers we have for its key, occurrence and transport
+                // destination (public subject planes), so the grant can travel.
+                for node in &nodes {
+                    let _ = pull_person_records(&st, &owner, node).await;
+                }
+                crate::replication_reconcile::nudge("contact resolved to a node");
+                crate::compose::kick_replication("contact resolved to a node");
+                continue;
+            }
+            let (peers, failed) = pull_person_records(&st, &owner, key_id).await;
+            let report = {
+                let mut t = unresolved().lock().expect("lock");
+                t.get_mut(&k).and_then(|u| {
+                    u.asked += 1;
+                    let due = since.elapsed() >= STALL_AFTER
+                        && u.last_report
+                            .is_none_or(|at| at.elapsed() >= STALL_REPORT_EVERY);
+                    if due {
+                        u.last_report = Some(Instant::now());
+                    }
+                    due.then_some(u.asked)
+                })
+            };
+            if let Some(asked) = report {
+                tracing::warn!(
+                    owner = %owner.key_id,
+                    key_id,
+                    waited_secs = since.elapsed().as_secs(),
+                    asked,
+                    pulled_from = ?peers,
+                    pull_failed = ?failed,
+                    "contacts: CONTACT UNRESOLVED — the person is a contact but resolves to no node \
+                     here, so a grant or message naming them has nowhere to go. This node asks each \
+                     peer for their records every pass. Where to look: (1) pulled_from=[] → no peer \
+                     to ask; (2) on the peer, `subject Pull refused … not publicly pullable` means \
+                     it will not serve their owner-binding on request (tracked: CIRISEdge#907); \
+                     (3) on the peer, is there a live federation `delegates_to` from this key_id to \
+                     a node at all — if not, they have not announced"
+                );
+            }
+        }
+    }
+
     /// One pass: complete, discard or expire every pending contact.
     pub(crate) async fn pass() {
+        resolve_pass().await;
         let due: Vec<Due> = {
             let t = table().lock().expect("pending contacts lock");
             t.iter()
@@ -5987,6 +6134,7 @@ pub(crate) mod pending_contacts {
                 }
                 continue;
             }
+            let st_for_resolve = st.clone();
             let resp = add_contact_for_owner(st, owner.clone(), k.1.clone()).await;
             let status = resp.status();
             if status == axum::http::StatusCode::ACCEPTED {
@@ -5995,6 +6143,7 @@ pub(crate) mod pending_contacts {
             table().lock().expect("lock").remove(&k);
             if status.is_success() {
                 tracing::info!(owner = %owner.key_id, key_id, waited_secs = since.elapsed().as_secs(), asked, "contacts: pending contact COMPLETED — the key arrived and matched the code");
+                track_until_resolved(&st_for_resolve, &owner, &key_id).await;
             } else {
                 tracing::warn!(owner = %owner.key_id, key_id, status = status.as_u16(), "contacts: pending contact discarded — the add path refused it once the key arrived (see the refusal logged just above)");
             }

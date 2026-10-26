@@ -498,3 +498,121 @@ async fn a_direct_key_pull_reaches_a_contact_the_recovery_queue_starves() {
         "the direct Key Pull brought the contact's key from the canonical"
     );
 }
+
+/// **A contact's announced owner-binding reaches the asker on a subject Pull.**
+///
+/// The five-platform run of 2026-10-26: after the add, linux held the android
+/// owner's Key but not their `delegates_to(owner → node)` at federation, so the
+/// contact request (a directed consent grant) had no node to reach. The
+/// canonical held the binding, but refused an Attestation subject Pull (not
+/// publicly pullable) and its advertise walk was ~20 min behind (tracked:
+/// CIRISEdge#907). The pending-contacts pass asks with exactly this Pull.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_contacts_announced_owner_binding_arrives_on_a_subject_pull() {
+    use ciris_server::auth::ownership::{
+        announced_nodes_of, apply_signed_owner_binding, build_signed_owner_binding,
+        promote_owner_binding_to_federation, OWNER_BINDING_INFRA_SCOPES,
+    };
+    init_tracing();
+    arm_test_trust_root();
+    let asker = node("ciris-node-bootstrap-resolver", 0x33).await;
+    let canonical = node("ciris-canonical-1-resolve", 0x43).await;
+
+    // The contact: a person who announced one node, as the canonical holds them.
+    let (contact_pen, contact) = pen("qa-node-resolve-contact", 0x53);
+    let (contact_node_pen, contact_node) = pen("ciris-node-bootstrap-contact", 0x63);
+    for (p, id, ty) in [
+        (&contact_pen, &contact, identity_type::USER),
+        (&contact_node_pen, &contact_node, identity_type::NODE),
+    ] {
+        register_key(
+            &canonical.engine,
+            KeySigner::Local(p),
+            id,
+            ty,
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("contact keys registered at the canonical");
+    }
+    let scopes: Vec<String> = OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let binding =
+        build_signed_owner_binding(&contact_pen, &contact_node, &scopes, cohort_scope::SELF)
+            .await
+            .expect("binding");
+    apply_signed_owner_binding(
+        &canonical.engine,
+        &contact_node,
+        cohort_scope::SELF,
+        ciris_persist::prelude::HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("the canonical holds the contact's binding");
+    promote_owner_binding_to_federation(&canonical.engine, &contact_pen, &contact_node)
+        .await
+        .expect("the contact announced");
+    assert!(
+        announced_nodes_of(&canonical.engine, &contact)
+            .await
+            .unwrap()
+            .contains(&contact_node),
+        "precondition: the canonical resolves the contact to their node"
+    );
+
+    // The asker after the add: it holds the contact's Key, not their binding.
+    carry_key(&canonical, &asker.engine, &asker.key_id).await;
+    carry_key(&asker, &canonical.engine, &canonical.key_id).await;
+    carry_key(&asker, &canonical.engine, &contact).await;
+    carry_key(&asker, &canonical.engine, &contact_node).await;
+    accept_shared_root(&[&asker, &canonical], "resolve-root", &canonical.key_id).await;
+    assert!(
+        announced_nodes_of(&asker.engine, &contact)
+            .await
+            .unwrap()
+            .is_empty(),
+        "precondition: the asker resolves the contact to no node"
+    );
+
+    let asker_bridge = bridge(&asker);
+    let canon_bridge = bridge(&canonical);
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let asker_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: c_tx }),
+        canonical.key_id.clone(),
+        EnvelopeKind::Attestation,
+        SessionRole::Initiator,
+        Arc::new(
+            DirectoryStateAdapter::new(asker_bridge.clone()).with_peer(canonical.key_id.clone()),
+        ),
+        Arc::new(MutableDirectoryStateAdapter::new(asker_bridge.clone())),
+    );
+    let canon_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: a_tx }),
+        asker.key_id.clone(),
+        EnvelopeKind::Attestation,
+        SessionRole::Responder,
+        Arc::new(DirectoryStateAdapter::new(canon_bridge.clone()).with_peer(asker.key_id.clone())),
+        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge)),
+    );
+
+    // What `pull_subject_testimony(canonical, contact)` sends on this plane.
+    asker_coord
+        .start_pull(&contact)
+        .await
+        .expect("Attestation subject Pull sends");
+    pump(&asker_coord, &mut a_rx, &canon_coord, &mut c_rx).await;
+
+    assert!(
+        announced_nodes_of(&asker.engine, &contact)
+            .await
+            .unwrap()
+            .contains(&contact_node),
+        "the contact's announced owner-binding reached the asker on a subject Pull, so a \
+         directed grant naming them has a node to reach (tracked: CIRISEdge#907)"
+    );
+}
