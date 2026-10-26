@@ -361,3 +361,140 @@ async fn a_pasted_strangers_key_arrives_from_the_canonical_over_a_recovery_pull(
         direct.len()
     );
 }
+
+/// Drive `asker` ↔ `canonical` until neither side has anything left to send.
+async fn pump(
+    asker_coord: &ReplicationCoordinator,
+    a_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    canon_coord: &ReplicationCoordinator,
+    c_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    for _ in 0..24 {
+        let mut progressed = false;
+        while let Ok(bytes) = c_rx.try_recv() {
+            let msg =
+                ReplicationCoordinator::parse_inbound_bytes(&bytes).expect("parse at canonical");
+            let s = canon_coord
+                .drive_round_step(Some(msg))
+                .await
+                .expect("responder step");
+            send_step(canon_coord, &s).await;
+            progressed = true;
+        }
+        while let Ok(bytes) = a_rx.try_recv() {
+            let msg = ReplicationCoordinator::parse_inbound_bytes(&bytes).expect("parse at asker");
+            let s = asker_coord
+                .drive_round_step(Some(msg))
+                .await
+                .expect("initiator step");
+            send_step(asker_coord, &s).await;
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+}
+
+/// **The recovery queue starves a pasted contact; a direct Key Pull does not.**
+///
+/// The five-platform run of 2026-10-26: linux's recovery queue held 270 names
+/// the canonical's own rows had delivered, and each Key round took ONE — always
+/// a name the peer delivered before an unrouted one, and a contact paste is
+/// unrouted. The canonical held the contact's key the whole time and was never
+/// asked (tracked: CIRISEdge#904). The pending-contacts pass now sends each
+/// peer a Key-plane subject Pull directly (`start_pull`), which is what this
+/// drives after showing the queue's pick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_key_pull_reaches_a_contact_the_recovery_queue_starves() {
+    use ciris_edge::replication::ReplicationDirectory;
+    init_tracing();
+    arm_test_trust_root();
+    let asker = node("ciris-node-bootstrap-starved", 0x32).await;
+    let canonical = node("ciris-canonical-1-starve", 0x42).await;
+    let (stranger_pen, stranger) = pen("qa-node-starved-contact", 0x52);
+    register_key(
+        &canonical.engine,
+        KeySigner::Local(&stranger_pen),
+        &stranger,
+        identity_type::USER,
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("stranger registered at the canonical");
+    carry_key(&canonical, &asker.engine, &asker.key_id).await;
+    carry_key(&asker, &canonical.engine, &canonical.key_id).await;
+    accept_shared_root(&[&asker, &canonical], "starve-root", &canonical.key_id).await;
+
+    let asker_bridge = bridge(&asker);
+    let canon_bridge = bridge(&canonical);
+
+    // The contact paste (unrouted), then a name the canonical's rows delivered.
+    let asker_dir = asker.engine.federation_directory();
+    let lens = ciris_edge::contact::PersistLens::new(asker_dir.as_ref())
+        .with_replication(asker_bridge.clone());
+    assert!(ciris_edge::contact::DirectoryLens::request_key_body(&lens, &stranger).await);
+    asker_bridge.note_missing_signer(
+        EnvelopeKind::Attestation,
+        "ciris-gate-peer-unmet",
+        Some(&canonical.key_id),
+    );
+
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let asker_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: c_tx }),
+        canonical.key_id.clone(),
+        EnvelopeKind::Key,
+        SessionRole::Initiator,
+        Arc::new(
+            DirectoryStateAdapter::new(asker_bridge.clone()).with_peer(canonical.key_id.clone()),
+        ),
+        Arc::new(MutableDirectoryStateAdapter::new(asker_bridge.clone())),
+    );
+    let canon_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: a_tx }),
+        asker.key_id.clone(),
+        EnvelopeKind::Key,
+        SessionRole::Responder,
+        Arc::new(DirectoryStateAdapter::new(canon_bridge.clone()).with_peer(asker.key_id.clone())),
+        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge)),
+    );
+
+    // The queue's pick: the routed name wins, the person's contact waits.
+    asker_coord.begin_round().await;
+    let pulled = asker_coord
+        .send_recovery_pull()
+        .await
+        .expect("recovery pull");
+    assert_eq!(
+        pulled.as_deref(),
+        Some("ciris-gate-peer-unmet"),
+        "the recovery queue takes the peer-delivered name before the contact (CIRISEdge#904); \
+         if this changes, edge fixed the order and the direct Pull is belt-and-braces"
+    );
+    pump(&asker_coord, &mut a_rx, &canon_coord, &mut c_rx).await;
+    assert!(
+        asker_dir
+            .lookup_public_key(&stranger)
+            .await
+            .unwrap()
+            .is_none(),
+        "a round spent on the routed name did not bring the contact's key"
+    );
+
+    // The pending-contacts pass's direct Pull.
+    asker_coord
+        .start_pull(&stranger)
+        .await
+        .expect("direct Key Pull sends");
+    pump(&asker_coord, &mut a_rx, &canon_coord, &mut c_rx).await;
+    assert!(
+        asker_dir
+            .lookup_public_key(&stranger)
+            .await
+            .unwrap()
+            .is_some(),
+        "the direct Key Pull brought the contact's key from the canonical"
+    );
+}

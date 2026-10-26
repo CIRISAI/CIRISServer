@@ -5835,9 +5835,62 @@ pub(crate) mod pending_contacts {
         ciris_edge::contact::DirectoryLens::request_key_body(&lens, key_id).await
     }
 
+    /// Ask every consent peer for `key_id`'s Key record NOW, with a subject Pull
+    /// on the Key plane. Returns the peers asked and the sends that failed.
+    ///
+    /// The recovery queue alone starves a pasted contact: each Key round takes ONE
+    /// name, names a peer delivered win over unrouted ones, and a contact paste is
+    /// unrouted — so on a node whose peers keep delivering rows from signers it has
+    /// not met (270 queued on the 2026-10-26 five-platform run) the contact's name
+    /// is never reached (tracked: CIRISEdge#904). A subject Pull goes out on its
+    /// own, and a peer answers it for any subject on the public Key plane when it
+    /// holds the key and shares a trust root with this node. One Key Pull per peer
+    /// per pass stays well under a responder's public-lookup limit (60/min).
+    async fn pull_key_from_peers(
+        st: &ChatState,
+        owner: &Owner,
+        key_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        use ciris_edge::replication::protocol::EnvelopeKind;
+        let Some(runtime) = crate::compose::held_replication_runtime() else {
+            return (Vec::new(), Vec::new());
+        };
+        let own = crate::receive_axis::own_keys(&owner.node_key_id);
+        let peers = crate::receive_axis::peers_to_ask(&st.engine, &own).await;
+        let mut failed = Vec::new();
+        for peer in &peers {
+            let sent = match runtime
+                .register_initiator_peer(peer.as_str(), EnvelopeKind::Key)
+                .await
+            {
+                Err(e) => Err(format!("{e:#}")),
+                Ok(()) => match runtime
+                    .registry()
+                    .get_initiator(peer, EnvelopeKind::Key)
+                    .await
+                {
+                    None => Err("Key initiator absent after register".to_owned()),
+                    Some(coord) => coord.start_pull(key_id).await.map_err(|e| format!("{e:#}")),
+                },
+            };
+            if let Err(e) = sent {
+                tracing::debug!(peer = %peer, key_id, error = %e, "contacts: direct Key Pull not sent to this peer");
+                failed.push(format!("{peer}: {e}"));
+            }
+        }
+        (peers, failed)
+    }
+
     /// The STALLED report: every fact this node holds about why a pasted
     /// person's key has not arrived, and where the rest of the evidence is.
-    fn report_stall(owner: &Owner, key_id: &str, waited: Duration, asked: u32, requeued: bool) {
+    fn report_stall(
+        owner: &Owner,
+        key_id: &str,
+        waited: Duration,
+        asked: u32,
+        requeued: bool,
+        (pulled_from, pull_failed): &(Vec<String>, Vec<String>),
+    ) {
         let runtime = crate::compose::held_replication_runtime();
         let queued = runtime
             .as_ref()
@@ -5860,12 +5913,15 @@ pub(crate) mod pending_contacts {
             replication_runtime = runtime.is_some(),
             edge_recovery_queue = ?queued,
             peers_with_no_route = ?no_route,
-            "contacts: KEY FETCH STALLED — a pasted person's key has not arrived. This node \
-             queues a Key Pull for it every pass; the next Key round toward ANY peer sends it, \
-             and the peer answers only if it holds the key AND shares a trust root with this \
-             node. Where to look: (1) requeued=false or replication_runtime=false → this \
-             node cannot ask at all; (2) peers_with_no_route lists peers the Pull cannot \
-             reach; (3) here, `CRPL reply DROPPED … kind=Key` means the answer arrived and \
+            direct_pull_peers = ?pulled_from,
+            direct_pull_failed = ?pull_failed,
+            "contacts: KEY FETCH STALLED — a pasted person's key has not arrived. Every pass \
+             this node sends each consent peer a direct Key Pull for it (direct_pull_peers) \
+             and queues it in edge's recovery queue; a peer answers only if it holds the key \
+             AND shares a trust root with this node. Where to look: (1) requeued=false, \
+             replication_runtime=false or direct_pull_peers=[] → this node cannot ask at all; \
+             (2) peers_with_no_route lists peers the Pull cannot reach, direct_pull_failed \
+             the sends that did not go out; (3) here, `CRPL reply DROPPED … kind=Key` means the answer arrived and \
              was discarded (history: CIRISEdge#634); (4) on the answering peer, `identifier lookup \
              refused: no mutual trust root` (DEBUG) or `identifier lookup RATE LIMITED` means \
              it declined; (5) on the peer, does it hold the key at all — `federation_keys` \
@@ -5910,6 +5966,7 @@ pub(crate) mod pending_contacts {
                 // reply strands the contact until the person pastes again. Re-queue
                 // every pass (idempotent: the queue is keyed by name).
                 let requeued = request_key_body(&st, &key_id).await;
+                let pulled = pull_key_from_peers(&st, &owner, &key_id).await;
                 let report = {
                     let mut t = table().lock().expect("lock");
                     t.get_mut(&k).and_then(|p| {
@@ -5926,7 +5983,7 @@ pub(crate) mod pending_contacts {
                     })
                 };
                 if let Some(asked) = report {
-                    report_stall(&owner, &key_id, since.elapsed(), asked, requeued);
+                    report_stall(&owner, &key_id, since.elapsed(), asked, requeued, &pulled);
                 }
                 continue;
             }
