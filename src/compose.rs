@@ -5177,6 +5177,9 @@ async fn build_edge(
         // is inert — no facilitator, none served, every peer's request refused —
         // so a re-pin does not move this node's network posture.
         direct_links: Default::default(),
+        // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
+        // no link shaped — so a re-pin does not move this node's posture.
+        shaping: Default::default(),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The
