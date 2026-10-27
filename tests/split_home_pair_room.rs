@@ -1,0 +1,178 @@
+//! **On a split home, the NODE key founds a pair room for its owner.**
+//!
+//! The five-platform run of 2026-10-27, after the contact ladder went green:
+//! every creator `POST /v1/chat` answered 500 `chat.community_create_failed`,
+//! `membership … refused (membership_founding_member_unsigned)`. The chat routes
+//! signed the founding record with the ENGINE's key, which on a split home (an
+//! agent embedding the node, 0.5.189 and later) is the AGENT key. An agent is
+//! its own self and carries no owner-binding, so persist could not lift that
+//! signer to the founder. The owner-binding names the NODE key, which persist
+//! lifts to its owner (`admission_identity_for_writer`), so the routes now sign
+//! membership with the node key (`contacts_chat::membership_authority`).
+
+use std::sync::Arc;
+
+use ciris_keyring::MlDsa65SoftwareSigner;
+use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
+use ciris_persist::federation::types::{cohort_scope, device_class};
+use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
+use ed25519_dalek::SigningKey;
+
+use ciris_server::attest::{register_key, KeySigner};
+use ciris_server::auth::ownership::{
+    apply_signed_owner_binding, build_signed_owner_binding, OWNER_BINDING_INFRA_SCOPES,
+};
+
+fn id_of(alias: &str, seed: u8) -> String {
+    let ed = SigningKey::from_bytes(&[seed; 32]);
+    ciris_verify_core::fedcode::derive_key_id(alias, ed.verifying_key().as_bytes())
+}
+
+fn pen_as(seed: u8, key_id: &str) -> LocalSigner {
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[seed ^ 0x5A; 32], format!("{key_id}-pqc"))
+            .expect("ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        SigningKey::from_bytes(&[seed; 32]),
+        key_id.to_owned(),
+        Some(pqc),
+        Some(format!("{key_id}-pqc")),
+    )
+}
+
+/// An edge signer for the same key, as `membership_authority` builds it.
+fn edge_of(pen: LocalSigner, key_id: &str) -> ciris_edge::identity::LocalSigner {
+    let pen = Arc::new(pen);
+    ciris_edge::identity::LocalSigner::new(
+        key_id,
+        Arc::new(ciris_persist::signing::LocalSignerHardwareAdapter::new(
+            Arc::clone(&pen),
+        )),
+        pen.pqc_signer(),
+    )
+}
+
+#[tokio::test]
+async fn a_split_home_founds_its_pair_room_with_the_node_key_not_the_agent_key() {
+    // The split home: engine on the agent key, the owner bound to the node key,
+    // the agent an occurrence of its human (the first-run claim's three rows).
+    let owner_id = id_of("owner-pair-split", 0x35);
+    let owner = pen_as(0x35, &owner_id);
+    let agent = id_of("qa-runner-ciris-agent-split", 0x13);
+    let engine = Arc::new(
+        Engine::with_signer(
+            Arc::new(pen_as(0x13, "qa-runner-ciris-agent-split")),
+            "sqlite::memory:",
+        )
+        .await
+        .expect("engine on the agent key"),
+    );
+    register_key(
+        &engine,
+        KeySigner::Engine(&engine),
+        &agent,
+        "agent",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("agent key");
+    let node = id_of("ciris-node-bootstrap-pairsplit", 0x23);
+    let node_pen = pen_as(0x23, &node);
+    register_key(
+        &engine,
+        KeySigner::Local(&node_pen),
+        &node,
+        "node",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("node key");
+    register_key(
+        &engine,
+        KeySigner::Local(&owner),
+        &owner_id,
+        "user",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("owner key");
+    let scopes: Vec<String> = OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let binding = build_signed_owner_binding(&owner, &node, &scopes, cohort_scope::SELF)
+        .await
+        .unwrap();
+    apply_signed_owner_binding(
+        &engine,
+        &node,
+        cohort_scope::SELF,
+        HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("the owner claims the node");
+    let enc = ciris_server::backend::content_kem_pubkeys(&engine)
+        .await
+        .expect("content KEM keys");
+    engine
+        .self_at_login(SelfAtLoginInput {
+            identity_key_id: owner_id.clone(),
+            identity_signer: Some(Arc::new(pen_as(0x35, "owner-pair-split"))),
+            app: SelfAtLoginOccurrence {
+                occurrence_key_id: node.clone(),
+                device_class: ciris_server::backend::host_device_class().to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc.clone(),
+                transport_destinations: Vec::new(),
+            },
+            agent: SelfAtLoginOccurrence {
+                occurrence_key_id: agent.clone(),
+                device_class: device_class::AGENT.to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc,
+                transport_destinations: Vec::new(),
+            },
+            bilateral_pair_id: format!("fold:{owner_id}:{agent}"),
+            delegation_scope: None,
+        })
+        .await
+        .expect("the agent becomes an occurrence of its human");
+
+    // The contact, as the add left them: their key is held here.
+    let peer_id = id_of("peer-pair-split", 0x45);
+    register_key(
+        &engine,
+        KeySigner::Local(&pen_as(0x45, &peer_id)),
+        &peer_id,
+        "user",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("peer key");
+
+    let dir = engine.federation_directory();
+    let now = chrono::Utc::now();
+    let expires = now + chrono::Duration::days(7);
+
+    // The engine's key (what the routes used): the founder did not sign it.
+    let agent_signer = edge_of(pen_as(0x13, &agent), &agent);
+    let refused =
+        ciris_edge::chat::open_pair_room(&*dir, &owner_id, &peer_id, now, expires, &agent_signer)
+            .await
+            .expect_err("an agent key does not act for its owner");
+    assert!(
+        refused.contains("membership_founding_member_unsigned"),
+        "the production refusal: {refused}"
+    );
+
+    // The node key (what `membership_authority` picks on a split home).
+    let node_signer = edge_of(pen_as(0x23, &node), &node);
+    let opened =
+        ciris_edge::chat::open_pair_room(&*dir, &owner_id, &peer_id, now, expires, &node_signer)
+            .await
+            .expect("the owned node key founds the room for its owner");
+    assert!(opened.founded, "this call founded the room");
+    assert!(opened.proposal.is_some(), "and invited the peer");
+}
