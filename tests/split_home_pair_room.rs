@@ -177,4 +177,49 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
             .expect("the person founds their own room");
     assert!(opened.founded, "this call founded the room");
     assert!(opened.proposal.is_some(), "and invited the peer");
+
+    // The invitation must be deliverable to the invitee's NODE (2026-10-27:
+    // the joiner never listed it). The peer announced one node; this side
+    // holds its key and the peer's owner-binding to it, as #907 left it.
+    let peer_node = id_of("ciris-node-bootstrap-peersplit", 0x46);
+    let peer_node_pen = pen_as(0x46, &peer_node);
+    register_key(
+        &engine,
+        KeySigner::Local(&peer_node_pen),
+        &peer_node,
+        "node",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("peer node key");
+    let peer_pen = pen_as(0x45, &peer_id);
+    let peer_binding =
+        build_signed_owner_binding(&peer_pen, &peer_node, &scopes, cohort_scope::SELF)
+            .await
+            .unwrap();
+    apply_signed_owner_binding(
+        &engine,
+        &peer_node,
+        cohort_scope::SELF,
+        HybridPolicy::Strict,
+        &peer_binding,
+    )
+    .await
+    .expect("the peer's owner-binding is held here");
+    let proposal = opened.proposal.expect("proposal");
+    let principals = ciris_persist::federation::self_collective::principals_of(&*dir, &peer_node)
+        .await
+        .unwrap();
+    let verdict =
+        ciris_persist::federation::replication_audience::may_receive(&*dir, &peer_node, &proposal)
+            .await
+            .unwrap();
+    eprintln!(
+        "proposal subject={:?} scope={} attester={} tier={} | peer node principals={principals:?} | verdict={verdict:?}",
+        proposal.subject_key_ids, proposal.cohort_scope, proposal.attesting_key_id, proposal.tier
+    );
+    assert!(
+        verdict.allowed(),
+        "the invitation reaches the invitee's node: {verdict:?}"
+    );
 }

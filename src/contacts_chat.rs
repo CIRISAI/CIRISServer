@@ -3871,6 +3871,35 @@ async fn start_chat(
             )
         }
     };
+    // Where the invitation can go, said once per open: the proposal, and
+    // persist's delivery verdict for each node the invitee announced. The
+    // 2026-10-27 run founded the room and the joiner never listed the invite;
+    // this line tells the two halves apart.
+    if let Some(p) = opened.proposal.as_ref() {
+        let nodes = crate::auth::ownership::announced_nodes_of(&st.engine, &key_id)
+            .await
+            .unwrap_or_default();
+        let mut verdicts = Vec::with_capacity(nodes.len());
+        for n in &nodes {
+            let v = ciris_persist::federation::replication_audience::may_receive(&*directory, n, p)
+                .await
+                .map_or_else(|e| format!("error: {e}"), |v| format!("{v:?}"));
+            verdicts.push(format!("{n}: {v}"));
+        }
+        tracing::info!(
+            room = %opened.room,
+            founded = opened.founded,
+            proposal_id = %p.attestation_id,
+            tier = %p.tier,
+            cohort_scope = %p.cohort_scope,
+            proposer = %p.attesting_key_id,
+            invitee = %key_id,
+            invitee_nodes = ?verdicts,
+            "chat: pair room invitation — the joiner lists it once this proposal is held on \
+             their node at federation tier; `invitee_nodes` is persist's verdict per node \
+             (no node → the invitee resolves to no node here)"
+        );
+    }
     if opened.founded {
         // The ROSTER is a row too — and so is the invitation. `share_in_room`
         // kicks for every chat row that goes through it, but the record and
