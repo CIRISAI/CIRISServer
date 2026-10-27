@@ -435,6 +435,35 @@ impl EntryKind {
 /// `node` is the box. `unknown` is honest: resolution genuinely stalls while a
 /// key body is in flight, and guessing "person" there would put a stranger's
 /// name on an agent's words.
+/// **Who signs a room's membership** — the founding record, the acceptance of a
+/// proposal, and a joiner's intent: the key that acts for the OWNER.
+///
+/// `st.node_signer` is the ENGINE's key. On a standalone node that is the node,
+/// owned by the person, and persist lifts it to the owner. On a split home (an
+/// agent embedding the node, 0.5.189 and later) the engine signs as the AGENT
+/// key, an agent is its own self, and the owner-binding names the separate NODE
+/// key — so a founding record signed by the engine reads as unsigned by the
+/// founder (`membership_founding_member_unsigned`, CIRISPersist#955; the
+/// five-platform run of 2026-10-27, every `POST /v1/chat` 500). Persist's
+/// `admission_identity_for_writer` resolves the node key to its owner, so on a
+/// split home the node key signs. Built once from the held node signer.
+fn membership_authority(st: &ChatState) -> Arc<ciris_edge::identity::LocalSigner> {
+    static SPLIT: std::sync::OnceLock<Arc<ciris_edge::identity::LocalSigner>> =
+        std::sync::OnceLock::new();
+    match crate::node_key::held_node_signer() {
+        Some(node) => Arc::clone(SPLIT.get_or_init(|| {
+            Arc::new(ciris_edge::identity::LocalSigner::new(
+                node.derived_key_id(),
+                Arc::new(ciris_persist::signing::LocalSignerHardwareAdapter::new(
+                    Arc::clone(&node),
+                )),
+                node.pqc_signer(),
+            ))
+        })),
+        None => Arc::clone(&st.node_signer),
+    }
+}
+
 fn author_kind_str(kind: &ciris_edge::contact::IdentityKind) -> &'static str {
     use ciris_edge::contact::IdentityKind;
     match kind {
@@ -3663,7 +3692,7 @@ async fn start_chat(
         if let Err(e) = ciris_edge::chat::accept_pair_proposal(
             &*directory,
             &pending.proposal.attestation_id,
-            &st.node_signer,
+            &membership_authority(&st),
         )
         .await
         {
@@ -3807,7 +3836,7 @@ async fn start_chat(
         &key_id,
         founded_at,
         expires_at,
-        &st.node_signer,
+        &membership_authority(&st),
     )
     .await
     {
@@ -3911,7 +3940,7 @@ async fn advance_pair_join(st: &ChatState, headers: &HeaderMap, owner: &Owner, r
         &*directory,
         &st.user_seed_dir,
         &owner.key_id,
-        &st.node_signer,
+        &membership_authority(st),
     )
     .await;
     let Ok(Some(record)) = directory.lookup_community(room).await else {
@@ -5671,7 +5700,8 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     let me = pen.key_id().to_owned();
     let dir = st.engine.federation_directory();
     // 1. The joiner's acceptance of a requested room's invitation.
-    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, &st.node_signer).await;
+    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, &membership_authority(st))
+        .await;
     // 2. Every pair room this person is in: the record's members, plus the
     //    widening plane (a joiner is seated by a widening — the record never
     //    grows, persist Q2).
