@@ -578,7 +578,25 @@ async fn a_contacts_announced_owner_binding_arrives_on_a_subject_pull() {
     );
 
     let asker_bridge = bridge(&asker);
-    let canon_bridge = bridge(&canonical);
+    // The canonical publishes every announced node, as compose installs it in
+    // production (`announced_relay::selector`); edge serves a third party's
+    // owner-binding only for a node the responder publishes (#752 / #907).
+    let canon_bridge = Arc::new(
+        FederationDirectoryReplicationBridge::new(
+            canonical.engine.federation_directory(),
+            Arc::new(Vec::new),
+        )
+        .with_local_key_id(Some(canonical.key_id.clone()))
+        .with_kind_publish_selector(Some(
+            ciris_server::announced_relay::selector_for_sets(
+                vec![canonical.key_id.clone()],
+                Some(ciris_server::announced_relay::RelaySets {
+                    announced_nodes: vec![contact_node.clone()],
+                    owners: vec![contact.clone()],
+                }),
+            ),
+        )),
+    );
     let (a_tx, mut a_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let (c_tx, mut c_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let asker_coord = ReplicationCoordinator::new(
