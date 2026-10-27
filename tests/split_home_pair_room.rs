@@ -1,4 +1,4 @@
-//! **On a split home, the NODE key founds a pair room for its owner.**
+//! **A pair room is founded by the PERSON, never by their machine's key.**
 //!
 //! The five-platform run of 2026-10-27, after the contact ladder went green:
 //! every creator `POST /v1/chat` answered 500 `chat.community_create_failed`,
@@ -6,9 +6,10 @@
 //! signed the founding record with the ENGINE's key, which on a split home (an
 //! agent embedding the node, 0.5.189 and later) is the AGENT key. An agent is
 //! its own self and carries no owner-binding, so persist could not lift that
-//! signer to the founder. The owner-binding names the NODE key, which persist
-//! lifts to its owner (`admission_identity_for_writer`), so the routes now sign
-//! membership with the node key (`contacts_chat::membership_authority`).
+//! signer to the founder. Membership — founding, proposal, acceptance, a
+//! joiner's intent — is the person's act, so the routes now sign it with the
+//! owner's own pen (`contacts_chat::membership_pen`); in production the user's
+//! signing key is always available.
 
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ fn pen_as(seed: u8, key_id: &str) -> LocalSigner {
     )
 }
 
-/// An edge signer for the same key, as `membership_authority` builds it.
+/// An edge signer for the same key.
 fn edge_of(pen: LocalSigner, key_id: &str) -> ciris_edge::identity::LocalSigner {
     let pen = Arc::new(pen);
     ciris_edge::identity::LocalSigner::new(
@@ -54,7 +55,7 @@ fn edge_of(pen: LocalSigner, key_id: &str) -> ciris_edge::identity::LocalSigner 
 }
 
 #[tokio::test]
-async fn a_split_home_founds_its_pair_room_with_the_node_key_not_the_agent_key() {
+async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_key() {
     // The split home: engine on the agent key, the owner bound to the node key,
     // the agent an occurrence of its human (the first-run claim's three rows).
     let owner_id = id_of("owner-pair-split", 0x35);
@@ -167,12 +168,13 @@ async fn a_split_home_founds_its_pair_room_with_the_node_key_not_the_agent_key()
         "the production refusal: {refused}"
     );
 
-    // The node key (what `membership_authority` picks on a split home).
-    let node_signer = edge_of(pen_as(0x23, &node), &node);
+    // The person's own pen (what the chat routes sign membership with): an
+    // invitation is the person's act, and their signing key is always held.
+    let owner_signer = edge_of(pen_as(0x35, &owner_id), &owner_id);
     let opened =
-        ciris_edge::chat::open_pair_room(&*dir, &owner_id, &peer_id, now, expires, &node_signer)
+        ciris_edge::chat::open_pair_room(&*dir, &owner_id, &peer_id, now, expires, &owner_signer)
             .await
-            .expect("the owned node key founds the room for its owner");
+            .expect("the person founds their own room");
     assert!(opened.founded, "this call founded the room");
     assert!(opened.proposal.is_some(), "and invited the peer");
 }
