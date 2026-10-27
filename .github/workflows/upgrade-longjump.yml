@@ -30,9 +30,10 @@
 #
 # WHERE OURS DIFFERS, deliberately: the agent reads a captured artifact, and
 # notes that retention silently shortens the jump over time. We build the
-# fixture by installing an OLD RELEASE FROM PyPI, which keeps every version
-# forever — so the jump cannot quietly get shorter, and any released version is
-# a legal starting point.
+# fixture by installing an OLD RELEASE FROM PyPI, so any released version still
+# on PyPI is a legal starting point. PyPI does NOT keep every version forever
+# here: releases are deleted to stay under the 10 GiB project cap, and each
+# deletion shortens this jump — move the default below when that happens.
 
 name: Upgrade Long Jump
 
@@ -43,8 +44,10 @@ on:
         description: "Released ciris-server version to upgrade FROM"
         required: false
         # 0.5.203 was removed from PyPI on 2026-10-18 (its release entry is gone,
-        # not yanked); 0.5.207 is the oldest release this lane can still install.
-        default: "0.5.207"
+        # not yanked). 0.5.207-0.5.220 were deleted on 2026-10-26 to get under
+        # PyPI's 10 GiB project cap (v0.5.238's upload hit it); 0.5.221 is the
+        # oldest release this lane can still install.
+        default: "0.5.221"
   pull_request:
     paths:
       # Anything that can change how an EXISTING database is read or migrated.
@@ -73,7 +76,7 @@ jobs:
     env:
       # The floor we claim to support upgrading from. Logged every run, so a
       # jump that quietly shortens is visible rather than assumed.
-      FROM_VERSION: ${{ inputs.from-version || '0.5.207' }}
+      FROM_VERSION: ${{ inputs.from-version || '0.5.221' }}
     steps:
       - uses: actions/checkout@v4
 
