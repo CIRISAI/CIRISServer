@@ -453,3 +453,138 @@ async fn deferral_rows_reads_the_chain_back_by_id() {
     );
     assert_eq!(rows[1].as_ref().unwrap().attesting_key_id, owner.key_id());
 }
+
+/// **A split home** — every home claimed on 0.5.189 or later: the engine signs as
+/// the AGENT key, the owner-binding names a separate NODE key, and the agent is
+/// tied to its human only as an OCCURRENCE (`self:delegates_to:agent_occurrence:v1`
+/// from the login ceremony), never by an owner-binding of its own. So the
+/// amendment's attester (the agent key) has no `owner_of`; its owner is reached
+/// through the node. Persist v60.1's #1120 gate admits this shape through the
+/// occurrence anchor (CIRISPersist PR #1135, witness I1368); this is Server's
+/// side of the same shape, run on every adoption.
+#[tokio::test]
+async fn a_split_home_amendment_is_authorised_by_the_nodes_owner() {
+    use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
+    use ciris_persist::federation::admission::owner_of;
+    use ciris_persist::federation::types::device_class;
+
+    let owner = pen("owner-fedid-split", 0x34);
+    let agent = id_of("ciris-agent-bootstrap-split", 0x12);
+    let engine = Arc::new(
+        Engine::with_signer(
+            Arc::new(pen_as(0x12, "ciris-agent-bootstrap-split")),
+            "sqlite::memory:",
+        )
+        .await
+        .expect("engine on the agent key"),
+    );
+    register_key(
+        &engine,
+        KeySigner::Engine(&engine),
+        &agent,
+        "agent",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("the agent key registers");
+    let node = id_of("ciris-node-bootstrap-split", 0x22);
+    register_key(
+        &engine,
+        KeySigner::Local(&pen_as(0x22, &node)),
+        &node,
+        "node",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("the node key registers");
+    register_key(
+        &engine,
+        KeySigner::Local(&owner),
+        owner.key_id(),
+        "user",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("the owner registers");
+
+    // The owner-binding names the NODE (the first-run claim's shape).
+    let scopes: Vec<String> = OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let binding = build_signed_owner_binding(&owner, &node, &scopes, cohort_scope::SELF)
+        .await
+        .unwrap();
+    apply_signed_owner_binding(
+        &engine,
+        &node,
+        cohort_scope::SELF,
+        HybridPolicy::Strict,
+        &binding,
+    )
+    .await
+    .expect("the owner claims the node");
+
+    // The login ceremony anchors the agent as an occurrence of its human
+    // (`node_key::anchor_agent_to_owner`'s call, with the owner's pen).
+    let enc = ciris_server::backend::content_kem_pubkeys(&engine)
+        .await
+        .expect("content KEM keys");
+    engine
+        .self_at_login(SelfAtLoginInput {
+            identity_key_id: owner.key_id().to_owned(),
+            // Named by its ALIAS: the ceremony derives the registered id from it,
+            // as the hardware login signer does in production.
+            identity_signer: Some(Arc::new(pen_as(0x34, "owner-fedid-split"))),
+            app: SelfAtLoginOccurrence {
+                occurrence_key_id: node.clone(),
+                device_class: ciris_server::backend::host_device_class().to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc.clone(),
+                transport_destinations: Vec::new(),
+            },
+            agent: SelfAtLoginOccurrence {
+                occurrence_key_id: agent.clone(),
+                device_class: device_class::AGENT.to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc,
+                transport_destinations: Vec::new(),
+            },
+            bilateral_pair_id: format!("fold:{}:{agent}", owner.key_id()),
+            delegation_scope: None,
+        })
+        .await
+        .expect("the agent becomes an occurrence of its human");
+
+    let dir = engine.federation_directory();
+    assert_eq!(
+        owner_of(dir.as_ref(), &agent).await.unwrap(),
+        None,
+        "precondition: the agent key carries no owner-binding of its own"
+    );
+    assert_eq!(
+        owner_of(dir.as_ref(), &node).await.unwrap().as_deref(),
+        Some(owner.key_id()),
+        "precondition: the node's owner is the human"
+    );
+
+    let req_id = emit_deferral_request(&engine, &node, &request(None))
+        .await
+        .expect("the agent defers");
+    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true)
+        .await
+        .expect("the owner, the seated WA, approves");
+    let amend_id = emit_identity_amendment(&engine, &node, DIGEST, &resp_id, &req_id)
+        .await
+        .expect("the node's owner authorises an amendment the agent key signs");
+    let amend = row(&engine, &amend_id).await;
+    assert_eq!(amend.attestation_envelope["dimension"], IDENTITY_AMENDMENT);
+    assert_eq!(
+        amend.attesting_key_id, agent,
+        "the agent key signs, not the node"
+    );
+    assert_eq!(
+        amend.attestation_envelope["authorized_by"],
+        resp_id.as_str()
+    );
+}
