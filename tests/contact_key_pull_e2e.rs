@@ -567,7 +567,9 @@ async fn a_contacts_announced_owner_binding_arrives_on_a_subject_pull() {
     carry_key(&canonical, &asker.engine, &asker.key_id).await;
     carry_key(&asker, &canonical.engine, &canonical.key_id).await;
     carry_key(&asker, &canonical.engine, &contact).await;
-    carry_key(&asker, &canonical.engine, &contact_node).await;
+    // NOT the contact's node key: the 2026-10-27 run's asker held the person's
+    // key (the add) but not their node's, and persist refused the binding. The
+    // node is named by the contact code (`owned_nodes`); its key is pulled first.
     accept_shared_root(&[&asker, &canonical], "resolve-root", &canonical.key_id).await;
     assert!(
         announced_nodes_of(&asker.engine, &contact)
@@ -615,14 +617,48 @@ async fn a_contacts_announced_owner_binding_arrives_on_a_subject_pull() {
         EnvelopeKind::Attestation,
         SessionRole::Responder,
         Arc::new(DirectoryStateAdapter::new(canon_bridge.clone()).with_peer(asker.key_id.clone())),
-        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge)),
+        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge.clone())),
     );
 
-    // What `pull_subject_testimony(canonical, contact)` sends on this plane.
+    // The resolve pass: the code's node key first (Key plane, public), then the
+    // person's records again.
+    let (ka_tx, mut ka_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (kc_tx, mut kc_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let asker_key_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: kc_tx }),
+        canonical.key_id.clone(),
+        EnvelopeKind::Key,
+        SessionRole::Initiator,
+        Arc::new(
+            DirectoryStateAdapter::new(asker_bridge.clone()).with_peer(canonical.key_id.clone()),
+        ),
+        Arc::new(MutableDirectoryStateAdapter::new(asker_bridge.clone())),
+    );
+    let canon_key_coord = ReplicationCoordinator::new(
+        Arc::new(Loopback { to_peer: ka_tx }),
+        asker.key_id.clone(),
+        EnvelopeKind::Key,
+        SessionRole::Responder,
+        Arc::new(DirectoryStateAdapter::new(canon_bridge.clone()).with_peer(asker.key_id.clone())),
+        Arc::new(MutableDirectoryStateAdapter::new(canon_bridge.clone())),
+    );
+    asker_key_coord
+        .start_pull(&contact_node)
+        .await
+        .expect("Key subject Pull for the code's node sends");
+    pump(&asker_key_coord, &mut ka_rx, &canon_key_coord, &mut kc_rx).await;
+    assert!(
+        asker_dir_holds(&asker, &contact_node).await,
+        "the code's node key arrived on the public Key plane"
+    );
+    // Then what `pull_subject_testimony(canonical, contact)` sends on the
+    // Attestation plane. Asked BEFORE the node key, persist refuses the binding
+    // (`attested_key_id … resolves as neither` — the 2026-10-27 deadlock) and
+    // edge then backs off re-asking it (CIRISEdge#544).
     asker_coord
         .start_pull(&contact)
         .await
-        .expect("Attestation subject Pull sends");
+        .expect("the person-records Pull");
     pump(&asker_coord, &mut a_rx, &canon_coord, &mut c_rx).await;
 
     assert!(
@@ -633,4 +669,14 @@ async fn a_contacts_announced_owner_binding_arrives_on_a_subject_pull() {
         "the contact's announced owner-binding reached the asker on a subject Pull, so a \
          directed grant naming them has a node to reach (tracked: CIRISEdge#907)"
     );
+}
+
+async fn asker_dir_holds(n: &Node, key_id: &str) -> bool {
+    matches!(
+        n.engine
+            .federation_directory()
+            .lookup_public_key(key_id)
+            .await,
+        Ok(Some(_))
+    )
 }

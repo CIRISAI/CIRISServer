@@ -2815,6 +2815,18 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         ciris_edge::contact::ContactResolution::Known(_) => "federation",
         ciris_edge::contact::ContactResolution::ReadyFromCode { .. } => "direct",
     };
+    // The nodes the code names (lightnet: the person's announced nodes). Their
+    // Key rows are what lets this node ADMIT the person's owner-binding once it
+    // arrives — persist refuses a binding whose attested node it has never met —
+    // so the resolve pass pulls them first (tracked: CIRISEdge#907).
+    let code_nodes: Vec<String> = match &resolution {
+        ciris_edge::contact::ContactResolution::ReadyFromCode { admission, .. } => admission
+            .owned_nodes
+            .iter()
+            .map(|n| n.key_id.clone())
+            .collect(),
+        ciris_edge::contact::ContactResolution::Known(_) => Vec::new(),
+    };
     let key_id = match resolution {
         // Already in the directory: nothing to admit, go straight to consent.
         // Re-pasting a code for someone already known lands here too, which is
@@ -3023,6 +3035,9 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         // report unknown rather than asserting either answer.
         None => (false, 0),
     };
+    // Every add, pasted once or completed by the pending pass: a person this
+    // node cannot resolve to a node is tracked until their owner-binding lands.
+    pending_contacts::track_until_resolved(&st, &owner, &key_id, &code_nodes).await;
     // Whether "not reachable" is offline or STRUCTURAL: an un-announced peer
     // has no node here to be reachable AT, and an un-announced self cannot be
     // delivered to however reachable the peer is. Said now, at the contact,
@@ -5786,6 +5801,8 @@ pub(crate) mod pending_contacts {
     struct Unresolved {
         st: ChatState,
         owner: Owner,
+        /// The nodes the contact code named — pulled by key before the binding.
+        code_nodes: Vec<String>,
         since: Instant,
         asked: u32,
         last_report: Option<Instant>,
@@ -5980,7 +5997,12 @@ pub(crate) mod pending_contacts {
 
     /// Track an added contact until their person resolves to a node here, and
     /// ask for their records now. A no-op when they already resolve.
-    pub(crate) async fn track_until_resolved(st: &ChatState, owner: &Owner, key_id: &str) {
+    pub(crate) async fn track_until_resolved(
+        st: &ChatState,
+        owner: &Owner,
+        key_id: &str,
+        code_nodes: &[String],
+    ) {
         if !nodes_of(st, key_id).await.is_empty() {
             return;
         }
@@ -5994,6 +6016,7 @@ pub(crate) mod pending_contacts {
                     Unresolved {
                         st: st.clone(),
                         owner: owner.clone(),
+                        code_nodes: code_nodes.to_vec(),
                         since: Instant::now(),
                         asked: 0,
                         last_report: None,
@@ -6011,13 +6034,22 @@ pub(crate) mod pending_contacts {
     /// One pass over the unresolved contacts: drop the resolved and expired,
     /// re-ask for the rest, and say so out loud when one stalls.
     async fn resolve_pass() {
-        let due: Vec<(Key, ChatState, Owner, Instant)> = {
+        type ResolveDue = (Key, ChatState, Owner, Vec<String>, Instant);
+        let due: Vec<ResolveDue> = {
             let t = unresolved().lock().expect("unresolved contacts lock");
             t.iter()
-                .map(|(k, u)| (k.clone(), u.st.clone(), u.owner.clone(), u.since))
+                .map(|(k, u)| {
+                    (
+                        k.clone(),
+                        u.st.clone(),
+                        u.owner.clone(),
+                        u.code_nodes.clone(),
+                        u.since,
+                    )
+                })
                 .collect()
         };
-        for (k, st, owner, since) in due {
+        for (k, st, owner, code_nodes, since) in due {
             let key_id = &k.1;
             if since.elapsed() > PENDING_TTL {
                 unresolved().lock().expect("lock").remove(&k);
@@ -6042,7 +6074,35 @@ pub(crate) mod pending_contacts {
                 crate::compose::kick_replication("contact resolved to a node");
                 continue;
             }
-            let (peers, failed) = pull_person_records(&st, &owner, key_id).await;
+            // The node keys first: persist admits `delegates_to(owner → node)` only
+            // once it holds the node's Key row, so a binding that arrives before
+            // it is refused (`attested_key_id … resolves as neither`, the
+            // 2026-10-27 run) and only re-admitted when asked for again — which
+            // the person-records Pull below does every pass.
+            let mut missing_nodes = Vec::new();
+            for node in &code_nodes {
+                let held = matches!(
+                    st.engine
+                        .federation_directory()
+                        .lookup_public_key(node)
+                        .await,
+                    Ok(Some(_))
+                );
+                if !held {
+                    missing_nodes.push(node.clone());
+                    let _ = pull_person_records(&st, &owner, node).await;
+                }
+            }
+            // Ask for the person's records only once the code's node keys are
+            // held: a binding refused for its unknown node is then held back by
+            // edge for a backoff window (CIRISEdge#544) before it is re-offered.
+            // A code naming a node no peer ever produces must not block forever,
+            // so after STALL_AFTER the person's records are asked for regardless.
+            let (peers, failed) = if missing_nodes.is_empty() || since.elapsed() >= STALL_AFTER {
+                pull_person_records(&st, &owner, key_id).await
+            } else {
+                (Vec::new(), Vec::new())
+            };
             let report = {
                 let mut t = unresolved().lock().expect("lock");
                 t.get_mut(&k).and_then(|u| {
@@ -6064,10 +6124,13 @@ pub(crate) mod pending_contacts {
                     asked,
                     pulled_from = ?peers,
                     pull_failed = ?failed,
+                    code_nodes = ?code_nodes,
+                    code_node_keys_missing = ?missing_nodes,
                     "contacts: CONTACT UNRESOLVED — the person is a contact but resolves to no node \
                      here, so a grant or message naming them has nowhere to go. This node asks each \
-                     peer for their records every pass. Where to look: (1) pulled_from=[] → no peer \
-                     to ask; (2) on the peer, `subject Pull refused … not publicly pullable` means \
+                     peer for their records every pass, and the code's nodes' keys first. Where to look: \
+                     (1) pulled_from=[] → no peer to ask; code_node_keys_missing non-empty → the \
+                     binding cannot be admitted until those keys land; (2) on the peer, `subject Pull refused … not publicly pullable` means \
                      it will not serve their owner-binding on request (tracked: CIRISEdge#907); \
                      (3) on the peer, is there a live federation `delegates_to` from this key_id to \
                      a node at all — if not, they have not announced"
@@ -6134,7 +6197,6 @@ pub(crate) mod pending_contacts {
                 }
                 continue;
             }
-            let st_for_resolve = st.clone();
             let resp = add_contact_for_owner(st, owner.clone(), k.1.clone()).await;
             let status = resp.status();
             if status == axum::http::StatusCode::ACCEPTED {
@@ -6143,7 +6205,6 @@ pub(crate) mod pending_contacts {
             table().lock().expect("lock").remove(&k);
             if status.is_success() {
                 tracing::info!(owner = %owner.key_id, key_id, waited_secs = since.elapsed().as_secs(), asked, "contacts: pending contact COMPLETED — the key arrived and matched the code");
-                track_until_resolved(&st_for_resolve, &owner, &key_id).await;
             } else {
                 tracing::warn!(owner = %owner.key_id, key_id, status = status.as_u16(), "contacts: pending contact discarded — the add path refused it once the key arrived (see the refusal logged just above)");
             }
