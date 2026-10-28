@@ -959,10 +959,19 @@ async fn publish_node_occurrence(
     use ciris_persist::federation::key_grant::publish_self_occurrence_with_local_signer;
     let node_key = node.derived_key_id();
     let dir = engine.federation_directory();
-    if ciris_persist::federation::occurrence_agreed_to(dir.as_ref(), owner, &node_key)
+    // The peer-portable question: is the CURRENT signed row for the pair the
+    // node's own? `occurrence_agreed_to` is the wrong test here: this node
+    // trusts its own rows locally and reads the history, so it answered yes
+    // while peers held only the identity-signed row.
+    let current_is_mine = dir
+        .list_signed_identity_occurrences_for(owner)
         .await
-        .map_err(|e| anyhow::anyhow!("occurrence_agreed_to({owner}, {node_key}): {e}"))?
-    {
+        .map_err(|e| anyhow::anyhow!("list_signed_identity_occurrences_for({owner}): {e}"))?
+        .iter()
+        .any(|r| {
+            r.identity_occurrence.occurrence_key_id == node_key && r.attesting_key_id == node_key
+        });
+    if current_is_mine {
         return Ok(false);
     }
     let class = crate::backend::host_device_class();
@@ -1012,6 +1021,51 @@ async fn publish_node_occurrence(
 pub async fn anchor_agent_to_owner(
     engine: &ciris_persist::prelude::Engine,
 ) -> Result<Option<String>> {
+    let anchored = anchor_agent_to_owner_inner(engine).await;
+    // AFTER the ceremony, on every path (fresh anchor, already anchored, or a
+    // ceremony error) — see [`reaffirm_node_occurrence`].
+    reaffirm_node_occurrence(engine).await;
+    anchored
+}
+
+/// **The node agrees to be its owner's device, in its own hand** (persist #851
+/// `publish_self_occurrence_with_local_signer`; #932 H1), unless the current
+/// row for the pair is already the node's. Call after anything that runs the
+/// login ceremony: the ceremony writes {owner, node} signed by the IDENTITY, the
+/// row is last-signed-wins per pair, and peers count an identity's unilateral
+/// row for nothing — so a node row published before it is replaced and peers
+/// never see the node as a device (2026-10-28 gate: both nodes logged the
+/// agreement, neither peer held it). Every "is this node one of U's devices"
+/// read on the chat path — room content, the room key, key-grant wraps, the
+/// room hold — needs it. A no-op on a standalone or unowned node.
+pub async fn reaffirm_node_occurrence(engine: &ciris_persist::prelude::Engine) {
+    if let Some(node) = held_node_signer() {
+        let node_key = node.derived_key_id();
+        let owner = ciris_persist::federation::admission::owner_of(
+            engine.federation_directory().as_ref(),
+            &node_key,
+        )
+        .await
+        .ok()
+        .flatten();
+        if let Some(owner) = owner {
+            if let Err(e) = publish_node_occurrence(engine, &node, &owner).await {
+                tracing::warn!(
+                    node_key_id = %node_key,
+                    owner_key_id = %owner,
+                    error = %format!("{e:#}"),
+                    "split home: the node's own occurrence agreement was NOT published — \
+                     peers will not count this node as its owner's device, so room content \
+                     and keys will not reach it until it is"
+                );
+            }
+        }
+    }
+}
+
+async fn anchor_agent_to_owner_inner(
+    engine: &ciris_persist::prelude::Engine,
+) -> Result<Option<String>> {
     use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
     use ciris_persist::federation::types::device_class;
 
@@ -1037,25 +1091,6 @@ pub async fn anchor_agent_to_owner(
         Ok(None) => return Ok(None),
         Err(e) => anyhow::bail!("owner_of({node_key}): {e}"),
     };
-    // The NODE agrees to be its owner's device, in its own hand (persist #851
-    // `publish_self_occurrence_with_local_signer`; #932 H1). The login
-    // ceremony below writes the pair signed by the IDENTITY alone, and a peer
-    // counts an identity's unilateral row for nothing: every "is this node one
-    // of U's devices" read on the chat path — room content, the room key,
-    // key-grant wraps, the room hold — saw no device for a split home's node
-    // on any peer (2026-10-28 gate; persist's audit of bea749c3). Signed by the
-    // node pen with this backend's content-KEM keys, through the gated door,
-    // so it replicates and wraps can target it.
-    if let Err(e) = publish_node_occurrence(engine, &held, &owner).await {
-        tracing::warn!(
-            node_key_id = %node_key,
-            owner_key_id = %owner,
-            error = %format!("{e:#}"),
-            "split home: the node's own occurrence agreement was NOT published — peers \
-             will not count this node as its owner's device, so room content and keys \
-             will not reach it until it is"
-        );
-    }
     let stewards = engine
         .steward_bindings_of(&agent_key)
         .await
