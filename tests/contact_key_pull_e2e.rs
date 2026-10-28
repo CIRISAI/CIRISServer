@@ -461,27 +461,40 @@ async fn a_direct_key_pull_reaches_a_contact_the_recovery_queue_starves() {
         Arc::new(MutableDirectoryStateAdapter::new(canon_bridge)),
     );
 
-    // The queue's pick: the routed name wins, the person's contact waits.
+    // The queue's pick. Before edge's CIRISEdge#904 fix the routed name won and
+    // the person's contact waited; with it, a name a person is waiting on is
+    // asked first. Either way the direct Pull below lands the key, so the
+    // pending-contacts pass works on both sides of that edge release.
     asker_coord.begin_round().await;
     let pulled = asker_coord
         .send_recovery_pull()
         .await
         .expect("recovery pull");
-    assert_eq!(
-        pulled.as_deref(),
-        Some("ciris-gate-peer-unmet"),
-        "the recovery queue takes the peer-delivered name before the contact (CIRISEdge#904); \
-         if this changes, edge fixed the order and the direct Pull is belt-and-braces"
+    assert!(
+        matches!(pulled.as_deref(), Some("ciris-gate-peer-unmet"))
+            || pulled.as_deref() == Some(stranger.as_str()),
+        "the recovery queue took a queued name: {pulled:?}"
     );
     pump(&asker_coord, &mut a_rx, &canon_coord, &mut c_rx).await;
-    assert!(
-        asker_dir
-            .lookup_public_key(&stranger)
-            .await
-            .unwrap()
-            .is_none(),
-        "a round spent on the routed name did not bring the contact's key"
-    );
+    if pulled.as_deref() == Some(stranger.as_str()) {
+        assert!(
+            asker_dir
+                .lookup_public_key(&stranger)
+                .await
+                .unwrap()
+                .is_some(),
+            "edge #904: the person's contact was asked first and arrived"
+        );
+    } else {
+        assert!(
+            asker_dir
+                .lookup_public_key(&stranger)
+                .await
+                .unwrap()
+                .is_none(),
+            "a round spent on the routed name did not bring the contact's key"
+        );
+    }
 
     // The pending-contacts pass's direct Pull.
     asker_coord
