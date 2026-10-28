@@ -345,31 +345,29 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
         "the room record reaches the live invitee's node: {group_verdict:?}"
     );
 
-    // The first message (2026-10-28 gate, room Ready on both sides): the
-    // engine — the AGENT — mints the room's epoch, and persist emits its
-    // key_grant set at `community` scope only if the minter resolves to a room
-    // member. The ceremony's identity-signed {owner, agent} row resolves
-    // nothing (#932 H1), so every send answered `chat.emit_failed`
-    // (NoCommunityMembership).
-    let mint_scope = || {
-        dir.check_write_cohort_scope_for(
-            &agent,
-            "key_grant",
-            cohort_scope::COMMUNITY,
-            Some(&opened.room),
-        )
+    // The first message (2026-10-28 gates, room Ready on both sides): the
+    // room's epoch is minted, and its key-grant set signed, by the SEALER, and
+    // every member's node admits that set only if the sealer is an active
+    // member occurrence of the room per its OWN roster fold. The agent was the
+    // sealer and was refused on the far side (`signer_not_active_member`): its
+    // tie to the person is a `self` row no peer receives. The NODE lifts
+    // through its owner-binding, which peers hold — so the node seals
+    // (`node_key::sealing_engine`), and the agent never signs as the node.
+    let now = chrono::Utc::now();
+    let sealer_is_member = |who: String| {
+        let dir = dir.clone();
+        let room = opened.room.clone();
+        async move {
+            ciris_persist::federation::key_grant::is_active_member_at(&*dir, &room, &who, now)
+                .await
+                .unwrap()
+        }
     };
-    let before = mint_scope().await;
+    // (Here, on the creator's own directory, the agent DOES count: its
+    // ceremony row is local. That asymmetry is exactly why it passed the
+    // creator's write gate and failed on every peer.)
     assert!(
-        before.is_err(),
-        "precondition — the ceremony's row alone does not seat the agent: {before:?}"
+        sealer_is_member(node.clone()).await,
+        "the node seals as its owner, a room member, through the owner-binding"
     );
-    // The agent agrees in its own hand (`node_key::publish_agent_occurrence`).
-    engine
-        .publish_self_occurrence(&owner_id, device_class::AGENT, None)
-        .await
-        .expect("the agent agrees to be its owner's occurrence");
-    mint_scope()
-        .await
-        .expect("the agent mints the room's epoch as its owner, a room member");
 }

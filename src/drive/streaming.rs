@@ -50,8 +50,9 @@ pub const RANGE_WINDOW: u64 = files::STREAM_WINDOW_BYTES;
 type Item = Result<Vec<u8>, FileError>;
 
 fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
+    // Sealed as the NODE on a split home (`node_key::sealing_engine`).
     ciris_edge::group_content::PersistGroupContentStore::new(
-        (**engine).clone(),
+        crate::node_key::sealing_engine(engine),
         engine.federation_directory(),
     )
 }
