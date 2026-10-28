@@ -1059,8 +1059,63 @@ pub async fn reaffirm_node_occurrence(engine: &ciris_persist::prelude::Engine) {
                      and keys will not reach it until it is"
                 );
             }
+            if let Err(e) = publish_agent_occurrence(engine, &node_key, &owner).await {
+                tracing::warn!(
+                    owner_key_id = %owner,
+                    error = %format!("{e:#}"),
+                    "split home: the agent's own occurrence agreement was NOT published — \
+                     the agent resolves to nobody, so every room key it mints (the epoch of \
+                     a chat message) is refused at community scope"
+                );
+            }
         }
     }
+}
+
+/// **The agent agrees to be its owner's occurrence, in its own hand** — the
+/// agent mirror of [`publish_node_occurrence`]. On a split home the engine
+/// signs as the AGENT, so the agent is the minter of every room epoch this
+/// node seals (a chat message's `key_grant` set); persist admits that set at
+/// `community` scope only if the minter resolves to a room member, and the
+/// ceremony's identity-signed {owner, agent} row resolves nothing (#932 H1).
+/// Signed by the engine's own LocalSigner (`Engine::publish_self_occurrence`),
+/// which the signed-occurrence gate admits because the agent is in the owner's
+/// active fold. Skipped when the current signed row is already the agent's,
+/// and on a standalone home (engine key == node key: the node's row covers it).
+async fn publish_agent_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    node_key: &str,
+    owner: &str,
+) -> Result<bool> {
+    use ciris_persist::federation::types::device_class;
+    let agent = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve the engine's derived key_id: {e}"))?;
+    if agent == node_key || agent == owner {
+        return Ok(false);
+    }
+    let current_is_mine = engine
+        .federation_directory()
+        .list_signed_identity_occurrences_for(owner)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_signed_identity_occurrences_for({owner}): {e}"))?
+        .iter()
+        .any(|r| r.identity_occurrence.occurrence_key_id == agent && r.attesting_key_id == agent);
+    if current_is_mine {
+        return Ok(false);
+    }
+    engine
+        .publish_self_occurrence(owner, device_class::AGENT, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("publish the agent's occurrence under {owner}: {e}"))?;
+    tracing::info!(
+        agent_key_id = %agent,
+        owner_key_id = %owner,
+        "split home: the agent agreed, in its own hand, to be its owner's occurrence — the \
+         room epochs it mints are admitted at community scope"
+    );
+    Ok(true)
 }
 
 async fn anchor_agent_to_owner_inner(

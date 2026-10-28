@@ -344,4 +344,32 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
         group_verdict.allowed(),
         "the room record reaches the live invitee's node: {group_verdict:?}"
     );
+
+    // The first message (2026-10-28 gate, room Ready on both sides): the
+    // engine — the AGENT — mints the room's epoch, and persist emits its
+    // key_grant set at `community` scope only if the minter resolves to a room
+    // member. The ceremony's identity-signed {owner, agent} row resolves
+    // nothing (#932 H1), so every send answered `chat.emit_failed`
+    // (NoCommunityMembership).
+    let mint_scope = || {
+        dir.check_write_cohort_scope_for(
+            &agent,
+            "key_grant",
+            cohort_scope::COMMUNITY,
+            Some(&opened.room),
+        )
+    };
+    let before = mint_scope().await;
+    assert!(
+        before.is_err(),
+        "precondition — the ceremony's row alone does not seat the agent: {before:?}"
+    );
+    // The agent agrees in its own hand (`node_key::publish_agent_occurrence`).
+    engine
+        .publish_self_occurrence(&owner_id, device_class::AGENT, None)
+        .await
+        .expect("the agent agrees to be its owner's occurrence");
+    mint_scope()
+        .await
+        .expect("the agent mints the room's epoch as its owner, a room member");
 }
