@@ -294,12 +294,6 @@ pub mod halt_gate;
 /// `register_federation_key` call site in this crate goes through.
 pub mod hardware_attestation;
 pub mod health;
-/// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
-/// (the publisher + converger that advertise this node's held fountain
-/// content and act on peers' holding claims) into the shared Edge. The
-/// persist-backed trait adapters + the `install_swarm_runtime` entry point
-/// that mirrors the replication wiring shape (build before `edge.run()`).
-pub mod holonomic;
 /// HTTP error-response logging middleware (the "never guess" layer).
 pub mod http_log;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation

@@ -1091,24 +1091,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // copy of the canonical, almost all of it freed by here): return it
     // before the loops start allocating on top.
     crate::diag::trim_after("boot: peering done");
-    crate::compose_status::phase("holonomic");
-    // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
-    // The publisher advertises the fountain content THIS node holds as signed
-    // FountainHoldingClaim envelopes to the consent cohort; the converger acts
-    // on PEERS' claims (tier-evict / hard-delete locally-held symbols once a
-    // content unit is sufficiently replicated). Like the ReplicationRuntime it
-    // reuses the SAME Reticulum transport and MUST install BEFORE edge.run()
-    // consumes the Edge (install routes verified inbound claims into the
-    // converger, CIRISEdge#184). Gated on `caps.lens_store`: the holonomic tier
-    // only makes sense when the node carries the corpus — a relay-only node
-    // holds no fountain content and has nothing to publish or converge. The
-    // handle is bound for the node's lifetime so the publisher/converger tasks
-    // are not dropped.
-    let _swarm = if caps.lens_store {
-        crate::holonomic::install_swarm_runtime(&engine, &edge).await
-    } else {
-        None
-    };
 
     // ── CEG-driven reconcile nudge ────────────────────────────────────────────
     // The peering API (POST /v1/federation/peering) NEVER touches the runtime — it
@@ -1237,7 +1219,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    at all: no bind, no error, no panic — the embedded app could never
     //    claim/login, and the only witness was one INFO line on a dark sink.
     //    The read surface is read-only and corpus-safe; the corpus-GROWTH tiers
-    //    (scorer, holonomic swarm, replication) stay gated on `caps.lens_store`
+    //    (scorer, replication) stay gated on `caps.lens_store`
     //    below. ──────────────────────────────────────────────────────────────
     if !caps.lens_store {
         tracing::warn!(
@@ -4576,7 +4558,11 @@ pub(crate) async fn start_replication_runtime(
     // `consent_peers_by_principals(actor)` matched nothing and the production-
     // shaped agent withheld its whole Attestation plane toward the canonical
     // (`send_set_size=0 consent=0 owner_routed=0`, 2026-09-24). The blob puller
-    // below keeps the signing key: its holder claims are self-attested by it.
+    // takes the wire identity too: since 0.5.241 the NODE signs its holder
+    // claims (`node_key::sealing_engine`), and the puller's store gate asks
+    // whether THIS node's principal is in the room — keyed on the actor it
+    // resolved to nobody and refused every room body (2026-10-28,
+    // `SenderNotApprovedForTier { cohort, VerifiedOnly }`).
     let wire = crate::node_key::wire_identity().unwrap_or(node_key_id);
     let candidates = crate::peer::replication_peers_from_consent(engine, wire).await?;
     let mut desired: Vec<String> = Vec::with_capacity(candidates.len());
@@ -4787,7 +4773,7 @@ pub(crate) async fn start_replication_runtime(
     // opts in. The revocation register lets an authorized `withdraws` make the
     // chunk source refuse and the backend evict (CIRISEdge#614).
     let (pull_sink, revocations) =
-        crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
+        crate::backend::spawn_blob_puller(engine, Arc::clone(edge), wire).await;
     // ── THE MEMBERSHIP WIDENER (edge v38.0.0 / persist v52.0.0, CIRISPersist#955) ──
     //
     // Nobody joins a family or community without their own signed acceptance

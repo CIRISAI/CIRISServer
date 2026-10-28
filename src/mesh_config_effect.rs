@@ -284,54 +284,18 @@ pub const fn consumption(key: MeshConfigKey) -> Consumption {
             owner: "CIRISPersist",
             tracked_by: "CIRISServer#365",
         },
-        // ── The fountain repair planner's four knobs (persist v30.0.0 /
-        //    CIRISPersist#602 split the two fused keys into their symbol and
-        //    holder axes). Still NOT wired, and the reason has CHANGED — which
-        //    is why it is restated rather than left as it stood.
-        //
-        // #365 gave two blockers. **The first is gone.** It was that this
-        // build's only repair/eviction knobs are edge's
-        // `SwarmRuntimeConfig { target_holders, min_viable }` + its
-        // `FountainPolicy { k_repair, min_viable_symbols }`, which count
-        // HOLDERS and SYMBOLS respectively, while persist's registry offered
-        // two keys typed `Count` — so binding either one meant choosing an
-        // axis on our own authority, which is this codebase's most productive
-        // defect class. persist now types them (`Symbols` / `Holders`) from
-        // edge's OWN four-tuple decomposition, so the mapping is no longer a
-        // judgement call: each key names exactly one field.
-        //
-        // **The second blocker stands, and it is the whole reason these stay
-        // `false`.** `FountainSwarmRuntime::start` takes `SwarmRuntimeConfig`
-        // BY VALUE and copies each field into its spawned publisher/converger
-        // tasks; there is no setter. The only place a value from this plane
-        // could be applied is `crate::holonomic::install_swarm_runtime`, once,
-        // at composition — and a boot-only consumer is strictly WORSE here
-        // than none:
-        //
-        //   * a relief filed after composition does not apply until a restart
-        //     nobody performs — the false confirmation #365 exists to remove;
-        //   * a relief whose TTL EXPIRES keeps applying until that restart.
-        //     The fold is TTL-evaluated at `now` and [`REFRESH_INTERVAL`]
-        //     exists precisely so an emergency stops applying without anyone
-        //     filing anything. Reading once at boot re-introduces the eternal
-        //     72-hour emergency, which is a NEW lie rather than the existing
-        //     gap.
-        //
-        // So the honest answer is `consumed: false` with the blocker named at
-        // the surface, not a `true` backed by a value the node applies once.
-        // `tests/substrate_contract_gate.rs` reconciles persist's ceilings
-        // against edge's EMITTED floor manifest, so the numbers on both sides
-        // of this gap stay checkable while the gap is open.
+        // ── The four `redundancy.*` knobs. Durability is plain whole COPIES
+        //    now (KISS / LOCKSS, Eric 2026-10-28): the fountain swarm runtime
+        //    these were blocked on is removed from this node, so edge's
+        //    no-setter blocker no longer applies. The two `Symbols` knobs have
+        //    no consumer at all (there is no erasure code); the two `Holders`
+        //    knobs are what the per-item durable mark's copy count will read
+        //    when it exists (CIRISServer#809). Until then `consumed: false`.
         MeshConfigKey::RedundancyKRepairSymbols
         | MeshConfigKey::RedundancyMinViableSymbols
         | MeshConfigKey::RedundancyTargetHolders
-        | MeshConfigKey::RedundancyMinViableHolders => Consumption::Unreachable {
-            owner: "CIRISEdge",
-            blocker: "FountainSwarmRuntime::start consumes SwarmRuntimeConfig by value and \
-                      exposes no setter, so a value from this plane could only be applied at \
-                      composition — after which an expired relief would keep applying until a \
-                      restart.",
-            tracked_by: "CIRISEdge#440",
+        | MeshConfigKey::RedundancyMinViableHolders => Consumption::Unbuilt {
+            tracked_by: "CIRISServer#809",
         },
         // #239's descent operator does not exist, so there is nothing to
         // multiply. A `consumed: true` here would be precisely the lie.
