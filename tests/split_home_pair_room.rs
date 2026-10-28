@@ -249,10 +249,38 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
         "peer login ceremony at the creator: {:?}",
         peer_login.as_ref().map(|_| "ok")
     );
+    // The invitee's node agrees, in its own hand, to be their device — what a
+    // split home publishes since 0.5.241 (`node_key::publish_node_occurrence`).
+    // With it the node resolves to the invitee as an AGREED device on any peer,
+    // with or without persist's owner-binding fallback.
+    {
+        use ciris_persist::engine::BackendDispatch;
+        // Named by ALIAS, as the held node signer is: its derived id is the node key.
+        let node_signer = Arc::new(pen_as(0x46, "ciris-node-bootstrap-peersplit"));
+        match engine.backend() {
+            BackendDispatch::Sqlite(b) => {
+                ciris_persist::federation::key_grant::publish_self_occurrence_with_local_signer(
+                    b.as_ref(),
+                    &node_signer,
+                    &peer_id,
+                    ciris_server::backend::host_device_class(),
+                    None,
+                )
+                .await
+                .expect("the invitee's node agrees to be their device");
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("in-memory sqlite"),
+        }
+    }
     let active = dir
         .active_identities_for_occurrence(&peer_node)
         .await
         .unwrap();
+    assert!(
+        active.contains(&peer_id),
+        "the agreed occurrence resolves the invitee's node to the invitee: {active:?}"
+    );
     let occs = dir
         .list_identity_occurrences_by_occurrence_key(&peer_node)
         .await
