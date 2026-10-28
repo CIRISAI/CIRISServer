@@ -352,7 +352,7 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
     // sealer and was refused on the far side (`signer_not_active_member`): its
     // tie to the person is a `self` row no peer receives. The NODE lifts
     // through its owner-binding, which peers hold — so the node seals
-    // (`node_key::sealing_engine`), and the agent never signs as the node.
+    // (`node_key::node_engine`), and the agent never signs as the node.
     let now = chrono::Utc::now();
     let sealer_is_member = |who: String| {
         let dir = dir.clone();

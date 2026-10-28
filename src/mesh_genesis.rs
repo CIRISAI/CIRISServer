@@ -1421,50 +1421,65 @@ pub async fn withdraw_trust_acceptance(
     use ciris_persist::federation::types::{attestation_type, cohort_scope};
     use ciris_persist::federation::EmitAttestationInput;
 
-    // The SAME accessor accept_trust_root uses — the withdraw must name the
-    // identity the acceptance was written under, or it withdraws nothing.
-    let node_key_id = engine
-        .local_derived_key_id()
-        .await
-        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
-    // EVERY live acceptance: an upgraded node holds the legacy unlabelled edge
-    // AND the labelled one written beside it, and persist counts either, so
-    // withdrawing one left the root trusted (Codex on #725).
-    let accepted = live_acceptance_ids(engine, &node_key_id, root).await?;
-    if accepted.is_empty() {
+    // EVERY key that accepted the root, each withdrawing its OWN acceptance
+    // with its own pen. On a split home `accept_trust_root` writes one as the
+    // engine (the agent) AND one as the NODE (`accept_trust_root_as_node_key`
+    // — the edge serve gate's `local_key_id`); withdrawing only the engine's
+    // left the node trusting the root (2026-10-28 audit). A standalone node
+    // has one key and this is one pass, as before.
+    let agent_engine = (**engine).clone();
+    let mut signers: Vec<ciris_persist::prelude::Engine> = vec![agent_engine];
+    if crate::node_key::held_node_signer().is_some() {
+        signers.push(crate::node_key::node_engine(engine));
+    }
+    let mut withdrawn: Vec<(String, Vec<String>)> = Vec::new();
+    for signer in &signers {
+        let key_id = signer
+            .local_derived_key_id()
+            .await
+            .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+        // EVERY live acceptance: an upgraded node holds the legacy unlabelled
+        // edge AND the labelled one written beside it, and persist counts
+        // either, so withdrawing one left the root trusted (Codex on #725).
+        let accepted = live_acceptance_ids(engine, &key_id, root).await?;
+        for accepted_id in &accepted {
+            let envelope = ciris_persist::federation::withdraws_attestation_envelope(
+                accepted_id,
+                attestation_type::DELEGATES_TO,
+            );
+            // A `withdraws` row: persist retires a row only for a structural
+            // retraction (`withdraws` / `recants`, precedence::retired_ids). The
+            // withdrawal used to be written as a `delegates_to` carrying a
+            // `withdraws` envelope, which no fold reads as a retraction — so
+            // un-trusting a root never un-trusted it.
+            let mut input = EmitAttestationInput::with_envelope(
+                attestation_type::WITHDRAWS,
+                ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+                    .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
+                cohort_scope::FEDERATION,
+            );
+            input.attested_key_id = Some(root.to_string());
+            signer
+                .emit_attestation_self(input)
+                .await
+                .map_err(|e| GenesisError::Directory(format!("withdraw trust:accepts: {e}")))?;
+        }
+        if !accepted.is_empty() {
+            withdrawn.push((key_id, accepted));
+        }
+    }
+    if withdrawn.is_empty() {
         tracing::info!(
             root = %root,
             "no live trust:accepts edge for this root — nothing to withdraw (already un-trusted)"
         );
         return Ok(false);
     }
-    for accepted_id in &accepted {
-        let envelope = ciris_persist::federation::withdraws_attestation_envelope(
-            accepted_id,
-            attestation_type::DELEGATES_TO,
-        );
-        // A `withdraws` row: persist retires a row only for a structural
-        // retraction (`withdraws` / `recants`, precedence::retired_ids). The
-        // withdrawal used to be written as a `delegates_to` carrying a
-        // `withdraws` envelope, which no fold reads as a retraction — so
-        // un-trusting a root never un-trusted it.
-        let mut input = EmitAttestationInput::with_envelope(
-            attestation_type::WITHDRAWS,
-            ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
-                .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
-            cohort_scope::FEDERATION,
-        );
-        input.attested_key_id = Some(root.to_string());
-        engine
-            .emit_attestation_self(input)
-            .await
-            .map_err(|e| GenesisError::Directory(format!("withdraw trust:accepts: {e}")))?;
-    }
-
     tracing::warn!(
-        node_key_id = %node_key_id, trust_root = %root, withdrawn = ?accepted,
-        "TRUST ROOT UN-TRUSTED — acceptance withdrawn. The capability cascade now fails closed \
-         on its own: serve gate withholds, agent capabilities gate off."
+        trust_root = %root, withdrawn = ?withdrawn,
+        "TRUST ROOT UN-TRUSTED — acceptance withdrawn by every key that held one. The \
+         capability cascade now fails closed on its own: serve gate withholds, agent \
+         capabilities gate off."
     );
     Ok(true)
 }
@@ -1681,7 +1696,8 @@ pub async fn install_baked_trust_root(
     // `trust_root_valid` is the same predicate the serve gate consults, so this is
     // the honest answer to "can this node serve?" rather than one inferred from
     // whether an idempotent install returned Ok.
-    let verdict = match (&accepted, engine.local_derived_key_id().await) {
+    // Asked of THIS NODE — the serve gate's `local_key_id` — never the agent.
+    let verdict = match (&accepted, crate::node_key::this_node_id(engine).await) {
         (Some(root), Ok(node)) => ciris_persist::federation::trust_root::trust_root_valid(
             engine.federation_directory().as_ref(),
             &node,

@@ -35,7 +35,7 @@ fn pen_as(seed: u8, alias: &str) -> LocalSigner {
 }
 
 #[tokio::test]
-async fn the_sealing_engine_and_the_chat_signer_are_the_node_on_a_split_home() {
+async fn the_node_engine_and_the_chat_signer_are_the_node_on_a_split_home() {
     let engine = Engine::with_signer(
         Arc::new(pen_as(0x13, "qa-runner-ciris-agent-seal")),
         "sqlite::memory:",
@@ -46,7 +46,7 @@ async fn the_sealing_engine_and_the_chat_signer_are_the_node_on_a_split_home() {
 
     // No split: the engine is the node, and seals as itself.
     assert_eq!(
-        ciris_server::node_key::sealing_engine(&engine)
+        ciris_server::node_key::node_engine(&engine)
             .local_derived_key_id()
             .await
             .unwrap(),
@@ -60,7 +60,7 @@ async fn the_sealing_engine_and_the_chat_signer_are_the_node_on_a_split_home() {
         Arc::new(pen_as(0x23, "ciris-node-bootstrap-seal")),
         String::new(),
     );
-    let sealing = ciris_server::node_key::sealing_engine(&engine);
+    let sealing = ciris_server::node_key::node_engine(&engine);
     assert_eq!(
         sealing.local_derived_key_id().await.unwrap(),
         node,

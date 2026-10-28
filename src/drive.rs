@@ -635,9 +635,9 @@ async fn everything_reachable(
 }
 
 fn store(engine: &Arc<Engine>) -> ciris_edge::group_content::PersistGroupContentStore {
-    // Sealed as the NODE on a split home (`node_key::sealing_engine`).
+    // Sealed as the NODE on a split home (`node_key::node_engine`).
     ciris_edge::group_content::PersistGroupContentStore::new(
-        crate::node_key::sealing_engine(engine),
+        crate::node_key::node_engine(engine),
         engine.federation_directory(),
     )
 }
@@ -1678,7 +1678,12 @@ async fn withdraw_rows(
     if let Some(sha) = sha_of(file) {
         use ciris_persist::federation::blob_tombstone::{binding_state, BindingState};
         match binding_state(&*dir, &sha).await {
-            Ok(BindingState::Withdrawn { .. }) => match st.engine.evict_blob(&sha, now).await {
+            // The NODE holds the bytes and signed their holding claim, so the
+            // node retracts it (`node_key::node_engine`).
+            Ok(BindingState::Withdrawn { .. }) => match crate::node_key::node_engine(&st.engine)
+                .evict_blob(&sha, now)
+                .await
+            {
                 Ok(report) => evicted = report.blob_deleted,
                 // Not fatal: the rows are withdrawn and persist already refuses
                 // every read of these bytes (CC 2.3). The copy is swept later.

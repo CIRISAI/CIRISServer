@@ -236,7 +236,26 @@ pub async fn bind_occurrence_core(
     // at-rest DEK to the newcomer so the new key decrypts the self's content.
     // Idempotent + fail-secure (a keyless occurrence is EXCLUDED, never granted).
     let newcomers = [occurrence_key_id.to_string()];
-    let rekey = engine
+    // WHOSE self is re-wrapped decides who signs it. The OWNER's self (a device
+    // added under the person) is re-wrapped by THIS NODE, their device; an
+    // agent's own self (`register_actor_occurrence`) only by the agent — the
+    // node does not speak for it (`node_key`'s "which key signs what").
+    let owner_of_this_node = match crate::node_key::wire_identity() {
+        Some(node) => ciris_persist::federation::admission::owner_of(
+            engine.federation_directory().as_ref(),
+            node,
+        )
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+    let rekeyer = if owner_of_this_node.as_deref() == Some(identity_key_id) {
+        crate::node_key::node_engine(engine)
+    } else {
+        engine.clone()
+    };
+    let rekey = rekeyer
         .rekey_self_occurrence_add(identity_key_id, &newcomers)
         .await
         .map_err(|e| format!("self-DEK cascade: {e}"))?;

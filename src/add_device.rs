@@ -1674,8 +1674,8 @@ async fn sign_and_record(
         })?;
 
     // (3) The self DEKs, re-wrapped to B's occurrence (the owner's act).
-    let granted = match st
-        .engine
+    // Signed by THIS NODE, the owner's device (`node_key::node_engine`).
+    let granted = match crate::node_key::node_engine(&st.engine)
         .rekey_self_occurrence_add(&owner, std::slice::from_ref(&occ_key))
         .await
     {

@@ -610,7 +610,8 @@ pub struct VerifyStatusState {
 /// and there was no read-only verify-status route at all. Unauthenticated like
 /// `/v1/system/health` — the key_id is public (it's in the NodeCode / federation_keys).
 async fn verify_status(State(st): State<VerifyStatusState>) -> Json<serde_json::Value> {
-    let key_id = st.engine.local_derived_key_id().await.ok();
+    // THIS NODE's key (the held node key on a split home), never the agent.
+    let key_id = crate::node_key::this_node_id(&st.engine).await.ok();
     let has_key = key_id.is_some();
     // The node's own ed25519 fingerprint (for display) = the suffix of the
     // FSD-003 derived key_id (`<label>-<fp>`), if present.

@@ -93,9 +93,16 @@ impl std::fmt::Display for Unresolved {
 
 impl std::error::Error for Unresolved {}
 
-/// Resolve THIS node's signing identity — the id the engine's own signer
-/// actually produces (`derive_key_id(<keystore alias>, <ed25519 pubkey>)`),
-/// **never** a CLI label, config alias or caller-supplied string.
+/// Resolve THIS NODE's identity — the held node key on a split home (the
+/// NODE row of `node_key`'s "which key signs what" table), else the id the
+/// engine's own signer actually produces (`derive_key_id(<keystore alias>,
+/// <ed25519 pubkey>)`); **never** a CLI label, config alias or caller-supplied
+/// string. A caller that SIGNS as this node signs through
+/// [`crate::node_key::node_engine`], so the id and the signature agree.
+///
+/// Before 0.5.241 this was always the engine's key — the AGENT on a split home
+/// — so every owner gate built on it answered `node_unowned` once the
+/// owner-binding had moved to the node key (2026-10-28 audit).
 ///
 /// `surface` names the caller so a failure is attributable in one log line.
 ///
@@ -105,6 +112,9 @@ impl std::error::Error for Unresolved {}
 /// unreadable hardware key, no local signer at all. There is no fallback: see
 /// the module docs.
 pub async fn resolve(engine: &Engine, surface: &'static str) -> Result<String, Unresolved> {
+    if let Some(node) = crate::node_key::wire_identity() {
+        return Ok(node.to_owned());
+    }
     match engine.local_derived_key_id().await {
         Ok(id) => Ok(id),
         Err(e) => {

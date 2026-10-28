@@ -458,6 +458,11 @@ async fn require_owner(st: &AdminOpsState, headers: &HeaderMap) -> Result<Sessio
 /// one value the gate itself was evaluated against — the node whose
 /// owner-binding was walked here and the node whose delegated authority is
 /// re-walked below cannot be two different keys (CIRISServer#372 Level 2).
+///
+/// The identity is THIS NODE (`self_identity::resolve`), and every row a route
+/// here emits — markers, de-admission revocations, refuse-writes scores and
+/// their withdrawals, eviction withdrawals — is signed by it through
+/// `node_key::node_engine`, never the agent (2026-10-28 audit).
 async fn gate(st: &AdminOpsState, headers: &HeaderMap) -> Result<String, Response> {
     let node_key_id = self_key_id(st).await?;
     if crate::auth::gate::require_owner_bound(&st.engine, &node_key_id)
@@ -1665,7 +1670,13 @@ async fn quarantine_op(
                 &c.reason,
             )
         };
-        let marker = match build_marker(&st.engine, target, envelope).await {
+        let marker = match build_marker(
+            &Arc::new(crate::node_key::node_engine(&st.engine)),
+            target,
+            envelope,
+        )
+        .await
+        {
             Ok(m) => m,
             Err(e) => {
                 results.push(serde_json::json!({
@@ -1828,7 +1839,10 @@ async fn descend(
                 ),
             })
         } else {
-            match st.engine.evict_actor(target, now).await {
+            match crate::node_key::node_engine(&st.engine)
+                .evict_actor(target, now)
+                .await
+            {
                 Ok(report) => serde_json::json!({
                     "performed": true,
                     "report": serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
@@ -1959,7 +1973,7 @@ async fn deadmit(
     let mut results = Vec::new();
     for target in &committed.preview.targets {
         match put_revocation_for(
-            &st.engine,
+            &Arc::new(crate::node_key::node_engine(&st.engine)),
             target,
             &committed.authority.delegation_id,
             &c.reason,
@@ -2753,7 +2767,14 @@ async fn refuse_writes(
         // failing open on the one control that stops an abuser. The response
         // reports the unreadable `standing_before` rather than hiding it.
         let envelope = deadmission_envelope(&committed.authority.delegation_id, &c.reason);
-        match emit_about_peer(&st.engine, attestation_type::SCORES, target, envelope).await {
+        match emit_about_peer(
+            &Arc::new(crate::node_key::node_engine(&st.engine)),
+            attestation_type::SCORES,
+            target,
+            envelope,
+        )
+        .await
+        {
             Ok(deadmission_id) => {
                 let after = read_admission_standing(&st.engine, &node_key_id, target).await;
                 let ev = tombstone(
@@ -2917,7 +2938,14 @@ async fn accept_writes(
                 &committed.authority.delegation_id,
                 &c.reason,
             );
-            match emit_about_peer(&st.engine, attestation_type::WITHDRAWS, target, envelope).await {
+            match emit_about_peer(
+                &Arc::new(crate::node_key::node_engine(&st.engine)),
+                attestation_type::WITHDRAWS,
+                target,
+                envelope,
+            )
+            .await
+            {
                 Ok(id) => withdrew.push(serde_json::json!({
                     "deadmission_id": deadmission_id, "withdraws_id": id,
                 })),

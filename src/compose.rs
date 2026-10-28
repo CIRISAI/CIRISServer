@@ -426,6 +426,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // owner-binding, and an agent has none. Rebound here, once the split
     // resolved, so every consumer below takes the node.
     let chat_node_signer = crate::node_key::held_node_edge_signer().unwrap_or(chat_node_signer);
+    // THIS NODE's key id, for every "who is this node / is it owned" question
+    // below (`node_key`'s "which key signs what"). `cfg.key_id` stays the
+    // ENGINE's key — the AGENT on a split home — and is used only where the
+    // engine itself signs.
+    let this_node: String = node_resolution.node_key_id.clone();
+    // Re-stamp the health `node` block with the NODE now that the split has
+    // resolved (it was stamped with the engine's key before the split).
+    crate::node_identity::stamp(&this_node, &cfg.home);
     // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
     // before any route or loop can touch a room, and registered under the key
     // id every room reads it by (the chat and self-room drives look it up by
@@ -845,7 +853,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // On a successful claim the founder's identity becomes WaRole::Root →
     // UserRole::SystemAdmin, which is what the owner-gated peering requires. Idempotent.
     let bootstrap_outcome =
-        match crate::auth::bootstrap::bootstrap_if_needed(&engine, &cfg.key_id).await {
+        match crate::auth::bootstrap::bootstrap_if_needed(&engine, &this_node).await {
             Ok(outcome) => {
                 tracing::info!(?outcome, "root-user bootstrap evaluated");
                 outcome
@@ -887,7 +895,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // The node alias hint comes from the resolved config:* `node.alias` (Server
     // 0.5 — no CIRIS_NODE_ALIAS env); falls back to the node key_id when unset.
     let node_alias = if initial_config.node_alias.trim().is_empty() {
-        cfg.key_id.clone()
+        this_node.clone()
     } else {
         initial_config.node_alias.clone()
     };
@@ -1243,7 +1251,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         );
         false
     } else {
-        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &cfg.key_id) {
+        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &this_node) {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!(error = %e, "could not write the serve marker");
@@ -1604,7 +1612,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // `wipe` verb — a session gate, never a second threshold.
                     .merge(crate::commons_surface::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        this_node.clone(),
                     ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
@@ -1657,10 +1665,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             peers: accord_peers.clone(),
                             // #347: the latch's release binding names THIS node,
                             // so an offline release token is not replayable
-                            // against any other node in the mesh. `cfg.key_id` is
-                            // the FSD-003 fingerprinted federation identity by
-                            // this point (derived above from the ed25519 pubkey).
-                            node_id: Some(cfg.key_id.clone()),
+                            // against any other node in the mesh — the NODE key,
+                            // never the agent on a split home.
+                            node_id: Some(this_node.clone()),
                         },
                     ))
                     // ACCORD-HOLDER PROVISIONING (CIRISServer#41, the safe-mesh
@@ -1811,7 +1818,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // closes.
                     .merge(crate::operator_surface::trace_plane_router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        this_node.clone(),
                         Some(edge.metrics()),
                         mesh_config_effect.clone(),
                     ))
@@ -1988,8 +1995,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let reconcile_join = replication.as_ref().map(|runtime| {
         crate::replication_reconcile::spawn(
             Arc::clone(&engine),
-            // The SAME signer identity as the runtime (#312) — never the alias.
-            edge.signer_key_id().to_string(),
+            // THIS NODE (never the alias, never the agent): the consent healer
+            // reads grants made FOR it, and every other read folds all of this
+            // node's keys from it (`peer::own_keys_of_this_node`).
+            this_node.clone(),
             Arc::clone(runtime),
             Arc::clone(&replication_notify),
             config_rx.clone(),
@@ -2690,6 +2699,20 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
     use ciris_keyring::self_enc_keys::SelfEncKeys;
     use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
 
+    // An AGENT never publishes a route (2026-10-28 audit; edge#888: a stale
+    // agent route broke a live pair). This row is the ENGINE's `{key, key}`
+    // occurrence carrying the Reticulum transport binding, and on a split home
+    // the engine is the agent while the transport is the node's. The node is
+    // reached through its own rows instead — edge's signed TransportDestination
+    // under the wire identity, and its content occurrence under its owner
+    // (`backend::provision_engine_occurrence`) — so a split home publishes none.
+    if crate::node_key::held_node_signer().is_some() {
+        tracing::info!(
+            "self identity-occurrence NOT published — this is a split home, and the engine \
+             is the agent, which carries no route; the node's own rows reach it"
+        );
+        return;
+    }
     let key_id = cfg.key_id.as_str();
     let Some(transport_pubkey) = edge.local_transport_pubkey() else {
         tracing::debug!(
@@ -3703,12 +3726,12 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
 ///
 /// WHICH KEY: the SEALING engine's signer — the MINTER the re-wrap compares,
 /// as edge's fix uses. On a split home that is the node key, never the agent:
-/// every epoch is minted by `node_key::sealing_engine` (2026-10-28 — an
+/// every epoch is minted by `node_key::node_engine` (2026-10-28 — an
 /// agent-minted epoch is refused on the far side, `signer_not_active_member`).
 /// Read back through the directory, like the AV-77 arm: a node key that did
 /// not stick is refused at boot rather than shipped silent.
 async fn arm_backend_node_key(engine: &Arc<Engine>) -> Result<()> {
-    let key_id = crate::node_key::sealing_engine(engine)
+    let key_id = crate::node_key::node_engine(engine)
         .local_derived_key_id()
         .await
         .context("resolve the engine's derived key id for the backend's node key")?;
@@ -4559,7 +4582,7 @@ pub(crate) async fn start_replication_runtime(
     // shaped agent withheld its whole Attestation plane toward the canonical
     // (`send_set_size=0 consent=0 owner_routed=0`, 2026-09-24). The blob puller
     // takes the wire identity too: since 0.5.241 the NODE signs its holder
-    // claims (`node_key::sealing_engine`), and the puller's store gate asks
+    // claims (`node_key::node_engine`), and the puller's store gate asks
     // whether THIS node's principal is in the room — keyed on the actor it
     // resolved to nobody and refused every room body (2026-10-28,
     // `SenderNotApprovedForTier { cohort, VerifiedOnly }`).
@@ -4852,9 +4875,9 @@ pub(crate) async fn start_replication_runtime(
         //   chunk source refuses against (`backend::revocation_register`).
         sealed_content: Some(ciris_edge::replication::SealedContentWiring {
             // The SEALING engine: a #916 re-wrap of an epoch this node minted
-            // is signed by its minter, the node (`node_key::sealing_engine`).
+            // is signed by its minter, the node (`node_key::node_engine`).
             engine: ciris_edge::replication::bridge::BridgeEngine(
-                crate::node_key::sealing_engine(engine),
+                crate::node_key::node_engine(engine),
             ),
             pull_sink,
             revocations,
