@@ -419,15 +419,23 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // THE CHAT PLANE'S NODE IS THE NODE (Eric, 2026-10-28: the agent never
+    // signs as the node). Built above from the engine's key, which on a split
+    // home is the AGENT; every row it signs for peers — a room row's co-scrub,
+    // the room's MLS identity — must be lifted by a peer through the node's
+    // owner-binding, and an agent has none. Rebound here, once the split
+    // resolved, so every consumer below takes the node.
+    let chat_node_signer = crate::node_key::held_node_edge_signer().unwrap_or(chat_node_signer);
     // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
     // before any route or loop can touch a room, and registered under the key
     // id every room reads it by (the chat and self-room drives look it up by
     // the chat signer's key id). Durable under persist's hardware-rooted key
     // when the host can seal it; ephemeral, and saying so, when it cannot.
     //
-    // AFTER the wire identity resolves (Codex, #689): on an actor/node split the
-    // chat signer is the ACTOR, and a host that registered its store under the
-    // wire NODE must be found there, not opened over by a second store.
+    // AFTER the wire identity resolves (Codex, #689): a host that registered
+    // its store under the wire NODE must be found there, not opened over by a
+    // second store. Since 0.5.241 the chat signer IS the wire node on a split
+    // home (rebound above), so the two ids agree.
     let mls_posture = crate::mls_state::open_for_node(
         &engine,
         &chat_node_signer.key_id,
@@ -3711,13 +3719,14 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
 /// compose engine, which sets nothing, so the server sets it here, once, at
 /// boot.
 ///
-/// WHICH KEY: the engine's own signer (`local_derived_key_id`) — the MINTER
-/// the re-wrap compares, as edge's fix uses — not the wire identity the AV-77
-/// gate arms (on a split node those differ; the epoch is minted by the
-/// engine's signer). Read back through the directory, like the AV-77 arm: a
-/// node key that did not stick is refused at boot rather than shipped silent.
+/// WHICH KEY: the SEALING engine's signer — the MINTER the re-wrap compares,
+/// as edge's fix uses. On a split home that is the node key, never the agent:
+/// every epoch is minted by `node_key::sealing_engine` (2026-10-28 — an
+/// agent-minted epoch is refused on the far side, `signer_not_active_member`).
+/// Read back through the directory, like the AV-77 arm: a node key that did
+/// not stick is refused at boot rather than shipped silent.
 async fn arm_backend_node_key(engine: &Arc<Engine>) -> Result<()> {
-    let key_id = engine
+    let key_id = crate::node_key::sealing_engine(engine)
         .local_derived_key_id()
         .await
         .context("resolve the engine's derived key id for the backend's node key")?;
@@ -4856,7 +4865,11 @@ pub(crate) async fn start_replication_runtime(
         // - `revocations`: the withdrawals observer, the SAME register the blob
         //   chunk source refuses against (`backend::revocation_register`).
         sealed_content: Some(ciris_edge::replication::SealedContentWiring {
-            engine: ciris_edge::replication::bridge::BridgeEngine(Engine::clone(engine)),
+            // The SEALING engine: a #916 re-wrap of an epoch this node minted
+            // is signed by its minter, the node (`node_key::sealing_engine`).
+            engine: ciris_edge::replication::bridge::BridgeEngine(
+                crate::node_key::sealing_engine(engine),
+            ),
             pull_sink,
             revocations,
         }),

@@ -4625,7 +4625,7 @@ async fn send_message(
     // we already hold — `Engine` is Clone and the directory is the same
     // substrate, so this is no second connection and no migration.
     let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
-        (*st.engine).clone(),
+        crate::node_key::sealing_engine(&st.engine),
         st.engine.federation_directory(),
     );
     // ROOM-KEYED, for every room (CIRISEdge#608): the row names the room it was
@@ -4779,7 +4779,7 @@ async fn collect_messages(
         // it — every body then reads "not granted" for a full member.
         .find(|occ| *occ == st.node_signer.key_id);
     let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
-        (*st.engine).clone(),
+        crate::node_key::sealing_engine(&st.engine),
         st.engine.federation_directory(),
     );
 
