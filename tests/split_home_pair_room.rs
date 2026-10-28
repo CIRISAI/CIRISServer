@@ -273,6 +273,23 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
             _ => unreachable!("in-memory sqlite"),
         }
     }
+    // What a peer receives is the CURRENT signed row for the pair, and it is
+    // last-signed-wins: published after the ceremony, it is the node's own.
+    let current_signer = |rows: Vec<ciris_persist::federation::SignedIdentityOccurrence>| {
+        rows.into_iter()
+            .find(|r| r.identity_occurrence.occurrence_key_id == peer_node)
+            .map(|r| r.attesting_key_id)
+    };
+    assert_eq!(
+        current_signer(
+            dir.list_signed_identity_occurrences_for(&peer_id)
+                .await
+                .unwrap()
+        )
+        .as_deref(),
+        Some(peer_node.as_str()),
+        "after the ceremony, the node's agreement is the current row peers receive"
+    );
     let active = dir
         .active_identities_for_occurrence(&peer_node)
         .await

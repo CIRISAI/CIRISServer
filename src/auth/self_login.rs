@@ -175,6 +175,10 @@ async fn self_login(State(st): State<SelfLoginState>, headers: HeaderMap, body: 
     };
     match st.engine.self_at_login(input).await {
         Ok(o) => {
+            // The ceremony may have re-signed {owner, this node} as the identity;
+            // the node's own agreement must stay the current row or peers stop
+            // counting this node as the owner's device (`node_key::reaffirm_node_occurrence`).
+            crate::node_key::reaffirm_node_occurrence(&st.engine).await;
             // Auto-mint ROOT for an admin-eligible founder identity (CIRISServer#19,
             // port of `_auto_mint_system_admin_if_needed`): on a successful login the
             // founder's identity becomes WaRole::Root → UserRole::SystemAdmin, so the
