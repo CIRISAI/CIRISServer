@@ -275,20 +275,11 @@ fn every_consumption_message_resolves_in_the_canonical_bundle() {
 }
 
 #[test]
-fn the_four_redundancy_keys_stay_unconsumed_and_say_why() {
-    // persist v30.0.0 (CIRISPersist#602) removed the FIRST of #365's two
-    // blockers: `redundancy.*` is now four keys on two TYPED axes (`Symbols` /
-    // `Holders`), taken from edge's own four-tuple decomposition, so mapping a
-    // key onto a knob is no longer an axis choice made on our own authority.
-    //
-    // The second blocker stands. `FountainSwarmRuntime::start` takes
-    // `SwarmRuntimeConfig` by value and offers no setter, so the only place a
-    // value could land is `crate::holonomic::install_swarm_runtime`, once, at
-    // composition — after which a TTL-expired relief would keep applying until
-    // a restart. That is a NEW lie, not the existing gap, so these stay false.
-    //
-    // Pinned so a later pass cannot flip them on the strength of the axis split
-    // alone, which is the half that changed.
+fn the_four_redundancy_keys_stay_unbuilt_until_the_copy_count_exists() {
+    // Durability is plain whole copies (KISS / LOCKSS, 2026-10-28) and the
+    // fountain swarm runtime is gone, so these four are UNBUILT, not blocked:
+    // the copy-count consumer is CIRISServer#809's per-item durable mark.
+    // Pinned so a later pass cannot flip them on the strength of reading them.
     let keys: Vec<MeshConfigKey> = MeshConfigKey::ALL
         .iter()
         .copied()
@@ -302,14 +293,11 @@ fn the_four_redundancy_keys_stay_unconsumed_and_say_why() {
     );
     for key in keys {
         match consumption(key) {
-            Consumption::Unreachable {
-                owner, tracked_by, ..
-            } => {
-                assert_eq!(owner, "CIRISEdge", "{}", key.wire_name());
-                assert_eq!(tracked_by, "CIRISEdge#440", "{}", key.wire_name());
+            Consumption::Unbuilt { tracked_by } => {
+                assert_eq!(tracked_by, "CIRISServer#809", "{}", key.wire_name());
             }
             other => panic!(
-                "{} must stay unconsumed while edge's swarm runtime has no setter: got {other:?}",
+                "{} must stay unconsumed until #809's copy count reads it: got {other:?}",
                 key.wire_name()
             ),
         }
