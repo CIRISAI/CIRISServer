@@ -2883,6 +2883,16 @@ mod python {
         })
     }
 
+    /// Author the trace CAPTURE grant (`consent:community_trust:v1`) as the
+    /// node's OWNER — about this node, naming node, owner and agent, signed by
+    /// the owner's pen. Returns the attestation id, or `None` when the owner's
+    /// pen is not reachable (the grant is deferred, never machine-written).
+    #[pyfunction]
+    #[pyo3(name = "author_community_trust")]
+    pub fn author_community_trust_py(py: Python<'_>) -> PyResult<Option<String>> {
+        py.detach(|| crate::federation_delivery::author_community_trust_embedded().map_err(py_err))
+    }
+
     #[pyfunction]
     #[pyo3(
         name = "start_federation_delivery",
@@ -3569,6 +3579,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
+        m.add_function(wrap_pyfunction!(author_community_trust_py, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_deferral_request, m)?)?;

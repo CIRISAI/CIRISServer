@@ -963,10 +963,38 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // spawn below is skipped for `embedded`. Slice attach + read-API mount proceed
     // on the shared edge (the routing registries edge reads live per inbound frame).
     let edge: Arc<Edge> = if embedded {
-        ciris_edge::current_edge().context(
+        let edge = ciris_edge::current_edge().context(
             "CIRISServer#221 fold: embedded Engine present but current_edge() is None — \
              init_edge_runtime must run before serve_with_python_adapter",
-        )?
+        )?;
+        // THE BLOB PLANE, on the Edge the agent built. `build_edge` below arms it
+        // for a standalone node (`.blob_chunk_source` + `.scope_native_addressing`);
+        // the fold's Edge was built by edge's own init, which arms neither — so an
+        // embedded node could neither address a room body nor serve one
+        // (2026-10-28: "NO scope address table is installed", both directions).
+        // Set-once on the running Edge; a second serve in this process finds it
+        // armed and says so.
+        match edge.arm_fold_host(
+            Arc::new(crate::backend::ServerBlobChunkSource::new(&engine)),
+            Some(ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW),
+        ) {
+            Ok(()) => {
+                tracing::info!(
+                    convergence_secs =
+                        ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW.as_secs(),
+                    "fold: blob plane ARMED on the agent's Edge — chunk source set and \
+                     scope-native addressing installed (scoped flows are one-hop, CC 5.4.6)"
+                );
+                spawn_scope_seal_loop(&edge);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "fold: blob plane NOT armed on the agent's Edge (already armed by an \
+                 earlier serve in this process, or no Reticulum transport) — room bodies \
+                 are addressed and served only if an earlier arm succeeded"
+            ),
+        }
+        edge
     } else {
         Arc::new(
             build_edge(
@@ -5437,6 +5465,15 @@ async fn build_edge(
     // advance happen where rooms are keyed (`contacts_chat::ensure_room_addresses`);
     // nothing else calls this, so without it a rotated-away address would stay
     // live forever. Named phase + jitter per `loop_cadence` (CIRISServer#575).
+    spawn_scope_seal_loop(&edge);
+    tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
+    Ok(edge)
+}
+
+/// The scope-address seal pass (CIRISEdge#499), for whichever Edge carries a
+/// scope lifecycle — the one `build_edge` armed, or the agent's Edge armed by
+/// `Edge::arm_fold_host` in the fold. No lifecycle, no loop.
+fn spawn_scope_seal_loop(edge: &Edge) {
     if let Some(life) = edge.scope_lifecycle().cloned() {
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(60);
@@ -5455,8 +5492,6 @@ async fn build_edge(
             }
         });
     }
-    tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
-    Ok(edge)
 }
 
 /// Open the shared Engine for an OFFLINE, console-trusted CLI op (`config set/get`)
