@@ -1143,9 +1143,30 @@ async fn room_key(
             // same material against the same Welcome forever; the next call
             // mints and publishes a fresh KeyPackage.
             crate::mls_state::clear_pending(&store, &room).await;
-            let group = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let group = match joined {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(
+                        room = %room,
+                        joiner = %me,
+                        creator = %peer,
+                        error = %e,
+                        "chat: the creator's Welcome is HERE but joining with it FAILED — \
+                         the KeyPackage material this node holds does not open it. The \
+                         next pass mints and publishes a fresh KeyPackage, and the creator \
+                         must answer it with a new Welcome"
+                    );
+                    return Err(format!("CohortGroup::join: {e}"));
+                }
+            };
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
+            tracing::info!(
+                room = %room,
+                joiner = %me,
+                creator = %peer,
+                "chat: room KEYED — WE ARE THE JOINER and joined with the creator's Welcome"
+            );
             rooms.insert(room, RoomState::Keyed(group));
             Ok(RoomHandshake::Ready)
         }
@@ -5754,15 +5775,47 @@ impl PairRoomDriver {
     }
 }
 
+/// Say a pair-room driver fact once per change (it runs every 30 s).
+fn driver_says(key: &str, line: String, warn: bool) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let Ok(mut last) = last.lock() else { return };
+    if last.get(key) == Some(&line) {
+        return;
+    }
+    last.insert(key.to_owned(), line.clone());
+    if warn {
+        tracing::warn!(detail = %line, "pair-room driver: idle — {key}");
+    } else {
+        tracing::info!(detail = %line, "pair-room driver: {key}");
+    }
+}
+
 async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
-    let Ok(node) = crate::family_api::this_node_key(&st.engine).await else {
-        return Vec::new();
+    let node = match crate::family_api::this_node_key(&st.engine).await {
+        Ok(n) => n,
+        Err(e) => {
+            driver_says("no node key", e, true);
+            return Vec::new();
+        }
     };
-    let Ok(pen) =
-        crate::owner_signer_capsule::for_owned_node_in(&st.engine, &node, st.user_seed_dir.clone())
-            .await
-    else {
-        return Vec::new();
+    let pen = match crate::owner_signer_capsule::for_owned_node_in(
+        &st.engine,
+        &node,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            driver_says(
+                "the owner's pen cannot be opened, so no pair room is advanced",
+                format!("node={node}: {e:?}"),
+                true,
+            );
+            return Vec::new();
+        }
     };
     let me = pen.key_id().to_owned();
     let dir = st.engine.federation_directory();
@@ -5836,10 +5889,16 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
         match room_key(st, &me, &peer, Some(pen.edge_signer())).await {
             Ok(state) => out.push((room, format!("{state:?}"))),
             Err(e) => {
-                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced")
+                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced");
+                out.push((room, format!("error: {e}")));
             }
         }
     }
+    driver_says(
+        "pass",
+        format!("person={me} seated pair rooms: {out:?}"),
+        false,
+    );
     out
 }
 
