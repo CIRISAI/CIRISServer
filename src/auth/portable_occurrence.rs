@@ -1254,7 +1254,8 @@ pub async fn record_signed_roster_occurrence(
             )))
         }
     }
-    if let Err(e) = engine
+    // Signed by THIS NODE, the owner's device (`node_key::node_engine`).
+    if let Err(e) = crate::node_key::node_engine(engine)
         .rekey_self_occurrence_add(identity, std::slice::from_ref(&occ_key))
         .await
     {

@@ -90,8 +90,9 @@ async fn erasure(State(st): State<ErasureState>, headers: HeaderMap, body: Bytes
         );
     }
 
-    match st
-        .engine
+    // The NODE retracts its holding claims for the erased bytes
+    // (`node_key::node_engine`): it signed them.
+    match crate::node_key::node_engine(&st.engine)
         .evict_actor(&req.attesting_key_id, chrono::Utc::now())
         .await
     {

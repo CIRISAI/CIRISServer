@@ -177,7 +177,9 @@ pub async fn rewrap_for_new_devices_with(
                 continue;
             }
         }
-        match engine
+        // The re-wrap is signed by THIS NODE — the owner's device, which a
+        // sibling lifts through the owner-binding (`node_key::node_engine`).
+        match crate::node_key::node_engine(engine)
             .rekey_self_occurrence_add(&owner, std::slice::from_ref(&occurrence))
             .await
         {

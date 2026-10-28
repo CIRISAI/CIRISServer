@@ -608,7 +608,8 @@ pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &st
                 if scope == GroupScope::Family {
                     // The household's existing content, re-wrapped to them —
                     // what the pre-v52 direct add did, now after their consent.
-                    if let Err(e) = engine
+                    // Signed by THIS NODE (`node_key::node_engine`).
+                    if let Err(e) = crate::node_key::node_engine(engine)
                         .rekey_family_member_add(&group_key_id, &member_key_id)
                         .await
                     {

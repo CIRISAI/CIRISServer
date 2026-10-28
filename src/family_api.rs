@@ -837,7 +837,11 @@ async fn sign_family_rows(
 /// committed, so a failure here is REPORTED, not raised: the member is in, and
 /// what they cannot yet read is named.
 async fn rewrap(engine: &Engine, family_id: &str, key_id: &str) -> serde_json::Value {
-    match engine.rekey_family_member_add(family_id, key_id).await {
+    // Signed by THIS NODE, a member's device (`node_key::node_engine`).
+    match crate::node_key::node_engine(engine)
+        .rekey_family_member_add(family_id, key_id)
+        .await
+    {
         Ok(r) => serde_json::json!({
             "blobs_scanned": r.blobs_scanned,
             "granted": r.granted.iter().map(|(k, n)| serde_json::json!({"occurrence_key_id": k, "grants": n})).collect::<Vec<_>>(),

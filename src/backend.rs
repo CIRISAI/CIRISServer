@@ -652,8 +652,8 @@ where
     };
     // The NODE holds the pulled bytes and signs their holding claims (and the
     // withdrawals below) — on a split home the sealing engine, never the agent
-    // (`node_key::sealing_engine`).
-    let sealing = Arc::new(crate::node_key::sealing_engine(engine));
+    // (`node_key::node_engine`).
+    let sealing = Arc::new(crate::node_key::node_engine(engine));
     let (sink, _puller) = BlobPuller::spawn(
         edge,
         (*sealing).clone(),

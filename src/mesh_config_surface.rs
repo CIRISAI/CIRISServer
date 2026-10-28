@@ -1429,8 +1429,10 @@ async fn submit(
             )
         }
     };
+    // Signed by THIS NODE — the subscriber `self_key_id` names — never the
+    // agent (`node_key::node_engine`).
     let row = match build_row(
-        &st.engine,
+        &Arc::new(crate::node_key::node_engine(&st.engine)),
         envelope.clone(),
         base.root_ref.trim(),
         additional_scrubs,
