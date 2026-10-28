@@ -206,6 +206,63 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
     )
     .await
     .expect("the peer's owner-binding is held here");
+    // The invitee's own login ceremony, as their node publishes it and this
+    // side pulls it with their records (#907): their node and agent are
+    // occurrences of the invitee. Production holds these; the first version of
+    // this test did not, and saw Yes where production saw NotInAudience.
+    let peer_agent = id_of("qa-runner-ciris-agent-peersplit", 0x47);
+    register_key(
+        &engine,
+        KeySigner::Local(&pen_as(0x47, &peer_agent)),
+        &peer_agent,
+        "agent",
+        serde_json::Value::Null,
+    )
+    .await
+    .expect("peer agent key");
+    let enc2 = ciris_server::backend::content_kem_pubkeys(&engine)
+        .await
+        .expect("content KEM keys");
+    let peer_login = engine
+        .self_at_login(SelfAtLoginInput {
+            identity_key_id: peer_id.clone(),
+            identity_signer: Some(Arc::new(pen_as(0x45, "peer-pair-split"))),
+            app: SelfAtLoginOccurrence {
+                occurrence_key_id: peer_node.clone(),
+                device_class: ciris_server::backend::host_device_class().to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc2.clone(),
+                transport_destinations: Vec::new(),
+            },
+            agent: SelfAtLoginOccurrence {
+                occurrence_key_id: peer_agent.clone(),
+                device_class: device_class::AGENT.to_owned(),
+                hardware_attestation: None,
+                encryption_pubkeys: enc2,
+                transport_destinations: Vec::new(),
+            },
+            bilateral_pair_id: format!("fold:{peer_id}:{peer_agent}"),
+            delegation_scope: None,
+        })
+        .await;
+    eprintln!(
+        "peer login ceremony at the creator: {:?}",
+        peer_login.as_ref().map(|_| "ok")
+    );
+    let active = dir
+        .active_identities_for_occurrence(&peer_node)
+        .await
+        .unwrap();
+    let occs = dir
+        .list_identity_occurrences_by_occurrence_key(&peer_node)
+        .await
+        .unwrap();
+    eprintln!(
+        "peer node: active identities={active:?} occurrence rows={:?}",
+        occs.iter()
+            .map(|o| (o.identity_key_id.clone(), o.device_class.clone()))
+            .collect::<Vec<_>>()
+    );
     let proposal = opened.proposal.expect("proposal");
     let principals = ciris_persist::federation::self_collective::principals_of(&*dir, &peer_node)
         .await
