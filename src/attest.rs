@@ -187,6 +187,17 @@ impl Spec {
         self
     }
 
+    /// [`Self::about`] for a claim with SEVERAL parties who may each revoke it:
+    /// `attested` is who it is about, `subjects` everyone it names (e.g.
+    /// `consent:community_trust` names the node, its owner and its agent, CC
+    /// 3.3.1).
+    #[must_use]
+    pub fn about_all(mut self, attested: &str, subjects: &[String]) -> Self {
+        self.attested_key_id = Some(attested.to_owned());
+        self.subject_key_ids = subjects.to_vec();
+        self
+    }
+
     /// Name who the claim is ABOUT without naming a subject.
     ///
     /// Distinct from [`Self::about`], and the distinction is load bearing:
