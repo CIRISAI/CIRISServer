@@ -1012,9 +1012,16 @@ async fn room_key(
                      looking here — nothing on this node can complete the \
                      handshake alone"
                 );
-                if let Ok(node) =
-                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
-                {
+                // The NODE key — the one the owner-binding names and announce
+                // widens. On a split home the engine resolves to the agent key,
+                // which is never announced, and the hint read "not announced"
+                // on a node that had (2026-10-28 gate).
+                if let Ok(node) = match crate::node_key::wire_identity() {
+                    Some(n) => Ok(n.to_owned()),
+                    None => {
+                        crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                    }
+                } {
                     DiscoveryStanding::of(&st.engine, &node, peer)
                         .await
                         .log("room_key:creator", &room);
@@ -1107,9 +1114,16 @@ async fn room_key(
                      lexicographically smaller fed-ID the creator's role, so the \
                      roles are fixed by the two ids and never negotiated"
                 );
-                if let Ok(node) =
-                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
-                {
+                // The NODE key — the one the owner-binding names and announce
+                // widens. On a split home the engine resolves to the agent key,
+                // which is never announced, and the hint read "not announced"
+                // on a node that had (2026-10-28 gate).
+                if let Ok(node) = match crate::node_key::wire_identity() {
+                    Some(n) => Ok(n.to_owned()),
+                    None => {
+                        crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                    }
+                } {
                     DiscoveryStanding::of(&st.engine, &node, peer)
                         .await
                         .log("room_key:joiner", &room);

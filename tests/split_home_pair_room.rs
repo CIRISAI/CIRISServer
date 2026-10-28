@@ -279,4 +279,24 @@ async fn a_split_home_founds_its_pair_room_with_the_persons_key_not_the_agent_ke
         verdict.allowed(),
         "the invitation reaches the invitee's node: {verdict:?}"
     );
+
+    // The room's own record and its roster rows (the group plane) must reach
+    // the live invitee's node too, or the joiner never learns it is seated and
+    // never publishes its KeyPackage (2026-10-28: `membership-plane row
+    // withheld — the recipient is neither a member's node, a live invitee's
+    // node …` toward the joiner, every round).
+    let group_verdict = ciris_persist::federation::replication_audience::may_receive_group_plane(
+        &*dir,
+        &peer_node,
+        cohort_scope::COMMUNITY,
+        &opened.room,
+        None,
+    )
+    .await
+    .unwrap();
+    eprintln!("group plane verdict for the invitee's node: {group_verdict:?}");
+    assert!(
+        group_verdict.allowed(),
+        "the room record reaches the live invitee's node: {group_verdict:?}"
+    );
 }
