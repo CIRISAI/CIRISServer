@@ -1968,11 +1968,22 @@ pub async fn run_federation_delivery(
                                 if verdict == "confirmed" {
                                     tracing::info!(peer = %peer, "rooting verdict: CONFIRMED — this node roots the peer through the pinned anchor");
                                 } else {
-                                    tracing::warn!(
+                                    // NOT the standing that gates the attributed
+                                    // planes. This is the key-registration chain
+                                    // to a pinned accord-holder anchor (AV-42); an
+                                    // owner-claimed node registers its own key, so
+                                    // it is advisory here by design. What gates
+                                    // Attestation/Community toward a peer is the
+                                    // mutual-root walk through the owner-bindings
+                                    // (CIRISEdge#659), and edge logs its own
+                                    // "Attributed but not Rooted" line whenever
+                                    // that withholds (2026-10-28: this line
+                                    // claimed a withholding that never happened).
+                                    tracing::info!(
                                         peer = %peer,
                                         verdict = %verdict,
                                         report = %report,
-                                        "rooting verdict: NOT confirmed — every plane that needs attribution (Attestation, Community) will withhold toward this peer until it is. `report.detail` names the failing link"
+                                        "key-registration rooting: the peer's key does not chain to a pinned accord-holder anchor (advisory — expected for an owner-claimed node). Attributed planes are gated separately by the owner-binding mutual-root walk; edge logs 'Attributed but not Rooted' if that withholds"
                                     );
                                 }
                             }
