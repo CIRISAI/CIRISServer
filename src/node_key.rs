@@ -974,6 +974,10 @@ async fn publish_node_occurrence(
         BackendDispatch::Postgres(b) => {
             publish_self_occurrence_with_local_signer(b.as_ref(), node, owner, class, None).await
         }
+        // Persist's postgres backend can be compiled in on other targets
+        // (feature unification), but a split home there runs on sqlite.
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!("the node's occurrence is published on sqlite or linux postgres only"),
     }
     .map_err(|e| anyhow::anyhow!("publish the node's occurrence under {owner}: {e}"))?;
     tracing::info!(
