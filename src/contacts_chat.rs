@@ -435,33 +435,47 @@ impl EntryKind {
 /// `node` is the box. `unknown` is honest: resolution genuinely stalls while a
 /// key body is in flight, and guessing "person" there would put a stranger's
 /// name on an agent's words.
-/// **Who signs a room's membership** — the founding record, the acceptance of a
-/// proposal, and a joiner's intent: the key that acts for the OWNER.
+/// **Who signs a room's membership** — the founding record, the proposal, the
+/// acceptance, a joiner's intent: the PERSON, with their own pen. An invitation
+/// is the person's act, not their machine's.
 ///
-/// `st.node_signer` is the ENGINE's key. On a standalone node that is the node,
-/// owned by the person, and persist lifts it to the owner. On a split home (an
-/// agent embedding the node, 0.5.189 and later) the engine signs as the AGENT
-/// key, an agent is its own self, and the owner-binding names the separate NODE
-/// key — so a founding record signed by the engine reads as unsigned by the
-/// founder (`membership_founding_member_unsigned`, CIRISPersist#955; the
-/// five-platform run of 2026-10-27, every `POST /v1/chat` 500). Persist's
-/// `admission_identity_for_writer` resolves the node key to its owner, so on a
-/// split home the node key signs. Built once from the held node signer.
-fn membership_authority(st: &ChatState) -> Arc<ciris_edge::identity::LocalSigner> {
-    static SPLIT: std::sync::OnceLock<Arc<ciris_edge::identity::LocalSigner>> =
-        std::sync::OnceLock::new();
-    match crate::node_key::held_node_signer() {
-        Some(node) => Arc::clone(SPLIT.get_or_init(|| {
-            Arc::new(ciris_edge::identity::LocalSigner::new(
-                node.derived_key_id(),
-                Arc::new(ciris_persist::signing::LocalSignerHardwareAdapter::new(
-                    Arc::clone(&node),
-                )),
-                node.pqc_signer(),
-            ))
-        })),
-        None => Arc::clone(&st.node_signer),
-    }
+/// These rows were signed with `st.node_signer`, the ENGINE key. On a
+/// standalone node that is the node, which persist lifts to its owner; on a
+/// split home (an agent embedding the node, 0.5.189 and later) it is the AGENT
+/// key — its own self, with no owner-binding — so a founding record read as
+/// unsigned by its founder (`membership_founding_member_unsigned`,
+/// CIRISPersist#955; every `POST /v1/chat` 500 on the five-platform run of
+/// 2026-10-27). The owner's signing key is always available in production; a
+/// delegated session cannot wield it and is refused.
+async fn membership_pen(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+) -> Result<crate::owner_signer_capsule::OwnerSignerCapsule, Response> {
+    crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer_of(headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    .map_err(|e| match e {
+        crate::owner_signer_capsule::CapsuleRefusal::Delegated => refuse(
+            StatusCode::FORBIDDEN,
+            "chat.delegation_denied",
+            // The bundle's sentence for this id (the guard pins it); the
+            // reason — the invitation is the owner's own act — is the doc above.
+            "This session's delegation does not grant that action.",
+        ),
+        other => refuse(
+            StatusCode::FORBIDDEN,
+            "chat.author_signer_unavailable",
+            format!(
+                "an invitation is signed by the person who sends it, and this node cannot \
+                 wield that identity right now: {other:?}"
+            ),
+        ),
+    })
 }
 
 fn author_kind_str(kind: &ciris_edge::contact::IdentityKind) -> &'static str {
@@ -998,9 +1012,16 @@ async fn room_key(
                      looking here — nothing on this node can complete the \
                      handshake alone"
                 );
-                if let Ok(node) =
-                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
-                {
+                // The NODE key — the one the owner-binding names and announce
+                // widens. On a split home the engine resolves to the agent key,
+                // which is never announced, and the hint read "not announced"
+                // on a node that had (2026-10-28 gate).
+                if let Ok(node) = match crate::node_key::wire_identity() {
+                    Some(n) => Ok(n.to_owned()),
+                    None => {
+                        crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                    }
+                } {
                     DiscoveryStanding::of(&st.engine, &node, peer)
                         .await
                         .log("room_key:creator", &room);
@@ -1093,9 +1114,16 @@ async fn room_key(
                      lexicographically smaller fed-ID the creator's role, so the \
                      roles are fixed by the two ids and never negotiated"
                 );
-                if let Ok(node) =
-                    crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
-                {
+                // The NODE key — the one the owner-binding names and announce
+                // widens. On a split home the engine resolves to the agent key,
+                // which is never announced, and the hint read "not announced"
+                // on a node that had (2026-10-28 gate).
+                if let Ok(node) = match crate::node_key::wire_identity() {
+                    Some(n) => Ok(n.to_owned()),
+                    None => {
+                        crate::self_identity::resolve(st.engine.as_ref(), "contacts_chat").await
+                    }
+                } {
                     DiscoveryStanding::of(&st.engine, &node, peer)
                         .await
                         .log("room_key:joiner", &room);
@@ -1115,9 +1143,30 @@ async fn room_key(
             // same material against the same Welcome forever; the next call
             // mints and publishes a fresh KeyPackage.
             crate::mls_state::clear_pending(&store, &room).await;
-            let group = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
+            let group = match joined {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(
+                        room = %room,
+                        joiner = %me,
+                        creator = %peer,
+                        error = %e,
+                        "chat: the creator's Welcome is HERE but joining with it FAILED — \
+                         the KeyPackage material this node holds does not open it. The \
+                         next pass mints and publishes a fresh KeyPackage, and the creator \
+                         must answer it with a new Welcome"
+                    );
+                    return Err(format!("CohortGroup::join: {e}"));
+                }
+            };
             let group = Arc::new(group);
             ensure_room_addresses(st, &room, &group).await;
+            tracing::info!(
+                room = %room,
+                joiner = %me,
+                creator = %peer,
+                "chat: room KEYED — WE ARE THE JOINER and joined with the creator's Welcome"
+            );
             rooms.insert(room, RoomState::Keyed(group));
             Ok(RoomHandshake::Ready)
         }
@@ -3689,10 +3738,14 @@ async fn start_chat(
         None => None,
     };
     if let Some(pending) = pending {
+        let pen = match membership_pen(&st, &headers, &owner).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
         if let Err(e) = ciris_edge::chat::accept_pair_proposal(
             &*directory,
             &pending.proposal.attestation_id,
-            &membership_authority(&st),
+            pen.edge_signer(),
         )
         .await
         {
@@ -3830,13 +3883,17 @@ async fn start_chat(
     }
     let expires_at =
         chrono::Utc::now() + chrono::Duration::days(crate::membership_invites::DEFAULT_INVITE_DAYS);
+    let pen = match membership_pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let opened = match ciris_edge::chat::open_pair_room(
         &*directory,
         &owner.key_id,
         &key_id,
         founded_at,
         expires_at,
-        &membership_authority(&st),
+        pen.edge_signer(),
     )
     .await
     {
@@ -3849,6 +3906,35 @@ async fn start_chat(
             )
         }
     };
+    // Where the invitation can go, said once per open: the proposal, and
+    // persist's delivery verdict for each node the invitee announced. The
+    // 2026-10-27 run founded the room and the joiner never listed the invite;
+    // this line tells the two halves apart.
+    if let Some(p) = opened.proposal.as_ref() {
+        let nodes = crate::auth::ownership::announced_nodes_of(&st.engine, &key_id)
+            .await
+            .unwrap_or_default();
+        let mut verdicts = Vec::with_capacity(nodes.len());
+        for n in &nodes {
+            let v = ciris_persist::federation::replication_audience::may_receive(&*directory, n, p)
+                .await
+                .map_or_else(|e| format!("error: {e}"), |v| format!("{v:?}"));
+            verdicts.push(format!("{n}: {v}"));
+        }
+        tracing::info!(
+            room = %opened.room,
+            founded = opened.founded,
+            proposal_id = %p.attestation_id,
+            tier = %p.tier,
+            cohort_scope = %p.cohort_scope,
+            proposer = %p.attesting_key_id,
+            invitee = %key_id,
+            invitee_nodes = ?verdicts,
+            "chat: pair room invitation — the joiner lists it once this proposal is held on \
+             their node at federation tier; `invitee_nodes` is persist's verdict per node \
+             (no node → the invitee resolves to no node here)"
+        );
+    }
     if opened.founded {
         // The ROSTER is a row too — and so is the invitation. `share_in_room`
         // kicks for every chat row that goes through it, but the record and
@@ -3936,13 +4022,15 @@ async fn advance_pair_join(st: &ChatState, headers: &HeaderMap, owner: &Owner, r
     let directory = st.engine.federation_directory();
     // The joiner's half: accept ONLY an invitation that matches an intent the
     // person recorded with their own `POST /v1/chat` (`crate::pair_intents`).
-    let _ = crate::pair_intents::advance(
-        &*directory,
-        &st.user_seed_dir,
-        &owner.key_id,
-        &membership_authority(st),
-    )
-    .await;
+    if let Ok(pen) = membership_pen(st, headers, owner).await {
+        let _ = crate::pair_intents::advance(
+            &*directory,
+            &st.user_seed_dir,
+            &owner.key_id,
+            pen.edge_signer(),
+        )
+        .await;
+    }
     let Ok(Some(record)) = directory.lookup_community(room).await else {
         return;
     };
@@ -4537,7 +4625,7 @@ async fn send_message(
     // we already hold — `Engine` is Clone and the directory is the same
     // substrate, so this is no second connection and no migration.
     let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
-        (*st.engine).clone(),
+        crate::node_key::node_engine(&st.engine),
         st.engine.federation_directory(),
     );
     // ROOM-KEYED, for every room (CIRISEdge#608): the row names the room it was
@@ -4691,7 +4779,7 @@ async fn collect_messages(
         // it — every body then reads "not granted" for a full member.
         .find(|occ| *occ == st.node_signer.key_id);
     let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
-        (*st.engine).clone(),
+        crate::node_key::node_engine(&st.engine),
         st.engine.federation_directory(),
     );
 
@@ -5687,21 +5775,52 @@ impl PairRoomDriver {
     }
 }
 
+/// Say a pair-room driver fact once per change (it runs every 30 s).
+fn driver_says(key: &str, line: String, warn: bool) {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let Ok(mut last) = last.lock() else { return };
+    if last.get(key) == Some(&line) {
+        return;
+    }
+    last.insert(key.to_owned(), line.clone());
+    if warn {
+        tracing::warn!(detail = %line, "pair-room driver: idle — {key}");
+    } else {
+        tracing::info!(detail = %line, "pair-room driver: {key}");
+    }
+}
+
 async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
-    let Ok(node) = crate::family_api::this_node_key(&st.engine).await else {
-        return Vec::new();
+    let node = match crate::family_api::this_node_key(&st.engine).await {
+        Ok(n) => n,
+        Err(e) => {
+            driver_says("no node key", e, true);
+            return Vec::new();
+        }
     };
-    let Ok(pen) =
-        crate::owner_signer_capsule::for_owned_node_in(&st.engine, &node, st.user_seed_dir.clone())
-            .await
-    else {
-        return Vec::new();
+    let pen = match crate::owner_signer_capsule::for_owned_node_in(
+        &st.engine,
+        &node,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            driver_says(
+                "the owner's pen cannot be opened, so no pair room is advanced",
+                format!("node={node}: {e:?}"),
+                true,
+            );
+            return Vec::new();
+        }
     };
     let me = pen.key_id().to_owned();
     let dir = st.engine.federation_directory();
     // 1. The joiner's acceptance of a requested room's invitation.
-    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, &membership_authority(st))
-        .await;
+    let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, pen.edge_signer()).await;
     // 2. Every pair room this person is in: the record's members, plus the
     //    widening plane (a joiner is seated by a widening — the record never
     //    grows, persist Q2).
@@ -5770,10 +5889,16 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
         match room_key(st, &me, &peer, Some(pen.edge_signer())).await {
             Ok(state) => out.push((room, format!("{state:?}"))),
             Err(e) => {
-                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced")
+                tracing::debug!(room = %room, error = %e, "pair-room driver: handshake not advanced");
+                out.push((room, format!("error: {e}")));
             }
         }
     }
+    driver_says(
+        "pass",
+        format!("person={me} seated pair rooms: {out:?}"),
+        false,
+    );
     out
 }
 

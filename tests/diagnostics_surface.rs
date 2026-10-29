@@ -169,7 +169,6 @@ fn the_listener_binds_before_the_loops_start() {
         "edge_slices",
         "transport_binding",
         "peering",
-        "holonomic",
     ] {
         assert!(
             at(early) < bind,

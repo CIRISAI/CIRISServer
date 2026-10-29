@@ -650,9 +650,13 @@ where
         },
         ..PullConfig::default()
     };
+    // The NODE holds the pulled bytes and signs their holding claims (and the
+    // withdrawals below) — on a split home the sealing engine, never the agent
+    // (`node_key::node_engine`).
+    let sealing = Arc::new(crate::node_key::node_engine(engine));
     let (sink, _puller) = BlobPuller::spawn(
         edge,
-        (**engine).clone(),
+        (*sealing).clone(),
         Arc::clone(&backend),
         engine.federation_directory(),
         local_key_id,
@@ -668,7 +672,7 @@ where
     // `withdraws` only the engine can sign — and only then deletes the bytes.
     // Deleting through the backend left a live claim naming bytes this node no
     // longer held.
-    let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = Arc::<Engine>::clone(engine);
+    let evictor: Arc<dyn ciris_edge::blob_swarm::BlobEvictor> = sealing;
     tracing::info!(
         local_key_id,
         "blob puller spawned — community/family/own content is held and announced, the \

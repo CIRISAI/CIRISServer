@@ -921,6 +921,9 @@ fn payload_sha256(envelope: &Value) -> Result<String, String> {
 /// AND additional scrubs over the stored envelope — so co-signatures made over a
 /// bare envelope verify against nothing while the node's own still counts. That
 /// is an m-of-n silently counting one, which is the quorum failing OPEN.
+/// `engine` signs as THIS NODE (`node_key::node_engine` at every caller): a
+/// conduct row is the node acting on its owner's authority, the same class as
+/// the admin surface's rows, never the agent.
 async fn stamp_for(
     engine: &Arc<Engine>,
     envelope: Value,
@@ -1053,7 +1056,15 @@ async fn post_objection(
         req.base.grounds.trim(),
     );
     let now = Utc::now();
-    let row = match build_row_from(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
+    let row = match build_row_from(
+        &Arc::new(crate::node_key::node_engine(&st.engine)),
+        envelope,
+        &ctx.actor,
+        Vec::new(),
+        now,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return sign_failed(e),
     };
@@ -1112,7 +1123,15 @@ async fn post_ballot(
         req.base.grounds.trim(),
     );
     let now = Utc::now();
-    let row = match build_row_from(&st.engine, envelope, &ctx.actor, Vec::new(), now).await {
+    let row = match build_row_from(
+        &Arc::new(crate::node_key::node_engine(&st.engine)),
+        envelope,
+        &ctx.actor,
+        Vec::new(),
+        now,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return sign_failed(e),
     };
@@ -1175,7 +1194,14 @@ async fn post_dismissal(
         // row's own id, its instant and the seven-column mirror — all minted by
         // the stamp. Advertising the BARE envelope here is what made every
         // co-signature verify against a document that never existed.
-        let stamped = match stamp_for(&st.engine, envelope, &ctx.actor, Utc::now()).await {
+        let stamped = match stamp_for(
+            &Arc::new(crate::node_key::node_engine(&st.engine)),
+            envelope,
+            &ctx.actor,
+            Utc::now(),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => return sign_failed(e),
         };
@@ -1251,7 +1277,7 @@ async fn post_dismissal(
 
     let now = Utc::now();
     let row = match build_row_from(
-        &st.engine,
+        &Arc::new(crate::node_key::node_engine(&st.engine)),
         echoed.unwrap_or(envelope),
         &ctx.actor,
         req.additional_scrubs,

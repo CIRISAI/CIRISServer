@@ -419,15 +419,31 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // the ACTOR on a split node (CIRISEdge#541 review: one binding, several jobs,
     // coinciding only until the identities diverge).
     crate::node_key::set_wire_identity(&node_resolution.node_key_id);
+    // THE CHAT PLANE'S NODE IS THE NODE (Eric, 2026-10-28: the agent never
+    // signs as the node). Built above from the engine's key, which on a split
+    // home is the AGENT; every row it signs for peers — a room row's co-scrub,
+    // the room's MLS identity — must be lifted by a peer through the node's
+    // owner-binding, and an agent has none. Rebound here, once the split
+    // resolved, so every consumer below takes the node.
+    let chat_node_signer = crate::node_key::held_node_edge_signer().unwrap_or(chat_node_signer);
+    // THIS NODE's key id, for every "who is this node / is it owned" question
+    // below (`node_key`'s "which key signs what"). `cfg.key_id` stays the
+    // ENGINE's key — the AGENT on a split home — and is used only where the
+    // engine itself signs.
+    let this_node: String = node_resolution.node_key_id.clone();
+    // Re-stamp the health `node` block with the NODE now that the split has
+    // resolved (it was stamped with the engine's key before the split).
+    crate::node_identity::stamp(&this_node, &cfg.home);
     // THE NODE'S ONE MLS STORE (CIRISServer#630, CIRISEdge#676). Opened HERE,
     // before any route or loop can touch a room, and registered under the key
     // id every room reads it by (the chat and self-room drives look it up by
     // the chat signer's key id). Durable under persist's hardware-rooted key
     // when the host can seal it; ephemeral, and saying so, when it cannot.
     //
-    // AFTER the wire identity resolves (Codex, #689): on an actor/node split the
-    // chat signer is the ACTOR, and a host that registered its store under the
-    // wire NODE must be found there, not opened over by a second store.
+    // AFTER the wire identity resolves (Codex, #689): a host that registered
+    // its store under the wire NODE must be found there, not opened over by a
+    // second store. Since 0.5.241 the chat signer IS the wire node on a split
+    // home (rebound above), so the two ids agree.
     let mls_posture = crate::mls_state::open_for_node(
         &engine,
         &chat_node_signer.key_id,
@@ -837,7 +853,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // On a successful claim the founder's identity becomes WaRole::Root →
     // UserRole::SystemAdmin, which is what the owner-gated peering requires. Idempotent.
     let bootstrap_outcome =
-        match crate::auth::bootstrap::bootstrap_if_needed(&engine, &cfg.key_id).await {
+        match crate::auth::bootstrap::bootstrap_if_needed(&engine, &this_node).await {
             Ok(outcome) => {
                 tracing::info!(?outcome, "root-user bootstrap evaluated");
                 outcome
@@ -879,7 +895,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // The node alias hint comes from the resolved config:* `node.alias` (Server
     // 0.5 — no CIRIS_NODE_ALIAS env); falls back to the node key_id when unset.
     let node_alias = if initial_config.node_alias.trim().is_empty() {
-        cfg.key_id.clone()
+        this_node.clone()
     } else {
         initial_config.node_alias.clone()
     };
@@ -947,10 +963,38 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // spawn below is skipped for `embedded`. Slice attach + read-API mount proceed
     // on the shared edge (the routing registries edge reads live per inbound frame).
     let edge: Arc<Edge> = if embedded {
-        ciris_edge::current_edge().context(
+        let edge = ciris_edge::current_edge().context(
             "CIRISServer#221 fold: embedded Engine present but current_edge() is None — \
              init_edge_runtime must run before serve_with_python_adapter",
-        )?
+        )?;
+        // THE BLOB PLANE, on the Edge the agent built. `build_edge` below arms it
+        // for a standalone node (`.blob_chunk_source` + `.scope_native_addressing`);
+        // the fold's Edge was built by edge's own init, which arms neither — so an
+        // embedded node could neither address a room body nor serve one
+        // (2026-10-28: "NO scope address table is installed", both directions).
+        // Set-once on the running Edge; a second serve in this process finds it
+        // armed and says so.
+        match edge.arm_fold_host(
+            Arc::new(crate::backend::ServerBlobChunkSource::new(&engine)),
+            Some(ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW),
+        ) {
+            Ok(()) => {
+                tracing::info!(
+                    convergence_secs =
+                        ciris_edge::scope_lifecycle::DEFAULT_CONVERGENCE_WINDOW.as_secs(),
+                    "fold: blob plane ARMED on the agent's Edge — chunk source set and \
+                     scope-native addressing installed (scoped flows are one-hop, CC 5.4.6)"
+                );
+                spawn_scope_seal_loop(&edge);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "fold: blob plane NOT armed on the agent's Edge (already armed by an \
+                 earlier serve in this process, or no Reticulum transport) — room bodies \
+                 are addressed and served only if an earlier arm succeeded"
+            ),
+        }
+        edge
     } else {
         Arc::new(
             build_edge(
@@ -1083,24 +1127,6 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // copy of the canonical, almost all of it freed by here): return it
     // before the loops start allocating on top.
     crate::diag::trim_after("boot: peering done");
-    crate::compose_status::phase("holonomic");
-    // ── Holonomic-tier swarm runtime (CIRISServer#11) ─────────────────────────
-    // The publisher advertises the fountain content THIS node holds as signed
-    // FountainHoldingClaim envelopes to the consent cohort; the converger acts
-    // on PEERS' claims (tier-evict / hard-delete locally-held symbols once a
-    // content unit is sufficiently replicated). Like the ReplicationRuntime it
-    // reuses the SAME Reticulum transport and MUST install BEFORE edge.run()
-    // consumes the Edge (install routes verified inbound claims into the
-    // converger, CIRISEdge#184). Gated on `caps.lens_store`: the holonomic tier
-    // only makes sense when the node carries the corpus — a relay-only node
-    // holds no fountain content and has nothing to publish or converge. The
-    // handle is bound for the node's lifetime so the publisher/converger tasks
-    // are not dropped.
-    let _swarm = if caps.lens_store {
-        crate::holonomic::install_swarm_runtime(&engine, &edge).await
-    } else {
-        None
-    };
 
     // ── CEG-driven reconcile nudge ────────────────────────────────────────────
     // The peering API (POST /v1/federation/peering) NEVER touches the runtime — it
@@ -1229,7 +1255,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     //    at all: no bind, no error, no panic — the embedded app could never
     //    claim/login, and the only witness was one INFO line on a dark sink.
     //    The read surface is read-only and corpus-safe; the corpus-GROWTH tiers
-    //    (scorer, holonomic swarm, replication) stay gated on `caps.lens_store`
+    //    (scorer, replication) stay gated on `caps.lens_store`
     //    below. ──────────────────────────────────────────────────────────────
     if !caps.lens_store {
         tracing::warn!(
@@ -1253,7 +1279,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         );
         false
     } else {
-        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &cfg.key_id) {
+        match crate::serve_marker::write(&cfg.data_dir, cfg.read_api_addr(), &this_node) {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!(error = %e, "could not write the serve marker");
@@ -1614,7 +1640,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // `wipe` verb — a session gate, never a second threshold.
                     .merge(crate::commons_surface::router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        this_node.clone(),
                     ))
                     // CONFIG-AS-CEG (Server 0.5): the owner-gated /v1/config
                     // surface over the signed GraphConfig store. A write is gated
@@ -1667,10 +1693,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                             peers: accord_peers.clone(),
                             // #347: the latch's release binding names THIS node,
                             // so an offline release token is not replayable
-                            // against any other node in the mesh. `cfg.key_id` is
-                            // the FSD-003 fingerprinted federation identity by
-                            // this point (derived above from the ed25519 pubkey).
-                            node_id: Some(cfg.key_id.clone()),
+                            // against any other node in the mesh — the NODE key,
+                            // never the agent on a split home.
+                            node_id: Some(this_node.clone()),
                         },
                     ))
                     // ACCORD-HOLDER PROVISIONING (CIRISServer#41, the safe-mesh
@@ -1821,7 +1846,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // closes.
                     .merge(crate::operator_surface::trace_plane_router(
                         Arc::clone(&engine),
-                        cfg.key_id.clone(),
+                        this_node.clone(),
                         Some(edge.metrics()),
                         mesh_config_effect.clone(),
                     ))
@@ -1998,8 +2023,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     let reconcile_join = replication.as_ref().map(|runtime| {
         crate::replication_reconcile::spawn(
             Arc::clone(&engine),
-            // The SAME signer identity as the runtime (#312) — never the alias.
-            edge.signer_key_id().to_string(),
+            // THIS NODE (never the alias, never the agent): the consent healer
+            // reads grants made FOR it, and every other read folds all of this
+            // node's keys from it (`peer::own_keys_of_this_node`).
+            this_node.clone(),
             Arc::clone(runtime),
             Arc::clone(&replication_notify),
             config_rx.clone(),
@@ -2700,6 +2727,20 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
     use ciris_keyring::self_enc_keys::SelfEncKeys;
     use ciris_verify_core::transport_binding::produce_signed_identity_occurrence;
 
+    // An AGENT never publishes a route (2026-10-28 audit; edge#888: a stale
+    // agent route broke a live pair). This row is the ENGINE's `{key, key}`
+    // occurrence carrying the Reticulum transport binding, and on a split home
+    // the engine is the agent while the transport is the node's. The node is
+    // reached through its own rows instead — edge's signed TransportDestination
+    // under the wire identity, and its content occurrence under its owner
+    // (`backend::provision_engine_occurrence`) — so a split home publishes none.
+    if crate::node_key::held_node_signer().is_some() {
+        tracing::info!(
+            "self identity-occurrence NOT published — this is a split home, and the engine \
+             is the agent, which carries no route; the node's own rows reach it"
+        );
+        return;
+    }
     let key_id = cfg.key_id.as_str();
     let Some(transport_pubkey) = edge.local_transport_pubkey() else {
         tracing::debug!(
@@ -3711,13 +3752,14 @@ pub(crate) async fn arm_peer_deadmission_gate(engine: &Arc<Engine>) -> Result<()
 /// compose engine, which sets nothing, so the server sets it here, once, at
 /// boot.
 ///
-/// WHICH KEY: the engine's own signer (`local_derived_key_id`) — the MINTER
-/// the re-wrap compares, as edge's fix uses — not the wire identity the AV-77
-/// gate arms (on a split node those differ; the epoch is minted by the
-/// engine's signer). Read back through the directory, like the AV-77 arm: a
-/// node key that did not stick is refused at boot rather than shipped silent.
+/// WHICH KEY: the SEALING engine's signer — the MINTER the re-wrap compares,
+/// as edge's fix uses. On a split home that is the node key, never the agent:
+/// every epoch is minted by `node_key::node_engine` (2026-10-28 — an
+/// agent-minted epoch is refused on the far side, `signer_not_active_member`).
+/// Read back through the directory, like the AV-77 arm: a node key that did
+/// not stick is refused at boot rather than shipped silent.
 async fn arm_backend_node_key(engine: &Arc<Engine>) -> Result<()> {
-    let key_id = engine
+    let key_id = crate::node_key::node_engine(engine)
         .local_derived_key_id()
         .await
         .context("resolve the engine's derived key id for the backend's node key")?;
@@ -4567,7 +4609,11 @@ pub(crate) async fn start_replication_runtime(
     // `consent_peers_by_principals(actor)` matched nothing and the production-
     // shaped agent withheld its whole Attestation plane toward the canonical
     // (`send_set_size=0 consent=0 owner_routed=0`, 2026-09-24). The blob puller
-    // below keeps the signing key: its holder claims are self-attested by it.
+    // takes the wire identity too: since 0.5.241 the NODE signs its holder
+    // claims (`node_key::node_engine`), and the puller's store gate asks
+    // whether THIS node's principal is in the room — keyed on the actor it
+    // resolved to nobody and refused every room body (2026-10-28,
+    // `SenderNotApprovedForTier { cohort, VerifiedOnly }`).
     let wire = crate::node_key::wire_identity().unwrap_or(node_key_id);
     let candidates = crate::peer::replication_peers_from_consent(engine, wire).await?;
     let mut desired: Vec<String> = Vec::with_capacity(candidates.len());
@@ -4778,7 +4824,7 @@ pub(crate) async fn start_replication_runtime(
     // opts in. The revocation register lets an authorized `withdraws` make the
     // chunk source refuse and the backend evict (CIRISEdge#614).
     let (pull_sink, revocations) =
-        crate::backend::spawn_blob_puller(engine, Arc::clone(edge), node_key_id).await;
+        crate::backend::spawn_blob_puller(engine, Arc::clone(edge), wire).await;
     // ── THE MEMBERSHIP WIDENER (edge v38.0.0 / persist v52.0.0, CIRISPersist#955) ──
     //
     // Nobody joins a family or community without their own signed acceptance
@@ -4856,7 +4902,11 @@ pub(crate) async fn start_replication_runtime(
         // - `revocations`: the withdrawals observer, the SAME register the blob
         //   chunk source refuses against (`backend::revocation_register`).
         sealed_content: Some(ciris_edge::replication::SealedContentWiring {
-            engine: ciris_edge::replication::bridge::BridgeEngine(Engine::clone(engine)),
+            // The SEALING engine: a #916 re-wrap of an epoch this node minted
+            // is signed by its minter, the node (`node_key::node_engine`).
+            engine: ciris_edge::replication::bridge::BridgeEngine(
+                crate::node_key::node_engine(engine),
+            ),
             pull_sink,
             revocations,
         }),
@@ -5415,6 +5465,15 @@ async fn build_edge(
     // advance happen where rooms are keyed (`contacts_chat::ensure_room_addresses`);
     // nothing else calls this, so without it a rotated-away address would stay
     // live forever. Named phase + jitter per `loop_cadence` (CIRISServer#575).
+    spawn_scope_seal_loop(&edge);
+    tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
+    Ok(edge)
+}
+
+/// The scope-address seal pass (CIRISEdge#499), for whichever Edge carries a
+/// scope lifecycle — the one `build_edge` armed, or the agent's Edge armed by
+/// `Edge::arm_fold_host` in the fold. No lifecycle, no loop.
+fn spawn_scope_seal_loop(edge: &Edge) {
     if let Some(life) = edge.scope_lifecycle().cloned() {
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(60);
@@ -5433,8 +5492,6 @@ async fn build_edge(
             }
         });
     }
-    tracing::info!(ret = %cfg.listen_addr, "shared reticulum edge runtime built");
-    Ok(edge)
 }
 
 /// Open the shared Engine for an OFFLINE, console-trusted CLI op (`config set/get`)

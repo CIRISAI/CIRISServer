@@ -610,7 +610,7 @@ pub const SERVER_DECLARED_GAPS: &[DeclaredGap] = &[
         tracked_at: "CIRISServer#809",
         reason: "no per-item durable mark on any publish route, no replication of an item's \
                  encrypted chunks to a target holder count, no repair at the floor and no \
-                 recovery route — the swarm runtime compose installs holds no durable items",
+                 recovery route",
     },
     DeclaredGap {
         cc: "6.1.5",
@@ -623,10 +623,9 @@ pub const SERVER_DECLARED_GAPS: &[DeclaredGap] = &[
         cc: "6.1.5.1",
         clm: "CLM-registry-replication",
         tracked_at: "CIRISServer#809",
-        reason: "no per-item replication target: holonomic::install_swarm_runtime starts \
-                 SwarmRuntimeConfig::default() over a boot snapshot of the cohort, and the \
-                 mesh_config redundancy keys are unconsumed (mesh_config_effect.rs) because \
-                 the runtime's config cannot change after start",
+        reason: "no per-item replication target: durability is whole copies via the blob \
+                 swarm (the fountain runtime is removed), and no copy count is read — the \
+                 mesh_config redundancy keys are unbuilt (mesh_config_effect.rs)",
     },
     DeclaredGap {
         cc: "4.2.6",

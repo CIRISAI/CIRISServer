@@ -322,7 +322,8 @@ async fn wipe_signing_key(
 /// See [`crate::capacity_read`] for what counts as responsible and why the
 /// query is by subject rather than by attester.
 async fn capacity(State(st): State<SystemDataState>) -> Response {
-    let node_key_id = match crate::graph_config::self_key_id(&st.engine).await {
+    // THIS NODE (the held node key on a split home), never the agent.
+    let node_key_id = match crate::node_key::this_node_id(&st.engine).await {
         Ok(k) => k,
         Err(e) => {
             // Not a 500: a node that cannot resolve its own registered key has

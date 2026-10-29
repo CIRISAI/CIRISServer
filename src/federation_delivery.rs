@@ -1256,6 +1256,82 @@ pub fn analyze_consent_stance(
 /// refuses. That is the same authority the HTTP route resolves to, established at
 /// claim time rather than per-request. The harness fence remains as an
 /// alternative for `CIRIS_TESTING_MODE`, which runs on unclaimed nodes.
+/// **The trace CAPTURE grant, authored by the OWNER** (`consent:community_trust:v1`,
+/// CC 3.3.1; persist's owner-authored form, CIRISPersist#1096).
+///
+/// The row is ABOUT this node and names the node, its owner and the agent that
+/// acts on it, so each can withdraw it; it is signed by the owner's own pen —
+/// never the agent's key (an agent-authored grant about the agent has no owner
+/// binding over it and persist refuses it, CC 3.3.1). `Ok(None)` when the
+/// owner's pen is not reachable in this process: the grant is DEFERRED, never
+/// written by a machine key in the owner's place.
+pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
+    use ciris_persist::federation::community_trust_consent::COMMUNITY_TRUST_DIMENSION;
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+    let node = crate::node_key::this_node_id(engine).await?;
+    let agent = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("derive the agent's key id: {e}"))?;
+    let Some(pen) = crate::peer::owner_consent_pen(engine, &node).await? else {
+        tracing::info!(
+            node_key_id = %node,
+            "community-trust grant DEFERRED — the node's owner pen is not reachable here; \
+             the grant is the owner's act and no machine key writes it in their place"
+        );
+        return Ok(None);
+    };
+    let Some(signer) = pen.signer.as_ref() else {
+        tracing::info!(
+            node_key_id = %node,
+            "community-trust grant DEFERRED — no owner pen distinct from the engine"
+        );
+        return Ok(None);
+    };
+    let mut subjects = vec![node.clone(), pen.key_id.clone()];
+    if agent != node && agent != pen.key_id {
+        subjects.push(agent);
+    }
+    let mut envelope = serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "score": 1.0,
+    });
+    envelope[ciris_persist::federation::envelope::paths::DIMENSION] =
+        serde_json::Value::from(COMMUNITY_TRUST_DIMENSION);
+    let row = crate::attest::Emit::stamp(
+        &pen.key_id,
+        crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
+            .about_all(&node, &subjects),
+    )
+    .map_err(|e| anyhow::anyhow!("stamp the community-trust grant: {e}"))?
+    .sign_and_assemble(crate::attest::KeySigner::Local(signer))
+    .await
+    .map_err(|e| anyhow::anyhow!("sign the community-trust grant as the owner: {e}"))?;
+    let id = crate::attest::put(engine, row)
+        .await
+        .map_err(|e| anyhow::anyhow!("put the community-trust grant: {e}"))?;
+    tracing::info!(
+        attestation_id = %id,
+        owner_key_id = %pen.key_id,
+        node_key_id = %node,
+        subjects = ?subjects,
+        "community-trust grant AUTHORED by the owner — traces of this node may be captured"
+    );
+    Ok(Some(id))
+}
+
+/// The pyo3 door for [`author_community_trust`]: the fold's agent calls this
+/// instead of authoring the grant under its own key.
+#[cfg(feature = "python")]
+pub fn author_community_trust_embedded() -> Result<Option<String>> {
+    let engine: Arc<Engine> = ciris_persist::ffi::pyo3::current_rust_engine()
+        .context("author_community_trust: no in-process persist Engine")?;
+    let (rt, _controller) = HELD
+        .get()
+        .context("author_community_trust: federation delivery not started")?;
+    rt.block_on(author_community_trust(&engine))
+}
+
 #[cfg(feature = "python")]
 pub fn author_consent_embedded(
     peer_key_id: &str,
@@ -1893,11 +1969,22 @@ pub async fn run_federation_delivery(
                                 if verdict == "confirmed" {
                                     tracing::info!(peer = %peer, "rooting verdict: CONFIRMED — this node roots the peer through the pinned anchor");
                                 } else {
-                                    tracing::warn!(
+                                    // NOT the standing that gates the attributed
+                                    // planes. This is the key-registration chain
+                                    // to a pinned accord-holder anchor (AV-42); an
+                                    // owner-claimed node registers its own key, so
+                                    // it is advisory here by design. What gates
+                                    // Attestation/Community toward a peer is the
+                                    // mutual-root walk through the owner-bindings
+                                    // (CIRISEdge#659), and edge logs its own
+                                    // "Attributed but not Rooted" line whenever
+                                    // that withholds (2026-10-28: this line
+                                    // claimed a withholding that never happened).
+                                    tracing::info!(
                                         peer = %peer,
                                         verdict = %verdict,
                                         report = %report,
-                                        "rooting verdict: NOT confirmed — every plane that needs attribution (Attestation, Community) will withhold toward this peer until it is. `report.detail` names the failing link"
+                                        "key-registration rooting: the peer's key does not chain to a pinned accord-holder anchor (advisory — expected for an owner-claimed node). Attributed planes are gated separately by the owner-binding mutual-root walk; edge logs 'Attributed but not Rooted' if that withholds"
                                     );
                                 }
                             }

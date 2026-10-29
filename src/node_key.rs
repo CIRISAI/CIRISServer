@@ -60,6 +60,32 @@
 //! node key; the agent↔node relation itself needs no edge, because CC 3.4.7.3
 //! Clause D derives it: an agent may act through a node iff the node's single
 //! owner appears in the agent's steward set.
+//!
+//! ## WHICH KEY SIGNS WHAT (Eric, 2026-10-28: the agent never signs as the node)
+//!
+//! A split home holds three keys. Every signature and every "is this me?"
+//! question names exactly one of them, chosen by WHOSE ACT it is:
+//!
+//! | Key | Whose act | Reach it through |
+//! |---|---|---|
+//! | **PERSON** (the owner) | membership (found, propose, accept, join), chat messages, consent grants, owner-bindings, trust-root acceptance as the owner | `owner_signer_capsule::acquire`, `contacts_chat::membership_pen`, `peer::owner_consent_pen` |
+//! | **NODE** | every machine row a PEER must admit as this machine's: room epochs and key-grant sets, holding claims and their withdrawals, room-row co-scrubs, MLS identity, transport destinations, admin/de-admission rows, scoring, the node's own occurrence agreement — and every "is THIS node owned / in the room / in the audience" question | [`this_node_id`], [`node_engine`], [`held_node_edge_signer`], [`held_node_signer`] |
+//! | **AGENT** (the engine on a split home) | the agent's own work only: traces, deferrals, its own key record and occurrence, its acceptance in the login ceremony | `Engine::local_derived_key_id`, the compose `engine` |
+//!
+//! **Not yet on this table:** `config:*` rows are still signed by the engine.
+//! They are `self`-scoped and never admitted by a peer, so they are outside the
+//! failure class below; making them the owner's act needs the owner's pen on
+//! every write path (the headless CLI too) and a reader that keeps existing
+//! rows, which is a design change, not a fix. The capacity scorer and the accord
+//! genesis record also sign as the engine; both run on the canonical, where the
+//! engine IS the node.
+//!
+//! Why the line falls there: a peer lifts a NODE to its person through the
+//! owner-binding it holds, and a PERSON signs for themself. An AGENT's tie to its
+//! person is a `self` row no peer ever receives, so an agent-signed peer-facing
+//! row passes this node's own gates and is refused on every peer — the failure
+//! class that kept chat dark through the 2026-10-28 gate runs. On a standalone
+//! node the engine IS the node and the NODE helpers return it unchanged.
 
 use anyhow::{Context, Result};
 use ciris_keyring::{HardwareSigner, MlDsa65SoftwareSigner, PqcSigner};
@@ -948,6 +974,58 @@ pub async fn migrate_consent_to_owner(
     Ok(moved)
 }
 
+/// Publish the node key's own occurrence under `owner`, signed by the node —
+/// unless the node already agreed to that pair. Returns whether it published.
+async fn publish_node_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    node: &std::sync::Arc<ciris_persist::prelude::LocalSigner>,
+    owner: &str,
+) -> Result<bool> {
+    use ciris_persist::engine::BackendDispatch;
+    use ciris_persist::federation::key_grant::publish_self_occurrence_with_local_signer;
+    let node_key = node.derived_key_id();
+    let dir = engine.federation_directory();
+    // The peer-portable question: is the CURRENT signed row for the pair the
+    // node's own? `occurrence_agreed_to` is the wrong test here: this node
+    // trusts its own rows locally and reads the history, so it answered yes
+    // while peers held only the identity-signed row.
+    let current_is_mine = dir
+        .list_signed_identity_occurrences_for(owner)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_signed_identity_occurrences_for({owner}): {e}"))?
+        .iter()
+        .any(|r| {
+            r.identity_occurrence.occurrence_key_id == node_key && r.attesting_key_id == node_key
+        });
+    if current_is_mine {
+        return Ok(false);
+    }
+    let class = crate::backend::host_device_class();
+    let published = match engine.backend() {
+        BackendDispatch::Sqlite(b) => {
+            publish_self_occurrence_with_local_signer(b.as_ref(), node, owner, class, None).await
+        }
+        #[cfg(target_os = "linux")]
+        BackendDispatch::Postgres(b) => {
+            publish_self_occurrence_with_local_signer(b.as_ref(), node, owner, class, None).await
+        }
+        // Persist's postgres backend can be compiled in on other targets
+        // (feature unification), but a split home there runs on sqlite.
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!("the node's occurrence is published on sqlite or linux postgres only"),
+    }
+    .map_err(|e| anyhow::anyhow!("publish the node's occurrence under {owner}: {e}"))?;
+    tracing::info!(
+        node_key_id = %node_key,
+        owner_key_id = %owner,
+        device_class = class,
+        occurrence = %published.identity_occurrence.occurrence_key_id,
+        "split home: the node agreed, in its own hand, to be its owner's device — peers now \
+         count it as one (room content, room keys and key wraps reach it)"
+    );
+    Ok(true)
+}
+
 /// On a SPLIT home, anchor the agent to the human: the login ceremony,
 /// `self_at_login(identity_signer: Some(human), agent: <engine key>)`, run with
 /// the same human whose owner-binding names the node (CIRISServer#601 items 7
@@ -967,6 +1045,51 @@ pub async fn migrate_consent_to_owner(
 /// registered; the human already anchors the agent (idempotent). `Err` when the
 /// node IS owned and split and the ceremony fails.
 pub async fn anchor_agent_to_owner(
+    engine: &ciris_persist::prelude::Engine,
+) -> Result<Option<String>> {
+    let anchored = anchor_agent_to_owner_inner(engine).await;
+    // AFTER the ceremony, on every path (fresh anchor, already anchored, or a
+    // ceremony error) — see [`reaffirm_node_occurrence`].
+    reaffirm_node_occurrence(engine).await;
+    anchored
+}
+
+/// **The node agrees to be its owner's device, in its own hand** (persist #851
+/// `publish_self_occurrence_with_local_signer`; #932 H1), unless the current
+/// row for the pair is already the node's. Call after anything that runs the
+/// login ceremony: the ceremony writes {owner, node} signed by the IDENTITY, the
+/// row is last-signed-wins per pair, and peers count an identity's unilateral
+/// row for nothing — so a node row published before it is replaced and peers
+/// never see the node as a device (2026-10-28 gate: both nodes logged the
+/// agreement, neither peer held it). Every "is this node one of U's devices"
+/// read on the chat path — room content, the room key, key-grant wraps, the
+/// room hold — needs it. A no-op on a standalone or unowned node.
+pub async fn reaffirm_node_occurrence(engine: &ciris_persist::prelude::Engine) {
+    if let Some(node) = held_node_signer() {
+        let node_key = node.derived_key_id();
+        let owner = ciris_persist::federation::admission::owner_of(
+            engine.federation_directory().as_ref(),
+            &node_key,
+        )
+        .await
+        .ok()
+        .flatten();
+        if let Some(owner) = owner {
+            if let Err(e) = publish_node_occurrence(engine, &node, &owner).await {
+                tracing::warn!(
+                    node_key_id = %node_key,
+                    owner_key_id = %owner,
+                    error = %format!("{e:#}"),
+                    "split home: the node's own occurrence agreement was NOT published — \
+                     peers will not count this node as its owner's device, so room content \
+                     and keys will not reach it until it is"
+                );
+            }
+        }
+    }
+}
+
+async fn anchor_agent_to_owner_inner(
     engine: &ciris_persist::prelude::Engine,
 ) -> Result<Option<String>> {
     use ciris_persist::engine::{SelfAtLoginInput, SelfAtLoginOccurrence};
@@ -1708,6 +1831,67 @@ pub fn set_node_signer(
 #[must_use]
 pub fn held_node_signer() -> Option<std::sync::Arc<ciris_persist::prelude::LocalSigner>> {
     NODE_SIGNER.get().cloned()
+}
+
+/// The held node key in EDGE's signer type — what the chat plane's `node`
+/// signer is on a split home. `None` when no split happened (the engine's key
+/// IS the node, and compose's own signer stays).
+///
+/// The agent never signs as the node (Eric, 2026-10-28). On a split home the
+/// engine is the AGENT, and a row a peer must admit as this node's — the
+/// co-scrub on a room row, a room epoch's key-grant set, a holding claim — is
+/// lifted by the peer through the node's OWNER-BINDING, which replicates. An
+/// agent has none: its tie to the person is a `self` row no peer receives, so
+/// every agent-signed room row was refused on the far side
+/// (`signer_not_active_member`, NoHolders).
+#[must_use]
+pub fn held_node_edge_signer() -> Option<std::sync::Arc<ciris_edge::identity::LocalSigner>> {
+    let node = held_node_signer()?;
+    let pqc = node.pqc_signer()?;
+    Some(std::sync::Arc::new(ciris_edge::identity::LocalSigner::new(
+        node.derived_key_id(),
+        std::sync::Arc::new(ciris_persist::signing::LocalSignerHardwareAdapter::new(
+            node.clone(),
+        )),
+        Some(pqc),
+    )))
+}
+
+/// **THIS node's key id** — the NODE row of the table in the module docs. The
+/// held node key on a split home, else the engine's own key (a standalone node
+/// IS its engine). Every "is this node owned / a member / in the audience"
+/// question asks about this key, never the engine's.
+///
+/// # Errors
+/// Only on a standalone node whose engine cannot derive its key id.
+pub async fn this_node_id(engine: &ciris_persist::prelude::Engine) -> Result<String> {
+    match wire_identity() {
+        Some(w) => Ok(w.to_owned()),
+        None => engine
+            .local_derived_key_id()
+            .await
+            .map_err(|e| anyhow::anyhow!("derive this node's key id: {e}")),
+    }
+}
+
+/// **An engine that signs as THIS node** — the NODE row of the table in the
+/// module docs. Same backend and directory as `engine`; on a split home its
+/// signer is the held node pen, so every row it emits — room epochs and their
+/// key-grant sets, holding claims and their withdrawals, admin rows — is the
+/// node's and a peer lifts it through the owner-binding (see
+/// [`held_node_edge_signer`]). On a standalone node, `engine` itself.
+#[must_use]
+pub fn node_engine(engine: &ciris_persist::prelude::Engine) -> ciris_persist::prelude::Engine {
+    match held_node_signer() {
+        Some(node) => ciris_persist::prelude::Engine::from_shared_with_local(
+            engine.backend().clone(),
+            std::sync::Arc::new(ciris_persist::signing::LocalSignerHardwareAdapter::new(
+                node.clone(),
+            )),
+            Some(node),
+        ),
+        None => engine.clone(),
+    }
 }
 
 /// The node key's self-signed `SignedKeyRecord` JSON, if this process split one

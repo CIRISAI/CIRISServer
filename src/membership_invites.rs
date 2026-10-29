@@ -608,7 +608,8 @@ pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &st
                 if scope == GroupScope::Family {
                     // The household's existing content, re-wrapped to them —
                     // what the pre-v52 direct add did, now after their consent.
-                    if let Err(e) = engine
+                    // Signed by THIS NODE (`node_key::node_engine`).
+                    if let Err(e) = crate::node_key::node_engine(engine)
                         .rekey_family_member_add(&group_key_id, &member_key_id)
                         .await
                     {
@@ -800,6 +801,66 @@ async fn group_name(
     }
 }
 
+/// An empty inbox, explained: every proposal held here that names `owner`,
+/// whatever its tier or state, and the filter that kept it out of the inbox.
+/// Logged once per distinct set (the inbox is polled), so a joiner who never
+/// sees an invitation shows whether it never arrived or arrived and was hidden
+/// (the five-platform run of 2026-10-27).
+async fn log_hidden_proposals(dir: &dyn FederationDirectory, owner: &str) {
+    use ciris_persist::federation::types::attestation_tier::FEDERATION;
+    static LAST: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    let now = chrono::Utc::now();
+    let mut found = Vec::new();
+    let mut since = None;
+    loop {
+        let Ok(page) = dir.list_attestations_since(since.clone(), 512).await else {
+            return;
+        };
+        let full = page.len() == 512;
+        since = page
+            .last()
+            .map(ciris_persist::federation::types::ServedAttestation::resume_pair);
+        for served in page {
+            let p = served.attestation;
+            if dimension_of(&p) != Some(PROPOSAL_DIMENSION)
+                || !p.subject_key_ids.iter().any(|k| k == owner)
+            {
+                continue;
+            }
+            let why = if p.tier != FEDERATION {
+                format!("tier={}", p.tier)
+            } else if p.expires_at.is_some_and(|t| t <= now) {
+                "expired".to_owned()
+            } else if p.subject_key_ids.first().map(String::as_str) != Some(owner) {
+                "invitee is not the first subject".to_owned()
+            } else {
+                "answered (or unreadable scope)".to_owned()
+            };
+            found.push(format!(
+                "{} by {}: {why}",
+                p.attestation_id, p.attesting_key_id
+            ));
+        }
+        if !full {
+            break;
+        }
+    }
+    let summary = found.join("; ");
+    let last = LAST.get_or_init(|| std::sync::Mutex::new(String::from("\u{0}")));
+    let Ok(mut last) = last.lock() else { return };
+    if *last == summary {
+        return;
+    }
+    last.clone_from(&summary);
+    tracing::info!(
+        owner,
+        held = found.len(),
+        proposals = %summary,
+        "invites: inbox empty — proposals held here naming this owner, and why each is not \
+         listed (held=0 → no invitation has reached this node)"
+    );
+}
+
 /// `GET /v1/self/invites` — the inbox: every live invitation held here that
 /// names this node's owner and that they have not answered, across families,
 /// communities and pair rooms (edge's `pending_proposals_for`). A delegate may
@@ -814,6 +875,9 @@ async fn inbox(State(st): State<InboxState>, headers: HeaderMap) -> Response {
         Ok(p) => p,
         Err(e) => return store_unavailable(e.to_string()),
     };
+    if pending.is_empty() {
+        log_hidden_proposals(dir.as_ref(), &caller.owner_key_id).await;
+    }
     let mut invites = Vec::with_capacity(pending.len());
     for p in pending {
         // Edge's inbox drops answered and lapsed proposals; a WITHDRAWN one

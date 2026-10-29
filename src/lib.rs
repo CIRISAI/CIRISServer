@@ -294,12 +294,6 @@ pub mod halt_gate;
 /// `register_federation_key` call site in this crate goes through.
 pub mod hardware_attestation;
 pub mod health;
-/// CIRISServer#11 — wire CIRISEdge's holonomic-tier `FountainSwarmRuntime`
-/// (the publisher + converger that advertise this node's held fountain
-/// content and act on peers' holding claims) into the shared Edge. The
-/// persist-backed trait adapters + the `install_swarm_runtime` entry point
-/// that mirrors the replication wiring shape (build before `edge.run()`).
-pub mod holonomic;
 /// HTTP error-response logging middleware (the "never guess" layer).
 pub mod http_log;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
@@ -2889,6 +2883,16 @@ mod python {
         })
     }
 
+    /// Author the trace CAPTURE grant (`consent:community_trust:v1`) as the
+    /// node's OWNER — about this node, naming node, owner and agent, signed by
+    /// the owner's pen. Returns the attestation id, or `None` when the owner's
+    /// pen is not reachable (the grant is deferred, never machine-written).
+    #[pyfunction]
+    #[pyo3(name = "author_community_trust")]
+    pub fn author_community_trust_py(py: Python<'_>) -> PyResult<Option<String>> {
+        py.detach(|| crate::federation_delivery::author_community_trust_embedded().map_err(py_err))
+    }
+
     #[pyfunction]
     #[pyo3(
         name = "start_federation_delivery",
@@ -3575,6 +3579,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_consent_disclosure, m)?)?;
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
+        m.add_function(wrap_pyfunction!(author_community_trust_py, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_deferral_request, m)?)?;

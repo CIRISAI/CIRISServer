@@ -878,8 +878,14 @@ async fn get_peer_sas(State(st): State<PeersState>, Path(key_id): Path<String>) 
         }
     };
 
-    // Local pubkey — the node's composed federation signer (Ed25519 half).
-    let local_pub: [u8; 32] = match st.engine.signer().public_key().await {
+    // Local pubkey — THIS NODE's (the key peers registered and compare words
+    // against), never the engine's: on a split home the engine is the agent and
+    // the two sides would read different words (2026-10-28 audit).
+    let local_pub_bytes = match crate::node_key::held_node_signer() {
+        Some(node) => Ok(node.ed25519_public_key_bytes().to_vec()),
+        None => st.engine.signer().public_key().await,
+    };
+    let local_pub: [u8; 32] = match local_pub_bytes {
         Ok(b) => match <[u8; 32]>::try_from(b.as_slice()) {
             Ok(pk) => pk,
             Err(_) => {
