@@ -1571,30 +1571,11 @@ pub async fn promote_owner_binding_to_federation(
         )));
     }
 
-    // Read this node's inbound owner-binding edges (federation tier). The
-    // responsible-party binding is the live `delegates_to(owner → node)` with the
-    // owner-binding purpose.
-    let rows = engine
-        .federation_directory()
-        .attestations_to_all(node_key_id)
-        .await
-        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    let rows = owner_binding_rows(engine, node_key_id, &owner).await?;
 
-    let owner_keys = owner_signing_keys(engine, &owner).await;
-    let is_owner_binding = |a: &Attestation| -> bool {
-        a.attestation_type == attestation_type::DELEGATES_TO
-            && owner_keys.contains(&a.attesting_key_id)
-            && a.attestation_envelope
-                .get("delegation_purpose")
-                .and_then(|v| v.as_str())
-                == Some(OWNER_BINDING_PURPOSE)
-    };
-
-    // Idempotent: already federation-scoped ⇒ nothing to widen.
-    if rows
-        .iter()
-        .any(|a| is_owner_binding(a) && a.cohort_scope == cohort_scope::FEDERATION)
-    {
+    // Idempotent: already federation-scoped ⇒ nothing to widen. The one
+    // predicate (`owner_binding_is_announced`), not a second spelling of it.
+    if owner_binding_is_announced(engine, node_key_id, &owner).await? {
         tracing::info!(
             responsible_user = %owner,
             node_key_id = %node_key_id,
@@ -1610,7 +1591,7 @@ pub async fn promote_owner_binding_to_federation(
     // scope set off the ROW rather than re-deriving it from the constant: the
     // promotion must say what the owner already said, at a wider audience, and
     // nothing more.
-    let existing = rows.iter().find(|a| is_owner_binding(a)).ok_or_else(|| {
+    let existing = rows.first().ok_or_else(|| {
         OwnershipError::Validation(
             "no responsible-party owner-binding found on this node to promote".into(),
         )
@@ -1633,6 +1614,53 @@ pub async fn promote_owner_binding_to_federation(
         responsible_user_key_id: owner,
         attestation_id: Some(attestation_id),
     })
+}
+
+/// The owner-binding rows on `node_key_id` signed by `owner` (or a key that
+/// signs for them): the live `delegates_to(owner → node)` with the
+/// owner-binding purpose, at whatever cohort each was signed for.
+///
+/// # Errors
+/// The directory read failed.
+pub async fn owner_binding_rows(
+    engine: &Engine,
+    node_key_id: &str,
+    owner: &str,
+) -> Result<Vec<Attestation>, OwnershipError> {
+    let rows = engine
+        .federation_directory()
+        .attestations_to_all(node_key_id)
+        .await
+        .map_err(|e| OwnershipError::Persist(e.to_string()))?;
+    let owner_keys = owner_signing_keys(engine, owner).await;
+    Ok(rows
+        .into_iter()
+        .filter(|a| {
+            a.attestation_type == attestation_type::DELEGATES_TO
+                && owner_keys.contains(&a.attesting_key_id)
+                && a.attestation_envelope
+                    .get("delegation_purpose")
+                    .and_then(|v| v.as_str())
+                    == Some(OWNER_BINDING_PURPOSE)
+        })
+        .collect())
+}
+
+/// **Has `owner` announced `node_key_id`?** Its owner-binding stands at
+/// `federation` (CC 5.4.6: a person's public roster is exactly their
+/// federation-scoped bindings), whatever narrower rows stand beside it.
+///
+/// # Errors
+/// The directory read failed.
+pub async fn owner_binding_is_announced(
+    engine: &Engine,
+    node_key_id: &str,
+    owner: &str,
+) -> Result<bool, OwnershipError> {
+    Ok(owner_binding_rows(engine, node_key_id, owner)
+        .await?
+        .iter()
+        .any(|a| a.cohort_scope == cohort_scope::FEDERATION))
 }
 
 /// Errors [`emit_steward_binding`] can surface.

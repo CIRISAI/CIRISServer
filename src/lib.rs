@@ -141,6 +141,7 @@ mod compose;
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
 pub mod mls_state;
+pub mod owner_requests;
 pub mod owner_signer_capsule;
 mod roster_rows;
 
@@ -213,6 +214,7 @@ pub mod degradation;
 /// characteristics onto every response (the "no silent authority" layer).
 pub mod delegation_transparency;
 pub mod deployment;
+pub mod device_release;
 /// Operator diagnostics — runtime-gated (`--diagnostics` / `CIRIS_DIAGNOSTICS`),
 /// loopback-only: the mallinfo2 memory report and the CPU clocks behind
 /// `compose_status::mark` (CIRISServer#549 / #550). Since 0.5.224 the memory
