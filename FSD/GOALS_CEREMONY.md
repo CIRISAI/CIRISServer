@@ -44,9 +44,14 @@ are exactly the supported languages in the client's `localization/manifest.json`
 `am ar bn de en es fa fr ha hi id it ja ko mr my pa pt ru sw ta te th tr uk ur vi
 yo zh`. Each Qₗ tracks the cell `{ℓ}_mental_health`.
 
-**Still open:** the method `rung` (CC: `substrate_rung` ∈ Ph0/Ph1/Ph2/A0..A5).
-CIRISAgent has asked CIRISConstitution for the ruling. The locked file (§4) is
-written once it is known.
+**Rung: `A3`**, the same for every deployment, so each method is
+`method:{P1.attestation_id}:A3`. This is CIRISConstitution's reading of CC 3.1.9.7: the
+rung names the practitioner's cognition, not its hardware. An LLM-backed agent with
+conscience, deferral and goal projection is at least A3, and phones, desktops and
+servers run the same cognition. The rung definitions live in the pinned
+coherence-ratchet manifest. If that manifest names a higher rung for agents that
+carry a goal projector, that rung is used instead. The steward confirms the rung at
+the ceremony.
 
 ## 2. Why the whole tree is staged at once
 
@@ -185,8 +190,7 @@ CSD-130:
 
 1. **CIRISConstitution:** the five atoms, vocabulary v6.
 2. **CIRISPersist:** community-issued goal-family rows, CIRISPersist#1154 (v61 or v62, after CC states `authority_id` for the goal family).
-3. **CIRISAgent / CIRISConstitution:** the rung (languages settled, §1). Then the
-   locked file is written and pinned.
+3. **CIRISServer:** write the locked file (rung and languages settled, §1) and pin it.
 4. **CIRISServer:** the persist adopt that carries #1154, the routes (§4), T21 and the
    requirements row as files, and the halt-proof tests.
 5. **CIRISClient:** the CSD-130 card and the Goals card on the Accord screen.
