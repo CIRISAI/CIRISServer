@@ -76,16 +76,26 @@ use crate::auth::roles::{Permission, UserRole};
 use crate::auth::session::{resolve_bearer, SessionCaller};
 use crate::nodecode;
 
-/// The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1).
-/// The 3-value restriction is intentional (a narrower subset of the persist
-/// `cohort_scope` vocabulary). Single-sourced here; the receiving side
-/// ([`crate::auth::bootstrap`]) validates against this SAME const, so the
-/// initiator and receiver never drift.
-pub(crate) const COHORT_SCOPES: &[&str] = &[
-    ciris_persist::federation::types::cohort_scope::SELF,
-    ciris_persist::federation::types::cohort_scope::FAMILY,
-    ciris_persist::federation::types::cohort_scope::COMMUNITY,
-];
+/// The cohort scopes an owner-binding may carry: all seven (CC 3.2, CC
+/// 4.4.3.2.1), in persist's widening order, re-exported rather than listed
+/// here so a scope added upstream needs no edit.
+///
+/// A claim is normally `self`, and announcing re-signs the binding at
+/// `federation` (CC 5.4.6). The tiers between are reached when an
+/// unannounced node joins a group: the owner signs a second binding at that
+/// group's scope, alongside the `self` row, so its members can see who owns
+/// the node (CC 3.2; CIRISPersist#1140). Every scope is therefore a legitimate
+/// binding audience, and the claim doors accept each one (CIRISServer#666).
+///
+/// Single-sourced here; the receiving side ([`crate::auth::bootstrap`])
+/// validates against this SAME const, and `GET /v1/setup/status` serves it so
+/// the client builds its picker from the node rather than from a copy.
+pub(crate) const COHORT_SCOPES: &[&str] = ciris_persist::federation::types::cohort_scope::ALL;
+
+/// `self|family|…`, for refusals that name the accepted set.
+pub(crate) fn cohort_scopes_listed() -> String {
+    COHORT_SCOPES.join("|")
+}
 
 /// Errors the claim-remote build/execute pipeline can surface.
 #[derive(Debug)]
@@ -136,7 +146,8 @@ fn validate_cohort_scope(raw: &str) -> Result<String, ClaimRemoteError> {
         Ok(v.to_string())
     } else {
         Err(ClaimRemoteError::BadCohortScope(format!(
-            "invalid {v:?} — must be one of self|family|community"
+            "invalid {v:?} — must be one of {}",
+            cohort_scopes_listed()
         )))
     }
 }
@@ -2120,8 +2131,35 @@ async fn heal_owner_record_with(
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_refusal, rns_seed_from_target, with_local_flag, without_session, ClaimRemoteError,
+        claim_refusal, rns_seed_from_target, validate_cohort_scope, with_local_flag,
+        without_session, ClaimRemoteError, COHORT_SCOPES,
     };
+
+    /// An owner-binding may carry any of the seven cohort scopes (CC 3.2,
+    /// CIRISServer#666): `self` to claim, `federation` to announce, and a
+    /// group's scope when an unannounced node joins it. The claim door used to
+    /// accept three, citing a clause about the key-grant cascade.
+    #[test]
+    fn every_cohort_scope_is_a_binding_audience() {
+        use ciris_persist::federation::types::cohort_scope;
+        assert_eq!(COHORT_SCOPES, cohort_scope::ALL);
+        for s in [
+            cohort_scope::SELF,
+            cohort_scope::FAMILY,
+            cohort_scope::COMMUNITY,
+            cohort_scope::AFFILIATIONS,
+            cohort_scope::SPECIES,
+            cohort_scope::BIOSPHERE,
+            cohort_scope::FEDERATION,
+        ] {
+            assert_eq!(validate_cohort_scope(&format!(" {s} ")).unwrap(), s);
+        }
+        let refused = validate_cohort_scope("household").unwrap_err().to_string();
+        assert!(
+            refused.contains("self|family|community|affiliations|species|biosphere|federation"),
+            "a refusal names the whole accepted set: {refused}"
+        );
+    }
 
     async fn body_of(r: axum::response::Response) -> (u16, serde_json::Value) {
         let status = r.status().as_u16();
