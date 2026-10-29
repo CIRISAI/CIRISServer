@@ -3,13 +3,19 @@
 # staged on C, scrubbed by one founder, held across a halt and a resume (the
 # halt-proof window), then cosigned to quorum. The evidence joins are the
 # agent's: its battery rows are offered against a declared method and counted
-# by that method's progress measure (CIRISAgent safety-evidence-sync).
+# by that method's progress measure (CIRISAgent safety-evidence-sync). The
+# cosign declares the whole tree: goal, approach, methods, progress measures.
 catalog_id: T21
 catalogue_version: 6
 title: The canonical declares its Goals under its founder quorum
 serves: [CSD-130]
 derives: [4a, 4b]
 promises: [root.rooted, goal.staged, goal.proposed, root.halted, root.resumed, goal.declared,
+           approach.declared, method.declared, progress_measure.declared,
+           {atom: evidence.admitted, realizer: CIRISAgent},
+           {atom: evidence.superseded, realizer: CIRISAgent},
+           {atom: evidence.standing.blessed, realizer: CIRISAgent},
+           {atom: evidence.standing.unblessed, realizer: CIRISAgent},
            {atom: evidence.offered, realizer: CIRISAgent},
            {atom: evidence.counted, realizer: CIRISAgent}]
 topology:

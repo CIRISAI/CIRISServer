@@ -120,7 +120,7 @@ operation, and need the `pkcs11` feature (501 `hardware_unavailable` without it)
 
 ## 6. CSD/4: catalogue entry T21 and the requirements row
 
-Catalogue version 6 pins CIRISConstitution rc14 (`efa0c58`), which carries the goal and
+Catalogue version 6 pins CIRISConstitution rc14 (`f671e46`), which carries the goal and
 evidence atoms. The entry is `harness/native/topologies/catalog/T21-canonical-goals.yaml`
 and the row is `CSD-130` in `requirements.yaml`. CIRISClient#260 mirrors the row byte
 for byte.
@@ -134,7 +134,7 @@ steps do not reach, so the evidence join is the agent's test, not a row here.
 
 ## 7. Order of work
 
-1. **CIRISConstitution:** the five atoms, vocabulary v6 (done: rc14 `efa0c58`, pinned).
+1. **CIRISConstitution:** the five atoms, vocabulary v6 (done: rc14 `f671e46`, pinned).
 2. **CIRISPersist:** community-issued goal-family rows, CIRISPersist#1154 (CC rc14 states the shape).
 3. **CIRISServer:** write the locked file (rung and languages settled, §1) and pin it.
 4. **CIRISServer:** the persist adopt that carries #1154, the routes (§4), T21 and the

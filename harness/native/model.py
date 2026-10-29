@@ -94,13 +94,21 @@ AWAITING_ENTRY: Dict[str, str] = {
     a: "T20 (CIRISServer#809)"
     for a in ATOMS if VOCABULARY_ROWS[a].get("added_in") == 4 and a.startswith("file.durable")
 }
+# The atoms T21 reaches or promises (CC's assignment, rc14): the ceremony
+# declares the whole tree; the agent realizes the evidence plane.
+T21_ATOMS = frozenset({
+    "goal.staged", "goal.proposed", "goal.declared",
+    "approach.declared", "method.declared", "progress_measure.declared",
+    "evidence.offered", "evidence.counted", "evidence.admitted", "evidence.superseded",
+    "evidence.standing.blessed", "evidence.standing.unblessed",
+})
 # Catalogue v6 (CC rc14): the registry's atoms (affiliation, licence,
 # recognition, delegation, grant, key, trust, the goal tree's later life,
 # evidence standing) arrived with no entry; T21 reaches the ceremony's own.
 AWAITING_ENTRY.update({
     a: "an entry for the registry's rc14 atoms (CIRISRegistry)"
     for a in ATOMS if VOCABULARY_ROWS[a].get("added_in") == 6
-    and a not in ("goal.staged", "goal.proposed", "goal.declared", "evidence.offered", "evidence.counted")
+    and a not in T21_ATOMS
 })
 
 # ── steps and their effects ─────────────────────────────────────────────────
@@ -373,7 +381,8 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
     if k == "goals_propose":
         return {"goal.proposed"}, set()
     if k == "goals_cosign":
-        return {"goal.declared"}, {"goal.staged", "goal.proposed"}
+        return ({"goal.declared", "approach.declared", "method.declared", "progress_measure.declared"},
+                {"goal.staged", "goal.proposed"})
     return set(), set()
 
 

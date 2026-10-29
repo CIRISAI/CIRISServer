@@ -1,6 +1,6 @@
 # CSD/4 — the topology catalogue, locked
 
-**Status:** LOCKED at catalogue version 6 (2026-10-29: 6 for CC rc14's goal, evidence and registry atoms, with T21, the Goals ceremony; vocabulary re-pinned to CIRISConstitution rc14 @ `efa0c58`. Version 5 on 2026-10-22: 4 for the durability atoms, `file.durable.*`, which await T20; 5 for the agent-plane deferral and identity-amendment atoms, promised by T7 and realized by CIRISAgent; vocabulary re-pinned to CIRISConstitution rc10 @ `9f6ff75a`). Version 3 on 2026-10-20 ( version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
+**Status:** LOCKED at catalogue version 6 (2026-10-29: 6 for CC rc14's goal, evidence and registry atoms, with T21, the Goals ceremony; vocabulary re-pinned to CIRISConstitution rc14 @ `f671e46`. Version 5 on 2026-10-22: 4 for the durability atoms, `file.durable.*`, which await T20; 5 for the agent-plane deferral and identity-amendment atoms, promised by T7 and realized by CIRISAgent; vocabulary re-pinned to CIRISConstitution rc10 @ `9f6ff75a`). Version 3 on 2026-10-20 ( version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
 catalogue, the model, the builder). **Consumers:** CIRISClient's CSD cards and
 `check_csd_v3`, the native harness, CC's `tools/topology_to_cfg.py`.
 **Source of the ruling:** the steward on CIRISClient#179 §2: *do not give CSD authors
@@ -69,7 +69,7 @@ the release trace lists it under `realized_by`.
 | T17 | a takedown and a steward purge; family and community scope | `row.standing.admitted` → `tombstoned`, `blob.custody.purged`, `row.scope.*` | up to `scoped_file` (branch pending) |
 | T18 | delegation ends; a key grant; a guardian bond absent | `delegation.link.*`, `grant.state.held`, `guardian.bond.none` | up to `key_grant` (branch pending) |
 | T19 | holders under coercion and censorship; revoked_after | `root.holder_disposition.*`, `key.revocation.*`, `node.announce.announced` | up to `holder` (branch pending) |
-| T21 | the accord's canonical declares its Goals under its founder quorum (CSD-130) | `goal.staged` → `goal.proposed` → `goal.declared` (held across a halt); realized by CIRISAgent: `evidence.offered`, `evidence.counted` | up to `goals_stage` (CIRISServer#834) |
+| T21 | the accord's canonical declares its Goals under its founder quorum (CSD-130) | `goal.staged` → `goal.proposed` → `goal.declared` + `approach/method/progress_measure.declared` (held across a halt); realized by CIRISAgent: `evidence.*` | up to `goals_stage` (CIRISServer#834) |
 
 T10–T19 were proposed by CIRISConstitution's reverse gate (`tools/catalogue_coverage.py`):
 of the 155 states in `formal/STATE_TABLE.tsv`, T0–T9 exercised 47, and 58 states a model
@@ -251,11 +251,14 @@ answered by the Wise Authority, and `identity_amendment:v1` applied citing the a
 
 ### 3.5 Added in version 6
 
-CIRISConstitution rc14 (`efa0c58`). T21 reaches the Goals ceremony's `goal.staged`,
-`goal.proposed` and `goal.declared`, and promises `evidence.offered` and `evidence.counted`
-with CIRISAgent as their realizer. The other 31 are the registry's (affiliation, licence,
-recognition, delegation, grant, key, trust, the goal tree's later life, evidence standing).
-They have no entry yet and are listed in `AWAITING_ENTRY`: reported, never failed.
+CIRISConstitution rc14 (`f671e46`; the vocabulary bytes have been unchanged since `efa0c58`). T21
+reaches the Goals ceremony's `goal.staged`, `goal.proposed` and `goal.declared`, plus the tree its
+cosign declares (`approach.declared`, `method.declared`, `progress_measure.declared`). It
+promises the evidence plane (`evidence.admitted`, `superseded`, `standing.*`, `offered`,
+`counted`) with CIRISAgent as the realizer. The other 24 have no entry yet and are listed in
+`AWAITING_ENTRY`: reported, never failed. CC assigns the affiliation-tier atoms to T6 and T18
+(CIRISServer#831). `goal.superseded`, `goal.withdrawn`, `goal.recanted` and
+`evidence.reference_unresolved` are not yet assigned.
 
 | atom | plane | CC | meaning |
 |---|---|---|---|

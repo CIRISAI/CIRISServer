@@ -242,9 +242,8 @@ def test_a_realizer_names_another_repo(tmp_path):
 
 def test_atoms_awaiting_an_entry_are_reported_not_failed(cat):
     durable = {a for a in model.ATOMS if a.startswith("file.durable")}
-    registry = {a for a in model.ATOMS if model.VOCABULARY_ROWS[a].get("added_in") == 6} - {
-        "goal.staged", "goal.proposed", "goal.declared", "evidence.offered", "evidence.counted"}
-    assert len(durable) == 6 and len(registry) == 31
+    registry = {a for a in model.ATOMS if model.VOCABULARY_ROWS[a].get("added_in") == 6} - model.T21_ATOMS
+    assert len(durable) == 6 and len(registry) == 24
     assert set(model.AWAITING_ENTRY) == durable | registry
     rep = model.evaluate(cat)
     assert {a: w for a, w in rep["awaiting_entry"].items() if a in durable} == \

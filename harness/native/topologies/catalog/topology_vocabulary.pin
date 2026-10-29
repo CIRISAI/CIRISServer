@@ -4,6 +4,6 @@
 # meaning lands there first, then this pin moves. harness/native/test_model.py
 # fails if the copy and the pin disagree.
 repo=CIRISAI/CIRISConstitution
-commit=efa0c58249e80c0e54585654c4d80e03e6782bcf
+commit=f671e469de3c1a1964d222a51c8c1717bcf65c48
 path=manifests/topology_vocabulary.json
 sha256=c37f6f9651579932835ff700a2ec376a0c5c928545c3ed476362ec4bd4ac0769
