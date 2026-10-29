@@ -120,76 +120,21 @@ operation, and need the `pkcs11` feature (501 `hardware_unavailable` without it)
 
 ## 6. CSD/4: catalogue entry T21 and the requirements row
 
-These land as files when CIRISConstitution publishes the `goal` atoms in vocabulary
-v6 and the pin moves. The model refuses any other `catalogue_version` (CSD/4 §3), so
-until then they live here.
+Catalogue version 6 pins CIRISConstitution rc14 (`efa0c58`), which carries the goal and
+evidence atoms. The entry is `harness/native/topologies/catalog/T21-canonical-goals.yaml`
+and the row is `CSD-130` in `requirements.yaml`. CIRISClient#260 mirrors the row byte
+for byte.
 
-Atoms requested of CC (catalogue_version 6, plane `goal`): `goal.staged`,
-`goal.proposed`, `goal.declared`, `evidence.offered`, `evidence.counted`.
-
-```yaml
-# harness/native/topologies/catalog/T21-canonical-goals.yaml
-catalog_id: T21
-catalogue_version: 6
-title: The canonical declares its Goals under its founder quorum
-serves: [CSD-130]
-derives: [4a, 4b]
-promises: [root.rooted, goal.staged, goal.proposed, root.halted, root.resumed,
-           goal.declared, {atom: evidence.offered, realizer: CIRISAgent},
-           {atom: evidence.counted, realizer: CIRISAgent}]
-topology:
-  roots:
-    - id: HA
-      kind: infrastructure
-      founders: {seated: 3, conferrable: 1, node_bearing: 0}
-      quorum: 2
-      charter: {halt_fuse_secs: 86400}
-      custody: software_test
-      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
-  canonicals:
-    - {id: C, holds: HA, serves: [infra:serve, infra:attest], community: ciris-canonical}
-  nodes:
-    - {id: A, dials: [C], accepts: HA, announced: true}
-  persons:
-    - {id: alice, owns: [A], accepts: HA}
-  relations:
-    - {rel: peered, between: [A, C]}
-    - {rel: goals_stage, at: C}
-    - {rel: goals_propose, holder: 0}
-    # The halt sits inside the propose window: the halt-proof test runs here.
-    - {rel: halt, id: halt-1, from: A}
-    - {rel: resume, halt: halt-1}
-    - {rel: goals_cosign, holder: 1}
-  actor: {person: alice, device: A}
-  negatives: []
-```
-
-```yaml
-# harness/native/topologies/catalog/requirements.yaml
-CSD-130:
-  topology: T21
-  tests:
-    goals_staged:
-      at: [root.rooted, goal.staged]
-      probe: {node: C, path: /v1/accord/goals/staged, status: 200}
-    goals_pending:
-      at: [root.rooted, goal.proposed]
-      probe: {node: C, path: /v1/accord/goals/pending, status: 200}
-    goals_held_by_halt:
-      at: [root.halted, goal.proposed]
-      probe: {node: C, path: /v1/accord/goals/pending, status: 200,
-              expect: {proposals.0.blocked_by: root_halted}}
-    goals_declared:
-      at: [root.rooted, goal.declared]
-      probe: {node: C, path: /v1/goals?declarer=ciris-canonical, status: 200}
-    evidence_joins:
-      at: [goal.declared, evidence.offered, evidence.counted]
-      probe: {node: C, path: "/v1/goals/${GOAL_ID}/evidence?suite=safety_battery", status: 200}
-```
+T21's three ceremony steps (`goals_stage`, `goals_propose`, `goals_cosign`) are marked
+`known_red: CIRISServer#834` until the routes and the builder branch exist. The halt and
+the resume sit inside the propose window, which is where `goals_held_by_halt` tests.
+`evidence.offered` and `evidence.counted` are T21 promises realized by CIRISAgent's QA
+against the node T21 builds. The model never schedules a server test on a state its own
+steps do not reach, so the evidence join is the agent's test, not a row here.
 
 ## 7. Order of work
 
-1. **CIRISConstitution:** the five atoms, vocabulary v6.
+1. **CIRISConstitution:** the five atoms, vocabulary v6 (done: rc14 `efa0c58`, pinned).
 2. **CIRISPersist:** community-issued goal-family rows, CIRISPersist#1154 (CC rc14 states the shape).
 3. **CIRISServer:** write the locked file (rung and languages settled, §1) and pin it.
 4. **CIRISServer:** the persist adopt that carries #1154, the routes (§4), T21 and the

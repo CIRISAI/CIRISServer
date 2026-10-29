@@ -83,6 +83,9 @@ AWAITING_ROUTE: Dict[str, str] = {
     "purge": "CIRISServer#756",           # the steward purge surface
     "delegation_withdraw": "CIRISServer#751",
     "delegation_expire": "CIRISServer#751",
+    "goals_stage": "CIRISServer#834",      # the Goals ceremony routes (CSD-130); persist #1154
+    "goals_propose": "CIRISServer#834",
+    "goals_cosign": "CIRISServer#834",
 }
 # Relations whose route EXISTS and whose builder branch is not written yet —
 # harness work, not a product defect. Named with the route a branch will drive.
@@ -199,7 +202,8 @@ def check(t: Decl) -> List[str]:
     owner_of = {nid: p["id"] for p in persons.values() for nid in p["owns"]}
     for rel in t["relations"]:
         kind = rel["rel"]
-        if kind in ("halt", "confirm", "resume", "join_request") and not any(
+        if kind in ("halt", "confirm", "resume", "join_request",
+                    "goals_stage", "goals_propose", "goals_cosign") and not any(
                 _is_accord_root(r) for r in roots.values()):
             raise Unrealizable(f"relation {kind} needs the infrastructure root (the ceremony's holders sign it; "
                                "a fresh device's record stays self-signed only under CIRIS_TEST_NO_CEREMONY)")

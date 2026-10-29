@@ -3,7 +3,7 @@
 # claimed and unannounced and appears in no relation — the outsider the
 # negative is proved against.
 catalog_id: T2
-catalogue_version: 5
+catalogue_version: 6
 title: Two people, pair room, one outsider
 serves: [CSD-091]
 promises: [contact.reachable, contact.added, room.pair.keyed, message.delivered, person.outsider,

@@ -186,16 +186,16 @@ def test_the_vocabulary_is_the_constitutions_pinned_copy():
     assert got == pin["sha256"], (
         f"topology_vocabulary.json is not the byte copy of {pin['repo']}@{pin['commit'][:12]} "
         f"{pin['path']} — vocabulary changes land in CIRISConstitution first, then the pin moves")
-    assert len(model.ATOMS) == 120
+    assert len(model.ATOMS) == 156
 
 
 def test_another_catalogue_version_of_the_vocabulary_is_refused(tmp_path):
     import json
     doc = json.loads(model.VOCABULARY.read_text(encoding="utf-8"))
-    doc["_meta"]["catalogue_version"] = 4
+    doc["_meta"]["catalogue_version"] = 5
     bumped = tmp_path / "topology_vocabulary.json"
     bumped.write_text(json.dumps(doc), encoding="utf-8")
-    with pytest.raises(ValueError, match="catalogue_version 4, this model implements 5"):
+    with pytest.raises(ValueError, match="catalogue_version 5, this model implements 6"):
         model._load_vocabulary(bumped)
 
 
@@ -242,9 +242,13 @@ def test_a_realizer_names_another_repo(tmp_path):
 
 def test_atoms_awaiting_an_entry_are_reported_not_failed(cat):
     durable = {a for a in model.ATOMS if a.startswith("file.durable")}
-    assert len(durable) == 6 and set(model.AWAITING_ENTRY) == durable
+    registry = {a for a in model.ATOMS if model.VOCABULARY_ROWS[a].get("added_in") == 6} - {
+        "goal.staged", "goal.proposed", "goal.declared", "evidence.offered", "evidence.counted"}
+    assert len(durable) == 6 and len(registry) == 31
+    assert set(model.AWAITING_ENTRY) == durable | registry
     rep = model.evaluate(cat)
-    assert rep["awaiting_entry"] == {a: "T20 (CIRISServer#809)" for a in durable}
+    assert {a: w for a, w in rep["awaiting_entry"].items() if a in durable} == \
+        {a: "T20 (CIRISServer#809)" for a in durable}
     assert "awaiting T20 (CIRISServer#809)" in model.summary(rep)
     # once an entry promises one, the listing is stale and says so
     bad = copy.deepcopy(cat)

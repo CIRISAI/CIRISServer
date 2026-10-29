@@ -3,7 +3,7 @@
 # mints ONE root per mesh today (mint_accord_root rewrites the mesh's base
 # env), so the builder stops before the second canonical, by name.
 catalog_id: T9
-catalogue_version: 5
+catalogue_version: 6
 title: Two roots and a party outside both
 serves: [CSD-127]
 derives: [6e, 4d, 4e]

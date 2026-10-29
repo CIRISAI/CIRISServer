@@ -1,6 +1,6 @@
 # CSD/4 — the topology catalogue, locked
 
-**Status:** LOCKED at catalogue version 5 (2026-10-22: 4 for the durability atoms, `file.durable.*`, which await T20; 5 for the agent-plane deferral and identity-amendment atoms, promised by T7 and realized by CIRISAgent; vocabulary re-pinned to CIRISConstitution rc10 @ `9f6ff75a`). Version 3 on 2026-10-20 ( version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
+**Status:** LOCKED at catalogue version 6 (2026-10-29: 6 for CC rc14's goal, evidence and registry atoms, with T21, the Goals ceremony; vocabulary re-pinned to CIRISConstitution rc14 @ `efa0c58`. Version 5 on 2026-10-22: 4 for the durability atoms, `file.durable.*`, which await T20; 5 for the agent-plane deferral and identity-amendment atoms, promised by T7 and realized by CIRISAgent; vocabulary re-pinned to CIRISConstitution rc10 @ `9f6ff75a`). Version 3 on 2026-10-20 ( version 1 and 2 on 2026-10-18 — 2 when the steward ruled the push waits on exhaustiveness over CC's formally defined states, 3 for the held self-roster ADDITION, `key.membership.proposed_add`). Brought in 2026-10-20 with the multi-device cut (CIRISServer#793, #794), the vocabulary pinned to CIRISConstitution rc9 @ `01b47e75`. **Owner:** CIRISServer (the
 catalogue, the model, the builder). **Consumers:** CIRISClient's CSD cards and
 `check_csd_v3`, the native harness, CC's `tools/topology_to_cfg.py`.
 **Source of the ruling:** the steward on CIRISClient#179 §2: *do not give CSD authors
@@ -24,7 +24,7 @@ server's copy of every card's `topology` and `tests` lives in
 `harness/native/topologies/catalog/requirements.yaml` (§6); the client checker
 compares the card against it. `check_csd_v3` refuses, by name:
 
-1. a `topology` outside T0–T19;
+1. a `topology` outside the catalogue (T0–T19, T21);
 2. an atom outside the vocabulary of the catalogue version the card names;
 3. a test whose atoms no catalogue entry reaches at one instant (`plan` reports it
    `uncovered`);
@@ -33,9 +33,9 @@ compares the card against it. `check_csd_v3` refuses, by name:
 `topology:` is a hint. The planner may choose a cheaper entry that reaches the same
 states (§6.1) and reports the change as `reselected`.
 
-## 2. The catalogue (version 5)
+## 2. The catalogue (version 6)
 
-Twenty entries, each one checked-in yaml file in `harness/native/topologies/catalog/`,
+Twenty-one entries (T20 is reserved for the durability tier and not yet written), each one checked-in yaml file in `harness/native/topologies/catalog/`,
 named `T<n>-<slug>.yaml`, carrying `catalog_id`, `catalogue_version`, `title`,
 `serves`, `derives`, `promises` (the atoms the entry guarantees to reach, which the
 model verifies) and the `topology` block typed by `FSD/TOPOLOGY.md`.
@@ -69,6 +69,7 @@ the release trace lists it under `realized_by`.
 | T17 | a takedown and a steward purge; family and community scope | `row.standing.admitted` → `tombstoned`, `blob.custody.purged`, `row.scope.*` | up to `scoped_file` (branch pending) |
 | T18 | delegation ends; a key grant; a guardian bond absent | `delegation.link.*`, `grant.state.held`, `guardian.bond.none` | up to `key_grant` (branch pending) |
 | T19 | holders under coercion and censorship; revoked_after | `root.holder_disposition.*`, `key.revocation.*`, `node.announce.announced` | up to `holder` (branch pending) |
+| T21 | the accord's canonical declares its Goals under its founder quorum (CSD-130) | `goal.staged` → `goal.proposed` → `goal.declared` (held across a halt); realized by CIRISAgent: `evidence.offered`, `evidence.counted` | up to `goals_stage` (CIRISServer#834) |
 
 T10–T19 were proposed by CIRISConstitution's reverse gate (`tools/catalogue_coverage.py`):
 of the 155 states in `formal/STATE_TABLE.tsv`, T0–T9 exercised 47, and 58 states a model
@@ -85,7 +86,7 @@ The pre-catalogue declarations (`topologies/csd-091…`, `csd-092…`, `csd-094�
 `csd-107…`, `selffiles`, `bigfile*`) stay as regression fixtures and are not
 catalogue entries. T1, T2 and T3 subsume their states.
 
-## 3. The vocabulary (version 5)
+## 3. The vocabulary (version 6)
 
 Closed, and **owned by the constitution** (steward decision 2026-10-18). CIRISConstitution
 publishes `manifests/topology_vocabulary.json`, which maps each atom to its plane state
@@ -248,9 +249,56 @@ answered by the Wise Authority, and `identity_amendment:v1` applied citing the a
 | `agent.deferral.rejected` | agent | 4.3 | a seated Wise Authority answered the deferral: rejected |
 | `agent.identity.amended` | agent | 3.1.5 4.3 | the agent applied the identity change its approved deferral authorised and published identity_amendment:v1 citing the response |
 
+### 3.5 Added in version 6
+
+CIRISConstitution rc14 (`efa0c58`). T21 reaches the Goals ceremony's `goal.staged`,
+`goal.proposed` and `goal.declared`, and promises `evidence.offered` and `evidence.counted`
+with CIRISAgent as their realizer. The other 31 are the registry's (affiliation, licence,
+recognition, delegation, grant, key, trust, the goal tree's later life, evidence standing).
+They have no entry yet and are listed in `AWAITING_ENTRY`: reported, never failed.
+
+| atom | plane | CC | meaning |
+|---|---|---|---|
+| `affiliation.charter.declared` | governance | 4.4.3.2.8 | the affiliation's record declares its charter at creation: role_term, the licence classes it issues, its succession; visible to members on joining |
+| `affiliation.charter.superseded` | governance | 4.4.3.2.8 | the body amended its charter by supersedes under its consensus_protocol; the charter is read at read, so a dropped class stops matching |
+| `licence.issued` | authority | 2.4.1.2.1 4.4.3.2.8 | an authority signed a licensure:{authority_id} row in a class its charter declares; the subject holds standing to practise |
+| `licence.status.suspended` | authority | 2.4.1.2.1 | the authority suspended the licence (a bounded revocation:* by the issuing authority); it does not chain and nobody else can lift it |
+| `licence.status.revoked` | authority | 2.4.1.2.1 4.4.3.2.8 | the authority revoked the licence by revocation:*; the standing it conferred is gone for every later use |
+| `licence.honoured` | authority | 4.4.3.8 2.4.1.2.1 | a reader honoured a licensure row: its own trust walk reached the issuing authority for the row's class and that authority's charter declares the class |
+| `licence.not_trusted` | authority | 4.4.3.8 4.4.3.2.8 | a reader admitted a licensure row and honoured it by no reader: no trust-set entry reaches the issuer for the class, or the class is outside the issuer's charter (licence_class_not_trusted) |
+| `recognition.outbound` | node | 4.4.3.8 4.4.3.2.8 | this reader's own trust-set entry recognises another authority as a licensor (for every class its charter declares, or the listed classes, to a depth) |
+| `recognition.inbound` | node | 4.4.3.8 4.4.3.2.8 | another reader's trust-set entry recognises this authority as a licensor; a licence this authority issues reaches that reader |
+| `delegation.scope.license` | authority | 4.4.3.4.3.1 2.4.1.2.1 | a live delegates_to carries the license scope: the delegate issues licensure rows on behalf of a delegator that itself holds licence authority; the right to issue, never the authority |
+| `delegation.scope.grant` | authority | 4.4.3.4.3.1 2.4.1.2.1 | a live delegates_to carries the grant scope: the delegate issues key_grant or consent:scope:* grants over assets the delegator owns, stewards or holds a grant-scoped delegation over |
+| `delegation.refused` | authority | 4.4.3.4.3.1 2.4.1.2.1 | a delegates_to or a scoped issuance was refused at admission: the delegator does not itself hold the underlying authority (licence authority for the authority_id, or the asset) |
+| `grant.axis.content` | authority | 5.1 2.4.1.2.1 | a key_grant on the content axis: one wrap per (content_sha256, recipient_key_id) in the substrate's grant store, opening exactly one item |
+| `grant.onward_refused` | authority | 2.4.1.2.1 4.4.3.4.3.1 | a substrate refused a key_grant at admission whose issuer neither owns nor stewards the asset nor holds a grant-scoped delegation over it; possession of the DEK is not issuance authority |
+| `grant.ended_by_rotation` | authority | 5.1 2.4.1.2.1 | a rotation superseded the grant: a new row under a new axis identity with rotation_chain as supersession lineage; the old wrap is not removed and conveys no later epoch |
+| `key.successor_committed` | self | 3.2 3.3.6.3 | the holder published a pre-rotation commitment: SHA-256 over the committed successor keys' public key material, so a later rotation verifies against it |
+| `key.rotated` | self | 3.3.6.3 5.1 | the holder rotated to a committed successor key: the new key joins the roster and signs; the old key's later rows are not admitted |
+| `key.escrowed` | self | 4.4.3.2.8 3.3.6.3 | a per-epoch archive key is held by an archive_custody custodian decoupled from the live roster, so permanent or retained records survive member turnover |
+| `trust.entry.licensor` | node | 4.4.3.8 | the reader's trust-set entry names the authority as a licensor: every class its charter declares (trust_classes absent) at the entry's trust_depth |
+| `trust.entry.root_removed` | node | 4.4.3.8 | the reader removed the shipped root's entry like any other; what reached only through it no longer reaches |
+| `goal.staged` | goal | 3.1.9.7 | the canonical holds the locked goal tree as stamped, unsigned rows |
+| `goal.proposed` | goal | 3.1.9.7 2.4 | at least one founder has scrubbed the staged rows, below quorum |
+| `goal.declared` | goal | 3.1.9.7 2.4 | the founder quorum has cosigned and the goal rows are admitted under the community; the declarer's signed scores row on goal:{scale} is the Goal and goal_id is its attestation_id |
+| `goal.superseded` | goal | 3.1.9.7 | the declarer amended the Goal by supersedes; the new row is the Goal and approaches keyed on goal_id follow it |
+| `goal.withdrawn` | goal | 3.1.9.7 | the declarer retired the Goal by withdraws |
+| `goal.recanted` | goal | 3.1.9.7 2.4.1.3 | the declarer recanted the Goal: this goal was never mine, an epistemic-error admission distinct from retirement |
+| `approach.declared` | goal | 3.1.9.7 | a signed approach:{goal_id} row names a strategic pathway from the current state toward a declared Goal |
+| `method.declared` | goal | 3.1.9.7 | a signed method:{approach_id}:{substrate_rung} row names a concrete operational practice serving an approach, with its required substrate_rung |
+| `progress_measure.declared` | goal | 3.1.9.7 | a signed progress_measure:{method_id} row declares tracks[], computation, validity_window and goodhart_resistance against a method |
+| `evidence.counted` | evidence | 3.1.9.3 | a declared progress_measure cites that evidence in evidence_refs |
+| `evidence.offered` | evidence | 3.1.5.5 | an evidence row names a declared goal, approach or method in references_attestation_id |
+| `evidence.reference_unresolved` | evidence | 3.1.5.5 | the row's evidence_refs names a Commons blob by SHA-256 that no holder serves; the row stands, the evidence does not |
+| `evidence.admitted` | evidence | 3.1.5.5 | the row admitted at federation scope from a key the root delegates infra:attest to, and its blob's digest matched the prefix in the dimension |
+| `evidence.superseded` | evidence | 3.1.5.5 | a re-post of the same capture or interpret landed as supersedes, never a silent replace |
+| `evidence.standing.blessed` | evidence | 3.1.5.5 | the evidence counts: emitted by a key the root delegates infra:attest to, so a reader under that root honours it |
+| `evidence.standing.unblessed` | evidence | 3.1.5.5 | the evidence does not count for this reader: no infra:attest delegation from a root the reader trusts reaches the emitter |
+
 ## 4. Change control
 
-The catalogue is closed: `evaluate` fails on an entry outside T0–T19 and on any
+The catalogue is closed: `evaluate` fails on an entry outside T0–T19 and T21 and on any
 missing entry. Any of these is a catalogue VERSION bump:
 
 - a new entry;

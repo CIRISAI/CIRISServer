@@ -8,7 +8,7 @@
 # with CIRIS_TEST_HALT_FUSE_SECS (test anchor only) because a ladder cannot
 # wait a day to watch a lone halt lapse.
 catalog_id: T8
-catalogue_version: 5
+catalogue_version: 6
 title: A trust root with M-of-N holders — halt, confirm, resume
 serves: [CSD-067, CSD-068, CSD-069, CSD-105, CSD-129]
 derives: [4a, 4b, 4c, 4d]

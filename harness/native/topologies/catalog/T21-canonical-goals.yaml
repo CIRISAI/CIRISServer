@@ -1,0 +1,39 @@
+# T21 — the canonical declares its Goals under its founder quorum (CSD-130;
+# FSD/GOALS_CEREMONY.md). The accord of T8 holds the root; the Goal tree is
+# staged on C, scrubbed by one founder, held across a halt and a resume (the
+# halt-proof window), then cosigned to quorum. The evidence joins are the
+# agent's: its battery rows are offered against a declared method and counted
+# by that method's progress measure (CIRISAgent safety-evidence-sync).
+catalog_id: T21
+catalogue_version: 6
+title: The canonical declares its Goals under its founder quorum
+serves: [CSD-130]
+derives: [4a, 4b]
+promises: [root.rooted, goal.staged, goal.proposed, root.halted, root.resumed, goal.declared,
+           {atom: evidence.offered, realizer: CIRISAgent},
+           {atom: evidence.counted, realizer: CIRISAgent}]
+topology:
+  roots:
+    - id: HA
+      kind: infrastructure
+      founders: {seated: 3, conferrable: 1, node_bearing: 0}
+      quorum: 2
+      charter: {halt_fuse_secs: 86400}
+      custody: software_test
+      lifecycle: {recipe: {ceremony: final_genesis}, verdict: rooted}
+  canonicals:
+    - {id: C, holds: HA, serves: [infra:serve, infra:attest]}
+  nodes:
+    - {id: A, dials: [C], accepts: HA, announced: true}
+  persons:
+    - {id: alice, owns: [A], accepts: HA}
+  relations:
+    - {rel: peered, between: [A, C]}
+    - {rel: goals_stage, at: C, known_red: "CIRISServer#834"}
+    - {rel: goals_propose, holder: 0, known_red: "CIRISServer#834"}
+    # The halt lands inside the propose window: goals_held_by_halt tests here.
+    - {rel: halt, id: halt-1, from: A}
+    - {rel: resume, halt: halt-1}
+    - {rel: goals_cosign, holder: 1, known_red: "CIRISServer#834"}
+  actor: {person: alice, device: A}
+  negatives: []

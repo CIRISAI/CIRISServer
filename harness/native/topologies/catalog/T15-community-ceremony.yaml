@@ -13,7 +13,7 @@
 # the ruling's own test: one approval (alice's proposal), no objections, the
 # window ends below the floor → declined (CIRISServer#796 ships the window).
 catalog_id: T15
-catalogue_version: 5
+catalogue_version: 6
 title: A community's ceremony — decline, removal, resignation; a moderator lapses, the room fails secure
 serves: [CSD-102, CSD-103, CSD-128]
 promises: [member.stage.proposed, member.stage.accepted_awaiting_group, member.stage.declined,

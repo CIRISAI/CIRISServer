@@ -3,7 +3,7 @@
 # `affiliations` tier (buildable); the licensing authority and a person-to-
 # person delegates_to chain have no route — the builder stops before them.
 catalog_id: T6
-catalogue_version: 5
+catalogue_version: 6
 title: An affiliation — licensing authority, delegation chain
 serves: [CSD-120, CSD-121, CSD-122, CSD-123, CSD-124, CSD-125, CSD-126]
 derives: [2f]
