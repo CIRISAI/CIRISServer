@@ -521,10 +521,11 @@ pub async fn apply(
                 "an announcement is a federation-scope binding",
             )
         } else {
+            // The scope just checked to be `federation`, as the owner signed it.
             match crate::auth::ownership::apply_signed_owner_binding(
                 engine,
                 &node,
-                cohort_scope::FEDERATION,
+                &staged.cohort_scope,
                 policy,
                 binding,
             )

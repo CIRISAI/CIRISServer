@@ -309,7 +309,11 @@ jobs:
         # Test-anchor builds only; no new production audience.
         # 48 -> 49 (CIRISServer#632): the NODE key's own trust-root acceptance on a split install
         # (mesh_genesis::accept_trust_root_as_node_key) — edge's serve gate (leg B) reads the wire key.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 49
+        # 49 -> 52 (0.5.242, owner requests, reviewed): the announcement a remotely
+        # claimed node's owner signs (a federation owner-binding, CC 5.4.6), the owner's
+        # root acceptance (trust:accepts is federation by definition), and the apply
+        # door's refusal of any announcement that is not federation-scoped.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 52
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
       # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of

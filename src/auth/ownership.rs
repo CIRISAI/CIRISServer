@@ -1573,11 +1573,9 @@ pub async fn promote_owner_binding_to_federation(
 
     let rows = owner_binding_rows(engine, node_key_id, &owner).await?;
 
-    // Idempotent: already federation-scoped ⇒ nothing to widen.
-    if rows
-        .iter()
-        .any(|a| a.cohort_scope == cohort_scope::FEDERATION)
-    {
+    // Idempotent: already federation-scoped ⇒ nothing to widen. The one
+    // predicate (`owner_binding_is_announced`), not a second spelling of it.
+    if owner_binding_is_announced(engine, node_key_id, &owner).await? {
         tracing::info!(
             responsible_user = %owner,
             node_key_id = %node_key_id,
