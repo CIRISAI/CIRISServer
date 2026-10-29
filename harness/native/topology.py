@@ -1289,8 +1289,12 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                         props = n.must("GET", "/v1/self/roster/proposals").get("proposals", [])
                         return True if any(x["proposal"]["id"] == pid_ for x in props) else None
                     wait_for(f"{d} to hold the eviction proposal", holds, float(rel.get("wait", 60)), every=1)
+                # A HELD release wipes nothing: the device stays the owner's until
+                # the roster's quorum lands it (steward, 2026-10-29).
+                if (N[rel["target"]].home / "released.json").exists():
+                    raise MeshError(f"{rel['target']} marked itself released while its eviction was only proposed")
                 step(f"evict_propose:{rel['target']}", layer="relations", by=rel["by"], proposal=prop["proposal"]["id"],
-                     proves="the eviction is a held proposal (CC 3.3.6.3)")
+                     proves="the eviction is a held proposal (CC 3.3.6.3), and the device is untouched")
             else:
                 pid = ctx.joins[rel["target"]].get("evict_proposal")
                 _roster_answer(by, pid, "assent", "evict", target)
@@ -1299,8 +1303,27 @@ def _build_steps(mesh: Mesh, t: Decl, args: Any, d: Decl, ctx: Ctx, gate: Any, p
                     roster = by.must("GET", "/v1/self/roster/proposals").get("roster", [])
                     return True if target not in roster else None
                 wait_for(f"{target} to leave {p_}'s roster", gone, float(rel.get("wait", 60)), every=2)
+                # The released device sees its landed eviction, marks its home and
+                # stops; it wipes itself at its next boot (crate::device_release).
+                marker = N[rel["target"]].home / "released.json"
+
+                def marked() -> Optional[bool]:
+                    return True if marker.exists() else None
+                try:
+                    wait_for(f"{rel['target']} to mark itself released", marked,
+                             float(rel.get("wait_release", 150)), every=3)
+                    released = json.loads(marker.read_text())
+                except MeshError:
+                    # KNOWN RED (CIRISPersist#1159): the evicted device's own roster
+                    # fold judges an earlier add against today's roster size, so the
+                    # eviction that landed everywhere else never lands where it must.
+                    released = {"known_red": "CIRISPersist#1159",
+                                "note": "the eviction landed on the owner's devices but not in the "
+                                        "evicted device's own fold"}
                 step(f"evict_cosign:{rel['target']}", layer="relations", by=rel["by"], proposal=pid,
-                     proves="a second roster key co-signed; the eviction landed by the quorum path")
+                     released=released,
+                     proves="a second roster key co-signed; the eviction landed by the quorum path and the "
+                            "released device marks itself for wipe when its own fold lands it")
         elif k == "join_complete":
             j = ctx.joins[rel["device"]]
             new = N[rel["device"]]

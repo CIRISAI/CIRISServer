@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.242" # 0.5.242 (OPENED): an owner-binding may carry any of the seven cohort scopes — the claim doors accepted three, citing a key-grant clause; GET /v1/setup/status now serves the set (CIRISServer#666)
+version = "0.5.242" # 0.5.242 (OPENED): an owner-binding may carry any of the seven cohort scopes — the claim doors accepted three, citing a key-grant clause; GET /v1/setup/status now serves the set (CIRISServer#666); and releasing a device needs a quorum of the owner's roster, after which the device wipes itself and boots as a new, unclaimed node — the data belongs to the roster, never the device
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
