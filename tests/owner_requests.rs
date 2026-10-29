@@ -204,6 +204,24 @@ async fn the_owner_signs_on_their_device_and_the_node_stops_asking() {
         Some(owner.key_id()),
         "announcing adds a row beside the claim; the owner is unchanged"
     );
+
+    // What the owner's list of what they own now says about this node
+    // (GET /v1/setup/owned-nodes, CSD-132): announced, and its agent named by
+    // the capture grant the owner just signed.
+    let agent = t.local_derived_key_id().await.expect("agent key id");
+    let view = ciris_server::auth::bootstrap::owned_nodes_view(&t, &node).await;
+    assert_eq!(view["owner"], owner.key_id());
+    let row = view["nodes"]
+        .as_array()
+        .and_then(|n| n.iter().find(|r| r["key_id"] == node.as_str()))
+        .cloned()
+        .unwrap_or_else(|| panic!("the node is listed: {view}"));
+    assert_eq!(row["announced"], true, "{row}");
+    assert_eq!(row["agents"], serde_json::json!([agent]), "{row}");
+    assert_eq!(
+        row["roster_member"], false,
+        "a managed agent is owned, not a roster device"
+    );
 }
 
 /// The owner names the node they sign for; a request about any other node, or
