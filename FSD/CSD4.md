@@ -69,7 +69,7 @@ the release trace lists it under `realized_by`.
 | T17 | a takedown and a steward purge; family and community scope | `row.standing.admitted` → `tombstoned`, `blob.custody.purged`, `row.scope.*` | up to `scoped_file` (branch pending) |
 | T18 | delegation ends; a key grant; a guardian bond absent | `delegation.link.*`, `grant.state.held`, `guardian.bond.none` | up to `key_grant` (branch pending) |
 | T19 | holders under coercion and censorship; revoked_after | `root.holder_disposition.*`, `key.revocation.*`, `node.announce.announced` | up to `holder` (branch pending) |
-| T21 | the accord's canonical declares its Goals under its founder quorum (CSD-130) | `goal.staged` → `goal.proposed` → `goal.declared` + `approach/method/progress_measure.declared` (held across a halt); realized by CIRISAgent: `evidence.*` | up to `goals_stage` (CIRISServer#834) |
+| T21 | the accord's canonical declares its Goals under its founder quorum (CSD-130) | `goal.staged` → `goal.proposed` → `goal.declared` + `approach/method/progress_measure.declared` (held across a halt), then `goal.superseded` (one founder's amendment refused), `goal.withdrawn`, `goal.recanted`; realized by CIRISAgent: `evidence.*` | up to `goals_stage` (CIRISServer#834) |
 
 T10–T19 were proposed by CIRISConstitution's reverse gate (`tools/catalogue_coverage.py`):
 of the 155 states in `formal/STATE_TABLE.tsv`, T0–T9 exercised 47, and 58 states a model
@@ -255,10 +255,11 @@ CIRISConstitution rc14 (`f671e46`; the vocabulary bytes have been unchanged sinc
 reaches the Goals ceremony's `goal.staged`, `goal.proposed` and `goal.declared`, plus the tree its
 cosign declares (`approach.declared`, `method.declared`, `progress_measure.declared`). It
 promises the evidence plane (`evidence.admitted`, `superseded`, `standing.*`, `offered`,
-`counted`) with CIRISAgent as the realizer. The other 24 have no entry yet and are listed in
-`AWAITING_ENTRY`: reported, never failed. CC assigns the affiliation-tier atoms to T6 and T18
-(CIRISServer#831). `goal.superseded`, `goal.withdrawn`, `goal.recanted` and
-`evidence.reference_unresolved` are not yet assigned.
+`counted`, and the refusal dye `reference_unresolved`) with CIRISAgent as the realizer. Its later
+steps reach `goal.superseded`, `goal.withdrawn` and `goal.recanted`, each quorum-cosigned
+(CC 3.1.9.3). The must-fail twin comes first: one founder's amendment (`cosigns: 1`) does
+not land. The other 20 are the affiliation-tier atoms, which CC assigns to T6 and T18
+(CIRISServer#831). They are listed in `AWAITING_ENTRY`: reported, never failed.
 
 | atom | plane | CC | meaning |
 |---|---|---|---|

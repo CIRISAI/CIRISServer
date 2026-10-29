@@ -101,6 +101,7 @@ T21_ATOMS = frozenset({
     "approach.declared", "method.declared", "progress_measure.declared",
     "evidence.offered", "evidence.counted", "evidence.admitted", "evidence.superseded",
     "evidence.standing.blessed", "evidence.standing.unblessed",
+    "goal.superseded", "goal.withdrawn", "goal.recanted", "evidence.reference_unresolved",
 })
 # Catalogue v6 (CC rc14): the registry's atoms (affiliation, licence,
 # recognition, delegation, grant, key, trust, the goal tree's later life,
@@ -383,6 +384,13 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
     if k == "goals_cosign":
         return ({"goal.declared", "approach.declared", "method.declared", "progress_measure.declared"},
                 {"goal.staged", "goal.proposed"})
+    if k == "goals_amend":
+        # Below the community's quorum an amendment does not land (CC 3.1.9.3).
+        return ({"goal.superseded"}, set()) if int(rel.get("cosigns", 1)) >= 2 else (set(), set())
+    if k == "goals_withdraw":
+        return {"goal.withdrawn"}, set()
+    if k == "goals_recant":
+        return {"goal.recanted"}, set()
     return set(), set()
 
 
@@ -399,7 +407,7 @@ KNOWN_RELATIONS = {
     "consent_decay", "community_trust", "community_trust_bound", "replication_withdraw", "scoped_file",
     "purge", "delegation_withdraw", "delegation_expire", "key_grant", "agent_bond", "agent_act", "retirement",
     # catalogue v6
-    "goals_stage", "goals_propose", "goals_cosign",
+    "goals_stage", "goals_propose", "goals_cosign", "goals_amend", "goals_withdraw", "goals_recant",
 }
 
 

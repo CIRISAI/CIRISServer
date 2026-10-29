@@ -12,6 +12,8 @@ serves: [CSD-130]
 derives: [4a, 4b]
 promises: [root.rooted, goal.staged, goal.proposed, root.halted, root.resumed, goal.declared,
            approach.declared, method.declared, progress_measure.declared,
+           goal.superseded, goal.withdrawn, goal.recanted,
+           {atom: evidence.reference_unresolved, realizer: CIRISAgent},
            {atom: evidence.admitted, realizer: CIRISAgent},
            {atom: evidence.superseded, realizer: CIRISAgent},
            {atom: evidence.standing.blessed, realizer: CIRISAgent},
@@ -41,5 +43,12 @@ topology:
     - {rel: halt, id: halt-1, from: A}
     - {rel: resume, halt: halt-1}
     - {rel: goals_cosign, holder: 1, known_red: "CIRISServer#834"}
+    # The goal's later life, each act quorum-cosigned under ciris-canonical's
+    # protocol (CC 3.1.9.3). The must-fail twin first: one founder's amendment
+    # does not land, and the goal stays as declared.
+    - {rel: goals_amend, goal: G1, cosigns: 1, known_red: "CIRISServer#834"}
+    - {rel: goals_amend, goal: G1, cosigns: 2, known_red: "CIRISServer#834"}
+    - {rel: goals_withdraw, goal: G2, known_red: "CIRISServer#834"}
+    - {rel: goals_recant, goal: G2, known_red: "CIRISServer#834"}
   actor: {person: alice, device: A}
   negatives: []

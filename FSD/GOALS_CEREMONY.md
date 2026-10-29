@@ -98,6 +98,7 @@ operation, and need the `pkcs11` feature (501 `hardware_unavailable` without it)
 | `GET /v1/accord/goals/staged` | Stages the tree on first call, then returns it. Per row: `{attestation_id, family, dimension, text, score, meta_goal_alignment \| alignment, language?}`, plus `proposal_digest`. The source is the locked file `assets/goals/ciris_canonical_goals.json`, pinned by sha256 in code. A mismatch is `staged_text_not_locked`, and nothing is staged. |
 | `POST /v1/accord/goals/propose` | `{proposal_digest, key_id, mldsa_usb_path, pkcs11}`. The first founder scrubs every row. The partials are inert below quorum and are persisted and gossiped like the canonical co-scrub partials. |
 | `POST /v1/accord/goals/cosign` | The same body. The next founder appends a scrub to every row. At quorum, the server re-checks the halt and PUTs the rows in tree order (goals, approach, methods, measures). |
+| `POST /v1/accord/goals/{attestation_id}/{amend\|withdraw\|recant}` | A goal's later life (CC 3.1.9.3). It is staged and scrubbed exactly like the declaration: an amend carries the whole new body as a `supersedes` of the current head, a withdraw is `withdraws` and a recant is `recants`. Each lands only when quorum-cosigned through the same propose and cosign steps. Below quorum the row is inert and the goal stays as it was. |
 | `GET /v1/accord/goals/pending` | `{proposals: [{proposal_digest, signed_by[], quorum, blocked_by?}]}`. |
 | `GET /v1/goals?declarer=` | Served by every node: the projection of the goal rows it holds (persist `goal_projection`), each with its `attestation_id` and the tree beneath it. |
 | `GET /v1/goals/{attestation_id}` | Served by every node: one goal and its tree. |
@@ -125,12 +126,18 @@ evidence atoms. The entry is `harness/native/topologies/catalog/T21-canonical-go
 and the row is `CSD-130` in `requirements.yaml`. CIRISClient#260 mirrors the row byte
 for byte.
 
-T21's three ceremony steps (`goals_stage`, `goals_propose`, `goals_cosign`) are marked
-`known_red: CIRISServer#834` until the routes and the builder branch exist. The halt and
+T21's ceremony steps (`goals_stage`, `goals_propose`, `goals_cosign`, then the goal's later
+life: `goals_amend`, `goals_withdraw`, `goals_recant`) are marked `known_red: CIRISServer#834` until the routes and the builder branch exist. The halt and
 the resume sit inside the propose window, which is where `goals_held_by_halt` tests.
 `evidence.offered` and `evidence.counted` are T21 promises realized by CIRISAgent's QA
 against the node T21 builds. The model never schedules a server test on a state its own
-steps do not reach, so the evidence join is the agent's test, not a row here.
+steps do not reach, so the evidence join is the agent's test, not a row here. The same holds
+for `evidence.reference_unresolved`: the refusal at the registry door when an evidence row
+names a withdrawn or foreign row.
+
+The goal's later life is quorum-cosigned too (CC 3.1.9.3). An amendment carrying one
+founder's scrub does not land (`goals_amend` with `cosigns: 1`, the must-fail twin). Two
+scrubs supersede the goal. A withdrawal and a recantation follow the same rule.
 
 ## 7. Order of work
 
