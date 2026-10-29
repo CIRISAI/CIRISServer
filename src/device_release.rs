@@ -239,10 +239,9 @@ pub fn spawn_release_watch(
     roster_key: Option<String>,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(WATCH_EVERY);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut cadence = crate::loop_cadence::Cadence::new("device_release", WATCH_EVERY);
         loop {
-            tick.tick().await;
+            cadence.tick().await;
             match released_by(&engine, roster_key.as_deref()).await {
                 Ok(Some(released)) => {
                     match mark_released(&home, &released) {

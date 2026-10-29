@@ -34,7 +34,7 @@
 //! With a fixed spacing, two loops tick together only if
 //! `(i − j) × SLOT_SPACING` is a multiple of `gcd(period_i, period_j)`. Every
 //! cadence here defaults to a multiple of 30 s, so that gcd is at least 30 s
-//! while `(i − j) × SLOT_SPACING` is at most 25 s (eleven loops at 2.5 s) —
+//! while `(i − j) × SLOT_SPACING` is at most 27 s (twelve gaps at 2.25 s) —
 //! the separation is never less than [`SLOT_SPACING`], at any of them.
 //!
 //! An operator who sets a cadence that shares no useful factor with the others
@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 12] = [
+pub const LOOPS: [&str; 13] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -111,6 +111,9 @@ pub const LOOPS: [&str; 12] = [
     // joiner's KeyPackage, the creator's Welcome) are advanced here, not only
     // on a read (`contacts_chat::PairRoomDriver`).
     "pair_rooms",
+    // The released-device watch (`crate::device_release`, steward 2026-10-29):
+    // a minute's read of the node's own occurrences, on its own slot.
+    "device_release",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.
@@ -134,7 +137,13 @@ fn epoch() -> Instant {
 /// loop before the spacing has to be revisited. Growing the list past twelve
 /// needs a narrower spacing or a longer shortest cadence; the
 /// `every_slot_fits_inside_the_shortest_cadence` test says which.
-pub const SLOT_SPACING: Duration = Duration::from_millis(2500);
+///
+/// 2.5 s → 2.25 s for 0.5.242, when `device_release` became the THIRTEENTH
+/// loop: at 2.5 s its slot would sit at 30 s, wrapping onto `config_reconcile`.
+/// At 2.25 s the widest slot is 27 s and every pair is still at least 2.25 s
+/// apart, above the 1-2 s burst width. A fourteenth loop needs the spacing
+/// revisited again (30 s / 14 is 2.14 s, near the burst width).
+pub const SLOT_SPACING: Duration = Duration::from_millis(2250);
 
 /// This loop's offset into its period: slot `i` of [`LOOPS`] sits at
 /// `i ×` [`SLOT_SPACING`], wrapped into the period.
@@ -360,7 +369,7 @@ mod tests {
     #[test]
     fn no_two_loops_ever_tick_together_at_the_default_periods() {
         const DAY: u64 = 24 * 60 * 60;
-        // In MILLISECONDS: the spacing is 2.5 s since 0.5.218, and a walk in
+        // In MILLISECONDS: the spacing is 2.25 s since 0.5.242, and a walk in
         // whole seconds would truncate 2.5 s gaps to 2 and pass a 2 s floor
         // that the real schedule never promised.
         let ticks = |name: &str, period: u64| -> Vec<u64> {
