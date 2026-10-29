@@ -82,10 +82,11 @@ staging. A re-stamp would change the ids the children name.
   (late cosigns are bounded by the CC 3.3.4 hold window). The declarer is projected
   as the community id. An amend, withdraw or recant stands only if it too is
   quorum-cosigned; a single holder's retraction is refused by name.
-- **BLOCKER:** persist admits this shape only once CC states `authority_id` for the
-  goal family; CC 3.1.9.7 today says "the declarer's signed scores row" (persist has
-  asked). If CC states it before persist's S2, it lands in v61.0.0, otherwise in v62.
-  The server pins v59.1.1, so the ceremony ships with that adopt.
+- **Status:** CC rc14 states the shape at 3.1.9.3: a community declares goal, approach,
+  method and progress_measure rows as cosigned rows under its consensus_protocol,
+  naming itself in `authority_id` the way a licence names its issuer. Persist
+  implements it as CIRISPersist#1154. The server pins v59.1.1, so the ceremony ships
+  with the persist adopt that carries #1154.
 
 ## 4. Routes
 
@@ -189,7 +190,7 @@ CSD-130:
 ## 7. Order of work
 
 1. **CIRISConstitution:** the five atoms, vocabulary v6.
-2. **CIRISPersist:** community-issued goal-family rows, CIRISPersist#1154 (v61 or v62, after CC states `authority_id` for the goal family).
+2. **CIRISPersist:** community-issued goal-family rows, CIRISPersist#1154 (CC rc14 states the shape).
 3. **CIRISServer:** write the locked file (rung and languages settled, §1) and pin it.
 4. **CIRISServer:** the persist adopt that carries #1154, the routes (§4), T21 and the
    requirements row as files, and the halt-proof tests.
