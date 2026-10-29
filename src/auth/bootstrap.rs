@@ -1654,6 +1654,13 @@ struct SetupStatusData {
     /// joins it (CC 3.2). The client renders its picker from this list, so it
     /// no longer keeps a third copy of the set in another language.
     cohort_scopes: &'static [&'static str],
+    /// **When this device was released by its former owner's roster and
+    /// erased** (`crate::device_release`), while it is still unclaimed. Only
+    /// the instant: nothing of the former owner survives the wipe. The
+    /// first-run screen reads it to say "this device was released and erased"
+    /// instead of showing a node that went away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wiped_after_release_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1802,6 +1809,14 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
                 config_exists: !first_run,
                 claim_pin_file,
                 cohort_scopes: COHORT_SCOPES,
+                wiped_after_release_at: if first_run {
+                    st.claim_pin_file
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .and_then(crate::device_release::wiped_at)
+                } else {
+                    None
+                },
             },
         }),
     )

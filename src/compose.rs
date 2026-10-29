@@ -163,6 +163,9 @@ async fn stop_step<T>(name: &'static str, fut: impl std::future::Future<Output =
 }
 
 pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) -> Result<()> {
+    // A node its owner's roster released wipes itself here, before any key is
+    // opened, and boots as a new node (crate::device_release).
+    crate::device_release::wipe_if_released(&cfg)?;
     cfg.ensure_dirs()?;
     // Before ANY key is opened by this crate, edge or persist: a home whose keys
     // are software-tier must not meet a newly loadable TPM plugin (#783).
@@ -2056,6 +2059,22 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         ))
     };
 
+    // A device its owner's roster releases wipes itself and starts over
+    // unclaimed (steward, 2026-10-29): watch for the landed eviction.
+    {
+        let seed_dir = crate::user_seed_dir(&cfg);
+        let alias = crate::active_user_alias(&seed_dir, &format!("{}-user", cfg.keystore_alias));
+        let roster_key = resolve_user_signer(&engine, FedIdUse::OwnerSession, &alias, seed_dir)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.key_id().to_owned());
+        crate::device_release::spawn_release_watch(
+            Arc::clone(&engine),
+            cfg.home.clone(),
+            roster_key,
+        );
+    }
     crate::compose_status::phase("replication_loop");
     // ── The CEG-driven replication reconcile loop ─────────────────────────────
     // Converges the live ReplicationRuntime to the corpus's consent:replication

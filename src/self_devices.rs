@@ -246,6 +246,11 @@ pub struct EvictionReport {
     /// path): `{occurrence_key_id, door}`. Held is not failed; the occurrence
     /// stays active until the proposal lands.
     pub occurrences_held: Vec<serde_json::Value>,
+    /// Nodes whose owner-bindings were NOT withdrawn because the eviction is
+    /// held for the roster's quorum (steward, 2026-10-29: a release needs a
+    /// quorum of the self roster). Their bindings are withdrawn when the held
+    /// eviction lands ([`finish_landed_releases`]); until then they stay yours.
+    pub bindings_pending_quorum: Vec<String>,
     /// Every part that did not complete, by name. Empty on a full eviction.
     pub failed: Vec<EvictFailure>,
     /// `true` when a replication round was kicked NOW; `false` when this
@@ -355,16 +360,20 @@ enum OccurrenceWithdrawal {
 ///
 /// # What it does
 ///
-/// 1. **Withdraw** every live owner-binding the owner holds on each of `nodes`
-///    — the owner's signed `withdraws`, at the binding's own audience (a
-///    federation binding is withdrawn where peers see it, a self one where the
-///    owner's devices do).
-/// 2. **Revoke** each of `occurrences` that is still active: the owner's
+/// 1. **Revoke** each of `occurrences` that is still active: the owner's
 ///    signed `withdraws` of its `identity:occurrence:v1` row
 ///    ([`withdraw_occurrence`]; persist v59 retired the framed revocation). It
-///    replicates as a row. From two roster keys persist's roster door may HOLD
-///    it as a proposal (CC 3.3.6.3) — reported in `occurrences_held`, not as a
+///    replicates as a row. From two roster keys persist's roster door HOLDS it
+///    as a proposal (CC 3.3.6.3) — reported in `occurrences_held`, not as a
 ///    failure.
+/// 2. **Withdraw** every live owner-binding the owner holds on each of `nodes`
+///    — the owner's signed `withdraws`, at the binding's own audience — but
+///    only when nothing was held. A release needs a quorum of the self roster
+///    (steward, 2026-10-29): while the eviction is held the device stays the
+///    owner's (`bindings_pending_quorum`), and its bindings are withdrawn when
+///    the eviction lands ([`finish_landed_releases`]). The released device then
+///    wipes itself and starts over unclaimed ([`crate::device_release`]); the
+///    owner's data belongs to the roster, never the device.
 /// 3. **Kick** replication so both ride this round, not the next cadence.
 /// 4. **Witness** each half from persist's own projections rather than from our
 ///    writes: `nodes_owned_by(owner)` must no longer list the nodes, and
@@ -397,41 +406,9 @@ pub(crate) async fn evict_device(
         ..EvictionReport::default()
     };
 
-    // (1) The owner-bindings.
-    for node in nodes {
-        let bindings = match live_bindings(engine, owner, node).await {
-            Ok(b) => b,
-            Err(e) => {
-                report.fail("owner_binding_withdrawal", node, e);
-                continue;
-            }
-        };
-        for b in &bindings {
-            // At the BINDING's own audience: a federation-scoped binding is
-            // withdrawn where peers can see the withdrawal, a self-scoped one
-            // where the owner's devices can.
-            let spec = crate::attest::Spec::new(
-                attestation_type::WITHDRAWS,
-                b.cohort_scope.clone(),
-                ciris_persist::federation::withdraws_attestation_envelope(
-                    &b.attestation_id,
-                    attestation_type::DELEGATES_TO,
-                ),
-            )
-            .about(node);
-            match emit_as_owner(engine, capsule, spec).await {
-                Ok(id) => report.withdrawn.push(serde_json::json!({
-                    "node_key_id": node,
-                    "binding": b.attestation_id,
-                    "withdraws": id,
-                    "cohort_scope": b.cohort_scope,
-                })),
-                Err(e) => report.fail("owner_binding_withdrawal", &b.attestation_id, e),
-            }
-        }
-    }
-
-    // (2) The occurrences — signed, so they replicate.
+    // (1) The occurrences — signed, so they replicate. FIRST: from two roster
+    // keys the door holds the eviction for the roster's quorum, and a held
+    // eviction must not have its node un-owned underneath it.
     let active: Option<std::collections::HashSet<String>> =
         match dir.list_identity_occurrences_active(owner).await {
             Ok(v) => Some(v.into_iter().map(|o| o.occurrence_key_id).collect()),
@@ -472,6 +449,18 @@ pub(crate) async fn evict_device(
         }
     }
 
+    // (2) The owner-bindings — only once the eviction has landed. A release
+    // needs a quorum of the self roster (steward, 2026-10-29); while the door
+    // holds it the device stays the owner's, and the bindings are withdrawn
+    // when it lands ([`finish_landed_releases`]).
+    if !report.occurrences_held.is_empty() {
+        report.bindings_pending_quorum = nodes.to_vec();
+    } else {
+        for node in nodes {
+            withdraw_bindings(engine, capsule, owner, node, &mut report).await;
+        }
+    }
+
     // (3) Make both halves cross now.
     report.replication_kicked = crate::compose::kick_replication("self:evict_device");
 
@@ -479,6 +468,9 @@ pub(crate) async fn evict_device(
     match nodes_owned_by(dir.as_ref(), owner).await {
         Ok(still) => {
             for node in nodes {
+                if report.bindings_pending_quorum.contains(node) {
+                    continue; // held for the roster's quorum: still owned until it lands
+                }
                 if still.iter().any(|n| n == node) {
                     report.fail(
                         "owner_binding_witness",
@@ -541,6 +533,101 @@ pub(crate) async fn evict_device(
          signed act; already-shared history stays readable to the device (no DEK rotation)"
     );
     report
+}
+
+/// Withdraw every live owner-binding `owner` holds on `node`, each at its own
+/// audience, into `report`.
+async fn withdraw_bindings(
+    engine: &Engine,
+    capsule: &OwnerSignerCapsule,
+    owner: &str,
+    node: &str,
+    report: &mut EvictionReport,
+) {
+    let bindings = match live_bindings(engine, owner, node).await {
+        Ok(b) => b,
+        Err(e) => {
+            report.fail("owner_binding_withdrawal", node, e);
+            return;
+        }
+    };
+    for b in &bindings {
+        // At the BINDING's own audience: a federation-scoped binding is
+        // withdrawn where peers can see the withdrawal, a self-scoped one
+        // where the owner's devices can.
+        let spec = crate::attest::Spec::new(
+            attestation_type::WITHDRAWS,
+            b.cohort_scope.clone(),
+            ciris_persist::federation::withdraws_attestation_envelope(
+                &b.attestation_id,
+                attestation_type::DELEGATES_TO,
+            ),
+        )
+        .about(node);
+        match emit_as_owner(engine, capsule, spec).await {
+            Ok(id) => report.withdrawn.push(serde_json::json!({
+                "node_key_id": node,
+                "binding": b.attestation_id,
+                "withdraws": id,
+                "cohort_scope": b.cohort_scope,
+            })),
+            Err(e) => report.fail("owner_binding_withdrawal", &b.attestation_id, e),
+        }
+    }
+}
+
+/// **Finish every release the roster's quorum has landed.** A device of the
+/// owner's whose every occurrence under the owner is now revoked, and which is
+/// still owned, had its eviction held and then landed (by assent or by the lone
+/// path after `W_self`): withdraw its owner-bindings now. A node that never
+/// held an occurrence (a server or managed agent the owner owns) is not a
+/// roster device and is left alone.
+///
+/// Returns the nodes whose bindings this call withdrew.
+pub(crate) async fn finish_landed_releases(
+    engine: &Engine,
+    capsule: &OwnerSignerCapsule,
+    owner: &str,
+) -> Vec<String> {
+    let dir = engine.federation_directory();
+    let (Ok(owned), Ok(all), Ok(active)) = (
+        nodes_owned_by(dir.as_ref(), owner).await,
+        dir.list_identity_occurrences_for(owner).await,
+        dir.list_identity_occurrences_active(owner).await,
+    ) else {
+        return Vec::new();
+    };
+    let active: std::collections::HashSet<String> =
+        active.into_iter().map(|o| o.occurrence_key_id).collect();
+    let mut finished = Vec::new();
+    for node in owned {
+        let keys = occurrence_keys_of_node(engine, &node, false).await;
+        let held: Vec<&str> = all
+            .iter()
+            .map(|o| o.occurrence_key_id.as_str())
+            .filter(|k| keys.iter().any(|n| n == k))
+            .collect();
+        if held.is_empty() || held.iter().any(|k| active.contains(*k)) {
+            continue;
+        }
+        let mut report = EvictionReport::default();
+        withdraw_bindings(engine, capsule, owner, &node, &mut report).await;
+        tracing::info!(
+            owner = %owner,
+            node = %node,
+            withdrawn = report.withdrawn.len(),
+            failed = report.failed.len(),
+            "self: a release the roster's quorum LANDED is finished — the device's owner-bindings \
+             are withdrawn; the device wipes itself when it sees its eviction"
+        );
+        if !report.withdrawn.is_empty() {
+            finished.push(node);
+        }
+    }
+    if !finished.is_empty() {
+        crate::compose::kick_replication("self:release_landed");
+    }
+    finished
 }
 
 /// The answer an eviction route gives: 200 with the report when every part
@@ -1448,8 +1535,15 @@ async fn roster_proposals(State(st): State<SelfState>, headers: HeaderMap) -> Re
         Ok(s) => s,
         Err(e) => return store_unavailable(format!("self_roster_standing: {e:#}")),
     };
+    // A held eviction can land with no route call (the lone path after
+    // `W_self`): the owner's devices finish it the next time they look.
+    let released = match pen(&st, &caller).await {
+        Ok(capsule) => finish_landed_releases(&st.engine, &capsule, owner).await,
+        Err(_) => Vec::new(),
+    };
     Json(serde_json::json!({
         "identity_key_id": owner,
+        "released_nodes": released,
         "roster": roster,
         "w_self_secs": ciris_persist::federation::self_roster::W_SELF_SECS,
         "proposals": standing.iter().map(standing_view).collect::<Vec<_>>(),
@@ -1531,6 +1625,9 @@ async fn answer_proposal(
         Err(e) => return store_unavailable(format!("emit roster answer: {e}")),
     };
     let _ = crate::compose::kick_replication("self:roster_answer");
+    // An eviction this answer landed is a release the quorum approved: finish
+    // it now, while the owner's pen is in hand.
+    let released = finish_landed_releases(&st.engine, &capsule, &owner).await;
     let after = match st.engine.self_roster_standing(&owner).await {
         Ok(s) => s,
         Err(e) => return store_unavailable(format!("self_roster_standing: {e:#}")),
@@ -1543,6 +1640,7 @@ async fn answer_proposal(
         "answer_attestation_id": answer_id,
         "settled": now.is_none(),
         "proposal": now.map(standing_view),
+        "released_nodes": released,
     }))
     .into_response()
 }

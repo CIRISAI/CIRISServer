@@ -642,12 +642,29 @@ async fn releasing_a_node_also_revokes_its_occurrence_signed() {
         active_occurrences(&alice).await.contains(&n2),
         "precondition"
     );
+    let dir = alice.engine.federation_directory();
+    assert_eq!(
+        ciris_server::device_release::released_by_keys(dir.as_ref(), std::slice::from_ref(&n2))
+            .await
+            .expect("released_by"),
+        None,
+        "an owned device with a live occurrence is not released"
+    );
 
     let (st, v) = alice
         .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
         .await;
     assert_eq!(st.as_u16(), 200, "{v}");
     assert_eq!(v["released"], true);
+    // The device sees its own release from the rows: it wipes itself and
+    // starts over unclaimed (steward, 2026-10-29).
+    let released =
+        ciris_server::device_release::released_by_keys(dir.as_ref(), std::slice::from_ref(&n2))
+            .await
+            .expect("released_by")
+            .expect("the released device reads its release");
+    assert_eq!(released.owner_key_id, alice.key());
+    assert_eq!(released.occurrences, vec![n2.clone()]);
     assert_eq!(v["withdrawn"].as_array().map(Vec::len), Some(1), "{v}");
     let revoked = v["occurrences_revoked"]
         .as_array()

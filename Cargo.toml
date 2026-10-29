@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.242" # 0.5.242 (OPENED): an owner-binding may carry any of the seven cohort scopes — the claim doors accepted three, citing a key-grant clause; GET /v1/setup/status now serves the set (CIRISServer#666); and adopts edge v43.3.0 — the chat author supersedes, withdraws and recants a message (CIRISEdge#917), every room-peer send can go direct (#915), a first Resource over 256 KiB no longer lost on a fresh link
+version = "0.5.242" # 0.5.242 (OPENED): MANAGED AGENTS SHIP TRACES, CHAT MESSAGES ARE REVISED BY THEIR AUTHOR, DEVICES LEAVE BY THE ROSTER — adopts edge v43.3.0 (persist v59.1.1, verify v20.2.0); a node's owner acts it cannot sign (root acceptance, announce, the capture grant) are listed for the owner, signed on their own device and applied on the node (#837); the chat author supersedes, withdraws and recants a message, with history (#836, CIRISEdge#917); every server facilitates direct links for room peers on UDP beside its listener (#838, CIRISEdge#915); releasing a device needs the roster's quorum and the released device wipes itself (#839); owned-nodes says what the owner knows of each node and any owned node can be named (#840); an owner-binding may carry any of the seven cohort scopes (#835)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
