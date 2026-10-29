@@ -1292,11 +1292,12 @@ pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
     if agent != node && agent != pen.key_id {
         subjects.push(agent);
     }
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "id": uuid::Uuid::new_v4().to_string(),
-        "dimension": COMMUNITY_TRUST_DIMENSION,
         "score": 1.0,
     });
+    envelope[ciris_persist::federation::envelope::paths::DIMENSION] =
+        serde_json::Value::from(COMMUNITY_TRUST_DIMENSION);
     let row = crate::attest::Emit::stamp(
         &pen.key_id,
         crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
