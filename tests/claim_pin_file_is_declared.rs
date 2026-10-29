@@ -75,6 +75,18 @@ fn setup_status_declares_the_pin_file_path() {
     );
 }
 
+/// The accepted owner-binding scopes are published on the same read, from the
+/// one const the claim doors validate against (CIRISServer#666), so the client's
+/// picker is the node's set rather than a copy of it.
+#[test]
+fn setup_status_declares_the_cohort_scopes() {
+    let code = code_only(&src());
+    assert!(
+        code.contains("cohort_scopes: COHORT_SCOPES"),
+        "GET /v1/setup/status must serve the claim doors' own COHORT_SCOPES"
+    );
+}
+
 /// **The PIN itself must never be served.** The whole security model is that the
 /// secret lives only on disk under 0600 and in-process; publishing the path is
 /// safe precisely because the file's mode is the gate. Publishing the value would

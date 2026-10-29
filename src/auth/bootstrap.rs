@@ -789,10 +789,10 @@ struct SetupRootResponse {
     claimer_key_admitted: Option<bool>,
 }
 
-// The closed set of cohort scopes a node may be claimed under (CC 4.4.3.4.1) —
+// The cohort scopes an owner-binding may carry (all seven, CC 3.2) —
 // single-sourced with the initiator side at `crate::claim_remote::COHORT_SCOPES`
 // so the receiver and initiator can never drift.
-use crate::claim_remote::COHORT_SCOPES;
+use crate::claim_remote::{cohort_scopes_listed, COHORT_SCOPES};
 
 /// Validate the claimed cohort scope against [`COHORT_SCOPES`]. Returns the
 /// normalized (trimmed) value, or `Err(response)` (a `400`) when absent/invalid.
@@ -803,7 +803,10 @@ fn validate_cohort_scope(req: &SetupRootRequest) -> Result<String, Box<Response>
         return Err(Box::new(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
             "auth.claim.cohort_missing",
-            "first-run ROOT claim must carry `cohort_scope` (one of self|family|community)",
+            format!(
+                "first-run ROOT claim must carry `cohort_scope` (one of {})",
+                cohort_scopes_listed()
+            ),
         )));
     };
     let v = raw.trim();
@@ -813,7 +816,10 @@ fn validate_cohort_scope(req: &SetupRootRequest) -> Result<String, Box<Response>
         Err(Box::new(super::refusal::refuse(
             StatusCode::BAD_REQUEST,
             "auth.claim.cohort_invalid",
-            format!("invalid cohort_scope {v:?} — must be one of self|family|community"),
+            format!(
+                "invalid cohort_scope {v:?} — must be one of {}",
+                cohort_scopes_listed()
+            ),
         )))
     }
 }
@@ -1017,7 +1023,7 @@ async fn adoptable_oauth_placeholder(engine: &Engine) -> Option<ciris_persist::w
 /// ```json
 /// {
 ///   "node_code": "CIRIS-V1-...",
-///   "cohort_scope": "self|family|community",
+///   "cohort_scope": "self|family|community|affiliations|species|biosphere|federation",
 ///   "claim_pin": "XXXX-XXXX",
 ///   "owner_binding": {
 ///     "envelope": { ...the delegates_to(user -> node, infra:*) envelope... },
@@ -1095,7 +1101,8 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
         return resp;
     }
 
-    // The cohort scope (self|family|community) the node is claimed under.
+    // The cohort scope the owner-binding is stamped with (any of the seven;
+    // normally `self`, with announce re-signing at `federation`).
     let cohort_scope = match validate_cohort_scope(&req) {
         Ok(v) => v,
         Err(resp) => return *resp,
@@ -1640,6 +1647,13 @@ struct SetupStatusData {
     /// when no PIN file was configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     claim_pin_file: Option<String>,
+    /// **The cohort scopes an owner-binding may carry**, in persist's
+    /// widening order (CIRISServer#666). The claim doors accept exactly these.
+    /// `self` is the ordinary claim, `federation` is what announce re-signs
+    /// at, and the tiers between are a group's scope when an unannounced node
+    /// joins it (CC 3.2). The client renders its picker from this list, so it
+    /// no longer keeps a third copy of the set in another language.
+    cohort_scopes: &'static [&'static str],
 }
 
 #[derive(Debug, Serialize)]
@@ -1724,6 +1738,7 @@ async fn setup_status(State(st): State<SetupState>) -> Response {
                 setup_required: first_run,
                 config_exists: !first_run,
                 claim_pin_file,
+                cohort_scopes: COHORT_SCOPES,
             },
         }),
     )
