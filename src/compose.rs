@@ -43,6 +43,48 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 /// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
 /// out a 5-minute announce cycle per direction — the single dominant wait in
 /// the ~7-minute run. Compile-fenced like every other harness knob.
+/// **This node's direct-link posture** (CIRISEdge#915): a transport node serves
+/// a facilitator on UDP at the same port number as its TCP listener (4242 in
+/// production) and accepts upgrades from room peers; a node that is not a
+/// transport node keeps edge's inert default. `CIRIS_DIRECT_LINK_FACILITATOR_PORT`
+/// moves the port, and `0` turns serving off for an operator whose network
+/// cannot open it.
+fn direct_links(
+    transport_node: bool,
+    listen_port: u16,
+) -> ciris_edge::transport::direct_path::DirectLinksConfig {
+    use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig};
+    if !transport_node {
+        return DirectLinksConfig::default();
+    }
+    let port = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR_PORT") {
+        Ok(v) => match v.trim().parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    default = listen_port,
+                    "CIRIS_DIRECT_LINK_FACILITATOR_PORT is not a port; serving beside the listener"
+                );
+                listen_port
+            }
+        },
+        Err(_) => listen_port,
+    };
+    let serve_facilitator = (port != 0).then_some(port);
+    tracing::info!(
+        serve_facilitator = ?serve_facilitator,
+        "direct links: this node facilitates NAT traversal for room peers (UDP) and accepts \
+         their upgrades; it proposes none itself (CIRISEdge#915)"
+    );
+    DirectLinksConfig {
+        facilitator: None,
+        serve_facilitator,
+        accept: DirectAccept::RoomPeers,
+    }
+}
+
 fn announce_interval() -> Duration {
     #[cfg(feature = "test-anchor")]
     if let Ok(v) = std::env::var("CIRIS_TEST_ANNOUNCE_SECS") {
@@ -5223,10 +5265,15 @@ async fn build_edge(
         // Transport-node mode; this is the legacy path's relay posture. Two axes,
         // not one knob spelled twice.
         transit: None,
-        // CIRISEdge#805 item 8 (edge v43): direct links through NAT. The default
-        // is inert — no facilitator, none served, every peer's request refused —
-        // so a re-pin does not move this node's network posture.
-        direct_links: Default::default(),
+        // CIRISEdge#805 item 8 / #915: direct links through NAT. Every server is
+        // a facilitator (steward, 2026-10-28): a fabric node serves one on UDP
+        // beside its TCP listener, so two NAT'd peers that share a room can
+        // learn their public addresses from it and take a direct path. A
+        // public server proposes nothing itself (`facilitator: None`, there is
+        // no NAT to learn through) and accepts an upgrade only from a room
+        // peer. Fixed at node build: leviculum takes it before the transport
+        // starts, never later.
+        direct_links: direct_links(transport_node, cfg.listen_addr.port()),
         // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
         // no link shaped — so a re-pin does not move this node's posture.
         shaping: Default::default(),
@@ -5823,5 +5870,33 @@ mod own_key_ids_tests {
         // (A negative check on the old "benign" comment cannot live in the file
         // it scrapes — its own needle is a match. The positive checks above are
         // the teeth; the traceflow ladder's `served` stage is the live one.)
+    }
+}
+
+#[cfg(test)]
+mod direct_link_tests {
+    use super::direct_links;
+
+    /// Every server facilitates (CIRISEdge#915): a transport node serves on UDP
+    /// beside its own TCP listener, so nodes sharing a host never collide, and
+    /// accepts room peers' upgrades. A node that is not a transport node keeps
+    /// edge's inert default.
+    #[test]
+    fn a_transport_node_facilitates_beside_its_listener() {
+        if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR_PORT").is_some() {
+            return;
+        }
+        let on = direct_links(true, 4242);
+        assert_eq!(on.serve_facilitator, Some(4242));
+        assert_eq!(
+            on.facilitator, None,
+            "a public server proposes nothing itself"
+        );
+        assert_eq!(
+            on.accept,
+            ciris_edge::transport::direct_path::DirectAccept::RoomPeers
+        );
+        assert_eq!(direct_links(true, 5301).serve_facilitator, Some(5301));
+        assert_eq!(direct_links(false, 4242).serve_facilitator, None);
     }
 }
