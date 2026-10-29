@@ -5,7 +5,7 @@
 # TRANSIENT — it holds between boot and the claim, so the wizard's screens are
 # tested at the `nodes` checkpoint, before `person:me` destroys it.
 catalog_id: T0
-catalogue_version: 5
+catalogue_version: 6
 title: Just me, offline — one person, one node, no root
 serves: [CSD-118]
 derives: [9c]
