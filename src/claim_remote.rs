@@ -1559,6 +1559,139 @@ pub async fn warn_if_owned_but_unbound(
     );
 }
 
+/// `GET /v1/self/owner-requests` — on a node: what it needs its owner to sign,
+/// now (`crate::owner_requests::pending`). Owner-session-gated, like
+/// upgrade-owner: the operator's tool reads it and carries it to the owner.
+async fn owner_requests_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    match crate::owner_requests::pending(&st.engine).await {
+        Ok(requests) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "node_key_id": crate::node_key::this_node_id(&st.engine).await.ok(),
+                "requests": requests,
+            })),
+        )
+            .into_response(),
+        Err(e) => crate::auth::refusal::refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_requests.directory",
+            format!("read what this node needs: {e:#}"),
+        ),
+    }
+}
+
+/// `POST /v1/self/owner-requests/sign` request: the node the owner is signing
+/// for, and the requests that node listed.
+#[derive(Debug, Deserialize)]
+struct SignOwnerRequestsRequest {
+    node_key_id: String,
+    requests: Vec<crate::owner_requests::OwnerRequest>,
+}
+
+/// `POST /v1/self/owner-requests/sign` — on the OWNER's device: sign what a
+/// node asked for (`crate::owner_requests::sign`), without sending anything.
+/// Gated like sign-owner-binding: it wields the owner's pen.
+async fn sign_owner_requests_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use crate::auth::refusal::refuse;
+    match require_owner(&st, &headers).await {
+        Ok(caller) => {
+            if let Some(resp) = crate::auth::gate::require_verb(
+                &caller,
+                crate::auth::gate::CapabilityVerb::ClaimRemote,
+            ) {
+                return resp;
+            }
+        }
+        Err(resp) => return resp,
+    }
+    let req: SignOwnerRequestsRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "owner_requests.bad_request",
+                format!("expected {{node_key_id, requests}}: {e}"),
+            )
+        }
+    };
+    let user_signer = match crate::compose::resolve_user_signer(
+        &st.engine,
+        crate::compose::FedIdUse::OwnerSession,
+        &crate::active_user_alias(&st.user_seed_dir, &st.user_key_id),
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "owner_requests.no_identity",
+                "no federation ID on this device to sign with",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "owner_requests.signer_unavailable",
+                format!("resolve user signer: {e}"),
+            )
+        }
+    };
+    match crate::owner_requests::sign(
+        &st.engine,
+        &user_signer,
+        req.node_key_id.trim(),
+        &req.requests,
+    )
+    .await
+    {
+        Ok(signed) => (StatusCode::OK, Json(signed)).into_response(),
+        Err(e) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_requests.directory",
+            format!("sign: {e:#}"),
+        ),
+    }
+}
+
+/// `POST /v1/self/owner-requests/apply` — on the node: apply what its owner
+/// signed on their own device (`crate::owner_requests::apply`). Gated like
+/// upgrade-owner; the rows' own signatures are the owner's authority.
+async fn apply_owner_requests_handler(
+    State(st): State<ClaimRemoteState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = require_owner(&st, &headers).await {
+        return resp;
+    }
+    let bundle: crate::owner_requests::SignedOwnerRequests = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return crate::auth::refusal::refuse(
+                StatusCode::BAD_REQUEST,
+                "owner_requests.bad_request",
+                format!("a body must be what POST /v1/self/owner-requests/sign returned: {e}"),
+            )
+        }
+    };
+    match crate::owner_requests::apply(&st.engine, st.policy, &bundle).await {
+        Ok(applied) => (StatusCode::OK, Json(applied)).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SetAgeSelfRequest {
     /// `"minor"` | `"adult"` — the owner's self-declared age band.
@@ -1869,6 +2002,20 @@ pub fn router(
         .route(
             "/v1/setup/sign-owner-binding",
             axum::routing::post(sign_owner_binding_handler),
+        )
+        // What this node needs its owner to sign, the owner's device signing it,
+        // and this node applying it (`crate::owner_requests`).
+        .route(
+            "/v1/self/owner-requests",
+            axum::routing::get(owner_requests_handler),
+        )
+        .route(
+            "/v1/self/owner-requests/apply",
+            axum::routing::post(apply_owner_requests_handler),
+        )
+        .route(
+            "/v1/self/owner-requests/sign",
+            axum::routing::post(sign_owner_requests_handler),
         )
         .route("/v1/self/age", axum::routing::post(set_age_self))
         .route(

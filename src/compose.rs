@@ -683,9 +683,10 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
              record (nothing written)"
         ),
         Ok(None) => tracing::info!(
-            "boot: no owner pen on this node (unowned, or no user seed registered) — the \
-             owner's root acceptance waits for the claim; until then this node is not Rooted \
-             by any peer (CIRISEdge#659)"
+            "boot: no owner pen on this node (unowned, or claimed remotely) — the owner's root \
+             acceptance is FILED AS AN OWNER REQUEST on an owned node (GET \
+             /v1/self/owner-requests, signed on the owner's own device); until it is applied \
+             this node is not Rooted by any peer (CIRISEdge#659)"
         ),
         Err(e) => tracing::warn!(
             error = %e,

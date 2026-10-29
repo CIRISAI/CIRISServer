@@ -905,6 +905,17 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # ALL FOURTEEN PAID AT CLIENT 0.5.232 (2026-10-26, for 0.5.238): the staged
     # owner-binding and the contact-request ids; the floor in pyproject.toml is
     # 0.5.232.
+    # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
+    # owner's device signing it, and the node applying it
+    # (src/owner_requests.rs). Queued for the client bundle with their English.
+    "owner_requests.bad_request",
+    "owner_requests.directory",
+    "owner_requests.no_identity",
+    "owner_requests.not_the_owner",
+    "owner_requests.proof_refused",
+    "owner_requests.signer_unavailable",
+    "owner_requests.unowned",
+    "owner_requests.wrong_node",
 )
 
 
