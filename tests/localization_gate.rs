@@ -846,7 +846,9 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 19 -> 24: the chat revision routes' `chat.{message_not_found,
     /// message_not_live,not_author,reason_invalid,unknown_revision_op}`
     /// (CIRISEdge#917) — same reason, same list, queued with their English.
-    const MAX_UNCOVERED: usize = 24;
+    /// 24 -> 32: the owner-request routes' eight `owner_requests.*` ids
+    /// (a remotely claimed node's owner acts) — same reason, same list.
+    const MAX_UNCOVERED: usize = 32;
 
     let en = load_en();
     let ids = scraped_server_ids();

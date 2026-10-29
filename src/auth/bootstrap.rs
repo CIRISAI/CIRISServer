@@ -1670,6 +1670,24 @@ struct OwnedNode {
     key_id: String,
     /// True for THIS node (the device the wizard is running on).
     is_self: bool,
+    /// Whether the owner announced it: its owner-binding stands at
+    /// `federation` (CC 5.4.6). `None` when the read failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    announced: Option<bool>,
+    /// The owner's own name for it (`device:label:v1`), when they gave one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    /// Whether it is one of the owner's own devices (it holds an occurrence of
+    /// them) rather than a node they merely own (a server, a managed agent).
+    /// A device that joined by approval holds its occurrence under its own
+    /// roster key, which no row links to its node yet (CIRISPersist#1158), so
+    /// `false` here can mean "not known to be" for such a device.
+    roster_member: bool,
+    /// The agents that act on it, as the owner's standing capture grant about
+    /// it names them (CC 3.3.1: node, owner, agent). ABSENT means unknown —
+    /// never "no agent": nothing else durable links an agent to its node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agents: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1679,19 +1697,64 @@ struct OwnedNodesResponse {
     nodes: Vec<OwnedNode>,
 }
 
-async fn owned_nodes(State(st): State<SetupState>) -> Response {
-    let owner = super::ownership::is_steward_bound(&st.engine, &st.node_key_id).await;
+/// The owner of `this_node` and the rows of every node they own, as
+/// `GET /v1/setup/owned-nodes` serves them (the client's "what I own", CSD-132).
+async fn owned_nodes_of(engine: &Engine, this_node: &str) -> (Option<String>, Vec<OwnedNode>) {
+    let owner = super::ownership::is_steward_bound(engine, this_node).await;
     let nodes: Vec<OwnedNode> = match &owner {
-        Some(user) => super::ownership::nodes_stewarded_by(&st.engine, user)
-            .await
-            .into_iter()
-            .map(|key_id| OwnedNode {
-                is_self: key_id == st.node_key_id,
-                key_id,
-            })
-            .collect(),
+        Some(user) => {
+            let keys = super::ownership::nodes_stewarded_by(engine, user).await;
+            let labels = crate::self_devices::labels_for(engine, user).await;
+            let dir = engine.federation_directory();
+            let occurrences: std::collections::HashSet<String> = dir
+                .list_identity_occurrences_for(user)
+                .await
+                .map(|v| v.into_iter().map(|o| o.occurrence_key_id).collect())
+                .unwrap_or_default();
+            let mut out = Vec::with_capacity(keys.len());
+            for key_id in keys {
+                let announced = super::ownership::owner_binding_is_announced(engine, &key_id, user)
+                    .await
+                    .ok();
+                let agents = ciris_persist::federation::community_trust_consent::community_trust_consent_for(
+                    dir.as_ref(),
+                    &key_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|grant| {
+                    grant
+                        .subject_key_ids
+                        .into_iter()
+                        .filter(|k| k != &key_id && k != user)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|a| !a.is_empty());
+                out.push(OwnedNode {
+                    is_self: key_id == this_node,
+                    announced,
+                    label: labels.get(&key_id).cloned(),
+                    roster_member: occurrences.contains(&key_id),
+                    agents,
+                    key_id,
+                });
+            }
+            out
+        }
         None => Vec::new(),
     };
+    (owner, nodes)
+}
+
+/// [`owned_nodes_of`] as the JSON `GET /v1/setup/owned-nodes` answers with.
+pub async fn owned_nodes_view(engine: &Engine, this_node: &str) -> serde_json::Value {
+    let (owner, nodes) = owned_nodes_of(engine, this_node).await;
+    serde_json::to_value(OwnedNodesResponse { owner, nodes }).unwrap_or_default()
+}
+
+async fn owned_nodes(State(st): State<SetupState>) -> Response {
+    let (owner, nodes) = owned_nodes_of(&st.engine, &st.node_key_id).await;
     // "Stupid-clear" diagnostic: the owned-nodes projection is the source of truth
     // for the client's node switcher. Log WHO owns this node + EXACTLY which nodes
     // it returns, so an empty list (e.g. queried before the self-claim) is obvious

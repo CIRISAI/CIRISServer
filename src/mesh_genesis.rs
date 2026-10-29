@@ -1073,33 +1073,8 @@ pub async fn accept_trust_roots_as_owner(
 ) -> Result<Vec<String>, GenesisError> {
     use ciris_persist::federation::types::cohort_scope;
 
-    let engine_key = engine
-        .local_derived_key_id()
-        .await
-        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
-    let dir = engine.federation_directory();
-    let now = chrono::Utc::now();
-    let mut roots: Vec<String> = Vec::new();
-    for k in crate::peer::own_keys_of_this_node(&engine_key) {
-        let accepted =
-            ciris_persist::federation::trust_root::trusted_roots_of(dir.as_ref(), &k, now)
-                .await
-                .map_err(|e| GenesisError::Directory(format!("trusted_roots_of({k}): {e}")))?;
-        for r in accepted {
-            if !roots.contains(&r) {
-                roots.push(r);
-            }
-        }
-    }
-    if let Some(baked) =
-        charter_root_key_id(ciris_persist::federation::genesis::canonical_genesis_bundle())
-    {
-        if !roots.contains(&baked) && node_trusts_root(engine, &engine_key, &baked).await? {
-            roots.push(baked);
-        }
-    }
     let mut newly = Vec::new();
-    for root in roots {
+    for root in roots_this_node_accepts(engine).await? {
         if root == owner_key_id {
             continue;
         }
@@ -1139,6 +1114,42 @@ pub async fn accept_trust_roots_as_owner(
         newly.push(root);
     }
     Ok(newly)
+}
+
+/// **The roots this node accepts**: every root a key this node IS holds a live
+/// acceptance of, plus the baked charter root it trusts. Read once, for the
+/// owner's acceptance written with the pen in hand
+/// ([`accept_trust_roots_as_owner`]) and for the request a node files when the
+/// pen is not here (`crate::owner_requests`).
+pub(crate) async fn roots_this_node_accepts(
+    engine: &ciris_persist::prelude::Engine,
+) -> Result<Vec<String>, GenesisError> {
+    let engine_key = engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| GenesisError::Directory(format!("resolve node identity: {e}")))?;
+    let dir = engine.federation_directory();
+    let now = chrono::Utc::now();
+    let mut roots: Vec<String> = Vec::new();
+    for k in crate::peer::own_keys_of_this_node(&engine_key) {
+        let accepted =
+            ciris_persist::federation::trust_root::trusted_roots_of(dir.as_ref(), &k, now)
+                .await
+                .map_err(|e| GenesisError::Directory(format!("trusted_roots_of({k}): {e}")))?;
+        for r in accepted {
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+    }
+    if let Some(baked) =
+        charter_root_key_id(ciris_persist::federation::genesis::canonical_genesis_bundle())
+    {
+        if !roots.contains(&baked) && node_trusts_root(engine, &engine_key, &baked).await? {
+            roots.push(baked);
+        }
+    }
+    Ok(roots)
 }
 
 /// **A node's allegiance facts** — the signed rows a peer's Rooted walk reads

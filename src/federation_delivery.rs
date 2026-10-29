@@ -164,6 +164,7 @@ fn hold(rt: tokio::runtime::Runtime, controller: Arc<DeliveryController>) -> usi
 /// surface, which only compiles into the wheel.
 #[cfg(feature = "python")]
 pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Result<usize> {
+    let _ = START_ARGS.set((cadence_seconds, announce_logger));
     if is_started() {
         tracing::info!("federation delivery already started in this process — no-op");
         return Ok(HELD
@@ -1266,8 +1267,6 @@ pub fn analyze_consent_stance(
 /// owner's pen is not reachable in this process: the grant is DEFERRED, never
 /// written by a machine key in the owner's place.
 pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
-    use ciris_persist::federation::community_trust_consent::COMMUNITY_TRUST_DIMENSION;
-    use ciris_persist::federation::types::{attestation_type, cohort_scope};
     let node = crate::node_key::this_node_id(engine).await?;
     let agent = engine
         .local_derived_key_id()
@@ -1276,8 +1275,10 @@ pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
     let Some(pen) = crate::peer::owner_consent_pen(engine, &node).await? else {
         tracing::info!(
             node_key_id = %node,
-            "community-trust grant DEFERRED — the node's owner pen is not reachable here; \
-             the grant is the owner's act and no machine key writes it in their place"
+            "community-trust grant FILED AS AN OWNER REQUEST — the node's owner pen is not \
+             reachable here; the grant is the owner's act and no machine key writes it in their \
+             place. It is listed on GET /v1/self/owner-requests for the owner to sign on their \
+             own device"
         );
         return Ok(None);
     };
@@ -1288,25 +1289,8 @@ pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
         );
         return Ok(None);
     };
-    let mut subjects = vec![node.clone(), pen.key_id.clone()];
-    if agent != node && agent != pen.key_id {
-        subjects.push(agent);
-    }
-    let mut envelope = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "score": 1.0,
-    });
-    envelope[ciris_persist::federation::envelope::paths::DIMENSION] =
-        serde_json::Value::from(COMMUNITY_TRUST_DIMENSION);
-    let row = crate::attest::Emit::stamp(
-        &pen.key_id,
-        crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
-            .about_all(&node, &subjects),
-    )
-    .map_err(|e| anyhow::anyhow!("stamp the community-trust grant: {e}"))?
-    .sign_and_assemble(crate::attest::KeySigner::Local(signer))
-    .await
-    .map_err(|e| anyhow::anyhow!("sign the community-trust grant as the owner: {e}"))?;
+    let row = community_trust_grant(signer, &pen.key_id, &node, &pen.key_id, Some(&agent)).await?;
+    let subjects = row.subject_key_ids.clone();
     let id = crate::attest::put(engine, row)
         .await
         .map_err(|e| anyhow::anyhow!("put the community-trust grant: {e}"))?;
@@ -1318,6 +1302,45 @@ pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
         "community-trust grant AUTHORED by the owner — traces of this node may be captured"
     );
     Ok(Some(id))
+}
+
+/// **The capture grant, built and signed but not stored**: attested by
+/// `attester` (the owner's fedID, or a live roster key of it), about `node`,
+/// its subjects the node, its `owner` at this instant and the `agent` that acts
+/// on it, at federation (CC 3.3.1; CIRISPersist#1096). One shape, written here
+/// when the pen is on the node and on the owner's device when it is not
+/// (`crate::owner_requests`).
+///
+/// # Errors
+/// Stamping or signing failed.
+pub async fn community_trust_grant(
+    signer: &ciris_persist::prelude::LocalSigner,
+    attester: &str,
+    node: &str,
+    owner: &str,
+    agent: Option<&str>,
+) -> Result<ciris_persist::federation::types::Attestation> {
+    use ciris_persist::federation::community_trust_consent::COMMUNITY_TRUST_DIMENSION;
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+    let mut subjects = vec![node.to_owned(), owner.to_owned()];
+    if let Some(agent) = agent.filter(|a| *a != node && *a != owner) {
+        subjects.push(agent.to_owned());
+    }
+    let mut envelope = serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "score": 1.0,
+    });
+    envelope[ciris_persist::federation::envelope::paths::DIMENSION] =
+        serde_json::Value::from(COMMUNITY_TRUST_DIMENSION);
+    crate::attest::Emit::stamp(
+        attester,
+        crate::attest::Spec::new(attestation_type::SCORES, cohort_scope::FEDERATION, envelope)
+            .about_all(node, &subjects),
+    )
+    .map_err(|e| anyhow::anyhow!("stamp the community-trust grant: {e}"))?
+    .sign_and_assemble(crate::attest::KeySigner::Local(signer))
+    .await
+    .map_err(|e| anyhow::anyhow!("sign the community-trust grant as the owner: {e}"))
 }
 
 /// The pyo3 door for [`author_community_trust`]: the fold's agent calls this
@@ -1776,6 +1799,40 @@ async fn prime_canonicals(
 /// an operator reading `delivery_status_json` must be able to tell that from a
 /// crash or a missing transport.
 static WAITING_FOR_CLAIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The arguments the host first started delivery with, so a resume the server
+/// drives itself ([`resume_if_held`]) starts it the way the host would have.
+#[cfg(feature = "python")]
+static START_ARGS: std::sync::OnceLock<(Option<u64>, bool)> = std::sync::OnceLock::new();
+
+/// **Resume delivery a claim was holding**, from a route that just made this
+/// node owned or gave it what its owner signed (upgrade-owner, an owner-request
+/// apply). The host is not in that HTTP path, so it has no event to reprime
+/// on; the node does it. A no-op unless startup is held at "waiting for claim"
+/// and the host has started delivery. On its own thread: the reprime drives
+/// delivery's own runtime, which cannot be entered from a request's.
+pub fn resume_if_held(why: &'static str) {
+    #[cfg(feature = "python")]
+    if is_waiting_for_claim() {
+        if let Some(&(cadence, announce)) = START_ARGS.get() {
+            std::thread::spawn(move || match reprime_and_hold(cadence, announce) {
+                Ok(n) => tracing::info!(
+                    why,
+                    canonical_targets = n,
+                    "federation delivery RESUMED — the node was held waiting for its claim"
+                ),
+                Err(e) => tracing::warn!(
+                    why,
+                    error = %format!("{e:#}"),
+                    "federation delivery did not resume after the claim; the host's own \
+                     reprime_federation_delivery is the fallback"
+                ),
+            });
+        }
+    }
+    #[cfg(not(feature = "python"))]
+    let _ = why;
+}
 
 /// True when startup is held pending an ownership claim.
 #[must_use]

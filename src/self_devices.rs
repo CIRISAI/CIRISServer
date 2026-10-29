@@ -1060,8 +1060,10 @@ async fn label_occurrence(
             "A device name must be between 1 and 64 characters.",
         );
     }
-    // The device must be one of the CALLER's occurrences (active or not — a
-    // revoked phone may still deserve a name in the history).
+    // The key must be one of the CALLER's occurrences (active or not — a
+    // revoked phone may still deserve a name in the history), or a node they
+    // own: a server or a managed agent is named the same way, so the owner's
+    // list of what they own reads in their own words (CSD-132).
     let dir = st.engine.federation_directory();
     let mine = match dir
         .list_identity_occurrences_for(&caller.owner_key_id)
@@ -1072,6 +1074,11 @@ async fn label_occurrence(
             .any(|o| o.occurrence_key_id == req.occurrence_key_id),
         Err(e) => return store_unavailable(format!("list_identity_occurrences_for: {e:#}")),
     };
+    let mine = mine
+        || match nodes_owned_by(dir.as_ref(), &caller.owner_key_id).await {
+            Ok(owned) => owned.iter().any(|n| n == &req.occurrence_key_id),
+            Err(e) => return store_unavailable(format!("nodes_owned_by: {e:#}")),
+        };
     if !mine {
         return refuse_with(
             StatusCode::NOT_FOUND,

@@ -141,6 +141,7 @@ mod compose;
 /// non-member is refused even when they own the node.
 pub mod contacts_chat;
 pub mod mls_state;
+pub mod owner_requests;
 pub mod owner_signer_capsule;
 mod roster_rows;
 

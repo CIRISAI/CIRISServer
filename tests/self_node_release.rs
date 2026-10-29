@@ -235,6 +235,23 @@ fn find<'a>(list: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Va
         .find(|o| o["occurrence_key_id"] == key)
 }
 
+/// A node the owner owns but which is not one of their devices (a server, a
+/// managed agent) is named the same way (CSD-132, "agents you own").
+#[tokio::test]
+async fn an_owned_node_is_named_like_a_device() {
+    let alice = Person::new("lbl-node").await;
+    let n2 = second_node(&alice, 0xD5).await;
+    let (st, v) = alice
+        .as_owner(
+            "POST",
+            "/v1/self/occurrence/label",
+            Some(json!({ "occurrence_key_id": n2, "label": "echo-speculative" })),
+        )
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(v["label"], "echo-speculative");
+}
+
 #[tokio::test]
 async fn a_device_is_relabelled_and_only_its_owner_reads_the_label() {
     let alice = Person::new("lbl-a").await;

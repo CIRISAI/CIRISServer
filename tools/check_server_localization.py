@@ -913,6 +913,17 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "chat.not_author",
     "chat.reason_invalid",
     "chat.unknown_revision_op",
+    # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
+    # owner's device signing it, and the node applying it
+    # (src/owner_requests.rs). Queued for the client bundle with their English.
+    "owner_requests.bad_request",
+    "owner_requests.directory",
+    "owner_requests.no_identity",
+    "owner_requests.not_the_owner",
+    "owner_requests.proof_refused",
+    "owner_requests.signer_unavailable",
+    "owner_requests.unowned",
+    "owner_requests.wrong_node",
 )
 
 
