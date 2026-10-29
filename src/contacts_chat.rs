@@ -797,6 +797,10 @@ fn transcript_pending(
         community_id: community_id.to_string(),
         status: "live",
         status_attestation_id: None,
+        status_reason_code: None,
+        edits: None,
+        // A system note is no one's words: nothing to revise.
+        viewer_ops: Vec::new(),
         body: Some(note.to_string()),
         unopened_reason: None,
         unopened_detail: None,
@@ -4183,6 +4187,22 @@ struct ChatMessage {
     /// The composer row that produced a non-`live` status, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     status_attestation_id: Option<String>,
+    /// The reason code the author gave on a `withdrawn` / `recanted` status:
+    /// one of edge's [`ciris_edge::chat::ComposerReason`] codes, verbatim.
+    /// A composer sits at the room's scope, plaintext to every holder, which is
+    /// why it is a code and never free text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_reason_code: Option<String>,
+    /// The row this one REVISES, when it is an edit: the author's `supersedes`
+    /// of their own message, carrying a new body. The transcript shows the
+    /// head of an edit chain only; `GET …/messages/{id}/history` walks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edits: Option<String>,
+    /// **What THIS viewer may do to THIS row**: any of `supersede`, `withdraw`,
+    /// `recant`, as the node judges it. Only the author, only while the row is
+    /// live, and never a delegate (authoring is never delegable). Always
+    /// present, so an absent field means a node that predates the routes.
+    viewer_ops: Vec<&'static str>,
     /// `None` when the row could not be opened — see `unopened_reason`. A
     /// message that cannot be read is NOT the same as one that says nothing, and
     /// collapsing them onto `""` would render a locked row as an empty bubble.
@@ -4293,6 +4313,18 @@ struct ChatMessage {
 /// second copy cannot drift from a name.
 const NOT_A_PAIR_ROOM: &str =
     "this room has no second member — a pair chat addresses exactly one other person";
+
+/// The revisions an author may make to a live message of theirs, in the order a
+/// client offers them (`viewer_ops`).
+const REVISION_OPS: &[&str] = &["supersede", "withdraw", "recant"];
+
+/// A row that changes another row's standing: a `supersedes` / `withdraws` /
+/// `recants` that is NOT a placement widening (a widening is how a row reached
+/// the room, not a change to it).
+fn is_revision(row: &Attestation) -> bool {
+    precedence::is_structural_composer(&row.attestation_type)
+        && !attestation_crossing::is_placement_widening(row)
+}
 
 /// The `live`/`superseded`/`withdrawn`/`recanted` token for a composer type.
 fn status_token(attestation_type_str: &str) -> &'static str {
@@ -4808,32 +4840,46 @@ async fn collect_messages(
     //    re-deriving trust in a claim.
     //  * `is_message_for`. `from_row` answers the same question — right room,
     //    right dimension — against edge's own vocabulary.
-    let mut rows: Vec<Attestation> = Vec::new();
-    for member in &members {
-        let mut by = directory
-            .attestations_by_all(&member.key_id)
-            .await
-            .map_err(|e| format!("list_attestations_by({}): {e}", member.key_id))?;
-        rows.append(&mut by);
-    }
-    rows.sort_by(|a, b| a.attestation_id.cmp(&b.attestation_id));
-    rows.dedup_by(|a, b| a.attestation_id == b.attestation_id);
+    let rows = rows_by(&*directory, members.iter().map(|m| m.key_id.as_str())).await?;
 
     // Composers first, so a message's status is available when it is projected.
     // A placement widening is NOT a status change — see `is_placement_widening`.
+    //
+    // ONLY THE AUTHOR REVISES. A composer naming a message this node holds counts
+    // only if it is the author's own act over it (edge's `composer_is_authors`:
+    // same attester, same room, names it). Anyone else's is dropped outright, as
+    // a status and as a row: persist screens a retraction's entitlement but not
+    // a `supersedes`, so a member's admitted "edit" of someone else's message
+    // would otherwise mark it superseded for everyone, or render as an empty
+    // message of its own (CIRISEdge#917).
+    let held: HashMap<&str, &Attestation> = rows
+        .iter()
+        .map(|r| (r.attestation_id.as_str(), r))
+        .collect();
     let mut composers: HashMap<String, Vec<&Attestation>> = HashMap::new();
+    let mut foreign: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for row in &rows {
-        if !precedence::is_structural_composer(&row.attestation_type)
-            || attestation_crossing::is_placement_widening(row)
-        {
+        if !is_revision(row) {
             continue;
         }
         if let Some(target) =
             precedence::references_attestation_id_from_envelope(&row.attestation_envelope)
         {
+            if let Some(t) = held.get(target) {
+                if !ciris_edge::chat::composer_is_authors(row, t) {
+                    foreign.insert(row.attestation_id.as_str());
+                    continue;
+                }
+            }
             composers.entry(target.to_owned()).or_default().push(row);
         }
     }
+    // Revising is authoring, which a delegate never does.
+    let may_author = crate::auth::gate::authorize_delegated(
+        &owner.caller,
+        crate::auth::gate::CapabilityVerb::ChatAuthor,
+    )
+    .is_ok();
 
     let mut out: Vec<ChatMessage> = Vec::new();
     let mut who_cache: HashMap<String, (&'static str, &'static str)> = HashMap::new();
@@ -4862,6 +4908,14 @@ async fn collect_messages(
             not_community += 1;
             continue;
         }
+        // A retraction is a status of its target, never a message; a foreign
+        // composer is nobody's message at all.
+        if foreign.contains(row.attestation_id.as_str())
+            || row.attestation_type == attestation_type::WITHDRAWS
+            || row.attestation_type == attestation_type::RECANTS
+        {
+            continue;
+        }
         // Edge decides whether this row belongs to the room AND opens it.
         // Recognising a row needs no key and touches no store — that split is
         // why listing a room no longer pays for content it will not show.
@@ -4887,6 +4941,22 @@ async fn collect_messages(
         )
         .await;
         let (status, status_attestation_id) = fold_status(composers.get(&row.attestation_id));
+        let status_reason_code = status_attestation_id
+            .as_deref()
+            .and_then(|id| held.get(id))
+            .and_then(|c| {
+                c.attestation_envelope
+                    .get(ciris_edge::chat::FIELD_REASON_CODE)
+            })
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let edits = opened.edits.clone();
+        let viewer_ops: Vec<&'static str> =
+            if may_author && status == "live" && row.attesting_key_id == owner.key_id {
+                REVISION_OPS.to_vec()
+            } else {
+                Vec::new()
+            };
         let (body, unopened_reason, unopened_detail) = match opened.body {
             ciris_edge::chat::Body::Text(text) => {
                 // The timeline's arrival mark: the FIRST time this node reads
@@ -4950,6 +5020,9 @@ async fn collect_messages(
             community_id: community_id.to_owned(),
             status,
             status_attestation_id,
+            status_reason_code,
+            edits,
+            viewer_ops,
             body,
             unopened_reason,
             unopened_detail,
@@ -5272,6 +5345,7 @@ async fn list_messages(
     };
     match collect_messages(&st, &community_id, &owner, None).await {
         Ok(messages) => {
+            let messages = heads_only(messages);
             let total = messages.len();
             (
                 StatusCode::OK,
@@ -5347,6 +5421,7 @@ async fn list_room_messages(
     let (handshake_id, _) = handshake.note();
     match collect_messages(st, community_id, owner, None).await {
         Ok(messages) => {
+            let messages = heads_only(messages);
             let total = messages.len();
             (
                 StatusCode::OK,
@@ -5372,6 +5447,497 @@ async fn list_room_messages(
             format!("read transcript: {e}"),
         ),
     }
+}
+
+/// Every row the room's members have written, deduplicated, in id order: what
+/// a transcript, an edit chain and a revision all read from.
+async fn rows_by<'a>(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    members: impl Iterator<Item = &'a str>,
+) -> Result<Vec<Attestation>, String> {
+    let mut rows: Vec<Attestation> = Vec::new();
+    for member in members {
+        let mut by = directory
+            .attestations_by_all(member)
+            .await
+            .map_err(|e| format!("list_attestations_by({member}): {e}"))?;
+        rows.append(&mut by);
+    }
+    rows.sort_by(|a, b| a.attestation_id.cmp(&b.attestation_id));
+    rows.dedup_by(|a, b| a.attestation_id == b.attestation_id);
+    Ok(rows)
+}
+
+/// The transcript shows the HEAD of each edit chain: a message its author has
+/// edited reads as the edit (which names it in `edits`). The earlier versions
+/// stay on `GET …/messages/{id}/history`. Withdrawn and recanted rows stay,
+/// with their status, because the room saw them.
+fn heads_only(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .filter(|m| m.status != "superseded")
+        .collect()
+}
+
+/// The author's own revisions of `target` among `rows` (edge's
+/// `composer_is_authors`): nobody else's act changes a message.
+fn authors_revisions<'a>(rows: &'a [Attestation], target: &Attestation) -> Vec<&'a Attestation> {
+    rows.iter()
+        .filter(|r| is_revision(r) && ciris_edge::chat::composer_is_authors(r, target))
+        .collect()
+}
+
+/// The author's edit of `target`, if any. Two edits naming one row are one to
+/// persist's replay dedup, so there is at most one that stands; the latest is
+/// taken if a node somehow holds two.
+fn next_edit<'a>(rows: &'a [Attestation], target: &Attestation) -> Option<&'a Attestation> {
+    authors_revisions(rows, target)
+        .into_iter()
+        .filter(|r| r.attestation_type == attestation_type::SUPERSEDES)
+        .max_by(|a, b| {
+            a.asserted_at
+                .cmp(&b.asserted_at)
+                .then_with(|| a.attestation_id.cmp(&b.attestation_id))
+        })
+}
+
+/// The author's retraction of `head`, if any; a recant outranks a withdraw.
+fn retraction_of<'a>(rows: &'a [Attestation], head: &Attestation) -> Option<&'a Attestation> {
+    let r = authors_revisions(rows, head);
+    r.iter()
+        .find(|c| c.attestation_type == attestation_type::RECANTS)
+        .or_else(|| {
+            r.iter()
+                .find(|c| c.attestation_type == attestation_type::WITHDRAWS)
+        })
+        .copied()
+}
+
+/// The current head of the edit chain `id` belongs to, walking forward. Every
+/// revision must name the head: persist's hide is one hop, and a second
+/// composer naming an older version collides with the first in replay dedup.
+/// So the client may send any id it holds and the node names the head.
+fn resolve_head<'a>(rows: &'a [Attestation], id: &str) -> Option<&'a Attestation> {
+    let mut cur = rows.iter().find(|r| r.attestation_id == id)?;
+    for _ in 0..rows.len() {
+        match next_edit(rows, cur) {
+            Some(n) => cur = n,
+            None => break,
+        }
+    }
+    Some(cur)
+}
+
+/// The first version of the chain `id` belongs to, walking back through the
+/// author's edits to the placed message.
+fn chain_root<'a>(rows: &'a [Attestation], id: &str) -> Option<&'a Attestation> {
+    let mut cur = rows.iter().find(|r| r.attestation_id == id)?;
+    for _ in 0..rows.len() {
+        if !(is_revision(cur) && cur.attestation_type == attestation_type::SUPERSEDES) {
+            break;
+        }
+        let prev = precedence::references_attestation_id_from_envelope(&cur.attestation_envelope)
+            .and_then(|p| rows.iter().find(|r| r.attestation_id == p));
+        match prev {
+            Some(p) if ciris_edge::chat::composer_is_authors(cur, p) => cur = p,
+            _ => break,
+        }
+    }
+    Some(cur)
+}
+
+/// `POST /v1/chat/{id}/messages/{attestation_id}/{supersede|withdraw|recant}`.
+#[derive(Debug, Default, Deserialize)]
+struct ReviseRequest {
+    /// `supersede`: the new text.
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    content_type: Option<String>,
+    /// `withdraw` / `recant`: a [`ciris_edge::chat::ComposerReason`] code.
+    /// Absent is `unspecified`.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// **The author revises their own message** (CIRISEdge#917, CIRISPersist#1155).
+///
+/// The composer is BORN in the room at federation tier and put directly: it is
+/// never a `self` row shared into the room, because a widening carries neither
+/// the composer's type nor its target. It names the CURRENT HEAD of the
+/// message's edit chain, resolved here from whatever id the client holds.
+async fn revise_message(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+    body: axum::body::Bytes,
+) -> Response {
+    let op: &'static str = match action.as_str() {
+        "supersede" => attestation_type::SUPERSEDES,
+        "withdraw" => attestation_type::WITHDRAWS,
+        "recant" => attestation_type::RECANTS,
+        _ => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "chat.unknown_revision_op",
+                "a message is revised by supersede, withdraw or recant",
+            )
+        }
+    };
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatAuthor,
+        "chat.delegate_may_not_author",
+    ) {
+        return resp;
+    }
+    if let Some(resp) =
+        crate::conformance::require_op(&st.engine, crate::auth::gate::CapabilityVerb::ChatAuthor)
+            .await
+    {
+        return resp;
+    }
+    if let Err(r) = require_member(&st, &owner, &community_id).await {
+        return r;
+    }
+    let req: ReviseRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        ReviseRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"body\"?, \"reason\"?}}: {e}"),
+                )
+            }
+        }
+    };
+
+    let directory = st.engine.federation_directory();
+    let members = match directory.active_community_members(&community_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("active_community_members: {e}"),
+            )
+        }
+    };
+    let rows = match rows_by(&*directory, members.iter().map(|m| m.key_id.as_str())).await {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read the room: {e}"),
+            )
+        }
+    };
+    // The head must be a message the room can see: a placed row or an edit of
+    // one. The author's `self` original is not what readers hold, and a
+    // composer naming it would retract nothing anyone sees.
+    let Some(head) = resolve_head(&rows, &attestation_id).filter(|h| {
+        h.cohort_scope == cohort_scope::COMMUNITY
+            && ciris_edge::chat::ChatMessage::from_row(h, &community_id).is_some()
+    }) else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "chat.message_not_found",
+            "no message with that id in this room",
+        );
+    };
+    if head.attesting_key_id != owner.key_id {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "chat.not_author",
+            "only the person who wrote a message may supersede, withdraw or recant it",
+        );
+    }
+    if retraction_of(&rows, head).is_some() {
+        return refuse(
+            StatusCode::CONFLICT,
+            "chat.message_not_live",
+            "this message was already withdrawn or recanted",
+        );
+    }
+    let head_id = head.attestation_id.clone();
+
+    let capsule = match crate::owner_signer_capsule::acquire(
+        &st.engine,
+        bearer_of(&headers),
+        &owner.key_id,
+        st.user_seed_dir.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "chat.author_signer_unavailable",
+                format!(
+                    "a chat message is signed by the person who wrote it, and this node \
+                     cannot wield that identity right now: {e:?}"
+                ),
+            )
+        }
+    };
+    let author = capsule.edge_signer();
+    let now = chrono::Utc::now();
+
+    let (row, readable) = if op == attestation_type::SUPERSEDES {
+        let text = req.body.unwrap_or_default();
+        if text.trim().is_empty() {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "chat.empty_message",
+                "a message body must carry at least one non-whitespace character",
+            );
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            return refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "chat.message_too_large",
+                format!(
+                    "message body is {} bytes; the ceiling is {MAX_MESSAGE_BYTES}",
+                    text.len()
+                ),
+            );
+        }
+        let content_type = req
+            .content_type
+            .as_deref()
+            .map_or(DEFAULT_CONTENT_TYPE, str::trim);
+        if content_type != DEFAULT_CONTENT_TYPE {
+            return refuse(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "chat.unsupported_content_type",
+                format!(
+                    "the sealed community tier carries text only; got {content_type:?}, want \
+                     {DEFAULT_CONTENT_TYPE:?}"
+                ),
+            );
+        }
+        ensure_owner_content_occurrence(&st, &owner.key_id).await;
+        let content_store = ciris_edge::group_content::PersistGroupContentStore::new(
+            crate::node_key::node_engine(&st.engine),
+            st.engine.federation_directory(),
+        );
+        match ciris_edge::chat::chat_message_supersede_in(
+            author,
+            &community_id,
+            head,
+            &text,
+            now,
+            &content_store,
+        )
+        .await
+        {
+            Ok((row, sealed)) => (row, Some((sealed.fully_readable(), sealed.excluded))),
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "chat.emit_failed",
+                    format!("chat_message_supersede_in: {e}"),
+                )
+            }
+        }
+    } else {
+        let reason =
+            ciris_edge::chat::ComposerReason::parse(req.reason.as_deref().unwrap_or("unspecified"));
+        if !reason.allowed_on(op) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "chat.reason_invalid",
+                "that reason code does not apply to this revision",
+            );
+        }
+        let built = if op == attestation_type::WITHDRAWS {
+            ciris_edge::chat::chat_message_withdraw_in(author, &community_id, head, &reason, now)
+                .await
+        } else {
+            ciris_edge::chat::chat_message_recant_in(author, &community_id, head, &reason, now)
+                .await
+        };
+        match built {
+            Ok(row) => (row, None),
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "chat.emit_failed",
+                    format!("build the {op}: {e}"),
+                )
+            }
+        }
+    };
+    let new_id = row.attestation_id.clone();
+    if let Err(e) = directory
+        .put_attestation_authored(ciris_persist::federation::SignedAttestation { attestation: row })
+        .await
+    {
+        tracing::error!(
+            room = %community_id,
+            target = %head_id,
+            op,
+            error = %e,
+            "chat: the revision was built and signed but the local put refused it"
+        );
+        return refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "chat.emit_failed",
+            format!("put the {op}: {e}"),
+        );
+    }
+    crate::compose::kick_replication("chat revision placed in a room");
+    tracing::info!(
+        room = %community_id,
+        op,
+        target = %head_id,
+        attestation_id = %new_id,
+        "chat: message revised by its author — born in the room, names the head"
+    );
+    let mut out = serde_json::json!({
+        "attestation_id": new_id,
+        "community_id": community_id,
+        "op": action,
+    });
+    // Named by the row's type, as the client contract reads it: `supersedes`,
+    // `withdraws` or `recants` → the head it revised.
+    out[op] = serde_json::json!(head_id);
+    if let Some((fully_readable, excluded)) = readable {
+        out["fully_readable"] = serde_json::json!(fully_readable);
+        out["excluded_key_ids"] = serde_json::json!(excluded);
+    }
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+/// `GET /v1/chat/{id}/messages/{attestation_id}/history` → `{chain: [...]}`,
+/// oldest first: the posted message, each of its author's edits, and the
+/// retraction that ended it, if any. Any id in the chain finds the whole chain.
+async fn message_history(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+) -> Response {
+    if action != "history" {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "chat.unknown_revision_op",
+            "a message is revised by supersede, withdraw or recant",
+        );
+    }
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatRead,
+        "chat.delegation_denied",
+    ) {
+        return resp;
+    }
+    if let Err(r) = require_member(&st, &owner, &community_id).await {
+        return r;
+    }
+    let directory = st.engine.federation_directory();
+    let rows = match directory.active_community_members(&community_id).await {
+        Ok(members) => rows_by(&*directory, members.iter().map(|m| m.key_id.as_str())).await,
+        Err(e) => Err(format!("active_community_members: {e}")),
+    };
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read the room: {e}"),
+            )
+        }
+    };
+    let Some(root) = chain_root(&rows, &attestation_id)
+        .filter(|r| ciris_edge::chat::ChatMessage::from_row(r, &community_id).is_some())
+    else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "chat.message_not_found",
+            "no message with that id in this room",
+        );
+    };
+    // Bodies come from the transcript's own projection, so a version opens
+    // here exactly as it opened in the room.
+    let projected = match collect_messages(&st, &community_id, &owner, None).await {
+        Ok(m) => m,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read transcript: {e}"),
+            )
+        }
+    };
+    let version = |row: &Attestation, op: &str| {
+        let m = projected
+            .iter()
+            .find(|m| m.attestation_id == row.attestation_id);
+        serde_json::json!({
+            "attestation_id": row.attestation_id,
+            "op": op,
+            "attesting_key_id": row.attesting_key_id,
+            "author": m.map_or(row.attesting_key_id.as_str(), |m| m.author.as_str()),
+            "asserted_at": m.map_or_else(|| row.asserted_at.to_rfc3339(), |m| m.asserted_at.clone()),
+            "body": m.and_then(|m| m.body.clone()),
+            "unopened_reason": m.and_then(|m| m.unopened_reason),
+        })
+    };
+    let mut chain = vec![version(root, "post")];
+    let mut head = root;
+    for _ in 0..rows.len() {
+        match next_edit(&rows, head) {
+            Some(n) => {
+                chain.push(version(n, "supersede"));
+                head = n;
+            }
+            None => break,
+        }
+    }
+    let mut status = "live";
+    if let Some(r) = retraction_of(&rows, head) {
+        let op = if r.attestation_type == attestation_type::RECANTS {
+            "recant"
+        } else {
+            "withdraw"
+        };
+        status = status_token(&r.attestation_type);
+        chain.push(serde_json::json!({
+            "attestation_id": r.attestation_id,
+            "op": op,
+            "attesting_key_id": r.attesting_key_id,
+            "author": r.attesting_key_id,
+            "asserted_at": r.asserted_at.to_rfc3339(),
+            "reason_code": r
+                .attestation_envelope
+                .get(ciris_edge::chat::FIELD_REASON_CODE)
+                .and_then(serde_json::Value::as_str),
+        }));
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "community_id": community_id,
+            "head_attestation_id": head.attestation_id,
+            "status": status,
+            "chain": chain,
+        })),
+    )
+        .into_response()
 }
 
 // ─── Router ─────────────────────────────────────────────────────────────────
@@ -5442,6 +6008,13 @@ pub fn router_with_driver(
         .route(
             "/v1/chat/{community_id}/messages",
             axum::routing::get(list_messages).post(send_message),
+        )
+        // The author's revisions of a message, and the chain they make
+        // (CIRISEdge#917, CIRISPersist#1155). One route: `{action}` is
+        // `supersede` / `withdraw` / `recant` on POST and `history` on GET.
+        .route(
+            "/v1/chat/{community_id}/messages/{attestation_id}/{action}",
+            axum::routing::get(message_history).post(revise_message),
         )
         // CIRISServer#594 — N-member rooms and affiliations: the same state,
         // the same owner gate, the same signer.

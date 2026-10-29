@@ -905,6 +905,14 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # ALL FOURTEEN PAID AT CLIENT 0.5.232 (2026-10-26, for 0.5.238): the staged
     # owner-binding and the contact-request ids; the floor in pyproject.toml is
     # 0.5.232.
+    # CHAT MESSAGE REVISIONS (CIRISEdge#917, CIRISPersist#1155): the author's
+    # supersede / withdraw / recant routes and their history. Queued for the
+    # client bundle with their English (CIRISClient chat-revisions card).
+    "chat.message_not_found",
+    "chat.message_not_live",
+    "chat.not_author",
+    "chat.reason_invalid",
+    "chat.unknown_revision_op",
 )
 
 

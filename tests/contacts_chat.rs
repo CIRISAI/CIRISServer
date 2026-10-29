@@ -1593,44 +1593,302 @@ async fn send_and_list_round_trip_carries_the_hamburger_fields() {
     assert!(m["asserted_at"].is_string());
 }
 
+/// POST a message and return its id.
+async fn send(client: &reqwest::Client, base: &str, owner: &str, room: &str, body: &str) -> String {
+    let resp = client
+        .post(format!("{base}/v1/chat/{room}/messages"))
+        .bearer_auth(owner)
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await
+        .expect("POST message");
+    assert_eq!(resp.status(), 200, "send: {:?}", resp.text().await);
+    resp.json::<serde_json::Value>().await.expect("send json")["attestation_id"]
+        .as_str()
+        .expect("attestation_id")
+        .to_string()
+}
+
+/// POST a revision of `id`; returns the status and the JSON body.
+async fn revise(
+    client: &reqwest::Client,
+    base: &str,
+    owner: &str,
+    room: &str,
+    id: &str,
+    action: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = client
+        .post(format!("{base}/v1/chat/{room}/messages/{id}/{action}"))
+        .bearer_auth(owner)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST revision");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+async fn transcript(
+    client: &reqwest::Client,
+    base: &str,
+    owner: &str,
+    room: &str,
+) -> serde_json::Value {
+    let resp = client
+        .get(format!("{base}/v1/chat/{room}/messages"))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .expect("GET messages");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("messages json")
+}
+
+/// The author withdraws their message through the route: the composer is born
+/// in the room (never a `self` row shared in, whose widening would lose its
+/// type and target), and the read folds it with the reason code it carries.
 #[tokio::test]
 async fn a_withdrawn_message_reads_back_as_withdrawn() {
     let (engine, base, owner, owner_id, _h) = fixture().await;
     let client = reqwest::Client::new();
     let (community_id, _contact_material) =
         open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let message_id = send(&client, &base, &owner, &community_id, "oops").await;
 
-    let resp = client
-        .post(format!("{base}/v1/chat/{community_id}/messages"))
-        .bearer_auth(&owner)
-        .json(&serde_json::json!({ "body": "oops" }))
-        .send()
-        .await
-        .expect("POST message");
-    assert_eq!(resp.status(), 200);
-    let sent: serde_json::Value = resp.json().await.expect("send json");
-    let message_id = sent["attestation_id"]
-        .as_str()
-        .expect("attestation_id")
-        .to_string();
+    let list = transcript(&client, &base, &owner, &community_id).await;
+    assert_eq!(
+        list["messages"][0]["viewer_ops"],
+        serde_json::json!(["supersede", "withdraw", "recant"]),
+        "the author may revise a live message of theirs: {list}"
+    );
 
-    // The author withdraws it — the ordinary CEG composer, emitted the same way
-    // the route emits the message it targets.
-    withdraw_own_message(&engine, &owner_id, &community_id, &message_id).await;
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &message_id,
+        "withdraw",
+        serde_json::json!({ "reason": "sent_in_error" }),
+    )
+    .await;
+    assert_eq!(status, 200, "withdraw: {out}");
+    assert_eq!(out["withdraws"], message_id.as_str());
 
-    let resp = client
-        .get(format!("{base}/v1/chat/{community_id}/messages"))
-        .bearer_auth(&owner)
-        .send()
-        .await
-        .expect("GET messages");
-    let list: serde_json::Value = resp.json().await.expect("messages json");
+    let list = transcript(&client, &base, &owner, &community_id).await;
     let m = &list["messages"][0];
     assert_eq!(
         m["status"], "withdrawn",
         "the read must fold the composer, not report the raw row: {list}"
     );
-    assert!(m["status_attestation_id"].is_string());
+    assert_eq!(m["status_attestation_id"], out["attestation_id"]);
+    assert_eq!(m["status_reason_code"], "sent_in_error");
+    assert_eq!(
+        m["viewer_ops"],
+        serde_json::json!([]),
+        "a withdrawn message is not live"
+    );
+    assert_eq!(
+        list["total"], 1,
+        "a retraction is a status, never a message of its own"
+    );
+
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &message_id,
+        "recant",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, 409, "{out}");
+    assert_eq!(out["reason_id"], "chat.message_not_live");
+}
+
+/// An edit is the author's `supersedes` carrying a new body. The transcript
+/// shows the head of the chain; every revision names the head even when the
+/// client sends an older id; `/history` walks the whole chain.
+#[tokio::test]
+async fn an_edit_chain_shows_its_head_and_history_walks_it() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let original = send(&client, &base, &owner, &community_id, "first").await;
+
+    let (status, e1) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &original,
+        "supersede",
+        serde_json::json!({ "body": "second" }),
+    )
+    .await;
+    assert_eq!(status, 200, "supersede: {e1}");
+    assert_eq!(e1["supersedes"], original.as_str());
+    let e1_id = e1["attestation_id"].as_str().expect("edit id").to_string();
+
+    // The ORIGINAL id again: the node names the current head, so this edits
+    // the edit rather than colliding with it in replay dedup.
+    let (status, e2) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &original,
+        "supersede",
+        serde_json::json!({ "body": "third" }),
+    )
+    .await;
+    assert_eq!(status, 200, "second supersede: {e2}");
+    assert_eq!(
+        e2["supersedes"],
+        e1_id.as_str(),
+        "the revision names the head"
+    );
+    let e2_id = e2["attestation_id"].as_str().expect("edit id").to_string();
+
+    let list = transcript(&client, &base, &owner, &community_id).await;
+    assert_eq!(list["total"], 1, "one message, shown at its head: {list}");
+    let m = &list["messages"][0];
+    assert_eq!(m["attestation_id"], e2_id.as_str());
+    assert_eq!(m["body"], "third");
+    assert_eq!(m["edits"], e1_id.as_str());
+    assert_eq!(m["status"], "live");
+
+    let resp = client
+        .get(format!(
+            "{base}/v1/chat/{community_id}/messages/{e1_id}/history"
+        ))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET history");
+    assert_eq!(resp.status(), 200);
+    let h: serde_json::Value = resp.json().await.expect("history json");
+    let ops: Vec<&str> = h["chain"]
+        .as_array()
+        .expect("chain")
+        .iter()
+        .map(|v| v["op"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(ops, ["post", "supersede", "supersede"], "{h}");
+    let bodies: Vec<&str> = h["chain"]
+        .as_array()
+        .expect("chain")
+        .iter()
+        .map(|v| v["body"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(bodies, ["first", "second", "third"], "{h}");
+    assert_eq!(h["head_attestation_id"], e2_id.as_str());
+
+    // Recant the head by the original id; the chain ends there.
+    let (status, r) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &original,
+        "recant",
+        serde_json::json!({ "reason": "incorrect" }),
+    )
+    .await;
+    assert_eq!(status, 200, "recant: {r}");
+    assert_eq!(r["recants"], e2_id.as_str());
+    let resp = client
+        .get(format!(
+            "{base}/v1/chat/{community_id}/messages/{original}/history"
+        ))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .expect("GET history");
+    let h: serde_json::Value = resp.json().await.expect("history json");
+    assert_eq!(h["status"], "recanted");
+    let last = h["chain"]
+        .as_array()
+        .and_then(|c| c.last())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(last["op"], "recant");
+    assert_eq!(last["reason_code"], "incorrect");
+}
+
+/// The refusals a client renders by id.
+#[tokio::test]
+async fn a_revision_is_refused_by_name() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _contact_material) =
+        open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let id = send(&client, &base, &owner, &community_id, "hello").await;
+
+    // A withdraw code on a recant: the codes are per-op.
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &id,
+        "recant",
+        serde_json::json!({ "reason": "privacy" }),
+    )
+    .await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (400, Some("chat.reason_invalid"))
+    );
+
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &id,
+        "delete",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (404, Some("chat.unknown_revision_op"))
+    );
+
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        "no-such-row",
+        "withdraw",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (404, Some("chat.message_not_found"))
+    );
+
+    let (status, out) = revise(
+        &client,
+        &base,
+        &owner,
+        &community_id,
+        &id,
+        "supersede",
+        serde_json::json!({ "body": "  " }),
+    )
+    .await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (400, Some("chat.empty_message"))
+    );
 }
 
 // ─── 4. THE contextual-integrity line ───────────────────────────────────────
@@ -1781,92 +2039,6 @@ async fn seed_message_as(
 
 /// The owner's `withdraws` composer over one of their own messages.
 ///
-/// **This one cannot be signature-deferred.** `is_subject_side_revocation`
-/// classifies a `withdraws` whose attester is in its own `subject_key_ids` as a
-/// TRANSIT revocation (§10.1.3 / AV-61), and the local door then demands a
-/// bound-hybrid signature that verifies against the attester's REGISTERED
-/// pubkeys before it will store the row. So the withdraw is signed here with the
-/// owner's own key — which is exactly the constraint the client faces: the
-/// server can stage a message on the owner's behalf, but only the holder of the
-/// owner's key can retract one.
-async fn withdraw_own_message(
-    engine: &Engine,
-    owner: &OwnerIdentity,
-    community_id: &str,
-    target_attestation_id: &str,
-) {
-    // OWNER-attested, like the message it retracts. From edge v20.0.0 a chat row
-    // is attested by the HUMAN (`chat_message_attestation(author, ..)`), and
-    // `collect_messages` walks the ROSTER to find composers — so the pre-v39
-    // node-attested form this fixture used to build is invisible to the read
-    // path, which is correct rather than a gap: a withdraw no member attested is
-    // not a member's withdraw.
-    let envelope = serde_json::json!({
-        (paths::DIMENSION): contacts_chat::CHAT_MESSAGE_DIMENSION,
-        (paths::REFERENCES_ATTESTATION_ID): target_attestation_id,
-    });
-    let input = LocalAttestationInput {
-        attestation_id: None,
-        attesting_key_id: owner.key_id.clone(),
-        attested_key_id: Some(owner.key_id.clone()),
-        attestation_type: attestation_type::WITHDRAWS.to_string(),
-        weight: None,
-        expires_at: None,
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .expect("withdraw envelope"),
-        // EMPTY, and load-bearing: `is_subject_side_revocation` classifies a
-        // `withdraws` whose attester is among its own subjects as a §10.1.3
-        // TRANSIT revocation, which the local door then demands a bound-hybrid
-        // signature for. Naming nobody keeps it an ordinary durable row — and
-        // matches persist's own `consent_peer_set` fixture composer.
-        subject_key_ids: Vec::new(),
-        cohort_scope: cohort_scope::SELF.to_string(),
-        scrub_signature_classical: None,
-        scrub_signature_pqc: None,
-    };
-    let id = engine
-        .federation_directory()
-        .attestation_upsert_local(input)
-        .await
-        .expect("upsert withdraws");
-
-    // THE CROSSING NEEDS THE OTHER KEYING. Same hardware material as
-    // `OwnerIdentity::signer()`, keyed for `custody_for` — see
-    // `identity::hardware_user_crossing_signer`. The ordinary user signer derives
-    // twice here and the widening is refused.
-    let crossing = ciris_server::identity::hardware_user_crossing_signer(
-        ciris_server::identity::UserIdentityBackend::Software,
-        &owner.alias,
-        owner.seed_dir.clone(),
-    )
-    .await
-    .expect("the owner's crossing signer");
-    assert_eq!(
-        crossing.derived_key_id(),
-        owner.key_id,
-        "the crossing signer must derive to the id the withdraw is attested under, \
-         or `custody_for` can never accept the owner as the actor"
-    );
-
-    let outcome = ciris_server::attestation_crossing::enter_mesh_at(
-        engine,
-        &id,
-        &Audience::Community {
-            community_key_id: community_id.to_string(),
-        },
-        &CrossingBasis::ProducerAuthority,
-        Some(&crossing),
-    )
-    .await
-    .expect("promote withdraws");
-    assert!(
-        ciris_server::attestation_crossing::is_placed(&outcome),
-        "the withdraw never reached the room: {outcome:?}"
-    );
-}
-
 /// **The test that matters.** The node's OWNER — the highest authority this
 /// process answers to — asks for a community they are not a member of, and the
 /// substrate's own §4.3 predicate refuses. If this ever returns 200, the

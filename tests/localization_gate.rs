@@ -843,7 +843,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `contacts.{delegate_may_not_answer,request_not_found,request_not_ignored}`
     /// (CIRISServer#818) — same reason, same list.
     /// 33 -> 19 at client 0.5.232: all fourteen of those paid.
-    const MAX_UNCOVERED: usize = 19;
+    /// 19 -> 24: the chat revision routes' `chat.{message_not_found,
+    /// message_not_live,not_author,reason_invalid,unknown_revision_op}`
+    /// (CIRISEdge#917) — same reason, same list, queued with their English.
+    const MAX_UNCOVERED: usize = 24;
 
     let en = load_en();
     let ids = scraped_server_ids();
