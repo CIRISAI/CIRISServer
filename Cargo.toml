@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.242" # 0.5.242 (OPENED): an owner-binding may carry any of the seven cohort scopes — the claim doors accepted three, citing a key-grant clause; GET /v1/setup/status now serves the set (CIRISServer#666)
+version = "0.5.242" # 0.5.242 (OPENED): an owner-binding may carry any of the seven cohort scopes — the claim doors accepted three, citing a key-grant clause; GET /v1/setup/status now serves the set (CIRISServer#666); and a remotely claimed node's owner acts (root acceptance, announce, the capture grant) are listed for the owner, signed on the owner's device and applied on the node — managed agents ship traces (#837)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
