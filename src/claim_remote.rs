@@ -1134,16 +1134,19 @@ async fn upgrade_owner_handler(
                 match apply_staged_owner_binding(&st.engine, &st.node_key_id, st.policy, &staged)
                     .await
                 {
-                    Ok(applied) => (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "owner": applied.responsible_user_key_id,
-                            "node_key_id": st.node_key_id,
-                            "owner_binding_attestation_id": applied.attestation_id,
-                            "staged": true,
-                        })),
-                    )
-                        .into_response(),
+                    Ok(applied) => {
+                        crate::federation_delivery::resume_if_held("staged owner-binding applied");
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "owner": applied.responsible_user_key_id,
+                                "node_key_id": st.node_key_id,
+                                "owner_binding_attestation_id": applied.attestation_id,
+                                "staged": true,
+                            })),
+                        )
+                            .into_response()
+                    }
                     Err(refusal) => refusal.into_response(),
                 }
             }
@@ -1687,7 +1690,10 @@ async fn apply_owner_requests_handler(
         }
     };
     match crate::owner_requests::apply(&st.engine, st.policy, &bundle).await {
-        Ok(applied) => (StatusCode::OK, Json(applied)).into_response(),
+        Ok(applied) => {
+            crate::federation_delivery::resume_if_held("owner requests applied");
+            (StatusCode::OK, Json(applied)).into_response()
+        }
         Err(refusal) => refusal.into_response(),
     }
 }

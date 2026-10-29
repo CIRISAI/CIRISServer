@@ -164,6 +164,7 @@ fn hold(rt: tokio::runtime::Runtime, controller: Arc<DeliveryController>) -> usi
 /// surface, which only compiles into the wheel.
 #[cfg(feature = "python")]
 pub fn start_and_hold(cadence_seconds: Option<u64>, announce_logger: bool) -> Result<usize> {
+    let _ = START_ARGS.set((cadence_seconds, announce_logger));
     if is_started() {
         tracing::info!("federation delivery already started in this process — no-op");
         return Ok(HELD
@@ -1798,6 +1799,40 @@ async fn prime_canonicals(
 /// an operator reading `delivery_status_json` must be able to tell that from a
 /// crash or a missing transport.
 static WAITING_FOR_CLAIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The arguments the host first started delivery with, so a resume the server
+/// drives itself ([`resume_if_held`]) starts it the way the host would have.
+#[cfg(feature = "python")]
+static START_ARGS: std::sync::OnceLock<(Option<u64>, bool)> = std::sync::OnceLock::new();
+
+/// **Resume delivery a claim was holding**, from a route that just made this
+/// node owned or gave it what its owner signed (upgrade-owner, an owner-request
+/// apply). The host is not in that HTTP path, so it has no event to reprime
+/// on; the node does it. A no-op unless startup is held at "waiting for claim"
+/// and the host has started delivery. On its own thread: the reprime drives
+/// delivery's own runtime, which cannot be entered from a request's.
+pub fn resume_if_held(why: &'static str) {
+    #[cfg(feature = "python")]
+    if is_waiting_for_claim() {
+        if let Some(&(cadence, announce)) = START_ARGS.get() {
+            std::thread::spawn(move || match reprime_and_hold(cadence, announce) {
+                Ok(n) => tracing::info!(
+                    why,
+                    canonical_targets = n,
+                    "federation delivery RESUMED — the node was held waiting for its claim"
+                ),
+                Err(e) => tracing::warn!(
+                    why,
+                    error = %format!("{e:#}"),
+                    "federation delivery did not resume after the claim; the host's own \
+                     reprime_federation_delivery is the fallback"
+                ),
+            });
+        }
+    }
+    #[cfg(not(feature = "python"))]
+    let _ = why;
+}
 
 /// True when startup is held pending an ownership claim.
 #[must_use]
