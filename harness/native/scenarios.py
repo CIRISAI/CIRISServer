@@ -6,6 +6,7 @@ Add one by writing a function and registering it in `SCENARIOS`.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -192,6 +193,59 @@ _HANDSHAKE = (r"ADVISORY|not conferred|SignedTransportDestination|KeyPackage|Wel
               r"withheld|UnknownKey|room not keyed|handshake cannot complete")
 _BODY = (r"no route to peer|has_path=|derived destination|holder retired|outcome=(Stored|FetchFailed)|"
          r"transcript is empty|not_fetched|NoHolders")
+
+
+# ── a FILE in the pair room, read on the other person's node ─────────────────
+
+
+def room_file(mesh: Mesh, args: Any) -> Record:
+    """A file shared in a chat room reaches the other person: alice puts files in
+    the pair room's drive (cohort `community`, the room's id), and bob reads the
+    same bytes on his node. Builds on `chat`, so the room is keyed and a body has
+    already crossed — a red here is the FILE's path, not the room's."""
+    base = chat(mesh, args)
+    room = base["values"]["ROOM_ID"]
+    a, b = mesh.nodes["alice"], mesh.nodes["bob"]
+    step = Steps(f"""
+ROOM FILE — a file in the pair room reaches the other person (CSD-107 for rooms).
+  builds on: the chat scenario (room {room} keyed, a message crossed).
+  proves:    alice writes files into the room's drive; bob reads the SAME bytes, by digest,
+             on his node: a small one, and one above 1 MiB (a chunk DAG) whose first chunk
+             is above 256 KiB (the first-Resource case edge v43.3.0 fixed).""")
+    step.log.extend(base["steps"])
+    sizes = {"small": 64 * 1024, "large": 3 * 1024 * 1024 + 4321}
+    written: Dict[str, Tuple[str, str]] = {}
+    for label, size in sizes.items():
+        data = os.urandom(size)
+        digest = hashlib.sha256(data).hexdigest()
+        got = a.must("POST", "/v1/files", {
+            "cohort": "community", "room_id": room,
+            "bytes_base64": base64.b64encode(data).decode(),
+            "media_type": "application/octet-stream", "filename": f"{label}.bin",
+        }, timeout=300)
+        written[label] = (got["attestation_id"], digest)
+        step(f"written:{label}", attestation_id=got["attestation_id"], bytes=size,
+             addressed=got.get("addressed"), crossed=got.get("crossed"), tier=got.get("tier"))
+
+    for label, (att, digest) in written.items():
+        def same_bytes(att: str = att, digest: str = digest) -> Optional[bool]:
+            st, body = b.api("GET", f"/v1/files/{att}?cohort=community&room_id={room}&raw=1",
+                             raw=True, timeout=300)
+            return True if st == 200 and hashlib.sha256(body).hexdigest() == digest else None
+        try:
+            wait_for(f"alice's {label} file on bob's node", same_bytes, args.arrive_wait, every=3)
+            step(f"read:{label}", proves="the same bytes, by SHA-256, on the other person's node")
+        except MeshError:
+            st, body = b.api("GET", f"/v1/files/{att}?cohort=community&room_id={room}",
+                             timeout=60)
+            step.fail(f"file_NOT_read:{label}",
+                      "the file's row or bytes did not reach the other member: the row crosses to "
+                      "the room like a message; the bytes are a room-DEK blob the reader pulls "
+                      "from a holder (holds_bytes claim, scoped fetch)",
+                      [a, b], _BODY, status=st, meta=body if isinstance(body, dict) else str(body)[:300])
+            raise
+    return {"verdict": "PASS", "steps": step.log, "values": {**base["values"], "ROOM_FILES": {
+        k: v[0] for k, v in written.items()}}}
 
 
 # ── two people peered directly, NO canonical (CIRISServer#808) ──────────────
@@ -1668,6 +1722,7 @@ def kex_unannounced_canonical(mesh: Mesh, args: Any) -> Record:
 
 
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
+    "room_file": room_file,
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
