@@ -477,6 +477,8 @@ pub mod replication_reconcile;
 /// Public so the integration test (`tests/retention_loop.rs`) can drive a single
 /// deterministic pass.
 pub mod retention_loop;
+/// A room's moderation decisions applied where its content is read (CC 4.5.5).
+pub mod room_moderation;
 pub mod safety;
 pub mod scorer;
 pub mod scrub;

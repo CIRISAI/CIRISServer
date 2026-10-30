@@ -2175,3 +2175,95 @@ async fn a_family_files_chunks_are_served_under_the_family() {
         ),
     }
 }
+
+/// **A moderator's flag holds a room file**: listed with its `moderation`, its
+/// bytes refused until the viewer reveals it, and it cannot be moved or copied
+/// out of the room while the flag stands (CC 4.5.5, `room_moderation`).
+#[tokio::test]
+async fn a_flagged_room_file_is_withheld_and_stays_in_the_room() {
+    use ciris_persist::federation::types::{attestation_type, cohort_scope};
+    let fx = fixture().await;
+    let community = fx.owners_community("flagged", &[]).await;
+    let id = fx
+        .upload_self(b"contested bytes", Some("c.txt"), "text/plain")
+        .await;
+    let (s, v) = fx
+        .post(
+            &format!("/v1/files/{id}/move"),
+            serde_json::json!({ "cohort": "community", "room_id": community }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().unwrap().to_owned();
+    let in_room = format!("cohort=community&room_id={community}");
+
+    // The owner founded the room, so they hold `moderate` zero-hop.
+    let owner = fx.owner_id.signer().await;
+    ciris_server::attest::emit(
+        &fx.engine,
+        ciris_server::attest::KeySigner::Local(&owner),
+        ciris_server::attest::Spec::new(
+            attestation_type::SCORES,
+            // FEDERATION until persist's duty-family carve-out (AV-84).
+            cohort_scope::FEDERATION,
+            serde_json::json!({
+                "dimension": "content_class:infohazard:v1",
+                "content_class": "infohazard",
+                "community_id": community,
+                "references_attestation_id": id,
+            }),
+        )
+        .about_all(
+            &fx.owner_id.key_id,
+            std::slice::from_ref(&fx.owner_id.key_id),
+        ),
+    )
+    .await
+    .expect("a moderator's flag is admitted");
+
+    let (s, drive) = fx.get(&format!("/v1/drive?{in_room}")).await;
+    assert_eq!(s, 200, "{drive}");
+    let entry = drive["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["attestation_id"] == id.as_str())
+        .cloned()
+        .expect("listed");
+    assert_eq!(entry["moderation"]["flag"], "infohazard", "{entry}");
+    assert_eq!(entry["moderation"]["withheld"], true, "{entry}");
+
+    for path in [
+        format!("/v1/files/{id}?{in_room}"),
+        format!("/v1/files/{id}?{in_room}&raw=1"),
+    ] {
+        let (s, v) = fx.get(&path).await;
+        assert_eq!(
+            (s, v["reason_id"].as_str()),
+            (403, Some("drive.withheld_by_moderation")),
+            "{path}: {v}"
+        );
+    }
+    let (s, v) = fx
+        .post(
+            &format!("/v1/files/{id}/move?{in_room}"),
+            serde_json::json!({ "cohort": "self", "keep_source": true }),
+        )
+        .await;
+    assert_eq!(
+        (s, v["reason_id"].as_str()),
+        (409, Some("drive.flagged_by_moderation")),
+        "a copy out of the room would shed the flag: {v}"
+    );
+
+    // Revealed — the viewer's own consent, by reference — it opens.
+    ciris_server::room_moderation::reveal(
+        &fx.engine,
+        &owner,
+        &id,
+        ciris_server::safety::infohazard::ContentFlag::Infohazard,
+    )
+    .await
+    .expect("reveal");
+    assert_eq!(fx.read_bytes(&id, &in_room).await, b"contested bytes");
+}

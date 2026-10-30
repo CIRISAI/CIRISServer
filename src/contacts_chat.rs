@@ -814,6 +814,7 @@ fn transcript_pending(
         status_reason_code: None,
         edits: None,
         attachment: None,
+        moderation: None,
         // A system note is no one's words: nothing to revise.
         viewer_ops: Vec::new(),
         body: Some(note.to_string()),
@@ -4169,7 +4170,16 @@ pub const UNOPENED_REASONS: &[&str] = &[
     "malformed_row",
     "not_text",
     "substrate",
+    UNOPENED_WITHHELD,
 ];
+
+/// A message a moderator of the room flagged, withheld until the viewer
+/// reveals it ([`crate::room_moderation`]). The server's word, not edge's: the
+/// body opened fine; the room decided this viewer must choose to see it.
+const UNOPENED_WITHHELD: &str = "withheld_by_moderation";
+
+/// How far back an edit chain is walked for a flag on an earlier version.
+const MAX_EDIT_CHAIN: usize = 32;
 
 /// A row still pointing at unfetched blob-store content after the read: edge's
 /// own word for "not held here yet".
@@ -4224,6 +4234,13 @@ struct ChatMessage {
     /// edit keeps it.
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment: Option<String>,
+    /// **What the room decided about this message** (CC 4.5.5): present once a
+    /// holder of the room's `moderate` duty flagged it (or an earlier version
+    /// of it). While `withheld`, `body` and `attachment` are absent and
+    /// `unopened_reason` is `withheld_by_moderation`;
+    /// `POST /v1/chat/{room}/items/{id}/reveal` is the viewer's consent to see it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moderation: Option<crate::room_moderation::ModerationView>,
     /// **What THIS viewer may do to THIS row**: any of `supersede`, `withdraw`,
     /// `recant`, as the node judges it. Only the author, only while the row is
     /// live, and never a delegate (authoring is never delegable). Always
@@ -4962,6 +4979,7 @@ async fn collect_messages(
     // The roster's roles, from the membership rows already read above. No extra
     // query: this is the same list the transcript is anchored on.
     let mut duty_cache: HashMap<String, Vec<&'static str>> = HashMap::new();
+    let mut moderation_duties = crate::room_moderation::DutyCache::default();
     let roles: HashMap<&str, Option<String>> = members
         .iter()
         .map(|m| (m.key_id.as_str(), m.role.clone()))
@@ -5027,7 +5045,40 @@ async fn collect_messages(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let edits = opened.edits.clone();
-        let attachment = opened.attachment.clone();
+        let mut attachment = opened.attachment.clone();
+        // THE ROOM'S DECISION (CC 4.5.5): a moderator's flag on this row — or
+        // on any earlier version of it, so an edit does not shed a flag —
+        // withholds the body from a viewer who has not chosen to see it.
+        let moderation = {
+            let mut chain = vec![row.attestation_id.clone()];
+            let mut prior = edits.clone();
+            while let Some(id) = prior.take() {
+                if chain.len() >= MAX_EDIT_CHAIN || chain.contains(&id) {
+                    break;
+                }
+                prior = held
+                    .get(id.as_str())
+                    .and_then(|r| ciris_edge::chat::ChatMessage::from_row(r, community_id))
+                    .and_then(|m| m.edits);
+                chain.push(id);
+            }
+            let mut found = None;
+            for id in &chain {
+                found = crate::room_moderation::view_of(
+                    &st.engine,
+                    &mut moderation_duties,
+                    community_id,
+                    id,
+                    &opened.author_key_id,
+                    &owner.key_id,
+                )
+                .await?;
+                if found.is_some() {
+                    break;
+                }
+            }
+            found
+        };
         let viewer_ops: Vec<&'static str> =
             if may_author && status == "live" && row.attesting_key_id == owner.key_id {
                 REVISION_OPS.to_vec()
@@ -5081,6 +5132,22 @@ async fn collect_messages(
                 ),
             ),
         };
+        let (body, unopened_reason, unopened_detail) = match &moderation {
+            Some(m) if m.withheld => {
+                // The attachment goes with the words: a withheld message does
+                // not point at its file until the viewer reveals it.
+                attachment = None;
+                (
+                    None,
+                    Some(UNOPENED_WITHHELD),
+                    Some(format!(
+                        "a moderator of this room flagged it as {}; reveal to view",
+                        m.flag.unwrap_or("reported")
+                    )),
+                )
+            }
+            _ => (body, unopened_reason, unopened_detail),
+        };
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),
@@ -5100,6 +5167,7 @@ async fn collect_messages(
             status_reason_code,
             edits,
             attachment,
+            moderation,
             viewer_ops,
             body,
             unopened_reason,
@@ -6114,11 +6182,159 @@ pub fn router_with_driver(
             "/v1/chat/{community_id}/messages/{attestation_id}/{action}",
             axum::routing::get(message_history).post(revise_message),
         )
+        // The room's moderation of one item — a message or a room file — by
+        // its attestation id (CC 4.5.5; `room_moderation`). `{action}` is
+        // `reveal`: the viewer's own consent to see what a moderator flagged.
+        .route(
+            "/v1/chat/{community_id}/items/{attestation_id}/{action}",
+            axum::routing::post(moderate_item),
+        )
         // CIRISServer#594 — N-member rooms and affiliations: the same state,
         // the same owner gate, the same signer.
         .merge(crate::communities::routes())
         .with_state(state.clone());
     (router, PairRoomDriver(state))
+}
+
+/// `POST /v1/chat/{room}/items/{id}/reveal` — **the viewer chooses to see
+/// what a moderator withheld.** `{id}` is the flagged item — a message or a
+/// room file; a message's `moderation.item_attestation_id` names it when the
+/// flag sits on an earlier version. The consent is the viewer's own signed act,
+/// kept on their devices ([`crate::room_moderation::reveal`]), so a delegate
+/// cannot give it for them. Answers the item's moderation as it now stands.
+async fn moderate_item(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+) -> Response {
+    if action != "reveal" {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "moderation.unknown_action",
+            "an item in a room is revealed with reveal",
+        );
+    }
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatAuthor,
+        "moderation.delegate_may_not_reveal",
+    ) {
+        return resp;
+    }
+    if let Err(r) = require_member(&st, &owner, &community_id).await {
+        return r;
+    }
+    // THE ITEM, from this room: a message (`ChatMessage::from_row` reads its
+    // room) or a file (`files::belongs_to`). Its author is whom the room's
+    // moderation rows are about.
+    let room = ciris_edge::scope_room::ScopeRoom::community(&community_id);
+    let author = match st
+        .engine
+        .federation_directory()
+        .get_attestation(&attestation_id)
+        .await
+    {
+        Ok(Some(row))
+            if ciris_edge::chat::ChatMessage::from_row(&row, &community_id).is_some()
+                || ciris_edge::files::belongs_to(&room, &row).is_some() =>
+        {
+            row.attesting_key_id
+        }
+        Ok(_) => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "moderation.item_not_in_room",
+                "that is not a message or a file in this room",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read {attestation_id}: {e}"),
+            )
+        }
+    };
+    let mut duties = crate::room_moderation::DutyCache::default();
+    let view = match crate::room_moderation::view_of(
+        &st.engine,
+        &mut duties,
+        &community_id,
+        &attestation_id,
+        &author,
+        &owner.key_id,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read the room's moderation of {attestation_id}: {e}"),
+            )
+        }
+    };
+    let class = match view.as_ref().and_then(|v| v.flag) {
+        Some(c) => c,
+        None => {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.not_flagged",
+                "no moderator of this room has flagged that item — there is nothing to reveal",
+            )
+        }
+    };
+    if view.as_ref().is_some_and(|v| v.revealed) {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "attestation_id": attestation_id, "moderation": view })),
+        )
+            .into_response();
+    }
+    let pen = match membership_pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let flag = crate::safety::infohazard::ContentFlag::from_token(class)
+        .unwrap_or(crate::safety::infohazard::ContentFlag::Reported);
+    let consent_attestation_id =
+        match crate::room_moderation::reveal(&st.engine, pen.local_signer(), &attestation_id, flag)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "moderation.reveal_failed",
+                    format!("record the consent to view: {e}"),
+                )
+            }
+        };
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut duties,
+        &community_id,
+        &attestation_id,
+        &author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "consent_attestation_id": consent_attestation_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -6369,6 +6585,10 @@ mod tests {
             assert_eq!(detail, d(), "the detail is the substrate's own sentence");
             seen.insert(token);
         }
+        // Edge's arms, plus the one word that is the server's own: a body that
+        // opened and the room's moderator withheld (`room_moderation`).
+        assert!(!seen.contains(UNOPENED_WITHHELD));
+        seen.insert(UNOPENED_WITHHELD);
         assert_eq!(
             seen.len(),
             UNOPENED_REASONS.len(),

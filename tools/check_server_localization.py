@@ -914,6 +914,12 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "chat.reason_invalid",
     "chat.unknown_revision_op",
     "chat.attachment_not_in_room",
+    "drive.flagged_by_moderation",
+    "drive.withheld_by_moderation",
+    "moderation.item_not_in_room",
+    "moderation.not_flagged",
+    "moderation.reveal_failed",
+    "moderation.unknown_action",
     # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
     # owner's device signing it, and the node applying it
     # (src/owner_requests.rs). Queued for the client bundle with their English.
