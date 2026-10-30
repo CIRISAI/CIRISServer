@@ -4187,6 +4187,12 @@ async fn setup_peer_replication(
             crate::receive_axis::pull_owner_testimony(&engine_for_pull, &node).await;
         });
     }
+    // Whom this node resolves its own owner to, said once at boot (and again
+    // after every announce) — "owner unresolved" further down names its key.
+    let engine_for_binding = Arc::clone(engine);
+    tokio::spawn(async move {
+        crate::contact_trace::owner_binding(&engine_for_binding, "boot").await;
+    });
     started
 }
 
@@ -4946,15 +4952,17 @@ pub(crate) async fn start_replication_runtime(
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
         // WHOSE CONSENT THE SEND SET READS (CIRISEdge fix/consent-send-set-agent).
-        // Consent is the AGENT's: the owner's `consent:replication` grant names
-        // the agent (`for_key_id`), not the node. Read by the wire identity
-        // above, a split home's send set was empty and no `trace:*` row ever
-        // left it (agent 2.18.0 harness, 2026-10-30). Empty where the agent and
-        // the node are one key — edge falls back to `local_key_id`.
+        // On a split home BOTH keys, never one. The owner's trace grant names
+        // the AGENT (`for_key_id`): read by the node alone, the send set was
+        // empty and no `trace:*` row left (agent 2.18.0 harness, 2026-10-30).
+        // A contact's grant names the NODE: read by the agent alone, the
+        // contact plane would lose the peer it just accepted (phone↔desktop,
+        // 2026-10-30). The union is what each grant names. Empty where the two
+        // are one key — edge falls back to `local_key_id`.
         consent_subject_key_ids: if wire == node_key_id {
             Vec::new()
         } else {
-            vec![node_key_id.to_owned()]
+            vec![node_key_id.to_owned(), wire.to_owned()]
         },
         // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
         // that only make sense together, spelled as one type so the half-wired

@@ -2258,7 +2258,20 @@ pub(crate) async fn contact_requests_split(
                 entry["ignore_id"] = serde_json::json!(ignore_id);
                 ignored.push(entry);
             }
-            None => pending.push(entry),
+            None => {
+                if let Some(from) = entry["requester_key_id"].as_str() {
+                    crate::contact_trace::contact_once(
+                        engine,
+                        "request-seen",
+                        owner_key_id,
+                        from,
+                        Some(&grant),
+                        Some(false),
+                    )
+                    .await;
+                }
+                pending.push(entry);
+            }
         }
     }
     Ok((pending, ignored))
@@ -2679,6 +2692,19 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
                 "mutual".into(),
                 serde_json::json!(inbound.contains(&key_id)),
             );
+            if inbound.contains(&key_id) {
+                crate::contact_trace::contact_once(
+                    &st.engine,
+                    "mutual",
+                    &owner.key_id,
+                    &key_id,
+                    receipts
+                        .get(&key_id)
+                        .and_then(|g| g["attestation_id"].as_str()),
+                    Some(true),
+                )
+                .await;
+            }
             // CIRISServer#616 — the grant's envelope, per row: the receipt.
             obj.insert(
                 "grant".into(),
@@ -3203,6 +3229,22 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         }
     };
     let chat_community_id = pair_community_key_id(&owner.key_id, &key_id);
+    // Add, or ACCEPT: the same route, told apart by whether their grant to us
+    // is already held (`inbound_chat_grants`) — which is also what makes the
+    // contact mutual on this side.
+    let theirs_held = inbound_chat_grants(&st.engine, &owner.key_id, &owner.node_key_id)
+        .await
+        .map(|g| g.iter().any(|(k, _)| *k == key_id))
+        .unwrap_or(false);
+    crate::contact_trace::contact(
+        &st.engine,
+        if theirs_held { "accept" } else { "add" },
+        &owner.key_id,
+        &key_id,
+        Some(&grant.attestation_id),
+        Some(theirs_held),
+    )
+    .await;
     (
         StatusCode::OK,
         Json(AddContactResponse {
@@ -3653,6 +3695,25 @@ async fn start_chat(
             "chat.self_chat",
             "refusing to open a two-member chat with yourself",
         );
+    }
+    // What a pair room is made of, said once when one is asked for — so a room
+    // that never keys names the missing fact here, not three stages later.
+    {
+        let theirs_held = inbound_chat_grants(&st.engine, &owner.key_id, &owner.node_key_id)
+            .await
+            .map(|g| g.iter().any(|(k, _)| *k == key_id))
+            .unwrap_or(false);
+        let path = DiscoveryStanding::of(&st.engine, &owner.node_key_id, &key_id)
+            .await
+            .hint();
+        crate::contact_trace::chat_readiness(
+            &st.engine,
+            &owner.key_id,
+            &key_id,
+            theirs_held,
+            path.as_deref(),
+        )
+        .await;
     }
     let directory = st.engine.federation_directory();
 

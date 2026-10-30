@@ -139,6 +139,8 @@ mod compose;
 /// a `chat:message:v1` `scores` attestation placed at `cohort_scope: community`.
 /// The read gate is persist's own §4.3 predicate (`CallerScope::admits`), so a
 /// non-member is refused even when they own the node.
+/// One line per contact transition, owner-binding resolution and chat readiness.
+pub mod contact_trace;
 pub mod contacts_chat;
 pub mod mls_state;
 pub mod owner_requests;
