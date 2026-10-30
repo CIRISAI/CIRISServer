@@ -757,8 +757,26 @@ async fn move_reseals_at_the_target_room() {
         .await;
     assert_eq!(s, 200, "{drive}");
     assert_eq!(drive["entries"].as_array().unwrap().len(), 2, "{drive}");
+    // The room's founder holds every §11.10 duty zero-hop, and the listing
+    // says so — the client's moderation actions key on it.
+    let duties: Vec<&str> = drive["viewer_duties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a community room's listing names viewer_duties: {drive}"))
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        ["moderate", "takedown", "review"]
+            .iter()
+            .all(|d| duties.contains(d)),
+        "{drive}"
+    );
     let (s, all) = fx.get("/v1/drive").await;
     assert_eq!(s, 200, "{all}");
+    assert!(
+        all.get("viewer_duties").is_none(),
+        "duties are per room; a listing spanning rooms has no one answer: {all}"
+    );
     assert!(
         all["entries"]
             .as_array()

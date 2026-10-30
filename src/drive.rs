@@ -2410,9 +2410,7 @@ async fn read_drive(
     }
     // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
     // reporting one would name whichever happened to be first.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
+    let mut body = serde_json::json!({
             "rooms": rooms
                 .iter()
                 .map(|(_, r)| serde_json::json!({
@@ -2425,9 +2423,17 @@ async fn read_drive(
             // `null` means the drive is exhausted; anything else is passed back
             // as `after` for the next page.
             "resume": resume.as_ref().map(encode_cursor),
-        })),
-    )
-        .into_response()
+    });
+    // One community room named → what this viewer may do to its files, from
+    // the same §11.10 walk the chat transcript uses. Absent on any other
+    // listing: duties are per room, and a drive spanning several has no one
+    // answer.
+    if let (Some("community"), Some(room_id)) = (q.cohort.as_deref(), q.room_id.as_deref()) {
+        body["viewer_duties"] = serde_json::json!(
+            crate::contacts_chat::viewer_duties(&*dir, &owner.key_id, room_id).await
+        );
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// `GET /v1/files/{attestation_id}/meta` — everything about a file except its

@@ -3148,6 +3148,18 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
         "all three CC 4.5.x duties, since the founder is in the authority set \
          for each: {m}"
     );
+    // The VIEWER's duties, top-level, from the same walk: the client offers
+    // the room's moderation actions exactly when the write would be admitted.
+    let viewer: Vec<&str> = json["viewer_duties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the transcript names viewer_duties: {json}"))
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        viewer, held,
+        "the founder viewing holds what the founder authoring holds"
+    );
 }
 
 /// **A room that has not finished starting says so IN THE TRANSCRIPT.**

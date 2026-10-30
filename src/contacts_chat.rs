@@ -525,6 +525,20 @@ async fn duties_of(
     held
 }
 
+/// **What the viewer may do to this room's content** — `viewer_duties` on the
+/// transcript and on the room's drive listing (client ask, CSD-091/CSD-110).
+/// The same walk as each author's `author_duties` and as persist's §11.10 duty
+/// gate, so a client offers the hamburger's moderation actions exactly when
+/// the write would be admitted. Empty = not a duty holder; a node that predates
+/// the field leaves it absent.
+pub(crate) async fn viewer_duties(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    who: &str,
+    community_id: &str,
+) -> Vec<&'static str> {
+    duties_of(directory, &mut HashMap::new(), who, community_id).await
+}
+
 /// Turn edge's [`LadderStall`](ciris_edge::contact::LadderStall) into a refusal.
 ///
 /// The stall vocabulary is deliberately not a wrapper over mechanical errors —
@@ -5362,6 +5376,12 @@ async fn list_messages(
                     // (measured 2026-09-04: 150 s of polling a ready room).
                     "ready": true,
                     "converges_on_its_own": false,
+                    "viewer_duties": viewer_duties(
+                        &*st.engine.federation_directory(),
+                        &owner.key_id,
+                        &community_id,
+                    )
+                    .await,
                 })),
             )
                 .into_response()
@@ -5437,6 +5457,12 @@ async fn list_room_messages(
                     "ready": true,
                     "converges_on_its_own": handshake.converges_on_its_own(),
                     "handshake": handshake_id,
+                    "viewer_duties": viewer_duties(
+                        &*st.engine.federation_directory(),
+                        &owner.key_id,
+                        community_id,
+                    )
+                    .await,
                 })),
             )
                 .into_response()
