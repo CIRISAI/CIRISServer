@@ -244,6 +244,33 @@ ROOM FILE — a file in the pair room reaches the other person (CSD-107 for room
                       "from a holder (holds_bytes claim, scoped fetch)",
                       [a, b], _BODY, status=st, meta=body if isinstance(body, dict) else str(body)[:300])
             raise
+    # THE FILE AS A MESSAGE: alice sends the small file into the conversation;
+    # bob's transcript carries it by id, and the node says it takes attachments.
+    small_att = written["small"][0]
+    sent = a.must("POST", f"/v1/chat/{room}/messages",
+                  {"body": "see attached", "attachment_attestation_id": small_att}, timeout=120)
+    step("attachment:sent", attestation_id=sent.get("attestation_id"), file=small_att)
+
+    def attached() -> Optional[Dict[str, Any]]:
+        st, body = b.api("GET", f"/v1/chat/{room}/messages", timeout=60)
+        if st != 200 or not isinstance(body, dict) or body.get("accepts_attachments") is not True:
+            return None
+        for m in body.get("messages", []):
+            if m.get("attestation_id") == sent.get("attestation_id") and m.get("attachment") == small_att:
+                return m
+        return None
+    try:
+        got = wait_for("alice's attachment in bob's transcript", attached, args.arrive_wait, every=3)
+        step("attachment:read", caption=got.get("body"),
+             proves="a message carrying a room file reaches the other member, naming the file")
+    except MeshError:
+        st, body = b.api("GET", f"/v1/chat/{room}/messages", timeout=60)
+        step.fail("attachment_NOT_read",
+                  "the message row crosses like any message; `attachment` is edge's "
+                  "ChatMessage.attachment (attachment_attestation_id on the row)",
+                  [a, b], _BODY, status=st,
+                  accepts_attachments=body.get("accepts_attachments") if isinstance(body, dict) else None)
+        raise
     return {"verdict": "PASS", "steps": step.log, "values": {**base["values"], "ROOM_FILES": {
         k: v[0] for k, v in written.items()}}}
 
