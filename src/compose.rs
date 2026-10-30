@@ -4945,6 +4945,17 @@ pub(crate) async fn start_replication_runtime(
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
+        // WHOSE CONSENT THE SEND SET READS (CIRISEdge fix/consent-send-set-agent).
+        // Consent is the AGENT's: the owner's `consent:replication` grant names
+        // the agent (`for_key_id`), not the node. Read by the wire identity
+        // above, a split home's send set was empty and no `trace:*` row ever
+        // left it (agent 2.18.0 harness, 2026-10-30). Empty where the agent and
+        // the node are one key — edge falls back to `local_key_id`.
+        consent_subject_key_ids: if wire == node_key_id {
+            Vec::new()
+        } else {
+            vec![node_key_id.to_owned()]
+        },
         // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
         // that only make sense together, spelled as one type so the half-wired
         // node cannot be built — `pull_sink ⇒ engine`, `revocations ⇒ engine`.
