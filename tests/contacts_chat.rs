@@ -4396,3 +4396,63 @@ async fn a_request_lapses_with_its_grants_window() {
         "a lapsed grant is not a request"
     );
 }
+
+/// **An attachment is a file already in the room.** The send names it by id;
+/// anything that is not a file row at this room's scope — an id nobody wrote,
+/// or a row that is in the room but is not a file (a message) — is refused by
+/// name before a row is built, and a message without one carries no
+/// `attachment` at all.
+#[tokio::test]
+async fn an_attachment_must_be_a_file_in_the_room() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _m) = open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let send = |body: serde_json::Value| {
+        let client = client.clone();
+        let url = format!("{base}/v1/chat/{community_id}/messages");
+        let owner = owner.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .bearer_auth(&owner)
+                .json(&body)
+                .send()
+                .await
+                .expect("send");
+            let status = resp.status().as_u16();
+            (
+                status,
+                resp.json::<serde_json::Value>().await.unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, sent) = send(serde_json::json!({ "body": "plain words" })).await;
+    assert_eq!(status, 200, "{sent}");
+    let message_id = sent["attestation_id"].as_str().expect("id").to_owned();
+    assert!(
+        sent["message"].get("attachment").is_none(),
+        "a message with no file carries no attachment field: {sent}"
+    );
+
+    for id in ["no-such-row", message_id.as_str()] {
+        let (status, out) = send(serde_json::json!({
+            "body": "see attached",
+            "attachment_attestation_id": id,
+        }))
+        .await;
+        assert_eq!(
+            (status, out["reason_id"].as_str()),
+            (409, Some("chat.attachment_not_in_room")),
+            "{id}: {out}"
+        );
+    }
+
+    // No caption is fine WITH a file; without one, it is still an empty message.
+    let (status, out) = send(serde_json::json!({ "body": "" })).await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (400, Some("chat.empty_message")),
+        "{out}"
+    );
+}

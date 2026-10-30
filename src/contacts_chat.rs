@@ -813,6 +813,7 @@ fn transcript_pending(
         status_attestation_id: None,
         status_reason_code: None,
         edits: None,
+        attachment: None,
         // A system note is no one's words: nothing to revise.
         viewer_ops: Vec::new(),
         body: Some(note.to_string()),
@@ -4212,6 +4213,13 @@ struct ChatMessage {
     /// head of an edit chain only; `GET …/messages/{id}/history` walks it.
     #[serde(skip_serializing_if = "Option::is_none")]
     edits: Option<String>,
+    /// The room file this message carries, by its attestation id
+    /// (`attachment_attestation_id` on the send; edge's
+    /// `chat_message_attachment_in`). The body is its caption. Fetch it from
+    /// the room's drive (`GET /v1/files/{id}?cohort=community&room_id=…`); an
+    /// edit keeps it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment: Option<String>,
     /// **What THIS viewer may do to THIS row**: any of `supersede`, `withdraw`,
     /// `recant`, as the node judges it. Only the author, only while the row is
     /// live, and never a delegate (authoring is never delegable). Always
@@ -4397,7 +4405,12 @@ fn fold_status<'a>(composers: Option<&'a Vec<&'a Attestation>>) -> (&'static str
 
 #[derive(Debug, Deserialize)]
 struct SendMessageRequest {
+    #[serde(default)]
     body: String,
+    /// A file already in this room, sent as a message; `body` is its caption
+    /// and may be empty.
+    #[serde(default)]
+    attachment_attestation_id: Option<String>,
     #[serde(default)]
     content_type: Option<String>,
 }
@@ -4512,7 +4525,7 @@ async fn send_message(
             )
         }
     };
-    if req.body.trim().is_empty() {
+    if req.body.trim().is_empty() && req.attachment_attestation_id.is_none() {
         return refuse(
             StatusCode::BAD_REQUEST,
             "chat.empty_message",
@@ -4529,6 +4542,36 @@ async fn send_message(
             ),
         );
     }
+    // THE FILE MUST ALREADY BE IN THIS ROOM: every member who can read the
+    // message can then fetch it, under the room's own grants. A file in some
+    // other room (or the sender's own drive) is refused by name — share it
+    // into the room first (`POST /v1/files/{id}/move`).
+    let attachment = match req.attachment_attestation_id.as_deref() {
+        None => None,
+        Some(id) => {
+            let room = ciris_edge::scope_room::ScopeRoom::community(&community_id);
+            match st.engine.federation_directory().get_attestation(id).await {
+                Ok(Some(row)) if ciris_edge::files::belongs_to(&room, &row).is_some() => Some(row),
+                Ok(_) => {
+                    return refuse(
+                        StatusCode::CONFLICT,
+                        "chat.attachment_not_in_room",
+                        format!(
+                            "{id} is not a file in this room — share it into the room first, \
+                             then send it"
+                        ),
+                    )
+                }
+                Err(e) => {
+                    return refuse(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "chat.store_unavailable",
+                        format!("read the attached file {id}: {e:#}"),
+                    )
+                }
+            }
+        }
+    };
     let content_type = req
         .content_type
         .as_deref()
@@ -4678,21 +4721,36 @@ async fn send_message(
     // asked for, and the seal wraps to the room's fold. For a pair room the id
     // is the derived pair id, so this is byte-for-byte the row the pair-form
     // builder produced.
-    let (row, sealed) = match ciris_edge::chat::chat_message_attestation_in(
-        author,
-        &community_id,
-        &req.body,
-        chrono::Utc::now(),
-        &content_store,
-    )
-    .await
-    {
+    let built = match attachment.as_ref() {
+        None => {
+            ciris_edge::chat::chat_message_attestation_in(
+                author,
+                &community_id,
+                &req.body,
+                chrono::Utc::now(),
+                &content_store,
+            )
+            .await
+        }
+        Some(file) => {
+            ciris_edge::chat::chat_message_attachment_in(
+                author,
+                &community_id,
+                file,
+                Some(req.body.as_str()).filter(|b| !b.trim().is_empty()),
+                chrono::Utc::now(),
+                &content_store,
+            )
+            .await
+        }
+    };
+    let (row, sealed) = match built {
         Ok(r) => r,
         Err(e) => {
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "chat.emit_failed",
-                format!("chat_message_attestation_in: {e}"),
+                format!("build the message row: {e}"),
             )
         }
     };
@@ -4965,6 +5023,7 @@ async fn collect_messages(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let edits = opened.edits.clone();
+        let attachment = opened.attachment.clone();
         let viewer_ops: Vec<&'static str> =
             if may_author && status == "live" && row.attesting_key_id == owner.key_id {
                 REVISION_OPS.to_vec()
@@ -5036,6 +5095,7 @@ async fn collect_messages(
             status_attestation_id,
             status_reason_code,
             edits,
+            attachment,
             viewer_ops,
             body,
             unopened_reason,
