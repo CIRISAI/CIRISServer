@@ -845,6 +845,10 @@ fn transcript_pending(
             // waiting states resolve when the peer's row replicates, and a human
             // pressing retry changes nothing about that.
             "converges_on_its_own": state.converges_on_its_own(),
+            // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+            // on a send. An older one ignores the field and drops the file, so a
+            // client offers "Attach" only where this is `true`.
+            "accepts_attachments": true,
             // DEVELOPER text, not a localized string: which side of the wire is
             // short and what to do about it. `null` when the wait is only time.
             "hint": hint,
@@ -5436,6 +5440,10 @@ async fn list_messages(
                     // (measured 2026-09-04: 150 s of polling a ready room).
                     "ready": true,
                     "converges_on_its_own": false,
+                    // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+                    // on a send. An older one ignores the field and drops the file, so a
+                    // client offers "Attach" only where this is `true`.
+                    "accepts_attachments": true,
                     "viewer_duties": viewer_duties(
                         &*st.engine.federation_directory(),
                         &owner.key_id,
@@ -5516,6 +5524,10 @@ async fn list_room_messages(
                     // the fold named at seal time.
                     "ready": true,
                     "converges_on_its_own": handshake.converges_on_its_own(),
+                    // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+                    // on a send. An older one ignores the field and drops the file, so a
+                    // client offers "Attach" only where this is `true`.
+                    "accepts_attachments": true,
                     "handshake": handshake_id,
                     "viewer_duties": viewer_duties(
                         &*st.engine.federation_directory(),

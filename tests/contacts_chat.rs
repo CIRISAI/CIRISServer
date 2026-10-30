@@ -3102,6 +3102,10 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
     // waited out its whole budget on a room that was already done.
     assert_eq!(json["ready"], true, "a keyed room states ready: {json}");
     assert_eq!(json["converges_on_its_own"], false, "{json}");
+    assert_eq!(
+        json["accepts_attachments"], true,
+        "the send side's gate: {json}"
+    );
     let m = &json["messages"].as_array().expect("messages")[0];
 
     assert_eq!(
