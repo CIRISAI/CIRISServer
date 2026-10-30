@@ -1504,7 +1504,9 @@ pub fn author_consent_embedded(
         attestation_id = %grant.attestation_id,
         freshly_emitted = grant.freshly_emitted,
         prefixes = ?prefixes,
-        owner_claimed = !testing,
+        // What this flag IS: `CIRIS_TESTING_MODE` was not set. It used to log as
+        // `owner_claimed`, which it never checked — a node with no owner logged true.
+        production_mode = !testing,
         analyze_grant = ?analyze_id,
         "consent:replication authored from the embedded host (the fold's consent path)"
     );
