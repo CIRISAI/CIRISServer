@@ -1813,6 +1813,10 @@ pub struct TracingInitStatus {
     pub log_path: Option<String>,
 }
 
+/// The Python-logging sink's constructor, registered by the Python module at
+/// import (`py_log_sink`). Empty in the standalone binary.
+static PYTHON_SINK: std::sync::OnceLock<fn() -> ErasedFileLayer> = std::sync::OnceLock::new();
+
 /// The file sink slot, kept hot-swappable behind a `reload` handle so LATER
 /// init calls can retrofit/replace the file layer on the live subscriber.
 type ErasedFileLayer =
@@ -1849,21 +1853,22 @@ fn install_or_reattach_tracing(
     // the host's Python `logging` instead of writing its own dated file, so
     // the host's `latest.log` carries both and one rotation bounds both.
     let build_file_layer = |dir: Option<&std::path::Path>| -> Option<ErasedFileLayer> {
-        #[cfg(feature = "python")]
+        // Through the factory the Python module registers at import — never a
+        // direct reference: the standalone binary is built with the `python`
+        // feature too, and a static path from `main` to pyo3's calls leaves it
+        // with undefined `Py*` symbols at link (it has no libpython).
         if python_logging {
-            return Some(
-                Box::new(crate::py_log_sink::layer::<tracing_subscriber::Registry>())
-                    as ErasedFileLayer,
-            );
+            if let Some(make) = PYTHON_SINK.get() {
+                return Some(make());
+            }
         }
-        let _ = python_logging;
         dir.and_then(|d| {
             sync_file_layer::<tracing_subscriber::Registry>(d)
                 .map(|l| Box::new(l) as ErasedFileLayer)
         })
     };
     // The python sink has no file of its own to probe.
-    let log_dir = if python_logging && cfg!(feature = "python") {
+    let log_dir = if python_logging && PYTHON_SINK.get().is_some() {
         None
     } else {
         log_dir
@@ -3638,6 +3643,10 @@ mod python {
         m.add_function(wrap_pyfunction!(py_default_attestation_prefixes, m)?)?;
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(author_community_trust_py, m)?)?;
+        let _ = crate::PYTHON_SINK.set(|| {
+            Box::new(crate::py_log_sink::layer::<tracing_subscriber::Registry>())
+                as crate::ErasedFileLayer
+        });
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
         m.add_function(wrap_pyfunction!(py_set_process_label, m)?)?;
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
