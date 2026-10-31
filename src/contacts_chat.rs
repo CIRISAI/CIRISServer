@@ -7247,6 +7247,37 @@ pub(crate) mod pending_contacts {
                 // the peers we have for its key, occurrence and transport
                 // destination (public subject planes), so the grant can travel.
                 super::direct_contact(&st, key_id, &nodes, true, "resolved").await;
+                // RE-AIM THE GRANT AT THE NODE. A contact added before their
+                // owner-binding landed got the person-subject grant (#472's
+                // recorded intent): edge withholds that row from the node it
+                // must reach — "the recipient is not in the row's audience" —
+                // every round, and the request never arrives (cross-NAT run
+                // 41170418825, 2026-10-31: 180 s, home never saw it). Now that
+                // the node is known, ensure the grant names it.
+                match crate::peer::ensure_contact_consent_covers(
+                    &st.engine,
+                    &owner.node_key_id,
+                    key_id,
+                    &crate::peer::default_attestation_prefixes(),
+                )
+                .await
+                {
+                    Ok((grant, subjects)) => {
+                        crate::contact_trace::contact(
+                            &st.engine,
+                            "re-aimed",
+                            &owner.key_id,
+                            key_id,
+                            Some(&grant.attestation_id),
+                            None,
+                            &subjects,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::warn!(owner = %owner.key_id, key_id, error = %format!("{e:#}"), "contacts: the resolved contact's grant could not be re-aimed at their node")
+                    }
+                }
                 for node in &nodes {
                     let _ = pull_person_records(&st, &owner, node).await;
                 }
