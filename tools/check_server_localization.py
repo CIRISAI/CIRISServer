@@ -908,11 +908,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # CHAT MESSAGE REVISIONS (CIRISEdge#917, CIRISPersist#1155): the author's
     # supersede / withdraw / recant routes and their history. Queued for the
     # client bundle with their English (CIRISClient chat-revisions card).
-    "chat.message_not_found",
-    "chat.message_not_live",
-    "chat.not_author",
-    "chat.reason_invalid",
-    "chat.unknown_revision_op",
     "chat.attachment_not_in_room",
     "drive.flagged_by_moderation",
     "drive.withheld_by_moderation",
@@ -923,14 +918,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
     # owner's device signing it, and the node applying it
     # (src/owner_requests.rs). Queued for the client bundle with their English.
-    "owner_requests.bad_request",
-    "owner_requests.directory",
-    "owner_requests.no_identity",
-    "owner_requests.not_the_owner",
-    "owner_requests.proof_refused",
-    "owner_requests.signer_unavailable",
-    "owner_requests.unowned",
-    "owner_requests.wrong_node",
 )
 
 
