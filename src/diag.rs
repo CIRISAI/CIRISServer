@@ -107,6 +107,13 @@ pub const ROUTE_READS: &str = "/v1/node/diagnostics/reads";
 /// naming the door is the probe that would have (FSD/UNIFIED_TELEMETRY.md).
 const HOT_READ_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
+/// …or served at least this many calls. persist counts the bytes of the rows a
+/// door RETURNS; a scan that reads the whole table and returns a handful (a
+/// `json_extract` filter, the 2026-10-30 suspect) decodes little and would
+/// never cross the bytes floor — but it is called in a loop, and the call
+/// count is what a loop cannot hide.
+const HOT_READ_FLOOR_CALLS: u64 = 6_000;
+
 /// Log the persist doors that read the most since the last call, when the top
 /// one crossed [`HOT_READ_FLOOR_BYTES`]. Called from the trimmer's period, so
 /// the window is that period. Read-only: a snapshot of relaxed counters.
@@ -140,16 +147,24 @@ pub fn log_hot_reads() {
             )
         })
         .collect();
-    deltas.sort_by_key(|x| std::cmp::Reverse(x.4));
-    if deltas.first().is_some_and(|x| x.4 >= HOT_READ_FLOOR_BYTES) {
-        let top: Vec<String> = deltas
-            .iter()
+    let render = |v: &[(&str, &str, u64, u64, u64)]| -> String {
+        v.iter()
             .take(3)
             .map(|(b, d, r, n, by)| format!("{d}[{b}] reads={r} rows={n} bytes={by}"))
-            .collect();
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    deltas.sort_by_key(|x| std::cmp::Reverse(x.4));
+    let by_bytes = render(&deltas);
+    let bytes_hot = deltas.first().is_some_and(|x| x.4 >= HOT_READ_FLOOR_BYTES);
+    deltas.sort_by_key(|x| std::cmp::Reverse(x.2));
+    let by_calls = render(&deltas);
+    let calls_hot = deltas.first().is_some_and(|x| x.2 >= HOT_READ_FLOOR_CALLS);
+    if bytes_hot || calls_hot {
         tracing::warn!(
-            top = %top.join("; "),
-            "PERSIST READS HOT: the doors that decoded the most envelope bytes since the last \
+            top_by_bytes = %by_bytes,
+            top_by_calls = %by_calls,
+            "PERSIST READS HOT: the persist doors that read the most (bytes decoded, and calls) since the last \
              period — a sustained line here names the query behind a CPU or I/O spin"
         );
     }
