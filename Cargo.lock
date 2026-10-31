@@ -581,7 +581,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1059,7 +1059,7 @@ dependencies = [
 [[package]]
 name = "ciris-edge"
 version = "43.4.0"
-source = "git+https://github.com/CIRISAI/CIRISEdge?rev=74635d1e44ef5966e44817599b1bc62d2fd64f39#74635d1e44ef5966e44817599b1bc62d2fd64f39"
+source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v43.4.0#53127cb10378259e76d09b666aebeabf51f2cec4"
 dependencies = [
  "async-trait",
  "axum",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "ciris-server"
-version = "0.5.242"
+version = "0.5.243"
 dependencies = [
  "anyhow",
  "async-trait",
