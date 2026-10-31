@@ -441,8 +441,8 @@ jobs:
 
   macos:
     name: wheel macos-${{ matrix.target }}
-    runs-on: macos-14
-    # KNOWN LIMITATION (macos x86_64 leg): the macos-14 runner is Apple Silicon,
+    runs-on: macos-15
+    # KNOWN LIMITATION (macos x86_64 leg): the macos-15 runner is Apple Silicon,
     # so `packageUberJarForCurrentOS` produces the arm64 macOS JAR for BOTH
     # matrix legs. The x86_64 *wheel* (the Rust .so) is a proper cross-compile,
     # but it carries the arm64 desktop JAR. Compose JARs are not single-arch JVM

@@ -3102,6 +3102,10 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
     // waited out its whole budget on a room that was already done.
     assert_eq!(json["ready"], true, "a keyed room states ready: {json}");
     assert_eq!(json["converges_on_its_own"], false, "{json}");
+    assert_eq!(
+        json["accepts_attachments"], true,
+        "the send side's gate: {json}"
+    );
     let m = &json["messages"].as_array().expect("messages")[0];
 
     assert_eq!(
@@ -3147,6 +3151,18 @@ async fn every_entry_carries_its_kind_and_its_author_on_separate_axes() {
         held.contains(&"takedown") && held.contains(&"review"),
         "all three CC 4.5.x duties, since the founder is in the authority set \
          for each: {m}"
+    );
+    // The VIEWER's duties, top-level, from the same walk: the client offers
+    // the room's moderation actions exactly when the write would be admitted.
+    let viewer: Vec<&str> = json["viewer_duties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the transcript names viewer_duties: {json}"))
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        viewer, held,
+        "the founder viewing holds what the founder authoring holds"
     );
 }
 
@@ -4383,4 +4399,310 @@ async fn a_request_lapses_with_its_grants_window() {
         0,
         "a lapsed grant is not a request"
     );
+}
+
+/// **An attachment is a file already in the room.** The send names it by id;
+/// anything that is not a file row at this room's scope — an id nobody wrote,
+/// or a row that is in the room but is not a file (a message) — is refused by
+/// name before a row is built, and a message without one carries no
+/// `attachment` at all.
+#[tokio::test]
+async fn an_attachment_must_be_a_file_in_the_room() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _m) = open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let send = |body: serde_json::Value| {
+        let client = client.clone();
+        let url = format!("{base}/v1/chat/{community_id}/messages");
+        let owner = owner.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .bearer_auth(&owner)
+                .json(&body)
+                .send()
+                .await
+                .expect("send");
+            let status = resp.status().as_u16();
+            (
+                status,
+                resp.json::<serde_json::Value>().await.unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, sent) = send(serde_json::json!({ "body": "plain words" })).await;
+    assert_eq!(status, 200, "{sent}");
+    let message_id = sent["attestation_id"].as_str().expect("id").to_owned();
+    assert!(
+        sent["message"].get("attachment").is_none(),
+        "a message with no file carries no attachment field: {sent}"
+    );
+
+    for id in ["no-such-row", message_id.as_str()] {
+        let (status, out) = send(serde_json::json!({
+            "body": "see attached",
+            "attachment_attestation_id": id,
+        }))
+        .await;
+        assert_eq!(
+            (status, out["reason_id"].as_str()),
+            (409, Some("chat.attachment_not_in_room")),
+            "{id}: {out}"
+        );
+    }
+
+    // No caption is fine WITH a file; without one, it is still an empty message.
+    let (status, out) = send(serde_json::json!({ "body": "" })).await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (400, Some("chat.empty_message")),
+        "{out}"
+    );
+}
+
+fn stranger_a_signer() -> LocalSigner {
+    let pqc = Arc::new(
+        MlDsa65SoftwareSigner::from_seed_bytes(&[0xC1; 32], format!("{STRANGER_A_KEY_ID}-pqc"))
+            .expect("stranger ML-DSA-65 seed"),
+    );
+    LocalSigner::from_parts(
+        SigningKey::from_bytes(&[0xC0; 32]),
+        STRANGER_A_KEY_ID.to_string(),
+        Some(pqc),
+        Some(format!("{STRANGER_A_KEY_ID}-pqc")),
+    )
+}
+
+/// A `content_class:{class}` flag on `target` in `room`, signed by `by` — the
+/// shape `room_moderation` folds (the edge producer's, CC 4.5.5).
+async fn put_room_flag(
+    engine: &Engine,
+    by: &LocalSigner,
+    room: &str,
+    target: &str,
+    author: &str,
+    withdrawn: bool,
+) -> Result<String, String> {
+    let mut envelope = serde_json::json!({
+        (paths::DIMENSION): "content_class:reported:v1",
+        "content_class": "reported",
+        "community_id": room,
+        "references_attestation_id": target,
+    });
+    if withdrawn {
+        envelope["withdrawn"] = serde_json::Value::Bool(true);
+    }
+    ciris_server::attest::emit(
+        engine,
+        ciris_server::attest::KeySigner::Local(by),
+        ciris_server::attest::Spec::new(
+            attestation_type::SCORES,
+            // FEDERATION for now: persist's community door refuses a row naming a
+            // party other than its producer (AV-84); the duty-family carve-out is
+            // asked of persist. The fold reads the room from `community_id`, not
+            // the tier, so it is proven either way.
+            cohort_scope::FEDERATION,
+            envelope,
+        )
+        .about_all(author, &[author.to_owned()]),
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// **A moderator's flag withholds the message; the viewer reveals it.**
+///
+/// In a pair room both people founded it, so each holds the `moderate` duty
+/// (CC 4.5.4 zero-hop). The contact flags the owner's message: the owner's
+/// transcript then carries `moderation` with the body withheld, and a reveal —
+/// the viewer's own consent — opens it again. A stranger's label is not the
+/// room's decision and changes nothing.
+#[tokio::test]
+async fn a_moderators_flag_withholds_until_the_viewer_reveals() {
+    let (engine, base, owner, owner_id, _h) = fixture().await;
+    let client = reqwest::Client::new();
+    let (community_id, _m) = open_chat(&client, &base, &owner, &engine, &owner_id).await;
+    let sent: serde_json::Value = client
+        .post(format!("{base}/v1/chat/{community_id}/messages"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "body": "something contested" }))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("send json");
+    let id = sent["attestation_id"].as_str().expect("id").to_owned();
+    let transcript = || async {
+        let json: serde_json::Value = client
+            .get(format!("{base}/v1/chat/{community_id}/messages"))
+            .bearer_auth(&owner)
+            .send()
+            .await
+            .expect("GET messages")
+            .json()
+            .await
+            .expect("messages json");
+        json["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|m| m["attestation_id"] == id.as_str())
+            .cloned()
+            .expect("the message is listed")
+    };
+    let reveal = || async {
+        let resp = client
+            .post(format!("{base}/v1/chat/{community_id}/items/{id}/reveal"))
+            .bearer_auth(&owner)
+            .send()
+            .await
+            .expect("reveal");
+        let status = resp.status().as_u16();
+        (
+            status,
+            resp.json::<serde_json::Value>().await.unwrap_or_default(),
+        )
+    };
+
+    // Nothing flagged: no field, and nothing to reveal.
+    let m = transcript().await;
+    assert!(m.get("moderation").is_none(), "{m}");
+    let (status, out) = reveal().await;
+    assert_eq!(
+        (status, out["reason_id"].as_str()),
+        (409, Some("moderation.not_flagged")),
+        "{out}"
+    );
+
+    // A stranger's label is not the room's decision. (If persist refuses the
+    // row outright, that is the same outcome one door earlier.)
+    let _ = put_room_flag(
+        &engine,
+        &stranger_a_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        false,
+    )
+    .await;
+    let m = transcript().await;
+    assert!(
+        m.get("moderation").is_none(),
+        "a stranger's flag must not withhold: {m}"
+    );
+    assert_eq!(m["body"], "something contested", "{m}");
+
+    // The contact — a founder, so a moderator — flags it.
+    let flag_id = put_room_flag(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        false,
+    )
+    .await
+    .expect("a moderator's flag is admitted");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["flag"], "reported", "{m}");
+    assert_eq!(m["moderation"]["withheld"], true, "{m}");
+    assert_eq!(
+        m["moderation"]["flag_attestation_id"],
+        flag_id.as_str(),
+        "{m}"
+    );
+    assert_eq!(m["moderation"]["flagged_by"], CONTACT_KEY_ID, "{m}");
+    assert!(m.get("body").is_none(), "the body is withheld: {m}");
+    assert_eq!(m["unopened_reason"], "withheld_by_moderation", "{m}");
+
+    // The viewer chooses to see it.
+    let (status, out) = reveal().await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["moderation"]["revealed"], true, "{out}");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["withheld"], false, "{m}");
+    assert_eq!(m["moderation"]["flag"], "reported", "the flag stands: {m}");
+    assert_eq!(m["body"], "something contested", "revealed: {m}");
+
+    // THE APPEAL (CC 4.5.5): the author files against the flag — persist
+    // admits them as its subject — and a `review` holder rules.
+    let reconsider = |by: LocalSigner, outcome: Option<&'static str>| {
+        let engine = Arc::clone(&engine);
+        let room = community_id.clone();
+        let flag = flag_id.clone();
+        let author = owner_id.key_id.clone();
+        async move {
+            let mut envelope = serde_json::json!({
+                (paths::DIMENSION): "reconsideration:new_evidence:v1",
+                "community_id": room,
+                "references_attestation_id": flag,
+            });
+            if let Some(o) = outcome {
+                envelope["outcome"] = serde_json::json!(o);
+            }
+            ciris_server::attest::emit(
+                &engine,
+                ciris_server::attest::KeySigner::Local(&by),
+                ciris_server::attest::Spec::new(
+                    attestation_type::SCORES,
+                    cohort_scope::FEDERATION,
+                    envelope,
+                )
+                .about_all(&author, std::slice::from_ref(&author)),
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))
+        }
+    };
+    let filing = reconsider(owner_id.signer().await, None)
+        .await
+        .expect("the flagged author's filing is admitted");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["reconsideration"], "filed", "{m}");
+    assert_eq!(
+        m["moderation"]["reconsideration_attestation_id"],
+        filing.as_str(),
+        "{m}"
+    );
+    assert!(
+        reconsider(stranger_a_signer(), None).await.is_err(),
+        "a stranger has no standing to appeal another's flag"
+    );
+    reconsider(contact_signer(), Some("upheld"))
+        .await
+        .expect("a review holder's ruling is admitted");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["reconsideration"], "upheld", "{m}");
+    assert_eq!(
+        m["moderation"]["flag"], "reported",
+        "upheld: the flag stands: {m}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    reconsider(contact_signer(), Some("reversed"))
+        .await
+        .expect("a later ruling is admitted");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["reconsideration"], "reversed", "{m}");
+    assert!(
+        m["moderation"]["flag"].is_null(),
+        "reversed lifts the flag: {m}"
+    );
+    assert_eq!(m["moderation"]["withheld"], false, "{m}");
+
+    // The moderator clears it: the history stays, the flag does not.
+    put_room_flag(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        true,
+    )
+    .await
+    .expect("a moderator's clear is admitted");
+    let m = transcript().await;
+    assert!(m["moderation"]["flag"].is_null(), "cleared: {m}");
+    assert_eq!(m["moderation"]["withheld"], false, "{m}");
 }

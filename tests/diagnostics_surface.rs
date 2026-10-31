@@ -231,6 +231,10 @@ async fn the_always_on_read_serves_memory_and_carries_no_trim_door() {
     };
     assert_eq!(call("GET", ROUTE, loopback).await, StatusCode::OK);
     assert_eq!(call("GET", ROUTE, remote).await, StatusCode::FORBIDDEN);
+    // persist's read counters ride the same always-on, loopback-only read.
+    let reads = ciris_server::diag::ROUTE_READS;
+    assert_eq!(call("GET", reads, loopback).await, StatusCode::OK);
+    assert_eq!(call("GET", reads, remote).await, StatusCode::FORBIDDEN);
     // A same-host reverse proxy connects from loopback; what it relays carries
     // forwarding headers and must not pass as local.
     for header in ["forwarded", "x-forwarded-for", "x-real-ip"] {

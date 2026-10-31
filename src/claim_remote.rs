@@ -1914,6 +1914,7 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
         );
     }
 
+    crate::contact_trace::owner_binding(&st.engine, "after announce").await;
     tracing::info!(
         responsible_user = %promoted.responsible_user_key_id,
         node_key_id = %st.node_key_id,

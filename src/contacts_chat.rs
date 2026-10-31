@@ -525,6 +525,66 @@ async fn duties_of(
     held
 }
 
+/// **What the viewer may do to this room's content** — `viewer_duties` on the
+/// transcript and on the room's drive listing (client ask, CSD-091/CSD-110).
+/// The same walk as each author's `author_duties` and as persist's §11.10 duty
+/// gate, so a client offers the hamburger's moderation actions exactly when
+/// the write would be admitted. Empty = not a duty holder; a node that predates
+/// the field leaves it absent.
+pub(crate) async fn viewer_duties(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    who: &str,
+    community_id: &str,
+) -> Vec<&'static str> {
+    duties_of(directory, &mut HashMap::new(), who, community_id).await
+}
+
+/// **Name a contact's nodes to edge as direct-link peers, or withdraw them**
+/// (edge v43.4.0 `allow_direct_contact`). A MUTUAL contact's node is accepted
+/// and proposed for a direct link like a room peer's — only after the request
+/// is accepted (steward ruling 2026-10-31: "After contact is accepted"; the
+/// request itself crosses relayed). The set is edge's, in memory: the
+/// pair-room driver re-seeds it once per process from the mutual contacts on
+/// file, and the accept / first-mutual transitions name their nodes here. `extra_nodes` are nodes known before the
+/// person's owner-binding lands (a v3 code's).
+async fn direct_contact(
+    st: &ChatState,
+    person: &str,
+    extra_nodes: &[String],
+    allow: bool,
+    why: &'static str,
+) {
+    let Some(transport) = st.routes.as_ref() else {
+        return;
+    };
+    let mut nodes = crate::peer::bound_nodes_of(&st.engine, person)
+        .await
+        .unwrap_or_default();
+    for n in extra_nodes {
+        if !nodes.contains(n) {
+            nodes.push(n.clone());
+        }
+    }
+    let mut full = Vec::new();
+    for n in &nodes {
+        if allow {
+            if !transport.allow_direct_contact(n) {
+                full.push(n.clone());
+            }
+        } else {
+            transport.forget_direct_contact(n);
+        }
+    }
+    if !full.is_empty() {
+        tracing::warn!(person, why, nodes = ?full, "contacts: edge's direct-contact set is full — these nodes stay relayed");
+    }
+    tracing::info!(
+        target: "ciris_server::contact_trace",
+        "DIRECT-CONTACT {} ({why}) peer_person={person} nodes={nodes:?}",
+        if allow { "allow" } else { "forget" }
+    );
+}
+
 /// Turn edge's [`LadderStall`](ciris_edge::contact::LadderStall) into a refusal.
 ///
 /// The stall vocabulary is deliberately not a wrapper over mechanical errors —
@@ -799,6 +859,8 @@ fn transcript_pending(
         status_attestation_id: None,
         status_reason_code: None,
         edits: None,
+        attachment: None,
+        moderation: None,
         // A system note is no one's words: nothing to revise.
         viewer_ops: Vec::new(),
         body: Some(note.to_string()),
@@ -830,6 +892,10 @@ fn transcript_pending(
             // waiting states resolve when the peer's row replicates, and a human
             // pressing retry changes nothing about that.
             "converges_on_its_own": state.converges_on_its_own(),
+            // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+            // on a send. An older one ignores the field and drops the file, so a
+            // client offers "Attach" only where this is `true`.
+            "accepts_attachments": true,
             // DEVELOPER text, not a localized string: which side of the wire is
             // short and what to do about it. `null` when the wait is only time.
             "hint": hint,
@@ -2238,7 +2304,20 @@ pub(crate) async fn contact_requests_split(
                 entry["ignore_id"] = serde_json::json!(ignore_id);
                 ignored.push(entry);
             }
-            None => pending.push(entry),
+            None => {
+                if let Some(from) = entry["requester_key_id"].as_str() {
+                    crate::contact_trace::contact_once(
+                        engine,
+                        "request-seen",
+                        owner_key_id,
+                        from,
+                        Some(&grant),
+                        Some(false),
+                    )
+                    .await;
+                }
+                pending.push(entry);
+            }
         }
     }
     Ok((pending, ignored))
@@ -2457,6 +2536,9 @@ async fn ignore_contact_request(
             format!("{grant_id} is not a pending contact request for this owner"),
         );
     };
+    if let Some(requester) = entry["requester_key_id"].as_str() {
+        direct_contact(&st, requester, &[], false, "ignored").await;
+    }
     let envelope = serde_json::json!({
         (ciris_persist::federation::envelope::paths::DIMENSION): CONTACT_IGNORED_DIMENSION,
         (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): grant_id,
@@ -2659,6 +2741,20 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
                 "mutual".into(),
                 serde_json::json!(inbound.contains(&key_id)),
             );
+            if inbound.contains(&key_id) {
+                direct_contact(&st, &key_id, &[], true, "mutual").await;
+                crate::contact_trace::contact_once(
+                    &st.engine,
+                    "mutual",
+                    &owner.key_id,
+                    &key_id,
+                    receipts
+                        .get(&key_id)
+                        .and_then(|g| g["attestation_id"].as_str()),
+                    Some(true),
+                )
+                .await;
+            }
             // CIRISServer#616 — the grant's envelope, per row: the receipt.
             obj.insert(
                 "grant".into(),
@@ -3183,6 +3279,30 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         }
     };
     let chat_community_id = pair_community_key_id(&owner.key_id, &key_id);
+    // Add, or ACCEPT: the same route, told apart by whether their grant to us
+    // is already held (`inbound_chat_grants`) — which is also what makes the
+    // contact mutual on this side.
+    let theirs_held = inbound_chat_grants(&st.engine, &owner.key_id, &owner.node_key_id)
+        .await
+        .map(|g| g.iter().any(|(k, _)| *k == key_id))
+        .unwrap_or(false);
+    // DIRECT ONLY AFTER ACCEPTANCE (steward ruling 2026-10-31: "After contact
+    // is accepted"): the request crosses relayed; a contact is named to edge
+    // as a direct-link peer once BOTH sides consented — here, when this add
+    // accepts their request.
+    if theirs_held {
+        direct_contact(&st, &key_id, &code_nodes, true, "accept").await;
+    }
+    crate::contact_trace::contact(
+        &st.engine,
+        if theirs_held { "accept" } else { "add" },
+        &owner.key_id,
+        &key_id,
+        Some(&grant.attestation_id),
+        Some(theirs_held),
+        &code_nodes,
+    )
+    .await;
     (
         StatusCode::OK,
         Json(AddContactResponse {
@@ -3329,6 +3449,7 @@ async fn remove_contact(
             )
         }
     };
+    direct_contact(&st, &key_id, &[], false, "removed").await;
     subjects.push(key_id.clone());
     let grants =
         match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
@@ -3633,6 +3754,25 @@ async fn start_chat(
             "chat.self_chat",
             "refusing to open a two-member chat with yourself",
         );
+    }
+    // What a pair room is made of, said once when one is asked for — so a room
+    // that never keys names the missing fact here, not three stages later.
+    {
+        let theirs_held = inbound_chat_grants(&st.engine, &owner.key_id, &owner.node_key_id)
+            .await
+            .map(|g| g.iter().any(|(k, _)| *k == key_id))
+            .unwrap_or(false);
+        let path = DiscoveryStanding::of(&st.engine, &owner.node_key_id, &key_id)
+            .await
+            .hint();
+        crate::contact_trace::chat_readiness(
+            &st.engine,
+            &owner.key_id,
+            &key_id,
+            theirs_held,
+            path.as_deref(),
+        )
+        .await;
     }
     let directory = st.engine.federation_directory();
 
@@ -4150,7 +4290,16 @@ pub const UNOPENED_REASONS: &[&str] = &[
     "malformed_row",
     "not_text",
     "substrate",
+    UNOPENED_WITHHELD,
 ];
+
+/// A message a moderator of the room flagged, withheld until the viewer
+/// reveals it ([`crate::room_moderation`]). The server's word, not edge's: the
+/// body opened fine; the room decided this viewer must choose to see it.
+const UNOPENED_WITHHELD: &str = "withheld_by_moderation";
+
+/// How far back an edit chain is walked for a flag on an earlier version.
+const MAX_EDIT_CHAIN: usize = 32;
 
 /// A row still pointing at unfetched blob-store content after the read: edge's
 /// own word for "not held here yet".
@@ -4198,6 +4347,20 @@ struct ChatMessage {
     /// head of an edit chain only; `GET …/messages/{id}/history` walks it.
     #[serde(skip_serializing_if = "Option::is_none")]
     edits: Option<String>,
+    /// The room file this message carries, by its attestation id
+    /// (`attachment_attestation_id` on the send; edge's
+    /// `chat_message_attachment_in`). The body is its caption. Fetch it from
+    /// the room's drive (`GET /v1/files/{id}?cohort=community&room_id=…`); an
+    /// edit keeps it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment: Option<String>,
+    /// **What the room decided about this message** (CC 4.5.5): present once a
+    /// holder of the room's `moderate` duty flagged it (or an earlier version
+    /// of it). While `withheld`, `body` and `attachment` are absent and
+    /// `unopened_reason` is `withheld_by_moderation`;
+    /// `POST /v1/chat/{room}/items/{id}/reveal` is the viewer's consent to see it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moderation: Option<crate::room_moderation::ModerationView>,
     /// **What THIS viewer may do to THIS row**: any of `supersede`, `withdraw`,
     /// `recant`, as the node judges it. Only the author, only while the row is
     /// live, and never a delegate (authoring is never delegable). Always
@@ -4383,7 +4546,12 @@ fn fold_status<'a>(composers: Option<&'a Vec<&'a Attestation>>) -> (&'static str
 
 #[derive(Debug, Deserialize)]
 struct SendMessageRequest {
+    #[serde(default)]
     body: String,
+    /// A file already in this room, sent as a message; `body` is its caption
+    /// and may be empty.
+    #[serde(default)]
+    attachment_attestation_id: Option<String>,
     #[serde(default)]
     content_type: Option<String>,
 }
@@ -4498,7 +4666,7 @@ async fn send_message(
             )
         }
     };
-    if req.body.trim().is_empty() {
+    if req.body.trim().is_empty() && req.attachment_attestation_id.is_none() {
         return refuse(
             StatusCode::BAD_REQUEST,
             "chat.empty_message",
@@ -4515,6 +4683,36 @@ async fn send_message(
             ),
         );
     }
+    // THE FILE MUST ALREADY BE IN THIS ROOM: every member who can read the
+    // message can then fetch it, under the room's own grants. A file in some
+    // other room (or the sender's own drive) is refused by name — share it
+    // into the room first (`POST /v1/files/{id}/move`).
+    let attachment = match req.attachment_attestation_id.as_deref() {
+        None => None,
+        Some(id) => {
+            let room = ciris_edge::scope_room::ScopeRoom::community(&community_id);
+            match st.engine.federation_directory().get_attestation(id).await {
+                Ok(Some(row)) if ciris_edge::files::belongs_to(&room, &row).is_some() => Some(row),
+                Ok(_) => {
+                    return refuse(
+                        StatusCode::CONFLICT,
+                        "chat.attachment_not_in_room",
+                        format!(
+                            "{id} is not a file in this room — share it into the room first, \
+                             then send it"
+                        ),
+                    )
+                }
+                Err(e) => {
+                    return refuse(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "chat.store_unavailable",
+                        format!("read the attached file {id}: {e:#}"),
+                    )
+                }
+            }
+        }
+    };
     let content_type = req
         .content_type
         .as_deref()
@@ -4664,21 +4862,36 @@ async fn send_message(
     // asked for, and the seal wraps to the room's fold. For a pair room the id
     // is the derived pair id, so this is byte-for-byte the row the pair-form
     // builder produced.
-    let (row, sealed) = match ciris_edge::chat::chat_message_attestation_in(
-        author,
-        &community_id,
-        &req.body,
-        chrono::Utc::now(),
-        &content_store,
-    )
-    .await
-    {
+    let built = match attachment.as_ref() {
+        None => {
+            ciris_edge::chat::chat_message_attestation_in(
+                author,
+                &community_id,
+                &req.body,
+                chrono::Utc::now(),
+                &content_store,
+            )
+            .await
+        }
+        Some(file) => {
+            ciris_edge::chat::chat_message_attachment_in(
+                author,
+                &community_id,
+                file,
+                Some(req.body.as_str()).filter(|b| !b.trim().is_empty()),
+                chrono::Utc::now(),
+                &content_store,
+            )
+            .await
+        }
+    };
+    let (row, sealed) = match built {
         Ok(r) => r,
         Err(e) => {
             return refuse(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "chat.emit_failed",
-                format!("chat_message_attestation_in: {e}"),
+                format!("build the message row: {e}"),
             )
         }
     };
@@ -4886,6 +5099,7 @@ async fn collect_messages(
     // The roster's roles, from the membership rows already read above. No extra
     // query: this is the same list the transcript is anchored on.
     let mut duty_cache: HashMap<String, Vec<&'static str>> = HashMap::new();
+    let mut moderation_duties = crate::room_moderation::DutyCache::default();
     let roles: HashMap<&str, Option<String>> = members
         .iter()
         .map(|m| (m.key_id.as_str(), m.role.clone()))
@@ -4951,6 +5165,40 @@ async fn collect_messages(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         let edits = opened.edits.clone();
+        let mut attachment = opened.attachment.clone();
+        // THE ROOM'S DECISION (CC 4.5.5): a moderator's flag on this row — or
+        // on any earlier version of it, so an edit does not shed a flag —
+        // withholds the body from a viewer who has not chosen to see it.
+        let moderation = {
+            let mut chain = vec![row.attestation_id.clone()];
+            let mut prior = edits.clone();
+            while let Some(id) = prior.take() {
+                if chain.len() >= MAX_EDIT_CHAIN || chain.contains(&id) {
+                    break;
+                }
+                prior = held
+                    .get(id.as_str())
+                    .and_then(|r| ciris_edge::chat::ChatMessage::from_row(r, community_id))
+                    .and_then(|m| m.edits);
+                chain.push(id);
+            }
+            let mut found = None;
+            for id in &chain {
+                found = crate::room_moderation::view_of(
+                    &st.engine,
+                    &mut moderation_duties,
+                    community_id,
+                    id,
+                    &opened.author_key_id,
+                    &owner.key_id,
+                )
+                .await?;
+                if found.is_some() {
+                    break;
+                }
+            }
+            found
+        };
         let viewer_ops: Vec<&'static str> =
             if may_author && status == "live" && row.attesting_key_id == owner.key_id {
                 REVISION_OPS.to_vec()
@@ -5004,6 +5252,22 @@ async fn collect_messages(
                 ),
             ),
         };
+        let (body, unopened_reason, unopened_detail) = match &moderation {
+            Some(m) if m.withheld => {
+                // The attachment goes with the words: a withheld message does
+                // not point at its file until the viewer reveals it.
+                attachment = None;
+                (
+                    None,
+                    Some(UNOPENED_WITHHELD),
+                    Some(format!(
+                        "a moderator of this room flagged it as {}; reveal to view",
+                        m.flag.unwrap_or("reported")
+                    )),
+                )
+            }
+            _ => (body, unopened_reason, unopened_detail),
+        };
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),
@@ -5022,6 +5286,8 @@ async fn collect_messages(
             status_attestation_id,
             status_reason_code,
             edits,
+            attachment,
+            moderation,
             viewer_ops,
             body,
             unopened_reason,
@@ -5362,6 +5628,16 @@ async fn list_messages(
                     // (measured 2026-09-04: 150 s of polling a ready room).
                     "ready": true,
                     "converges_on_its_own": false,
+                    // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+                    // on a send. An older one ignores the field and drops the file, so a
+                    // client offers "Attach" only where this is `true`.
+                    "accepts_attachments": true,
+                    "viewer_duties": viewer_duties(
+                        &*st.engine.federation_directory(),
+                        &owner.key_id,
+                        &community_id,
+                    )
+                    .await,
                 })),
             )
                 .into_response()
@@ -5436,7 +5712,17 @@ async fn list_room_messages(
                     // the fold named at seal time.
                     "ready": true,
                     "converges_on_its_own": handshake.converges_on_its_own(),
+                    // THE SEND SIDE'S GATE: this node takes `attachment_attestation_id`
+                    // on a send. An older one ignores the field and drops the file, so a
+                    // client offers "Attach" only where this is `true`.
+                    "accepts_attachments": true,
                     "handshake": handshake_id,
+                    "viewer_duties": viewer_duties(
+                        &*st.engine.federation_directory(),
+                        &owner.key_id,
+                        community_id,
+                    )
+                    .await,
                 })),
             )
                 .into_response()
@@ -6016,11 +6302,159 @@ pub fn router_with_driver(
             "/v1/chat/{community_id}/messages/{attestation_id}/{action}",
             axum::routing::get(message_history).post(revise_message),
         )
+        // The room's moderation of one item — a message or a room file — by
+        // its attestation id (CC 4.5.5; `room_moderation`). `{action}` is
+        // `reveal`: the viewer's own consent to see what a moderator flagged.
+        .route(
+            "/v1/chat/{community_id}/items/{attestation_id}/{action}",
+            axum::routing::post(moderate_item),
+        )
         // CIRISServer#594 — N-member rooms and affiliations: the same state,
         // the same owner gate, the same signer.
         .merge(crate::communities::routes())
         .with_state(state.clone());
     (router, PairRoomDriver(state))
+}
+
+/// `POST /v1/chat/{room}/items/{id}/reveal` — **the viewer chooses to see
+/// what a moderator withheld.** `{id}` is the flagged item — a message or a
+/// room file; a message's `moderation.item_attestation_id` names it when the
+/// flag sits on an earlier version. The consent is the viewer's own signed act,
+/// kept on their devices ([`crate::room_moderation::reveal`]), so a delegate
+/// cannot give it for them. Answers the item's moderation as it now stands.
+async fn moderate_item(
+    State(st): State<ChatState>,
+    headers: HeaderMap,
+    Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+) -> Response {
+    if action != "reveal" {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "moderation.unknown_action",
+            "an item in a room is revealed with reveal",
+        );
+    }
+    let owner = match require_owner(&st, &headers).await {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    if let Some(resp) = require_verb(
+        &owner,
+        crate::auth::gate::CapabilityVerb::ChatAuthor,
+        "moderation.delegate_may_not_reveal",
+    ) {
+        return resp;
+    }
+    if let Err(r) = require_member(&st, &owner, &community_id).await {
+        return r;
+    }
+    // THE ITEM, from this room: a message (`ChatMessage::from_row` reads its
+    // room) or a file (`files::belongs_to`). Its author is whom the room's
+    // moderation rows are about.
+    let room = ciris_edge::scope_room::ScopeRoom::community(&community_id);
+    let author = match st
+        .engine
+        .federation_directory()
+        .get_attestation(&attestation_id)
+        .await
+    {
+        Ok(Some(row))
+            if ciris_edge::chat::ChatMessage::from_row(&row, &community_id).is_some()
+                || ciris_edge::files::belongs_to(&room, &row).is_some() =>
+        {
+            row.attesting_key_id
+        }
+        Ok(_) => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "moderation.item_not_in_room",
+                "that is not a message or a file in this room",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read {attestation_id}: {e}"),
+            )
+        }
+    };
+    let mut duties = crate::room_moderation::DutyCache::default();
+    let view = match crate::room_moderation::view_of(
+        &st.engine,
+        &mut duties,
+        &community_id,
+        &attestation_id,
+        &author,
+        &owner.key_id,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("read the room's moderation of {attestation_id}: {e}"),
+            )
+        }
+    };
+    let class = match view.as_ref().and_then(|v| v.flag) {
+        Some(c) => c,
+        None => {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.not_flagged",
+                "no moderator of this room has flagged that item — there is nothing to reveal",
+            )
+        }
+    };
+    if view.as_ref().is_some_and(|v| v.revealed) {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "attestation_id": attestation_id, "moderation": view })),
+        )
+            .into_response();
+    }
+    let pen = match membership_pen(&st, &headers, &owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let flag = crate::safety::infohazard::ContentFlag::from_token(class)
+        .unwrap_or(crate::safety::infohazard::ContentFlag::Reported);
+    let consent_attestation_id =
+        match crate::room_moderation::reveal(&st.engine, pen.local_signer(), &attestation_id, flag)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "moderation.reveal_failed",
+                    format!("record the consent to view: {e}"),
+                )
+            }
+        };
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut duties,
+        &community_id,
+        &attestation_id,
+        &author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "consent_attestation_id": consent_attestation_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -6271,6 +6705,10 @@ mod tests {
             assert_eq!(detail, d(), "the detail is the substrate's own sentence");
             seen.insert(token);
         }
+        // Edge's arms, plus the one word that is the server's own: a body that
+        // opened and the room's moderator withheld (`room_moderation`).
+        assert!(!seen.contains(UNOPENED_WITHHELD));
+        seen.insert(UNOPENED_WITHHELD);
         assert_eq!(
             seen.len(),
             UNOPENED_REASONS.len(),
@@ -6391,6 +6829,24 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
         }
     };
     let me = pen.key_id().to_owned();
+    // Edge's direct-contact set is in memory: name every contact on file once
+    // per process, so a restart does not leave consented contacts relayed.
+    {
+        static SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SEEDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            // Mutual contacts only — direct after acceptance.
+            if let (Ok((contacts, _)), Ok(inbound)) = (
+                contact_persons(&st.engine, &me, &node).await,
+                inbound_chat_grants(&st.engine, &me, &node).await,
+            ) {
+                for person in contacts {
+                    if inbound.iter().any(|(k, _)| *k == person) {
+                        direct_contact(st, &person, &[], true, "boot").await;
+                    }
+                }
+            }
+        }
+    }
     let dir = st.engine.federation_directory();
     // 1. The joiner's acceptance of a requested room's invitation.
     let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, pen.edge_signer()).await;
@@ -6795,6 +7251,37 @@ pub(crate) mod pending_contacts {
                 // The node is not our peer yet and we hold no route to it: ask
                 // the peers we have for its key, occurrence and transport
                 // destination (public subject planes), so the grant can travel.
+                // RE-AIM THE GRANT AT THE NODE. A contact added before their
+                // owner-binding landed got the person-subject grant (#472's
+                // recorded intent): edge withholds that row from the node it
+                // must reach — "the recipient is not in the row's audience" —
+                // every round, and the request never arrives (cross-NAT run
+                // 41170418825, 2026-10-31: 180 s, home never saw it). Now that
+                // the node is known, ensure the grant names it.
+                match crate::peer::ensure_contact_consent_covers(
+                    &st.engine,
+                    &owner.node_key_id,
+                    key_id,
+                    &crate::peer::default_attestation_prefixes(),
+                )
+                .await
+                {
+                    Ok((grant, subjects)) => {
+                        crate::contact_trace::contact(
+                            &st.engine,
+                            "re-aimed",
+                            &owner.key_id,
+                            key_id,
+                            Some(&grant.attestation_id),
+                            None,
+                            &subjects,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::warn!(owner = %owner.key_id, key_id, error = %format!("{e:#}"), "contacts: the resolved contact's grant could not be re-aimed at their node")
+                    }
+                }
                 for node in &nodes {
                     let _ = pull_person_records(&st, &owner, node).await;
                 }

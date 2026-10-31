@@ -286,6 +286,43 @@ pub struct DriveEntry {
     /// `null` on a withdrawn row, or when the roster could not be read.
     /// `GET /v1/files/{id}/custody` is the full answer.
     pub custody: Option<crate::file_custody::CompactCustody>,
+    /// **What the room decided about this file** (CC 4.5.5;
+    /// [`crate::room_moderation`]): present once a holder of a community
+    /// room's `moderate` duty flagged it. While `withheld`, the bytes refuse
+    /// `drive.withheld_by_moderation` until the viewer reveals it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderation: Option<crate::room_moderation::ModerationView>,
+}
+
+/// The room's moderation decision about `attestation_id`, for `viewer`. Only a
+/// community room has moderators; every other room answers `None`.
+async fn moderation_of(
+    st: &DriveState,
+    duties: &mut crate::room_moderation::DutyCache,
+    room: &ScopeRoom,
+    attestation_id: &str,
+    author: &str,
+    viewer: &str,
+) -> Result<Option<crate::room_moderation::ModerationView>, Response> {
+    if room.row_scope_token() != ciris_persist::federation::types::cohort_scope::COMMUNITY {
+        return Ok(None);
+    }
+    crate::room_moderation::view_of(
+        &st.engine,
+        duties,
+        room.content_group_id(),
+        attestation_id,
+        author,
+        viewer,
+    )
+    .await
+    .map_err(|e| {
+        refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "drive.listing_failed",
+            format!("read the room's moderation of {attestation_id}: {e}"),
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2339,6 +2376,7 @@ async fn read_drive(
     };
     let content = store(&st.engine);
     let mut out = Vec::with_capacity(rows.len());
+    let mut moderation_duties = crate::room_moderation::DutyCache::default();
     for (cohort, room_id, file) in rows {
         let withdrawn = match withdrawn_by(&st, &file.attestation_id).await {
             Ok(w) => w,
@@ -2383,6 +2421,23 @@ async fn read_drive(
             )),
             _ => None,
         };
+        let moderation = if cohort == ciris_persist::federation::types::cohort_scope::COMMUNITY {
+            match moderation_of(
+                &st,
+                &mut moderation_duties,
+                &ScopeRoom::community(&room_id),
+                &file.attestation_id,
+                &file.attesting_key_id,
+                &owner.key_id,
+            )
+            .await
+            {
+                Ok(m) => m,
+                Err(e) => return e,
+            }
+        } else {
+            None
+        };
         out.push(DriveEntry {
             // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
             // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
@@ -2406,13 +2461,12 @@ async fn read_drive(
                 .map(envelope_of)
                 .unwrap_or(serde_json::Value::Null),
             custody,
+            moderation,
         });
     }
     // The ROOMS listed, not "the room" — an unfiltered drive spans several, and
     // reporting one would name whichever happened to be first.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
+    let mut body = serde_json::json!({
             "rooms": rooms
                 .iter()
                 .map(|(_, r)| serde_json::json!({
@@ -2425,9 +2479,17 @@ async fn read_drive(
             // `null` means the drive is exhausted; anything else is passed back
             // as `after` for the next page.
             "resume": resume.as_ref().map(encode_cursor),
-        })),
-    )
-        .into_response()
+    });
+    // One community room named → what this viewer may do to its files, from
+    // the same §11.10 walk the chat transcript uses. Absent on any other
+    // listing: duties are per room, and a drive spanning several has no one
+    // answer.
+    if let (Some("community"), Some(room_id)) = (q.cohort.as_deref(), q.room_id.as_deref()) {
+        body["viewer_duties"] = serde_json::json!(
+            crate::contacts_chat::viewer_duties(&*dir, &owner.key_id, room_id).await
+        );
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// `GET /v1/files/{attestation_id}/meta` — everything about a file except its
@@ -2841,6 +2903,32 @@ async fn read_file(
         Ok(f) => f,
         Err(e) => return e,
     };
+    // A FLAGGED FILE OPENS ONLY FOR A VIEWER WHO CHOSE TO SEE IT — whole or
+    // raw, the bytes are the same bytes.
+    match moderation_of(
+        &st,
+        &mut crate::room_moderation::DutyCache::default(),
+        &room,
+        &attestation_id,
+        &found.file.attesting_key_id,
+        &owner.key_id,
+    )
+    .await
+    {
+        Ok(Some(m)) if m.withheld => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "drive.withheld_by_moderation",
+                format!(
+                    "a moderator of this room flagged this file as {}; reveal it \
+                     (POST /v1/chat/{{room}}/items/{{id}}/reveal) to open it",
+                    m.flag.unwrap_or("reported")
+                ),
+            )
+        }
+        Ok(_) => {}
+        Err(e) => return e,
+    }
     let viewer = match viewer_key(&st).await {
         Ok(v) => v,
         Err(e) => {
@@ -3340,6 +3428,32 @@ async fn move_file(
         Ok(f) => f,
         Err(e) => return e,
     };
+    // A flag stays with the file: moving or copying it out of the room it was
+    // flagged in would shed the room's decision, so a live flag holds it
+    // there — revealed or not. An appeal is the way out
+    // (`POST /v1/chat/{room}/items/{flag}/reconsider`).
+    match moderation_of(
+        &st,
+        &mut crate::room_moderation::DutyCache::default(),
+        &source,
+        &attestation_id,
+        &found.file.attesting_key_id,
+        &owner.key_id,
+    )
+    .await
+    {
+        Ok(Some(m)) if m.flag.is_some() => {
+            return refuse(
+                StatusCode::CONFLICT,
+                "drive.flagged_by_moderation",
+                "a moderator of this room flagged this file; it stays in the room while the \
+                 flag stands"
+                    .into(),
+            )
+        }
+        Ok(_) => {}
+        Err(e) => return e,
+    }
     if let Err(e) = require_author(&st, &owner.key_id, &found.row) {
         return e;
     }

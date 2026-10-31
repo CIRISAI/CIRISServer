@@ -95,6 +95,81 @@ pub fn enable(source: &'static str) {
 /// report the heap before and after. Loopback-only, under the same switch.
 pub const ROUTE_TRIM: &str = "/v1/node/diagnostics/memory/trim";
 
+/// `GET` — persist's read counters, per `(backend, door)` and per fold, as
+/// `ciris_persist::observe::snapshot()` keeps them: reads, rows, envelope
+/// bytes. Cumulative since boot; the periodic [`log_hot_reads`] line is the
+/// windowed view.
+pub const ROUTE_READS: &str = "/v1/node/diagnostics/reads";
+
+/// A window whose busiest door decoded at least this many envelope bytes is
+/// logged as HOT. The 2026-10-30 canonical spin read ~80 MB/s for 16 min from
+/// one thread and nothing in the log said which query: one line per window
+/// naming the door is the probe that would have (FSD/UNIFIED_TELEMETRY.md).
+const HOT_READ_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
+
+/// …or served at least this many calls. persist counts the bytes of the rows a
+/// door RETURNS; a scan that reads the whole table and returns a handful (a
+/// `json_extract` filter, the 2026-10-30 suspect) decodes little and would
+/// never cross the bytes floor — but it is called in a loop, and the call
+/// count is what a loop cannot hide.
+const HOT_READ_FLOOR_CALLS: u64 = 6_000;
+
+/// Log the persist doors that read the most since the last call, when the top
+/// one crossed [`HOT_READ_FLOOR_BYTES`]. Called from the trimmer's period, so
+/// the window is that period. Read-only: a snapshot of relaxed counters.
+pub fn log_hot_reads() {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    /// `(backend, door) -> (reads, rows, bytes)`.
+    type Counts = HashMap<(&'static str, &'static str), (u64, u64, u64)>;
+    static PREV: Mutex<Option<Counts>> = Mutex::new(None);
+    let now: Counts = ciris_persist::observe::snapshot()
+        .reads
+        .into_iter()
+        .map(|d| ((d.backend, d.door), (d.reads, d.rows, d.bytes)))
+        .collect();
+    let Ok(mut prev) = PREV.lock() else {
+        return;
+    };
+    let Some(last) = prev.replace(now.clone()) else {
+        return;
+    };
+    let mut deltas: Vec<(&str, &str, u64, u64, u64)> = now
+        .iter()
+        .map(|(&(b, d), &(r, n, by))| {
+            let (pr, pn, pb) = last.get(&(b, d)).copied().unwrap_or_default();
+            (
+                b,
+                d,
+                r.saturating_sub(pr),
+                n.saturating_sub(pn),
+                by.saturating_sub(pb),
+            )
+        })
+        .collect();
+    let render = |v: &[(&str, &str, u64, u64, u64)]| -> String {
+        v.iter()
+            .take(3)
+            .map(|(b, d, r, n, by)| format!("{d}[{b}] reads={r} rows={n} bytes={by}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    deltas.sort_by_key(|x| std::cmp::Reverse(x.4));
+    let by_bytes = render(&deltas);
+    let bytes_hot = deltas.first().is_some_and(|x| x.4 >= HOT_READ_FLOOR_BYTES);
+    deltas.sort_by_key(|x| std::cmp::Reverse(x.2));
+    let by_calls = render(&deltas);
+    let calls_hot = deltas.first().is_some_and(|x| x.2 >= HOT_READ_FLOOR_CALLS);
+    if bytes_hot || calls_hot {
+        tracing::warn!(
+            top_by_bytes = %by_bytes,
+            top_by_calls = %by_calls,
+            "PERSIST READS HOT: the persist doors that read the most (bytes decoded, and calls) since the last \
+             period — a sustained line here names the query behind a CPU or I/O spin"
+        );
+    }
+}
+
 /// The arena cap this process asks glibc for when the operator has not.
 ///
 /// CIRISStatus#69 measured `MALLOC_ARENA_MAX=2` on the sister node: committed
@@ -271,6 +346,7 @@ pub fn spawn_trimmer() {
                 .spawn(move || loop {
                     std::thread::sleep(Duration::from_secs(secs));
                     trim_after("period");
+                    log_hot_reads();
                 });
             match spawned {
                 Ok(_) => tracing::info!(
@@ -640,10 +716,16 @@ async fn memory_trim() -> Json<Value> {
 pub fn read_router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
+        .route(ROUTE_READS, get(reads))
         .layer(axum::middleware::from_fn(require_direct))
         .layer(axum::middleware::from_fn(
             crate::auth::loopback::require_loopback,
         ))
+}
+
+/// `GET` [`ROUTE_READS`] — persist's read counters as they stand.
+async fn reads() -> axum::Json<ciris_persist::observe::TelemetrySnapshot> {
+    axum::Json(ciris_persist::observe::snapshot())
 }
 
 /// Headers a reverse proxy adds when it relays a request.
@@ -679,6 +761,7 @@ async fn require_direct(
 pub fn router() -> Router {
     Router::new()
         .route(ROUTE_MEMORY, get(memory))
+        .route(ROUTE_READS, get(reads))
         .route(ROUTE_TRIM, axum::routing::post(memory_trim))
         .layer(axum::middleware::from_fn(require_direct))
         .layer(axum::middleware::from_fn(
