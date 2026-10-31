@@ -72,7 +72,7 @@ fn direct_links(
     // a punch that succeeds on one side only moves that side onto the UDP path
     // while the other stays relayed, and the link dies `ChannelExhausted`
     // (Eric↔Francesco, 2026-10-31: every send 0/N landed for 14 min).
-    // TODO(leviculum two-sided commit + edge stall guard): default to
+    // TODO(CIRISAI/leviculum#89 two-sided commit + CIRISEdge#926 stall guard): default to
     // `bootstrap` again once both ship and a cross-NAT run is green.
     let facilitator = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR") {
         Ok(v) if v.trim().eq_ignore_ascii_case("bootstrap") => {
