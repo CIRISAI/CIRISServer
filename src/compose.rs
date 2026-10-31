@@ -4951,6 +4951,16 @@ pub(crate) async fn start_replication_runtime(
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
+        // TODO(CIRISPersist#1165): CONSENT-GATED ROUTES — edge v43.4.0's
+        // `consent_gated_routes`, OFF until a relay can hold contact grants
+        // (steward ruling 2026-10-31, CIRISConstitution#196). With it on and no
+        // grant at the relay, two NAT'd persons' nodes can never seal a link:
+        // worse than off. In the release that adopts #1165 (and edge's
+        // serve-to-relay half), set it `true` on every node that relays
+        // (`announced_relay::serves_infrastructure`), then re-run phone<->desktop
+        // and look for: the grant id on the canonical; `route_not_consented` on
+        // a stranger's fetch; the route served once consent lands; and
+        // `CONTACT request-seen` on the recipient.
         // WHOSE CONSENT THE SEND SET READS (CIRISEdge fix/consent-send-set-agent).
         // On a split home BOTH keys, never one. The owner's trace grant names
         // the AGENT (`for_key_id`): read by the node alone, the send set was
