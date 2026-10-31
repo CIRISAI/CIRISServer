@@ -34,7 +34,7 @@ on:
 jobs:
   ios-build:
     name: ios PyO3 abi3 (${{ matrix.dir }})
-    runs-on: macos-14
+    runs-on: macos-15
     # The two targets are a 2-entry MATRIX, not one job building both: cargo's
     # target-dir lock prevents in-job parallelism, so a matrix is the only way
     # to overlap them (persist measured a ~20m sequential job before the split).
