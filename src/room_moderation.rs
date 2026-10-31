@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 
 use ciris_persist::federation::admission;
+use ciris_persist::federation::consent::consent_dimension;
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::types::{attestation_type, cohort_scope};
 use ciris_persist::federation::{Attestation, FederationDirectory};
@@ -126,7 +127,7 @@ fn flag_class(dimension: &str) -> Option<ContentFlag> {
 
 fn references(row: &Attestation) -> Option<&str> {
     row.attestation_envelope
-        .get("references_attestation_id")
+        .get(paths::REFERENCES_ATTESTATION_ID)
         .and_then(serde_json::Value::as_str)
 }
 
@@ -301,7 +302,7 @@ async fn has_view_consent(
             r.attesting_key_id == viewer
                 && r.attestation_type == attestation_type::SCORES
                 && references(r) == Some(target_id)
-                && dimension(r).is_some_and(|d| d.starts_with("consent:state:"))
+                && dimension(r).is_some_and(|d| d.starts_with(consent_dimension::STATE_PREFIX))
                 && r.attestation_envelope
                     .get("scope")
                     .and_then(serde_json::Value::as_str)
@@ -314,7 +315,7 @@ async fn has_view_consent(
         .max_by_key(|r| r.asserted_at);
     Ok(newest
         .and_then(dimension)
-        .is_some_and(|d| d.starts_with("consent:state:granted")))
+        .is_some_and(|d| d.starts_with(consent_dimension::STATE_GRANTED_PREFIX)))
 }
 
 /// **The viewer's consent to view a flagged item** — their own signed
@@ -335,10 +336,10 @@ pub async fn reveal(
         attestation_type::SCORES,
         cohort_scope::SELF,
         serde_json::json!({
-            "dimension": "consent:state:granted:v1",
+            (paths::DIMENSION): format!("{}:v1", consent_dimension::STATE_GRANTED_PREFIX),
             "scope": VIEW_SCOPE,
             "content_class": class.as_str(),
-            "references_attestation_id": target_id,
+            (paths::REFERENCES_ATTESTATION_ID): target_id,
         }),
     )
     .about(viewer.key_id());
