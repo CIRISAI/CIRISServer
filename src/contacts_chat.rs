@@ -539,6 +539,52 @@ pub(crate) async fn viewer_duties(
     duties_of(directory, &mut HashMap::new(), who, community_id).await
 }
 
+/// **Name a contact's nodes to edge as direct-link peers, or withdraw them**
+/// (steward ruling 2026-10-30: "collapse to direct immediately for the
+/// consent exchange"; edge v43.4.0 `allow_direct_contact`). A consented
+/// contact's node is accepted and proposed for a direct link like a room
+/// peer's. The set is edge's, in memory: the pair-room driver re-seeds it
+/// once per process from the contacts on file, and every transition after
+/// that names its own nodes here. `extra_nodes` are nodes known before the
+/// person's owner-binding lands (a v3 code's).
+async fn direct_contact(
+    st: &ChatState,
+    person: &str,
+    extra_nodes: &[String],
+    allow: bool,
+    why: &'static str,
+) {
+    let Some(transport) = st.routes.as_ref() else {
+        return;
+    };
+    let mut nodes = crate::peer::bound_nodes_of(&st.engine, person)
+        .await
+        .unwrap_or_default();
+    for n in extra_nodes {
+        if !nodes.contains(n) {
+            nodes.push(n.clone());
+        }
+    }
+    let mut full = Vec::new();
+    for n in &nodes {
+        if allow {
+            if !transport.allow_direct_contact(n) {
+                full.push(n.clone());
+            }
+        } else {
+            transport.forget_direct_contact(n);
+        }
+    }
+    if !full.is_empty() {
+        tracing::warn!(person, why, nodes = ?full, "contacts: edge's direct-contact set is full — these nodes stay relayed");
+    }
+    tracing::info!(
+        target: "ciris_server::contact_trace",
+        "DIRECT-CONTACT {} ({why}) peer_person={person} nodes={nodes:?}",
+        if allow { "allow" } else { "forget" }
+    );
+}
+
 /// Turn edge's [`LadderStall`](ciris_edge::contact::LadderStall) into a refusal.
 ///
 /// The stall vocabulary is deliberately not a wrapper over mechanical errors —
@@ -2490,6 +2536,9 @@ async fn ignore_contact_request(
             format!("{grant_id} is not a pending contact request for this owner"),
         );
     };
+    if let Some(requester) = entry["requester_key_id"].as_str() {
+        direct_contact(&st, requester, &[], false, "ignored").await;
+    }
     let envelope = serde_json::json!({
         (ciris_persist::federation::envelope::paths::DIMENSION): CONTACT_IGNORED_DIMENSION,
         (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): grant_id,
@@ -2693,6 +2742,7 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
                 serde_json::json!(inbound.contains(&key_id)),
             );
             if inbound.contains(&key_id) {
+                direct_contact(&st, &key_id, &[], true, "mutual").await;
                 crate::contact_trace::contact_once(
                     &st.engine,
                     "mutual",
@@ -3236,6 +3286,14 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         .await
         .map(|g| g.iter().any(|(k, _)| *k == key_id))
         .unwrap_or(false);
+    direct_contact(
+        &st,
+        &key_id,
+        &code_nodes,
+        true,
+        if theirs_held { "accept" } else { "add" },
+    )
+    .await;
     crate::contact_trace::contact(
         &st.engine,
         if theirs_held { "accept" } else { "add" },
@@ -3391,6 +3449,7 @@ async fn remove_contact(
             )
         }
     };
+    direct_contact(&st, &key_id, &[], false, "removed").await;
     subjects.push(key_id.clone());
     let grants =
         match crate::peer::live_consent_grants_for_machine(&st.engine, &owner.node_key_id).await {
@@ -6770,6 +6829,18 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
         }
     };
     let me = pen.key_id().to_owned();
+    // Edge's direct-contact set is in memory: name every contact on file once
+    // per process, so a restart does not leave consented contacts relayed.
+    {
+        static SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SEEDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Ok((contacts, _)) = contact_persons(&st.engine, &me, &node).await {
+                for person in contacts {
+                    direct_contact(st, &person, &[], true, "boot").await;
+                }
+            }
+        }
+    }
     let dir = st.engine.federation_directory();
     // 1. The joiner's acceptance of a requested room's invitation.
     let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, pen.edge_signer()).await;
@@ -7174,6 +7245,7 @@ pub(crate) mod pending_contacts {
                 // The node is not our peer yet and we hold no route to it: ask
                 // the peers we have for its key, occurrence and transport
                 // destination (public subject planes), so the grant can travel.
+                super::direct_contact(&st, key_id, &nodes, true, "resolved").await;
                 for node in &nodes {
                     let _ = pull_person_records(&st, &owner, node).await;
                 }
