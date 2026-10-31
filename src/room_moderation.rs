@@ -36,7 +36,6 @@ use ciris_persist::federation::{Attestation, FederationDirectory};
 use ciris_persist::prelude::Engine;
 use serde::Serialize;
 
-use crate::attestation_reads::AllAttestations as _;
 use crate::safety::infohazard::ContentFlag;
 
 /// The scope token persist's `resolve_scoped_consent` matches a view consent on.
@@ -83,12 +82,68 @@ pub struct ModerationView {
     pub reconsideration_attestation_id: Option<String>,
 }
 
-/// Duty answers memoised for one read: a transcript of many messages from a
-/// few moderators costs a few walks, not one per row.
+/// Duty answers and duty-layer rows memoised for one read: a transcript of
+/// many messages from a few authors and moderators costs a few walks and a few
+/// indexed reads, not one per row.
 #[derive(Default)]
-pub struct DutyCache(HashMap<(String, &'static str), bool>);
+pub struct DutyCache(
+    HashMap<(String, &'static str), bool>,
+    HashMap<String, std::sync::Arc<Vec<Attestation>>>,
+);
+
+/// The duty-layer rows about `key` in the families `prefixes` — through
+/// persist's indexed `to(key).dimension_prefix(..)` read, NEVER
+/// `attestations_to_all(key)`: a chat message is itself a row about its
+/// author, so the unfiltered read returns every message the author ever wrote
+/// and a transcript paid that once per message (the 0.5.243 chat bench hit its
+/// 45-minute timeout on it).
+async fn rows_about(
+    dir: &dyn FederationDirectory,
+    key: &str,
+    prefixes: &[&str],
+) -> Result<Vec<Attestation>, String> {
+    use ciris_persist::federation::attestation_query::{AttestationQuery, FOLD_PAGE};
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        let mut pages = AttestationQuery::to(key, FOLD_PAGE)
+            .dimension_prefix(prefix)
+            .pages();
+        while let Some(rows) = pages
+            .next(dir)
+            .await
+            .map_err(|e| format!("read {prefix}* rows about {key}: {e:#}"))?
+        {
+            out.extend(rows);
+        }
+    }
+    Ok(out)
+}
 
 impl DutyCache {
+    /// The flag and appeal rows about `author`, read once per cache.
+    async fn moderation_rows(
+        &mut self,
+        dir: &dyn FederationDirectory,
+        author: &str,
+    ) -> Result<std::sync::Arc<Vec<Attestation>>, String> {
+        if let Some(hit) = self.1.get(author) {
+            return Ok(hit.clone());
+        }
+        let rows = std::sync::Arc::new(
+            rows_about(
+                dir,
+                author,
+                &[
+                    "content_class:",
+                    admission::RECONSIDERATION_DIMENSION_PREFIX,
+                ],
+            )
+            .await?,
+        );
+        self.1.insert(author.to_owned(), rows.clone());
+        Ok(rows)
+    }
+
     async fn holds(
         &mut self,
         dir: &dyn FederationDirectory,
@@ -153,15 +208,12 @@ pub async fn view_of(
     viewer: &str,
 ) -> Result<Option<ModerationView>, String> {
     let dir = engine.federation_directory();
-    let rows = dir
-        .attestations_to_all(author)
-        .await
-        .map_err(|e| format!("read moderation rows about {author}: {e}"))?;
+    let rows = duties.moderation_rows(dir.as_ref(), author).await?;
 
     // THE FLAG: per class, the newest row from a `moderate` holder of THIS
     // room. A cleared flag (`withdrawn: true`) is the newest row saying so.
     let mut newest: HashMap<&'static str, &Attestation> = HashMap::new();
-    for row in &rows {
+    for row in rows.iter() {
         if row.attestation_type != attestation_type::SCORES
             || !names_room(row, room)
             || references(row) != Some(target_id)
@@ -210,7 +262,7 @@ pub async fn view_of(
     // ruling from a `review` holder after it.
     let mut filing: Option<&Attestation> = None;
     let mut ruling: Option<(&Attestation, String)> = None;
-    for row in &rows {
+    for row in rows.iter() {
         if row.attestation_type != attestation_type::SCORES
             || !dimension(row)
                 .is_some_and(|d| d.starts_with(admission::RECONSIDERATION_DIMENSION_PREFIX))
@@ -291,11 +343,12 @@ async fn has_view_consent(
     target_id: &str,
     class: ContentFlag,
 ) -> Result<bool, String> {
-    let rows = engine
-        .federation_directory()
-        .attestations_to_all(viewer)
-        .await
-        .map_err(|e| format!("read {viewer}'s view consents: {e}"))?;
+    let rows = rows_about(
+        engine.federation_directory().as_ref(),
+        viewer,
+        &[consent_dimension::STATE_PREFIX],
+    )
+    .await?;
     let newest = rows
         .iter()
         .filter(|r| {
