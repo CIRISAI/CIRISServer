@@ -540,12 +540,12 @@ pub(crate) async fn viewer_duties(
 }
 
 /// **Name a contact's nodes to edge as direct-link peers, or withdraw them**
-/// (steward ruling 2026-10-30: "collapse to direct immediately for the
-/// consent exchange"; edge v43.4.0 `allow_direct_contact`). A consented
-/// contact's node is accepted and proposed for a direct link like a room
-/// peer's. The set is edge's, in memory: the pair-room driver re-seeds it
-/// once per process from the contacts on file, and every transition after
-/// that names its own nodes here. `extra_nodes` are nodes known before the
+/// (edge v43.4.0 `allow_direct_contact`). A MUTUAL contact's node is accepted
+/// and proposed for a direct link like a room peer's — only after the request
+/// is accepted (steward ruling 2026-10-31: "After contact is accepted"; the
+/// request itself crosses relayed). The set is edge's, in memory: the
+/// pair-room driver re-seeds it once per process from the mutual contacts on
+/// file, and the accept / first-mutual transitions name their nodes here. `extra_nodes` are nodes known before the
 /// person's owner-binding lands (a v3 code's).
 async fn direct_contact(
     st: &ChatState,
@@ -3286,14 +3286,13 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         .await
         .map(|g| g.iter().any(|(k, _)| *k == key_id))
         .unwrap_or(false);
-    direct_contact(
-        &st,
-        &key_id,
-        &code_nodes,
-        true,
-        if theirs_held { "accept" } else { "add" },
-    )
-    .await;
+    // DIRECT ONLY AFTER ACCEPTANCE (steward ruling 2026-10-31: "After contact
+    // is accepted"): the request crosses relayed; a contact is named to edge
+    // as a direct-link peer once BOTH sides consented — here, when this add
+    // accepts their request.
+    if theirs_held {
+        direct_contact(&st, &key_id, &code_nodes, true, "accept").await;
+    }
     crate::contact_trace::contact(
         &st.engine,
         if theirs_held { "accept" } else { "add" },
@@ -6835,9 +6834,15 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     {
         static SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !SEEDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            if let Ok((contacts, _)) = contact_persons(&st.engine, &me, &node).await {
+            // Mutual contacts only — direct after acceptance.
+            if let (Ok((contacts, _)), Ok(inbound)) = (
+                contact_persons(&st.engine, &me, &node).await,
+                inbound_chat_grants(&st.engine, &me, &node).await,
+            ) {
                 for person in contacts {
-                    direct_contact(st, &person, &[], true, "boot").await;
+                    if inbound.iter().any(|(k, _)| *k == person) {
+                        direct_contact(st, &person, &[], true, "boot").await;
+                    }
                 }
             }
         }
@@ -7246,7 +7251,6 @@ pub(crate) mod pending_contacts {
                 // The node is not our peer yet and we hold no route to it: ask
                 // the peers we have for its key, occurrence and transport
                 // destination (public subject planes), so the grant can travel.
-                super::direct_contact(&st, key_id, &nodes, true, "resolved").await;
                 // RE-AIM THE GRANT AT THE NODE. A contact added before their
                 // owner-binding landed got the person-subject grant (#472's
                 // recorded intent): edge withholds that row from the node it
