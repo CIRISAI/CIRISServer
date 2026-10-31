@@ -43,19 +43,55 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 /// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
 /// out a 5-minute announce cycle per direction — the single dominant wait in
 /// the ~7-minute run. Compile-fenced like every other harness knob.
-/// **This node's direct-link posture** (CIRISEdge#915): a transport node serves
-/// a facilitator on UDP at the same port number as its TCP listener (4242 in
-/// production) and accepts upgrades from room peers; a node that is not a
-/// transport node keeps edge's inert default. `CIRIS_DIRECT_LINK_FACILITATOR_PORT`
-/// moves the port, and `0` turns serving off for an operator whose network
-/// cannot open it.
+/// **This node's direct-link posture** (CIRISEdge#915, #920; edge v43.4.0).
+///
+/// - **Proposing** — OPT-IN (off by default until leviculum's two-sided commit;
+///   see the TODO below). `CIRIS_DIRECT_LINK_FACILITATOR=bootstrap` proposes
+///   direct paths to room peers and consented contacts (`allow_direct_contact`)
+///   through the first bootstrap peer as facilitator: a canonical serves one on UDP at its listener's
+///   port, and learning a NAT'd node's public address is what a facilitator is
+///   for (steward 2026-10-30: "collapse to direct immediately"). Edge never
+///   proposes without a facilitator, and until 0.5.243 every node this repo
+///   started was built without one — no server-hosted phone or desktop could
+///   take a direct path at all. `transport.node` does not decide it: it
+///   defaults ON for every node, NAT'd devices included. A public server has
+///   no room peers to propose to, so it proposes nothing in practice.
+///   `CIRIS_DIRECT_LINK_FACILITATOR=host:port` names another; unset or `off`
+///   proposes nothing.
+/// - **Serving** — a transport node serves a facilitator on UDP at its TCP
+///   listener's port (4242 in production) and accepts upgrades from room
+///   peers. `CIRIS_DIRECT_LINK_FACILITATOR_PORT` moves the port, and `0` turns
+///   serving off for an operator whose network cannot open it.
 fn direct_links(
     transport_node: bool,
     listen_port: u16,
+    bootstrap: &[std::net::SocketAddr],
 ) -> ciris_edge::transport::direct_path::DirectLinksConfig {
     use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig};
+    // OPT-IN until leviculum's two-sided commit (steward ruling 2026-10-31):
+    // a punch that succeeds on one side only moves that side onto the UDP path
+    // while the other stays relayed, and the link dies `ChannelExhausted`
+    // (Eric↔Francesco, 2026-10-31: every send 0/N landed for 14 min).
+    // TODO(CIRISAI/leviculum#89 two-sided commit + CIRISEdge#926 stall guard): default to
+    // `bootstrap` again once both ship and a cross-NAT run is green.
+    let facilitator = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR") {
+        Ok(v) if v.trim().eq_ignore_ascii_case("bootstrap") => {
+            bootstrap.first().map(std::string::ToString::to_string)
+        }
+        Ok(v) if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("off") => None,
+        Ok(v) => Some(v.trim().to_owned()),
+        Err(_) => None,
+    };
     if !transport_node {
-        return DirectLinksConfig::default();
+        tracing::info!(
+            facilitator = ?facilitator,
+            "direct links: this node proposes direct paths to room peers and consented contacts \
+             through its facilitator, and serves none"
+        );
+        return DirectLinksConfig {
+            facilitator,
+            ..DirectLinksConfig::default()
+        };
     }
     let port = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR_PORT") {
         Ok(v) => match v.trim().parse::<u16>() {
@@ -75,11 +111,12 @@ fn direct_links(
     let serve_facilitator = (port != 0).then_some(port);
     tracing::info!(
         serve_facilitator = ?serve_facilitator,
-        "direct links: this node facilitates NAT traversal for room peers (UDP) and accepts \
-         their upgrades; it proposes none itself (CIRISEdge#915)"
+        facilitator = ?facilitator,
+        "direct links: this node facilitates NAT traversal for room peers (UDP), accepts their \
+         upgrades, and proposes through its own facilitator when it has a bootstrap peer"
     );
     DirectLinksConfig {
-        facilitator: None,
+        facilitator,
         serve_facilitator,
         accept: DirectAccept::RoomPeers,
     }
@@ -4187,6 +4224,12 @@ async fn setup_peer_replication(
             crate::receive_axis::pull_owner_testimony(&engine_for_pull, &node).await;
         });
     }
+    // Whom this node resolves its own owner to, said once at boot (and again
+    // after every announce) — "owner unresolved" further down names its key.
+    let engine_for_binding = Arc::clone(engine);
+    tokio::spawn(async move {
+        crate::contact_trace::owner_binding(&engine_for_binding, "boot").await;
+    });
     started
 }
 
@@ -4945,6 +4988,29 @@ pub(crate) async fn start_replication_runtime(
     let runtime_config = ReplicationRuntimeConfig {
         metrics: Some(edge.metrics()),
         local_key_id: Some(wire.to_string()),
+        // TODO(CIRISPersist#1165): CONSENT-GATED ROUTES — edge v43.4.0's
+        // `consent_gated_routes`, OFF until a relay can hold contact grants
+        // (steward ruling 2026-10-31, CIRISConstitution#196). With it on and no
+        // grant at the relay, two NAT'd persons' nodes can never seal a link:
+        // worse than off. In the release that adopts #1165 (and edge's
+        // serve-to-relay half), set it `true` on every node that relays
+        // (`announced_relay::serves_infrastructure`), then re-run phone<->desktop
+        // and look for: the grant id on the canonical; `route_not_consented` on
+        // a stranger's fetch; the route served once consent lands; and
+        // `CONTACT request-seen` on the recipient.
+        // WHOSE CONSENT THE SEND SET READS (CIRISEdge fix/consent-send-set-agent).
+        // On a split home BOTH keys, never one. The owner's trace grant names
+        // the AGENT (`for_key_id`): read by the node alone, the send set was
+        // empty and no `trace:*` row left (agent 2.18.0 harness, 2026-10-30).
+        // A contact's grant names the NODE: read by the agent alone, the
+        // contact plane would lose the peer it just accepted (phone↔desktop,
+        // 2026-10-30). The union is what each grant names. Empty where the two
+        // are one key — edge falls back to `local_key_id`.
+        consent_subject_key_ids: if wire == node_key_id {
+            Vec::new()
+        } else {
+            vec![node_key_id.to_owned(), wire.to_owned()]
+        },
         // SEALED-CONTENT WIRING (edge v27.0.0, CIRISEdge#640): the three hooks
         // that only make sense together, spelled as one type so the half-wired
         // node cannot be built — `pull_sink ⇒ engine`, `revocations ⇒ engine`.
@@ -5288,12 +5354,12 @@ async fn build_edge(
         // CIRISEdge#805 item 8 / #915: direct links through NAT. Every server is
         // a facilitator (steward, 2026-10-28): a fabric node serves one on UDP
         // beside its TCP listener, so two NAT'd peers that share a room can
-        // learn their public addresses from it and take a direct path. A
-        // public server proposes nothing itself (`facilitator: None`, there is
-        // no NAT to learn through) and accepts an upgrade only from a room
-        // peer. Fixed at node build: leviculum takes it before the transport
-        // starts, never later.
-        direct_links: direct_links(transport_node, cfg.listen_addr.port()),
+        // learn their public addresses from it and take a direct path. Every
+        // node with a bootstrap peer proposes through it (see `direct_links`),
+        // and accepts an upgrade only from a room peer or a consented contact.
+        // Fixed at node build: leviculum takes it before the transport starts,
+        // never later.
+        direct_links: direct_links(transport_node, cfg.listen_addr.port(), &cfg.bootstrap_peers),
         // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
         // no link shaped — so a re-pin does not move this node's posture.
         shaping: Default::default(),
@@ -5906,17 +5972,39 @@ mod direct_link_tests {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR_PORT").is_some() {
             return;
         }
-        let on = direct_links(true, 4242);
+        let on = direct_links(true, 4242, &[]);
         assert_eq!(on.serve_facilitator, Some(4242));
         assert_eq!(
             on.facilitator, None,
-            "a public server proposes nothing itself"
+            "no bootstrap peer, nothing to propose through"
         );
         assert_eq!(
             on.accept,
             ciris_edge::transport::direct_path::DirectAccept::RoomPeers
         );
-        assert_eq!(direct_links(true, 5301).serve_facilitator, Some(5301));
-        assert_eq!(direct_links(false, 4242).serve_facilitator, None);
+        assert_eq!(direct_links(true, 5301, &[]).serve_facilitator, Some(5301));
+        assert_eq!(direct_links(false, 4242, &[]).serve_facilitator, None);
+    }
+
+    /// A NAT'd node proposes through its bootstrap peer — without a
+    /// facilitator edge never proposes, and no server-hosted node could go
+    /// direct (2026-10-31).
+    #[test]
+    fn a_node_proposes_only_when_opted_in() {
+        if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR").is_some() {
+            return;
+        }
+        // OFF by default until the two-sided commit (2026-10-31): a bootstrap
+        // peer alone does not make a node propose.
+        let canonical: std::net::SocketAddr = "108.61.242.236:4242".parse().unwrap();
+        let off = direct_links(false, 4242, &[canonical]);
+        assert!(
+            !off.proposes(),
+            "proposing is opt-in until leviculum's two-sided commit"
+        );
+        assert_eq!(off.serve_facilitator, None, "a NAT'd node serves none");
+        let both = direct_links(true, 4242, &[canonical]);
+        assert!(!both.proposes());
+        assert_eq!(both.serve_facilitator, Some(4242), "serving is unchanged");
     }
 }

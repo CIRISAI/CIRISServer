@@ -65,7 +65,7 @@ decimal_id	claim_id	repo	path#symbol	crate@version
 4.2.1.1	CLM-halt-one-row	CIRISServer	src/accord_halt.rs#release_halt	ciris-server@v0.5.225
 4.2.1.1	CLM-halt-one-row	CIRISServer	src/accord_halt.rs#load_halt_latch	ciris-server@v0.5.225
 4.2.1.1	CLM-invocation	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#Invocation::canonical_bytes	ciris-verify-core@v10.1.1
-4.2.1.2	CLM-notify	CIRISClient	client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/ui/screens/AccordScreen.kt#invocationBadge	ciris-client@0.5.232
+4.2.1.2	CLM-notify	CIRISClient	client/shared/src/commonMain/kotlin/ai/ciris/mobile/shared/ui/screens/AccordScreen.kt#invocationBadge	ciris-client@0.5.237
 4.2.1.3	CLM-lifecycle	CIRISVerify	src/ciris-verify-core/src/humanity_accord.rs#verify_invocation	ciris-verify-core@v10.1.1
 4.2.2	CLM-hardware-class	CIRISVerify	src/ciris-keyring/src/hw_token.rs#hardware_class_table	ciris-keyring@v10.1.1
 4.2.2.1	CLM-hardware-class-hardware	CIRISServer	src/hardware_attestation.rs#admit_hardware_class	ciris-server@main

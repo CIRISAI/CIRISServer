@@ -12,7 +12,9 @@ fn main() -> Result<()> {
     // construction sites, and the other two host the embedded agent/fold serve
     // path on exactly the small hosts this exists for (CIRISServer#501).
     let workers = ciris_server::node_runtime::worker_threads();
-    let runtime = ciris_server::node_runtime::build("ciris-node")?;
+    // The process's name on the host: `CIRIS_NODE_LABEL`, else `ciris-node`.
+    ciris_server::node_runtime::set_process_name(&ciris_server::node_runtime::label());
+    let runtime = ciris_server::node_runtime::build(&ciris_server::node_runtime::label())?;
     let result = runtime.block_on(async_main(workers));
     // A bounded runtime shutdown (CIRISServer#568): a blocking-pool thread
     // parked in a transport read would otherwise hold the process open after

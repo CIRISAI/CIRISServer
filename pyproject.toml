@@ -81,6 +81,10 @@ requires-python = ">=3.10"
 # `chat.unsupported_content_type` — CIRISClient#36). 0.5.201 defines none of
 # them; below it a fresh install renders those states as raw ids. The
 # `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
+# FLOOR 0.5.237 (2026-10-31): room files, file actions and moderation under the
+# item menu (CSD-007/-065/-091/-110), and the thirteen ids 0.5.242 emitted with
+# no en.json entry — the chat revision refusals and `owner_requests.*` — off
+# the guard's debt list (39 → 26).
 # FLOOR 0.5.232 (2026-10-26): the client localizing the fourteen ids 0.5.234
 # and 0.5.237 queued (`sign_owner_binding.*`, `upgrade_owner.*`, the contact
 # request ignore ids) and the CSD-109 contact requests; five-platform run with
@@ -105,7 +109,7 @@ requires-python = ">=3.10"
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
 dependencies = [
-    "ciris-client>=0.5.232,<0.6",
+    "ciris-client>=0.5.237,<0.6",
 ]
 
 [project.urls]
