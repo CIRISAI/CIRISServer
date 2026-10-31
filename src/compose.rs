@@ -45,9 +45,10 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 /// the ~7-minute run. Compile-fenced like every other harness knob.
 /// **This node's direct-link posture** (CIRISEdge#915, #920; edge v43.4.0).
 ///
-/// - **Proposing** — every node with a bootstrap peer proposes direct paths to
-///   its room peers and consented contacts (`allow_direct_contact`) through
-///   that peer as facilitator: a canonical serves one on UDP at its listener's
+/// - **Proposing** — OPT-IN (off by default until leviculum's two-sided commit;
+///   see the TODO below). `CIRIS_DIRECT_LINK_FACILITATOR=bootstrap` proposes
+///   direct paths to room peers and consented contacts (`allow_direct_contact`)
+///   through the first bootstrap peer as facilitator: a canonical serves one on UDP at its listener's
 ///   port, and learning a NAT'd node's public address is what a facilitator is
 ///   for (steward 2026-10-30: "collapse to direct immediately"). Edge never
 ///   proposes without a facilitator, and until 0.5.243 every node this repo
@@ -55,7 +56,8 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 ///   take a direct path at all. `transport.node` does not decide it: it
 ///   defaults ON for every node, NAT'd devices included. A public server has
 ///   no room peers to propose to, so it proposes nothing in practice.
-///   `CIRIS_DIRECT_LINK_FACILITATOR=host:port` names another; `off` stops it.
+///   `CIRIS_DIRECT_LINK_FACILITATOR=host:port` names another; unset or `off`
+///   proposes nothing.
 /// - **Serving** — a transport node serves a facilitator on UDP at its TCP
 ///   listener's port (4242 in production) and accepts upgrades from room
 ///   peers. `CIRIS_DIRECT_LINK_FACILITATOR_PORT` moves the port, and `0` turns
@@ -66,10 +68,19 @@ fn direct_links(
     bootstrap: &[std::net::SocketAddr],
 ) -> ciris_edge::transport::direct_path::DirectLinksConfig {
     use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig};
+    // OPT-IN until leviculum's two-sided commit (steward ruling 2026-10-31):
+    // a punch that succeeds on one side only moves that side onto the UDP path
+    // while the other stays relayed, and the link dies `ChannelExhausted`
+    // (Eric↔Francesco, 2026-10-31: every send 0/N landed for 14 min).
+    // TODO(leviculum two-sided commit + edge stall guard): default to
+    // `bootstrap` again once both ship and a cross-NAT run is green.
     let facilitator = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR") {
-        Ok(v) if v.trim().eq_ignore_ascii_case("off") => None,
-        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_owned()),
-        _ => bootstrap.first().map(std::string::ToString::to_string),
+        Ok(v) if v.trim().eq_ignore_ascii_case("bootstrap") => {
+            bootstrap.first().map(std::string::ToString::to_string)
+        }
+        Ok(v) if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("off") => None,
+        Ok(v) => Some(v.trim().to_owned()),
+        Err(_) => None,
     };
     if !transport_node {
         tracing::info!(
@@ -5979,23 +5990,21 @@ mod direct_link_tests {
     /// facilitator edge never proposes, and no server-hosted node could go
     /// direct (2026-10-31).
     #[test]
-    fn a_natted_node_proposes_through_its_bootstrap_peer() {
+    fn a_node_proposes_only_when_opted_in() {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR").is_some() {
             return;
         }
+        // OFF by default until the two-sided commit (2026-10-31): a bootstrap
+        // peer alone does not make a node propose.
         let canonical: std::net::SocketAddr = "108.61.242.236:4242".parse().unwrap();
         let off = direct_links(false, 4242, &[canonical]);
-        assert_eq!(off.facilitator.as_deref(), Some("108.61.242.236:4242"));
-        assert!(off.proposes());
-        assert_eq!(off.serve_facilitator, None, "a NAT'd node serves none");
         assert!(
-            !direct_links(false, 4242, &[]).proposes(),
-            "no bootstrap peer, no facilitator to learn through"
+            !off.proposes(),
+            "proposing is opt-in until leviculum's two-sided commit"
         );
-        // `transport.node` defaults ON for every node, NAT'd ones included:
-        // a transport node with a bootstrap peer proposes too, and serves.
+        assert_eq!(off.serve_facilitator, None, "a NAT'd node serves none");
         let both = direct_links(true, 4242, &[canonical]);
-        assert!(both.proposes());
-        assert_eq!(both.serve_facilitator, Some(4242));
+        assert!(!both.proposes());
+        assert_eq!(both.serve_facilitator, Some(4242), "serving is unchanged");
     }
 }
