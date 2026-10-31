@@ -447,6 +447,9 @@ pub mod proxy;
 /// [`serve_with_adapter`] (`ciris_server.serve_with_python_adapter`).
 #[cfg(feature = "python")]
 mod py_adapter;
+/// The node's tracing lines as records on the host's Python `logging`.
+#[cfg(feature = "python")]
+mod py_log_sink;
 /// Serial-attached RNode LoRa radio driver for the edge packet-radio transport
 /// (CIRISServer LoRa medium). Desktop-only (the `serialport` crate is not
 /// available on the android/ios wheels), so the whole module is gated off the
@@ -1839,13 +1842,31 @@ static FILE_RELOAD: std::sync::OnceLock<
 fn install_or_reattach_tracing(
     log_dir: Option<&std::path::Path>,
     filter: tracing_subscriber::EnvFilter,
+    python_logging: bool,
 ) -> TracingInitStatus {
     use tracing_subscriber::{fmt, prelude::*};
+    // ONE LOG FILE (steward 2026-10-31): an embedded node hands its lines to
+    // the host's Python `logging` instead of writing its own dated file, so
+    // the host's `latest.log` carries both and one rotation bounds both.
     let build_file_layer = |dir: Option<&std::path::Path>| -> Option<ErasedFileLayer> {
+        #[cfg(feature = "python")]
+        if python_logging {
+            return Some(
+                Box::new(crate::py_log_sink::layer::<tracing_subscriber::Registry>())
+                    as ErasedFileLayer,
+            );
+        }
+        let _ = python_logging;
         dir.and_then(|d| {
             sync_file_layer::<tracing_subscriber::Registry>(d)
                 .map(|l| Box::new(l) as ErasedFileLayer)
         })
+    };
+    // The python sink has no file of its own to probe.
+    let log_dir = if python_logging && cfg!(feature = "python") {
+        None
+    } else {
+        log_dir
     };
 
     // Our subscriber already live → hot-swap the file slot (the reattach path).
@@ -1961,7 +1982,7 @@ pub fn init_tracing_with(log_dir: Option<&std::path::Path>) {
 pub fn init_tracing_with_status(log_dir: Option<&std::path::Path>) -> TracingInitStatus {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    install_or_reattach_tracing(log_dir, filter)
+    install_or_reattach_tracing(log_dir, filter, false)
 }
 
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
@@ -2185,7 +2206,7 @@ mod python {
         // embedded agent/fold topology, on exactly the small hosts the floor exists
         // for. `Runtime::new()` here would have given them two workers while the
         // fix reported success.
-        let rt = crate::node_runtime::build("ciris-node").map_err(py_err)?;
+        let rt = crate::node_runtime::build(&crate::node_runtime::label()).map_err(py_err)?;
         rt.block_on(fut).map_err(py_err)
     }
 
@@ -2210,7 +2231,7 @@ mod python {
         let run = || -> PyResult<()> {
             // FLOORED for the same reason as `rt_block_on` — this is the reentrant
             // serve path, same hosts, same two-worker exposure.
-            let rt = crate::node_runtime::build("ciris-node").map_err(py_err)?;
+            let rt = crate::node_runtime::build(&crate::node_runtime::label()).map_err(py_err)?;
             // ── RUNTIME-TOPOLOGY PROBE (#315 field diagnosis) ────────────────
             // Prove the SERVE runtime's time driver independently of any task
             // spawned onto it: if this heartbeat logs, timers work HERE; a
@@ -2544,12 +2565,31 @@ mod python {
     /// `filter` overrides the env filter (e.g. `"info,ciris_edge=debug"`) — on
     /// Android the host env whitelist can drop `RUST_LOG` before this runs, so an
     /// explicit arg beats the env round-trip. Both optional; bare call unchanged.
+    /// `set_process_label(label)` — name this node on the host. Sets
+    /// `CIRIS_NODE_LABEL` (the node's runtime threads take it when serve starts)
+    /// and names the CALLING thread, which on the host's main thread is the
+    /// process name `ps` / `top` / `pgrep` show (Linux; 15 bytes). Call it
+    /// before serving, e.g. `set_process_label("ciris-agent")` or
+    /// `"ciris-manager"`, so two nodes on one box can be told apart.
     #[pyfunction]
-    #[pyo3(name = "init_tracing", signature = (log_dir=None, filter=None))]
+    #[pyo3(name = "set_process_label")]
+    fn py_set_process_label(label: String) -> PyResult<String> {
+        // SAFETY: called by the host before it starts the node; no other
+        // thread of ours reads the environment concurrently at that point.
+        unsafe { std::env::set_var("CIRIS_NODE_LABEL", label.trim()) };
+        let applied = crate::node_runtime::label();
+        crate::node_runtime::set_process_name(&applied);
+        tracing::info!(label = %applied, "node label set — this node's threads and process carry it");
+        Ok(applied)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "init_tracing", signature = (log_dir=None, filter=None, python_logging=false))]
     fn py_init_tracing(
         py: Python<'_>,
         log_dir: Option<String>,
         filter: Option<String>,
+        python_logging: bool,
     ) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
         use tracing_subscriber::EnvFilter;
         let filter = filter
@@ -2563,15 +2603,27 @@ mod python {
         // Android boot). Return the verdict so the host detects a dark sink at
         // t=0: {"fresh_subscriber", "file_layer_attached", "first_write_ok",
         // "log_path"}. Existing callers that ignore the return are unchanged.
+        // `python_logging=True`: the node's lines become records on the
+        // `ciris_node.<crate>` loggers, written by the host's own handlers —
+        // one file, one rotation (`py_log_sink`). `log_dir` is then unused.
         let status = crate::install_or_reattach_tracing(
             log_dir.map(std::path::PathBuf::from).as_deref(),
             filter,
+            python_logging,
         );
         let d = pyo3::types::PyDict::new(py);
         d.set_item("fresh_subscriber", status.fresh_subscriber)?;
         d.set_item("file_layer_attached", status.file_layer_attached)?;
         d.set_item("first_write_ok", status.first_write_ok)?;
         d.set_item("log_path", status.log_path)?;
+        d.set_item(
+            "sink",
+            if python_logging {
+                "python_logging"
+            } else {
+                "file"
+            },
+        )?;
         Ok(d.into())
     }
 
@@ -3587,6 +3639,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_author_federation_consent, m)?)?;
         m.add_function(wrap_pyfunction!(author_community_trust_py, m)?)?;
         m.add_function(wrap_pyfunction!(py_init_tracing, m)?)?;
+        m.add_function(wrap_pyfunction!(py_set_process_label, m)?)?;
         m.add_function(wrap_pyfunction!(py_resolve_bearer, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_deferral_request, m)?)?;
         m.add_function(wrap_pyfunction!(py_emit_deferral_response, m)?)?;

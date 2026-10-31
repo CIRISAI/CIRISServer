@@ -219,6 +219,49 @@ pub const fn resolve_workers(requested: Option<usize>, detected: usize) -> usize
     }
 }
 
+/// **This node's name on the host** (steward 2026-10-31: more than one node
+/// runs on a box — the agent's, the manager client's — and every one showed
+/// as `ciris-node`). `CIRIS_NODE_LABEL` names the node's runtime threads and,
+/// through [`set_process_name`], the process; `ciris-node` when unset.
+/// Linux keeps 15 bytes of a thread or process name, so a label is cut there.
+#[must_use]
+pub fn label() -> String {
+    let raw = std::env::var("CIRIS_NODE_LABEL")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "ciris-node".to_owned());
+    truncate_name(&raw)
+}
+
+/// Cut `name` to the 15 bytes Linux keeps, on a character boundary.
+fn truncate_name(name: &str) -> String {
+    let mut end = name.len().min(15);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
+}
+
+/// Name the CALLING thread `name` (cut to 15 bytes). Called on a process's
+/// main thread, it is the name `ps`, `top` and `pgrep` show. Linux only; a
+/// no-op elsewhere (Windows names threads through the runtime builder).
+pub fn set_process_name(name: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let cut = truncate_name(name);
+        if let Ok(c) = std::ffi::CString::new(cut) {
+            // SAFETY: PR_SET_NAME reads a NUL-terminated string of at most 16
+            // bytes; `c` is one and outlives the call.
+            unsafe {
+                libc::prctl(libc::PR_SET_NAME, c.as_ptr() as libc::c_ulong, 0, 0, 0);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = name;
+}
+
 /// Build a multi-thread runtime with the floor applied.
 ///
 /// # Errors
@@ -241,6 +284,16 @@ mod tests {
 
     /// A 2-vCPU host must not get a 2-slot runtime, where one blocking task leaves
     /// HTTP unschedulable (CIRISServer#446, hit in #501).
+    #[test]
+    fn a_label_is_cut_to_what_linux_keeps() {
+        assert_eq!(
+            truncate_name("ciris-manager-client-node"),
+            "ciris-manager-c"
+        );
+        assert!(truncate_name("cn-é-ü-ö-ä-ß-node").len() <= 15);
+        assert_eq!(truncate_name("ciris-node"), "ciris-node");
+    }
+
     #[test]
     fn a_small_host_still_gets_the_floor() {
         assert_eq!(resolve_workers(None, 1), MIN_WORKER_THREADS);
