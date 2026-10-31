@@ -123,6 +123,7 @@ pub async fn contact(
     peer_person: &str,
     grant_id: Option<&str>,
     mutual: Option<bool>,
+    code_nodes: &[String],
 ) {
     let nodes = crate::peer::bound_nodes_of(engine, peer_person)
         .await
@@ -132,10 +133,13 @@ pub async fn contact(
         None => "grant=-".to_owned(),
     };
     let members = membership(engine, &nodes).await;
+    // The code's nodes are known before the person's owner-binding lands; the
+    // bound list is what a grant can route to, so both are said.
+    let code_only: Vec<&String> = code_nodes.iter().filter(|n| !nodes.contains(n)).collect();
     tracing::info!(
         target: "ciris_server::contact_trace",
         "CONTACT {transition} owner={owner_key_id} peer_person={peer_person} peer_nodes={nodes:?} \
-         {grant} mutual={} -> {members}",
+         code_nodes_not_yet_bound={code_only:?} {grant} mutual={} -> {members}",
         mutual.map_or("-".to_owned(), |m| m.to_string()),
     );
 }
@@ -168,6 +172,7 @@ pub async fn contact_once(
             peer_person,
             grant_id,
             mutual,
+            &[],
         )
         .await;
     }

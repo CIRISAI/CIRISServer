@@ -3301,6 +3301,7 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         &key_id,
         Some(&grant.attestation_id),
         Some(theirs_held),
+        &code_nodes,
     )
     .await;
     (
