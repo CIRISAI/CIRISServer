@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.243" # 0.5.243 (OPENED): CONTACTS GO DIRECT, AGENTS SHIP TRACES ON A SPLIT HOME, ROOMS SHARE FILES AND MODERATE THEM — adopts edge v43.4.1 (persist v59.1.2, verify v20.2.0); the send set reads consent for the node AND the agent key (CIRISEdge consent_subject_key_ids); consented contacts are named to edge for direct links (allow_direct_contact); proposing a direct link is OPT-IN (CIRIS_DIRECT_LINK_FACILITATOR=bootstrap) until leviculum's two-sided punch commit — a one-sided punch kills the link; a contact grant is re-aimed at the person's node once their binding lands; a chat message may carry a room file (accepts_attachments); a moderate holder's content_class flag withholds a room message or file until the viewer reveals it, and a review holder's reversal lifts it (CC 4.5.5); viewer_duties on transcripts and the room drive; CONTACT / OWNER-BINDING / CHAT READINESS / DIRECT-CONTACT lines; PERSIST READS HOT and GET /v1/node/diagnostics/reads; client floor 0.5.237
+version = "0.5.244" # 0.5.244 (OPENED): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.
