@@ -81,10 +81,65 @@ async fn enter_background_waits_for_the_pass_in_flight_and_honours_its_deadline(
         .unwrap();
     assert!(long.drained, "{long:?}");
     assert_eq!(in_pass(), 0);
-    assert!(
-        !long.transport_suspended,
-        "edge suspend is not wired yet, and says so"
-    );
+
     h.abort();
+    enter_foreground();
+}
+
+/// A transport that records what it was asked, and says whether it closed.
+struct FakeTransport {
+    quiescent: bool,
+    suspends: std::sync::Mutex<Vec<Duration>>,
+    resumes: AtomicU32,
+}
+
+impl TransportSleep for FakeTransport {
+    fn suspend(&self, deadline: Duration) -> bool {
+        self.suspends.lock().unwrap().push(deadline);
+        self.quiescent
+    }
+    fn resume(&self) {
+        self.resumes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_transport_sleeps_after_the_loops_and_wakes_before_them() {
+    let _s = SERIAL.lock().await;
+    enter_foreground();
+    let t = Arc::new(FakeTransport {
+        quiescent: true,
+        suspends: std::sync::Mutex::new(Vec::new()),
+        resumes: AtomicU32::new(0),
+    });
+    set_transport(t.clone());
+
+    let r = tokio::task::spawn_blocking(|| enter_background(Duration::from_secs(3)))
+        .await
+        .unwrap();
+    assert!(
+        r.transport_suspended,
+        "a quiescent transport is reported: {r:?}"
+    );
+    let asked = t.suspends.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "suspended once");
+    assert!(
+        asked[0] <= Duration::from_secs(3),
+        "the transport gets what is LEFT of the host's deadline, never more: {asked:?}"
+    );
+
+    enter_foreground();
+    assert_eq!(t.resumes.load(Ordering::SeqCst), 1, "resumed on foreground");
+
+    // A transport that could not close in time is reported as such.
+    set_transport(Arc::new(FakeTransport {
+        quiescent: false,
+        suspends: std::sync::Mutex::new(Vec::new()),
+        resumes: AtomicU32::new(0),
+    }));
+    let r = tokio::task::spawn_blocking(|| enter_background(Duration::from_millis(200)))
+        .await
+        .unwrap();
+    assert!(!r.transport_suspended, "{r:?}");
     enter_foreground();
 }

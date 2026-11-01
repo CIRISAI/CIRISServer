@@ -67,6 +67,30 @@ fn phase_tx() -> &'static watch::Sender<Phase> {
     TX.get_or_init(|| watch::channel(Phase::Foreground).0)
 }
 
+/// The transport's own sleep — edge's `Edge::suspend` / `resume` (agreed with
+/// edge 2026-11-01). Compose registers it once the transport exists; tests
+/// register a fake. Blocking: the host's lifecycle callback is not async.
+pub trait TransportSleep: Send + Sync {
+    /// Close links, interfaces and listener within `deadline`; `true` when
+    /// everything closed (edge's `SuspendReport::quiescent`).
+    fn suspend(&self, deadline: Duration) -> bool;
+    /// Bring the transport back.
+    fn resume(&self);
+}
+
+static TRANSPORT: std::sync::RwLock<Option<std::sync::Arc<dyn TransportSleep>>> =
+    std::sync::RwLock::new(None);
+
+/// Register the transport `enter_background` / `enter_foreground` sleep and
+/// wake. A later call replaces it (a re-serve builds a new transport).
+pub fn set_transport(t: std::sync::Arc<dyn TransportSleep>) {
+    *TRANSPORT.write().unwrap_or_else(|p| p.into_inner()) = Some(t);
+}
+
+fn transport() -> Option<std::sync::Arc<dyn TransportSleep>> {
+    TRANSPORT.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 /// Loops between a tick and their next call to `tick` — i.e. mid-pass.
 static IN_PASS: AtomicUsize = AtomicUsize::new(0);
 
@@ -114,7 +138,8 @@ pub struct BackgroundReport {
     pub still_in_pass: usize,
     /// How long the call waited.
     pub waited: Duration,
-    /// Edge's transport was suspended too. `false` until edge ships `suspend`.
+    /// The registered transport closed everything inside the deadline. `false`
+    /// when none is registered (edge's `suspend` is wired at its adoption).
     pub transport_suspended: bool,
 }
 
@@ -130,20 +155,24 @@ pub fn enter_background(deadline: Duration) -> BackgroundReport {
     while in_pass() > 0 && start.elapsed() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    let drained = in_pass() == 0;
+    // The loops first (they may be mid-send), then the transport, with what is
+    // left of the host's deadline.
+    let transport_suspended =
+        transport().is_some_and(|t| t.suspend(deadline.saturating_sub(start.elapsed())));
     let report = BackgroundReport {
-        drained: in_pass() == 0,
+        drained,
         still_in_pass: in_pass(),
         waited: start.elapsed(),
-        // TODO(edge suspend/resume — agreed 2026-11-01 with edge and agent):
-        // call edge's `suspend(remaining deadline)` here and report its result.
-        transport_suspended: false,
+        transport_suspended,
     };
     if report.drained {
         tracing::info!(
             was = was.as_str(),
             waited_ms = report.waited.as_millis() as u64,
+            transport_suspended = report.transport_suspended,
             "LIFECYCLE background — every periodic loop is paused at its next tick and no \
-             pass is running; edge's transport is not suspended yet (edge suspend pending)"
+             pass is running; transport_suspended says whether the transport closed too"
         );
     } else {
         tracing::warn!(
@@ -160,8 +189,11 @@ pub fn enter_background(deadline: Duration) -> BackgroundReport {
 /// Foreground the node: every paused loop resumes and runs its overdue pass at
 /// once. Idempotent.
 pub fn enter_foreground() {
+    // The transport first, so the loops' catch-up passes have a link to use.
+    if let Some(t) = transport() {
+        t.resume();
+    }
     let was = phase_tx().send_replace(Phase::Foreground);
-    // TODO(edge suspend/resume): call edge's `resume()` here.
     tracing::info!(
         was = was.as_str(),
         "LIFECYCLE foreground — every periodic loop resumes and runs its catch-up pass now"
