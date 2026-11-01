@@ -170,3 +170,24 @@ CSD-127:
   tests:
     first_contact:
       at: [root.two, party.outside_roots]
+# The canonical's Goal rows, signed by its founder quorum (CSD-130,
+# FSD/GOALS_CEREMONY.md; CIRISClient#260 mirrors this entry byte for byte).
+CSD-130:
+  topology: T21
+  tests:
+    goals_staged:
+      at: [root.rooted, goal.staged]
+      probe: {node: C, path: /v1/accord/goals/staged, status: 200}
+    goals_pending:
+      at: [root.rooted, goal.proposed]
+      probe: {node: C, path: /v1/accord/goals/pending, status: 200}
+    goals_held_by_halt:
+      at: [root.halted, goal.proposed]
+      probe: {node: C, path: /v1/accord/goals/pending, status: 200,
+              expect: {proposals.0.blocked_by: root_halted}}
+    goals_declared:
+      at: [root.rooted, goal.declared]
+      probe: {node: C, path: "/v1/goals?declarer=ciris-canonical", status: 200}
+    # The evidence joins (evidence.offered, evidence.counted) are realized by
+    # CIRISAgent's QA against this node (T21 promises them with a realizer);
+    # the model never schedules a test on a state its own steps do not reach.

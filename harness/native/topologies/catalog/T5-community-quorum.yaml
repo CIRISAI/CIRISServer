@@ -5,7 +5,7 @@
 # applies it. `quorum_change.held` is TRANSIENT: tested before `cosign`. The
 # moderator is appointed last, so a refusal there costs no earlier state.
 catalog_id: T5
-catalogue_version: 5
+catalogue_version: 6
 title: A community — a held quorum change, a moderator duty
 serves: [CSD-102, CSD-103, CSD-065, CSD-128]
 derives: [6c, 6d, 3d, 2d]
