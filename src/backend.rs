@@ -615,6 +615,30 @@ pub async fn spawn_blob_puller(
     (None, None)
 }
 
+/// **The blob durability pass's interval** — `CIRIS_DURABILITY_INTERVAL_SECS`,
+/// for an operator to set on the one node where the pass is expensive.
+///
+/// Edge's pass issues one custody read per blob × device × audience node. On a
+/// node that acks every blob (the canonical) that count grows with the square
+/// of the corpus: at the edge default (15 min) it was the canonical's read
+/// storm, ~30 min after every boot (CIRISPersist#1177; the call count itself is
+/// CIRISEdge#933). The bridge sets this on the canonical; every other node keeps
+/// edge's default. Unset or unparseable → `default`; `0` or `off` → `None` (no
+/// pass); `N` → `N` seconds, floored at one minute. The re-file horizon is 24 h,
+/// so an hour keeps repair well inside it.
+fn durability_interval(
+    env: Option<&str>,
+    default: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match env.map(str::trim) {
+        Some("0") | Some("off") => None,
+        Some(v) => v
+            .parse::<u64>()
+            .map_or(default, |n| Some(std::time::Duration::from_secs(n.max(60)))),
+        None => default,
+    }
+}
+
 fn spawn_puller_with<B>(
     engine: &Arc<Engine>,
     edge: Arc<ciris_edge::Edge>,
@@ -648,6 +672,12 @@ where
             community: ConsentDisposition::Announce,
             commons: ConsentDisposition::Decline,
         },
+        durability_interval: durability_interval(
+            std::env::var("CIRIS_DURABILITY_INTERVAL_SECS")
+                .ok()
+                .as_deref(),
+            PullConfig::default().durability_interval,
+        ),
         ..PullConfig::default()
     };
     // The NODE holds the pulled bytes and signs their holding claims (and the
@@ -748,5 +778,29 @@ mod host_device_class_tests {
             "server"
         };
         assert_eq!(host_device_class(), expected, "unset: the build decides");
+    }
+}
+
+#[cfg(test)]
+mod durability_interval_tests {
+    use super::durability_interval;
+    use std::time::Duration;
+
+    #[test]
+    fn the_operator_sets_the_canonicals_durability_pass_and_everyone_else_keeps_the_default() {
+        let d = Some(Duration::from_secs(900));
+        assert_eq!(durability_interval(None, d), d, "unset: edge's default");
+        assert_eq!(
+            durability_interval(Some("3600"), d),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(durability_interval(Some("off"), d), None);
+        assert_eq!(durability_interval(Some("0"), d), None);
+        assert_eq!(
+            durability_interval(Some("5"), d),
+            Some(Duration::from_secs(60)),
+            "floored"
+        );
+        assert_eq!(durability_interval(Some("junk"), d), d);
     }
 }
