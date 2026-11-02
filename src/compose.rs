@@ -2392,7 +2392,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // consensus, no automatic penalty (see the module doc).
     let _equivocation = crate::equivocation::spawn(
         Arc::clone(&engine),
-        crate::equivocation::DetectorConfig::default(),
+        crate::equivocation::DetectorConfig::from_env(),
     );
 
     // ── ADAPTER SEAM (start + run_lifecycle) ──────────────────────────────────
