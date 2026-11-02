@@ -98,6 +98,31 @@ impl<D: FederationDirectory + ?Sized + Sync> AllAttestations for D {
     }
 }
 
+/// **Every row of `types` by / to one key** — the narrow form of the
+/// whole-key reads: a seek on `(key, attestation_type)` instead of a walk of
+/// everything the key ever signed or was named in (steward 2026-11-01: route
+/// on the fields we route on, touch only hot data). On the canonical a
+/// whole-key read of its own key fetched ~1,500 pages per page of results; a
+/// typed seek reads the index and the few rows it returns.
+pub async fn attestations_of_types<D: FederationDirectory + ?Sized + Sync>(
+    dir: &D,
+    key: &str,
+    by: bool,
+    types: &[&str],
+) -> Result<Vec<Attestation>, Error> {
+    let q = if by {
+        AttestationQuery::by(key, FOLD_PAGE)
+    } else {
+        AttestationQuery::to(key, FOLD_PAGE)
+    };
+    let mut pages = q.types(types).pages();
+    let mut out = Vec::new();
+    while let Some(rows) = pages.next(dir).await? {
+        out.extend(rows);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -773,10 +773,24 @@ async fn scan_window(
             .list_attestations(filter, state.cursor.take(), cfg.page, scope.clone())
             .await
             .map_err(|e| anyhow::anyhow!("list live attestations: {e}"))?;
-        report.read_ms += t_read.elapsed().as_millis() as u64;
+        let page_ms = t_read.elapsed().as_millis() as u64;
+        report.read_ms += page_ms;
         report.pages += 1;
         scanned += page.items.len();
         report.rows_scanned += page.items.len();
+        // Progress every 10 pages (and any page slower than 5 s): a scan whose
+        // pages get slower as its cursor deepens is a plan problem, and this
+        // line is where it shows before the pass ever ends.
+        if report.pages % 10 == 0 || page_ms > 5_000 {
+            tracing::info!(
+                pass,
+                pages = report.pages,
+                rows = report.rows_scanned,
+                page_ms,
+                read_ms = report.read_ms,
+                "equivocation pass progress"
+            );
+        }
 
         // The in-process re-check is kept as a WITNESS, not as the enforcement:
         // a local-tier row surviving the push-down would mean the axis stopped
@@ -912,6 +926,17 @@ pub async fn run_pass_with(
     let t0 = std::time::Instant::now();
     state.pass += 1;
     let mut report = DetectorReport::default();
+    // A pass that never ends must still show up: the canonical's 2026-11-01
+    // storm runs logged the detector STARTING and never one `equivocation
+    // pass` line in 50 min, so whether a pass was running at the onset could
+    // not be read from the log. Start + progress lines make it legible.
+    tracing::info!(
+        pass = state.pass,
+        resumed = state.cursor.is_some(),
+        max_rows = cfg.max_rows,
+        page = cfg.page,
+        "equivocation pass started"
+    );
     scan_window(engine, node_key_id, cfg, state, &mut report)
         .await
         .context("equivocation detector: scan window")?;
