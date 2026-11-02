@@ -180,8 +180,9 @@ pub fn log_hot_reads() {
 fn hot_whole_key_sites() -> String {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    static PREV: Mutex<Option<HashMap<String, (u64, u64, u64)>>> = Mutex::new(None);
-    let now: HashMap<String, (u64, u64, u64)> = crate::attestation_reads::whole_key_read_sites()
+    type BySite = HashMap<String, (u64, u64, u64)>;
+    static PREV: Mutex<Option<BySite>> = Mutex::new(None);
+    let now: BySite = crate::attestation_reads::whole_key_read_sites()
         .into_iter()
         .map(|(s, c, r, us)| (s, (c, r, us)))
         .collect();

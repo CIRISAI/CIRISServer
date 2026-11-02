@@ -20,9 +20,9 @@ use ciris_persist::federation::{Attestation, Error, FederationDirectory};
 /// server's widest reads (a key the canonical vouches for has thousands of
 /// rows), and persist's per-door counters cannot say WHICH caller pays: the
 /// call site can (steward 2026-11-01: "we need the hot paths clear").
-static SITES: std::sync::Mutex<
-    Option<std::collections::HashMap<&'static std::panic::Location<'static>, (u64, u64, u64)>>,
-> = std::sync::Mutex::new(None);
+type SiteCounts =
+    std::collections::HashMap<&'static std::panic::Location<'static>, (u64, u64, u64)>;
+static SITES: std::sync::Mutex<Option<SiteCounts>> = std::sync::Mutex::new(None);
 
 fn record(site: &'static std::panic::Location<'static>, rows: usize, micros: u64) {
     let Ok(mut g) = SITES.lock() else {
