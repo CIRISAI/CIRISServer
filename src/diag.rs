@@ -553,6 +553,7 @@ pub fn spawn_burst_sampler() {
 /// reason.
 pub fn arm(flag: bool) -> bool {
     tune_allocator();
+    crate::capacity_monitor::start();
     spawn_trimmer();
     spawn_burst_sampler();
     if flag {
