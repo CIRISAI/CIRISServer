@@ -423,6 +423,10 @@ pub mod node_identity;
 pub mod node_key;
 pub mod serve_marker;
 
+/// Host pressure, sampled agent-style, for edge's load shedding (steward 2026-11-01).
+pub mod capacity_monitor;
+/// Foreground / background: the node sleeps with its phone (steward 2026-11-01).
+pub mod node_lifecycle;
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).
 pub mod node_runtime;
 /// The NodeCode codec — a faithful Rust port of the agent's authoritative
@@ -3532,6 +3536,37 @@ mod python {
         py.detach(|| crate::node_control::shutdown_node_blocking(timeout))
     }
 
+    /// `enter_background(deadline_secs)` — the app is going to the background
+    /// (Android `onStop`, iOS `sceneDidEnterBackground`). No periodic loop
+    /// starts a new pass, and the call waits up to `deadline_secs` for the
+    /// passes already running to finish (`node_lifecycle`). Call it inside the
+    /// time the OS grants — on iOS inside `beginBackgroundTask`, ending the task
+    /// when this returns. Returns `{"drained", "still_in_pass", "waited_ms",
+    /// "transport_suspended"}`. Idempotent.
+    #[pyfunction]
+    #[pyo3(name = "enter_background", signature = (deadline_secs=5.0))]
+    fn py_enter_background(
+        py: Python<'_>,
+        deadline_secs: f64,
+    ) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+        let deadline = std::time::Duration::from_secs_f64(deadline_secs.max(0.0));
+        let r = py.detach(|| crate::node_lifecycle::enter_background(deadline));
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("drained", r.drained)?;
+        d.set_item("still_in_pass", r.still_in_pass)?;
+        d.set_item("waited_ms", r.waited.as_millis() as u64)?;
+        d.set_item("transport_suspended", r.transport_suspended)?;
+        Ok(d.into())
+    }
+
+    /// `enter_foreground()` — the app is in use again. Every paused loop runs
+    /// its overdue catch-up pass at once. Idempotent.
+    #[pyfunction]
+    #[pyo3(name = "enter_foreground")]
+    fn py_enter_foreground() {
+        crate::node_lifecycle::enter_foreground();
+    }
+
     // ── Substrate re-export (the one-wheel surface, CIRISServer#4) ───────────
     // The agent consumes the substrate as the SINGLE `ciris-server` wheel and
     // drops its standalone ciris_persist / ciris_edge wheels. Re-hosting the
@@ -3659,6 +3694,8 @@ mod python {
         m.add_function(wrap_pyfunction!(py_compose_status, m)?)?;
         m.add_function(wrap_pyfunction!(py_node_identity, m)?)?;
         m.add_function(wrap_pyfunction!(py_shutdown_node, m)?)?;
+        m.add_function(wrap_pyfunction!(py_enter_background, m)?)?;
+        m.add_function(wrap_pyfunction!(py_enter_foreground, m)?)?;
         // Re-export lens-core's Python surface so CIRISAgent can swap
         // `from ciris_lens_core import LensClient` → `from ciris_server import
         // LensClient` (drop-in). One wheel bundles the lens slice; registry +

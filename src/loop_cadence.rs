@@ -190,6 +190,9 @@ pub struct Cadence {
     seq: u64,
     /// Whether the immediate first tick has been taken.
     started: bool,
+    /// Held from a tick returning to the next `tick` call: this loop is
+    /// mid-pass (`node_lifecycle::enter_background` waits for these).
+    pass: Option<crate::node_lifecycle::PassGuard>,
 }
 
 impl Cadence {
@@ -213,6 +216,7 @@ impl Cadence {
             base: epoch() + phase_for(name, period),
             seq: 0,
             started: false,
+            pass: None,
         };
         c.seq = c.first_seq_after(Instant::now());
         c
@@ -277,6 +281,27 @@ impl Cadence {
     /// config write could postpone the next pass by a full cadence, and a stream
     /// of them could postpone it indefinitely.
     pub async fn tick(&mut self) {
+        // The pass that the previous tick started is over.
+        self.pass = None;
+        self.wait_for_deadline().await;
+        self.pass = Some(crate::node_lifecycle::PassGuard::begin());
+    }
+
+    /// [`tick`](Self::tick)'s schedule, held while the node is backgrounded
+    /// (`node_lifecycle`, steward 2026-11-01): a backgrounded node starts no
+    /// pass. A deadline that falls while backgrounded is overdue on return, so
+    /// the loop runs its catch-up pass as soon as the node is foregrounded.
+    async fn wait_for_deadline(&mut self) {
+        loop {
+            crate::node_lifecycle::foreground().await;
+            self.wait_on_grid().await;
+            if crate::node_lifecycle::phase() == crate::node_lifecycle::Phase::Foreground {
+                return;
+            }
+        }
+    }
+
+    async fn wait_on_grid(&mut self) {
         if !self.started {
             self.started = true;
             return;

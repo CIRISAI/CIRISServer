@@ -38,6 +38,73 @@ use crate::config::{Capabilities, ServerConfig};
 /// Re-announce cadence for the local Reticulum destination (Leviculum default).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 
+/// **A phone holds no listener** (CIRISEdge request 2026-11-01; steward
+/// 2026-11-01, the minimum listener, CIRISServer#24). A phone behind carrier
+/// NAT cannot be reached inbound, so a TCP server on `:4242` is only one more
+/// socket the OS must keep for a backgrounded app — and both platforms
+/// expect a backgrounded app to hold none
+/// (<https://developer.android.com/training/monitoring-device-state/doze-standby>,
+/// <https://developer.apple.com/documentation/backgroundtasks>). Its inbound
+/// arrives down the outbound link it holds to a transport node (#24's warm
+/// link).
+///
+/// So on Android and iOS the transport is client-only: one `TcpClient`
+/// interface per bootstrap peer. A non-empty `interfaces` list turns off edge's
+/// legacy `listen_addr` path, which is what binds the server. Elsewhere `None`
+/// keeps today's posture. `CIRIS_TRANSPORT_CLIENT_ONLY=1` forces it on any
+/// platform (tests; a desktop that wants no listener); `=0` forces it off.
+///
+/// No bootstrap peer → `None`, with a warning: an empty list would bring the
+/// legacy listener back, and a phone with nothing to dial is unreachable
+/// either way.
+/// Whether the transport is client-only: the `CIRIS_TRANSPORT_CLIENT_ONLY`
+/// override when it says yes or no, else whether this build is for a phone.
+fn client_only_wanted(env: Option<&str>, phone: bool) -> bool {
+    match env.map(str::trim) {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => phone,
+    }
+}
+
+fn client_only_interfaces(
+    bootstrap: &[std::net::SocketAddr],
+) -> Option<Vec<ciris_edge::transport::reticulum::ReticulumInterfaceConfig>> {
+    use ciris_edge::transport::reticulum::{ReticulumInterfaceConfig, TcpClientInterfaceConfig};
+    let env = std::env::var("CIRIS_TRANSPORT_CLIENT_ONLY").ok();
+    if !client_only_wanted(
+        env.as_deref(),
+        cfg!(any(target_os = "android", target_os = "ios")),
+    ) {
+        return None;
+    }
+    if bootstrap.is_empty() {
+        tracing::warn!(
+            "transport: client-only wanted (a phone holds no listener) but there is no \
+             bootstrap peer to dial — keeping the legacy listener; this node is reachable \
+             only on its LAN until a bootstrap peer is configured"
+        );
+        return None;
+    }
+    tracing::info!(
+        peers = ?bootstrap,
+        "transport: CLIENT-ONLY — one outbound link per bootstrap peer, no TCP listener and no \
+         facilitator; inbound arrives down the outbound link (CIRISServer#24)"
+    );
+    Some(
+        bootstrap
+            .iter()
+            .map(|a| {
+                ReticulumInterfaceConfig::TcpClient(TcpClientInterfaceConfig {
+                    target_addr: *a,
+                    transit: None,
+                    ifac: None,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The effective periodic-announce interval. PROD: the 300s const, always
 /// (zero-env). TEST-ANCHOR builds only: `CIRIS_TEST_ANNOUNCE_SECS` overrides it
 /// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
@@ -2392,7 +2459,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // consensus, no automatic penalty (see the module doc).
     let _equivocation = crate::equivocation::spawn(
         Arc::clone(&engine),
-        crate::equivocation::DetectorConfig::default(),
+        crate::equivocation::DetectorConfig::from_env(),
     );
 
     // ── ADAPTER SEAM (start + run_lifecycle) ──────────────────────────────────
@@ -5267,6 +5334,10 @@ async fn build_edge(
     // owner opts out via the `transport.node` config:* object (Phase 2). (Leviculum's builder
     // default is true; edge always calls .enable_transport explicitly, so this
     // value is honoured either way.)
+    // A phone holds no listener: client-only interfaces, and no facilitator
+    // (a UDP socket is a listener too).
+    let client_only = client_only_interfaces(&cfg.bootstrap_peers);
+    let serves_facilitator = transport_node && client_only.is_none();
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
@@ -5294,7 +5365,9 @@ async fn build_edge(
             .is_some_and(|w| w != cfg.key_id))
         .then(|| cfg.key_id.clone()),
         local_epoch: 0,
-        interfaces: vec![],
+        // Empty = edge's legacy listen + dial path (a fabric node's TCP server
+        // on `listen_addr`); a phone's client-only list replaces it.
+        interfaces: client_only.unwrap_or_default(),
         enable_transport: transport_node,
         // CIRISEdge#363: 30s bootstrap link keepalive (60s stale = 2× the
         // anti-entropy cadence) so an advisory-admitted link survives long enough
@@ -5359,7 +5432,11 @@ async fn build_edge(
         // and accepts an upgrade only from a room peer or a consented contact.
         // Fixed at node build: leviculum takes it before the transport starts,
         // never later.
-        direct_links: direct_links(transport_node, cfg.listen_addr.port(), &cfg.bootstrap_peers),
+        direct_links: direct_links(
+            serves_facilitator,
+            cfg.listen_addr.port(),
+            &cfg.bootstrap_peers,
+        ),
         // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
         // no link shaped — so a re-pin does not move this node's posture.
         shaping: Default::default(),
@@ -5967,6 +6044,26 @@ mod direct_link_tests {
     /// beside its own TCP listener, so nodes sharing a host never collide, and
     /// accepts room peers' upgrades. A node that is not a transport node keeps
     /// edge's inert default.
+    /// A phone holds no listener: client-only by default on Android/iOS, and
+    /// the override wins either way.
+    #[test]
+    fn a_phone_is_client_only_and_the_override_wins() {
+        assert!(
+            super::client_only_wanted(None, true),
+            "a phone build is client-only"
+        );
+        assert!(
+            !super::client_only_wanted(None, false),
+            "a server keeps its listener"
+        );
+        assert!(super::client_only_wanted(Some("1"), false));
+        assert!(!super::client_only_wanted(Some("0"), true));
+        assert!(
+            super::client_only_wanted(Some("junk"), true),
+            "junk falls back to the build"
+        );
+    }
+
     #[test]
     fn a_transport_node_facilitates_beside_its_listener() {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR_PORT").is_some() {
