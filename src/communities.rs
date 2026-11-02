@@ -146,10 +146,6 @@ const MAX_NAME_CHARS: usize = 200;
 const MAX_LIST_LIMIT: usize = 500;
 const DEFAULT_LIST_LIMIT: usize = 100;
 
-/// Page size when walking the widening plane for rooms the caller was ADDED
-/// to — persist indexes the record's members, not the widening plane's.
-const WIDENING_SCAN_PAGE: u32 = 500;
-
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
 /// A room's audience tier (FSD §4): `community`, or `affiliations` — the same
@@ -1598,11 +1594,15 @@ struct ListQuery {
 }
 
 /// `GET /v1/communities` — every room the caller is ACTIVE in, pair rooms
-/// included, by the fold. Candidates are the rooms whose RECORD names the
-/// caller (persist's index) plus the rooms whose WIDENING plane does (persist
-/// indexes no widening by member, so the plane is walked) — then each is
-/// judged by the fold, so a removed member's room drops out and an added
-/// member's room appears.
+/// included, by the fold. Candidates come from ONE member-indexed read:
+/// persist's `list_communities_for_member` names the rooms whose record lists
+/// the caller AND the rooms a widening seated them in
+/// (`federation_community_membership_widenings_by_member`, V151) — then each
+/// is judged by the fold, so a removed member's room drops out and an added
+/// member's room appears. (Until 0.5.245 this also walked the WHOLE widening
+/// plane per request to find the caller's widenings — every member's, every
+/// room's — which the member index already answers: steward 2026-11-01, route
+/// on the field we route on.)
 async fn list_communities(
     State(st): State<ChatState>,
     headers: HeaderMap,
@@ -1613,34 +1613,10 @@ async fn list_communities(
         Err(r) => return r,
     };
     let dir = st.engine.federation_directory();
-    let mut ids: BTreeSet<String> = match dir.list_communities_for_member(&owner.key_id).await {
+    let ids: BTreeSet<String> = match dir.list_communities_for_member(&owner.key_id).await {
         Ok(v) => v.into_iter().map(|c| c.community_key_id).collect(),
         Err(e) => return store_unavailable(format!("list_communities_for_member: {e:#}")),
     };
-    let mut cursor = None;
-    loop {
-        let page = match dir
-            .list_signed_community_membership_widenings_since(cursor.clone(), WIDENING_SCAN_PAGE)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return store_unavailable(format!(
-                    "list_signed_community_membership_widenings_since: {e:#}"
-                ))
-            }
-        };
-        for w in &page {
-            let row = &w.widening.community_membership_widening;
-            if row.member_key_id == owner.key_id {
-                ids.insert(row.community_key_id.clone());
-            }
-        }
-        if page.len() < WIDENING_SCAN_PAGE as usize {
-            break;
-        }
-        cursor = page.last().map(|p| p.resume_pair());
-    }
     let limit = q
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)

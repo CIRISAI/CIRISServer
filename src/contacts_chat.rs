@@ -6851,32 +6851,15 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     // 1. The joiner's acceptance of a requested room's invitation.
     let _ = crate::pair_intents::advance(&*dir, &st.user_seed_dir, &me, pen.edge_signer()).await;
     // 2. Every pair room this person is in: the record's members, plus the
-    //    widening plane (a joiner is seated by a widening — the record never
-    //    grows, persist Q2).
-    let mut rooms: std::collections::BTreeSet<String> = dir
+    //    rooms a widening seated them in (a joiner is seated by a widening —
+    //    the record never grows, persist Q2). Both from ONE member-indexed
+    //    read (`list_communities_for_member` covers the widenings by member,
+    //    V151), not a walk of every widening every tick.
+    let rooms: std::collections::BTreeSet<String> = dir
         .list_communities_for_member(&me)
         .await
         .map(|v| v.into_iter().map(|c| c.community_key_id).collect())
         .unwrap_or_default();
-    let mut cursor = None;
-    loop {
-        let Ok(page) = dir
-            .list_signed_community_membership_widenings_since(cursor.clone(), 500)
-            .await
-        else {
-            break;
-        };
-        for w in &page {
-            let row = &w.widening.community_membership_widening;
-            if row.member_key_id == me {
-                rooms.insert(row.community_key_id.clone());
-            }
-        }
-        if page.len() < 500 {
-            break;
-        }
-        cursor = page.last().map(|p| p.resume_pair());
-    }
     let widener =
         ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
     let mut out = Vec::new();
