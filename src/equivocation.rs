@@ -181,6 +181,40 @@ pub struct DetectorConfig {
     pub max_rows: usize,
 }
 
+impl DetectorConfig {
+    /// The default, with `CIRIS_EQUIVOCATION_CADENCE_SECS` for an operator:
+    /// `0` / `off` pauses the detector (a year between passes), `N` sets the
+    /// cadence in seconds (floored at 60). The canonical's 2026-11-01 read storm
+    /// pointed at this pass: its page read is a full table scan plus a sort on
+    /// every page (no index serves `asserted_at, attestation_id` across keys;
+    /// the persist index ask is the fix), so the canonical can be relieved
+    /// without a release. Local detection only — pausing it skips no consensus
+    /// and no penalty.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Some(cadence) = cadence_override(
+            std::env::var("CIRIS_EQUIVOCATION_CADENCE_SECS")
+                .ok()
+                .as_deref(),
+        ) {
+            c.cadence = cadence;
+        }
+        c
+    }
+}
+
+/// `CIRIS_EQUIVOCATION_CADENCE_SECS` → a cadence: `None` keeps the default.
+fn cadence_override(v: Option<&str>) -> Option<Duration> {
+    match v.map(str::trim)? {
+        "0" | "off" => Some(Duration::from_secs(365 * 24 * 3600)),
+        n => n
+            .parse::<u64>()
+            .ok()
+            .map(|n| Duration::from_secs(n.max(60))),
+    }
+}
+
 impl Default for DetectorConfig {
     fn default() -> Self {
         DetectorConfig {
@@ -1501,5 +1535,27 @@ mod tests {
             "the two hashes are the verifiable half of the proof; equal hashes would mean \
              the pair was never a contradiction"
         );
+    }
+}
+
+#[cfg(test)]
+mod cadence_override_tests {
+    use super::cadence_override;
+    use std::time::Duration;
+
+    #[test]
+    fn the_operator_can_slow_or_pause_the_detector() {
+        assert_eq!(cadence_override(None), None, "unset: the default");
+        assert_eq!(
+            cadence_override(Some("3600")),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            cadence_override(Some("5")),
+            Some(Duration::from_secs(60)),
+            "floored"
+        );
+        assert!(cadence_override(Some("off")).unwrap() > Duration::from_secs(300 * 24 * 3600));
+        assert_eq!(cadence_override(Some("junk")), None);
     }
 }
