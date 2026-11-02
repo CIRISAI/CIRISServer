@@ -161,13 +161,48 @@ pub fn log_hot_reads() {
     let by_calls = render(&deltas);
     let calls_hot = deltas.first().is_some_and(|x| x.2 >= HOT_READ_FLOOR_CALLS);
     if bytes_hot || calls_hot {
+        let sites = hot_whole_key_sites();
         tracing::warn!(
             top_by_bytes = %by_bytes,
             top_by_calls = %by_calls,
+            server_whole_key_sites = %sites,
             "PERSIST READS HOT: the persist doors that read the most (bytes decoded, and calls) since the last \
              period — a sustained line here names the query behind a CPU or I/O spin"
         );
     }
+}
+
+/// The server's own whole-key reads (`attestation_reads::AllAttestations`) that
+/// cost the most wall time since the last call, by call site: `file:line
+/// calls rows ms`. persist's counters name the door; this names the CALLER, and
+/// wall time per call is the page cost the door counters cannot show (the
+/// canonical, 2026-11-01: ~330 pages per `attestation_query` call for ~4 rows).
+fn hot_whole_key_sites() -> String {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static PREV: Mutex<Option<HashMap<String, (u64, u64, u64)>>> = Mutex::new(None);
+    let now: HashMap<String, (u64, u64, u64)> = crate::attestation_reads::whole_key_read_sites()
+        .into_iter()
+        .map(|(s, c, r, us)| (s, (c, r, us)))
+        .collect();
+    let Ok(mut prev) = PREV.lock() else {
+        return String::new();
+    };
+    let last = prev.replace(now.clone()).unwrap_or_default();
+    let mut d: Vec<(String, u64, u64, u64)> = now
+        .into_iter()
+        .map(|(s, (c, r, us))| {
+            let (pc, pr, pus) = last.get(&s).copied().unwrap_or_default();
+            (s, c - pc, r - pr, us - pus)
+        })
+        .filter(|x| x.1 > 0)
+        .collect();
+    d.sort_by_key(|x| std::cmp::Reverse(x.3));
+    d.iter()
+        .take(5)
+        .map(|(s, c, r, us)| format!("{s} calls={c} rows={r} ms={}", us / 1000))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The arena cap this process asks glibc for when the operator has not.
