@@ -674,6 +674,45 @@ pub fn normalize_prefixes<S: AsRef<str>>(prefixes: &[S]) -> Vec<String> {
 }
 
 /// The default prefix set as owned strings (boot-env peering convenience).
+/// What announcing shares (steward 2026-11-04: two consents, "1) announce (be
+/// found) 2) share traces"): the owner-binding rows that let someone find this
+/// node. Traces, capacity and chat are not here, so being found never shares them.
+pub const ANNOUNCE_CONSENT_PREFIXES: [&str; 2] = ["ownership:", "self:delegates_to:"];
+
+/// Consent the canonicals carry what announcing shares. Announcing alone has to
+/// reach them: a node with no consent peer sends its rows nowhere, so someone who
+/// announced and declined traces could not be found by anyone. Widens an existing
+/// grant and narrows nothing. A failure is logged and not fatal: the announce
+/// stands, and the next boot asks again.
+pub async fn consent_to_be_found(engine: &Engine, node_key_id: &str) {
+    let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
+    for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
+        if canonical == node_key_id {
+            continue;
+        }
+        match ensure_replication_consent_covers(
+            engine,
+            node_key_id,
+            &canonical,
+            &ANNOUNCE_CONSENT_PREFIXES,
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(
+                canonical = %canonical,
+                "announce: this node's identity rows may reach this canonical (traces are a \
+                 separate consent)"
+            ),
+            Err(e) => tracing::warn!(
+                canonical = %canonical,
+                error = %format!("{e:#}"),
+                "announce: could not consent to this canonical carrying the identity rows, so \
+                 nobody can find this node through it yet; the next boot asks again"
+            ),
+        }
+    }
+}
+
 pub fn default_attestation_prefixes() -> Vec<String> {
     normalize_prefixes(DEFAULT_GRANT_ATTESTATION_PREFIXES)
 }
@@ -2378,6 +2417,22 @@ pub async fn replication_peers_from_consent(
     }
     peers.sort();
     Ok(peers)
+}
+
+#[cfg(test)]
+mod announce_consent_tests {
+    use super::ANNOUNCE_CONSENT_PREFIXES;
+
+    /// Two consents (steward 2026-11-04): being found shares nothing else.
+    #[test]
+    fn announcing_shares_no_traces_scores_or_chat() {
+        for other in ["trace:", "capacity:", "chat:"] {
+            assert!(
+                !ANNOUNCE_CONSENT_PREFIXES.contains(&other),
+                "announcing must not consent to {other}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

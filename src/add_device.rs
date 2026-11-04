@@ -1651,8 +1651,9 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
 }
 
 /// How long the join waits for the other device's route before answering
-/// "try again" (the canonical's next bootstrap-plane round carries it).
-const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// "try again" (the canonical's next bootstrap-plane round carries it). Under the
+/// client's 30 s request timeout, or it never reads the answer: run 41896619027.
+const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Wait until this node holds at least one of `targets`' signed routes WITH
 /// its transit pair (`transit_kex_pair_for`, Rooted), kicking a replication

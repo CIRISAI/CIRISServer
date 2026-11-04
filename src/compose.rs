@@ -2195,6 +2195,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         )
     });
 
+    // A node that announced before announcing carried this consent, or whose
+    // first try failed: being found is what the person already asked for.
+    if config_rx.borrow().announce_ownership {
+        let engine = Arc::clone(&engine);
+        let node = this_node.clone();
+        tokio::spawn(async move {
+            crate::peer::consent_to_be_found(&engine, &node).await;
+            crate::replication_reconcile::nudge("announced: identity may reach the canonical");
+        });
+    }
+
     crate::compose_status::phase("config_reconcile_loop");
     // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
     // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
