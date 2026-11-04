@@ -122,6 +122,26 @@ fn direct_links(
     }
 }
 
+/// The transport identity this home already has. The fold's edge keeps it at
+/// `<home>/data/edge/edge_identity.rid`, and the no-AI hand-off replaces that
+/// process with this one: minting another here is a new destination for the same
+/// node, and its signed route no longer matches. So inherit the fold's when this
+/// home has none at the conventional path; edge adopts it into the keystore.
+fn inherited_ret_identity(cfg: &ServerConfig) -> std::path::PathBuf {
+    choose_ret_identity(
+        cfg.ret_identity_path(),
+        cfg.home.join("data/edge/edge_identity.rid"),
+    )
+}
+
+fn choose_ret_identity(own: std::path::PathBuf, fold: std::path::PathBuf) -> std::path::PathBuf {
+    if !own.exists() && fold.exists() {
+        tracing::info!(path = %fold.display(), "transport identity: inheriting the embedded edge's");
+        return fold;
+    }
+    own
+}
+
 fn announce_interval() -> Duration {
     #[cfg(feature = "test-anchor")]
     if let Ok(v) = std::env::var("CIRIS_TEST_ANNOUNCE_SECS") {
@@ -5238,7 +5258,25 @@ async fn build_edge(
     // node emits carries a FULL HYBRID signature (Ed25519 + ML-DSA-65). One
     // federation identity per node (distinct from the RNS transport-tier identity
     // held in the keystore below).
-    let signer = Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, Some(pqc)));
+    //
+    // On a split home the wire identity is the NODE key, and the transport signs
+    // with it. Signing with the actor while advertising the node is a node nobody
+    // can attribute: every peer's rooting refuses the mismatch and drops its
+    // frames, with nothing wrong on this side but one log line. That was the
+    // no-AI hand-off, where the fold's edge carries the node key and this boot
+    // came up as the actor (five-platform run 41905966241).
+    let signer = match crate::node_key::held_node_edge_signer() {
+        Some(node) if crate::node_key::wire_identity() == Some(node.key_id.as_str()) => node,
+        _ => Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, Some(pqc))),
+    };
+    if let Some(wire) = crate::node_key::wire_identity() {
+        anyhow::ensure!(
+            wire == signer.key_id,
+            "this node advertises {wire} but would sign as {}: no peer could attribute it, so \
+             the transport refuses to start",
+            signer.key_id
+        );
+    }
 
     // Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99):
     // TPM-sealed when available (the `tpm` feature + hardware), encrypted software
@@ -5270,7 +5308,7 @@ async fn build_edge(
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
-        identity_path: cfg.ret_identity_path(),
+        identity_path: inherited_ret_identity(cfg),
         announce_interval: announce_interval(),
         // ADVERTISE the wire identity — what peers are told this node is. On a
         // split node that is the NODE key; everywhere else it is `cfg.key_id`
@@ -5956,6 +5994,36 @@ mod own_key_ids_tests {
         // (A negative check on the old "benign" comment cannot live in the file
         // it scrapes — its own needle is a match. The positive checks above are
         // the teeth; the traceflow ladder's `served` stage is the live one.)
+    }
+}
+
+#[cfg(test)]
+mod ret_identity_tests {
+    use super::choose_ret_identity;
+
+    #[test]
+    fn a_home_the_fold_started_keeps_the_folds_transport_identity() {
+        let dir = std::env::temp_dir().join(format!("ret-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (own, fold) = (dir.join("own.rid"), dir.join("fold.rid"));
+        assert_eq!(
+            choose_ret_identity(own.clone(), fold.clone()),
+            own,
+            "neither: mint"
+        );
+        std::fs::write(&fold, b"x").unwrap();
+        assert_eq!(
+            choose_ret_identity(own.clone(), fold.clone()),
+            fold,
+            "the fold's"
+        );
+        std::fs::write(&own, b"y").unwrap();
+        assert_eq!(
+            choose_ret_identity(own.clone(), fold.clone()),
+            own,
+            "its own stands"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
