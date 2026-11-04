@@ -750,6 +750,12 @@ pub async fn consent_to_be_found(
     node_key_id: &str,
     consented: &mut std::collections::BTreeSet<String>,
 ) {
+    // The trust set is the person's, carried on the owner's own acceptance rows
+    // (CC 4.4.3.8). A node holds none of its own.
+    let Some(owner) = crate::receive_axis::owner_of_any(engine, &[node_key_id.to_owned()]).await
+    else {
+        return;
+    };
     let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
     let roster = crate::federation_delivery::distinct_canonical_key_ids(&hints);
     for canonical in canonicals_to_consent(&roster, consented, node_key_id) {
@@ -760,13 +766,8 @@ pub async fn consent_to_be_found(
             capability_roots_to_trusted_root, INFRA_SERVE_SCOPE,
         };
         let dir = engine.federation_directory();
-        match capability_roots_to_trusted_root(
-            dir.as_ref(),
-            node_key_id,
-            &canonical,
-            INFRA_SERVE_SCOPE,
-        )
-        .await
+        match capability_roots_to_trusted_root(dir.as_ref(), &owner, &canonical, INFRA_SERVE_SCOPE)
+            .await
         {
             Ok(Some(_)) => {}
             Ok(None) => {
