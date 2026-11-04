@@ -644,6 +644,43 @@ async fn naming_trace_without_the_traces_consent_is_refused() {
     }
 }
 
+/// Turning traces off takes `trace:` off a live grant and leaves the rest; a
+/// second pass, as a healing cycle would be, finds nothing to do and adds nothing.
+#[tokio::test]
+async fn turning_traces_off_narrows_the_grant_and_stays_off() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let me = engine.local_derived_key_id().await.expect("derive");
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &me,
+        &peer_key_id(),
+        &["trace:", "ownership:"],
+    )
+    .await
+    .expect("a grant carrying traces");
+    let changed = ciris_server::peer::drop_traces_from_grants(&engine, &me, &peer_key_id())
+        .await
+        .expect("narrow");
+    assert!(changed >= 1, "the grant carried trace:");
+    let grants = ciris_server::peer::live_consent_grants_for_machine(&engine, &me)
+        .await
+        .expect("read");
+    let peer = peer_key_id();
+    let grant = grants
+        .iter()
+        .find(|g| g.subject_key_ids.iter().any(|k| *k == peer))
+        .expect("the grant is still live");
+    let live = ciris_server::peer::grant_receipt(grant)["consent_prefixes"].clone();
+    assert_eq!(live, serde_json::json!(["ownership:"]));
+    let again = ciris_server::peer::drop_traces_from_grants(&engine, &me, &peer_key_id())
+        .await
+        .expect("again");
+    assert_eq!(again, 0, "nothing re-added it");
+}
+
 #[tokio::test]
 async fn unowned_node_refuses_peering_even_for_system_admin() {
     let engine = node().await;

@@ -177,14 +177,13 @@ flipping flags, and a human needs somewhere to do that.
 Anyone can stand up a server and contribute capability. Two rules govern what
 you get back. Both are worth reading before you deploy.
 
-### 1. Announce, or you get nothing
+### 1. Announcing is your choice, and it has costs
 
-**A node that does not announce gets no service access on the mesh and no agent
-services.** This is not a throttle or a penalty tier — it is the floor.
+**A node that does not announce can be reached only by a contact code or QR its
+owner hands over directly, and cannot take part in public groups.** Private rooms,
+contacts and traces still work (CC 5.4.6). A serve seat must announce.
 
-The reason is the kill switch. The accord's halt is only meaningful against a
-node it can *reach*; an unreachable node cannot be stopped, so it is never
-served in the first place. Every canonical record carries both halves for
+Every canonical record carries both halves for
 exactly this reason: its **trust** (the `canonical` role) and its
 **reachability** (the signed envelope transport hint). Baking canonical records
 was gated on the kill switch being enforceable *first*.

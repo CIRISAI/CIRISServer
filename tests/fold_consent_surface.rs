@@ -238,15 +238,8 @@ fn the_readme_states_both_mesh_participation_rules() {
     let readme: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
     assert!(
-        readme.contains("no service access on the mesh and no agent services"),
-        "rule 1 must be on the front page: a node that does not announce gets no service access \
-         and no agent services, because the kill switch is only meaningful against a node it can \
-         reach. An operator who learns this after deploying learns it as an outage."
-    );
-    assert!(
-        readme.contains("kill switch"),
-        "rule 1 without its REASON is an arbitrary-sounding restriction, and arbitrary-sounding \
-         restrictions get worked around. Say why: an unreachable node cannot be halted."
+        readme.contains("reached only by a contact code or QR"),
+        "the cost of not announcing belongs on the front page (CC 5.4.6, CLM-unannounced-costs)"
     );
     assert!(
         readme.contains("TWO consents"),
@@ -323,9 +316,8 @@ fn the_consent_disclosure_states_both_rules_and_all_three_costs() {
         .as_str()
         .expect("announce_requirement");
     assert!(
-        announce.contains("no service access") && announce.contains("kill switch"),
-        "rule 1 must ride along with its reason. A wizard that omits it ships a node whose \
-         operator learns the announce requirement as an outage.\ngot: {announce}"
+        announce.contains("contact code") && announce.contains("public groups"),
+        "the cost of not announcing, as CC 5.4.6 states it.\ngot: {announce}"
     );
 }
 

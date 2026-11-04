@@ -1392,11 +1392,29 @@ pub fn author_consent_embedded(
     let (rt, _controller) = HELD
         .get()
         .context("author_federation_consent: federation delivery not started")?;
+    // Every caller reaches here, and several default their prefixes. Sharing traces
+    // has one door, the capture grant: without it `trace:` is not this call's to
+    // add, so turning traces off stays off across a retry or a heal.
+    let mut prefixes = prefixes.to_vec();
+    if rt
+        .block_on(crate::peer::check_traces_consent(
+            &engine,
+            &node_key_id,
+            &prefixes,
+        ))
+        .is_err()
+    {
+        tracing::info!(
+            peer_key_id,
+            "consent authored without trace:: this node's owner has not chosen to share traces"
+        );
+        prefixes.retain(|p| p != "trace:");
+    }
     let grant = rt.block_on(crate::peer::emit_replication_consent(
         &engine,
         &node_key_id,
         peer_key_id,
-        prefixes,
+        &prefixes,
     ))?;
 
     // ── CIRISConstitution#46 — the `analyze` grant, the SECOND half ──────────
