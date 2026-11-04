@@ -279,7 +279,23 @@ struct HandoffStore {
     /// outcome; the TTL prune is a leak-guard for a callback that dies between
     /// the two (nothing else removes the entry).
     in_flight: HashMap<String, Instant>,
+    /// **Nonces polled before the browser reached `/login`**: first and last
+    /// poll. The app opens the browser and starts polling, but the nonce is
+    /// registered only when the browser arrives, so a slow browser made the
+    /// poll answer "expired" and the app give up on a sign-in that then
+    /// succeeded. See [`UNSEEN_NONCE_GRACE`].
+    unseen: HashMap<String, (Instant, Instant)>,
 }
+
+/// How long a poll for a nonce this node has never seen hears "not yet". Past
+/// this it is a flow that never started, and the app is told to stop.
+const UNSEEN_NONCE_GRACE: Duration = Duration::from_secs(30);
+/// Forget an unseen nonce nobody has polled for this long. It must outlast the
+/// gap between polls: forgetting one still being polled would restart its grace.
+const UNSEEN_NONCE_IDLE: Duration = Duration::from_secs(300);
+/// The route is loopback-only, so this only bounds a misbehaving local client:
+/// past it a new unseen nonce gets no grace.
+const UNSEEN_NONCE_MAX: usize = 256;
 
 /// How long an in-flight marker may outlive its insert. Generous next to the
 /// provider client's 15s HTTP timeout — a too-short window here IS the race
@@ -382,6 +398,22 @@ impl HandoffStore {
     fn is_in_flight(&mut self, nonce: &str) -> bool {
         self.prune();
         self.in_flight.contains_key(nonce)
+    }
+
+    /// May a poll for this nonce, known to nothing else here, still be waiting
+    /// on its browser? True for [`UNSEEN_NONCE_GRACE`] from its first poll.
+    fn in_unseen_grace(&mut self, nonce: &str, now: Instant) -> bool {
+        self.unseen
+            .retain(|_, (_, last)| now.duration_since(*last) < UNSEEN_NONCE_IDLE);
+        if let Some((first, last)) = self.unseen.get_mut(nonce) {
+            *last = now;
+            return now.duration_since(*first) < UNSEEN_NONCE_GRACE;
+        }
+        if self.unseen.len() >= UNSEEN_NONCE_MAX {
+            return false;
+        }
+        self.unseen.insert(nonce.to_owned(), (now, now));
+        true
     }
 
     fn prune(&mut self) {
@@ -2540,7 +2572,10 @@ struct ExchangeRequest {
 ///  3. the flow is still PENDING — an unconsumed authorization carries this
 ///     nonce, or the callback holds it between CSRF-consume and outcome-park
 ///     (the in-flight window, THE race) → `204` *not yet*;
-///  4. nothing anywhere → `410` `{"status":"expired", …}` — this flow is dead
+///  4. a nonce first polled under [`UNSEEN_NONCE_GRACE`] ago → `204` *not yet*:
+///     the app polls from when it opens the browser, and the nonce is registered
+///     only when the browser reaches `/login`;
+///  5. nothing anywhere → `410` `{"status":"expired", …}` — this flow is dead
 ///     and polling harder will not revive it.
 ///
 /// `204` means *keep waiting* and ONLY that. It used to also mean "your flow
@@ -2613,7 +2648,13 @@ async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuer
                     .lock()
                     .map(|mut c| c.has_pending_nonce(&q.app_nonce))
                     .unwrap_or(false);
-            if pending {
+            let waiting_on_browser = !pending
+                && st
+                    .handoff
+                    .lock()
+                    .map(|mut h| h.in_unseen_grace(&q.app_nonce, Instant::now()))
+                    .unwrap_or(false);
+            if pending || waiting_on_browser {
                 StatusCode::NO_CONTENT.into_response()
             } else {
                 tracing::info!(
@@ -3626,6 +3667,39 @@ mod tests {
         h.park(Some(nonce), complete("sess:raced"));
         assert!(!h.is_in_flight("n-race"), "park retires the marker");
         assert!(h.collect("n-race").is_some());
+    }
+
+    /// **A poll that beats the browser to `/login` hears "not yet", then
+    /// "expired".** A desktop sign-in of 2026-11-04: the browser took over 2 s, the
+    /// first poll got 410, and the app gave up on a sign-in that then succeeded.
+    #[test]
+    fn a_poll_before_the_browser_arrives_waits_then_expires() {
+        let mut h = HandoffStore::default();
+        let t0 = Instant::now();
+        assert!(h.in_unseen_grace("n", t0), "the first poll waits");
+        assert!(
+            h.in_unseen_grace("n", t0 + UNSEEN_NONCE_GRACE - Duration::from_secs(1)),
+            "still inside the grace"
+        );
+        assert!(
+            !h.in_unseen_grace("n", t0 + UNSEEN_NONCE_GRACE),
+            "a flow that never started is told to stop"
+        );
+        // A real gap between polls does not hand the same nonce a new grace.
+        let later = t0 + UNSEEN_NONCE_GRACE + UNSEEN_NONCE_IDLE - Duration::from_secs(1);
+        assert!(!h.in_unseen_grace("n", later));
+    }
+
+    /// A local client spraying nonces cannot grow the map without limit.
+    #[test]
+    fn unseen_nonces_are_bounded() {
+        let mut h = HandoffStore::default();
+        let now = Instant::now();
+        for i in 0..UNSEEN_NONCE_MAX {
+            assert!(h.in_unseen_grace(&format!("n{i}"), now));
+        }
+        assert!(!h.in_unseen_grace("one-too-many", now));
+        assert_eq!(h.unseen.len(), UNSEEN_NONCE_MAX);
     }
 
     /// **A native success is JSON, never the hand-off page** (CIRISServer#429).
