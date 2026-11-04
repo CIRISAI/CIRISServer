@@ -2964,7 +2964,39 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
         Err(stall) => {
             let known = matches!(directory.lookup_public_key(&key_id).await, Ok(Some(_)));
             if !known {
-                return contact_stall_refusal(&stall);
+                // A bare fedID this node has never met. The canonical knows
+                // whether the person announced a node; when they did, get the
+                // key and finish on its arrival rather than refuse a real
+                // person. Its answer only says where to look: everything that
+                // comes back is verified as any other row.
+                let named = crate::add_device::canonical_nodes_of(&st.engine, &key_id).await;
+                let asked = match crate::compose::held_replication_runtime() {
+                    Some(runtime) if !named.is_empty() => {
+                        ciris_edge::contact::DirectoryLens::request_key_body(
+                            &ciris_edge::contact::PersistLens::new(directory.as_ref())
+                                .with_replication(runtime.bridge()),
+                            &key_id,
+                        )
+                        .await
+                    }
+                    _ => false,
+                };
+                if !asked {
+                    return contact_stall_refusal(&stall);
+                }
+                pending_contacts::record(&st, &owner, &pasted, &key_id);
+                return crate::auth::refusal::refuse_with(
+                    StatusCode::ACCEPTED,
+                    "contacts.awaiting_key_body",
+                    "We're still getting this person's key. They'll be added once it \
+                     arrives — usually within a minute.",
+                    serde_json::json!({
+                        "key_id": key_id,
+                        "fed_id": key_id,
+                        "source": "federation",
+                        "converges_on_its_own": true,
+                    }),
+                );
             }
             tracing::info!(
                 key_id = %key_id,
@@ -6942,6 +6974,21 @@ pub(crate) mod pending_contacts {
     pub const STALL_AFTER: Duration = Duration::from_secs(60);
     /// How often a stalled key is reported again.
     pub const STALL_REPORT_EVERY: Duration = Duration::from_secs(300);
+    /// How long a contact added with no node keeps asking the canonical for
+    /// the person's nodes. A brand-new person may not have announced yet.
+    pub const CANONICAL_ASK_FOR: Duration = Duration::from_secs(600);
+    /// The next pass after a key was asked for: the same 5 s add-device kicks
+    /// at, which a fresh node answers in, against the 10 s of [`PASS_EVERY`].
+    const AFTER_KEY_PULL: Duration = Duration::from_secs(5);
+    /// A contact is hurried this long after it was added, then left to
+    /// [`PASS_EVERY`]. Six passes at most, so a key that never comes cannot
+    /// spend a peer's lookup quota.
+    const HURRY_FOR: Duration = Duration::from_secs(30);
+    /// How often one contact's person is asked for their records. A person
+    /// Pull costs a responder's lookup limit one per kind (five), so asking for
+    /// a person and a node every [`PASS_EVERY`] was 60 a minute: the whole of
+    /// the limit, and the next name asked for got an empty answer.
+    const RECORDS_EVERY: Duration = Duration::from_secs(30);
 
     type Key = (String, String);
     type Due = (Key, ChatState, Owner, String, Instant, u32);
@@ -6973,6 +7020,7 @@ pub(crate) mod pending_contacts {
         since: Instant,
         asked: u32,
         last_report: Option<Instant>,
+        records_asked: Option<Instant>,
     }
 
     fn unresolved() -> &'static Mutex<HashMap<Key, Unresolved>> {
@@ -7035,9 +7083,52 @@ pub(crate) mod pending_contacts {
             fresh
         };
         if fresh {
+            hurry("contact:key", Instant::now());
             tracing::info!(owner = %owner.key_id, key_id, "contacts: pending — the contact completes when this key's record arrives (no second paste needed)");
         }
         ensure_pass();
+    }
+
+    /// Runs the next pass now. A pass asks every peer for several kinds of row,
+    /// and a peer's lookup quota is finite, so this is for a new contact or a
+    /// key just asked for, never for a shorter period.
+    fn wake() -> &'static tokio::sync::Notify {
+        static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
+        WAKE.get_or_init(tokio::sync::Notify::new)
+    }
+
+    /// A subject Pull travels on the next round, and a round may be 30 s off:
+    /// run one now and look again shortly.
+    fn hurry(why: &'static str, since: Instant) {
+        if since.elapsed() >= HURRY_FOR {
+            return;
+        }
+        crate::compose::kick_replication(why);
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async {
+                tokio::time::sleep(AFTER_KEY_PULL).await;
+                wake().notify_one();
+            });
+        }
+    }
+
+    /// A contact added with no node (a bare fedID) has nothing to pull a node
+    /// key for, and an owner-binding that arrives before its node's key is
+    /// refused and held back. So ask the canonical which nodes the person
+    /// announced and treat them as the code's nodes. An answer of none, or a
+    /// canonical too old to serve the read, leaves the mesh path as it was.
+    async fn nodes_from_canonical(k: &Key, st: &ChatState, since: Instant) -> Vec<String> {
+        if since.elapsed() > CANONICAL_ASK_FOR {
+            return Vec::new();
+        }
+        let nodes = crate::add_device::canonical_nodes_of(&st.engine, &k.1).await;
+        if !nodes.is_empty() {
+            tracing::info!(key_id = %k.1, nodes = %nodes.join(", "), "contacts: the canonical named the person's nodes; asking for their keys first");
+            if let Some(u) = unresolved().lock().expect("lock").get_mut(k) {
+                u.code_nodes.clone_from(&nodes);
+            }
+        }
+        nodes
     }
 
     fn ensure_pass() {
@@ -7048,7 +7139,10 @@ pub(crate) mod pending_contacts {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async {
                 loop {
-                    tokio::time::sleep(PASS_EVERY).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(PASS_EVERY) => {}
+                        () = wake().notified() => {}
+                    }
                     pass().await;
                 }
             });
@@ -7187,12 +7281,14 @@ pub(crate) mod pending_contacts {
                         since: Instant::now(),
                         asked: 0,
                         last_report: None,
+                        records_asked: None,
                     },
                 );
             }
             fresh
         };
         if fresh {
+            wake().notify_one();
             tracing::info!(owner = %owner.key_id, key_id, "contacts: added, but their person resolves to no node here yet — asking peers for their announced owner-binding until it lands (tracked: CIRISEdge#907)");
         }
         ensure_pass();
@@ -7272,6 +7368,11 @@ pub(crate) mod pending_contacts {
                 crate::compose::kick_replication("contact resolved to a node");
                 continue;
             }
+            let code_nodes = if code_nodes.is_empty() {
+                nodes_from_canonical(&k, &st, since).await
+            } else {
+                code_nodes
+            };
             // The node keys first: persist admits `delegates_to(owner → node)` only
             // once it holds the node's Key row, so a binding that arrives before
             // it is refused (`attested_key_id … resolves as neither`, the
@@ -7288,15 +7389,35 @@ pub(crate) mod pending_contacts {
                 );
                 if !held {
                     missing_nodes.push(node.clone());
-                    let _ = pull_person_records(&st, &owner, node).await;
+                    let _ = pull_key_from_peers(&st, &owner, node).await;
                 }
+            }
+            if !missing_nodes.is_empty() {
+                hurry("contact:node_key", since);
             }
             // Ask for the person's records only once the code's node keys are
             // held: a binding refused for its unknown node is then held back by
             // edge for a backoff window (CIRISEdge#544) before it is re-offered.
             // A code naming a node no peer ever produces must not block forever,
             // so after STALL_AFTER the person's records are asked for regardless.
-            let (peers, failed) = if missing_nodes.is_empty() || since.elapsed() >= STALL_AFTER {
+            let keys_ready = missing_nodes.is_empty() || since.elapsed() >= STALL_AFTER;
+            let records_due = keys_ready && {
+                let mut t = unresolved().lock().expect("lock");
+                t.get_mut(&k).is_some_and(|u| {
+                    let every = if since.elapsed() < 2 * HURRY_FOR {
+                        PASS_EVERY
+                    } else {
+                        RECORDS_EVERY
+                    };
+                    let due = u.records_asked.is_none_or(|at| at.elapsed() >= every);
+                    if due {
+                        u.records_asked = Some(Instant::now());
+                    }
+                    due
+                })
+            };
+            let (peers, failed) = if records_due {
+                hurry("contact:records", since);
                 pull_person_records(&st, &owner, key_id).await
             } else {
                 (Vec::new(), Vec::new())
@@ -7375,6 +7496,7 @@ pub(crate) mod pending_contacts {
                 // every pass (idempotent: the queue is keyed by name).
                 let requeued = request_key_body(&st, &key_id).await;
                 let pulled = pull_key_from_peers(&st, &owner, &key_id).await;
+                hurry("contact:key", since);
                 let report = {
                     let mut t = table().lock().expect("lock");
                     t.get_mut(&k).and_then(|p| {

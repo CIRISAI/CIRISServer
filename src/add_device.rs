@@ -713,7 +713,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
 /// (`GET /v1/federation/people/{fed_id}/nodes`). Best effort: an unreachable
 /// canonical, or one too old to serve the read, contributes nothing and the
 /// code's nodes still stand.
-async fn canonical_nodes_of(engine: &Engine, fed_id: &str) -> Vec<String> {
+pub(crate) async fn canonical_nodes_of(engine: &Engine, fed_id: &str) -> Vec<String> {
     let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
@@ -725,16 +725,16 @@ async fn canonical_nodes_of(engine: &Engine, fed_id: &str) -> Vec<String> {
         let body = match http.get(&url).send().await {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
             Ok(r) => {
-                tracing::info!(url = %url, status = %r.status(), "add-device: this canonical serves no node list");
+                tracing::info!(url = %url, status = %r.status(), "this canonical serves no node list");
                 None
             }
             Err(e) => {
-                tracing::info!(url = %url, error = %e, "add-device: could not ask this canonical for the person's nodes");
+                tracing::info!(url = %url, error = %e, "could not ask this canonical for the person's nodes");
                 None
             }
         };
         let found = body.as_ref().map(nodes_from_body).unwrap_or_default();
-        tracing::info!(canonical = %read.key_id, nodes = ?found, "add-device: nodes registered with this canonical");
+        tracing::info!(canonical = %read.key_id, nodes = ?found, "nodes registered with this canonical");
         nodes = union_nodes(nodes, found);
     }
     nodes

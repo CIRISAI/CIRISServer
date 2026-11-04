@@ -636,7 +636,10 @@ async fn allegiance(State(st): State<PeersState>) -> Response {
 /// signed route, and the join is answered under the person's own signature.
 async fn person_nodes(State(st): State<PeersState>, Path(fed_id): Path<String>) -> Response {
     match crate::auth::ownership::announced_nodes_of(&st.engine, &fed_id).await {
-        Ok(nodes) => (StatusCode::OK, Json(serde_json::json!({ "nodes": nodes }))).into_response(),
+        Ok(nodes) => {
+            crate::announced_relay::someone_is_waiting_for(&nodes);
+            (StatusCode::OK, Json(serde_json::json!({ "nodes": nodes }))).into_response()
+        }
         Err(e) => err(
             StatusCode::SERVICE_UNAVAILABLE,
             &format!("announced nodes: {e}"),

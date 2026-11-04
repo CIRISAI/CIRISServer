@@ -249,6 +249,35 @@ pub fn nudge() {
     state().wake.notify_one();
 }
 
+/// Are any of `nodes` missing from the relay? `None` when this node is not a
+/// relay, or has not computed its sets yet.
+fn any_unrelayed(sets: Option<&RelaySets>, nodes: &[String]) -> bool {
+    sets.is_some_and(|s| nodes.iter().any(|n| !s.announced_nodes.contains(n)))
+}
+
+/// Someone is looking for a person whose announced `nodes` this node holds. If
+/// any of them is not relayed yet, it is served only from the next recompute,
+/// and at [`RELAY_REFRESH`] that is the whole wait of a first contact. So
+/// recompute now, and again when the floor lifts in case this nudge fell inside
+/// it. The route that calls this is public: a node already relayed costs
+/// nothing, and [`NUDGE_FLOOR`] bounds the rest.
+pub fn someone_is_waiting_for(nodes: &[String]) {
+    static RETRY_QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let snapshot = state().snapshot.read().ok().and_then(|g| g.clone());
+    if !any_unrelayed(snapshot.as_deref(), nodes) {
+        return;
+    }
+    nudge();
+    if RETRY_QUEUED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(NUDGE_FLOOR).await;
+        RETRY_QUEUED.store(false, std::sync::atomic::Ordering::SeqCst);
+        nudge();
+    });
+}
+
 /// Wait for a nudge, at most `period`. The publish-own updater's sleep.
 pub(crate) async fn wait_for_nudge(period: Duration) -> bool {
     tokio::time::timeout(period, state().wake.notified())
@@ -464,6 +493,15 @@ mod tests {
             t0 + NUDGE_FLOOR - Duration::from_millis(1)
         ));
         assert!(nudge_may_recompute(Some(t0), t0 + NUDGE_FLOOR));
+    }
+
+    #[test]
+    fn only_a_node_not_yet_relayed_asks_for_a_recompute() {
+        let r = relay();
+        let held = r.announced_nodes[0].clone();
+        assert!(!any_unrelayed(Some(&r), std::slice::from_ref(&held)));
+        assert!(any_unrelayed(Some(&r), &[held, "new-node".to_owned()]));
+        assert!(!any_unrelayed(None, &s(&["new-node"])), "not a relay");
     }
 
     #[test]

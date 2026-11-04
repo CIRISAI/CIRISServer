@@ -1356,6 +1356,11 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+# Add to the other person's `request-seen` (steward 2026-11-04: "we need this to
+# be rapid, even when relayed").
+NEW_CONTACT_LIMIT_SECS = 30
+
+
 def contact_edges(mesh: Mesh, args: Any) -> Record:
     """The contact edges from Eric's report (CIRISServer#777, #778), on the real
     wire: add by fed ID before the person is known, then after they converge;
@@ -1458,6 +1463,41 @@ CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-1
         step.fail("code_chat", "a completed pending contact must open a chat", [a], r"chat",
                   got={"status": chat_code, "body": chat_body})
     step("code_chat", status=chat_code)
+
+    # ── A NEW PERSON, ADDED BY FED ID ONCE ── the person reinstalled and came back
+    # as someone alice's node has never met. One add, no retry: the canonical
+    # names their node, and the request has to reach them inside the limit.
+    d = mesh.add("dan")
+    d.claim("dan-person")
+    d.announce()
+    join(d)
+    d.self_record()
+    wait_for("the canonical to name dan's node",
+             lambda: d.node_key_id in (cnl.must("GET", f"/v1/federation/people/{d.owner_key_id}/nodes").get("nodes") or []),
+             args.owner_wait, every=1)
+    t_added = time.monotonic()
+    code, body = a.api("POST", "/v1/contacts", {"key_id": d.owner_key_id})
+    if code not in (200, 201, 202):
+        ok = False
+        step.fail("new_person_add", "a fed ID the canonical can name must be accepted first time", [a],
+                  r"contacts", got={"status": code, "body": body})
+    step("new_person_added", status=code, reason_id=(body or {}).get("reason_id"))
+
+    def request_seen() -> bool:
+        reqs = d.must("GET", "/v1/contacts/requests").get("requests", [])
+        return any(r.get("requester_key_id") == a.owner_key_id for r in reqs)
+    # Wait past the limit, so a miss still reports the real time.
+    try:
+        wait_for("dan to see alice's request", request_seen, args.arrive_wait, every=1)
+    except MeshError:
+        pass
+    seconds = round(time.monotonic() - t_added, 1)
+    if seconds > NEW_CONTACT_LIMIT_SECS:
+        ok = False
+        step.fail("new_person_request_slow", f"the request must arrive inside {NEW_CONTACT_LIMIT_SECS} s of the add",
+                  [a, d, mesh.canonical], r"contacts|re-aimed|CONTACT|RATE LIMITED|parked", seconds=seconds)
+    else:
+        step("new_person_saw_the_request", seconds=seconds, limit=NEW_CONTACT_LIMIT_SECS)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
