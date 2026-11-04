@@ -691,17 +691,67 @@ pub fn contact_attestation_prefixes() -> Vec<String> {
     prefixes
 }
 
+/// May this node grant `prefixes`? `trace:` needs the traces consent, a live
+/// capture grant (`consent:community_trust`), so sharing traces has one door and
+/// no peering, explicit or defaulted, opens it. An unowned node has no person to
+/// ask, and its provisional grant is re-signed at the claim.
+///
+/// # Errors
+/// The traces prefix was named and nobody consented to sharing traces.
+pub async fn check_traces_consent<S: AsRef<str>>(
+    engine: &Engine,
+    node_key_id: &str,
+    prefixes: &[S],
+) -> Result<(), String> {
+    if !prefixes.iter().any(|p| p.as_ref() == "trace:") {
+        return Ok(());
+    }
+    let owned = crate::receive_axis::owner_of_any(engine, &[node_key_id.to_owned()])
+        .await
+        .is_some();
+    if !owned
+        || matches!(
+            engine.community_trust_consent_for(node_key_id).await,
+            Ok(Some(_))
+        )
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "this consent names trace:, and {node_key_id}'s owner has not chosen to share traces"
+    ))
+}
+
+/// The canonicals on the live roster that are not yet in `consented`, in roster
+/// order. Evaluation is against the active roster, not the baked list (steward
+/// 2026-11-04): one added after boot appears here, and one that left is simply no
+/// longer a target. Its existing grant stands until the person withdraws it.
+fn canonicals_to_consent(
+    roster: &[String],
+    consented: &std::collections::BTreeSet<String>,
+    node_key_id: &str,
+) -> Vec<String> {
+    roster
+        .iter()
+        .filter(|k| !consented.contains(*k) && k.as_str() != node_key_id)
+        .cloned()
+        .collect()
+}
+
 /// Consent the canonicals carry what announcing shares. Announcing alone has to
 /// reach them: a node with no consent peer sends its rows nowhere, so someone who
-/// announced and declined traces could not be found by anyone. Widens an existing
+/// announced and declined traces could not be found by anyone. Reads the live
+/// roster, and adds to `consented` each canonical that took. Widens an existing
 /// grant and narrows nothing. A failure is logged and not fatal: the announce
-/// stands, and the next boot asks again.
-pub async fn consent_to_be_found(engine: &Engine, node_key_id: &str) {
+/// stands, and the next pass asks again.
+pub async fn consent_to_be_found(
+    engine: &Engine,
+    node_key_id: &str,
+    consented: &mut std::collections::BTreeSet<String>,
+) {
     let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
-    for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
-        if canonical == node_key_id {
-            continue;
-        }
+    let roster = crate::federation_delivery::distinct_canonical_key_ids(&hints);
+    for canonical in canonicals_to_consent(&roster, consented, node_key_id) {
         match ensure_replication_consent_covers(
             engine,
             node_key_id,
@@ -710,16 +760,19 @@ pub async fn consent_to_be_found(engine: &Engine, node_key_id: &str) {
         )
         .await
         {
-            Ok(_) => tracing::info!(
-                canonical = %canonical,
-                "announce: this node's identity rows may reach this canonical (traces are a \
-                 separate consent)"
-            ),
+            Ok(_) => {
+                tracing::info!(
+                    canonical = %canonical,
+                    "announce: this node's identity rows may reach this canonical (traces are a \
+                     separate consent)"
+                );
+                consented.insert(canonical);
+            }
             Err(e) => tracing::warn!(
                 canonical = %canonical,
                 error = %format!("{e:#}"),
                 "announce: could not consent to this canonical carrying the identity rows, so \
-                 nobody can find this node through it yet; the next boot asks again"
+                 nobody can find this node through it yet; the next pass asks again"
             ),
         }
     }
@@ -2264,6 +2317,87 @@ async fn ensure_replication_consent_covers_for<S: AsRef<str>>(
     })
 }
 
+/// Take `trace:` off this node's live grants to `peer`, so turning traces off
+/// means off for anything not yet promoted: placement reads the union of live
+/// grants, and withdrawing the capture grant leaves the ship grant standing.
+/// Supersedes with the rest of the grant unchanged, on every key of this node.
+/// Returns how many grants changed.
+pub async fn drop_traces_from_grants(
+    engine: &Engine,
+    node_key_id: &str,
+    peer_key_id: &str,
+) -> Result<usize> {
+    use ciris_persist::federation::consent_grammar::parse_grant_payload;
+    let mut changed = 0;
+    for own in own_keys_of_this_node(node_key_id) {
+        let author = consent_author(engine, &own, None).await?;
+        let Some(standing) = standing_live_grant_for(
+            engine,
+            &author.key_id,
+            peer_key_id,
+            author.for_key_id.as_deref(),
+        )
+        .await?
+        else {
+            continue;
+        };
+        let Ok(policy) = parse_grant_payload(&standing.attestation_envelope) else {
+            continue;
+        };
+        let covered = normalize_prefixes(&policy.attestation_prefixes);
+        if !covered.iter().any(|p| p == "trace:") {
+            continue;
+        }
+        let rest: Vec<String> = covered.into_iter().filter(|p| p != "trace:").collect();
+        if rest.is_empty() {
+            tracing::warn!(
+                peer_key_id,
+                "this grant covers traces alone; left to the person"
+            );
+            continue;
+        }
+        let opts = ConsentGrantOptions {
+            for_key_id: author.for_key_id.clone(),
+            author_signer: None,
+            audience: Some(policy.audience.clone()),
+            valid_until: policy.valid_until,
+            restrictions: policy.restrictions.clone(),
+            kinds: Some(policy.kinds.clone()),
+            direction: enum_token(&policy.direction),
+            principle: enum_token(&policy.principle),
+            purpose: policy.purpose.clone(),
+        };
+        emit_grant_row(engine, &author, peer_key_id, &rest, &opts).await?;
+        if let Err(e) = emit_grant_supersedes(engine, &author, &standing.attestation_id).await {
+            tracing::error!(
+                peer_key_id,
+                unretired_grant = %standing.attestation_id,
+                error = %e,
+                "traces off: the narrower grant is live, but the supersedes row failed"
+            );
+        }
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Traces just went from on to off: take `trace:` off the grants to the live
+/// canonical roster. A transition, not a state: grants from before this release
+/// stay as they are (steward 2026-11-04: "No one offs, just fix it moving forward").
+pub async fn traces_turned_off(engine: &Engine, node_key_id: &str) {
+    let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
+    for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
+        match drop_traces_from_grants(engine, node_key_id, &canonical).await {
+            Ok(n) => {
+                tracing::info!(canonical = %canonical, grants = n, "traces off: this canonical's grants no longer carry traces")
+            }
+            Err(e) => {
+                tracing::warn!(canonical = %canonical, error = %format!("{e:#}"), "traces off: could not narrow this canonical's grant")
+            }
+        }
+    }
+}
+
 /// The wire token for one of persist's lowercase-renamed consent enums
 /// (`Direction`, `TransmissionPrinciple`). Read through serde rather than a
 /// hand-written match, so a variant persist adds cannot be silently re-spelled
@@ -2436,6 +2570,28 @@ mod announce_consent_tests {
     use super::ANNOUNCE_CONSENT_PREFIXES;
 
     /// Two consents (steward 2026-11-04): being found shares nothing else.
+    #[test]
+    fn the_announce_grant_follows_the_live_roster() {
+        use super::canonicals_to_consent as due;
+        let s = |v: &[&str]| v.iter().map(|k| (*k).to_owned()).collect::<Vec<String>>();
+        let mut consented = std::collections::BTreeSet::new();
+        assert_eq!(due(&s(&["a", "b", "me"]), &consented, "me"), s(&["a", "b"]));
+        consented.extend(s(&["a", "b"]));
+        assert!(
+            due(&s(&["a", "b"]), &consented, "me").is_empty(),
+            "nothing new"
+        );
+        assert_eq!(
+            due(&s(&["a", "b", "c"]), &consented, "me"),
+            s(&["c"]),
+            "a canonical added after boot is a target with no restart"
+        );
+        assert!(
+            due(&s(&["b"]), &consented, "me").is_empty(),
+            "one that left is no target"
+        );
+    }
+
     #[test]
     fn adding_a_contact_shares_chat_and_no_traces_or_scores() {
         let p = super::contact_attestation_prefixes();

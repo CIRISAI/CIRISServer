@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 13] = [
+pub const LOOPS: [&str; 14] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -114,6 +114,8 @@ pub const LOOPS: [&str; 13] = [
     // The released-device watch (`crate::device_release`, steward 2026-10-29):
     // a minute's read of the node's own occurrences, on its own slot.
     "device_release",
+    // Being found follows the live canonical roster (`peer::consent_to_be_found`).
+    "announce_consent",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.

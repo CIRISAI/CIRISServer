@@ -340,6 +340,12 @@ async fn peering(
 
     // ── (b) Consent: emit THIS node's directed consent:replication:v1 grant at
     //    the peer, carrying the caller-supplied prefixes (idempotent). ──────────
+    if let Err(e) =
+        crate::peer::check_traces_consent(&st.engine, &st.node_key_id, &req.attestation_prefixes)
+            .await
+    {
+        return err(StatusCode::CONFLICT, e);
+    }
     let grant = match crate::peer::emit_replication_consent(
         &st.engine,
         &st.node_key_id,
@@ -790,6 +796,12 @@ async fn consent(
         principle: None,
         purpose: None,
     };
+    if let Err(e) =
+        crate::peer::check_traces_consent(&st.engine, &st.node_key_id, &req.attestation_prefixes)
+            .await
+    {
+        return err(StatusCode::CONFLICT, e);
+    }
     let grant = match crate::peer::emit_replication_consent_with_policy(
         &st.engine,
         &st.node_key_id,

@@ -500,7 +500,9 @@ class Node:
         return out
 
 
-DEFAULT_PREFIXES = ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:", "trace:"]
+# No `trace:`: peering refuses it on an owned node until the owner chose to share
+# traces. A scenario that wants traces passes it, after that choice.
+DEFAULT_PREFIXES = ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:"]
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 

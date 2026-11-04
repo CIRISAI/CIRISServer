@@ -1948,7 +1948,12 @@ async fn announce_self_handler(State(st): State<ClaimRemoteState>, headers: Head
     // author door did not spell it; a call site cannot tell whether the rows it
     // just wrote are owner-attested, so the kick owns the ordering now and
     // there is nothing to remember here.
-    crate::peer::consent_to_be_found(&st.engine, &st.node_key_id).await;
+    crate::peer::consent_to_be_found(
+        &st.engine,
+        &st.node_key_id,
+        &mut std::collections::BTreeSet::new(),
+    )
+    .await;
     crate::compose::kick_replication("owner-binding announced");
     (
         StatusCode::OK,

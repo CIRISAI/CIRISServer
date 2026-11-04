@@ -2195,14 +2195,42 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         )
     });
 
-    // A node that announced before announcing carried this consent, or whose
-    // first try failed: being found is what the person already asked for.
-    if config_rx.borrow().announce_ownership {
+    // Being found follows the live canonical roster: a node that announced before
+    // announcing carried this consent, a canonical added since, a first try that
+    // failed. It reads the config each pass, so an announce after boot joins in.
+    {
         let engine = Arc::clone(&engine);
         let node = this_node.clone();
+        let config = config_rx.clone();
         tokio::spawn(async move {
-            crate::peer::consent_to_be_found(&engine, &node).await;
-            crate::replication_reconcile::nudge("announced: identity may reach the canonical");
+            let mut cadence = crate::loop_cadence::Cadence::new(
+                "announce_consent",
+                crate::announced_relay::RELAY_REFRESH,
+            );
+            let mut consented = std::collections::BTreeSet::new();
+            let mut sharing_traces = None;
+            loop {
+                cadence.tick().await;
+                let capture = engine.community_trust_consent_for(&node).await;
+                if let Ok(capture) = capture {
+                    let now = capture.is_some();
+                    if sharing_traces == Some(true) && !now {
+                        crate::peer::traces_turned_off(&engine, &node).await;
+                        crate::replication_reconcile::nudge("traces turned off");
+                    }
+                    sharing_traces = Some(now);
+                }
+                let announced = config.borrow().announce_ownership;
+                if announced {
+                    let before = consented.len();
+                    crate::peer::consent_to_be_found(&engine, &node, &mut consented).await;
+                    if consented.len() != before {
+                        crate::replication_reconcile::nudge(
+                            "announced: the roster gained a canonical",
+                        );
+                    }
+                }
+            }
         });
     }
 

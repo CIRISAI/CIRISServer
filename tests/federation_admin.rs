@@ -599,6 +599,51 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
 /// owner-binding) REFUSES federation peering — even from a SYSTEM_ADMIN session.
 /// The node has no accountable party to root the cross-node authority in, so it
 /// may only serve cleartext from the canonical root.
+/// Sharing traces has one door (steward 2026-11-04: two consents): an owner who
+/// has not chosen it cannot have `trace:` named for them by a peering or consent
+/// call, supplied or defaulted.
+#[tokio::test]
+async fn naming_trace_without_the_traces_consent_is_refused() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+    for (route, body) in [
+        (
+            "peering",
+            serde_json::json!({
+                "peer_key_id": peer_key_id(),
+                "peer_key_record": peer_signed_key_record().await,
+                "attestation_prefixes": ["trace:"],
+            }),
+        ),
+        (
+            "consent",
+            serde_json::json!({
+                "peer_key_id": peer_key_id(),
+                "attestation_prefixes": ["trace:", "capacity:"],
+            }),
+        ),
+    ] {
+        let resp = client
+            .post(format!("{base}/v1/federation/{route}"))
+            .bearer_auth(&owner)
+            .json(&body)
+            .send()
+            .await
+            .expect("POST");
+        assert_eq!(
+            resp.status(),
+            409,
+            "{route} must refuse trace: without the consent"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unowned_node_refuses_peering_even_for_system_admin() {
     let engine = node().await;
@@ -861,7 +906,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     // handler normalizes (sorts / dedupes / drops empty), like peering.
     let body = serde_json::json!({
         "peer_key_id": peer_key_id(),
-        "attestation_prefixes": ["trace:", "capacity:", "capacity:", "  "],
+        "attestation_prefixes": ["health:", "capacity:", "capacity:", "  "],
     });
     let resp = client
         .post(format!("{base}/v1/federation/consent"))
@@ -881,7 +926,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     assert_eq!(json["freshly_emitted"], true);
     assert_eq!(
         json["attestation_prefixes"],
-        serde_json::json!(["capacity:", "trace:"]),
+        serde_json::json!(["capacity:", "health:"]),
         "explicit scope echoed sorted + deduped + empty-dropped"
     );
 
