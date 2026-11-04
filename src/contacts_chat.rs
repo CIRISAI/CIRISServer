@@ -2765,6 +2765,24 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
             );
             obj.insert("chat_community_id".into(), serde_json::json!(community_id));
             obj.insert("chat_started".into(), serde_json::json!(chat_started));
+            let nodes = crate::auth::ownership::announced_nodes_of(&st.engine, &key_id)
+                .await
+                .unwrap_or_default();
+            obj.insert(
+                "reach".into(),
+                serde_json::json!(contact_reach(inbound.contains(&key_id), !nodes.is_empty())),
+            );
+            let heard = last_heard_from(&st.engine, &key_id, &occurrence_key_ids).await;
+            obj.insert(
+                "last_heard_at".into(),
+                serde_json::json!(
+                    heard.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                ),
+            );
+            obj.insert(
+                "stale".into(),
+                serde_json::json!(is_stale(heard, chrono::Utc::now())),
+            );
             obj.insert(
                 "occurrence_key_ids".into(),
                 serde_json::json!(occurrence_key_ids),
@@ -2778,6 +2796,55 @@ async fn list_contacts(State(st): State<ChatState>, headers: HeaderMap) -> Respo
         Json(serde_json::json!({ "contacts": contacts, "total": total })),
     )
         .into_response()
+}
+
+/// A contact nothing has been heard from for this long is shown as stale. The
+/// person may simply be away, or may have reinstalled and become a new person,
+/// which nothing here can tell apart: so it is a label, and nothing is removed.
+const CONTACT_STALE_AFTER_DAYS: i64 = 14;
+
+/// How far an add has got, for the person who made it (`GET /v1/contacts`
+/// `reach`). `connected`: they added this owner back. `sent`: the grant names a
+/// node of theirs and travels, with no answer yet. `waiting_to_reach`: no node
+/// of theirs is known here, so nothing has left this node for them.
+fn contact_reach(mutual: bool, node_known: bool) -> &'static str {
+    match (mutual, node_known) {
+        (true, _) => "connected",
+        (false, true) => "sent",
+        (false, false) => "waiting_to_reach",
+    }
+}
+
+/// `true` only when something was heard, long ago. Never having heard from
+/// someone is `reach`'s to say, not staleness.
+fn is_stale(
+    last_heard: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    last_heard.is_some_and(|t| now - t >= chrono::Duration::days(CONTACT_STALE_AFTER_DAYS))
+}
+
+/// The newest row held here that the person or one of their devices signed.
+async fn last_heard_from(
+    engine: &Engine,
+    person: &str,
+    occurrences: &[String],
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use ciris_persist::federation::attestation_query::AttestationQuery;
+    let dir = engine.federation_directory();
+    let mut newest = None;
+    for key in std::iter::once(person).chain(occurrences.iter().map(String::as_str)) {
+        let one = std::num::NonZeroU32::MIN;
+        let page = AttestationQuery::by(key, one)
+            .pages()
+            .next(&*dir)
+            .await
+            .ok()
+            .flatten();
+        let at = page.and_then(|rows| rows.first().map(|a| a.asserted_at));
+        newest = newest.max(at);
+    }
+    newest
 }
 
 /// Is `key_id` infrastructure rather than a person's key — a canonical server?
@@ -7529,6 +7596,31 @@ pub(crate) mod pending_contacts {
                 tracing::warn!(owner = %owner.key_id, key_id, status = status.as_u16(), "contacts: pending contact discarded — the add path refused it once the key arrived (see the refusal logged just above)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod contact_reach_tests {
+    use super::{contact_reach, is_stale, CONTACT_STALE_AFTER_DAYS};
+
+    #[test]
+    fn reach_says_how_far_the_add_got() {
+        assert_eq!(contact_reach(true, false), "connected");
+        assert_eq!(contact_reach(true, true), "connected");
+        assert_eq!(contact_reach(false, true), "sent");
+        assert_eq!(contact_reach(false, false), "waiting_to_reach");
+    }
+
+    #[test]
+    fn stale_needs_something_heard_long_ago() {
+        let now = chrono::Utc::now();
+        let days = |n| chrono::Duration::days(n);
+        assert!(!is_stale(None, now), "never heard is reach's to say");
+        assert!(!is_stale(
+            Some(now - days(CONTACT_STALE_AFTER_DAYS - 1)),
+            now
+        ));
+        assert!(is_stale(Some(now - days(CONTACT_STALE_AFTER_DAYS)), now));
     }
 }
 
