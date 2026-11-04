@@ -1454,18 +1454,18 @@ async fn create_community(
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .unwrap_or(consensus_protocol::FOUNDER_ONLY)
+        .unwrap_or(consensus_protocol::MAJORITY)
         .to_owned();
     match Protocol::parse(&protocol) {
-        Some(Protocol::Quorum { n, .. }) if n != members.len() + 1 => {
+        // A room cannot be founder_only above a family (persist v61), and until
+        // a quorum room can grow (CIRISPersist#1173) the only one that could be
+        // created is quorum:1/1, one voice at any size: refused rather than
+        // offered as a quorum.
+        Some(Protocol::FounderOnly | Protocol::Quorum { .. }) => {
             return refuse(
                 StatusCode::BAD_REQUEST,
                 "community.bad_consensus_protocol",
-                format!(
-                    "{protocol:?} names {n} member(s) but the room is founded with {} — a \
-                     quorum's N is its roster size",
-                    members.len() + 1
-                ),
+                format!("{protocol:?} cannot found a room; use majority or unanimous"),
             )
         }
         Some(_) => {}

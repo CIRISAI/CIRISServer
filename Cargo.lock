@@ -581,7 +581,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -777,7 +777,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokenizers 0.22.2",
  "yoke",
- "zip",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -1031,18 +1031,18 @@ dependencies = [
 
 [[package]]
 name = "ciris-crypto"
-version = "20.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v20.2.0#3c16f9c65f23d71f40ab52fd7f330e4e13a5fd15"
+version = "22.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v22.0.0#cbcd957612009b7307f6412c8cb486408475c1be"
 dependencies = [
  "chacha20poly1305 0.10.1",
  "ed25519-dalek",
  "hex",
  "hkdf 0.12.4",
  "hmac 0.12.1",
- "k256 0.13.4",
+ "k256",
  "ml-dsa",
  "ml-kem",
- "p256 0.13.2",
+ "p256 0.14.0",
  "pbkdf2",
  "rand_core 0.6.4",
  "ring",
@@ -1059,7 +1059,6 @@ dependencies = [
 [[package]]
 name = "ciris-edge"
 version = "43.4.1"
-source = "git+https://github.com/CIRISAI/CIRISEdge?tag=v43.4.1#0f73576005a9afdd52656c4a26eefb3125cc1ac3"
 dependencies = [
  "async-trait",
  "axum",
@@ -1116,8 +1115,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-keyring"
-version = "20.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v20.2.0#3c16f9c65f23d71f40ab52fd7f330e4e13a5fd15"
+version = "22.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v22.0.0#cbcd957612009b7307f6412c8cb486408475c1be"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -1136,7 +1135,7 @@ dependencies = [
  "libloading",
  "objc2",
  "objc2-foundation",
- "p256 0.13.2",
+ "p256 0.14.0",
  "rand 0.8.8",
  "rand_core 0.6.4",
  "secret-service",
@@ -1183,8 +1182,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "59.1.2"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v59.1.2#94a7b15793772543a4a987e447e0b7a1a79e48e0"
+version = "61.0.1"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v61.0.1#c28af914a457a4a01fabc951a2131b813ae1d1cd"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1280,8 +1279,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-verify-core"
-version = "20.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v20.2.0#3c16f9c65f23d71f40ab52fd7f330e4e13a5fd15"
+version = "22.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v22.0.0#cbcd957612009b7307f6412c8cb486408475c1be"
 dependencies = [
  "android_system_properties",
  "async-trait",
@@ -1319,13 +1318,13 @@ dependencies = [
  "windows-sys 0.52.0",
  "x509-parser",
  "zeroize",
- "zip",
+ "zip 9.3.0",
 ]
 
 [[package]]
 name = "ciris-verify-ffi"
-version = "20.2.0"
-source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v20.2.0#3c16f9c65f23d71f40ab52fd7f330e4e13a5fd15"
+version = "22.0.0"
+source = "git+https://github.com/CIRISAI/CIRISVerify?tag=v22.0.0#cbcd957612009b7307f6412c8cb486408475c1be"
 dependencies = [
  "aes-gcm 0.10.3",
  "android_logger",
@@ -1708,6 +1707,7 @@ checksum = "cc907c45bb7e9ef8fc3778defd0f3cd8c81288f1b4e748eba064948f20c47122"
 dependencies = [
  "cpubits",
  "ctutils",
+ "getrandom 0.4.3",
  "hybrid-array",
  "num-traits",
  "rand_core 0.10.1",
@@ -1987,7 +1987,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
- "pem-rfc7468",
+ "pem-rfc7468 0.7.0",
  "zeroize",
 ]
 
@@ -1998,6 +1998,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a69dedd701da44b0536442edf09c81a64b0ab97a7a4a5e3d1971f00027cbc63d"
 dependencies = [
  "const-oid 0.10.2",
+ "pem-rfc7468 1.0.0",
  "zeroize",
 ]
 
@@ -2157,9 +2158,24 @@ dependencies = [
  "der 0.7.10",
  "digest 0.10.7",
  "elliptic-curve 0.13.8",
- "rfc6979",
+ "rfc6979 0.4.0",
  "signature 2.2.0",
  "spki 0.7.3",
+]
+
+[[package]]
+name = "ecdsa"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
+dependencies = [
+ "der 0.8.1",
+ "digest 0.11.3",
+ "elliptic-curve 0.14.1",
+ "rfc6979 0.6.0",
+ "signature 3.0.0",
+ "spki 0.8.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -2205,7 +2221,7 @@ dependencies = [
  "ff 0.13.1",
  "generic-array",
  "group 0.13.0",
- "pem-rfc7468",
+ "pem-rfc7468 0.7.0",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
  "sec1 0.7.3",
@@ -2227,6 +2243,8 @@ dependencies = [
  "group 0.14.0",
  "hkdf 0.13.0",
  "hybrid-array",
+ "pem-rfc7468 1.0.0",
+ "pkcs8 0.11.0",
  "rand_core 0.10.1",
  "sec1 0.8.1",
  "subtle",
@@ -3352,7 +3370,7 @@ dependencies = [
  "elliptic-curve 0.14.1",
  "hkdf 0.13.0",
  "hpke-rs-crypto",
- "k256 0.14.0",
+ "k256",
  "p256 0.14.0",
  "p384",
  "rand 0.10.2",
@@ -3919,27 +3937,16 @@ dependencies = [
 
 [[package]]
 name = "k256"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
-dependencies = [
- "cfg-if",
- "ecdsa",
- "elliptic-curve 0.13.8",
- "once_cell",
- "sha2 0.10.9",
- "signature 2.2.0",
-]
-
-[[package]]
-name = "k256"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93f50113171a713f4a4231ef82eb26703607139b35dcb56241f0ceab2ae1f7d8"
 dependencies = [
  "cpubits",
+ "ecdsa 0.17.0",
  "elliptic-curve 0.14.1",
  "primeorder 0.14.0",
+ "sha2 0.11.0",
+ "signature 3.0.0",
  "wnaf",
 ]
 
@@ -3991,7 +3998,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "leviculum-announce-policy"
 version = "0.1.0"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "leviculum-telemetry-policy",
 ]
@@ -3999,7 +4006,7 @@ dependencies = [
 [[package]]
 name = "leviculum-ble-tx"
 version = "0.1.0"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "embassy-sync",
  "leviculum-core",
@@ -4008,15 +4015,15 @@ dependencies = [
 [[package]]
 name = "leviculum-channel-access"
 version = "0.1.0"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "leviculum-core",
 ]
 
 [[package]]
 name = "leviculum-core"
-version = "0.31.1+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+version = "0.33.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "aes 0.8.4",
  "cbc",
@@ -4033,19 +4040,25 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.31.1+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+version = "0.33.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
  "rmp",
  "sha2 0.10.9",
+ "tracing",
 ]
 
 [[package]]
+name = "leviculum-queue-budget"
+version = "0.1.0"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
+
+[[package]]
 name = "leviculum-std"
-version = "0.31.1+ciris.1"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+version = "0.33.0+ciris.1"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 dependencies = [
  "bluer",
  "clap 4.6.6",
@@ -4059,6 +4072,7 @@ dependencies = [
  "leviculum-channel-access",
  "leviculum-core",
  "leviculum-lxmf",
+ "leviculum-queue-budget",
  "libc",
  "md-5 0.10.6",
  "metrics",
@@ -4081,7 +4095,7 @@ dependencies = [
 [[package]]
 name = "leviculum-telemetry-policy"
 version = "0.1.0"
-source = "git+https://github.com/CIRISAI/leviculum?rev=c6d0a224cf318c92238038df038056099c14a1c6#c6d0a224cf318c92238038df038056099c14a1c6"
+source = "git+https://github.com/CIRISAI/leviculum?tag=v0.33.0%2Bciris.1#a3dc12cd1e76ac985393c1fde8a69a6ba1fa53bd"
 
 [[package]]
 name = "libbz2-rs-sys"
@@ -5154,7 +5168,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
 dependencies = [
- "ecdsa",
+ "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
  "primeorder 0.13.6",
  "sha2 0.10.9",
@@ -5166,9 +5180,11 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
 dependencies = [
+ "ecdsa 0.17.0",
  "elliptic-curve 0.14.1",
  "primefield",
  "primeorder 0.14.0",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -5249,6 +5265,15 @@ name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
 dependencies = [
  "base64ct",
 ]
@@ -5552,7 +5577,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
 dependencies = [
  "elliptic-curve 0.14.1",
+ "once_cell",
  "primefield",
+ "serdect",
  "wnaf",
 ]
 
@@ -6200,6 +6227,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfc6979"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
+dependencies = [
+ "crypto-bigint 0.7.7",
+ "hmac 0.13.0",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6729,6 +6766,16 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct 1.0.0",
+ "serde",
 ]
 
 [[package]]
@@ -7775,6 +7822,12 @@ name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -9021,10 +9074,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
 dependencies = [
  "crc32fast",
- "flate2",
  "indexmap 2.14.0",
  "memchr",
- "typed-path",
+ "typed-path 0.12.3",
+]
+
+[[package]]
+name = "zip"
+version = "9.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaeb7f16d2605b49aef586996ded29e65642fab7259a3077e537351df6d80426"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap 2.14.0",
+ "libc",
+ "memchr",
+ "nix 0.31.3",
+ "typed-path 0.13.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -112,19 +112,10 @@ fn client_only_interfaces(
 /// the ~7-minute run. Compile-fenced like every other harness knob.
 /// **This node's direct-link posture** (CIRISEdge#915, #920; edge v43.4.0).
 ///
-/// - **Proposing** — OPT-IN (off by default until leviculum's two-sided commit;
-///   see the TODO below). `CIRIS_DIRECT_LINK_FACILITATOR=bootstrap` proposes
-///   direct paths to room peers and consented contacts (`allow_direct_contact`)
-///   through the first bootstrap peer as facilitator: a canonical serves one on UDP at its listener's
-///   port, and learning a NAT'd node's public address is what a facilitator is
-///   for (steward 2026-10-30: "collapse to direct immediately"). Edge never
-///   proposes without a facilitator, and until 0.5.243 every node this repo
-///   started was built without one — no server-hosted phone or desktop could
-///   take a direct path at all. `transport.node` does not decide it: it
-///   defaults ON for every node, NAT'd devices included. A public server has
-///   no room peers to propose to, so it proposes nothing in practice.
-///   `CIRIS_DIRECT_LINK_FACILITATOR=host:port` names another; unset or `off`
-///   proposes nothing.
+/// - **Proposing** — on by default from edge v44: through the first bootstrap
+///   peer, to accepted contacts only. `CIRIS_DIRECT_LINK_FACILITATOR=off` turns it
+///   off and `host:port` names another facilitator. Edge never proposes without
+///   a facilitator, and `transport.node` does not decide it.
 /// - **Serving** — a transport node serves a facilitator on UDP at its TCP
 ///   listener's port (4242 in production) and accepts upgrades from room
 ///   peers. `CIRIS_DIRECT_LINK_FACILITATOR_PORT` moves the port, and `0` turns
@@ -134,20 +125,22 @@ fn direct_links(
     listen_port: u16,
     bootstrap: &[std::net::SocketAddr],
 ) -> ciris_edge::transport::direct_path::DirectLinksConfig {
-    use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig};
-    // OPT-IN until leviculum's two-sided commit (steward ruling 2026-10-31):
-    // a punch that succeeds on one side only moves that side onto the UDP path
-    // while the other stays relayed, and the link dies `ChannelExhausted`
-    // (Eric↔Francesco, 2026-10-31: every send 0/N landed for 14 min).
-    // TODO(CIRISAI/leviculum#89 two-sided commit + CIRISEdge#926 stall guard): default to
-    // `bootstrap` again once both ship and a cross-NAT run is green.
-    let facilitator = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR") {
-        Ok(v) if v.trim().eq_ignore_ascii_case("bootstrap") => {
-            bootstrap.first().map(std::string::ToString::to_string)
-        }
-        Ok(v) if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("off") => None,
-        Ok(v) => Some(v.trim().to_owned()),
-        Err(_) => None,
+    use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig, Proposing};
+    // ON by default from edge v44 (steward ruling 2026-11-04), with leviculum's
+    // two-sided commit and edge's stall guard underneath. Unset or `bootstrap`
+    // proposes through the first bootstrap peer; `off` turns it off. A link is
+    // still proposed only to an accepted contact (ruling 2026-10-31).
+    let chosen = std::env::var("CIRIS_DIRECT_LINK_FACILITATOR").ok();
+    let chosen = chosen.as_deref().map(str::trim);
+    let proposing = if chosen.is_some_and(|v| v.is_empty() || v.eq_ignore_ascii_case("off")) {
+        Proposing::Off
+    } else {
+        Proposing::On
+    };
+    let facilitator = match chosen {
+        _ if proposing == Proposing::Off => None,
+        Some(v) if !v.eq_ignore_ascii_case("bootstrap") => Some(v.to_owned()),
+        _ => bootstrap.first().map(std::string::ToString::to_string),
     };
     if !transport_node {
         tracing::info!(
@@ -156,6 +149,7 @@ fn direct_links(
              through its facilitator, and serves none"
         );
         return DirectLinksConfig {
+            proposing,
             facilitator,
             ..DirectLinksConfig::default()
         };
@@ -183,6 +177,7 @@ fn direct_links(
          upgrades, and proposes through its own facilitator when it has a bootstrap peer"
     );
     DirectLinksConfig {
+        proposing,
         facilitator,
         serve_facilitator,
         accept: DirectAccept::RoomPeers,
@@ -5440,6 +5435,11 @@ async fn build_edge(
         // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
         // no link shaped — so a re-pin does not move this node's posture.
         shaping: Default::default(),
+        // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first, and a
+        // forwarding node closes to new forwarded links under load.
+        steer_roster_relays: true,
+        relay_establish_budget: std::time::Duration::from_secs(5),
+        forward_admission: Default::default(),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The
@@ -6087,21 +6087,17 @@ mod direct_link_tests {
     /// facilitator edge never proposes, and no server-hosted node could go
     /// direct (2026-10-31).
     #[test]
-    fn a_node_proposes_only_when_opted_in() {
+    fn a_node_proposes_through_its_bootstrap_peer_by_default() {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR").is_some() {
             return;
         }
-        // OFF by default until the two-sided commit (2026-10-31): a bootstrap
-        // peer alone does not make a node propose.
         let canonical: std::net::SocketAddr = "108.61.242.236:4242".parse().unwrap();
-        let off = direct_links(false, 4242, &[canonical]);
-        assert!(
-            !off.proposes(),
-            "proposing is opt-in until leviculum's two-sided commit"
-        );
-        assert_eq!(off.serve_facilitator, None, "a NAT'd node serves none");
+        let on = direct_links(false, 4242, &[canonical]);
+        assert!(on.proposes(), "on by default from edge v44");
+        assert_eq!(on.facilitator.as_deref(), Some("108.61.242.236:4242"));
+        assert_eq!(on.serve_facilitator, None, "a NAT'd node serves none");
         let both = direct_links(true, 4242, &[canonical]);
-        assert!(!both.proposes());
+        assert!(both.proposes());
         assert_eq!(both.serve_facilitator, Some(4242), "serving is unchanged");
     }
 }

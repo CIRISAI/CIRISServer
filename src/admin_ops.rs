@@ -3324,6 +3324,9 @@ async fn read_self_axis(
             .list_hard_case_events(HardCaseFilter {
                 kind: Some(admin_action_kind(op)),
                 since: None,
+                // This node's own decisions. Since persist v60 these rows
+                // replicate, and a peer's must not decide for this node.
+                emitter_key_id: directory.node_key_id(),
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -3987,6 +3990,9 @@ async fn reader_decisions(engine: &Arc<Engine>) -> Result<BTreeMap<String, bool>
             .list_hard_case_events(HardCaseFilter {
                 kind: Some(admin_action_kind(op)),
                 since: None,
+                // This node's own decisions. Since persist v60 these rows
+                // replicate, and a peer's must not decide for this node.
+                emitter_key_id: directory.node_key_id(),
             })
             .await
             .map_err(|e| format!("read reader decisions: {e}"))?;

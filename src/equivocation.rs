@@ -592,6 +592,7 @@ impl Contradiction {
                 "detection": "local — this node holds both rows; no consensus, no penalty",
             }),
             emitted_at,
+            emitter_key_id: String::new(),
         }
     }
 }

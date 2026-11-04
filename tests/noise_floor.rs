@@ -329,8 +329,8 @@ async fn signed_agg_inputs(
     // root is over `(member_id, mass)` leaves. This fixture is a BALANCED fold —
     // every member carries equal mass — which is what makes `n_eff == N` honest.
     let masses: Vec<(String, u64)> = member_ids.iter().map(|id| (id.clone(), 1u64)).collect();
-    let mass_root = ciris_verify_core::holonomic::mass_commitment(&masses);
-    let meta = ciris_verify_core::holonomic::AggregationMetaV1 {
+    let mass_root = ciris_verify_core::substrate::mass_commitment(&masses);
+    let meta = ciris_verify_core::substrate::AggregationMetaV1 {
         // v10 §19.7.1.3 (CIRISVerify#191): version-3 carries a SIGNED
         // `max_source_multiplicity` + `mass_commitment`. This is a FLAG-DAY cut —
         // a v1/v2 tier lacks the surface and fails CLOSED at
@@ -948,7 +948,7 @@ async fn aggregation_collapse_erases_the_individual_pending_ciris_edge_266() {
 // ════════════════════════════════════════════════════════════════════
 #[tokio::test]
 async fn dominance_and_multiplicity_are_rejected_on_v3() {
-    use ciris_verify_core::holonomic::{
+    use ciris_verify_core::substrate::{
         effective_source_count, mass_commitment, passes_dominance_gate, passes_multiplicity_gate,
         verify_aggregation_meta, AggregationMetaV1, AggregationMetaVerification,
         MASS_FIXED_POINT_SCALE,
@@ -1220,7 +1220,7 @@ async fn a_repeated_member_id_is_refused_before_hashing() {
         &backend,
         composite_cid,
         &sources,
-        ciris_verify_core::holonomic::ConsentState::Active,
+        ciris_verify_core::substrate::ConsentState::Active,
         false,
         None,
     )

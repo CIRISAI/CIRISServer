@@ -303,8 +303,11 @@ fn config_envelope(
         "version": entry.version,
         "updated_by": entry.updated_by,
         "scope": entry.scope,
-        "previous_version": entry.previous_version,
     });
+    // Absent when there is none: persist refuses an explicit null (CC 2.6.1.1.1).
+    if let Some(previous) = &entry.previous_version {
+        env["previous_version"] = serde_json::Value::String(previous.clone());
+    }
     // A renewal is a `supersedes` and MUST name the row it replaces on this
     // leaf (persist v42, CC 3.4.5.1) — the CEG §3.2 composer pointer, read by
     // persist's `check_config_renewal_supersedes` and its precedence fold.

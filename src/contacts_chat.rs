@@ -7048,9 +7048,9 @@ pub(crate) mod pending_contacts {
     /// at, which a fresh node answers in, against the 10 s of [`PASS_EVERY`].
     const AFTER_KEY_PULL: Duration = Duration::from_secs(5);
     /// A contact is hurried this long after it was added, then left to
-    /// [`PASS_EVERY`]. Six passes at most, so a key that never comes cannot
-    /// spend a peer's lookup quota.
-    const HURRY_FOR: Duration = Duration::from_secs(30);
+    /// [`PASS_EVERY`], so a key that never comes cannot go on spending a peer's
+    /// lookup quota.
+    const HURRY_FOR: Duration = Duration::from_secs(60);
     /// How often one contact's person is asked for their records. A person
     /// Pull costs a responder's lookup limit one per kind (five), so asking for
     /// a person and a node every [`PASS_EVERY`] was 60 a minute: the whole of
@@ -7456,23 +7456,26 @@ pub(crate) mod pending_contacts {
                 );
                 if !held {
                     missing_nodes.push(node.clone());
-                    let _ = pull_key_from_peers(&st, &owner, node).await;
+                    // A subject Pull runs through to the apply on its own round
+                    // (edge v44), and costs a peer's lookup limit once.
+                    let _ = pull_person_records(&st, &owner, node).await;
                 }
             }
             if !missing_nodes.is_empty() {
                 hurry("contact:node_key", since);
             }
+            // Ask for the person in the same pass: a row that lands before the
+            // node's key is parked and released when the key lands (edge #679).
             // Ask for the person's records only once the code's node keys are
             // held: a binding refused for its unknown node is then held back by
             // edge for a backoff window (CIRISEdge#544) before it is re-offered.
             // A code naming a node no peer ever produces must not block forever,
             // so after STALL_AFTER the person's records are asked for regardless.
-            let keys_ready = missing_nodes.is_empty() || since.elapsed() >= STALL_AFTER;
-            let records_due = keys_ready && {
+            let records_due = {
                 let mut t = unresolved().lock().expect("lock");
                 t.get_mut(&k).is_some_and(|u| {
-                    let every = if since.elapsed() < 2 * HURRY_FOR {
-                        PASS_EVERY
+                    let every = if since.elapsed() < HURRY_FOR {
+                        AFTER_KEY_PULL
                     } else {
                         RECORDS_EVERY
                     };
