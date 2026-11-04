@@ -741,7 +741,8 @@ fn canonicals_to_consent(
 /// Consent the canonicals carry what announcing shares. Announcing alone has to
 /// reach them: a node with no consent peer sends its rows nowhere, so someone who
 /// announced and declined traces could not be found by anyone. Reads the live
-/// roster, and adds to `consented` each canonical that took. Widens an existing
+/// roster, grants only canonicals in this person's trust set, and adds to
+/// `consented` each that took. Widens an existing
 /// grant and narrows nothing. A failure is logged and not fatal: the announce
 /// stands, and the next pass asks again.
 pub async fn consent_to_be_found(
@@ -752,6 +753,31 @@ pub async fn consent_to_be_found(
     let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
     let roster = crate::federation_delivery::distinct_canonical_key_ids(&hints);
     for canonical in canonicals_to_consent(&roster, consented, node_key_id) {
+        // Only one this person trusts (CC 3.3.7, 4.4.3.8): the roster says who
+        // may be evaluated, the trust set says who gets the grant. Not yet in it
+        // means not consented, so the next pass looks again.
+        use ciris_persist::federation::trust_root::{
+            capability_roots_to_trusted_root, INFRA_SERVE_SCOPE,
+        };
+        let dir = engine.federation_directory();
+        match capability_roots_to_trusted_root(
+            dir.as_ref(),
+            node_key_id,
+            &canonical,
+            INFRA_SERVE_SCOPE,
+        )
+        .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::debug!(canonical = %canonical, "announce: not in this person's trust set");
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(canonical = %canonical, error = %format!("{e:#}"), "announce: could not read the trust set");
+                continue;
+            }
+        }
         match ensure_replication_consent_covers(
             engine,
             node_key_id,
