@@ -123,23 +123,47 @@ fn direct_links(
 }
 
 /// The transport identity this home already has. The fold's edge keeps it at
-/// `<home>/data/edge/edge_identity.rid`, and the no-AI hand-off replaces that
-/// process with this one: minting another here is a new destination for the same
-/// node, and its signed route no longer matches. So inherit the fold's when this
-/// home has none at the conventional path; edge adopts it into the keystore.
-fn inherited_ret_identity(cfg: &ServerConfig) -> std::path::PathBuf {
-    choose_ret_identity(
-        cfg.ret_identity_path(),
-        cfg.home.join("data/edge/edge_identity.rid"),
-    )
+/// `<home>/data/edge/edge_identity.rid`, with its transit KEX seed beside it, and
+/// the no-AI hand-off replaces that process with this one: minting another here
+/// is a new destination for the same node, and its signed route no longer matches.
+/// So copy the fold's to the conventional path when this home has none there.
+/// Copy, not move: edge archives what it adopts into the keystore, and turning AI
+/// back on boots the fold again from its own files, on the same identity.
+fn inherited_ret_identity(cfg: &ServerConfig) -> Result<std::path::PathBuf> {
+    let own = cfg.ret_identity_path();
+    inherit_ret_identity(&cfg.home.join("data/edge/edge_identity.rid"), &own)?;
+    Ok(own)
 }
 
-fn choose_ret_identity(own: std::path::PathBuf, fold: std::path::PathBuf) -> std::path::PathBuf {
-    if !own.exists() && fold.exists() {
-        tracing::info!(path = %fold.display(), "transport identity: inheriting the embedded edge's");
-        return fold;
+fn inherit_ret_identity(fold: &std::path::Path, own: &std::path::Path) -> Result<()> {
+    if own.exists() || !fold.exists() {
+        return Ok(());
     }
-    own
+    use ciris_edge::transport::transit_kex_custody::seed_path;
+    if let Some(dir) = own.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    for (from, to) in [
+        (fold.to_path_buf(), own.to_path_buf()),
+        (seed_path(fold), seed_path(own)),
+    ] {
+        if from.exists() {
+            let bytes = std::fs::read(&from).with_context(|| format!("read {}", from.display()))?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts
+                .open(&to)
+                .with_context(|| format!("create {}", to.display()))?;
+            std::io::Write::write_all(&mut file, &bytes)?;
+        }
+    }
+    tracing::info!(path = %fold.display(), "transport identity: inherited the embedded edge's");
+    Ok(())
 }
 
 fn announce_interval() -> Duration {
@@ -5308,7 +5332,7 @@ async fn build_edge(
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
-        identity_path: inherited_ret_identity(cfg),
+        identity_path: inherited_ret_identity(cfg)?,
         announce_interval: announce_interval(),
         // ADVERTISE the wire identity — what peers are told this node is. On a
         // split node that is the NODE key; everywhere else it is `cfg.key_id`
@@ -5999,29 +6023,31 @@ mod own_key_ids_tests {
 
 #[cfg(test)]
 mod ret_identity_tests {
-    use super::choose_ret_identity;
+    use super::inherit_ret_identity;
+    use ciris_edge::transport::transit_kex_custody::seed_path as seed;
 
+    /// The hand-off keeps the fold's identity, and leaves the fold's files in
+    /// place so turning AI back on boots on the same one.
     #[test]
-    fn a_home_the_fold_started_keeps_the_folds_transport_identity() {
+    fn a_home_the_fold_started_keeps_its_identity_in_both_directions() {
         let dir = std::env::temp_dir().join(format!("ret-id-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (own, fold) = (dir.join("own.rid"), dir.join("fold.rid"));
+        let (fold, own) = (dir.join("fold/e.rid"), dir.join("own/e.rid"));
+        inherit_ret_identity(&fold, &own).unwrap();
+        assert!(!own.exists(), "nothing to inherit: edge mints");
+        std::fs::create_dir_all(fold.parent().unwrap()).unwrap();
+        std::fs::write(&fold, b"rns").unwrap();
+        std::fs::write(seed(&fold), b"kex").unwrap();
+        inherit_ret_identity(&fold, &own).unwrap();
+        assert_eq!(std::fs::read(&own).unwrap(), b"rns");
+        assert_eq!(std::fs::read(seed(&own)).unwrap(), b"kex");
+        assert!(fold.exists(), "the fold keeps its own files");
+        std::fs::write(&own, b"its own").unwrap();
+        inherit_ret_identity(&fold, &own).unwrap();
         assert_eq!(
-            choose_ret_identity(own.clone(), fold.clone()),
-            own,
-            "neither: mint"
-        );
-        std::fs::write(&fold, b"x").unwrap();
-        assert_eq!(
-            choose_ret_identity(own.clone(), fold.clone()),
-            fold,
-            "the fold's"
-        );
-        std::fs::write(&own, b"y").unwrap();
-        assert_eq!(
-            choose_ret_identity(own.clone(), fold.clone()),
-            own,
-            "its own stands"
+            std::fs::read(&own).unwrap(),
+            b"its own",
+            "an existing identity stands"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
