@@ -679,6 +679,18 @@ pub fn normalize_prefixes<S: AsRef<str>>(prefixes: &[S]) -> Vec<String> {
 /// node. Traces, capacity and chat are not here, so being found never shares them.
 pub const ANNOUNCE_CONSENT_PREFIXES: [&str; 2] = ["ownership:", "self:delegates_to:"];
 
+/// What adding a contact shares: edge's default without `trace:` and `capacity:`.
+/// A row is placed by the union of every live grant, so a contact grant carrying
+/// `trace:` would promote this node's traces whatever the person said about
+/// sharing them (steward 2026-11-04: two consents). Traces and scores travel on
+/// the traces consent alone.
+#[must_use]
+pub fn contact_attestation_prefixes() -> Vec<String> {
+    let mut prefixes = default_attestation_prefixes();
+    prefixes.retain(|p| p != "trace:" && p != "capacity:");
+    prefixes
+}
+
 /// Consent the canonicals carry what announcing shares. Announcing alone has to
 /// reach them: a node with no consent peer sends its rows nowhere, so someone who
 /// announced and declined traces could not be found by anyone. Widens an existing
@@ -2424,6 +2436,16 @@ mod announce_consent_tests {
     use super::ANNOUNCE_CONSENT_PREFIXES;
 
     /// Two consents (steward 2026-11-04): being found shares nothing else.
+    #[test]
+    fn adding_a_contact_shares_chat_and_no_traces_or_scores() {
+        let p = super::contact_attestation_prefixes();
+        assert!(
+            p.iter().any(|x| x == "chat:"),
+            "a contact is someone you can message"
+        );
+        assert!(!p.iter().any(|x| x == "trace:" || x == "capacity:"));
+    }
+
     #[test]
     fn announcing_shares_no_traces_scores_or_chat() {
         for other in ["trace:", "capacity:", "chat:"] {

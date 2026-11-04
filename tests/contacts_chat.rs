@@ -631,9 +631,7 @@ fn narrow_peering_prefixes() -> Vec<String> {
 /// default the moment the default moved, which is exactly the failure mode the
 /// single-sourcing of that constant exists to prevent.
 fn contact_grant_prefixes() -> Vec<String> {
-    let mut prefixes = ciris_server::peer::default_attestation_prefixes();
-    prefixes.push(ciris_edge::chat::CHAT_ATTESTATION_PREFIX.to_string());
-    ciris_server::peer::normalize_prefixes(&prefixes)
+    ciris_server::peer::contact_attestation_prefixes()
 }
 
 /// The sorted, deduped UNION of two prefix sets — what a widening must produce.

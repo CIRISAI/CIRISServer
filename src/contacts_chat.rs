@@ -3353,11 +3353,11 @@ async fn add_contact_for_owner(st: ChatState, owner: Owner, key_id: String) -> R
     // can route (#472 — the contact's bound NODE, resolved through persist's
     // own withdraws-aware nodes_stewarded_by; an unclaimed contact falls back
     // to the person-subject grant as recorded intent).
-    // The default already carries `chat:` — it IS edge's `DEFAULT_CONSENT_PREFIXES`
-    // now — so the explicit push this used to do was covering for a divergence
-    // that no longer exists. Re-adding it would be the restated list again, one
+    // `contact_attestation_prefixes` is edge's default less traces and scores, so
+    // it carries `chat:`: the explicit push this used to do was covering for a
+    // divergence that no longer exists. Re-adding it would be the restated list, one
     // element at a time.
-    let prefixes = crate::peer::default_attestation_prefixes();
+    let prefixes = crate::peer::contact_attestation_prefixes();
     let (grant, _covered_subjects) = match crate::peer::ensure_contact_consent_covers(
         &st.engine,
         &owner.node_key_id,
@@ -7408,7 +7408,7 @@ pub(crate) mod pending_contacts {
                     &st.engine,
                     &owner.node_key_id,
                     key_id,
-                    &crate::peer::default_attestation_prefixes(),
+                    &crate::peer::contact_attestation_prefixes(),
                 )
                 .await
                 {
