@@ -108,7 +108,8 @@
 //! every [`RELAY_REFRESH`], and immediately when [`nudge`] fires (every
 //! `kick_replication`: an announce, a release, an eviction, a claim). An
 //! announce made on ANOTHER node reaches this one as an inbound row, which
-//! nothing kicks on; the period bounds that lag.
+//! nothing kicks on; the period bounds that lag, and someone asking for that
+//! person cuts it short ([`someone_is_waiting_for`]).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -325,34 +326,18 @@ pub async fn serves_infrastructure(engine: &Engine, own_key_ids: &[String]) -> b
 /// relay built from half a corpus would silently drop people.
 pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> {
     let dir = engine.federation_directory();
-    // persist v59 retired the framed occurrence listing this paged through
-    // (`list_signed_identity_occurrences_since`, the sealed-transport floor).
-    // ONLY A PERSON ANNOUNCES (below), so the candidates are the `user`-typed
-    // keys, each kept only when it holds a SIGNED occurrence here — the same
-    // set the occurrence plane named, read from the key table (small) instead
-    // of the attestation log (orders of magnitude larger on a canonical).
+    // Every `user` key. A person counts from their federation-scope owner-binding,
+    // not from a signed occurrence as well: edge serves a stranger the binding of
+    // a node in this set, so waiting on the occurrence, which arrives separately,
+    // withheld a binding this node already held from the first person to ask.
     let users = dir
         .list_keys_by_identity_type(identity_type::USER)
         .await
         .map_err(|e| format!("list_keys_by_identity_type(user): {e:#}"))?;
-    let mut identities: BTreeSet<String> = BTreeSet::new();
-    for user in users {
-        let signed = dir
-            .list_signed_identity_occurrences_for(&user.key_id)
-            .await
-            .map_err(|e| {
-                format!(
-                    "list_signed_identity_occurrences_for({}): {e:#}",
-                    user.key_id
-                )
-            })?;
-        if !signed.is_empty() {
-            identities.insert(user.key_id);
-        }
-    }
     let mut nodes: BTreeSet<String> = BTreeSet::new();
     let mut owners: BTreeSet<String> = BTreeSet::new();
-    for identity in identities {
+    for user in users {
+        let identity = user.key_id;
         // ONLY A PERSON ANNOUNCES — applied at enumeration above: an
         // owner-binding is user → node, and `announced_nodes_of` reads every
         // row the identity ever AUTHORED, which for agents is by far the most
