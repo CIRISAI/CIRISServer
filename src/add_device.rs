@@ -465,19 +465,20 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             )
         }
     };
-    let Some(target) = subject
-        .nodes
-        .iter()
-        .find(|n| **n != st.node_key_id)
-        .cloned()
-    else {
+    // Every node of the person's, not the first: the list is sorted, and a
+    // node they stopped running still has a live owner-binding until they
+    // release it (Eric's laptop, 2026-11-03: `ciris-client-…` sorts before the
+    // real `ciris-node-…`, so the join never reached the node holding the
+    // window open). Each is asked in turn below, and each attempt is logged.
+    let targets = other_nodes(&subject.nodes, &st.node_key_id);
+    if targets.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
             "add_device.no_device",
             "that code names no device to ask — open Share my ID on your other device and use its QR or long form",
         );
-    };
-    // 1a. Wait, bounded, for the other device's ROUTE (edge v43, CC 5.3.3.5 E1):
+    }
+    // 1a. Wait, bounded, for ANY of the other devices' ROUTES (edge v43, CC 5.3.3.5 E1):
     // every link is sealed, so B can reach A only once it holds A's signed
     // route row with A's transit pair. An ANNOUNCED node's identity rows reach
     // everyone on their bootstrap planes, so the canonical B already dials
@@ -485,7 +486,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     // round now rather than waiting the cadence. Not here yet is RETRYABLE
     // (503 + Retry-After), never a refusal: a 502 means A refused. BEFORE the
     // mint, so a retry after the 503 has nothing of its own to collide with.
-    if let Err(r) = await_owner_route(&st.engine, &target).await {
+    if let Err(r) = await_owner_route(&st.engine, &targets).await {
         return r;
     }
     // 1b. An approval already held names the key an earlier ask minted; minting
@@ -583,38 +584,78 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         encryption_pubkeys: enc,
     }));
     // 3. Ask — a first contact: the request carries this node's own key record.
-    let exchange = match edge
-        .send_opaque_request_introducing(
-            &target,
-            DEVICE_JOIN_KIND,
-            serde_json::to_vec(&join).unwrap_or_default(),
-            ROUND_TIMEOUT_MS,
-        )
-        .await
-    {
-        Ok(x) => x,
-        Err(e) => {
-            return refuse(
-                StatusCode::BAD_GATEWAY,
-                "add_device.unreachable",
-                format!("could not reach your other device: {e}"),
+    //    Each of the person's nodes in turn, until one holds the window open: a
+    //    node that is gone, or that is up but not accepting, must not end the
+    //    join while another of theirs is waiting for it.
+    let payload = serde_json::to_vec(&join).unwrap_or_default();
+    let mut outcomes: Vec<AskOutcome> = Vec::with_capacity(targets.len());
+    let mut held = None;
+    for node in &targets {
+        if !matches!(
+            ciris_persist::federation::self_at_login::transit_kex_pair_for(
+                directory.as_ref(),
+                node
             )
+            .await,
+            Ok(Some(_))
+        ) {
+            tracing::info!(node = %node, "add-device: skipping — no route to this node yet");
+            outcomes.push(AskOutcome::NoRoute);
+            continue;
         }
-    };
-    let ans: JoinAnswer =
-        serde_json::from_slice(&exchange.response.payload).unwrap_or(JoinAnswer::Unknown);
-    let (request_id, code) = match ans {
-        JoinAnswer::Pending { request_id, match_code } => (request_id, match_code),
-        JoinAnswer::NotAccepting => {
-            return refuse(
+        tracing::info!(node = %node, "add-device: asking this node");
+        let sent = edge
+            .send_opaque_request_introducing(
+                node,
+                DEVICE_JOIN_KIND,
+                payload.clone(),
+                ROUND_TIMEOUT_MS,
+            )
+            .await;
+        match sent {
+            Err(e) => {
+                tracing::info!(node = %node, error = %e, "add-device: this node could not be reached");
+                outcomes.push(AskOutcome::Unreachable(format!("{node}: {e}")));
+            }
+            Ok(x) => {
+                match serde_json::from_slice(&x.response.payload).unwrap_or(JoinAnswer::Unknown) {
+                    JoinAnswer::Pending {
+                        request_id,
+                        match_code,
+                    } => {
+                        held = Some((node.clone(), request_id, match_code));
+                        break;
+                    }
+                    JoinAnswer::NotAccepting => {
+                        tracing::info!(node = %node, "add-device: this node is not accepting new devices");
+                        outcomes.push(AskOutcome::NotAccepting);
+                    }
+                    other => {
+                        tracing::info!(node = %node, answer = ?other, "add-device: unexpected answer");
+                        outcomes.push(AskOutcome::Unexpected(format!("{node}: {other:?}")));
+                    }
+                }
+            }
+        }
+    }
+    let Some((target, request_id, code)) = held else {
+        return match summarize_asks(&outcomes) {
+            AskVerdict::NotAccepting => refuse(
                 StatusCode::CONFLICT,
                 "add_device.not_accepting",
                 "your other device is not accepting new devices — open Add a device on it, then try again",
-            )
-        }
-        other => {
-            return refuse(StatusCode::BAD_GATEWAY, "add_device.unexpected", format!("unexpected answer: {other:?}"))
-        }
+            ),
+            AskVerdict::Unreachable(detail) => refuse(
+                StatusCode::BAD_GATEWAY,
+                "add_device.unreachable",
+                format!("could not reach your other device: {detail}"),
+            ),
+            AskVerdict::Unexpected(detail) => refuse(
+                StatusCode::BAD_GATEWAY,
+                "add_device.unexpected",
+                format!("unexpected answer: {detail}"),
+            ),
+        };
     };
     set_progress(|p| {
         *p = JoinProgress {
@@ -654,6 +695,56 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         Json(progress().lock().map(|p| p.clone()).unwrap_or_default()),
     )
         .into_response()
+}
+
+/// The person's nodes other than this one, in the order given.
+fn other_nodes(nodes: &[String], me: &str) -> Vec<String> {
+    nodes.iter().filter(|n| *n != me).cloned().collect()
+}
+
+/// What asking one node came to, when it did not take the request.
+#[derive(Debug, PartialEq, Eq)]
+enum AskOutcome {
+    NoRoute,
+    Unreachable(String),
+    NotAccepting,
+    Unexpected(String),
+}
+
+/// What to tell the person when no node took the request.
+#[derive(Debug, PartialEq, Eq)]
+enum AskVerdict {
+    NotAccepting,
+    Unreachable(String),
+    Unexpected(String),
+}
+
+/// A node that ANSWERED beats one that did not: "open Add a device on it" is
+/// the actionable reply when one device is up and another is gone.
+fn summarize_asks(outcomes: &[AskOutcome]) -> AskVerdict {
+    if outcomes.contains(&AskOutcome::NotAccepting) {
+        return AskVerdict::NotAccepting;
+    }
+    let detail = |want_unexpected: bool| -> Vec<String> {
+        outcomes
+            .iter()
+            .filter_map(|o| match o {
+                AskOutcome::Unexpected(d) if want_unexpected => Some(d.clone()),
+                AskOutcome::Unreachable(d) if !want_unexpected => Some(d.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let unexpected = detail(true);
+    if !unexpected.is_empty() {
+        return AskVerdict::Unexpected(unexpected.join("; "));
+    }
+    let unreachable = detail(false);
+    if unreachable.is_empty() {
+        AskVerdict::Unreachable("no route to any of your devices".into())
+    } else {
+        AskVerdict::Unreachable(unreachable.join("; "))
+    }
 }
 
 /// One outstanding join request on B: where it went and what it expects back.
@@ -1497,25 +1588,27 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
 /// "try again" (the canonical's next bootstrap-plane round carries it).
 const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Wait until this node holds `target`'s signed route WITH its transit pair
-/// (`transit_kex_pair_for`, Rooted), kicking a replication round toward the
-/// canonical every few seconds. `Err` is the 503 to answer: retryable, and it
+/// Wait until this node holds at least one of `targets`' signed routes WITH
+/// its transit pair (`transit_kex_pair_for`, Rooted), kicking a replication
+/// round toward the canonical every few seconds. `Err` is the 503 to answer: retryable, and it
 /// names the case the online path cannot serve — an UNANNOUNCED device's rows
 /// never leave its owner's nodes, so only the pairing QR / LAN reaches it
 /// (CC 3.2 (f)).
 async fn await_owner_route(
     engine: &ciris_persist::prelude::Engine,
-    target: &str,
+    targets: &[String],
 ) -> Result<(), Response> {
     let dir = engine.federation_directory();
     let deadline = std::time::Instant::now() + OWNER_ROUTE_WAIT;
     let mut kicked_at: Option<std::time::Instant> = None;
     loop {
-        if let Ok(Some(_)) =
-            ciris_persist::federation::self_at_login::transit_kex_pair_for(dir.as_ref(), target)
-                .await
-        {
-            return Ok(());
+        for target in targets {
+            if let Ok(Some(_)) =
+                ciris_persist::federation::self_at_login::transit_kex_pair_for(dir.as_ref(), target)
+                    .await
+            {
+                return Ok(());
+            }
         }
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -1541,9 +1634,11 @@ async fn await_owner_route(
             if let Some(runtime) = crate::compose::held_replication_runtime() {
                 let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
                 for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
-                    if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
-                        tracing::debug!(canonical = %canonical, target, error = %e,
-                            "add-device: subject Pull for the other device's route not sent yet");
+                    for target in targets {
+                        if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
+                            tracing::debug!(canonical = %canonical, target = %target, error = %e,
+                                "add-device: subject Pull for the other device's route not sent yet");
+                        }
                     }
                 }
             }
@@ -1771,5 +1866,51 @@ mod tests {
             "an attacker who copies B's challenge must show a different code (N1)"
         );
         assert_eq!(b, match_code("ciris-node-b", &ch), "deterministic");
+    }
+}
+
+#[cfg(test)]
+mod ask_every_node_tests {
+    use super::*;
+
+    #[test]
+    fn every_other_node_is_a_target_in_order() {
+        let nodes = vec![
+            "ciris-client-old".to_owned(),
+            "me".to_owned(),
+            "ciris-node-real".to_owned(),
+        ];
+        assert_eq!(
+            other_nodes(&nodes, "me"),
+            vec!["ciris-client-old".to_owned(), "ciris-node-real".to_owned()],
+            "the stale node that sorts first does not hide the real one"
+        );
+    }
+
+    #[test]
+    fn a_node_that_answered_beats_one_that_is_gone() {
+        let gone = AskOutcome::Unreachable("ciris-client-old: no route".into());
+        assert_eq!(
+            summarize_asks(&[gone, AskOutcome::NotAccepting]),
+            AskVerdict::NotAccepting,
+            "tell the person to open Add a device, not that their device is unreachable"
+        );
+    }
+
+    #[test]
+    fn nothing_routable_says_so() {
+        assert_eq!(
+            summarize_asks(&[AskOutcome::NoRoute, AskOutcome::NoRoute]),
+            AskVerdict::Unreachable("no route to any of your devices".into())
+        );
+        let v = summarize_asks(&[
+            AskOutcome::Unreachable("a: x".into()),
+            AskOutcome::Unreachable("b: y".into()),
+        ]);
+        assert_eq!(
+            v,
+            AskVerdict::Unreachable("a: x; b: y".into()),
+            "every attempt is named"
+        );
     }
 }
