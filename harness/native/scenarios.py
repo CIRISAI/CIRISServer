@@ -1498,6 +1498,32 @@ CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-1
                   [a, d, mesh.canonical], r"contacts|re-aimed|CONTACT|RATE LIMITED|parked", seconds=seconds)
     else:
         step("new_person_saw_the_request", seconds=seconds, limit=NEW_CONTACT_LIMIT_SECS)
+
+    # ── THE ROOM, END TO END ── through the canonical, from dan accepting to a first
+    # message read on the other side. Measured, not gated: no target is set yet.
+    t_room = time.monotonic()
+    lap = lambda: round(time.monotonic() - t_room, 1)
+    d.must("POST", "/v1/contacts", {"key_id": a.owner_key_id})
+    step("room:accepted", seconds=lap())
+    cid = a.open_pair(d.owner_key_id)
+    if d.open_pair(a.owner_key_id) != cid:
+        ok = False
+        step.fail("room_two_rooms", "both people must land in one pair room", [a, d], r"chat|pair")
+    step("room:opened", seconds=lap())
+    creator, joiner = (a, d) if a.owner_key_id < d.owner_key_id else (d, a)
+    try:
+        wait_for("the pair room to key", lambda: creator.room(cid)["ready"], args.ready_wait, every=1)
+        step("room:keyed", seconds=lap(), creator=creator.name)
+        sent = creator.say(cid, "first message")
+        step("room:sent", seconds=lap())
+        wait_for("the first message to arrive", lambda: any(
+            m.get("attestation_id") == sent and m.get("body") for m in joiner.room(cid)["messages"]),
+            args.arrive_wait, every=1)
+        step("room:first_message_read", seconds=lap(), proves="accepted, seated, keyed, sent, read")
+    except MeshError:
+        ok = False
+        step.fail("room_not_end_to_end", "the pair room must reach a read message", [a, d, mesh.canonical],
+                  _HANDSHAKE, seconds=lap(), creator_state=creator.room(cid)["state"])
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 

@@ -3966,6 +3966,7 @@ async fn start_chat(
             format!("record the pair-room request: {e}"),
         );
     }
+    hurry_pair_rooms();
     // Only an invitation FROM this contact's person is accepted here: the
     // derived id names the pair, but anyone can propose into an id.
     let pending = match pending {
@@ -6851,6 +6852,8 @@ pub struct PairRoomDriver(ChatState);
 
 /// The driver's period: the node's common 30 s (`loop_cadence`'s premise).
 pub const PAIR_ROOM_DRIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+const PAIR_ROOM_HURRY_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+const PAIR_ROOM_HURRY_FOR: std::time::Duration = std::time::Duration::from_secs(90);
 
 impl PairRoomDriver {
     /// One pass. Returns `(room, state)` for every seated pair room it keyed or
@@ -6873,6 +6876,7 @@ impl PairRoomDriver {
                 }
                 tokio::select! {
                     () = schedule.tick() => {}
+                    () = pair_room_wake().notified() => {}
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() { break; }
                         continue;
@@ -6883,6 +6887,41 @@ impl PairRoomDriver {
             tracing::info!("pair-room driver stopped");
         })
     }
+}
+
+/// Runs the next pair-room pass now.
+fn pair_room_wake() -> &'static tokio::sync::Notify {
+    static WAKE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    WAKE.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A person just asked for a chat and is waiting. The join takes four acts across
+/// two nodes (acceptance, widening, KeyPackage, Welcome), and at the driver's 30 s
+/// each one waited out a pass: 37 of the 39 s from accept to first message on the
+/// native mesh. So pass every [`PAIR_ROOM_HURRY_EVERY`] for [`PAIR_ROOM_HURRY_FOR`].
+fn hurry_pair_rooms() {
+    static UNTIL: std::sync::Mutex<Option<tokio::time::Instant>> = std::sync::Mutex::new(None);
+    let now = tokio::time::Instant::now();
+    let Ok(mut until) = UNTIL.lock() else { return };
+    let running = until.is_some_and(|u| u > now);
+    *until = Some(now + PAIR_ROOM_HURRY_FOR);
+    drop(until);
+    if running {
+        return;
+    }
+    pair_room_wake().notify_one();
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(PAIR_ROOM_HURRY_EVERY).await;
+            let more = UNTIL
+                .lock()
+                .is_ok_and(|u| u.is_some_and(|u| u > tokio::time::Instant::now()));
+            if !more {
+                return;
+            }
+            pair_room_wake().notify_one();
+        }
+    });
 }
 
 /// Say a pair-room driver fact once per change (it runs every 30 s).
