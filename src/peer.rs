@@ -519,12 +519,13 @@ pub fn consent_disclosure_json() -> String {
                 ],
             },
         },
-        // Rule 1. Not a consent choice — the floor for being served at all.
+        // Announce is a choice like any other (CC 4.5.13); these are its costs when
+        // off (CC 5.4.6, CLM-unannounced-costs).
         "announce_requirement": m(
             "mesh.announce_requirement",
-            "A node that does not announce gets no service access on the mesh and no agent \
-             services. The accord's kill switch is only meaningful against a node it can reach, \
-             so an unreachable node is never served in the first place."
+            "If you don't announce, you can be reached only by a contact code or QR you hand \
+             over yourself, and you can't take part in public groups. Private rooms, contacts \
+             and traces still work."
         ),
     })
     .to_string()
