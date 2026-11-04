@@ -1114,11 +1114,13 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
     c = mesh.add("stranger")
     d = mesh.add("changer")   # withdraws before approval (8)
     e = mesh.add("regret")    # withdraws after approval (9)
+    f = mesh.add("barefedid") # holds only a fedID, never a code (8b)
     b_pin = (b.home / "claim_pin").read_text().strip()
     b.self_record()
     c.self_record()
     d.self_record()
     e.self_record()
+    f.self_record()
     step("booted", alice_owner=a.owner_key_id, b_node=b.node_key_id, c_node=c.node_key_id)
 
     # A self file on A before anything joins.
@@ -1290,6 +1292,22 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
                   dropped=dropped)
     step("withdrawn_pending_dropped", request=d_code, seen_before=seen, cancel_status=c_code2, dropped=dropped)
 
+    # (8b) A BARE FEDID, no code at all (steward 2026-11-04): a fresh device knows
+    # only `alice-person-…`. F has never seen a code: it must find alice's nodes
+    # through the canonical and reach the same held request.
+    f_bare, _ = wait_for("the bare fedID to reach alice", lambda: (lambda r: r if r[0] == 202 else None)(
+        f.api("POST", "/v1/setup/add-device", {"contact": a.owner_key_id, "label": "bare-fedid"})),
+        args.arrive_wait, every=5)
+    bare_seen = any(r.get("node_key_id") == f.node_key_id
+                    for r in a.must("GET", "/v1/self/device-requests").get("requests", []))
+    f.api("DELETE", "/v1/setup/add-device")
+    if f_bare != 202 or not bare_seen:
+        ok = False
+        step.fail("bare_fedid", "a bare fedID finds the person's nodes through the canonical", [a, f],
+                  r"device-join|add-device", request=f_bare, seen=bare_seen)
+    step("bare_fedid_reached_the_owner", request=f_bare, seen_on_a=bare_seen,
+         proves="a device holding only a fedID finds the person's announced nodes through the canonical")
+
     # (9) a device that changes its mind AFTER approval: the owner's device
     # evicts what it recorded (B's occurrence revoked) — nothing lingers.
     e_code, _ = ask(e, "regret")
@@ -1302,9 +1320,12 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
         # it lands by the quorum or the lone path (routes: CIRISServer#794). The
         # approval answers 409 add_device.roster_change_held, naming it.
         st_e, body_e = a.api("POST", f"/v1/self/device-requests/{e_row['request_id']}/approve")
-        if st_e == 409 and (body_e or {}).get("reason_id") == "add_device.roster_change_held":
+        # (Since the held-approval path it answers 202 {"approved": false, "held": true};
+        # it resumes when the roster lands the key.)
+        held_e = st_e == 202 and (body_e or {}).get("held") is True
+        if held_e or (st_e == 409 and (body_e or {}).get("reason_id") == "add_device.roster_change_held"):
             e.api("DELETE", "/v1/setup/add-device")
-            step("third_device_held", status=st_e, reason_id=body_e.get("reason_id"),
+            step("third_device_held", status=st_e, reason_id=(body_e or {}).get("reason_id"),
                  proves="from a roster of two, an addition is held as a proposal (CC 3.3.6.3)")
             return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
         if st_e not in (200, 201):

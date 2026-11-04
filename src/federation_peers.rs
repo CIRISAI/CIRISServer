@@ -626,6 +626,24 @@ async fn allegiance(State(st): State<PeersState>) -> Response {
     }
 }
 
+/// `GET /v1/federation/people/{fed_id}/nodes` — the nodes this person chose to
+/// announce, for a device that holds only their fedID (steward 2026-11-04:
+/// add-device must dial "any nodes registered with the canonical, especially if
+/// they only used a fedid"). Public, like the rest of the lightnet: announced =
+/// public, per node (CIRISServer#655). A person who announced nothing and a key
+/// nobody has heard of get the SAME empty answer, so this read cannot be used
+/// to tell them apart. Hints, not authority: a caller still needs each node's
+/// signed route, and the join is answered under the person's own signature.
+async fn person_nodes(State(st): State<PeersState>, Path(fed_id): Path<String>) -> Response {
+    match crate::auth::ownership::announced_nodes_of(&st.engine, &fed_id).await {
+        Ok(nodes) => (StatusCode::OK, Json(serde_json::json!({ "nodes": nodes }))).into_response(),
+        Err(e) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("announced nodes: {e}"),
+        ),
+    }
+}
+
 async fn get_peer(State(st): State<PeersState>, Path(key_id): Path<String>) -> Response {
     let rec = match st
         .engine
@@ -1443,6 +1461,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
     let router = Router::new()
         .route("/v1/federation/peers", axum::routing::get(list_peers))
         .route("/v1/federation/allegiance", axum::routing::get(allegiance))
+        .route(
+            "/v1/federation/people/{fed_id}/nodes",
+            axum::routing::get(person_nodes),
+        )
         .route(
             "/v1/federation/peers/{key_id}",
             axum::routing::get(get_peer),

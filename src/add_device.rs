@@ -454,23 +454,35 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     // 1. Who: resolve the person's code (QR / long form / short form) to their nodes.
     let directory = st.engine.federation_directory();
     let lens = ciris_edge::contact::PersistLens::new(&*directory);
-    let subject = match ciris_edge::contact::resolve_contact(&lens, req.contact.trim()).await {
-        Ok(ciris_edge::contact::ContactResolution::Known(s)) => s,
-        Ok(ciris_edge::contact::ContactResolution::ReadyFromCode { subject, .. }) => subject,
-        Err(stall) => {
-            return refuse(
-                StatusCode::NOT_FOUND,
-                "add_device.unknown_identity",
-                format!("could not find that identity: {stall:?}"),
-            )
-        }
-    };
+    use ciris_edge::contact::{ContactResolution, LadderStall};
+    let (fed_id, known_nodes) =
+        match ciris_edge::contact::resolve_contact(&lens, req.contact.trim()).await {
+            Ok(ContactResolution::Known(s)) => (s.fed_id, s.nodes),
+            Ok(ContactResolution::ReadyFromCode { subject, .. }) => (subject.fed_id, subject.nodes),
+            // A bare fedID this device has never heard of. A fresh device knows
+            // nobody, so this is the normal case, not a refusal: the canonical
+            // knows the person's announced nodes (steward 2026-11-04).
+            Err(LadderStall::NotYetDiscovered { fed_id } | LadderStall::Unreachable { fed_id }) => {
+                (fed_id, Vec::new())
+            }
+            Err(stall) => {
+                return refuse(
+                    StatusCode::NOT_FOUND,
+                    "add_device.unknown_identity",
+                    format!("could not find that identity: {stall:?}"),
+                )
+            }
+        };
     // Every node of the person's, not the first: the list is sorted, and a
     // node they stopped running still has a live owner-binding until they
     // release it (Eric's laptop, 2026-11-03: `ciris-client-…` sorts before the
     // real `ciris-node-…`, so the join never reached the node holding the
     // window open). Each is asked in turn below, and each attempt is logged.
-    let targets = other_nodes(&subject.nodes, &st.node_key_id);
+    // The union of what the code named, what this directory holds, and what the
+    // canonicals have registered for the person.
+    let registered = canonical_nodes_of(&st.engine, &fed_id).await;
+    let targets = other_nodes(&union_nodes(known_nodes, registered), &st.node_key_id);
+    tracing::info!(fed_id = %fed_id, targets = ?targets, "add-device: the nodes to ask");
     if targets.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -486,7 +498,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     // round now rather than waiting the cadence. Not here yet is RETRYABLE
     // (503 + Retry-After), never a refusal: a 502 means A refused. BEFORE the
     // mint, so a retry after the 503 has nothing of its own to collide with.
-    if let Err(r) = await_owner_route(&st.engine, &targets).await {
+    if let Err(r) = await_owner_route(&st.engine, &targets, &fed_id).await {
         return r;
     }
     // 1b. An approval already held names the key an earlier ask minted; minting
@@ -506,7 +518,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     //    fingerprint. Never a device name: the device name (`label`) belongs to
     //    the NODE key, and `device-<hex>-<fp>` is refused (tracked: CIRISServer#793).
     let label = req.label.unwrap_or_else(|| "new device".into());
-    let alias = subject.fed_id.clone();
+    let alias = fed_id.clone();
     let occurrence_dir = st.identity_dir.join("user");
     // An earlier ask from this device (unanswered, or failed after its mint)
     // left never-approved keys under this alias; this ask supersedes it. The
@@ -685,7 +697,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             request_id,
             challenge,
             alias,
-            expected_owner: subject.fed_id.clone(),
+            expected_owner: fed_id.clone(),
             occurrence_key: keyset.key_id.clone(),
             gen,
         },
@@ -695,6 +707,60 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         Json(progress().lock().map(|p| p.clone()).unwrap_or_default()),
     )
         .into_response()
+}
+
+/// Ask each canonical which nodes `fed_id` announced
+/// (`GET /v1/federation/people/{fed_id}/nodes`). Best effort: an unreachable
+/// canonical, or one too old to serve the read, contributes nothing and the
+/// code's nodes still stand.
+async fn canonical_nodes_of(engine: &Engine, fed_id: &str) -> Vec<String> {
+    let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap_or_default();
+    let mut nodes = Vec::new();
+    for read in crate::trace_receipt::roster_from_hints(hints) {
+        let url = format!("{}/v1/federation/people/{fed_id}/nodes", read.url);
+        let body = match http.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+            Ok(r) => {
+                tracing::info!(url = %url, status = %r.status(), "add-device: this canonical serves no node list");
+                None
+            }
+            Err(e) => {
+                tracing::info!(url = %url, error = %e, "add-device: could not ask this canonical for the person's nodes");
+                None
+            }
+        };
+        let found = body.as_ref().map(nodes_from_body).unwrap_or_default();
+        tracing::info!(canonical = %read.key_id, nodes = ?found, "add-device: nodes registered with this canonical");
+        nodes = union_nodes(nodes, found);
+    }
+    nodes
+}
+
+/// The `nodes` array of the canonical's answer.
+fn nodes_from_body(v: &serde_json::Value) -> Vec<String> {
+    v.get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `a` then whatever `b` adds, without repeats. The order is kept: the code's
+/// nodes, the ones the person handed over, are asked first.
+fn union_nodes(mut a: Vec<String>, b: Vec<String>) -> Vec<String> {
+    for n in b {
+        if !a.contains(&n) {
+            a.push(n);
+        }
+    }
+    a
 }
 
 /// The person's nodes other than this one, in the order given.
@@ -1597,6 +1663,7 @@ const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30)
 async fn await_owner_route(
     engine: &ciris_persist::prelude::Engine,
     targets: &[String],
+    fed_id: &str,
 ) -> Result<(), Response> {
     let dir = engine.federation_directory();
     let deadline = std::time::Instant::now() + OWNER_ROUTE_WAIT;
@@ -1634,7 +1701,9 @@ async fn await_owner_route(
             if let Some(runtime) = crate::compose::held_replication_runtime() {
                 let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
                 for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
-                    for target in targets {
+                    // The person's own key too: from a bare fedID this device
+                    // holds nothing to verify the owner's answer against.
+                    for target in targets.iter().map(String::as_str).chain([fed_id]) {
                         if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
                             tracing::debug!(canonical = %canonical, target = %target, error = %e,
                                 "add-device: subject Pull for the other device's route not sent yet");
@@ -1885,6 +1954,28 @@ mod ask_every_node_tests {
             vec!["ciris-client-old".to_owned(), "ciris-node-real".to_owned()],
             "the stale node that sorts first does not hide the real one"
         );
+    }
+
+    #[test]
+    fn the_codes_nodes_come_first_and_the_canonicals_add_to_them() {
+        let code = vec!["from-code".to_owned()];
+        let reg = vec!["from-code".to_owned(), "registered".to_owned()];
+        assert_eq!(
+            union_nodes(code, reg),
+            vec!["from-code".to_owned(), "registered".to_owned()]
+        );
+        // A bare fedID: nothing from a code, everything from the canonical.
+        assert_eq!(
+            union_nodes(Vec::new(), vec!["registered".to_owned()]),
+            vec!["registered".to_owned()]
+        );
+    }
+
+    #[test]
+    fn the_canonicals_answer_parses_and_junk_is_nothing() {
+        let v = serde_json::json!({ "nodes": ["a", "b", 7] });
+        assert_eq!(nodes_from_body(&v), vec!["a".to_owned(), "b".to_owned()]);
+        assert!(nodes_from_body(&serde_json::json!({ "error": "x" })).is_empty());
     }
 
     #[test]
