@@ -522,7 +522,7 @@ pub fn consent_disclosure_json() -> String {
         // Announce is a choice like any other (CC 4.5.13); these are its costs when
         // off (CC 5.4.6, CLM-unannounced-costs).
         "announce_requirement": m(
-            "mesh.announce_requirement",
+            "mesh.announce_costs",
             "If you don't announce, you can be reached only by a contact code or QR you hand \
              over yourself, and you can't take part in public groups. Private rooms, contacts \
              and traces still work."

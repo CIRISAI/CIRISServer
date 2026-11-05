@@ -733,6 +733,12 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # `mesh.announce_costs` (0.5.245) replaces `mesh.announce_requirement`, whose
+    # translations state the old costs. It can't be translated first: the client's
+    # gate compares its bundle to the server at its pin, and this one reads the
+    # released bundle, so neither side could move first with a changed value.
+    # Client 0.5.239 pins 0.5.245 and adds it; the entry leaves at that floor.
+    "mesh.announce_costs",
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the

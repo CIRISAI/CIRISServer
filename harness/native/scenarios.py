@@ -278,6 +278,117 @@ ROOM FILE — a file in the pair room reaches the other person (CSD-107 for room
 # ── two people peered directly, NO canonical (CIRISServer#808) ──────────────
 
 
+def remote_admin(mesh: Mesh, args: Any) -> Record:
+    """A person administers a node they own from another of their devices, through
+    their own node, over the mesh (steward 2026-11-05). The owner is checked against
+    the self-key roster, so a key the binding never named still counts. The same
+    check against a removed key and an agent is `self_roster_key`'s, on one engine."""
+    step = Steps("""
+REMOTE ADMIN — a roster device reads and acts on a node its person owns, over the relay.
+  nodes:  the canonical; A (alice: claimed, announced, the target); B (joined to alice's roster
+          by the real add-device flow); S (a stranger with their own owner).
+  proves: (1) B holds a roster key, not the key A's binding names;
+          (2) B reads A's metrics and logs through the relay, with no session on A;
+          (3) the answer is A's, not B's;
+          (4) S, owner of its own node, is refused by A;
+          (5) a route off the allow-list is refused on the gateway and signs nothing.""")
+    ok = True
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step)
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    a.self_record()
+    a.peer_with(cnl)
+    cnl.peer_with(a)
+    b = mesh.add("newdev")
+    s = mesh.add("stranger")
+    s.claim("stranger-person")
+    s.announce()
+    s.self_record()
+    s.peer_with(cnl)
+    cnl.peer_with(s)
+    b_pin = (b.home / "claim_pin").read_text().strip()
+    b.self_record()
+    step("booted", alice_owner=a.owner_key_id, a_node=a.node_key_id, b_node=b.node_key_id,
+         stranger_owner=s.owner_key_id)
+
+    a.must("POST", "/v1/self/device-requests/open", {"seconds": 600})
+    code_link = a.contact_code()
+    last: Any = None
+
+    def ask() -> Optional[Tuple[int, Any]]:
+        nonlocal last
+        last = b.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": "second device"})
+        return last if last[0] == 202 else None
+    wait_for("B to reach A with its join request", ask, args.owner_wait, every=5)
+    rows = a.must("GET", "/v1/self/device-requests").get("requests", [])
+    row = next(r for r in rows if r.get("node_key_id") == b.node_key_id)
+    occ = a.must("POST", f"/v1/self/device-requests/{row['request_id']}/approve").get("occurrence_key_id")
+
+    def held() -> Optional[Dict[str, Any]]:
+        st = b.must("GET", "/v1/setup/add-device")
+        return st if st.get("state") == "approved" else None
+    wait_for("B to hold the owner's approval", held, args.arrive_wait, every=2)
+    b.must("POST", "/v1/setup/add-device/complete", {})
+    b.token = b.must("POST", "/v1/setup/claimed-session", {"claim_pin": b_pin})["access_token"]
+    if not occ or occ == a.owner_key_id:
+        ok = False
+        step.fail("roster_key", "B must hold its own roster key, not the key the binding names", [a, b],
+                  r"occurrence", occurrence=occ)
+    step("b_on_the_roster", occurrence=occ, binding_names=a.owner_key_id)
+
+    def relay(n: Node, method: str, path: str) -> Tuple[int, Any]:
+        return n.api("POST", "/v1/mesh/relay",
+                     {"target_key_id": a.node_key_id, "method": method, "path": path})
+
+    last_read: Any = None
+
+    def read_metrics() -> Optional[Tuple[int, Any]]:
+        nonlocal last_read
+        last_read = relay(b, "GET", "/v1/federation/metrics")
+        return last_read if last_read[0] == 200 else None
+    try:
+        code, metrics = wait_for("B to read A's metrics through the relay", read_metrics,
+                                 args.arrive_wait, every=5)
+    except MeshError:
+        code, metrics = last_read
+    if code != 200:
+        ok = False
+        step.fail("relay_metrics", "a roster device must read its person's node through the relay", [a, b],
+                  r"mesh control|relay|signer does not", status=code, body=str(metrics)[:300])
+    step("metrics_over_the_relay", status=code)
+
+    code, logs = relay(b, "GET", "/v1/telemetry/logs?limit=5")
+    if code != 200:
+        ok = False
+        step.fail("relay_logs", "logs must cross the relay for a roster device", [a, b],
+                  r"mesh control|relay", status=code, body=str(logs)[:300])
+    step("logs_over_the_relay", status=code)
+
+    code, seen = relay(b, "GET", "/v1/federation/self-key-record")
+    answered_by_a = a.node_key_id in str(seen) or a.owner_key_id in str(seen)
+    if code != 200 or not answered_by_a:
+        ok = False
+        step.fail("answer_is_the_targets", "the relayed answer must come from the target", [a, b],
+                  r"mesh control|relay", status=code, body=str(seen)[:300])
+    step("the_answer_is_As", status=code)
+
+    code, refused = relay(s, "GET", "/v1/federation/metrics")
+    if code == 200:
+        ok = False
+        step.fail("stranger", "a stranger must not read a node it does not own", [a, s],
+                  r"mesh control|signer does not", status=code, body=str(refused)[:300])
+    step("stranger_refused", status=code, body=str(refused)[:160])
+
+    code, offlist = relay(b, "POST", "/v1/system/data/wipe-signing-key")
+    if code != 403:
+        ok = False
+        step.fail("allow_list", "a route off the allow-list must be refused on the gateway", [b],
+                  r"relayable", status=code, body=str(offlist)[:300])
+    step("off_the_list_refused", status=code)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -1841,6 +1952,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "halt": halt,
     "halt_agent": halt_agent,
     "add_device": add_device,
+    "remote_admin": remote_admin,
     "kex_fresh_node": kex_fresh_node,
     "kex_unannounced_canonical": kex_unannounced_canonical,
     "contact_edges": contact_edges,
