@@ -84,8 +84,8 @@ pub enum JoinOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub v: u32,
-    /// B's NodeCode — what the owner-binding pins, and the node it names MUST be
-    /// the request's signer.
+    /// B's NodeCode — what the owner-binding pins. The node it names is the
+    /// request's signer, or has signed `node_proof` for that signer.
     pub node_code: String,
     /// 32 fresh random bytes, hex. Correlates B's polls and seeds the code.
     pub challenge: String,
@@ -95,6 +95,58 @@ pub struct JoinRequest {
     pub occurrence_key_record: SignedKeyRecord,
     /// B's content-KEM keys for that occurrence (the self-DEK recipient).
     pub encryption_pubkeys: EncryptionPubkeys,
+    /// On a split home the agent is on the wire and the NodeCode names the node,
+    /// so the node vouches for the request: its Ed25519 signature over
+    /// [`node_proof_message`], base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_proof: Option<String>,
+    /// With `node_proof`: first contact introduced the agent's key, and A must
+    /// hold the node's before it can record an owner-binding naming it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key_record: Option<SignedKeyRecord>,
+}
+
+/// What the node signs to vouch for a join sent by another key of its home.
+#[must_use]
+pub fn node_proof_message(sender: &str, challenge: &str) -> Vec<u8> {
+    format!("ciris:add-device:node-proof:v1\n{sender}\n{challenge}").into_bytes()
+}
+
+/// **The node a join is really from**, or `None` if the request can't show one.
+/// Nobody may ask on another node's behalf: the sender is the node, or it holds a
+/// proof only that node's private key can make. A split home has to take the
+/// second path, since its wire identity is the agent (CC 3.4.7.3).
+#[must_use]
+pub fn request_node(req: &JoinRequest, sender: &str) -> Option<String> {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let nc = crate::nodecode::decode(&req.node_code).ok()?;
+    if nc.key_id == sender {
+        return Some(nc.key_id);
+    }
+    let record = &req.node_key_record.as_ref()?.record;
+    if record.key_id != nc.key_id || record.pubkey_ed25519_base64 != nc.pubkey_ed25519_base64 {
+        return None;
+    }
+    let key: [u8; 32] = b64
+        .decode(&nc.pubkey_ed25519_base64)
+        .ok()?
+        .try_into()
+        .ok()?;
+    let sig: [u8; 64] = b64
+        .decode(req.node_proof.as_deref()?)
+        .ok()?
+        .try_into()
+        .ok()?;
+    VerifyingKey::from_bytes(&key)
+        .ok()?
+        .verify(
+            &node_proof_message(sender, &req.challenge),
+            &Signature::from_bytes(&sig),
+        )
+        .ok()?;
+    Some(nc.key_id)
 }
 
 /// A → B, the answer payload.
@@ -158,7 +210,11 @@ fn opaque(status: u16, answer: &JoinAnswer) -> ciris_edge::OpaqueResponse {
 
 struct Held {
     id: String,
+    /// The wire signer, which polls and withdraws.
     sender: String,
+    /// The node that asked, which the owner-binding names. The same key unless
+    /// this is a split home.
+    node: String,
     req: JoinRequest,
     code: String,
     at: Instant,
@@ -242,15 +298,18 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
                 tracing::info!(sender = %ctx.sender_key_id, "device-join: refused — the owner has not opened \"add a device\"");
                 return opaque(403, &JoinAnswer::NotAccepting).into();
             }
-            // The NodeCode must name the request's signer: the binding the owner
-            // will sign pins that node, and nobody may ask on another node's behalf.
-            let names_signer = crate::nodecode::decode(&req.node_code)
-                .map(|nc| nc.key_id == ctx.sender_key_id)
-                .unwrap_or(false);
-            if !names_signer || req.challenge.len() < 32 {
-                tracing::info!(sender = %ctx.sender_key_id, "device-join: refused — malformed request (node code does not name the signer, or no challenge)");
+            // The binding the owner will sign pins this node, and nobody may ask
+            // on another node's behalf. The answer stays generic (#554 D3), so the
+            // reason goes to the owner's log.
+            let node = request_node(&req, &ctx.sender_key_id);
+            let Some(node) = node.filter(|_| req.challenge.len() >= 32) else {
+                tracing::warn!(
+                    sender = %ctx.sender_key_id,
+                    "device-join: refused with the window open — the node code names another \
+                     key and carries no valid proof, or there is no challenge"
+                );
                 return opaque(400, &JoinAnswer::NotAccepting).into();
-            }
+            };
             // One per sender: a repeat returns the held request (idempotent).
             if let Some(held) = h.pending.iter().find(|p| p.sender == ctx.sender_key_id) {
                 return opaque(
@@ -279,6 +338,7 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
             h.pending.push(Held {
                 id: id.clone(),
                 sender: ctx.sender_key_id,
+                node,
                 req: *req,
                 code: code.clone(),
                 at: Instant::now(),
@@ -583,6 +643,42 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         );
     }
     let challenge = hex::encode(ch);
+    // On a split home the agent is on the wire, so the node vouches for it.
+    let sender = edge.signer_key_id().to_owned();
+    let (node_proof, node_key_record) = if st.node_key_id == sender {
+        (None, None)
+    } else {
+        use base64::Engine as _;
+        let signed = match crate::node_key::held_node_signer() {
+            Some(node) => node
+                .sign_hybrid(&node_proof_message(&sender, &challenge))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("this node holds no node key".to_owned()),
+        };
+        let record = directory
+            .lookup_public_key(&st.node_key_id)
+            .await
+            .ok()
+            .flatten();
+        match (signed, record) {
+            (Ok(sig), Some(record)) => (
+                Some(base64::engine::general_purpose::STANDARD.encode(&sig.classical.signature)),
+                Some(SignedKeyRecord { record }),
+            ),
+            (signed, record) => {
+                return refuse_with(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "add_device.node_proof",
+                    "this device could not prove which node it is",
+                    serde_json::json!({
+                        "detail": signed.err().unwrap_or_else(|| "no key record".to_owned()),
+                        "node_key_record": record.is_some(),
+                    }),
+                )
+            }
+        }
+    };
     let join = JoinOp::Join(Box::new(JoinRequest {
         v: 1,
         node_code: st.node_code.clone(),
@@ -594,6 +690,8 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         device_class: crate::backend::host_device_class().into(),
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
+        node_proof,
+        node_key_record,
     }));
     // 3. Ask — a first contact: the request carries this node's own key record.
     //    Each of the person's nodes in turn, until one holds the window open: a
@@ -1439,7 +1537,7 @@ async fn list_requests(State(st): State<AddDeviceState>, headers: HeaderMap) -> 
                 "label": p.req.label,
                 "device_class": p.req.device_class,
                 "match_code": p.code,
-                "node_key_id": p.sender,
+                "node_key_id": p.node,
                 "requested_secs_ago": p.at.elapsed().as_secs(),
             })
         })
@@ -1493,10 +1591,15 @@ async fn approve(
     if let Err(r) = crate::federation_peers::require_owner_session(&st.engine, &headers).await {
         return r;
     }
-    let (sender, req, code) = {
+    let (sender, node, req, code) = {
         let h = host().lock().unwrap_or_else(|p| p.into_inner());
         match h.pending.iter().find(|p| p.id == id) {
-            Some(p) => (p.sender.clone(), p.req.clone(), p.code.clone()),
+            Some(p) => (
+                p.sender.clone(),
+                p.node.clone(),
+                p.req.clone(),
+                p.code.clone(),
+            ),
             None => {
                 return refuse(
                     StatusCode::NOT_FOUND,
@@ -1506,7 +1609,7 @@ async fn approve(
             }
         }
     };
-    match sign_and_record(&st, &sender, &req).await {
+    match sign_and_record(&st, &node, &req).await {
         Ok(signed) => record_approved(&id, &sender, &req, &code, signed).into_response(),
         Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
             // CC 3.3.6.3: from a roster of two or more keys the addition is a
@@ -1548,7 +1651,7 @@ async fn approve(
                     "approved": false,
                     "held": true,
                     "match_code": code,
-                    "node_key_id": sender,
+                    "node_key_id": node,
                     "occurrence_key_id": occ_key,
                     "proposal_id": proposal_id,
                     "detail": e,
@@ -1573,6 +1676,9 @@ fn record_approved(
     code: &str,
     (approval, intro, granted): (Approval, ciris_edge::Introductions, usize),
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // The node the owner approved, which on a split home is not the wire signer.
+    let node =
+        crate::nodecode::decode(&req.node_code).map_or_else(|_| sender.to_owned(), |nc| nc.key_id);
     let occurrence_key_id = approval
         .occurrence
         .identity_occurrence
@@ -1598,7 +1704,7 @@ fn record_approved(
         Json(serde_json::json!({
             "approved": true,
             "match_code": code,
-            "node_key_id": sender,
+            "node_key_id": node,
             "occurrence_key_id": occurrence_key_id,
             "self_dek_granted": granted,
         })),
@@ -1624,9 +1730,16 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
             h.pending
                 .iter()
                 .find(|p| p.id == id && p.held_since.is_some())
-                .map(|p| (p.sender.clone(), p.req.clone(), p.code.clone()))
+                .map(|p| {
+                    (
+                        p.sender.clone(),
+                        p.node.clone(),
+                        p.req.clone(),
+                        p.code.clone(),
+                    )
+                })
         };
-        let Some((sender, req, code)) = held else {
+        let Some((sender, node, req, code)) = held else {
             return;
         };
         match ciris_persist::federation::self_roster::roster_now(dir.as_ref(), &owner).await {
@@ -1637,7 +1750,7 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
                 continue;
             }
         }
-        match sign_and_record(&st, &sender, &req).await {
+        match sign_and_record(&st, &node, &req).await {
             Ok(signed) => {
                 let _ = record_approved(&id, &sender, &req, &code, signed);
                 tracing::info!(request_id = %id, occurrence = %occ_key, "device-join: the self roster LANDED the key — the held approval is delivered");
@@ -1726,7 +1839,7 @@ const ROSTER_CHANGE_HELD: &str = "the self roster holds this addition as a propo
 /// with the OWNER's pen; record both here; re-wrap the self DEKs to B.
 async fn sign_and_record(
     st: &AddDeviceState,
-    sender: &str,
+    node: &str,
     req: &JoinRequest,
 ) -> Result<(Approval, ciris_edge::Introductions, usize), String> {
     let alias = crate::active_user_alias(&st.user_seed_dir, &st.user_key_id);
@@ -1752,11 +1865,28 @@ async fn sign_and_record(
         crate::claim_remote::build_claim_for_target(&pen, &req.node_code, &cohort)
             .await
             .map_err(|e| format!("build the owner-binding: {e}"))?;
-    if nc.key_id != sender {
-        return Err("the request's NodeCode does not name its signer".into());
+    if nc.key_id != node {
+        return Err("the request's NodeCode does not name the node that asked".into());
     }
-    // Recorded HERE too, so this node knows its owner's new device (B's node key
-    // was admitted by edge's first contact).
+    // A split home's first contact introduced its agent, so its node key comes
+    // with the request (already checked against the NodeCode by `request_node`).
+    if let Some(record) = &req.node_key_record {
+        let known = st
+            .engine
+            .federation_directory()
+            .lookup_public_key(node)
+            .await
+            .map_err(|e| e.to_string())?;
+        if known.is_none() {
+            crate::hardware_attestation::register_attested_federation_key(
+                &st.engine,
+                record.clone(),
+            )
+            .await
+            .map_err(|e| format!("register the asking node's key: {e}"))?;
+        }
+    }
+    // Recorded HERE too, so this node knows its owner's new device.
     crate::auth::ownership::apply_signed_owner_binding(
         &st.engine,
         &nc.key_id,
@@ -1936,6 +2066,105 @@ mod tests {
             "an attacker who copies B's challenge must show a different code (N1)"
         );
         assert_eq!(b, match_code("ciris-node-b", &ch), "deterministic");
+    }
+
+    /// A split home has its agent on the wire and its node in the NodeCode, so a
+    /// join must show the node vouched for that agent. Every agent install is one.
+    #[test]
+    fn a_split_home_proves_its_node_and_nobody_else_can() {
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let node = SigningKey::from_bytes(&[3u8; 32]);
+        let pubkey = b64.encode(node.verifying_key().to_bytes());
+        let node_code = crate::nodecode::encode(&crate::nodecode::NodeCode {
+            key_id: "the-node".into(),
+            pubkey_ed25519_base64: pubkey.clone(),
+            transport_hint: None,
+            alias_hint: None,
+        })
+        .expect("encode");
+        let challenge = "ab".repeat(32);
+        let record: SignedKeyRecord = serde_json::from_value(serde_json::json!({ "record": {
+            "key_id": "the-node",
+            "pubkey_ed25519_base64": pubkey,
+            "pubkey_ml_dsa_65_base64": null,
+            "algorithm": "hybrid",
+            "identity_type": "node",
+            "identity_ref": "the-node",
+            "valid_from": "2026-11-05T00:00:00.000Z",
+            "valid_until": null,
+            "registration_envelope": {},
+            "original_content_hash": "",
+            "scrub_signature_classical": "",
+            "scrub_signature_pqc": null,
+            "scrub_key_id": "the-node",
+            "scrub_timestamp": "2026-11-05T00:00:00.000Z",
+            "pqc_completed_at": null,
+            "persist_row_hash": "",
+        }}))
+        .expect("a key record");
+        let proof = |signer: &SigningKey, sender: &str, ch: &str| {
+            Some(b64.encode(signer.sign(&node_proof_message(sender, ch)).to_bytes()))
+        };
+        let occurrence = record.clone();
+        let req = |node_proof: Option<String>, node_key_record: Option<SignedKeyRecord>| {
+            serde_json::from_value::<JoinRequest>(serde_json::json!({
+                "v": 1, "node_code": node_code, "challenge": challenge, "label": "x",
+                "device_class": "phone",
+                "occurrence_key_record": occurrence,
+                "encryption_pubkeys": {"x25519_base64": "", "ml_kem_768_base64": ""},
+            }))
+            .map(|mut r| {
+                r.node_proof = node_proof;
+                r.node_key_record = node_key_record;
+                r
+            })
+            .expect("a join request")
+        };
+        let good = proof(&node, "the-agent", &challenge);
+
+        assert_eq!(
+            request_node(&req(None, None), "the-node").as_deref(),
+            Some("the-node"),
+            "an unsplit node is its own signer, and needs no proof"
+        );
+        assert_eq!(
+            request_node(&req(good.clone(), Some(record.clone())), "the-agent").as_deref(),
+            Some("the-node"),
+            "the agent of a split home, vouched for by its node"
+        );
+        assert_eq!(request_node(&req(None, None), "the-agent"), None);
+        assert_eq!(
+            request_node(&req(good.clone(), None), "the-agent"),
+            None,
+            "the host couldn't hold the node's key"
+        );
+        assert_eq!(
+            request_node(&req(good, Some(record.clone())), "someone-else"),
+            None,
+            "a proof made for one sender is no use to another"
+        );
+        let stranger = SigningKey::from_bytes(&[4u8; 32]);
+        assert_eq!(
+            request_node(
+                &req(
+                    proof(&stranger, "the-agent", &challenge),
+                    Some(record.clone())
+                ),
+                "the-agent"
+            ),
+            None,
+            "only the named node's key can vouch"
+        );
+        assert_eq!(
+            request_node(
+                &req(proof(&node, "the-agent", "another-challenge"), Some(record)),
+                "the-agent"
+            ),
+            None,
+            "a proof is for one request"
+        );
     }
 }
 
