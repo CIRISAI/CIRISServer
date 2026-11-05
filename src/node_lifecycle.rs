@@ -31,10 +31,9 @@
 //! on iOS, inside `beginBackgroundTask` and ending it when this returns
 //! (<https://developer.apple.com/documentation/uikit/uiapplication/beginbackgroundtask(withname:expirationhandler:)>).
 //!
-//! Scope: this pauses the SERVER's loops. Edge's transport (its links and
-//! replication rounds) sleeps through edge's own `suspend` / `resume`, which
-//! this module calls once edge ships them; until then [`BackgroundReport`]
-//! says so rather than claiming the transport is quiet.
+//! This pauses the SERVER's loops, then edge's transport through its own
+//! `suspend` / `resume` ([`crate::edge_hooks`]). [`BackgroundReport`] says whether
+//! the transport actually closed.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -139,7 +138,7 @@ pub struct BackgroundReport {
     /// How long the call waited.
     pub waited: Duration,
     /// The registered transport closed everything inside the deadline. `false`
-    /// when none is registered (edge's `suspend` is wired at its adoption).
+    /// when none is registered, as on a node with no transport.
     pub transport_suspended: bool,
 }
 

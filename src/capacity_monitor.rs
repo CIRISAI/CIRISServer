@@ -177,7 +177,7 @@ impl Hysteresis {
 }
 
 /// Where the pressure goes — edge's `Edge::set_load_pressure` (agreed with edge
-/// 2026-11-01), registered at its adoption. Called every sample; cheap.
+/// 2026-11-01), through [`crate::edge_hooks`]. Called every sample; cheap.
 pub trait PressureSink: Send + Sync {
     fn set_load_pressure(&self, p: LoadPressure);
 }

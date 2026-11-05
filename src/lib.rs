@@ -425,6 +425,7 @@ pub mod serve_marker;
 
 /// Host pressure, sampled agent-style, for edge's load shedding (steward 2026-11-01).
 pub mod capacity_monitor;
+pub mod edge_hooks;
 /// Foreground / background: the node sleeps with its phone (steward 2026-11-01).
 pub mod node_lifecycle;
 /// The node's tokio runtime, with a worker floor (CIRISServer#446 / #501).

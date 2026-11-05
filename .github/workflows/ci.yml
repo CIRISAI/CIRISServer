@@ -389,7 +389,23 @@ jobs:
       # any assertion. Compilation coverage is not execution coverage.
       - name: test (test-anchor surface, Linux)
         if: runner.os == 'Linux'
-        run: cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa
+        run: >-
+          cargo test --features test-anchor
+          --test trace_round_e2e --test trust_root_qa --test accord_duty_grant
+          --test first_run_to_moderation_e2e --test final_genesis_dry_run
+          --test contact_key_pull_e2e --test anchor_block_verifies --test seed_digest_probe
+      # Remote administration on a real mesh, every run (steward 2026-11-05: it
+      # has to work organically and stay part of standard testing). A device
+      # added by the real flow reads a node its person owns over the relay, and a
+      # stranger is refused. `cargo test` rebuilds the binary without the feature
+      # in some orders, so this builds what it runs.
+      - name: remote administration (native mesh, Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor
+          python3 -m pip install --quiet pyyaml
+          python3 -m harness.native remote_admin --binary target/debug/ciris-server --work "$RUNNER_TEMP/remote-admin"
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the

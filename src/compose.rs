@@ -1353,6 +1353,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&mesh_dispatch_router),
     ));
     crate::mesh_relay::register_mesh_control_handler(&edge, Arc::clone(&mesh_responder));
+    crate::edge_hooks::register(&edge);
 
     // edge v8.2.0 (CIRISEdge#249) makes `Edge::run` take `self: Arc<Self>`, so
     // the composition root can now retain a live `Arc<Edge>` ACROSS the run loop
