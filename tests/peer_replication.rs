@@ -184,7 +184,7 @@ impl NodeB {
             "score": 1.0,
             "confidence": 1.0,
             "context": "US (Chicago) — billing+proxy",
-            "valid_until": valid_until.to_rfc3339(),
+            "valid_until": valid_until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "epistemic_mode": "direct",
             "witness_relation": "external",
             "stake": "reputational",

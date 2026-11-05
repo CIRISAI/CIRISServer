@@ -936,7 +936,7 @@ pub async fn set_config(
     // `Engine::emit_attestation_self` from the engine's own signer.
     let mut input = EmitAttestationInput::with_envelope(
         kind,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        crate::attest::envelope_core(envelope)?,
         CONFIG_COHORT_SCOPE,
     );
     input.attested_key_id = Some(node_key_id.clone());

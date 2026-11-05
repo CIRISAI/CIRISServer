@@ -414,6 +414,9 @@ async fn mint_portable_root() -> PortableRoot {
     let dir = SqliteBackend::open_in_memory()
         .await
         .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir)
+        .await
+        .expect("migrate the directory");
     let holder_rows =
         ciris_persist::federation::genesis::effective_accord_holder_records().into_owned();
     assert_eq!(
@@ -702,6 +705,9 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     let dir2 = SqliteBackend::open_in_memory()
         .await
         .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir2)
+        .await
+        .expect("migrate the directory");
     let report = install_trust_root_records(&dir2, &bundle)
         .await
         .expect("attach onto a fresh directory");
@@ -1049,6 +1055,9 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
     let dir2 = SqliteBackend::open_in_memory()
         .await
         .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir2)
+        .await
+        .expect("migrate the directory");
     install_trust_root_records(&dir2, &bundle)
         .await
         .expect("attach");

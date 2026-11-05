@@ -175,10 +175,7 @@ pub async fn emit_moderation_event(
         attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .map_err(|e| e.to_string())?,
+        attestation_envelope: crate::attest::envelope_core(envelope).map_err(|e| e.to_string())?,
         subject_key_ids: target_key_ids.to_vec(),
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Self-emitted producer-authority local row: sig deferred to promote

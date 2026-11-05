@@ -1069,12 +1069,14 @@ async fn a_callback_refusal_is_a_page_for_humans_and_json_on_request() {
 
 /// #425: the hand-off's verdicts in sequence — pending (204) while the human
 /// is at the provider, a one-time `"status":"failed"` once the exchange dies,
-/// then 410 expired; and a nonce nothing ever knew is 410 immediately.
+/// then 410 expired; and a nonce nothing ever knew waits out a short grace.
 #[tokio::test]
 async fn the_handoff_reports_pending_then_failure_then_expired() {
     let app = app_with(None).await;
 
-    // Nothing anywhere → 410, not an eternal 204.
+    // Nothing anywhere: a nonce can be polled before the browser reaches the
+    // start route, so it waits out a short grace, not for ever. The grace and its
+    // end are `in_unseen_grace`'s unit tests; the 410 is below.
     let h = app
         .clone()
         .oneshot(handoff_req("n-never-issued"))
@@ -1082,14 +1084,8 @@ async fn the_handoff_reports_pending_then_failure_then_expired() {
         .expect("poll");
     assert_eq!(
         h.status(),
-        StatusCode::GONE,
-        "a flow the node never heard of must not read as 'keep waiting'"
-    );
-    let v = body_json(h).await;
-    assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("expired"));
-    assert_eq!(
-        v.get("reason_id").and_then(|x| x.as_str()),
-        Some("auth.oauth.flow_expired")
+        StatusCode::NO_CONTENT,
+        "a nonce polled before its flow starts gets the grace"
     );
 
     // A started flow is PENDING while unconsumed.

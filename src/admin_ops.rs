@@ -1557,7 +1557,7 @@ async fn build_marker(
     subject_key_id: &str,
     envelope: serde_json::Value,
 ) -> Result<Attestation, String> {
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+    let core = crate::attest::envelope_core(envelope)
         .map_err(|e| format!("type the quarantine-marker envelope: {e}"))?;
     let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
         attestation_type::SCORES,
@@ -2580,8 +2580,8 @@ async fn emit_about_peer(
     peer_key_id: &str,
     envelope: serde_json::Value,
 ) -> Result<String, String> {
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
-        .map_err(|e| format!("type the envelope: {e}"))?;
+    let core =
+        crate::attest::envelope_core(envelope).map_err(|e| format!("type the envelope: {e}"))?;
     let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
         attestation_type,
         core,

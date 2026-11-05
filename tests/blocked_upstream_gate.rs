@@ -241,25 +241,31 @@ fn checkout(repo: &str) -> Result<Option<PathBuf>, String> {
         return Ok(None);
     };
     let rev = locked_rev(repo);
-    let base = entries
+    // A machine can hold several checkouts of one repo (a source URL spelled two
+    // ways is two directories), so look in all of them for the locked rev.
+    let bases: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .find(|p| {
+        .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with(prefix))
         })
-        .ok_or_else(|| format!("no `{prefix}*` checkout under {}", checkouts.display()))?;
-    let at_rev = base.join(&rev);
-    if !at_rev.is_dir() {
+        .collect();
+    if bases.is_empty() {
         return Err(format!(
-            "{repo}: Cargo.lock pins rev {rev} but {} does not exist. This gate would otherwise \
-             have read a DIFFERENT revision of the substrate and reported a verdict about it. \
-             Run `cargo fetch` and re-run.",
-            at_rev.display()
+            "no `{prefix}*` checkout under {}",
+            checkouts.display()
         ));
     }
-    Ok(Some(at_rev))
+    match bases.iter().map(|b| b.join(&rev)).find(|p| p.is_dir()) {
+        Some(at_rev) => Ok(Some(at_rev)),
+        None => Err(format!(
+            "{repo}: Cargo.lock pins rev {rev} but no `{prefix}*` checkout holds it. This gate \
+             would otherwise have read a DIFFERENT revision of the substrate and reported a \
+             verdict about it. Run `cargo fetch` and re-run."
+        )),
+    }
 }
 
 /// Files and lines under `root` matching `needle` (`|`-separated alternatives).

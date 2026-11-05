@@ -158,7 +158,7 @@ pub async fn emit_analyze_consent(
     }
     let id = match author.signer.as_ref() {
         None => {
-            let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            let core = crate::attest::envelope_core(envelope)
                 .map_err(|e| anyhow::anyhow!("analyze-consent envelope: {e}"))?;
             let mut input = EmitAttestationInput::with_envelope(
                 attestation_type::SCORES,
@@ -1652,7 +1652,7 @@ async fn emit_grant_row<S: AsRef<str>>(
 
     let mut input = EmitAttestationInput::with_envelope(
         attestation_type::SCORES,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        crate::attest::envelope_core(envelope)?,
         // consent:replication:v1 is federation-scope MANDATORY (the grant must
         // be readable by the peer it names, and by the CCS leg).
         cohort_scope::FEDERATION,
@@ -2478,7 +2478,7 @@ async fn emit_grant_supersedes(
         None => {
             let input = EmitAttestationInput::with_envelope(
                 attestation_type::SUPERSEDES,
-                ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+                crate::attest::envelope_core(envelope)?,
                 cohort_scope::FEDERATION.to_owned(),
             );
             engine.emit_attestation_self(input).await.map_err(|e| {

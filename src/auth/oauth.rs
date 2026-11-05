@@ -374,6 +374,12 @@ impl HandoffStore {
         if let Some((outcome, deadline)) = self.ready.remove(nonce) {
             if deadline > Instant::now() {
                 self.recent = None; // claimed; do not hand it out twice
+                                    // This flow is over: its next poll is told so, not given the
+                                    // grace meant for a nonce whose flow has yet to start.
+                let now = Instant::now();
+                if let Some(past) = now.checked_sub(UNSEEN_NONCE_GRACE) {
+                    self.unseen.insert(nonce.to_owned(), (past, now));
+                }
                 return Some(outcome);
             }
         }

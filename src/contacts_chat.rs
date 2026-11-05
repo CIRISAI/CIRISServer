@@ -2645,10 +2645,8 @@ async fn insert_local(
         attestation_type: attestation_type.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .map_err(|e| format!("envelope: {e}"))?,
+        attestation_envelope: crate::attest::envelope_core(envelope)
+            .map_err(|e| format!("envelope: {e}"))?,
         subject_key_ids: Vec::new(),
         cohort_scope: cohort_scope::SELF.to_owned(),
         scrub_signature_classical: None,

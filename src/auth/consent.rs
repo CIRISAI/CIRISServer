@@ -100,16 +100,15 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
         (paths::DIMENSION): req.dimension,
         "granted": req.granted,
     });
-    let attestation_envelope =
-        match ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope) {
-            Ok(c) => c,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("consent envelope: {e}"),
-                )
-            }
-        };
+    let attestation_envelope = match crate::attest::envelope_core(envelope) {
+        Ok(c) => c,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("consent envelope: {e}"),
+            )
+        }
+    };
     let input = LocalAttestationInput {
         attestation_id: None,
         attesting_key_id: req.consenting_key_id,

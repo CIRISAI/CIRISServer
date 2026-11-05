@@ -929,7 +929,7 @@ pub async fn accept_trust_root(
     let envelope = acceptance_envelope(engine, &node_key_id, &root).await?;
     let mut input = EmitAttestationInput::with_envelope(
         attestation_type::DELEGATES_TO,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+        crate::attest::envelope_core(envelope)
             .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
         // Federation-visible: the mesh must be able to verify this node's anchoring.
         cohort_scope::FEDERATION,
@@ -1465,7 +1465,7 @@ pub async fn withdraw_trust_acceptance(
             // un-trusting a root never un-trusted it.
             let mut input = EmitAttestationInput::with_envelope(
                 attestation_type::WITHDRAWS,
-                ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+                crate::attest::envelope_core(envelope)
                     .map_err(|e| GenesisError::CharterInvalid(e.to_string()))?,
                 cohort_scope::FEDERATION,
             );

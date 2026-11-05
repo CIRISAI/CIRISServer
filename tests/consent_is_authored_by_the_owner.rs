@@ -336,7 +336,13 @@ async fn an_owned_node_authors_consent_as_its_owner_and_reads_it_back() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect::<Vec<_>>();
-    let mut expected: Vec<&str> = PREFIXES.to_vec();
+    // The live row's policy, less `trace:`: a re-sign keeps a person's trace
+    // sharing only if they turned it on, and this one did not.
+    let mut expected: Vec<&str> = PREFIXES
+        .iter()
+        .copied()
+        .filter(|p| *p != "trace:")
+        .collect();
     expected.sort(); // the grant payload is normalized (sorted + deduped)
     assert_eq!(
         prefixes, expected,

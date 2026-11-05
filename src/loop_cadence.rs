@@ -145,7 +145,13 @@ fn epoch() -> Instant {
 /// At 2.25 s the widest slot is 27 s and every pair is still at least 2.25 s
 /// apart, above the 1-2 s burst width. A fourteenth loop needs the spacing
 /// revisited again (30 s / 14 is 2.14 s, near the burst width).
-pub const SLOT_SPACING: Duration = Duration::from_millis(2250);
+///
+/// 2.25 s → 2.1 s for 0.5.245, when `announce_consent` became that FOURTEENTH
+/// loop: at 2.25 s its slot sits at 29.25 s, 750 ms from `config_reconcile`. At
+/// 2.1 s the widest slot is 27.3 s and every pair is at least 2.1 s apart,
+/// still above the 1-2 s burst width. A fifteenth loop does not fit: 30 s / 15
+/// is 2 s, the burst width, so it needs a longer shortest cadence instead.
+pub const SLOT_SPACING: Duration = Duration::from_millis(2100);
 
 /// This loop's offset into its period: slot `i` of [`LOOPS`] sits at
 /// `i ×` [`SLOT_SPACING`], wrapped into the period.

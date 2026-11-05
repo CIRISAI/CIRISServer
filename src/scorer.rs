@@ -1740,7 +1740,7 @@ async fn score_and_emit(
     // model reads the real score, not the `1.0` default.
     let mut input = EmitAttestationInput::with_envelope(
         ATTESTATION_TYPE_SCORES,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        crate::attest::envelope_core(envelope)?,
         // capacity:* is a REPUTATIONAL claim about an agent, federation-visible
         // by design (the whole point is that peers read it).
         cohort_scope::FEDERATION,

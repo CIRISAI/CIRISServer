@@ -1305,7 +1305,7 @@ async fn property_5_every_zero_names_its_own_cause() {
     put_community(
         &f.engine,
         "cm-ungoverned",
-        "founder_only",
+        "majority",
         &[("ca-founder", "founder"), (node_key.as_str(), "member")],
     )
     .await;
