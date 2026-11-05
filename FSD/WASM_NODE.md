@@ -715,6 +715,11 @@ Benefit and downside are required by the schema, never empty. A person may still
 | **Q-CC10** | Origin trust. Whoever serves the page can replace the node. Does the CC take a position on code served per load holding an owner key? A signed release manifest pinned by a Service Worker narrows it; it cannot close it | §8.5 |
 | **Q-CC11** | A `constitutional` halt and `serve_nodes` in the genesis bundle: can an EFI node, with no operator session, take these rows on the same path? | Unchecked |
 
+
+**The CC's readings, 2026-11-05, nothing landed while this is a draft.** Decided by the text: Q-CC1 no CC change, a carrier is conformant when E1's hybrid seal runs over it and shaping is negotiable. Q-CC2 `webauthn_prf` can be minted once the mechanism is confirmed; a personal node has no `hardware_class` row. Q-CC3 report custody per half; until then state the weaker half. Q-CC4 no new state: an evicted store is a lost device, with no shorter window. Q-CC6 a pressure descent relieves without expanding, and rows are never shed. Q-CC7 a vanishing holder is valid, like a sleeping phone. Q-CC8 no new rows: budget classes follow hardware and interface, so `host_device_class` defaulting to `server` on a browser is a server bug. Q-CC9 a lost anonymous identity is lost, stated at the choice. Q-CC10 code served per load is a build: the manifest chain applies and the remaining origin risk is a stated residual. Q-CC11 an EFI node takes both on the ordinary path.
+
+**Eric's:** Q-CC5 (D11), the sole evictable key; the CC recommends allowing it with the cost on screen. The weight of browser custody and the origin residual for federation-scope verification (Q-CC2, Q-CC10).
+
 ---
 
 ## 10. Work, per repo
