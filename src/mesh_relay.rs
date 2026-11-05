@@ -99,17 +99,24 @@ pub const RELAY_TIMEOUT_MS: u64 = 30_000;
 /// mesh-seed surface plus the reads the node switcher needs. Everything else
 /// is refused with 403 BEFORE any dispatch. **Never-relayable by omission**
 /// (asserted in tests): wipe (`/v1/system/data/*`), claim (`/v1/setup/root`),
-/// fed-ID mint (`/v1/self/identity`), login, delegation issuance, and any
-/// large read. Adding a route here is a reviewed code change, not config.
+/// fed-ID mint (`/v1/self/identity`), login, delegation issuance, and the
+/// memory graph. Adding a route here is a reviewed code change, not config.
 pub const RELAYABLE: &[(&str, &str)] = &[
     ("POST", "/v1/federation/announce"),
     ("POST", "/v1/federation/peering"),
     ("GET", "/v1/federation/self-key-record"),
     ("GET", "/v1/setup/owned-nodes"),
+    // What the owner reads about a node they own, from their own client
+    // (steward 2026-11-05). Reads only. Event streams don't fit a single
+    // request and response, so a remote view is a snapshot.
+    ("GET", "/v1/federation/metrics"),
+    ("GET", "/v1/telemetry/logs"),
 ];
 
 /// True iff `(method, path)` is on the closed relayable allow-list.
 pub fn is_relayable(method: &str, path: &str) -> bool {
+    // A query narrows a read; it does not name a different route.
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
     RELAYABLE.iter().any(|(m, p)| *m == method && *p == path)
 }
 
@@ -519,17 +526,17 @@ impl MeshControlResponder {
             }
         }
 
-        // (7) AUTHORIZE — the verified signer must BE (or act for, §5.6.8.8)
-        // THIS node's bound owner. An unowned node refuses every relayed op
-        // (the CC 3.2 serve-only floor); a signer that isn't the owner (nor an
-        // admitted occurrence of it) has no authority here, whatever it signed.
+        // (7) AUTHORIZE — the verified signer must be a live key of the self that
+        // owns THIS node, whichever of that person's keys the binding names. An
+        // unowned node refuses every relayed op (the CC 3.2 serve-only floor); any
+        // other signer has no authority here, whatever it signed.
         let Some(owner) = gate::is_steward_bound(&self.engine, &self.node_key_id).await else {
             return wire_err(
                 403,
                 "this node has no responsible party (owner-binding) — mesh control refused",
             );
         };
-        if !verify::signer_acts_for(&self.engine, &caller.key_id, &owner).await {
+        if !verify::signer_is_owner(&self.engine, &caller.key_id, &owner).await {
             return wire_err(
                 403,
                 "signer does not act for this node's owner — mesh control refused",
@@ -1011,7 +1018,6 @@ mod tests {
             ("POST", "/v1/auth/login"),
             ("POST", "/v1/auth/device/delegate"),
             ("GET", "/v1/memory/timeline"),
-            ("GET", "/v1/telemetry/logs"),
         ] {
             assert!(
                 !is_relayable(method, path),

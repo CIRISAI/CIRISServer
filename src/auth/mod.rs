@@ -54,6 +54,7 @@ pub mod oauth_link;
 /// single-purpose version of the [`self_login`] app-slot path: one occurrence
 /// binding + the Self-DEK cascade, gated by [`verify::signer_acts_for`].
 pub mod occurrence;
+pub mod operator_gate;
 /// Node ownership = the **responsible-party** model (CC 4.4.3.5 + CC 3.2 +
 /// CC 1.13.5): a fabric node has NO agency, so ownership is a `user`-role
 /// responsible party bound by an `infra:*`-only `delegates_to` — NOT the

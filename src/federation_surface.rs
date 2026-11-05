@@ -23,10 +23,11 @@
 //!
 //! ## Auth posture
 //!
-//! `identity` / `metrics` / `events` are unauthenticated — the agent gated
-//! them OBSERVER+ (its lowest tier), and the node's read surface has no
-//! observer tier; they carry non-sensitive operational telemetry, same
-//! posture as the peers list ([`crate::federation_peers`]) and `/v1/health`.
+//! `identity` is public, same posture as the peers list
+//! ([`crate::federation_peers`]) and `/v1/health`. `metrics` and `events` are for
+//! the node's host or its owner ([`crate::auth::operator_gate`]): the read API
+//! binds `0.0.0.0` by default, and their counters are a timing feed of the node's
+//! real activity, which is what shaping hides from an observer.
 //! `content` POST stays owner-gated (the agent required SYSTEM_ADMIN — it
 //! commands a network fetch on the node's behalf), via the SAME session gate
 //! the peers sideband PUTs share ([`crate::federation_peers::require_owner_session`]).
@@ -872,17 +873,23 @@ async fn events_stream(
 /// **It takes no key id** (CIRISServer#372 Level 2): the node's own derived
 /// federation `key_id` is resolved from the engine at request time.
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
-    let state = SurfaceState { engine, edge };
-    Router::new()
-        .route("/v1/federation/identity", axum::routing::get(get_identity))
+    let operator = Router::new()
         .route("/v1/federation/metrics", axum::routing::get(get_metrics))
-        .route(
-            "/v1/federation/content/{content_id}",
-            axum::routing::post(fetch_content),
-        )
         .route(
             "/v1/federation/events/{channel}",
             axum::routing::get(events_stream),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&engine),
+            crate::auth::operator_gate::require_operator,
+        ));
+    let state = SurfaceState { engine, edge };
+    Router::new()
+        .route("/v1/federation/identity", axum::routing::get(get_identity))
+        .route(
+            "/v1/federation/content/{content_id}",
+            axum::routing::post(fetch_content),
+        )
+        .merge(operator)
         .with_state(state)
 }

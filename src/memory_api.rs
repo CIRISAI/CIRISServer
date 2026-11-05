@@ -1271,6 +1271,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 "/v1/memory/{node_id}/edges",
                 axum::routing::get(get_node_edges),
             )
+            .route_layer(axum::middleware::from_fn_with_state(
+                engine,
+                crate::auth::operator_gate::require_operator,
+            ))
             .with_state(state)
     } else {
         // Postgres-only node — mount stub routes that return 503.

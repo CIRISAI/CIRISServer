@@ -13,8 +13,9 @@
 //!             "total": <int>, "has_more": <bool> } }
 //! ```
 //!
-//! Read-only + localhost (mounted on the same read-API listener as
-//! `/v1/memory/*`), so it is ungated like the memory read endpoints.
+//! Read-only, for the node's own host or its owner
+//! ([`crate::auth::operator_gate`]). The read API binds `0.0.0.0` by default, so
+//! being on that listener says nothing about who is asking.
 
 use std::path::PathBuf;
 
@@ -173,9 +174,16 @@ async fn get_logs(State(st): State<LogsState>, Query(p): Query<LogsParams>) -> R
 }
 
 /// The `/v1/telemetry/logs` router. `log_dir` is `<home>/logs`.
-pub fn router(log_dir: PathBuf) -> axum::Router {
+pub fn router(
+    engine: std::sync::Arc<ciris_persist::prelude::Engine>,
+    log_dir: PathBuf,
+) -> axum::Router {
     axum::Router::new()
         .route("/v1/telemetry/logs", axum::routing::get(get_logs))
+        .route_layer(axum::middleware::from_fn_with_state(
+            engine,
+            crate::auth::operator_gate::require_operator,
+        ))
         .with_state(LogsState { log_dir })
 }
 

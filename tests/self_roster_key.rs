@@ -280,3 +280,125 @@ async fn a_live_roster_key_of_the_owners_fedid_signs_as_the_fedid() {
         after.map(|p| p.map(|p| p.key_id))
     );
 }
+
+/// **The owner of a node is a person, not a key** (steward 2026-11-05): a node's
+/// owner-binding names one key, and any live key on that person's roster is the
+/// owner. This is the check the mesh relay makes, so it is what lets someone
+/// administer a node they own from any of their devices. A key leaves that
+/// authority the moment it leaves the roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_is_the_self_and_not_the_key_the_binding_names() {
+    use ciris_server::auth::verify::signer_is_owner;
+
+    let node_signer = Arc::new(signer_for("ciris-node-for-the-owner-is-the-self"));
+    let engine = Arc::new(
+        Engine::with_signer(node_signer.clone(), "sqlite::memory:")
+            .await
+            .expect("engine"),
+    );
+
+    let alias = format!("owner-self-{}", std::process::id());
+    let first = scratch("owner-genesis");
+    let fed_id = ciris_server::identity::mint_user_identity(
+        ciris_server::identity::UserIdentityBackend::Software,
+        &alias,
+        Some("Owner"),
+        first.clone(),
+        ciris_server::identity::ActiveAlias::Adopt,
+    )
+    .await
+    .expect("mint the fedID")
+    .key_id;
+    let genesis = ciris_server::identity::hardware_user_signers(
+        ciris_server::identity::UserIdentityBackend::Software,
+        &alias,
+        first,
+    )
+    .await
+    .expect("re-open the genesis key")
+    .0;
+    register(&engine, &genesis, &fed_id, identity_type::USER).await;
+
+    let occurrence = |key: &str, class: &str| IdentityOccurrence {
+        identity_key_id: fed_id.clone(),
+        occurrence_key_id: key.to_owned(),
+        device_class: class.to_owned(),
+        hardware_attestation: None,
+        asserted_at: chrono::Utc::now(),
+        valid_until: None,
+        encryption_pubkeys: None,
+        transport_binding: None,
+        persist_row_hash: String::new(),
+    };
+    let mut devices = Vec::new();
+    for tag in ["owner-laptop", "owner-phone"] {
+        let d = ciris_server::identity::mint_local_device_occurrence(&scratch(tag), &fed_id)
+            .await
+            .expect("mint a roster key");
+        engine
+            .register_federation_key(d.key_record.clone())
+            .await
+            .expect("register the roster key");
+        engine
+            .federation_directory()
+            .put_identity_occurrence_local(IdentityOccurrence {
+                encryption_pubkeys: d.encryption_pubkeys.clone(),
+                ..occurrence(&d.key_id, device_class::LAPTOP)
+            })
+            .await
+            .expect("signed into the roster");
+        devices.push(d.key_id);
+    }
+    let (laptop, phone) = (devices[0].clone(), devices[1].clone());
+
+    // The agent runs as the person's occurrence too, but it isn't the person.
+    let agent_signer = signer_for("the-owners-agent");
+    let agent = agent_signer.derived_key_id();
+    register(&engine, &agent_signer, &agent, identity_type::AGENT).await;
+    engine
+        .federation_directory()
+        .put_identity_occurrence_local(occurrence(&agent, device_class::AGENT))
+        .await
+        .expect("the agent is an occurrence of the fedID");
+
+    let stranger_signer = signer_for("someone-else-entirely");
+    let stranger = stranger_signer.derived_key_id();
+    register(&engine, &stranger_signer, &stranger, identity_type::USER).await;
+
+    // Whichever key the binding names, each of the person's keys is the owner.
+    for owner in [&fed_id, &laptop, &phone] {
+        for signer in [&fed_id, &laptop, &phone] {
+            assert!(
+                signer_is_owner(&engine, signer, owner).await,
+                "{signer} is the same person as {owner}"
+            );
+        }
+        assert!(
+            !signer_is_owner(&engine, &stranger, owner).await,
+            "a stranger is not {owner}"
+        );
+        assert!(
+            !signer_is_owner(&engine, &agent, owner).await,
+            "an agent acts for its person, and is not its person"
+        );
+    }
+
+    // A removed key loses it at once, and the rest of the roster keeps it.
+    let now = chrono::Utc::now();
+    engine
+        .federation_directory()
+        .put_identity_occurrence_revocation_local(IdentityOccurrenceRevocation {
+            identity_key_id: fed_id.clone(),
+            occurrence_key_id: phone.clone(),
+            revoked_at: now,
+            effective_at: now,
+            reason: Some("evicted from the self roster".into()),
+            witness_set: vec![fed_id.clone()],
+            persist_row_hash: String::new(),
+        })
+        .await
+        .expect("evict the phone");
+    assert!(!signer_is_owner(&engine, &phone, &fed_id).await);
+    assert!(!signer_is_owner(&engine, &phone, &laptop).await);
+    assert!(signer_is_owner(&engine, &laptop, &fed_id).await);
+}

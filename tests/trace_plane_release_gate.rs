@@ -1277,6 +1277,10 @@ async fn the_metrics_surface_names_the_live_link_count() {
     let req = Request::builder()
         .method("GET")
         .uri("/v1/federation/metrics")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))))
         .body(Body::empty())
         .expect("build request");
     let resp = app.oneshot(req).await.expect("router oneshot");

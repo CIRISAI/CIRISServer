@@ -2044,12 +2044,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // GET /v1/memory/{node_id}, GET /v1/memory/{node_id}/edges. Projects
                     // the cirisgraph_nodes / cirisgraph_edges SQLite tables onto the
                     // client's wire contract so both cards work in server mode.
-                    // Unauthenticated (read-only public surface, same posture as
+                    // For the node's host or its owner (`auth::operator_gate`), not
+                    // the network: on a node with an agent this is private. Was public,
+                    // same posture as
                     // federation_peers and the health endpoint).
                     .merge(crate::memory_api::router(Arc::clone(&engine)))
                     // GET /v1/telemetry/logs — the node's own logs for the client
                     // Logs screen (tails <home>/logs/ciris-server.log*). Read-only.
-                    .merge(crate::telemetry_logs::router(cfg.home.join("logs")))
+                    .merge(crate::telemetry_logs::router(
+                        Arc::clone(&engine),
+                        cfg.home.join("logs"),
+                    ))
                     // Data page: owner-gated data wipe (reset-account = data-only;
                     // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
                     .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()));
