@@ -433,7 +433,7 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
     }
     let protocol = extra["consensus_protocol"]
         .as_str()
-        .unwrap_or("founder_only")
+        .unwrap_or("majority")
         .to_owned();
     let community_id = ciris_edge::chat::new_room_community_key_id();
     let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
@@ -485,6 +485,33 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
     community_id
 }
 
+/// A room change the way a room makes one: `on` builds the envelope and signs,
+/// each of `voters` cosigns on their own node, and `on` assembles.
+async fn carried(on: &Node, room: &str, voters: &[&Node], op: Value) -> Value {
+    let (s, v) = post(on, &format!("/v1/communities/{room}/changes/envelope"), op).await;
+    assert_eq!(s, 200, "envelope: {v}");
+    let env = v["change_envelope"].clone();
+    let mut sigs = vec![v["signatures"][0].clone()];
+    for n in voters {
+        let (s, v) = post(
+            n,
+            &format!("/v1/communities/{room}/changes/cosign"),
+            json!({ "change_envelope": env }),
+        )
+        .await;
+        assert_eq!(s, 200, "cosign: {v}");
+        sigs.push(v["signature"].clone());
+    }
+    let (s, v) = post(
+        on,
+        &format!("/v1/communities/{room}/changes/assemble"),
+        json!({ "change_envelope": env, "signatures": sigs }),
+    )
+    .await;
+    assert_eq!(s, 200, "assemble: {v}");
+    v
+}
+
 /// **`who` joins `room` the way a person does** (persist v52, CIRISPersist#955):
 /// `on` invites them through the route, `who` accepts on THEIR node with
 /// their own pen, and `on` — a founder of a `founder_only` room — lists the
@@ -492,7 +519,13 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
 /// with `on`'s person key). No bypass: every row is one a production node
 /// writes. Before 0.5.218's v52 adopt this was `test_only_widen`, a direct
 /// owner-signed widening.
-async fn join_by_invitation(on: &Node, room: &str, who: &Node, role: Option<&str>) {
+async fn join_by_invitation(
+    on: &Node,
+    room: &str,
+    who: &Node,
+    role: Option<&str>,
+    voters: &[&Node],
+) {
     // Strictly after any roster event just written (a re-add after a removal).
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let (s, v) = post(
@@ -520,12 +553,23 @@ async fn join_by_invitation(on: &Node, room: &str, who: &Node, role: Option<&str
     );
     let (s, v) = get(on, &format!("/v1/communities/{room}/invites")).await;
     assert_eq!(s, 200, "list invites: {v}");
-    assert!(
-        v["seated_now"]
-            .as_array()
-            .is_some_and(|a| a.contains(&json!(who.owner.key_id))),
-        "the founder's read seats the accepted invitee: {v}"
+    let seated = v["seated_now"]
+        .as_array()
+        .is_some_and(|a| a.contains(&json!(who.owner.key_id)));
+    assert_eq!(
+        seated,
+        voters.is_empty(),
+        "a founder alone seats in a room of one; past that it takes the protocol: {v}"
     );
+    if !seated {
+        carried(
+            on,
+            room,
+            voters,
+            json!({ "op": "add", "key_id": who.owner.key_id }),
+        )
+        .await;
+    }
 }
 
 /// A roster-growing request answered as an INVITATION (persist v52): 202,
@@ -539,14 +583,11 @@ fn invited(s: u16, v: &Value) {
     assert!(v["proposal_id"].is_string(), "{v}");
 }
 
-/// Under `founder_only` only a founder invites (persist's proposer rule,
-/// named by the room's own id).
+/// Any member of a `majority` room may invite, and inviting seats nobody: that
+/// takes the invitee's acceptance and the room's signatures. A repeat of a live
+/// invitation answers as the invitation it already is, or names itself.
 fn founder_invites_only(s: u16, v: &Value) {
-    assert_eq!(
-        (s, reason(v)),
-        (403, "community.not_authorized"),
-        "under founder_only only a founder invites: {v}"
-    );
+    assert!(s == 202 || s == 409, "any member may invite: {s} {v}");
 }
 
 /// The active roster by persist's fold, sorted.
@@ -660,11 +701,17 @@ async fn appoint_moderator(appointer: &Node, who: &Node) {
         &appointer.owner.signer().await,
         attestation_type::DELEGATES_TO,
         &who.owner.key_id,
-        ciris_persist::federation::delegates_to_envelope(
-            &who.owner.key_id,
-            &["moderate".to_string()],
-            false,
-        ),
+        {
+            let mut env = ciris_persist::federation::delegates_to_envelope(
+                &who.owner.key_id,
+                &["moderate".to_string()],
+                false,
+            );
+            env["delegation_valid_until"] = json!((chrono::Utc::now()
+                + chrono::Duration::days(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            env
+        },
         None,
     )
     .await
@@ -869,7 +916,7 @@ async fn create_refuses_with_a_typed_reason_each() {
     assert_eq!(s, 201, "{v}");
     assert_eq!(v["name"], "Book club");
     assert_eq!(v["tier"], "community");
-    assert_eq!(v["consensus_protocol"], "founder_only");
+    assert_eq!(v["consensus_protocol"], "majority");
     assert_eq!(v["my_role"], "founder");
     assert_eq!(v["member_count"], 1);
 }
@@ -1038,7 +1085,7 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     );
     // What the rest pins is the WIDENING plane: Carol accepts and the founder
     // seats her — the widening a production node writes.
-    join_by_invitation(a, &room, c, None).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
 
     // THE ROW: one widening, on its own plane — and the record untouched.
     let widenings = dir
@@ -1115,12 +1162,13 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     );
 
     // REMOVE: a revocation row, and the fold drops her.
-    let (s, v) = delete(
+    carried(
         a,
-        &format!("/v1/communities/{room}/members/{}", c.owner.key_id),
+        &room,
+        &[b],
+        json!({ "op": "remove", "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "remove: {v}");
     assert!(!fold(&a.engine, &room).await.contains(&c.owner.key_id));
     assert_eq!(
         dir.list_community_membership_revocations_for(&room)
@@ -1149,7 +1197,7 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
     )
     .await;
     invited(s, &v);
-    join_by_invitation(a, &room, c, None).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     assert_eq!(
         dir.list_community_membership_widenings_for(&room)
@@ -1159,12 +1207,13 @@ async fn add_by_widening_then_remove_and_re_add_move_the_fold_not_the_record() {
         2
     );
     // …and removed again: a re-added member can be removed again.
-    let (s, v) = delete(
+    carried(
         a,
-        &format!("/v1/communities/{room}/members/{}", c.owner.key_id),
+        &room,
+        &[b],
+        json!({ "op": "remove", "key_id": c.owner.key_id }),
     )
     .await;
-    assert_eq!(s, 200, "{v}");
     assert!(!fold(&a.engine, &room).await.contains(&c.owner.key_id));
 }
 
@@ -1185,7 +1234,7 @@ async fn a_widened_member_reads_the_rooms_messages_cirispersist_907() {
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let room = test_only_found(a, "late joiner", &[b], json!({})).await;
     contact(a, c).await;
-    join_by_invitation(a, &room, c, None).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     let (s, v) = get(c, &format!("/v1/chat/{room}/messages")).await;
     assert_eq!(s, 200, "a widened member reads the transcript: {v}");
@@ -1220,13 +1269,23 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     )
     .await;
     founder_invites_only(s, &v);
-    join_by_invitation(a, &room, d, None).await;
+    contact(a, d).await;
+    join_by_invitation(a, &room, d, None, &[b, c]).await;
+    // A moderator's signature alone removes nobody (persist v61.0.3, #1200): it
+    // takes the room's signatures.
     let (s, v) = delete(
         b,
         &format!("/v1/communities/{room}/members/{}", d.owner.key_id),
     )
     .await;
-    assert_eq!(s, 200, "…and removes one: {v}");
+    assert_eq!((s, reason(&v)), (409, "community.quorum_pending"), "{v}");
+    carried(
+        a,
+        &room,
+        &[b, c],
+        json!({ "op": "remove", "key_id": d.owner.key_id }),
+    )
+    .await;
     // But may not add a FOUNDER (closed to everyone — the consent door
     // answers first), remove the founder, or change a role.
     let (s, v) = post(
@@ -1242,7 +1301,7 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
         json!({ "role": "founder" }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.quorum_pending"), "{v}");
     let (s, v) = delete(b, &format!("/v1/communities/{room}")).await;
     assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
     // Carol, a plain member with no appointment, may do none of it.
@@ -1254,28 +1313,13 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     .await;
     founder_invites_only(s, &v);
 
-    // Removing a founder: make Carol a second founder first, so the refusal
-    // below is about WHO removes, not about orphaning the room.
-    let (s, v) = post(
-        a,
-        &format!("/v1/communities/{room}/members/{}/role", c.owner.key_id),
-        json!({ "role": "founder" }),
-    )
-    .await;
-    assert_eq!(s, 200, "{v}");
+    // The last founder cannot be removed at all.
     let (s, v) = delete(
         b,
         &format!("/v1/communities/{room}/members/{}", a.owner.key_id),
     )
     .await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
-    // …while a founder may remove a founder.
-    let (s, v) = delete(
-        c,
-        &format!("/v1/communities/{room}/members/{}", a.owner.key_id),
-    )
-    .await;
-    assert_eq!(s, 200, "{v}");
+    assert_eq!(reason(&v), "community.last_founder", "{s}: {v}");
 }
 
 // ─── 6. Roles, leaving, the last founder ────────────────────────────────────
@@ -1320,13 +1364,13 @@ async fn leave_role_and_the_last_founder_rule() {
     assert_eq!((s, reason(&v)), (400, "community.malformed_body"), "{v}");
 
     // Hand over: Bob becomes a founder (a widening carrying the new role).
-    let (s, v) = post(
+    carried(
         a,
-        &format!("/v1/communities/{room}/members/{}/role", b.owner.key_id),
-        json!({ "role": "founder" }),
+        &room,
+        &[b],
+        json!({ "op": "role", "key_id": b.owner.key_id, "role": "founder" }),
     )
     .await;
-    assert_eq!(s, 200, "{v}");
     let (_, v) = get(b, &format!("/v1/communities/{room}")).await;
     assert_eq!(v["my_role"], "founder", "{v}");
 
@@ -1349,25 +1393,18 @@ async fn dissolve_is_the_founders_and_empties_the_fold() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let room = test_only_found(a, "short-lived", &[b, c], json!({})).await;
-    let (s, v) = delete(b, &format!("/v1/communities/{room}")).await;
-    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    // Refused by name until the record's cosigned `withdraws` is here
+    // (CIRISServer issue, CC 4.4.3.2.8): revocations cannot reach it past two.
     let (s, v) = delete(a, &format!("/v1/communities/{room}")).await;
+    assert_eq!((s, reason(&v)), (403, "community.not_authorized"), "{v}");
+    assert_eq!(fold(&a.engine, &room).await.len(), 3, "nothing half-done");
+    // A room of one is its founder's to dissolve.
+    let (s, v) = post(a, "/v1/communities", json!({ "name": "alone" })).await;
+    assert_eq!(s, 201, "{v}");
+    let alone = v["community_id"].as_str().expect("id").to_owned();
+    let (s, v) = delete(a, &format!("/v1/communities/{alone}")).await;
     assert_eq!(s, 200, "{v}");
-    assert!(fold(&a.engine, &room).await.is_empty(), "nobody is left");
-    assert_eq!(
-        a.engine
-            .federation_directory()
-            .list_community_membership_revocations_for(&room)
-            .await
-            .expect("revs")
-            .len(),
-        3,
-        "one revocation per member"
-    );
-    for n in [a, b, c] {
-        let (s, v) = get(n, &format!("/v1/communities/{room}")).await;
-        assert_eq!((s, reason(&v)), (404, "community.not_found"), "{v}");
-    }
+    assert!(fold(&a.engine, &alone).await.is_empty(), "nobody is left");
 }
 
 // ─── 8. Affiliations ────────────────────────────────────────────────────────
@@ -1400,7 +1437,7 @@ async fn affiliations_is_the_same_machinery_at_its_own_tier() {
     .await;
     invited(s, &v);
     // The same widening machinery at this tier, through the test-only fixture.
-    join_by_invitation(a, &room, c, None).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
 }
 
@@ -1862,7 +1899,7 @@ async fn the_invite_flow_seats_only_the_person_who_accepted() {
     assert_eq!((s, reason(&v)), (410, "membership.invite_expired"), "{v}");
 
     // Dave accepts, and the founder's read seats him.
-    join_by_invitation(a, &room, d, None).await;
+    join_by_invitation(a, &room, d, None, &[]).await;
     let (s, v) = get(a, &format!("/v1/communities/{room}/invites")).await;
     assert_eq!(s, 200, "{v}");
     let states: std::collections::BTreeMap<String, String> = v["invites"]

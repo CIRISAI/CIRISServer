@@ -191,6 +191,9 @@ impl LensCore {
             // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
             // no link shaped — so a re-pin does not move this node's posture.
             shaping: Default::default(),
+            device: ciris_edge::transport::link_shaping::DeviceState::of(
+                ciris_edge::transport::link_shaping::DeviceKind::platform_default(),
+            ),
             // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first, and a
             // forwarding node closes to new forwarded links under load.
             steer_roster_relays: true,

@@ -1725,8 +1725,8 @@ async fn score_and_emit(
         // thing. Being on a bucket boundary, it is a whole number of seconds and
         // therefore cannot carry the sub-microsecond precision CIRISPersist#598
         // refuses — `the_scorers_floored_instant_is_storable` pins that.
-        "asserted_at": asserted_at.to_rfc3339(),
-        "valid_until": valid_until.to_rfc3339(),
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": valid_until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "cohort_scope": cohort_scope::FEDERATION,
     });
 

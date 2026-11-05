@@ -286,13 +286,14 @@ async fn hard_cases(engine: &Engine) -> Vec<ciris_persist::federation::hard_case
         .list_hard_case_events(HardCaseFilter {
             kind: Some(HARD_CASE_KIND.to_string()),
             since: None,
+            emitter_key_id: None,
         })
         .await
         .expect("list hard cases")
 }
 
-const T0: &str = "2026-08-01T17:00:00Z";
-const T1: &str = "2026-08-01T18:00:00Z";
+const T0: &str = "2026-08-01T17:00:00.000Z";
+const T1: &str = "2026-08-01T18:00:00.000Z";
 
 /// `h` hours from an instant fixed once per process — NOT a fresh clock read
 /// per call.

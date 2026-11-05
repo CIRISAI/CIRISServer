@@ -1078,6 +1078,8 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
+ "libcrux-kem",
+ "libcrux-sha3",
  "memchr",
  "openmls",
  "openmls_basic_credential",
@@ -1182,8 +1184,8 @@ dependencies = [
 
 [[package]]
 name = "ciris-persist"
-version = "61.0.1"
-source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v61.0.1#c28af914a457a4a01fabc951a2131b813ae1d1cd"
+version = "61.0.3"
+source = "git+https://github.com/CIRISAI/CIRISPersist?tag=v61.0.3#7894b39c1693a9c3556e3867684a436c3484cb60"
 dependencies = [
  "anyhow",
  "async-trait",

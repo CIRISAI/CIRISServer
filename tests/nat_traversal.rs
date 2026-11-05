@@ -83,6 +83,9 @@ fn transport_node_flag_maps_into_reticulum_config() {
         // edge v43 (CIRISEdge#805 item 8), as compose.rs: inert by default.
         direct_links: Default::default(),
         shaping: Default::default(),
+        device: ciris_edge::transport::link_shaping::DeviceState::of(
+            ciris_edge::transport::link_shaping::DeviceKind::platform_default(),
+        ),
         // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first, and a
         // forwarding node closes to new forwarded links under load.
         steer_roster_relays: true,

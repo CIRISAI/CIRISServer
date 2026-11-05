@@ -767,14 +767,18 @@ fn planned_rows(room: &Room, op: &ChangeOp) -> Vec<PlannedRow> {
             member: key_id.clone(),
             reason: "removed",
         }],
-        ChangeOp::Dissolve => room
-            .roster
-            .iter()
-            .map(|m| PlannedRow::Revocation {
-                member: m.key_id.clone(),
-                reason: "dissolved",
-            })
-            .collect(),
+        // Founders last: a room's last founder cannot leave while others remain.
+        ChangeOp::Dissolve => {
+            let (founders, rest): (Vec<_>, Vec<_>) =
+                room.roster.iter().partition(|m| room.is_founder(&m.key_id));
+            rest.into_iter()
+                .chain(founders)
+                .map(|m| PlannedRow::Revocation {
+                    member: m.key_id.clone(),
+                    reason: "dissolved",
+                })
+                .collect()
+        }
     }
 }
 
@@ -961,7 +965,9 @@ async fn tally(
     let (eligible, required): (BTreeSet<String>, usize) = match protocol {
         Protocol::FounderOnly => {
             let mut e: BTreeSet<String> = room.founders().into_iter().collect();
-            if op.touches_only_plain_members(room) {
+            // Adding only: a moderator alone cannot remove anyone (persist v61.0.3,
+            // CIRISPersist#1200), in any protocol.
+            if op.touches_only_plain_members(room) && op.removal_target().is_none() {
                 // An APPOINTED roster-duty holder: a founder-rooted,
                 // `moderate`-scoped `delegates_to` chain (persist's
                 // `appointed_moderators_of`, CIRISPersist#591) — not the
@@ -988,11 +994,28 @@ async fn tally(
         }
         Protocol::Majority => {
             let n = strict_majority(everyone.len());
-            (everyone.clone(), n)
+            let e = everyone
+                .iter()
+                .filter(|k| Some(k.as_str()) != op.removal_target())
+                .cloned()
+                .collect();
+            (e, n)
         }
         // M absolute (CC 4.4.3.4.2.1), exactly as persist's evaluator counts.
         Protocol::Quorum { m, .. } => (everyone.clone(), m),
     };
+    // A removal needs a strict majority of the roster from everyone but the person
+    // named (CC 3.1.3.2), so at two members nobody can be removed: leaving is the
+    // exit. Refused, not left pending for a voice that cannot exist.
+    if op.removal_target().is_some()
+        && protocol != Protocol::FounderOnly
+        && eligible.len() < strict_majority(everyone.len())
+    {
+        return Err(not_authorized(
+            &protocol_str,
+            "nobody can be removed from a room this small; leaving is the exit",
+        ));
+    }
     let mut members: Vec<ThresholdMember> = Vec::with_capacity(eligible.len());
     for k in &eligible {
         if let Some(rec) = dir
@@ -1176,7 +1199,10 @@ async fn apply_change(
                 .iter()
                 .any(|m| !cosigs("revocation", &m.key_id).is_empty()) =>
         {
-            for m in &room.roster {
+            // Founders last, as `planned_rows`: the last founder cannot leave first.
+            let (founders, rest): (Vec<_>, Vec<_>) =
+                room.roster.iter().partition(|m| room.is_founder(&m.key_id));
+            for m in rest.into_iter().chain(founders) {
                 put_revocation(
                     dir.as_ref(),
                     room.id(),
@@ -1268,6 +1294,15 @@ async fn precheck(
             if role.as_str() != MEMBER_ROLE_FOUNDER && room.orphans_if_gone(key_id) {
                 return Err(last_founder(key_id));
             }
+        }
+        // Persist v61 dissolves a community by a cosigned `withdraws` of its roster
+        // record (CC 4.4.3.2.8), and revocations one member at a time cannot reach
+        // it past two. Until that door is here, say so rather than half-do it.
+        ChangeOp::Dissolve if room.roster.len() > 1 => {
+            return Err(not_authorized(
+                &room.record.consensus_protocol,
+                "dissolving a room with other members isn't available yet; members can leave",
+            ));
         }
         ChangeOp::Dissolve => {}
     }
@@ -1826,7 +1861,11 @@ async fn list_invites(
         .any(|(v, _)| v.state == crate::membership_invites::STATE_ACCEPTED);
     let mut seated = Vec::new();
     if accepted
-        && Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+        // One signature seats: the founder of a room of one, whose acceptance is the
+        // second voice, or a family's founder. Past that it takes the protocol's
+        // signatures, through changes/envelope.
+        && (Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+            || room.roster.len() == 1)
         && room.is_founder(&owner.key_id)
         && require_verb(
             &owner,
