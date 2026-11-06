@@ -1460,17 +1460,24 @@ async fn test_admit_peer(
 /// federation `key_id` (the one excluded from the listing) is resolved from the
 /// engine at request time — see [`self_key_id`].
 pub fn router(engine: Arc<Engine>) -> Router {
+    // Who a node peers with is the operator's (`auth::operator_gate`).
+    let operator = Router::new()
+        .route("/v1/federation/peers", axum::routing::get(list_peers))
+        .route(
+            "/v1/federation/peers/{key_id}",
+            axum::routing::get(get_peer),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&engine),
+            crate::auth::operator_gate::require_operator,
+        ));
     let state = PeersState { engine };
     let router = Router::new()
-        .route("/v1/federation/peers", axum::routing::get(list_peers))
+        .merge(operator)
         .route("/v1/federation/allegiance", axum::routing::get(allegiance))
         .route(
             "/v1/federation/people/{fed_id}/nodes",
             axum::routing::get(person_nodes),
-        )
-        .route(
-            "/v1/federation/peers/{key_id}",
-            axum::routing::get(get_peer),
         )
         // The #261 write sideband + SAS (see module doc): owner-gated PUTs,
         // unauthenticated SAS read — the routes the agent wave-2 purge deletes.

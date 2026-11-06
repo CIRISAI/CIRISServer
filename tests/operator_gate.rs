@@ -68,3 +68,33 @@ async fn the_operator_routes_refuse_the_network_and_answer_the_host() {
         );
     }
 }
+
+/// Liveness stays public, and only liveness: status, version and the conformance
+/// fingerprint CC 2.6.4 publishes. The host's pressure moves with its real activity.
+#[tokio::test]
+async fn public_health_says_it_is_alive_and_keeps_the_rest() {
+    let app = ciris_server::health::router();
+    let read = |from: [u8; 4]| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/health")
+                .extension(ConnectInfo(SocketAddr::from((from, 40_000))))
+                .body(Body::empty())
+                .expect("request");
+            let resp = app.oneshot(req).await.expect("oneshot");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")
+        }
+    };
+    let stranger = read([203, 0, 113, 9]).await;
+    assert!(stranger["data"]["resources"].is_null(), "{stranger}");
+    assert!(stranger["data"]["version"].is_string());
+    assert!(stranger["data"]["conformance"].is_object());
+    let host = read([127, 0, 0, 1]).await;
+    assert!(host["data"]["resources"].is_object(), "the host keeps it");
+}

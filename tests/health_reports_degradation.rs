@@ -33,6 +33,10 @@ async fn health_data(path: &str) -> serde_json::Value {
         .oneshot(
             Request::builder()
                 .uri(path)
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    0,
+                ))))
                 .body(Body::empty())
                 .expect("build request"),
         )

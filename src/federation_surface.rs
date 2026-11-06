@@ -122,7 +122,26 @@ fn err(code: StatusCode, error: &str) -> Response {
 /// resolved from the engine (CIRISServer#372 Level 2), not threaded in from
 /// `cfg.key_id`. It was documented as `== edge.signer_key_id()`; asking the
 /// engine makes that an identity rather than an assertion.
-async fn get_identity(State(st): State<SurfaceState>) -> Response {
+async fn get_identity(
+    State(st): State<SurfaceState>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+) -> Response {
+    // Who a node peers with, and how many, is the operator's: a stranger gets the
+    // identity and capabilities only.
+    if !crate::auth::operator_gate::is_operator(&st.engine, &extensions, &headers).await {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "data": {
+                    "signer_key_id": st.edge.signer_key_id(),
+                    "crate_version": ciris_edge::version::VERSION,
+                    "capabilities": FEDERATION_CAPABILITIES,
+                }
+            })),
+        )
+            .into_response();
+    }
     let (total, canonical, standing) =
         match crate::self_identity::resolve(&st.engine, "federation_surface").await {
             Err(_) => (0, 0, crate::self_identity::REFUSAL_TOKEN),

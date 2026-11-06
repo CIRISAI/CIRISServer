@@ -1052,6 +1052,10 @@ async fn federation_identity(
     let req = Request::builder()
         .method("GET")
         .uri("/v1/federation/identity")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))))
         .body(Body::empty())
         .expect("build request");
     let resp = app.oneshot(req).await.expect("router oneshot");

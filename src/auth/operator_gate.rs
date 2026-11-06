@@ -18,6 +18,19 @@ use axum::middleware::Next;
 use axum::response::Response;
 use ciris_persist::prelude::Engine;
 
+/// Is this caller the node's own host or its owner? For a route that stays public
+/// and answers the operator more.
+pub async fn is_operator(
+    engine: &Arc<Engine>,
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    super::loopback::caller_is_loopback(extensions)
+        || crate::federation_peers::require_owner_session(engine, headers)
+            .await
+            .is_ok()
+}
+
 /// Let the request through for the node's own host, or for an owner session.
 pub async fn require_operator(
     State(engine): State<Arc<Engine>>,
