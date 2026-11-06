@@ -381,31 +381,24 @@ async fn a_node_less_code_resolves_through_the_directory() {
     assert_eq!(v["key_id"], alice.key(), "{v}");
 }
 
-/// An owner who announced nothing shares this node: it is how they connect
-/// (CIRISPersist#1140).
+/// An owner who announced nothing still has a code — their key, no nodes — and
+/// is offered nothing to include.
 #[tokio::test]
-async fn an_owner_with_no_announced_node_shares_this_node() {
+async fn an_owner_with_no_announced_node_gets_a_node_less_code() {
     let alice = Person::new_unannounced("cc-quiet").await;
     publish_transport(&alice, &alice.node_key_id, 0x71).await;
     let (st, v) = contact_code(&alice, "").await;
     assert_eq!(st, 200, "{v}");
-    assert_eq!(available(&v), vec![alice.node_key_id.clone()], "{v}");
-    assert_eq!(included(&v), vec![alice.node_key_id.clone()], "{v}");
-    assert_eq!(v["available_nodes"][0]["announced"], false, "{v}");
-    assert_eq!(v["reachable_without_directory"], true, "{v}");
+    assert!(available(&v).is_empty(), "{v}");
+    assert!(included(&v).is_empty(), "{v}");
     let decoded = fedcode::decode(v["code"].as_str().expect("code")).expect("decode");
     assert_eq!(decoded.key_id, alice.key());
-    assert_eq!(decoded.owned_nodes.len(), 1);
-    assert_eq!(decoded.owned_nodes[0].key_id, alice.node_key_id);
-    // They may still share no node at all.
-    let (st, v) = contact_code(&alice, "?nodes=none").await;
-    assert_eq!(st, 200, "{v}");
-    assert!(included(&v).is_empty(), "{v}");
-    // A node that is not theirs stays refused.
+    assert!(decoded.owned_nodes.is_empty());
+    // Naming this (unannounced) node is refused.
     let r = alice
         .as_owner(
             "GET",
-            "/v1/self/contact-code?nodes=someone-elses-node",
+            &format!("/v1/self/contact-code?nodes={}", alice.node_key_id),
             None,
         )
         .await;
