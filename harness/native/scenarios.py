@@ -320,7 +320,8 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
         nonlocal last
         last = b.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": "second device"})
         return last if last[0] == 202 else None
-    wait_for("B to reach A with its join request", ask, args.owner_wait, every=5)
+    # This proves administration, not first-contact speed, which contact_edges times.
+    wait_for("B to reach A with its join request", ask, max(args.owner_wait, 300), every=5)
     rows = a.must("GET", "/v1/self/device-requests").get("requests", [])
     row = next(r for r in rows if r.get("node_key_id") == b.node_key_id)
     occ = a.must("POST", f"/v1/self/device-requests/{row['request_id']}/approve").get("occurrence_key_id")
@@ -330,7 +331,18 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
         return st if st.get("state") == "approved" else None
     wait_for("B to hold the owner's approval", held, args.arrive_wait, every=2)
     b.must("POST", "/v1/setup/add-device/complete", {})
-    b.token = b.must("POST", "/v1/setup/claimed-session", {"claim_pin": b_pin})["access_token"]
+    # In the client's order: it reads the PIN file only after the claim has landed.
+    # Reading it first passed here for months while no real device could sign in.
+    pin_file = b.home / "claim_pin"
+    after_pin = pin_file.read_text().strip() if pin_file.exists() else ""
+    if after_pin != b_pin:
+        ok = False
+        step.fail("pin_after_claim", "the PIN must still be readable to collect the session", [b],
+                  r"claim PIN", found=bool(after_pin))
+    b.token = b.must("POST", "/v1/setup/claimed-session", {"claim_pin": after_pin or b_pin})["access_token"]
+    if pin_file.exists():
+        ok = False
+        step.fail("pin_kept", "the PIN file must go once the session is collected", [b], r"claim PIN")
     if not occ or occ == a.owner_key_id:
         ok = False
         step.fail("roster_key", "B must hold its own roster key, not the key the binding names", [a, b],
