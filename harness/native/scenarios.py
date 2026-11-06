@@ -410,7 +410,22 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
-def pair_unannounced(mesh: Mesh, args: Any) -> Record:
+def pair_alice_announced(mesh: Mesh, args: Any) -> Record:
+    """`pair_unannounced` with only the room's creator announced."""
+    return pair_unannounced(mesh, args, announced=("alice",))
+
+
+def pair_bob_announced(mesh: Mesh, args: Any) -> Record:
+    """`pair_unannounced` with only the room's joiner announced."""
+    return pair_unannounced(mesh, args, announced=("bob",))
+
+
+def pair_both_announced(mesh: Mesh, args: Any) -> Record:
+    """The control for the two above: `pair_unannounced` with both announced."""
+    return pair_unannounced(mesh, args, announced=("alice", "bob"))
+
+
+def pair_unannounced(mesh: Mesh, args: Any, announced: Tuple[str, ...] = ()) -> Record:
     """CIRISPersist#1140: two people who never announced, no canonical anywhere, each
     node sealing for its owner. A peer lifts a node to its person through the owner-
     binding, which an unannounced owner holds at `self`, so no peer ever receives it.
@@ -426,8 +441,10 @@ PAIR, UNANNOUNCED — two people's nodes, no canonical, neither owner announced 
     a.claim("alice-person")
     b.claim("bob-person")
     for n in (a, b):
+        if n.name in announced:
+            n.announce()
         n.self_record()
-    step("claimed_not_announced", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
+    step("claimed", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id, announced=announced)
     a.peer_with(b)
     b.peer_with(a)
     for host, guest in ((a, b), (b, a)):
@@ -2042,4 +2059,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "corpus": corpus,
     "peer_pair": peer_pair,
     "pair_unannounced": pair_unannounced,
+    "pair_alice_announced": pair_alice_announced,
+    "pair_bob_announced": pair_bob_announced,
+    "pair_both_announced": pair_both_announced,
 }
