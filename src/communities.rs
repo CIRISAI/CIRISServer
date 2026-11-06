@@ -2086,13 +2086,21 @@ pub async fn escape_founder_only_rooms(
         .list_communities_for_member(&owner)
         .await
         .map_err(|e| format!("list_communities_for_member: {e:#}"))?;
-    let founded_here = |c: &&ciris_persist::federation::types::Community| {
-        Protocol::parse(&c.consensus_protocol) == Some(Protocol::FounderOnly)
-            && c.members
-                .iter()
-                .any(|m| m.key_id == owner && m.role.as_deref() == Some(MEMBER_ROLE_FOUNDER))
-    };
-    let stored: Vec<_> = rooms.iter().filter(founded_here).collect();
+    // The live roster: a founder who left is still on the record, and persist would
+    // refuse their signature.
+    let mut stored = Vec::new();
+    for room in &rooms {
+        if Protocol::parse(&room.consensus_protocol) != Some(Protocol::FounderOnly) {
+            continue;
+        }
+        let active = crate::contacts_chat::active_roster(dir.as_ref(), room).await?;
+        if active
+            .iter()
+            .any(|m| m.key_id == owner && m.role.as_deref() == Some(MEMBER_ROLE_FOUNDER))
+        {
+            stored.push(room);
+        }
+    }
     if stored.is_empty() {
         return Ok(0);
     }
