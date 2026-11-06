@@ -601,9 +601,11 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
 /// may only serve cleartext from the canonical root.
 /// Sharing traces has one door (steward 2026-11-04: two consents): an owner who
 /// has not chosen it cannot have `trace:` named for them by a peering or consent
-/// call, supplied or defaulted.
+/// call, supplied or defaulted. The name comes out and the rest of the grant stands,
+/// because the wizard sends this a moment before the capture consent, and refusing
+/// it failed every yes.
 #[tokio::test]
-async fn naming_trace_without_the_traces_consent_is_refused() {
+async fn naming_trace_without_the_traces_consent_leaves_it_out() {
     let engine = node().await;
     register_self(&engine).await;
     bind_owner(&engine).await;
@@ -618,7 +620,7 @@ async fn naming_trace_without_the_traces_consent_is_refused() {
             serde_json::json!({
                 "peer_key_id": peer_key_id(),
                 "peer_key_record": peer_signed_key_record().await,
-                "attestation_prefixes": ["trace:"],
+                "attestation_prefixes": ["trace:", "capacity:"],
             }),
         ),
         (
@@ -636,12 +638,14 @@ async fn naming_trace_without_the_traces_consent_is_refused() {
             .send()
             .await
             .expect("POST");
-        assert_eq!(
-            resp.status(),
-            409,
-            "{route} must refuse trace: without the consent"
-        );
+        assert!(resp.status().is_success(), "{route}: {}", resp.status());
     }
+    // What the routes do to the request. Their responses can't show it here: the
+    // fixture's peer already holds a grant, and that row is what they answer with.
+    let node = engine.local_derived_key_id().await.expect("node key");
+    let mut prefixes = vec!["trace:".to_owned(), "capacity:".to_owned()];
+    ciris_server::peer::drop_unchosen_traces(&engine, &node, &mut prefixes).await;
+    assert_eq!(prefixes, ["capacity:"]);
 }
 
 /// Turning traces off takes `trace:` off a live grant and leaves the rest; a
