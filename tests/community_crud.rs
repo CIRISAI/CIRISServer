@@ -2083,3 +2083,56 @@ async fn a_contact_request_reaches_the_other_persons_inbox() {
         "connected on the requester's side once Bob added back: {alice_contacts}"
     );
 }
+
+/// A room stored under `founder_only`, which persist refuses above a family, takes
+/// its one admissible version: the protocol changes, and nothing else. It can't be
+/// founded that way any more, so the stored state is written in directly, as a room
+/// from before the rule would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_founder_only_room_moves_to_majority_and_only_that() {
+    let nodes = mesh(2).await;
+    let (alice, bob) = (&nodes[0], &nodes[1]);
+    let room = test_only_found(alice, "legacy", &[bob], json!({})).await;
+    let dir = alice.engine.federation_directory();
+    alice
+        .engine
+        .sqlite_backend()
+        .expect("sqlite")
+        .conn_handle()
+        .lock()
+        .execute(
+            "UPDATE federation_communities SET consensus_protocol = 'founder_only' \
+             WHERE community_key_id = ?1",
+            [room.as_str()],
+        )
+        .expect("store the legacy protocol");
+    let before = dir
+        .lookup_community(&room)
+        .await
+        .unwrap()
+        .expect("the room");
+    assert_eq!(before.consensus_protocol, "founder_only");
+
+    let node = alice.engine.local_derived_key_id().await.expect("node key");
+    let seeds = alice.owner.seed_dir.clone();
+    let moved =
+        ciris_server::communities::escape_founder_only_rooms(&alice.engine, &node, seeds.clone())
+            .await
+            .expect("the sweep runs");
+    assert_eq!(moved, 1, "the founder's room moves");
+
+    let after = dir
+        .lookup_community(&room)
+        .await
+        .unwrap()
+        .expect("the room");
+    assert_eq!(after.consensus_protocol, "majority");
+    assert_eq!(after.members, before.members, "nothing else changes");
+    assert_eq!(
+        ciris_server::communities::escape_founder_only_rooms(&alice.engine, &node, seeds)
+            .await
+            .expect("the sweep runs again"),
+        0,
+        "and it happens once"
+    );
+}

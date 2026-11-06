@@ -2059,6 +2059,71 @@ async fn leave_room(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: Ro
         .into_response()
 }
 
+/// **A room stored under `founder_only` moves to `majority`** (CC 4.5.13; persist
+/// v61 #1123). Above a family that protocol is refused, so such a room refuses
+/// every event but a resignation until its one admissible new version lands. That
+/// version changes the protocol and nothing else, and needs an active founder's
+/// signature, so it runs on a node holding a founder's pen: a room with no founder
+/// on this node waits for one who is. Returns how many rooms moved.
+///
+/// # Errors
+/// The directory could not be read. One room's refusal is logged and skipped.
+pub async fn escape_founder_only_rooms(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    node_key_id: &str,
+    seed_dir: std::path::PathBuf,
+) -> Result<usize, String> {
+    let dir = engine.federation_directory();
+    let Some(owner) = admission::owner_of(dir.as_ref(), node_key_id)
+        .await
+        .map_err(|e| format!("owner_of: {e:#}"))?
+    else {
+        return Ok(0);
+    };
+    let rooms = dir
+        .list_communities_for_member(&owner)
+        .await
+        .map_err(|e| format!("list_communities_for_member: {e:#}"))?;
+    let founded_here = |c: &&ciris_persist::federation::types::Community| {
+        Protocol::parse(&c.consensus_protocol) == Some(Protocol::FounderOnly)
+            && c.members
+                .iter()
+                .any(|m| m.key_id == owner && m.role.as_deref() == Some(MEMBER_ROLE_FOUNDER))
+    };
+    let stored: Vec<_> = rooms.iter().filter(founded_here).collect();
+    if stored.is_empty() {
+        return Ok(0);
+    }
+    let pen = crate::owner_signer_capsule::for_owned_node_in(engine, node_key_id, seed_dir)
+        .await
+        .map_err(|e| format!("open the founder's pen: {e:?}"))?;
+    let mut moved = 0;
+    for room in stored {
+        let mut next = room.clone();
+        next.consensus_protocol = consensus_protocol::MAJORITY.to_owned();
+        next.prev_head_digest = room.persist_row_hash.clone();
+        next.persist_row_hash = String::new();
+        let id = room.community_key_id.clone();
+        let outcome = match ciris_edge::chat::signed_community(next, pen.edge_signer()).await {
+            Ok(signed) => dir
+                .supersede_community(signed, None)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(_) => {
+                moved += 1;
+                tracing::info!(room = %id, "communities: room moved from founder_only to majority");
+            }
+            Err(e) => {
+                tracing::warn!(room = %id, error = %e, "communities: founder_only room did not move");
+            }
+        }
+    }
+    Ok(moved)
+}
+
 /// `DELETE /v1/communities/{id}` — dissolve: every active member revoked, the
 /// room's DEK rotated on each, and nobody left who can change it.
 ///

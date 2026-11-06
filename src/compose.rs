@@ -2401,10 +2401,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // drivers would contend over the same person's room (Codex,
         // CIRISServer#628).
         let engine_for_roster = Arc::clone(&engine);
+        let room_escape_node = node_code.key_id.clone();
+        let room_escape_seeds = crate::user_seed_dir(&cfg);
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
+            let mut rooms_escaped = false;
             loop {
                 if *self_room_sd_rx.borrow() {
                     break;
@@ -2448,6 +2451,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         error = %format!("{e:#}"),
                         "self roster: the sweep could not run — held changes wait for the next tick"
                     ),
+                }
+                // Rooms stored under founder_only (CC 4.5.13). Once clean, one
+                // process never needs to look again: nothing can create another.
+                if !rooms_escaped {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::communities::escape_founder_only_rooms(
+                        &engine_for_roster,
+                        &node,
+                        room_escape_seeds.clone(),
+                    )
+                    .await
+                    {
+                        Ok(moved) => {
+                            rooms_escaped = true;
+                            if moved > 0 {
+                                crate::compose::kick_replication("rooms left founder_only");
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "founder_only rooms: not yet"),
+                    }
                 }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
