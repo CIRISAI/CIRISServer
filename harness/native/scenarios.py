@@ -410,6 +410,65 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+def pair_unannounced(mesh: Mesh, args: Any) -> Record:
+    """CIRISPersist#1140: two people who never announced, no canonical anywhere, each
+    node sealing for its owner. A peer lifts a node to its person through the owner-
+    binding, which an unannounced owner holds at `self`, so no peer ever receives it.
+    Unsplit nodes, so a pass is necessary and not sufficient: the issue is written
+    for a split home, where the node seals and the agent doesn't."""
+    step = Steps("""
+PAIR, UNANNOUNCED — two people's nodes, no canonical, neither owner announced (CIRISPersist#1140).
+  proves:  (1) they reach each other by direct peering; (2) a pair room seats and keys;
+           (3) a sealed message crosses and reads back; (4) neither side refused a row with
+           signer_not_active_member or NoHolders, the issue's failure.""")
+    a = mesh.add("alice", canonical=False)
+    b = mesh.add("bob", dial=[a], canonical=False)
+    a.claim("alice-person")
+    b.claim("bob-person")
+    for n in (a, b):
+        n.self_record()
+    step("claimed_not_announced", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
+    a.peer_with(b)
+    b.peer_with(a)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    step("keys_crossed")
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    step("contacts_added")
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    step("room_opened", room=room)
+
+    def keyed() -> Optional[bool]:
+        return True if a.room(room)["ready"] and b.room(room)["ready"] else None
+    bad = r"signer_not_active_member|NoHolders"
+    try:
+        wait_for("the pair room to key on both sides", keyed, args.arrive_wait, every=2)
+    except MeshError:
+        step.fail("room_not_keyed", "a pair room between unannounced owners must key", [a, b], bad)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("room_keyed")
+    secret = f"unannounced-{os.urandom(4).hex()}"
+    a.say(room, secret)
+
+    def read() -> Optional[bool]:
+        return True if any(secret in str(m) for m in b.room(room)["messages"]) else None
+    try:
+        wait_for("bob to read alice's message", read, args.arrive_wait, every=2)
+    except MeshError:
+        step.fail("message_not_read", "the sealed body must cross", [a, b], bad)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("message_read")
+    seen = {n.name: len(n.grep(bad)) for n in (a, b)}
+    if any(seen.values()):
+        step.fail("refused_rows", "the issue's refusal appeared", [a, b], bad, seen=seen)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("no_refusals", seen=seen)
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -1982,4 +2041,5 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "chat": chat,
     "corpus": corpus,
     "peer_pair": peer_pair,
+    "pair_unannounced": pair_unannounced,
 }
