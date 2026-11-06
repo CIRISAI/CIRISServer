@@ -1234,6 +1234,22 @@ struct ContactCodeQuery {
     nodes: Option<String>,
 }
 
+/// The key the owner's binding on this node names: on a split home that is the
+/// node key, not the engine key.
+async fn own_bound_node(engine: &Engine, owner: &str) -> Option<String> {
+    let engine_key = engine.local_derived_key_id().await.ok()?;
+    for k in crate::peer::own_keys_of_this_node(&engine_key) {
+        if crate::auth::ownership::is_steward_bound(engine, &k)
+            .await
+            .as_deref()
+            == Some(owner)
+        {
+            return Some(k);
+        }
+    }
+    None
+}
+
 /// **The owner's CURRENT contact code** (CIRISServer#673): a v3 fedcode naming
 /// the person (their fed-ID key and the commitment to its ML-DSA-65 half) and,
 /// by the person's CHOICE, some of their announced nodes, each with the
@@ -1249,20 +1265,26 @@ struct ContactCodeQuery {
 /// person's code was served before was `POST /v1/self/identity`, at MINT,
 /// before any node was claimed.
 ///
-/// **Only ANNOUNCED nodes may be named** (the maintainer's rulings on #655 /
-/// #673, 2026-09-25): announce is per node, each node's wizard asks, and the
-/// devices a person announced are the ones people contact them through. The
-/// choice is the person's — `available_nodes` lists what they may include,
-/// `included_nodes` what this code carries — and naming an unannounced or
-/// foreign node refuses `self.node_not_announced`. An announced node with no
+/// **An unannounced person connects through this code** (the maintainer's ruling
+/// on CIRISPersist#1140, 2026-11-06, replacing the announced-only rule of #655 /
+/// #673): handing someone a code is addressed, so it publishes nothing, and it
+/// is the only way an adder can learn a route to a node the directory will
+/// never list. So this node may ride a code unannounced. Absent `?nodes=` a
+/// person who announced a device still shares what they announced, because a
+/// private device must not leak into a code by default; a person with nothing
+/// announced shares this node, or they could reach nobody. The choice is the
+/// person's — `available_nodes` lists what they may include, `included_nodes`
+/// what this code carries — and naming a foreign node refuses
+/// `self.node_not_announced`. A node with no
 /// live reticulum transport binding here is reported under
 /// `nodes_without_transport` rather than guessed at, because the transport key
 /// is NOT derivable from the node's federation key (CIRISServer#335).
 ///
 /// Built with verify's own encoder (`fedcode::FedCode` + `encode` /
-/// `encode_qr`), never by hand. Lightnet facts only (CC 5.4.6): a fed-ID key,
-/// announced node ids and their transport keys. Nothing group-scoped rides a
-/// code.
+/// `encode_qr`), never by hand. A fed-ID key, node ids and their transport keys:
+/// unsigned, so the code names a node and gives a route but binds nothing. The
+/// owner's signed binding reaches the adder another way. Nothing group-scoped
+/// rides a code.
 async fn contact_code(
     State(st): State<SelfState>,
     headers: HeaderMap,
@@ -1336,15 +1358,20 @@ async fn contact_code(
         use sha2::Digest as _;
         hex::encode(sha2::Sha256::digest(&pqc))
     };
-    // THE ANNOUNCED NODES are what the person may choose from. Announce is per
-    // node — each node's wizard asks — and a node they did not announce never
-    // rides a code, whatever their other nodes chose.
+    // What the person may choose from: the nodes they announced, and this node.
     let announced = match crate::auth::ownership::announced_nodes_of(&st.engine, &owner).await {
         Ok(v) => v,
         Err(e) => return store_unavailable(e),
     };
+    let mut offered = announced.clone();
+    if let Some(this_node) = own_bound_node(&st.engine, &owner).await {
+        if !offered.contains(&this_node) {
+            offered.push(this_node);
+        }
+    }
     // WHICH of them this code carries — the person's choice.
     let selected: Vec<String> = match q.nodes.as_deref().map(str::trim) {
+        None if announced.is_empty() => offered.clone(),
         None => announced.clone(),
         Some(none) if none.eq_ignore_ascii_case("none") => Vec::new(),
         Some(list) => {
@@ -1358,11 +1385,11 @@ async fn contact_code(
             chosen.dedup();
             if chosen.is_empty() {
                 return bad_request(
-                    "nodes must be `none` or a comma-separated list of announced node key ids"
+                    "nodes must be `none` or a comma-separated list of your node key ids"
                         .to_owned(),
                 );
             }
-            let refused: Vec<&String> = chosen.iter().filter(|k| !announced.contains(k)).collect();
+            let refused: Vec<&String> = chosen.iter().filter(|k| !offered.contains(k)).collect();
             if !refused.is_empty() {
                 return refuse_with(
                     StatusCode::BAD_REQUEST,
@@ -1387,10 +1414,10 @@ async fn contact_code(
         .map(crate::peer::own_keys_of_this_node)
         .unwrap_or_default();
     let labels = labels_for(&st.engine, &owner).await;
-    let mut available: Vec<serde_json::Value> = Vec::with_capacity(announced.len());
+    let mut available: Vec<serde_json::Value> = Vec::with_capacity(offered.len());
     let mut named: Vec<CodeNode> = Vec::new();
     let mut without_transport: Vec<String> = Vec::new();
-    for node in &announced {
+    for node in &offered {
         let lookup: Vec<String> = if own.contains(node) {
             let mut keys = vec![node.clone()];
             keys.extend(own.iter().filter(|k| *k != node).cloned());
@@ -1426,7 +1453,7 @@ async fn contact_code(
         let label = lookup.iter().find_map(|k| labels.get(k).cloned());
         let mut entry = serde_json::json!({
             "node_key_id": node,
-            "announced": true,
+            "announced": announced.contains(node),
             "has_transport": transport.is_some(),
             "this_node": own.contains(node),
         });
@@ -1486,7 +1513,7 @@ async fn contact_code(
         "available_nodes": available,
         // What THIS code carries (each with the transport key it embeds).
         "included_nodes": named,
-        // Chosen, announced, but with no transport binding here to embed.
+        // Chosen, but with no transport binding here to embed.
         "nodes_without_transport": without_transport,
         // Whether a stranger can reach you from this code alone. `false` means
         // it still identifies you and resolves through the public directory,
