@@ -523,9 +523,10 @@ pub fn consent_disclosure_json() -> String {
         // off (CC 5.4.6, CLM-unannounced-costs).
         "announce_requirement": m(
             "mesh.announce_costs",
-            "If you don't announce, you can be reached only by a contact code or QR you hand \
-             over yourself, and you can't take part in public groups. A private room needs \
-             both of you to have announced."
+            "If you don't announce, nobody can reach you through the mesh in this version: \
+             your contact code identifies you but doesn't yet carry a way to reach your \
+             devices. You can't take part in public groups. A private room needs both of you \
+             to have announced."
         ),
     })
     .to_string()
