@@ -4737,6 +4737,19 @@ async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
     true
 }
 
+/// **A local write changed who this node's audience is** (a room record, a widening,
+/// a binding). Rows parked waiting for that group or owner are re-asked now, rather
+/// than after edge's terminal wait: writes this node makes itself skip the apply
+/// path that would have released them. `group_or_key` is a group id or owner key.
+pub(crate) fn audience_changed(group_or_key: &str) {
+    if let Some(runtime) = held_replication_runtime() {
+        let released = runtime.bridge().release_audience(group_or_key);
+        if released > 0 {
+            tracing::debug!(group_or_key, released, "parked rows released");
+        }
+    }
+}
+
 pub(crate) fn kick_replication(reason: &'static str) -> bool {
     let Some(runtime) = held_replication_runtime() else {
         return false;

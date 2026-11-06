@@ -30,7 +30,7 @@ pub struct EdgePressure(pub Arc<Edge>);
 
 impl PressureSink for EdgePressure {
     fn set_load_pressure(&self, p: LoadPressure) {
-        self.0.set_load_pressure(match p {
+        let _tier = self.0.set_load_pressure(match p {
             LoadPressure::Normal => ciris_edge::LoadPressure::Normal,
             LoadPressure::Warning => ciris_edge::LoadPressure::Warning,
             LoadPressure::Critical => ciris_edge::LoadPressure::Critical,

@@ -1896,6 +1896,7 @@ async fn sign_and_record(
     )
     .await
     .map_err(|e| format!("record the owner-binding locally: {e}"))?;
+    crate::compose::audience_changed(&owner);
 
     // (2) B's occurrence key, then the occurrence signed by the owner.
     let occ_key = req.occurrence_key_record.record.key_id.clone();

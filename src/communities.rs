@@ -1242,6 +1242,7 @@ async fn apply_change(
             }
         }
     }
+    crate::compose::audience_changed(room.id());
     crate::compose::kick_replication("community roster changed");
     tracing::info!(
         room = %room.id(),
@@ -1546,6 +1547,7 @@ async fn create_community(
         return write_failed(format!("put_community: {e:#}"));
     }
     ensure_owner_content_occurrence(&st, &owner.key_id).await;
+    crate::compose::audience_changed(&community_id);
     crate::compose::kick_replication("community room founded");
     let Ok(Some(room)) = load_room(&st, &community_id).await else {
         return store_unavailable("the room was written and could not be read back");
