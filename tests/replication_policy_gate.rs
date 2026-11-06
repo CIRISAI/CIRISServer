@@ -248,6 +248,11 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// group's membership-plane audience. A Rooted keyless `ciris-canonical` is
 /// served to every peer.
 ///
+/// `ead63aac…` → `83099f47…` with edge v44 / persist v61, read as a diff: traces
+/// narrow to a per-recipient consent; retired planes leave; and a subject pull may
+/// serve a held live owner-binding and its owner's root acceptance, which first
+/// contact needs. That last one is a widening, bounded by `Reach::FirstContact`
+/// admitting only federation-audience rows (edge `FSD/FIRST_CONTACT.md` §2).
 /// `68c5298b…` → `ead63aac…` with edge v43.0.0 / persist v59 (the sealed
 /// transport, CC 5.3.3.5 E1): the key plane travels as its ROWS
 /// (`key:record:v1`, `identity:occurrence:v1`, withdraws) on its own planes,
@@ -255,7 +260,7 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// first contact carries the `key_record_row`. Equal to edge's published
 /// `SERVE_ADVERTISE_POLICY_HASH` at the v43.0.0 tag.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "ead63aac63f6736b12084a07278557b7b273e6a98c9d52b77504f512d9fc5439";
+    "83099f472ec6f9d378753239802393915aa7645f3ec25088c0fcf8f1db70b34d";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {
