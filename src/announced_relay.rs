@@ -326,10 +326,12 @@ pub async fn serves_infrastructure(engine: &Engine, own_key_ids: &[String]) -> b
 /// relay built from half a corpus would silently drop people.
 pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> {
     let dir = engine.federation_directory();
-    // Every `user` key. A person counts from their federation-scope owner-binding,
-    // not from a signed occurrence as well: edge serves a stranger the binding of
-    // a node in this set, so waiting on the occurrence, which arrives separately,
-    // withheld a binding this node already held from the first person to ask.
+    // Candidates first, because the walk below is several reads a person and a
+    // canonical holds thousands of `user` keys. A candidate has a signed occurrence
+    // here, or has itself signed a federation-scope owner-binding: edge serves a
+    // stranger the binding of a node in this set, so waiting on the occurrence,
+    // which arrives separately, withheld a binding this node already held from the
+    // first person to ask. A device joined by approval has both.
     let users = dir
         .list_keys_by_identity_type(identity_type::USER)
         .await
@@ -338,6 +340,9 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
     let mut owners: BTreeSet<String> = BTreeSet::new();
     for user in users {
         let identity = user.key_id;
+        if !may_have_announced(dir.as_ref(), &identity).await? {
+            continue;
+        }
         // ONLY A PERSON ANNOUNCES — applied at enumeration above: an
         // owner-binding is user → node, and `announced_nodes_of` reads every
         // row the identity ever AUTHORED, which for agents is by far the most
@@ -354,6 +359,31 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
         announced_nodes: nodes.into_iter().collect(),
         owners: owners.into_iter().collect(),
     })
+}
+
+/// Could this person have announced? At most two indexed reads.
+async fn may_have_announced(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    identity: &str,
+) -> Result<bool, String> {
+    use ciris_persist::federation::attestation_query::AttestationQuery;
+    use ciris_persist::federation::types::{cohort_scope, owner_binding};
+    let signed = dir
+        .list_signed_identity_occurrences_for(identity)
+        .await
+        .map_err(|e| format!("list_signed_identity_occurrences_for({identity}): {e:#}"))?;
+    if !signed.is_empty() {
+        return Ok(true);
+    }
+    let mut bindings = AttestationQuery::by(identity, std::num::NonZeroU32::MIN)
+        .dimension(owner_binding::DIMENSION)
+        .scope(cohort_scope::FEDERATION, None)
+        .pages();
+    bindings
+        .next(dir)
+        .await
+        .map(|page| page.is_some_and(|rows| !rows.is_empty()))
+        .map_err(|e| format!("federation bindings by({identity}): {e:#}"))
 }
 
 /// One refresh pass: decide whether this node relays, recompute the sets if
