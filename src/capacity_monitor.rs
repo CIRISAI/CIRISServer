@@ -369,6 +369,13 @@ fn run() {
         let smoothed = smooth(&window);
         let (assessed, cause) = assess(&smoothed, &budget);
         let held = hold.step(assessed, Instant::now());
+        // A rig holds a relay at a level without having to load it.
+        #[cfg(feature = "test-anchor")]
+        let held = match std::env::var("CIRIS_TEST_LOAD_PRESSURE").as_deref() {
+            Ok("warning") => LoadPressure::Warning,
+            Ok("critical") => LoadPressure::Critical,
+            _ => held,
+        };
         let was = LoadPressure::from_u8(CURRENT.swap(held as u8, Ordering::Relaxed));
         if held != was {
             let line = format!(

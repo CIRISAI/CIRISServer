@@ -5592,11 +5592,18 @@ async fn build_edge(
         device: ciris_edge::transport::link_shaping::DeviceState::of(
             ciris_edge::transport::link_shaping::DeviceKind::platform_default(),
         ),
-        // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first, and a
-        // forwarding node closes to new forwarded links under load.
+        // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first. Forwarding
+        // does not close on load: first contact is the role a loaded relay keeps
+        // (steward 2026-11-06). Closed on tier, a canonical at 70% CPU refused new
+        // forwarded links for 42% of its first 69 minutes on 0.5.245.
         steer_roster_relays: true,
         relay_establish_budget: std::time::Duration::from_secs(5),
-        forward_admission: Default::default(),
+        forward_admission: ciris_edge::transport::relay_tier::ForwardAdmissionConfig {
+            // The rig's baseline reproduces the old behaviour.
+            admit_close_on_tier: cfg!(feature = "test-anchor")
+                && std::env::var_os("CIRIS_TEST_FORWARD_CLOSES_ON_TIER").is_some(),
+            ..Default::default()
+        },
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The

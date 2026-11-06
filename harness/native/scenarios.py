@@ -10,9 +10,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -408,6 +410,119 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
                   r"relayable", status=code, body=str(offlist)[:300])
     step("off_the_list_refused", status=code)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
+def _first_seen(node: Node, pattern: str, after: float) -> Optional[float]:
+    """Seconds after `after` (epoch) of the first log line matching `pattern`."""
+    for line in node.grep(pattern):
+        m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+)Z", line)
+        if not m:
+            continue
+        at = datetime.strptime(m.group(1)[:26], "%Y-%m-%dT%H:%M:%S.%f")
+        secs = at.replace(tzinfo=timezone.utc).timestamp() - after
+        if secs >= 0:
+            return round(secs, 1)
+    return None
+
+
+def _relay_pair(mesh: Mesh, args: Any, i: int) -> Dict[str, Any]:
+    """One pair that meets only through the code, as a client does: no peering."""
+    a = mesh.add(f"p{i}a")
+    b = mesh.add(f"p{i}b")
+    a.claim(f"p{i}a-person")
+    b.claim(f"p{i}b-person")
+    for n in (a, b):
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)  # An agent's mesh-participation consent.
+        wait_for(f"{n.name} to publish its transit route", n.transit_route, 60)
+    code = lambda n: wait_for(  # noqa: E731
+        f"{n.name}'s code to carry a node",
+        lambda: "CIRIS-V3" in (c := n.contact_code()) and c, 60, every=2)
+    code_b, code_a = code(b), code(a)
+    rec: Dict[str, Any] = {"pair": i, "alice": a.name, "bob": b.name}
+    # 202 is the ordinary answer for a stranger: the node keeps resolving them.
+    def add(host: Node, code: str) -> None:
+        got = host.api("POST", "/v1/contacts", {"key_id": code})
+        if got[0] not in (200, 201, 202):
+            raise MeshError(f"{host.name}: POST /v1/contacts answered {got[0]}: {got[1]}")
+
+    t0 = time.time()
+    add(a, code_b)
+
+    def seen() -> bool:
+        return a.owner_key_id in str(b.must("GET", "/v1/contacts/requests"))
+
+    def stage(name: str, fn: Callable[[], Any], wait: float) -> bool:
+        try:
+            wait_for(f"p{i} {name}", fn, wait, every=1)
+            rec[name] = round(time.time() - t0, 1)
+            return True
+        except MeshError:
+            rec[name] = None
+            return False
+
+    if stage("request_seen", seen, args.ready_wait):
+        add(b, code_a)
+        rec["mutual_added"] = round(time.time() - t0, 1)
+        cid_a = a.open_pair(b.owner_key_id)
+        cid_b = b.open_pair(a.owner_key_id)
+        creator, cid = (a, cid_a) if a.owner_key_id < b.owner_key_id else (b, cid_b)
+        stage("keyed", lambda: creator.room(cid)["ready"], args.ready_wait)
+    rec["re_aimed"] = _first_seen(a, r"re-aimed", t0)
+    if rec.get("keyed") is not None and rec["re_aimed"] is not None:
+        rec["keyed_after_re_aim"] = round(rec["keyed"] - rec["re_aimed"], 1)
+    if rec.get("request_seen") is not None and rec["re_aimed"] is not None:
+        rec["seen_after_re_aim"] = round(rec["request_seen"] - rec["re_aimed"], 1)
+    rec["link_requests"] = len(a.grep(r"[Ll]ink request|LINKREQUEST|initiate_link"))
+    return rec
+
+
+def relay_rig(mesh: Mesh, args: Any) -> Record:
+    """The stalled-link rig: pairs that meet only through one relay, each stage timed.
+
+    RIG_PAIRS pairs (default 10). RIG_SHAPE: a shape file to seed the relay with,
+    using RIG_SEEDER (`seed_synthetic_seat`). RIG_KEEP_PAIRS=1 leaves each pair
+    running, so later pairs have earlier ones behind the relay. RIG_RELAY_PRESSURE
+    (warning, critical) holds the relay at that level. RIG_FORWARD_CLOSES=1 restores
+    forwarding that closes on tier, the 0.5.245 behaviour. Results go to
+    <work>/rig.jsonl and every node's log to <work>/<node>/node.log."""
+    pairs = int(os.environ.get("RIG_PAIRS", "10"))
+    keep = os.environ.get("RIG_KEEP_PAIRS") == "1"
+    shape = os.environ.get("RIG_SHAPE")
+    step = Steps(f"""
+RELAY RIG — {pairs} pairs through one relay, contact code only, no peering.
+  shape: {shape or 'fresh relay'}; earlier pairs {'stay up' if keep else 'stop'}.""")
+    relay = mesh.start_canonical()
+    pressure = os.environ.get("RIG_RELAY_PRESSURE")
+    closes = os.environ.get("RIG_FORWARD_CLOSES") == "1"
+    if shape or pressure or closes:
+        relay.stop()
+        if shape:
+            subprocess.run([os.environ["RIG_SEEDER"], str(relay.home / "data" / "ciris_engine.db"),
+                            shape], check=True, capture_output=True, timeout=300)
+        if pressure:
+            relay.env["CIRIS_TEST_LOAD_PRESSURE"] = pressure
+        if closes:
+            relay.env["CIRIS_TEST_FORWARD_CLOSES_ON_TIER"] = "1"
+        relay.start()
+    step("relay_up", url=relay.url, seeded=bool(shape), pressure=pressure, closes=closes)
+    out = mesh.work / "rig.jsonl"
+    rows = []
+    for i in range(pairs):
+        rec = _relay_pair(mesh, args, i)
+        rows.append(rec)
+        with out.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        step("pair", **{k: v for k, v in rec.items() if k not in ("alice", "bob")})
+        if not keep:
+            mesh.nodes[rec["alice"]].stop()
+            mesh.nodes[rec["bob"]].stop()
+    reads = relay.api("GET", "/v1/node/diagnostics/reads")
+    (mesh.work / "relay-reads.json").write_text(json.dumps(reads[1]), encoding="utf-8")
+    missed = [r["pair"] for r in rows if r.get("keyed") is None]
+    return {"verdict": "FAIL" if missed else "PASS", "steps": step.log, "rows": rows,
+            "unkeyed_pairs": missed}
 
 
 def pair_alice_announced(mesh: Mesh, args: Any) -> Record:
@@ -2059,6 +2174,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "corpus": corpus,
     "peer_pair": peer_pair,
     "pair_unannounced": pair_unannounced,
+    "relay_rig": relay_rig,
     "pair_alice_announced": pair_alice_announced,
     "pair_bob_announced": pair_bob_announced,
     "pair_both_announced": pair_both_announced,
