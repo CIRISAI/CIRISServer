@@ -7088,6 +7088,10 @@ pub(crate) mod pending_contacts {
     /// [`PASS_EVERY`], so a key that never comes cannot go on spending a peer's
     /// lookup quota.
     const HURRY_FOR: Duration = Duration::from_secs(60);
+    /// How often a hurried contact's rows are looked for locally. A read of this
+    /// node's own store, so it spends nobody's lookup limit, and what it finds
+    /// runs the pass at once instead of on its next tick.
+    const WATCH_EVERY: Duration = Duration::from_secs(1);
     /// How often one contact's person is asked for their records. A person
     /// Pull costs a responder's lookup limit one per kind (five), so asking for
     /// a person and a node every [`PASS_EVERY`] was 60 a minute: the whole of
@@ -7125,6 +7129,8 @@ pub(crate) mod pending_contacts {
         asked: u32,
         last_report: Option<Instant>,
         records_asked: Option<Instant>,
+        /// The code's node keys were all seen held, so the records were re-asked.
+        keys_landed: bool,
     }
 
     fn unresolved() -> &'static Mutex<HashMap<Key, Unresolved>> {
@@ -7235,6 +7241,55 @@ pub(crate) mod pending_contacts {
         nodes
     }
 
+    /// Whether a hurried contact's rows landed since the last look: a pending
+    /// key, a code's node keys, or the person's binding. Each runs the pass once.
+    async fn something_landed() -> bool {
+        let pending: Vec<(ChatState, String)> = {
+            let t = table().lock().expect("pending contacts lock");
+            t.values()
+                .filter(|p| p.since.elapsed() < HURRY_FOR)
+                .map(|p| (p.st.clone(), p.key_id.clone()))
+                .collect()
+        };
+        for (st, key_id) in pending {
+            let dir = st.engine.federation_directory();
+            if matches!(dir.lookup_public_key(&key_id).await, Ok(Some(_))) {
+                return true;
+            }
+        }
+        type Waiting = (Key, ChatState, Vec<String>, bool);
+        let waiting: Vec<Waiting> = {
+            let t = unresolved().lock().expect("unresolved contacts lock");
+            t.iter()
+                .filter(|(_, u)| u.since.elapsed() < HURRY_FOR)
+                .map(|(k, u)| (k.clone(), u.st.clone(), u.code_nodes.clone(), u.keys_landed))
+                .collect()
+        };
+        let mut landed = false;
+        for (k, st, code_nodes, keys_landed) in waiting {
+            if !nodes_of(&st, &k.1).await.is_empty() {
+                landed = true;
+                continue;
+            }
+            if keys_landed || code_nodes.is_empty() {
+                continue;
+            }
+            let dir = st.engine.federation_directory();
+            let mut held = true;
+            for node in &code_nodes {
+                held &= matches!(dir.lookup_public_key(node).await, Ok(Some(_)));
+            }
+            if held {
+                if let Some(u) = unresolved().lock().expect("lock").get_mut(&k) {
+                    u.keys_landed = true;
+                    u.records_asked = None;
+                }
+                landed = true;
+            }
+        }
+        landed
+    }
+
     fn ensure_pass() {
         static STARTED: OnceLock<()> = OnceLock::new();
         if STARTED.set(()).is_err() {
@@ -7248,6 +7303,16 @@ pub(crate) mod pending_contacts {
                         () = wake().notified() => {}
                     }
                     pass().await;
+                }
+            });
+            rt.spawn(async {
+                let mut ticks = tokio::time::interval(WATCH_EVERY);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticks.tick().await;
+                    if something_landed().await {
+                        wake().notify_one();
+                    }
                 }
             });
         }
@@ -7405,6 +7470,7 @@ pub(crate) mod pending_contacts {
                         asked: 0,
                         last_report: None,
                         records_asked: None,
+                        keys_landed: false,
                     },
                 );
             }
