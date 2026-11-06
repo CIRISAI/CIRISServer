@@ -524,8 +524,8 @@ pub fn consent_disclosure_json() -> String {
         "announce_requirement": m(
             "mesh.announce_costs",
             "If you don't announce, you can be reached only by a contact code or QR you hand \
-             over yourself, and you can't take part in public groups. Private rooms, contacts \
-             and traces still work."
+             over yourself, and you can't take part in public groups. A private room needs \
+             both of you to have announced."
         ),
     })
     .to_string()
