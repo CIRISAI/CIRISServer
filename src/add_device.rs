@@ -1696,7 +1696,7 @@ fn record_approved(
         },
     );
     tracing::info!(
-        request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
+        request_id = %id, node = %node, occurrence = %occurrence_key_id, self_dek_granted = granted,
         "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
     );
     (
