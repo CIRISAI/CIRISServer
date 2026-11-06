@@ -739,6 +739,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # released bundle, so neither side could move first with a changed value.
     # Client 0.5.239 pins 0.5.245 and adds it; the entry leaves at that floor.
     "mesh.announce_costs",
+    # `add_device.node_proof` (0.5.245): the device can't prove its node. Same
+    # order: client 0.5.239 adds it, and the entry leaves at that floor.
+    "add_device.node_proof",
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the
