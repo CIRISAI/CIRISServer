@@ -1984,13 +1984,12 @@ pub async fn run_federation_delivery(
                         crate::replication_reconcile::note_convergence(&mut last_logged, reconciled)
                     {
                         if !gained.is_empty() {
-                            crate::receive_axis::pull_on_peers_gained(
+                            crate::receive_axis::spawn_pull_on_peers_gained(
                                 &reconcile_engine,
                                 &reconcile_runtime,
                                 &reconcile_node_key,
                                 &gained,
-                            )
-                            .await;
+                            );
                         }
                         if count == 0 {
                             // ZERO IS NOT CONVERGENCE. This read "converged to 0
