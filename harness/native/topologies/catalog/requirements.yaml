@@ -96,6 +96,12 @@ CSD-094:
       probe: {node: A2, path: /v1/setup/add-device, status: 200, expect: {state: approved}}
     applied:
       at: [device.joined]
+    # A joined device administers a node its person owns, checked against the
+    # self-key roster. A relay is a POST through another node, which one `probe:`
+    # read cannot make, so the `remote_admin` scenario drives it (ci.yml). No card
+    # names this surface yet; the picker's goes to CSD-035.
+    remote_admin:
+      at: [device.joined]
     joined:
       at: [device.joined, file.held]
 CSD-100:
