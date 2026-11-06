@@ -7265,6 +7265,10 @@ pub(crate) mod pending_contacts {
         ciris_edge::contact::DirectoryLens::request_key_body(&lens, key_id).await
     }
 
+    /// How long one direct Key Pull waits for its reply. A pass repeats the ask, and
+    /// one already in flight answers the repeat.
+    const KEY_PULL_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Ask every consent peer for `key_id`'s Key record NOW, with a subject Pull
     /// on the Key plane. Returns the peers asked and the sends that failed.
     ///
@@ -7281,6 +7285,7 @@ pub(crate) mod pending_contacts {
         owner: &Owner,
         key_id: &str,
     ) -> (Vec<String>, Vec<String>) {
+        use ciris_edge::replication::coordinator::PullDispatched;
         use ciris_edge::replication::protocol::EnvelopeKind;
         let Some(runtime) = crate::compose::held_replication_runtime() else {
             return (Vec::new(), Vec::new());
@@ -7300,7 +7305,20 @@ pub(crate) mod pending_contacts {
                     .await
                 {
                     None => Err("Key initiator absent after register".to_owned()),
-                    Some(coord) => coord.start_pull(key_id).await.map_err(|e| format!("{e:#}")),
+                    // An exchange of its own, not `start_pull`: that takes the live
+                    // round's id, so on a node running back-to-back Key rounds a
+                    // reply slower than what's left of the round is dropped. Cost
+                    // most of two minutes per contact on cross-NAT runs.
+                    Some(coord) => {
+                        match coord.pull_exchange(key_id, KEY_PULL_REPLY_TIMEOUT).await {
+                            Err(e) => Err(format!("{e:#}")),
+                            // Nothing left: saying so keeps it in `direct_pull_failed`.
+                            Ok(PullDispatched::Throttled { retry_after_secs }) => {
+                                Err(format!("peer throttled Pulls for {retry_after_secs} s"))
+                            }
+                            Ok(_) => Ok(()),
+                        }
+                    }
                 },
             };
             if let Err(e) = sent {
@@ -7351,12 +7369,13 @@ pub(crate) mod pending_contacts {
              AND shares a trust root with this node. Where to look: (1) requeued=false, \
              replication_runtime=false or direct_pull_peers=[] → this node cannot ask at all; \
              (2) peers_with_no_route lists peers the Pull cannot reach, direct_pull_failed \
-             the sends that did not go out; (3) here, `CRPL reply DROPPED … kind=Key` means the answer arrived and \
-             was discarded (history: CIRISEdge#634); (4) on the answering peer, `identifier lookup \
+             the sends that did not go out; (3) here, a `subject_pull_exchange` span ending `subject Pull exchange ended short` \
+             means the ask left and no answer landed in time; `subject Pull held back` means \
+             the peer throttled it; \
+             (4) on the answering peer, `identifier lookup \
              refused: no mutual trust root` (DEBUG) or `identifier lookup RATE LIMITED` means \
              it declined; (5) on the peer, does it hold the key at all — `federation_keys` \
-             row for this key_id. Edge logs the Pull itself at DEBUG only \
-             (`recovery round: asked this peer`)"
+             row for this key_id"
         );
     }
 
@@ -7567,7 +7586,21 @@ pub(crate) mod pending_contacts {
 
     /// One pass: complete, discard or expire every pending contact.
     pub(crate) async fn pass() {
+        let started = Instant::now();
+        // Keys first. Resolving walks every unresolved contact in turn, with HTTP and
+        // pulls for each, so a person added after two others waited behind them
+        // before their key was even asked for.
+        pending_pass().await;
         resolve_pass().await;
+        if started.elapsed() >= PASS_EVERY {
+            tracing::warn!(
+                took_secs = started.elapsed().as_secs(),
+                "contacts: a pending pass outran its period, so every contact behind it waited"
+            );
+        }
+    }
+
+    async fn pending_pass() {
         let due: Vec<Due> = {
             let t = table().lock().expect("pending contacts lock");
             t.iter()
