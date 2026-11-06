@@ -1334,12 +1334,27 @@ fn preflight(
     Ok(fc.key_id)
 }
 
+/// The local account the wizard collected, when it asked for one. Optional: an older
+/// client sends no body, and a node with no agent has no use for it.
+#[derive(Debug, Default, Deserialize)]
+struct CompleteRequest {
+    #[serde(default)]
+    owner_username: Option<String>,
+    #[serde(default)]
+    owner_password: Option<String>,
+}
+
 /// `POST /v1/setup/add-device/complete` — the end of first run on a device
 /// joining an existing identity: apply the verified, held approval (the claim
 /// through this node's own setup/root, then the occurrence and the active
 /// identity). The wizard then collects its session with `claimed-session`, as
 /// the new-identity path does.
-async fn complete(State(st): State<AddDeviceState>) -> Response {
+///
+/// `owner_username` / `owner_password`, when the wizard asked for them, go to
+/// `setup/root` as the creator's do. With an agent the runtime restarts after setup
+/// and ends the wizard's session, so without them this device has no way to sign in.
+async fn complete(State(st): State<AddDeviceState>, body: axum::body::Bytes) -> Response {
+    let account: CompleteRequest = serde_json::from_slice(&body).unwrap_or_default();
     let held = pending().lock().ok().and_then(|g| g.clone());
     let Some(p) = held else {
         return refuse(
@@ -1348,7 +1363,7 @@ async fn complete(State(st): State<AddDeviceState>) -> Response {
             "your other device has not approved this one yet",
         );
     };
-    match apply(&st, p.approval, &p.alias).await {
+    match apply(&st, p.approval, &p.alias, &account).await {
         Ok(()) => {
             if let Ok(mut g) = pending().lock() {
                 *g = None;
@@ -1433,7 +1448,12 @@ pub fn roster_key_named_under(fed_id: &str, record: &SignedKeyRecord) -> Result<
 
 /// Apply the owner's approval on B: the binding through B's OWN setup/root with
 /// B's own claim PIN (local presence), then the owner-signed occurrence.
-async fn apply(st: &AddDeviceState, a: Approval, alias: &str) -> Result<(), String> {
+async fn apply(
+    st: &AddDeviceState,
+    a: Approval,
+    alias: &str,
+    account: &CompleteRequest,
+) -> Result<(), String> {
     let pin = std::fs::read_to_string(&st.claim_pin_file)
         .map_err(|e| format!("read this device's claim PIN file: {e}"))?;
     let body = serde_json::json!({
@@ -1442,6 +1462,8 @@ async fn apply(st: &AddDeviceState, a: Approval, alias: &str) -> Result<(), Stri
         "claim_pin": pin.trim(),
         "owner_binding": a.owner_binding,
         "claimer_key_record": a.claimer_key_record,
+        "owner_username": account.owner_username,
+        "owner_password": account.owner_password,
     });
     let url = format!("{}/v1/setup/root", st.local_self_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()

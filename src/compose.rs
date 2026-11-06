@@ -2258,6 +2258,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 crate::announced_relay::RELAY_REFRESH,
             );
             let mut consented = std::collections::BTreeSet::new();
+            let mut traces_consented = std::collections::BTreeSet::new();
             let mut sharing_traces = None;
             loop {
                 cadence.tick().await;
@@ -2267,8 +2268,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     if sharing_traces == Some(true) && !now {
                         crate::peer::traces_turned_off(&engine, &node).await;
                         crate::replication_reconcile::nudge("traces turned off");
+                        traces_consented.clear();
                     }
                     sharing_traces = Some(now);
+                }
+                if sharing_traces == Some(true) {
+                    let before = traces_consented.len();
+                    crate::peer::consent_to_share_traces(&engine, &node, &mut traces_consented)
+                        .await;
+                    if traces_consented.len() != before {
+                        crate::replication_reconcile::nudge("traces: consent written");
+                    }
                 }
                 let announced = config.borrow().announce_ownership;
                 if announced {

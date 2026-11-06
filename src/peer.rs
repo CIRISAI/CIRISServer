@@ -723,6 +723,16 @@ pub async fn check_traces_consent<S: AsRef<str>>(
     ))
 }
 
+/// A grant may name `trace:` only for an owner who chose to share traces. The wizard
+/// sends the grant a moment before the capture consent, so a name here is not an
+/// error: it comes out, and [`consent_to_share_traces`] writes it once capture exists.
+pub async fn drop_unchosen_traces(engine: &Engine, node_key_id: &str, prefixes: &mut Vec<String>) {
+    if let Err(why) = check_traces_consent(engine, node_key_id, prefixes).await {
+        tracing::info!(reason = %why, "consent written without trace: for now");
+        prefixes.retain(|p| p != "trace:");
+    }
+}
+
 /// The canonicals on the live roster that are not yet in `consented`, in roster
 /// order. Evaluation is against the active roster, not the baked list (steward
 /// 2026-11-04): one added after boot appears here, and one that left is simply no
@@ -750,6 +760,26 @@ pub async fn consent_to_be_found(
     engine: &Engine,
     node_key_id: &str,
     consented: &mut std::collections::BTreeSet<String>,
+) {
+    consent_for_canonicals(engine, node_key_id, consented, &ANNOUNCE_CONSENT_PREFIXES).await;
+}
+
+/// The owner chose to share traces (CC 5.4.6, its own consent): each canonical in
+/// their trust set gets a grant covering `trace:`. `consented` holds the ones done,
+/// and is cleared when the choice is withdrawn.
+pub async fn consent_to_share_traces(
+    engine: &Engine,
+    node_key_id: &str,
+    consented: &mut std::collections::BTreeSet<String>,
+) {
+    consent_for_canonicals(engine, node_key_id, consented, &["trace:"]).await;
+}
+
+async fn consent_for_canonicals(
+    engine: &Engine,
+    node_key_id: &str,
+    consented: &mut std::collections::BTreeSet<String>,
+    prefixes: &[&str],
 ) {
     // The trust set is the person's, carried on the owner's own acceptance rows
     // (CC 4.4.3.8). A node holds none of its own.
@@ -780,27 +810,20 @@ pub async fn consent_to_be_found(
                 continue;
             }
         }
-        match ensure_replication_consent_covers(
-            engine,
-            node_key_id,
-            &canonical,
-            &ANNOUNCE_CONSENT_PREFIXES,
-        )
-        .await
-        {
+        match ensure_replication_consent_covers(engine, node_key_id, &canonical, prefixes).await {
             Ok(_) => {
                 tracing::info!(
                     canonical = %canonical,
-                    "announce: this node's identity rows may reach this canonical (traces are a \
-                     separate consent)"
+                    ?prefixes,
+                    "consent to this canonical now covers these rows"
                 );
                 consented.insert(canonical);
             }
             Err(e) => tracing::warn!(
                 canonical = %canonical,
                 error = %format!("{e:#}"),
-                "announce: could not consent to this canonical carrying the identity rows, so \
-                 nobody can find this node through it yet; the next pass asks again"
+                ?prefixes,
+                "could not extend consent to this canonical; the next pass asks again"
             ),
         }
     }

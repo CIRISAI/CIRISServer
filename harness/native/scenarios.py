@@ -330,7 +330,8 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
         st = b.must("GET", "/v1/setup/add-device")
         return st if st.get("state") == "approved" else None
     wait_for("B to hold the owner's approval", held, args.arrive_wait, every=2)
-    b.must("POST", "/v1/setup/add-device/complete", {})
+    b.must("POST", "/v1/setup/add-device/complete",
+           {"owner_username": "second-device", "owner_password": "a-long-local-password"})
     # In the client's order: it reads the PIN file only after the claim has landed.
     # Reading it first passed here for months while no real device could sign in.
     pin_file = b.home / "claim_pin"
@@ -343,6 +344,14 @@ REMOTE ADMIN — a roster device reads and acts on a node its person owns, over 
     if pin_file.exists():
         ok = False
         step.fail("pin_kept", "the PIN file must go once the session is collected", [b], r"claim PIN")
+    # An agent restart ends that session, so the device must be able to sign in.
+    code, login = b.api("POST", "/v1/auth/login",
+                        {"username": "second-device", "password": "a-long-local-password"})
+    if code != 200:
+        ok = False
+        step.fail("device_login", "a device added by approval must be able to sign in", [b],
+                  r"login", status=code, body=str(login)[:200])
+    step("b_can_sign_in", status=code)
     if not occ or occ == a.owner_key_id:
         ok = False
         step.fail("roster_key", "B must hold its own roster key, not the key the binding names", [a, b],
