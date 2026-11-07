@@ -579,7 +579,10 @@ def _late_joiner(founder: Node, joiner: Node, history: int, wait: float) -> Dict
     cid = got.get("community_id") or got.get("id")
     for i in range(history):
         founder.say(cid, f"history {i}")
-    founder.must("POST", f"/v1/communities/{cid}/invites", {"key_id": joiner.owner_key_id})
+    code, body = founder.api("POST", f"/v1/communities/{cid}/invites",
+                             {"key_id": joiner.owner_key_id})
+    if code not in (200, 201, 202):
+        raise MeshError(f"invite answered {code}: {body}")
     rec: Dict[str, Any] = {"room": cid, "history": history}
     t0 = time.time()
 
@@ -596,18 +599,35 @@ def _late_joiner(founder: Node, joiner: Node, history: int, wait: float) -> Dict
     joiner.must("POST", f"/v1/self/invites/{pid}/accept", {})
     t1 = time.time()
 
-    def read(n: int) -> bool:
-        code, body = joiner.api("GET", f"/v1/chat/{cid}/messages")
-        msgs = body.get("messages", []) if code == 200 and isinstance(body, dict) else []
-        return sum(1 for m in msgs if str(m.get("body", "")).startswith("history ")) >= n
+    # MLS: a joiner holds the backlog's rows but cannot open bodies sealed before it
+    # joined. What it must get promptly: the rows, the room keyed, then a message.
+    def transcript(n: Node) -> Dict[str, Any]:
+        code, body = n.api("GET", f"/v1/chat/{cid}/messages")
+        return body if code == 200 and isinstance(body, dict) else {}
 
-    for name, n in (("read_first", 1), ("read_all", history)):
+    def rows_held() -> bool:
+        return len(transcript(joiner).get("messages", [])) >= history
+
+    def keyed() -> bool:
+        transcript(founder)  # the founder's app has the room open
+        return bool(transcript(joiner).get("ready"))
+
+    for name, fn in (("backlog_rows_held", rows_held), ("keyed", keyed)):
         try:
-            wait_for(f"the joiner to read {n} of the backlog", lambda n=n: read(n), wait, every=3)
+            wait_for(f"the joiner: {name}", fn, wait, every=3)
             rec[name] = round(time.time() - t1, 1)
         except MeshError:
             rec[name] = None
-            break
+    if rec.get("keyed") is not None:
+        sent = founder.say(cid, "after the join")
+        t2 = time.time()
+        try:
+            wait_for("the joiner to read a new message", lambda: any(
+                m.get("attestation_id") == sent and m.get("body")
+                for m in transcript(joiner).get("messages", [])), wait, every=2)
+            rec["new_message_read"] = round(time.time() - t2, 1)
+        except MeshError:
+            rec["new_message_read"] = None
     return rec
 
 
@@ -682,7 +702,7 @@ PERSON STORE — a seeded person's node and a stranger, through one relay, both 
     (mesh.work / "person-store.json").write_text(
         json.dumps({"seed": seed, "requesting": asking, "accepting": answering,
                     "late_joiner": late, "reads": busiest}, indent=1), encoding="utf-8")
-    ok = all(r.get("keyed") is not None for r in (asking, answering)) and late.get("read_all") is not None
+    ok = all(r.get("keyed") is not None for r in (asking, answering)) and late.get("new_message_read") is not None
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
             "requesting": asking, "accepting": answering}
 
