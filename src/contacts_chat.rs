@@ -6939,6 +6939,28 @@ fn driver_says(key: &str, line: String, warn: bool) {
     }
 }
 
+/// Whether an N-member room has work for the driver: no group held here yet, or a
+/// roster that differs from the group's members (someone to add, someone to
+/// remove). One roster read; a quiet room does no MLS work and no further read.
+async fn room_has_pending_member(st: &ChatState, room: &str) -> bool {
+    let Ok(roster) = st
+        .engine
+        .federation_directory()
+        .active_community_members(room)
+        .await
+    else {
+        return false;
+    };
+    let group = match st.rooms.lock().await.get(room) {
+        Some(RoomState::Keyed(group)) => Arc::clone(group),
+        _ => return true,
+    };
+    let in_group: std::collections::BTreeSet<String> =
+        group.member_key_ids().await.into_iter().collect();
+    let named: std::collections::BTreeSet<String> = roster.into_iter().map(|m| m.key_id).collect();
+    in_group != named
+}
+
 async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     let node = match crate::family_api::this_node_key(&st.engine).await {
         Ok(n) => n,
@@ -7007,6 +7029,9 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     // that lands after the creator's last touch is never added, so the joiner
     // never installs the room's address and opens nothing sent after it joined.
     for room in groups {
+        if !room_has_pending_member(st, &room).await {
+            continue;
+        }
         match room_key_room(st, &room, &me, Some(pen.edge_signer())).await {
             Ok(state) => out.push((room, format!("{state:?}"))),
             Err(e) => {
