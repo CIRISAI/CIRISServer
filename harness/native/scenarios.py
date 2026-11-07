@@ -525,6 +525,129 @@ RELAY RIG — {pairs} pairs through one relay, contact code only, no peering.
             "unkeyed_pairs": missed}
 
 
+def _person_contact(mesh: Mesh, args: Any, adder: Node, accepter: Node) -> Dict[str, Any]:
+    """`adder` adds `accepter` by code, as a client does; the stages are timed."""
+    codes = {}
+    for n in (adder, accepter):
+        codes[n.name] = wait_for(
+            f"{n.name}'s code to carry a node",
+            lambda m=n: "CIRIS-V3" in (c := m.contact_code()) and c, 90, every=2)
+
+    def add(host: Node, code: str) -> None:
+        got = host.api("POST", "/v1/contacts", {"key_id": code})
+        if got[0] not in (200, 201, 202):
+            raise MeshError(f"{host.name}: POST /v1/contacts answered {got[0]}: {got[1]}")
+
+    def seen() -> bool:
+        return adder.owner_key_id in str(accepter.must("GET", "/v1/contacts/requests"))
+
+    rec: Dict[str, Any] = {"adder": adder.name, "accepter": accepter.name}
+    t0 = time.time()
+
+    def stage(name: str, fn: Callable[[], Any]) -> bool:
+        try:
+            wait_for(f"{adder.name}→{accepter.name} {name}", fn, args.ready_wait, every=1)
+            rec[name] = round(time.time() - t0, 1)
+            return True
+        except MeshError:
+            rec[name] = None
+            return False
+
+    add(adder, codes[accepter.name])
+    if stage("request_seen", seen):
+        add(accepter, codes[adder.name])
+        rec["accepted"] = round(time.time() - t0, 1)
+        cid_a = adder.open_pair(accepter.owner_key_id)
+        cid_b = accepter.open_pair(adder.owner_key_id)
+        first = adder.owner_key_id < accepter.owner_key_id
+        creator, cid = (adder, cid_a) if first else (accepter, cid_b)
+        stage("keyed", lambda: creator.room(cid)["ready"])
+    rec["re_aimed"] = _first_seen(adder, r"re-aimed", t0)
+    return rec
+
+
+def _reads(node: Node) -> Dict[str, List[int]]:
+    """Reads per persist door on `node`, since it booted: {door: [calls, rows, bytes]}."""
+    snap = node.api("GET", "/v1/node/diagnostics/reads")[1]
+    out: Dict[str, List[int]] = {}
+    for d in snap.get("reads", []) if isinstance(snap, dict) else []:
+        out[str(d.get("door"))] = [int(d.get(k, 0)) for k in ("reads", "rows", "bytes")]
+    return out
+
+
+def person_store(mesh: Mesh, args: Any) -> Record:
+    """A long-lived person's node meets a stranger, in both directions.
+
+    The seeded node's store has the shape of a real one, every row really signed
+    and admitted (`seed_person_store`). PERSON_SEEDER names that binary, PERSON_SHAPE
+    the shape file, PERSON_SCALE scales it for a smoke run. Results go to
+    <work>/person-store.json, the seed tally to <work>/seed.json."""
+    shape = os.environ.get("PERSON_SHAPE") or str(HARNESS / "native" / "shapes" / "person-store.json")
+    seeder = os.environ.get("PERSON_SEEDER") or str(
+        Path(args.binary).parent / "examples" / "seed_person_store")
+    scale = os.environ.get("PERSON_SCALE", "1.0")
+    root = os.environ.get("PERSON_ROOT", "test-accord-holder-0")
+    step = Steps(f"""
+PERSON STORE — a seeded person's node and a stranger, through one relay, both directions.
+  shape: {shape} at scale {scale}.
+  proves: the seeded node can request (1) and accept (2) a contact and key a room, without
+          walking its store for a row the stranger needs.""")
+    relay = mesh.start_canonical()
+    # Seeded before it is claimed: a boot makes the schema and holds the root, and
+    # the claim's session then outlives no restart.
+    s = mesh.add("seeded")
+    s.stop()
+    t0 = time.time()
+    done = subprocess.run([seeder, str(s.home / "data" / "ciris_engine.db"), shape, root, scale],
+                          capture_output=True, text=True, timeout=3600,
+                          env={**os.environ, **s.env})
+    (mesh.work / "seed.log").write_text(done.stderr, encoding="utf-8")
+    if done.returncode != 0:
+        step.fail("seed_failed", done.stderr[-400:], [s], r"$^")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    seed = json.loads(done.stdout.strip().splitlines()[-1])
+    (mesh.work / "seed.json").write_text(json.dumps(seed, indent=1), encoding="utf-8")
+    step("seeded", secs=round(time.time() - t0),
+         admitted={k: v["admitted"] for k, v in seed["dimensions"].items()},
+         refused={k: v["refused"] for k, v in seed["dimensions"].items() if v["refused"]})
+    t0 = time.time()
+    s.start(health_timeout=600.0)
+    step("seeded_booted", secs=round(time.time() - t0))
+    s.claim("seeded-person")
+    s.announce()
+    s.self_record()
+    s.peer_with(relay)
+    wait_for("seeded to publish its transit route", s.transit_route, 60)
+    step("seeded_claimed", owner=s.owner_key_id)
+
+    def stranger(name: str) -> Node:
+        n = mesh.add(name)
+        n.claim(f"{name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(relay)
+        wait_for(f"{name} to publish its transit route", n.transit_route, 60)
+        return n
+
+    before = _reads(s)
+    p = stranger("stranger1")
+    asking = _person_contact(mesh, args, s, p)
+    step("seeded_requesting", **asking)
+    q = stranger("stranger2")
+    answering = _person_contact(mesh, args, q, s)
+    step("seeded_accepting", **answering)
+    after = _reads(s)
+    moved = {d: [v[i] - before.get(d, [0, 0, 0])[i] for i in range(3)] for d, v in after.items()}
+    busiest = dict(sorted(moved.items(), key=lambda kv: -kv[1][1])[:8])
+    step("reads_on_the_seeded_node", doors_reads_rows_bytes=busiest)
+    (mesh.work / "person-store.json").write_text(
+        json.dumps({"seed": seed, "requesting": asking, "accepting": answering,
+                    "reads": busiest}, indent=1), encoding="utf-8")
+    ok = all(r.get("keyed") is not None for r in (asking, answering))
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
+            "requesting": asking, "accepting": answering}
+
+
 def pair_alice_announced(mesh: Mesh, args: Any) -> Record:
     """`pair_unannounced` with only the room's creator announced."""
     return pair_unannounced(mesh, args, announced=("alice",))
@@ -2175,6 +2298,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "peer_pair": peer_pair,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
+    "person_store": person_store,
     "pair_alice_announced": pair_alice_announced,
     "pair_bob_announced": pair_bob_announced,
     "pair_both_announced": pair_both_announced,
