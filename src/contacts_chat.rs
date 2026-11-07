@@ -7290,7 +7290,44 @@ pub(crate) mod pending_contacts {
         landed
     }
 
+    fn any_hurried() -> bool {
+        let hurried = |since: Instant| since.elapsed() < HURRY_FOR;
+        table()
+            .lock()
+            .expect("pending contacts lock")
+            .values()
+            .any(|p| hurried(p.since))
+            || unresolved()
+                .lock()
+                .expect("unresolved contacts lock")
+                .values()
+                .any(|u| hurried(u.since))
+    }
+
+    /// Looks for a hurried contact's rows, and stops when none is left. Bounded by
+    /// [`HURRY_FOR`], so it isn't a periodic loop: an idle node runs nothing here.
+    fn ensure_watch() {
+        static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        use std::sync::atomic::Ordering::SeqCst;
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if WATCHING.swap(true, SeqCst) {
+            return;
+        }
+        rt.spawn(async {
+            while any_hurried() {
+                tokio::time::sleep(WATCH_EVERY).await;
+                if something_landed().await {
+                    wake().notify_one();
+                }
+            }
+            WATCHING.store(false, SeqCst);
+        });
+    }
+
     fn ensure_pass() {
+        ensure_watch();
         static STARTED: OnceLock<()> = OnceLock::new();
         if STARTED.set(()).is_err() {
             return;
@@ -7303,16 +7340,6 @@ pub(crate) mod pending_contacts {
                         () = wake().notified() => {}
                     }
                     pass().await;
-                }
-            });
-            rt.spawn(async {
-                let mut ticks = tokio::time::interval(WATCH_EVERY);
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    ticks.tick().await;
-                    if something_landed().await {
-                        wake().notify_one();
-                    }
                 }
             });
         }
