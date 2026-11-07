@@ -572,6 +572,45 @@ def _reads(node: Node) -> Dict[str, List[int]]:
     return out
 
 
+def _late_joiner(founder: Node, joiner: Node, history: int, wait: float) -> Dict[str, Any]:
+    """A room with history on the seeded node, then a contact who joins late: how long
+    until the joiner holds the room and reads the backlog. Times from the accept."""
+    got = founder.must("POST", "/v1/communities", {"name": "history"})
+    cid = got.get("community_id") or got.get("id")
+    for i in range(history):
+        founder.say(cid, f"history {i}")
+    founder.must("POST", f"/v1/communities/{cid}/invites", {"key_id": joiner.owner_key_id})
+    rec: Dict[str, Any] = {"room": cid, "history": history}
+    t0 = time.time()
+
+    def invite() -> Optional[str]:
+        rows = joiner.must("GET", "/v1/self/invites").get("invites", [])
+        return next((r["proposal_id"] for r in rows if r.get("group_id") == cid), None)
+
+    try:
+        pid = wait_for("the joiner to list the invitation", invite, wait, every=2)
+    except MeshError:
+        rec["invite_seen"] = None
+        return rec
+    rec["invite_seen"] = round(time.time() - t0, 1)
+    joiner.must("POST", f"/v1/self/invites/{pid}/accept", {})
+    t1 = time.time()
+
+    def read(n: int) -> bool:
+        code, body = joiner.api("GET", f"/v1/chat/{cid}/messages")
+        msgs = body.get("messages", []) if code == 200 and isinstance(body, dict) else []
+        return sum(1 for m in msgs if str(m.get("body", "")).startswith("history ")) >= n
+
+    for name, n in (("read_first", 1), ("read_all", history)):
+        try:
+            wait_for(f"the joiner to read {n} of the backlog", lambda n=n: read(n), wait, every=3)
+            rec[name] = round(time.time() - t1, 1)
+        except MeshError:
+            rec[name] = None
+            break
+    return rec
+
+
 def person_store(mesh: Mesh, args: Any) -> Record:
     """A long-lived person's node meets a stranger, in both directions.
 
@@ -633,14 +672,17 @@ PERSON STORE — a seeded person's node and a stranger, through one relay, both 
     q = stranger("stranger2")
     answering = _person_contact(mesh, args, q, s)
     step("seeded_accepting", **answering)
+    late = _late_joiner(s, q, int(os.environ.get("PERSON_HISTORY", "20")),
+                        float(os.environ.get("PERSON_LATE_WAIT", "900")))
+    step("late_joiner", **late)
     after = _reads(s)
     moved = {d: [v[i] - before.get(d, [0, 0, 0])[i] for i in range(3)] for d, v in after.items()}
     busiest = dict(sorted(moved.items(), key=lambda kv: -kv[1][1])[:8])
     step("reads_on_the_seeded_node", doors_reads_rows_bytes=busiest)
     (mesh.work / "person-store.json").write_text(
         json.dumps({"seed": seed, "requesting": asking, "accepting": answering,
-                    "reads": busiest}, indent=1), encoding="utf-8")
-    ok = all(r.get("keyed") is not None for r in (asking, answering))
+                    "late_joiner": late, "reads": busiest}, indent=1), encoding="utf-8")
+    ok = all(r.get("keyed") is not None for r in (asking, answering)) and late.get("read_all") is not None
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
             "requesting": asking, "accepting": answering}
 
