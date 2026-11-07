@@ -1812,6 +1812,8 @@ async fn invite(
                 room = %room.id(), invitee = %key_id, proposal = %proposal.attestation_id,
                 "communities: invitation sent — the invitee joins only on their own acceptance"
             );
+            // The invitee's KeyPackage lands after this; keep the room driver hurried.
+            crate::contacts_chat::hurry_pair_rooms();
             crate::compose::kick_replication("community invitation sent");
             crate::membership_invites::invited(
                 room.tier.group_scope(),

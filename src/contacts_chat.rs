@@ -6897,7 +6897,7 @@ fn pair_room_wake() -> &'static tokio::sync::Notify {
 /// two nodes (acceptance, widening, KeyPackage, Welcome), and at the driver's 30 s
 /// each one waited out a pass: 37 of the 39 s from accept to first message on the
 /// native mesh. So pass every [`PAIR_ROOM_HURRY_EVERY`] for [`PAIR_ROOM_HURRY_FOR`].
-fn hurry_pair_rooms() {
+pub(crate) fn hurry_pair_rooms() {
     static UNTIL: std::sync::Mutex<Option<tokio::time::Instant>> = std::sync::Mutex::new(None);
     let now = tokio::time::Instant::now();
     let Ok(mut until) = UNTIL.lock() else { return };
@@ -6999,10 +6999,23 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
     let widener =
         ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
     let mut out = Vec::new();
-    for room in rooms
+    let (pairs, groups): (Vec<String>, Vec<String>) = rooms
         .into_iter()
-        .filter(|r| r.starts_with(PAIR_COMMUNITY_PREFIX))
-    {
+        .partition(|r| r.starts_with(PAIR_COMMUNITY_PREFIX));
+    // N-member rooms: the creator adds a member whose KeyPackage arrived, and a
+    // member joins from its Welcome, on a touch. Without this retry a KeyPackage
+    // that lands after the creator's last touch is never added, so the joiner
+    // never installs the room's address and opens nothing sent after it joined.
+    for room in groups {
+        match room_key_room(st, &room, &me, Some(pen.edge_signer())).await {
+            Ok(state) => out.push((room, format!("{state:?}"))),
+            Err(e) => {
+                tracing::debug!(room = %room, error = %e, "room driver: handshake not advanced");
+                out.push((room, format!("error: {e}")));
+            }
+        }
+    }
+    for room in pairs {
         let Ok(Some(record)) = dir.lookup_community(&room).await else {
             continue;
         };
@@ -7042,11 +7055,7 @@ async fn drive_pair_rooms(st: &ChatState) -> Vec<(String, String)> {
             }
         }
     }
-    driver_says(
-        "pass",
-        format!("person={me} seated pair rooms: {out:?}"),
-        false,
-    );
+    driver_says("pass", format!("person={me} seated rooms: {out:?}"), false);
     out
 }
 

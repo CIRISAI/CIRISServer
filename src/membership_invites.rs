@@ -991,6 +991,10 @@ async fn answer(st: InboxState, headers: HeaderMap, proposal_id: String, accept:
             }
         }
     }
+    if accept {
+        // The room's creator adds us on its next touch, and we join from the Welcome.
+        crate::contacts_chat::hurry_pair_rooms();
+    }
     let _ = crate::compose::kick_replication(if accept {
         "membership: invitation accepted"
     } else {
