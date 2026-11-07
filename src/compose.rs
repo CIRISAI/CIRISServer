@@ -5247,6 +5247,7 @@ pub(crate) async fn start_replication_runtime(
         // `self_provider` above reads, so an owner admitted after the claim is
         // in the union without a rebuild. Routes (`TransportDestination`) are
         // never relayed. The closure does no I/O; see `announced_relay`.
+        recognised_seats: Some(edge.recognised_seats()),
         kind_publish_selector: Some(crate::announced_relay::selector(Arc::clone(
             &self_publish_keys,
         ))),
@@ -5593,17 +5594,11 @@ async fn build_edge(
             ciris_edge::transport::link_shaping::DeviceKind::platform_default(),
         ),
         // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first. Forwarding
-        // does not close on load: first contact is the role a loaded relay keeps
-        // (steward 2026-11-06). Closed on tier, a canonical at 70% CPU refused new
-        // forwarded links for 42% of its first 69 minutes on 0.5.245.
+        // does not close on load (steward 2026-11-06): first contact is the role a
+        // loaded relay keeps, and shedding is the levers' job.
         steer_roster_relays: true,
         relay_establish_budget: std::time::Duration::from_secs(5),
-        forward_admission: ciris_edge::transport::relay_tier::ForwardAdmissionConfig {
-            // The rig's baseline reproduces the old behaviour.
-            admit_close_on_tier: cfg!(feature = "test-anchor")
-                && std::env::var_os("CIRIS_TEST_FORWARD_CLOSES_ON_TIER").is_some(),
-            ..Default::default()
-        },
+        forward_admission: Default::default(),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The

@@ -260,7 +260,7 @@ const RATIFIED_REPLICATION_POLICY_HASH: &str =
 /// first contact carries the `key_record_row`. Equal to edge's published
 /// `SERVE_ADVERTISE_POLICY_HASH` at the v43.0.0 tag.
 const RATIFIED_SERVE_ADVERTISE_POLICY_HASH: &str =
-    "83099f472ec6f9d378753239802393915aa7645f3ec25088c0fcf8f1db70b34d";
+    "14aedf2590745dbac03b9f1f859085c43ead0ce0c67e46d10321d88257aded09";
 
 #[test]
 fn persist_replication_policy_hash_pinned() {

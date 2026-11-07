@@ -986,6 +986,7 @@ pub fn round_diagnostics_json(
     let rounds_total: u64 = snap.replication_round_outcomes_total.values().sum();
     let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
     let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
+    let round_no_route = round_outcomes.get("no_route").copied().unwrap_or(0);
     // CIRISEdge#373 (edge v13.6.0): inbound frames dropped because a stalled
     // responder reply parked the coordinator drain. The tripwire — should sit at
     // 0. Non-zero = the trace is being actively LOST (a reply is still stalling
@@ -1070,6 +1071,10 @@ pub fn round_diagnostics_json(
         // round contention under concurrent-peer load, transport-layer ceiling —
         // CIRISEdge#370 / leviculum concurrency).
         "kex missing + round_timed_out >= round_completed — the reverse IdentityOccurrence round is TIMING OUT, not completing. This is canonical round contention under concurrent-peer load (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA; transport-layer ceiling per CIRISEdge#370). Check the canonical's live peer count — advisory/low-legitimacy peers starving real ones"
+    } else if round_no_route > 0 && round_completed == 0 {
+        // Nothing failed: a peer with no live link and no path has nowhere to send
+        // to, and comes back by dialing in.
+        "kex missing + rounds found NO ROUTE (edge v44.1) — these peers have no live link and no path; check whether they dial this node"
     } else if failures_by_class.get("timeout").copied().unwrap_or(0) > 0 {
         "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with replication_plane.round_outcomes.timed_out. NOTE the plane: send_failures_by_class is the APPLICATION plane (announce/durable sends), so it corroborates transport health, it does not measure replication carriage"
     } else if failures_by_class.get("unreachable").copied().unwrap_or(0) > 0 {

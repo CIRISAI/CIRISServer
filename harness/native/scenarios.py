@@ -485,8 +485,7 @@ def relay_rig(mesh: Mesh, args: Any) -> Record:
     RIG_PAIRS pairs (default 10). RIG_SHAPE: a shape file to seed the relay with,
     using RIG_SEEDER (`seed_synthetic_seat`). RIG_KEEP_PAIRS=1 leaves each pair
     running, so later pairs have earlier ones behind the relay. RIG_RELAY_PRESSURE
-    (warning, critical) holds the relay at that level. RIG_FORWARD_CLOSES=1 restores
-    forwarding that closes on tier, the 0.5.245 behaviour. Results go to
+    (warning, critical) holds the relay at that level. Results go to
     <work>/rig.jsonl and every node's log to <work>/<node>/node.log."""
     pairs = int(os.environ.get("RIG_PAIRS", "10"))
     keep = os.environ.get("RIG_KEEP_PAIRS") == "1"
@@ -496,18 +495,15 @@ RELAY RIG — {pairs} pairs through one relay, contact code only, no peering.
   shape: {shape or 'fresh relay'}; earlier pairs {'stay up' if keep else 'stop'}.""")
     relay = mesh.start_canonical()
     pressure = os.environ.get("RIG_RELAY_PRESSURE")
-    closes = os.environ.get("RIG_FORWARD_CLOSES") == "1"
-    if shape or pressure or closes:
+    if shape or pressure:
         relay.stop()
         if shape:
             subprocess.run([os.environ["RIG_SEEDER"], str(relay.home / "data" / "ciris_engine.db"),
                             shape], check=True, capture_output=True, timeout=300)
         if pressure:
             relay.env["CIRIS_TEST_LOAD_PRESSURE"] = pressure
-        if closes:
-            relay.env["CIRIS_TEST_FORWARD_CLOSES_ON_TIER"] = "1"
         relay.start()
-    step("relay_up", url=relay.url, seeded=bool(shape), pressure=pressure, closes=closes)
+    step("relay_up", url=relay.url, seeded=bool(shape), pressure=pressure)
     out = mesh.work / "rig.jsonl"
     rows = []
     for i in range(pairs):
