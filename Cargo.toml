@@ -399,6 +399,10 @@ required-features = ["test-anchor"]
 name = "seed_synthetic_seat"
 required-features = ["test-anchor"]
 
+[[example]]
+name = "seed_person_store"
+required-features = ["test-anchor"]
+
 # PQC realtime-A/V streaming E2E benchmark (CIRISEdge#62 realtime_av profile).
 [[bench]]
 name = "pqc_av_streaming"
