@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -776,7 +777,21 @@ def _owned_canonical_baseline(mesh: Mesh, args: Any, step: "Steps") -> Record:
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "baseline": True}
 
 
-def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True):
+def _serve_input(n: Node) -> Dict[str, Any]:
+    """A seat the ceremony host has never met: its whole record, as a bundle takes it."""
+    r = n.record["record"]
+    roles = ["infra:attest", "infra:serve", "infra:store", "infra:transport"]
+    envelope = {**(r.get("registration_envelope") or {}), "roles": roles,
+                "transport_hints": [{"kind": "ip", "destination": n.transport}]}
+    return {"key_id": r["key_id"], "identity_type": "canonical,node",
+            "pubkey_ed25519_base64": r["pubkey_ed25519_base64"],
+            "pubkey_ml_dsa_65_base64": r["pubkey_ml_dsa_65_base64"],
+            "capability_roles": roles, "registration_envelope": envelope,
+            "attestation_evidence": r.get("attestation_evidence")}
+
+
+def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True,
+                     second_seat: bool = False):
     """Layers 1-2 of the T8 catalogue entry: the 0.5.220 ceremony over the
     routes with THREE software holders, and a canonical rebooted on the minted
     bundle as its baked genesis, claimed and announced. Returns
@@ -801,13 +816,25 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
     mesh.canonical, mesh.nodes["canonical"] = c, c
     c.self_record()
     step("canonical_booted", key_id=c.node_key_id)
+    seat2: Optional[Node] = None
+    if second_seat:
+        seat2 = mesh._node("seat2", {"CIRIS_TEST_BLESS_CANONICAL": "false",
+                                     "CIRIS_DEVICE_CLASS": "server"})
+        seat2.configure(dial=[])
+        seat2.start()
+        mesh.nodes["seat2"] = seat2
+        seat2.self_record()
+        step("second_seat_booted", key_id=seat2.node_key_id)
 
     # 2. The ceremony, over the routes.
     planned = c.must("POST", "/v1/accord/final-genesis/plan", {
         # Where peers dial it — as the baked canonical carries it.
         "serve_nodes": [{"key_id": c.node_key_id,
-                         "transport_hints": [{"kind": "ip", "destination": c.transport}]}],
+                         "transport_hints": [{"kind": "ip", "destination": c.transport}]}]
+                       + ([_serve_input(seat2)] if seat2 else []),
         "recovery_keys": anchor["recovery_keys"],
+        "serve_transport_destinations": ([wait_for("seat 2's transit route", seat2.transit_route, 60)]
+                                         if seat2 else []),
         "clock_checked": True})
     step("planned", complete=planned.get("complete"), owed=planned.get("owed"))
     for rnd in (1, 2):
@@ -839,6 +866,17 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
         f.unlink()
     c.configure(dial=[])  # the listen address lives in the database's config:*
     c.start()
+    if seat2:
+        seat2.env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
+        seat2.stop()
+        for f in (seat2.home / "data").glob("ciris_engine.db*"):
+            f.unlink()
+        seat2.configure(dial=[c.transport])
+        seat2.start()
+        seat2.claim("operator-two")
+        if announce:
+            seat2.announce()
+        seat2.self_record()
     step("canonical_rebooted_on_bundle",
          evidence=c.grep(r"booting on a ceremony-minted genesis bundle")[-1:])
     # The production canonical is OWNED (the operator's fedID) — an unowned
@@ -850,6 +888,71 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
     step("canonical_claimed", owner=c.owner_key_id)
     mesh.accord_holders = anchor["holders"]
     return c, anchor, done
+
+
+def _held_rows(n: Node, author: str, dimension: str) -> int:
+    """How many rows of `dimension` by `author` this node's store holds. Read-only."""
+    db = sqlite3.connect(f"file:{n.home / 'data' / 'ciris_engine.db'}?mode=ro", uri=True, timeout=5)
+    try:
+        return db.execute(
+            "select count(*) from federation_attestations where attesting_key_id = ? "
+            "and json_extract(attestation_envelope, '$.dimension') = ?",
+            (author, dimension)).fetchone()[0]
+    finally:
+        db.close()
+
+
+def two_seats(mesh: Mesh, args: Any) -> Record:
+    """CC 5.2: two serve seats walk the commons between themselves, and a seat offers
+    a person's node only what is required or appropriate.
+
+    Not a witness for `recognised_seats`: both seats are in the bundle, so the
+    directory fallback finds them and the scenario passes with it unset. It proves
+    the walk on one bundle, nothing about a seat the directory doesn't name. The
+    second assertion also passes on edge v44.0.0, so it is a floor, not a witness."""
+    step = Steps("""
+TWO SEATS — two seats on one bundle, a person behind each.
+  proves: (1) a row a person published at seat 1 reaches seat 2 by the commons walk;
+          (2) a person at seat 2 who never asked is not handed it.""")
+    c, _, _ = mint_accord_root(mesh, args, step, second_seat=True)
+    seat2 = mesh.nodes["seat2"]
+    c.peer_with(seat2)
+    seat2.peer_with(c)
+    step("seats_peered")
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    a.self_record()
+    a.peer_with(c)
+    c.peer_with(a)
+    b = mesh.add("bob", canonical=False, dial=[seat2])
+    b.claim("bob-person")
+    b.announce()
+    b.self_record()
+    b.peer_with(seat2)
+    seat2.peer_with(b)
+    step("people_up", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
+    # A key, an owner-binding and an acceptance are the announced set everyone may
+    # hold. A consent row is commons between seats and appropriate to no stranger.
+    def holds_consent(n: Node) -> bool:
+        return _held_rows(n, a.owner_key_id, "consent:replication:v1") > 0
+
+    try:
+        wait_for("seat 2 to hold alice's consent row", lambda: holds_consent(seat2),
+                 args.owner_wait, every=2)
+    except MeshError:
+        step.fail("commons_walk_stopped", "seats do not walk the commons between themselves",
+                  [c, seat2], r"recognised|seat|withheld")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("commons_crossed_seats")
+    time.sleep(90)
+    unasked = holds_consent(b)
+    step("person_left_alone", bob_holds_alice_consent=unasked)
+    if unasked:
+        step.fail("person_handed_the_commons", "a seat offered a person's node a row that is "
+                  "neither required nor appropriate", [seat2, b], r"SEND SET|offered")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
 
 
 def mint_accord_mesh(mesh: Mesh, args: Any, step: "Steps"):
@@ -2175,6 +2278,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "peer_pair": peer_pair,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
+    "two_seats": two_seats,
     "pair_alice_announced": pair_alice_announced,
     "pair_bob_announced": pair_bob_announced,
     "pair_both_announced": pair_both_announced,
