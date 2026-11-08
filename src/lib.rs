@@ -77,6 +77,7 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 pub mod attestation_reads;
+pub mod qa_call;
 
 /// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
 /// Key and IdentityOccurrence rows of every announced device and its owner,

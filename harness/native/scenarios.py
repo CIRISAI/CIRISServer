@@ -783,6 +783,69 @@ PAIR, UNANNOUNCED — two people's nodes, no canonical, neither owner announced 
     return {"verdict": "PASS", "steps": step.log}
 
 
+def av_call(mesh: Mesh, args: Any) -> Record:
+    """Two people's nodes on the canonical, a keyed pair room, then a call over the
+    QA call routes (CIRIS_QA_CALLS=1): both join, both stream generated frames, both
+    read stats, both leave. Env AV_RATE_HZ (30), AV_FRAME_BYTES (600), AV_SECONDS (10)."""
+    rate = int(os.environ.get("AV_RATE_HZ", "30"))
+    size = int(os.environ.get("AV_FRAME_BYTES", "600"))
+    secs = int(os.environ.get("AV_SECONDS", "10"))
+    step = Steps(f"""
+AV CALL — a pair room's call over the QA call routes (0.5.245).
+  proves:  join on both sides → each publishes {rate} Hz x {size} B for {secs} s → each hears
+           the other's stream (>= 80% of what the other sent) → both leave cleanly.""")
+    os.environ["CIRIS_QA_CALLS"] = "1"
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    t0 = time.time()
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    step("room_keyed", room=room, keyed_s=round(time.time() - t0, 1))
+    for n in (a, b):
+        st, got = n.api("POST", "/v1/qa/call/start", {"room": room})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "join_call refused", [a, b],
+                      r"qa call|join_call|CallError", status=st, body=got)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        step(f"joined:{n.name}", legs=got.get("legs"), budget=got.get("frame_budget_bytes"))
+    time.sleep(3)
+    for n in (a, b):
+        n.must("POST", "/v1/qa/call/stream",
+               {"room": room, "rate_hz": rate, "frame_bytes": size, "seconds": secs})
+    time.sleep(secs + 4)
+    stats = {}
+    for n in (a, b):
+        _, stats[n.name] = n.api("POST", "/v1/qa/call/stop", {"room": room})
+        s = stats[n.name]
+        step(f"stats:{n.name}", sent=s.get("sent"), received=s.get("received"),
+             call=s.get("call"), summary=s.get("summary"), events=s.get("events"))
+    ok = True
+    for me, other in (("alice", "bob"), ("bob", "alice")):
+        sent = (stats[other].get("sent") or {}).get("frames") or 0
+        got = (stats[me].get("received") or {}).get("frames") or 0
+        ratio = got / sent if sent else 0.0
+        step(f"heard:{me}<-{other}", sent=sent, received=got, ratio=round(ratio, 3))
+        ok = ok and sent > 0 and ratio >= 0.8
+    if not ok:
+        step.fail("stream_not_heard", "each side must hear >= 80% of the other's frames", [a, b],
+                  r"qa call|av_call|call|stream")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -2457,6 +2520,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "chat": chat,
     "corpus": corpus,
     "peer_pair": peer_pair,
+    "av_call": av_call,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
     "two_seats": two_seats,

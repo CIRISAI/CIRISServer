@@ -1992,6 +1992,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&edge),
                     ))
+                    // QA call routes (0.5.245): mounted only under
+                    // CIRIS_QA_CALLS=1, owner-gated — the cross-NAT A/V step's
+                    // HTTP door onto edge's call API.
+                    .merge(crate::qa_call::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&edge),
+                    ))
                     // The receipt's canonical door (CIRISServer#369's other half):
                     // a producer asks what this node holds for one agent hash.
                     .merge(crate::trace_receipt::router(Arc::clone(&engine)))
@@ -5403,6 +5410,44 @@ pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
     });
 }
 
+/// The device this node reports to link shaping (CC 5.4.3). An operator's
+/// `CIRIS_DEVICE_KIND` (`server`, `home`, `phone`) wins; otherwise the canonical
+/// is a server, and every other node is its platform's default (a home node on
+/// a desktop OS, a phone on Android/iOS). Steward 2026-11-08: servers on, homes
+/// and phones off.
+async fn shaping_device(
+    engine: &Arc<Engine>,
+    cfg: &ServerConfig,
+) -> ciris_edge::transport::link_shaping::DeviceState {
+    use ciris_edge::transport::link_shaping::{DeviceKind, DeviceState};
+    let chosen = std::env::var("CIRIS_DEVICE_KIND").ok();
+    let (kind, why) = match chosen.as_deref().map(str::trim).and_then(DeviceKind::parse) {
+        Some(k) => (k, "CIRIS_DEVICE_KIND"),
+        None => {
+            let me = crate::node_key::wire_identity().unwrap_or(&cfg.key_id);
+            if engine.is_canonical(me).await.unwrap_or(false) {
+                (DeviceKind::Server, "this node is the canonical")
+            } else {
+                (DeviceKind::platform_default(), "platform default")
+            }
+        }
+    };
+    if let Some(v) = chosen
+        .as_deref()
+        .filter(|v| DeviceKind::parse(v.trim()).is_none())
+    {
+        tracing::warn!(value = %v, "CIRIS_DEVICE_KIND is not server/home/phone; ignored");
+    }
+    let device = DeviceState::of(kind);
+    let policy = ciris_edge::transport::link_shaping::ShapingPolicy::for_device(&device);
+    tracing::info!(
+        kind = ?kind, why,
+        class = ?policy.class, scope = ?policy.scope, bytes_per_s = policy.bytes_per_s,
+        "link shaping: device fleet default"
+    );
+    device
+}
+
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -5472,6 +5517,9 @@ async fn build_edge(
     // (a UDP socket is a listener too).
     let client_only = client_only_interfaces(&cfg.bootstrap_peers);
     let serves_facilitator = transport_node && client_only.is_none();
+    // CC 5.4.3 (edge v44.1): link shaping follows the device's fleet default
+    // (steward 2026-11-08: servers on, homes and phones off).
+    let device = shaping_device(engine, cfg).await;
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
@@ -5571,12 +5619,11 @@ async fn build_edge(
             cfg.listen_addr.port(),
             &cfg.bootstrap_peers,
         ),
-        // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
-        // no link shaped — so a re-pin does not move this node's posture.
-        shaping: Default::default(),
-        device: ciris_edge::transport::link_shaping::DeviceState::of(
-            ciris_edge::transport::link_shaping::DeviceKind::platform_default(),
-        ),
+        // CC 5.4.3 (edge v44.1): link shaping at the device's fleet default
+        // (`shaping_device`): a server shapes every identity link, a home node
+        // only its layer links, a phone per its network and opt-ins.
+        shaping: ciris_edge::transport::link_shaping::ShapingPolicy::for_device(&device),
+        device,
         // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first. Forwarding
         // does not close on load (steward 2026-11-06): first contact is the role a
         // loaded relay keeps, and shedding is the levers' job.
@@ -5700,6 +5747,15 @@ async fn build_edge(
         // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
         // populate the RET-transport role of GET /v1/identity.
         .reticulum_transport(transport)
+        // CIRISEdge#805 item 5: the room groups a call keys from (edge's
+        // `join_call`). The same durable MLS store the chat driver opens for
+        // this node; read only when a call joins.
+        .room_groups(Arc::new(ciris_edge::mls::CohortGroups::new(
+            crate::mls_state::store_for(crate::node_key::wire_identity().unwrap_or(&cfg.key_id)),
+            crate::node_key::wire_identity()
+                .unwrap_or(&cfg.key_id)
+                .to_owned(),
+        )))
         // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
         // row pointing at bytes this node has asks for them with a
         // `BlobChunkFetch`; without a source wired here edge drops it —
