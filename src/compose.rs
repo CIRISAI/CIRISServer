@@ -4451,7 +4451,7 @@ async fn setup_peer_replication(
 /// `list_revocations`, one permit per member read). Correctness wins until edge
 /// offers a per-kind cadence or kick-only rounds; the operator's relief stays
 /// the brake.
-pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] = {
+pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 7] = {
     use ciris_edge::replication::EnvelopeKind as K;
     [
         // capacity:* / trace out, health:liveness in — the one Consentable
@@ -4473,36 +4473,6 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
         // for this kind the signed TD is published locally but never
         // transferred (the item-2 dead end).
         K::TransportDestination,
-        // THE COMMUNITY PLANE — the roster. A `cohort_scope: community` row is
-        // readable only by members, and the receiving node decides membership
-        // from ITS roster. Without this round the far side has no community to
-        // be a member OF, and one-sided initiation cannot work at all.
-        K::Community,
-        // Its REMOVAL primitive, wired with it deliberately: the roster is
-        // append-only, effective membership is `admitted AND NOT revoked`, so
-        // admissions without revocations replicate a roster that can only GROW
-        // — a removed member keeps passing `require_member` on the far side.
-        K::CommunityMembershipRevocation,
-        // ── CIRISServer#646 (0.5.218) — planes the server wrote and never
-        //    routed. Appended so the six above keep their order. ──
-        //
-        // persist v48 (#860): the roster's APPEND plane, the revocation's
-        // mirror. Adding a member to a room writes one (`communities.rs`,
-        // `put_community_membership_widening`); without this round a member
-        // added after first contact exists only on the node that added them,
-        // and the fold diverges per node (the `CommunityRosterFork` class the
-        // plane replaced).
-        K::CommunityMembershipWidening,
-        // The household roster (`family_api.rs` → `put_family`). Without it a
-        // household created on one device never reaches another, so a
-        // `cohort_scope: family` row sealed there has no family to be a member
-        // of anywhere else (CIRISServer#647's rung).
-        K::Family,
-        // A household member removed / leaving / a family dissolved
-        // (`family_api.rs` → `put_family_membership_revocation`). Same argument
-        // as `CommunityMembershipRevocation`: without it a removed member stays
-        // a member on every peer.
-        K::FamilyMembershipRevocation,
         // A device released from the owner's self (`auth/occurrence.rs` →
         // `put_identity_occurrence_revocation`). Without it a released device
         // is still one of the owner's occurrences on every OTHER device, and
@@ -4523,20 +4493,6 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
         // EVALUATING node's directory, so the proof must reach every node that
         // holds the room. Edge advertises it at `cohort` only.
         K::LocationProof,
-        // ── persist v49.0.0 / edge v32 (0.5.218) — kinds 18 and 19. ──
-        //
-        // #910: the HOUSEHOLD roster's append plane, the family twin of
-        // `CommunityMembershipWidening`. A member added after a family was
-        // created now travels as its own signed row; without this round the
-        // grown roster exists only on the node that added them, and a device
-        // of that member never sees the household (the devices ladder's
-        // `family_on_b` rung, and the reason it was XFAIL on #910).
-        K::FamilyMembershipWidening,
-        // #912: CC 2 `listed` — a member's OWN signed choice to appear in a
-        // room's enumerable roster. It is the member's row about themselves;
-        // without this round their choice stays on their node and every other
-        // member renders a roster that disagrees with it.
-        K::CommunityMembershipListing,
     ]
 };
 
@@ -4550,7 +4506,7 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
 /// Read only by that gate: it is a decision RECORD, which is why it lives here
 /// beside the list it partitions rather than inside the test.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 5] = {
+pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 12] = {
     use ciris_edge::replication::EnvelopeKind as K;
     [
         (
@@ -4587,6 +4543,34 @@ pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, 
             "operational-data plane (CIRISRegistry): as Organization, no \
              `OperationalProviders`, so every delivered row is refused terminally, and the \
              server writes none",
+        ),
+        (
+            K::Community,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipRevocation,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipWidening,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::Family,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::FamilyMembershipRevocation,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::FamilyMembershipWidening,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipListing,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
         ),
     ]
 };
@@ -6224,6 +6208,20 @@ mod ret_identity_tests {
             "an existing identity stands"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod routed_kinds_tests {
+    /// persist v61 retired these planes' framed carriage; their rows ride the
+    /// Attestation plane. Routing one does nothing but log on every reconcile.
+    #[test]
+    fn no_routed_kind_is_a_retired_plane() {
+        let retired: Vec<_> = super::REPLICATED_KINDS
+            .iter()
+            .filter(|k| k.is_retired_plane())
+            .collect();
+        assert!(retired.is_empty(), "routed but retired: {retired:?}");
     }
 }
 

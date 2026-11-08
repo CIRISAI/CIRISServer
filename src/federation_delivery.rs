@@ -2320,23 +2320,11 @@ mod tests {
             EnvelopeKind::IdentityOccurrence,
             // The PQ transport-attribution plane (CIRISEdge#406).
             EnvelopeKind::TransportDestination,
-            // The chat roster — without it a `cohort_scope: community` row
-            // arrives somewhere with no community to be a member of.
-            EnvelopeKind::Community,
-            // And its removals: the roster is append-only, so admissions
-            // without revocations replicate a membership that can only grow.
-            EnvelopeKind::CommunityMembershipRevocation,
-            // CIRISServer#646 — the planes the server wrote and never routed.
-            EnvelopeKind::CommunityMembershipWidening,
-            EnvelopeKind::Family,
-            EnvelopeKind::FamilyMembershipRevocation,
+            // Roster and family planes are retired (persist v61): their rows ride
+            // the Attestation plane, so they are not routed.
             EnvelopeKind::IdentityOccurrenceRevocation,
             EnvelopeKind::Revocation,
             EnvelopeKind::LocationProof,
-            // persist v49.0.0 — the household roster's append plane (#910) and
-            // a member's own `listed` choice (#912).
-            EnvelopeKind::FamilyMembershipWidening,
-            EnvelopeKind::CommunityMembershipListing,
         ];
         assert_eq!(peers.len(), desired.len() * expected.len());
         for (target_index, target) in desired.iter().enumerate() {
@@ -2433,10 +2421,9 @@ mod tests {
         // The kinds this server WRITES on a roster / device / key change are
         // named here on their own, so shrinking the routed list by moving one
         // of them into the exclusions is a visible edit to this test too.
+        // Roster and family rows ride the Attestation plane since persist v61.
         for must in [
-            EnvelopeKind::CommunityMembershipWidening,
-            EnvelopeKind::Family,
-            EnvelopeKind::FamilyMembershipRevocation,
+            EnvelopeKind::Attestation,
             EnvelopeKind::IdentityOccurrenceRevocation,
             EnvelopeKind::Revocation,
         ] {
