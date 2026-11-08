@@ -390,6 +390,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
             "state": format!("{:?}", call.state()),
             "service_tier": format!("{:?}", call.service_tier()),
             "legs": call.legs(),
+            "frame_budget_bytes": call.chunk_plaintext_budget(),
             "streams": streams,
             "reorder": {
                 "released": reorder.released,
