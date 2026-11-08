@@ -436,6 +436,11 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     // macro's recursion limit.
     let unread = serde_json::json!({
         "log_dedup_suppressed_total": crate::log_dedup::suppressed_snapshot(),
+        // edge v44.1: the A/V plane's counters (`av_sent_timed`,
+        // `av_frame_expired_late`, `av_frame_stale_dropped`, …) and the link
+        // stall guard's (`link_stall_zero_landed_send`, `link_stall_closed`).
+        "av_plane": bundle.av_plane,
+        "link_stall": bundle.link_stall,
         "inbound_dropped_low_trust": bundle.inbound_dropped_low_trust,
         "replication_inbound_backpressure_drops_by_role":
                     bundle.replication_inbound_backpressure_drops_by_role,

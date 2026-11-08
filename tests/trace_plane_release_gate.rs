@@ -1325,6 +1325,8 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "apply_refusals_by_class",
         "removal_delivery",
         "link_pool_links",
+        "av_plane",
+        "link_stall",
         "link_pool_max_per_destination",
         "link_pool_closed_by_reason",
         "replication_round_duration_seconds",
