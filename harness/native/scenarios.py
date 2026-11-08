@@ -821,7 +821,22 @@ AV CALL — a pair room's call over the QA call routes (0.5.245).
                       r"qa call|join_call|CallError", status=st, body=got)
             return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
         step(f"joined:{n.name}", legs=got.get("legs"), budget=got.get("frame_budget_bytes"))
-    time.sleep(3)
+    # The peer is in the call once this side has a leg to it; the frame budget
+    # is known only then (the smallest leg's Channel limit less chunk overhead).
+    budgets = {}
+    for n in (a, b):
+        def leg_up(n=n) -> Optional[int]:
+            _, s = n.api("GET", f"/v1/qa/call/stats?room={room}")
+            c = (s or {}).get("call") or {}
+            return c.get("frame_budget_bytes") if c.get("legs") else None
+        try:
+            budgets[n.name] = wait_for(f"{n.name}'s call leg", leg_up, 60, every=1)
+        except MeshError:
+            step.fail(f"no_leg:{n.name}", "no call leg to the peer within 60 s", [a, b],
+                      r"call leg|dial failed|av_call")
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    size = min([size] + list(budgets.values()))
+    step("legs_up", budgets=budgets, frame_bytes=size)
     for n in (a, b):
         n.must("POST", "/v1/qa/call/stream",
                {"room": room, "rate_hz": rate, "frame_bytes": size, "seconds": secs})
