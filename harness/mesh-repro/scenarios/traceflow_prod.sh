@@ -56,11 +56,48 @@ stage_converge() { harness_log_count agent "converged to [1-9][0-9]* consent pee
 # RECEIVER's line names the sender, the plane and the count, so it is the
 # direct evidence; the counter stays so a future edge that counts pushes still
 # reads here.
+#
+# Edge v44 moved the traces off the push: the canonical now PULLS them in a round
+# it asked for, and a solicited Deliver logs nothing, so the receiver's line went
+# quiet with arrive=15 beside it (PR #866). The sender's own count is the third
+# reading, from the metrics snapshot (GET /v1/federation/metrics,
+# `replication_envelopes_served_total`, the Attestation plane), which needs no log
+# line at all — the selffiles lesson (0.5.218): a log grep for a counter edge
+# never logs can only print nothing.
+_tfp_served_attestation() {
+  compose exec -T agent python - "${TFP_OWNER_TOKEN:-}" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+req = urllib.request.Request("http://127.0.0.1:4243/v1/federation/metrics",
+    headers={"Authorization": "Bearer " + sys.argv[1]} if sys.argv[1] else {})
+try:
+    doc = json.loads(urllib.request.urlopen(req, timeout=10).read().decode() or "{}")
+except Exception:
+    print(0); sys.exit(0)
+def find(o):
+    if isinstance(o, dict):
+        if isinstance(o.get("replication_envelopes_served_total"), dict):
+            return o["replication_envelopes_served_total"]
+        for v in o.values():
+            r = find(v)
+            if r is not None:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find(v)
+            if r is not None:
+                return r
+    return None
+served = find(doc) or {}
+print(sum(int(v) for k, v in served.items() if "attestation" in k.lower()))
+PY
+}
 stage_ship() {
-  local sent recv
+  local sent recv pulled
   sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]')"
   recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris-agent[^"]*" envelopes=[1-9]')"
-  echo $(( ${sent:-0} + ${recv:-0} ))
+  pulled="$(_tfp_served_attestation)"
+  [[ "$pulled" =~ ^[0-9]+$ ]] || pulled=0
+  echo $(( ${sent:-0} + ${recv:-0} + pulled ))
 }
 
 # ── the production-shape assertions, before any rung is read ────────────────
@@ -115,6 +152,8 @@ except Exception: print("")')"
 try: print(json.load(sys.stdin).get("identity_key_id") or "")
 except Exception: print("")')"
   [ -z "$token" ] && { echo "  ✗ claim yielded no session:"; tail -3 /tmp/tfp-claim.err | sed 's/^/      /'; return 1; }
+  # The ship rung reads the agent's metrics snapshot with the owner's session.
+  TFP_OWNER_TOKEN="$token"
   echo "  ✓ claimed — owner=$owner"
   # 5. Announce (the owner re-signs the binding at federation scope — the copy a peer may hold).
   compose exec -T "$agent_svc" python - "$token" <<'PY' 2>/dev/null | sed 's/^/  /'
