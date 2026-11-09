@@ -1203,7 +1203,7 @@ async fn bound_own_key_for(
                 return Some(k);
             }
             // …or a live roster key of one of them: the fedID's other keypair
-            // is the fedID (CC 3.3.6.3, tracked: CIRISServer#793).
+            // is the fedID (CC 3.3.6.3, history: CIRISServer#793).
             for st in &stewards {
                 if crate::auth::verify::signer_acts_for(engine, author, st).await {
                     return Some(k);
@@ -1439,7 +1439,7 @@ pub async fn owner_consent_pen(
         // — its registered id — for persist's steward gate to resolve to the
         // fedID at the row's asserted_at (CIRISPersist#1099). The owner capsule
         // has accepted a roster key since CIRISServer#391; this was the one
-        // owner door still asking for the genesis key (tracked: CIRISServer#793).
+        // owner door still asking for the genesis key (history: CIRISServer#793).
         Some(signer)
             if crate::auth::verify::signer_acts_for(engine, signer.key_id(), &owner).await =>
         {
@@ -1448,7 +1448,7 @@ pub async fn owner_consent_pen(
                 roster_key_id = %signer.key_id(),
                 node_key_id = %node_key_id,
                 "owner act signed by a live ROSTER KEY of the owner's fedID — CC 3.3.6.3 \
-                 (tracked: CIRISServer#793)"
+                 (history: CIRISServer#793)"
             );
             Ok(Some(ConsentAuthor {
                 key_id: signer.key_id().to_owned(),

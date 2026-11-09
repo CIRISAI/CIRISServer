@@ -576,7 +576,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     //    `CLM-self-roster-key-id`) — the whole fedID as the CC 2.6.8 label, so
     //    the alias IS the fedID and `derive_key_id` appends the key's own
     //    fingerprint. Never a device name: the device name (`label`) belongs to
-    //    the NODE key, and `device-<hex>-<fp>` is refused (tracked: CIRISServer#793).
+    //    the NODE key, and `device-<hex>-<fp>` is refused (history: CIRISServer#793).
     let label = req.label.unwrap_or_else(|| "new device".into());
     let alias = fed_id.clone();
     let occurrence_dir = st.identity_dir.join("user");
@@ -1424,7 +1424,7 @@ async fn owner_code(st: &AddDeviceState, owner: &str) -> Result<String, String> 
 }
 
 /// **Is `record` a roster key of `fed_id`, named the way CC 3.3.6.3 names one?**
-/// (`CLM-self-roster-key-id`, tracked: CIRISServer#793) A roster key other than
+/// (`CLM-self-roster-key-id`, history: CIRISServer#793) A roster key other than
 /// the genesis key is `<fedID>-<fingerprint of its own Ed25519 key>`: the whole
 /// fedID string as the CC 2.6.8 label, then the key's own fingerprint. A device
 /// name (`device-<hex>-<fp>`, what 0.5.231 minted) or a fedID label with a

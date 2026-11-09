@@ -316,7 +316,7 @@ fn undo_import_pin_for_another_home(home: &Path) {
         import_home = %scanned.display(),
         served_home = %home.display(),
         "keyring tier: the import-time pin was made for another home — undone; the served \
-         home decides its own tier (tracked: CIRISServer#807)"
+         home decides its own tier (history: CIRISServer#807)"
     );
     *pin = None;
 }

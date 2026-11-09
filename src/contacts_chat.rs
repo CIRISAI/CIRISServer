@@ -7703,7 +7703,7 @@ pub(crate) mod pending_contacts {
                      peer for their records every pass, and the code's nodes' keys first. Where to look: \
                      (1) pulled_from=[] → no peer to ask; code_node_keys_missing non-empty → the \
                      binding cannot be admitted until those keys land; (2) on the peer, `subject Pull refused … not publicly pullable` means \
-                     it will not serve their owner-binding on request (tracked: CIRISEdge#907); \
+                     it will not serve their owner-binding on request (history: CIRISEdge#907); \
                      (3) on the peer, is there a live federation `delegates_to` from this key_id to \
                      a node at all — if not, they have not announced"
                 );
