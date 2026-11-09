@@ -79,8 +79,13 @@ impl Mode {
     }
 }
 
-/// Which composed slices are active. **0.1 ships lens-only**; registry (0.6) and
-/// node (1.0) fold in as their co-bumps land (CIRISRegistry#76 / CIRISNodeCore#38).
+/// Which composed slices the EMBEDDER allows. The lens slice is always composed;
+/// the node slice (1.0) folds in with CIRISNodeCore#38.
+///
+/// `registry` is an opt-OUT, never the authorization: the accord confers the
+/// registry slice (`src/registry_slice.rs`), and this flag can only keep a
+/// conferred node from serving it. It defaults to `true`, because a default of
+/// `false` made the conferral unreachable on every node.
 #[derive(Debug, Clone, Copy)]
 pub struct Slices {
     pub lens: bool,
@@ -92,7 +97,7 @@ impl Default for Slices {
     fn default() -> Self {
         Slices {
             lens: true,
-            registry: false,
+            registry: true,
             node: false,
         }
     }

@@ -479,6 +479,22 @@ pub mod radio;
 /// the runtime — it writes CEG and nudges this loop. Public so the integration
 /// test (`tests/replication_reconcile.rs`) can drive `reconcile_once` directly.
 pub mod receive_axis;
+/// The substrate **safety foundation** (CIRISServer#20) — moderation +
+/// child-safety as first-class fabric primitives, built AHEAD of content
+/// features: age-assurance + the protective age-gate, moderation as a delegable
+/// DUTY (composing persist v9.0.0's §11.10 admit-iff gate), the CC 4.5.4
+/// named-moderator existence invariant (fail-secure + merit auto-promotion), and
+/// the opt-in per-group watchlist config + duty/authority gate + publish-seam
+/// hook (the matcher defers to the NodeCore content seam). Public so the
+/// integration test (`tests/safety.rs`) can drive the modules + routers directly.
+/// The capacity score→emit pipeline — a periodic task that derives per-agent
+/// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
+/// (CIRISServer federation Round 1, deliverable 2). Public so the integration
+/// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
+/// CIRISServer#537 — the registry slice's role gate: conferred by the accord
+/// (`infra:attest` from a root this node accepts), declinable by the owner,
+/// never configured on.
+pub mod registry_slice;
 pub mod replication_reconcile;
 /// The **retention / eviction control loop** (CIRISServer#348) — the periodic
 /// pass that enforces the node's `RetentionPolicy` against the local store.
@@ -500,18 +516,6 @@ pub mod scrub;
 /// acts or signs as this node asks [`self_identity::resolve`] instead of taking
 /// a `node_key_id` argument a caller could disagree with.
 pub mod self_identity;
-/// The substrate **safety foundation** (CIRISServer#20) — moderation +
-/// child-safety as first-class fabric primitives, built AHEAD of content
-/// features: age-assurance + the protective age-gate, moderation as a delegable
-/// DUTY (composing persist v9.0.0's §11.10 admit-iff gate), the CC 4.5.4
-/// named-moderator existence invariant (fail-secure + merit auto-promotion), and
-/// the opt-in per-group watchlist config + duty/authority gate + publish-seam
-/// hook (the matcher defers to the NodeCore content seam). Public so the
-/// integration test (`tests/safety.rs`) can drive the modules + routers directly.
-/// The capacity score→emit pipeline — a periodic task that derives per-agent
-/// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
-/// (CIRISServer federation Round 1, deliverable 2). Public so the integration
-/// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
 pub mod sign_object;
 pub mod system_data;
 pub mod telemetry_logs;

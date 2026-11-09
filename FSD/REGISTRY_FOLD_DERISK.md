@@ -8,29 +8,58 @@
 > Companion: [`MISSION.md`](../MISSION.md) §1.5/§3, [`FSD/SERVER_1.0_PLAN.md`](SERVER_1.0_PLAN.md),
 > [`FSD/LENS_TO_SERVER_MIGRATION.md`](LENS_TO_SERVER_MIGRATION.md), CIRISServer#1.
 
-## 1. Steward key → m-of-N founder-quorum (the trust-root swap)
+## 1. Steward key → the accord quorum (the trust-root swap)
 
-The shared vaulted steward key (registry-us + registry-eu held one secret — the
-AV-14 single point of compromise) is **retired**, replaced by an **entrenched
-2-of-3 founder-quorum** over the three `ciris-canonical` per-node keys. A node
-gains a vote, never a verdict (MISSION §1.5; CEG §8.1.13.1.1 founder-subset eval).
-
-**Built now: `src/quorum.rs`** (shared; the registry slice uses it at 0.5):
-- `canonical_community(founders)` → the `InfrastructureCommunity` trust root
-  (`community_key_id: "ciris-canonical"`, `cohort_subkind: infrastructure`,
-  `admission_quorum_basis: founders`, `consensus_protocol: "quorum:2/3"`,
-  `consensus_protocol_entrenched: true`) — `is_trust_root_conformant()` by
-  construction.
-- `verify_canonical_quorum(community, bytes, sigs)` → `QuorumPolicy::parse` +
-  `verify_quorum_policy` (verify v5.4.0 `threshold` / `infrastructure_community`):
-  strict-majority `2M>N`, declared N == founder roster, non-founder sigs don't
-  count (anti-Sybil), hybrid Ed25519 + ML-DSA-65.
-- `community_signing_bytes()` — domain-separated, member-order-independent.
-
-Consumers re-root their pin from the steward fingerprint to `community_key_id:
-"ciris-canonical"` (lens already pins the constant). `/v1/steward-key` becomes the
-community/founder-roster publish. **Break-glass stays the 3 human accord keys
-(CEG §9), hardware-rooted, NEVER on the fabric nodes — verifier-only.**
+> **Re-cut 2026-11-09 (CIRISServer#537) under the steward's ruling of
+> 2026-09-22: infrastructure does not vote.** Only the accord family is a
+> quorum; a canonical node's OWNER sets its configuration. The founder-quorum
+> reading below (kept, struck, as the record of what was built and why it was
+> retired) gave each `ciris-canonical` node key a vote. Nodes have no vote.
+>
+> **What holds now:**
+>
+> - The trust-root swap is steward-key → **accord** quorum. The authority is
+>   `humanity-accord`'s entrenched `quorum:M/N` over the holder roster
+>   (`accord.rs::canonical_op_quorum_m` → `family_quorum_m`); the
+>   `ciris-canonical` community is the conferred ROSTER the accord admits
+>   serve nodes into, and its founders are the accord holders (CC 8.1.1,
+>   rc10; `final_genesis.rs`). It is an audience, not a voter.
+> - `src/quorum.rs` (the node-founder quorum) was deleted in 0.5.233 (#803)
+>   on the "founders are the holders" ruling; it had no production callers.
+> - A node serves the registry slice because the accord conferred
+>   `infra:attest` on it — `src/registry_slice.rs` walks
+>   `capability_roots_to_trusted_root(dir, me, me, infra:attest)` — never
+>   because an operator set a flag. The owner's signed `config:slices.registry`
+>   can only DECLINE a conferred slice.
+> - `/v1/steward-key` serves the portable trust root (the baked
+>   `GenesisBundle`, self-authenticating), not a node's own key and not a
+>   founder roster (CIRISRegistry#133).
+> - The Operational vs Structural quorum for `add-canonical` (#441) is a
+>   question over the **accord holders**, open with the steward.
+>
+> **Retired reading (2026-06-14, not in force):**
+>
+> The shared vaulted steward key (registry-us + registry-eu held one secret — the
+> AV-14 single point of compromise) is **retired**, replaced by an **entrenched
+> 2-of-3 founder-quorum** over the three `ciris-canonical` per-node keys. A node
+> gains a vote, never a verdict (MISSION §1.5; CEG §8.1.13.1.1 founder-subset eval).
+>
+> **Built now: `src/quorum.rs`** (shared; the registry slice uses it at 0.5):
+> - `canonical_community(founders)` → the `InfrastructureCommunity` trust root
+>   (`community_key_id: "ciris-canonical"`, `cohort_subkind: infrastructure`,
+>   `admission_quorum_basis: founders`, `consensus_protocol: "quorum:2/3"`,
+>   `consensus_protocol_entrenched: true`) — `is_trust_root_conformant()` by
+>   construction.
+> - `verify_canonical_quorum(community, bytes, sigs)` → `QuorumPolicy::parse` +
+>   `verify_quorum_policy` (verify v5.4.0 `threshold` / `infrastructure_community`):
+>   strict-majority `2M>N`, declared N == founder roster, non-founder sigs don't
+>   count (anti-Sybil), hybrid Ed25519 + ML-DSA-65.
+> - `community_signing_bytes()` — domain-separated, member-order-independent.
+>
+> Consumers re-root their pin from the steward fingerprint to `community_key_id:
+> "ciris-canonical"` (lens already pins the constant). `/v1/steward-key` becomes the
+> community/founder-roster publish. **Break-glass stays the 3 human accord keys
+> (CEG §9), hardware-rooted, NEVER on the fabric nodes — verifier-only.**
 
 ## 2. Accommodating registry's existing keys (adopt vs retire)
 
@@ -40,7 +69,7 @@ registry-us/registry-eu:
 
 | Key | Disposition |
 |---|---|
-| Steward **Ed25519 seed** (`ED25519_KEY_PATH`) | **ADOPT** byte-identical → `SealedEd25519Signer::adopt` (key_id preserved), TPM-sealed. Its role as *shared constitutional authority* is **RETIRED** → the 2-of-3 quorum. If literally shared us↔eu, split into per-node sealed identities. |
+| Steward **Ed25519 seed** (`ED25519_KEY_PATH`) | **ADOPT** byte-identical → `SealedEd25519Signer::adopt` (key_id preserved), TPM-sealed. Its role as *shared constitutional authority* is **RETIRED** → the accord quorum (§1, re-cut 2026-11-09; was "the 2-of-3 quorum" of node keys). If literally shared us↔eu, split into per-node sealed identities. |
 | Steward **ML-DSA-65 seed** (`MLDSA_KEY_PATH`) | **ADOPT** byte-identical (travels with the Ed25519 seed; the hybrid half). *(Follow-up: extend `federation_signer` to also adopt the PQC seed — today it adopts the Ed25519 seed; the PQC adoption mirrors it.)* |
 | **Reticulum transport identity** (`CIRIS_REGISTRY_EDGE_IDENTITY_PATH`, 64B) | **ADOPT** byte-identical via `CIRIS_SERVER_RET_IDENTITY_PATH` → `BlobTransportKeystore` (dest hash preserved). Already wired. |
 | JWT / mTLS / DB password | per-node operational; re-provision, not federation identity. |
@@ -118,3 +147,27 @@ tests; the anti-entropy Responder awaits CIRISEdge#119.
 `HardwareSigner`. Resolving that impedance + the #76 co-bump (registry-core →
 6.8.1/3.5.0/5.4.0; it's on the old 5.5.5/2.2.2/5.1.3 floor) is the only seam that
 isn't a copy of an already-working lens pattern.
+
+## 5. Fold status (2026-11-09, `fold/registry`, CIRISServer#537)
+
+Read §4 items 2 and 3 through §1's re-cut: there is no founder-quorum door and
+no founder-roster publish; `/v1/steward-key` serves the bundle.
+
+The "one non-mechanical seam" above is resolved by **porting, not pinning**.
+Registry-core's no-`standalone` fold surface (`fold.rs`, `fold_builds.rs`,
+`fold_evidence.rs`, at CIRISRegistry `f04b149` / v4.1.0) needs no Postgres
+`Database` and no `HybridCrypto`. It runs on the shared `Engine`. It is ported
+into `src/registry/` at this repo's substrate triple, so there is no co-bump
+and no second persist/edge graph. The sqlx/tonic half of registry-core is not
+ported. Each of its live surfaces is rewritten onto the persist directory when
+it is taken up (revocation, key lookup, partner, licensure), or waits on a
+persist table (`/v1/verify/*-manifest` bytes, transparency witnesses, device
+integrity).
+
+| Increment | What | Where |
+|---|---|---|
+| Phase 1 | The role gate: conferred by the accord, declinable by the owner | `src/registry_slice.rs` |
+| Phase 2a | `GET /v1/trust-root/bundle` (+ `/v1/steward-key`) in the CC 5.3.4 / registry wrapper | `src/trust_root_api.rs` (#830) |
+| Phase 2b | CEG-native `/v1/builds`, mounted on conferred nodes only | `src/registry/builds.rs` |
+| Phase 2c | `/v1/evidence/{suite}` (CC 3.1.5.5), the same door generalized | `src/registry/evidence.rs` |
+| Later | Commons-blob holding of manifests between canonicals; the P-tier directory reads; licensure | — |

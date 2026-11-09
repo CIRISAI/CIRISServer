@@ -1213,9 +1213,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
              (no local corpus / read API); free up disk to the baked minimum"
         );
     }
-    if cfg.slices.registry {
-        compose_registry(&edge, &engine, &cfg).await?;
-    }
+    // The registry slice is CONFERRED by the accord, never configured
+    // (src/registry_slice.rs, CIRISServer#537). `slices.registry` and the owner's
+    // signed `config:slices.registry` can only decline it; the walk inside
+    // compose_registry is the authorization. Always evaluated, never fatal.
+    let _registry_slice =
+        compose_registry(&engine, &node_resolution.node_key_id, cfg.slices.registry).await;
     if cfg.slices.node {
         compose_node(&edge, &engine, &cfg).await?;
     }
@@ -6034,11 +6037,23 @@ pub async fn run_config_get(
     crate::graph_config::get_config(&engine, key).await
 }
 
-/// Authority slice — folds in at **Server 0.6** (CIRISRegistry#76). Attaches to
-/// the shared Edge (the node's single identity) + serves the registry trust
-/// surface over the shared Engine. SCAFFOLD. (0.5 is config-as-CEG; registry is 0.6.)
-async fn compose_registry(_edge: &Edge, _engine: &Arc<Engine>, _cfg: &ServerConfig) -> Result<()> {
-    todo!("registry slice (Server 0.6) — pin ciris-registry-core (history: CIRISRegistry#76) + attach to the shared Edge")
+/// Authority slice (CIRISRegistry#62, CIRISServer#537). Resolves whether the
+/// accord conferred the registry slice on this node and logs the answer once.
+///
+/// This was a `todo!()`, unreachable only because `slices.registry` defaulted
+/// to `false`. Making the grant the trigger without first giving it a body that
+/// RETURNS would panic at boot on exactly the nodes that are blessed (the
+/// production canonical holds all four charter verbs). It never errors: an
+/// unblessed node is in a steady state, and a walk that cannot be evaluated
+/// withholds the slice rather than failing the boot.
+async fn compose_registry(
+    engine: &Arc<Engine>,
+    node_key_id: &str,
+    embedder_enabled: bool,
+) -> crate::registry_slice::RegistrySlice {
+    let slice = crate::registry_slice::resolve(engine, node_key_id, embedder_enabled).await;
+    crate::registry_slice::log_resolution(&slice, node_key_id);
+    slice
 }
 
 /// Consensus slice — folds in at **Server 1.0** (CIRISNodeCore#38). `install(&edge)`

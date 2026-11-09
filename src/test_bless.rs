@@ -664,7 +664,16 @@ async fn perform_trust_root_ceremony(
     // ── (4) Capability grant: delegates_to(root → self, infra:serve). CANONICAL
     //         ONLY, cohort=federation so it REPLICATES to the sending peer. ─────
     if bless_canonical && !has_capability_grant(engine, &root_key_id, &self_key_id).await? {
-        let grant_scopes = vec![INFRA_SERVE_SCOPE.to_string()];
+        // BOTH verbs, as the key record above claims and as the production
+        // serve-node grants carry them (final_genesis::SERVE_NODE_ROLES).
+        // `infra:serve` alone left the harness canonical with a record that says
+        // it may attest and a grant that does not, so the registry slice's walk
+        // (registry_slice::registry_slice_conferred) found nothing on a node
+        // blessed as canonical.
+        let grant_scopes = vec![
+            INFRA_SERVE_SCOPE.to_string(),
+            INFRA_ATTEST_SCOPE.to_string(),
+        ];
         let mut envelope = delegates_to_envelope(&self_key_id, &grant_scopes, false);
         envelope[paths::DIMENSION] =
             serde_json::json!(ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION);
@@ -684,7 +693,7 @@ async fn perform_trust_root_ceremony(
         tracing::warn!(
             root_key_id = %root_key_id,
             subject = %self_key_id,
-            "TEST-ANCHOR ceremony: minted capability grant delegates_to(root→self, infra:serve) @ federation (replicating)"
+            "TEST-ANCHOR ceremony: minted capability grant delegates_to(root→self, infra:serve + infra:attest) @ federation (replicating)"
         );
     }
 
