@@ -459,14 +459,31 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 — Conflict (already present) is benign
         log(f"self-key registration: {type(e).__name__}: {e} (benign if already present)")
 
-    edge = init_edge_runtime(
-        engine,
-        identity_path,
+    # THE SPLIT, AS THE REAL AGENT DOES IT (CC 3.4.7.3 Clause A; CIRISAgent
+    # 2.19 edge_runtime.py, CIRISAgent#1119). Mint and register `<alias>-node`
+    # BEFORE edge init, then run the transport under it. Without this the
+    # harness agent's edge carried the AGENT key, and persist v61 refuses an
+    # agent-keyed route (`transport_destination_agent_key`): the agent published
+    # no route, the canonical could attribute none of its frames, and no trace
+    # shipped — a harness diverged from production (0.5.245 traceflow red).
+    edge_kwargs = dict(
         listen_addr=listen,
         bootstrap_peers=peers,
         agent_mode=agent_mode,
         enable_transport=delivery_on,
     )
+    provision = getattr(ciris_server, "provision_node_identity", None)
+    if provision is not None:
+        node_key_id = provision(key_id, str(seed.parent))
+        log(f"node identity provisioned: {node_key_id} (actor {key_id} keeps its own key)")
+        edge_kwargs.update(
+            use_node_identity=True,
+            node_identity_dir=str(seed.parent),
+            node_keystore_alias=node_key_id.rsplit("-", 1)[0],
+        )
+    else:
+        log("provision_node_identity absent: edge carries the ACTOR key (pre-split substrate)")
+    edge = init_edge_runtime(engine, identity_path, **edge_kwargs)
     try:
         signer = edge.signer_key_id()
     except Exception:  # noqa: BLE001 — best-effort label for the log only

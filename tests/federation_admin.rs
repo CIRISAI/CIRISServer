@@ -675,7 +675,7 @@ async fn turning_traces_off_narrows_the_grant_and_stays_off() {
     let peer = peer_key_id();
     let grant = grants
         .iter()
-        .find(|g| g.subject_key_ids.iter().any(|k| *k == peer))
+        .find(|g| g.subject_key_ids.contains(&peer))
         .expect("the grant is still live");
     let live = ciris_server::peer::grant_receipt(grant)["consent_prefixes"].clone();
     assert_eq!(live, serde_json::json!(["ownership:"]));

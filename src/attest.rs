@@ -238,6 +238,10 @@ impl Spec {
 ///
 /// # Errors
 /// The envelope is not a JSON object persist can type.
+// persist v61.0.5 grew `federation::Error` past clippy's 128-byte line; this
+// returns persist's own error type to callers that `?` it into persist doors, so
+// boxing it here would only re-wrap it at every call site.
+#[allow(clippy::result_large_err)]
 pub fn envelope_core(
     mut envelope: serde_json::Value,
 ) -> Result<EnvelopeCore, ciris_persist::federation::Error> {

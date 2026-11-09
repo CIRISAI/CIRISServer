@@ -917,13 +917,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # CHAT MESSAGE REVISIONS (CIRISEdge#917, CIRISPersist#1155): the author's
     # supersede / withdraw / recant routes and their history. Queued for the
     # client bundle with their English (CIRISClient chat-revisions card).
-    "chat.attachment_not_in_room",
-    "drive.flagged_by_moderation",
-    "drive.withheld_by_moderation",
-    "moderation.item_not_in_room",
-    "moderation.not_flagged",
-    "moderation.reveal_failed",
-    "moderation.unknown_action",
+    # PAID AT CLIENT 0.5.238 (2026-11-08, for 0.5.245): chat.attachment_not_in_room,
+    # drive.{flagged,withheld}_by_moderation, moderation.{item_not_in_room,
+    # not_flagged,reveal_failed,unknown_action}; the floor in pyproject.toml is
+    # 0.5.238.
     # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
     # owner's device signing it, and the node applying it
     # (src/owner_requests.rs). Queued for the client bundle with their English.
