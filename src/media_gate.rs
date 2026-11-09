@@ -334,6 +334,10 @@ pub fn policy() -> serde_json::Value {
         },
         "inline_max_bytes": 1024 * 1024,
         "whole_read_max_bytes": crate::drive::WHOLE_READ_CAP,
+        // The largest single file a multipart upload WITH `size` takes (413
+        // `drive.too_large` above it). Published so a client sizes its picker
+        // from the node, not from a number it hardcoded (0.5.245).
+        "streamed_max_bytes": crate::drive::STREAMED_FILE_CEILING,
         "renditions": false,
     })
 }
