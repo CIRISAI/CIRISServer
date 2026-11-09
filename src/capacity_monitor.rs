@@ -198,7 +198,9 @@ pub fn current() -> LoadPressure {
 
 // ── /proc sampling ───────────────────────────────────────────────────────────
 
-/// Cumulative CPU ticks (utime + stime) from a `/proc/.../stat` line.
+/// Cumulative CPU ticks (utime + stime) from a `/proc/.../stat` line. Only
+/// `/proc` hosts (and the parser test, on every host) call it.
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 fn stat_ticks(stat: &str) -> Option<u64> {
     // The command name is parenthesised and may contain spaces: split after it.
     let rest = &stat[stat.rfind(')')? + 2..];
