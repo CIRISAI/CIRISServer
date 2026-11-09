@@ -1,6 +1,7 @@
 [package]
 name = "ciris-server"
-version = "0.5.245" # 0.5.245 (OPENED): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
+version = "0.5.246" # 0.5.246 (OPENED): THE CLEAN LTS — edge on persist 61.2.0 / verify v22.2.0 (the contact-add waits, the late-joiner backfill), and a desktop sign-in that waits for its browser (#868)
+# 0.5.245 (TAGGED 2026-11-09, 7af5d4eb): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.

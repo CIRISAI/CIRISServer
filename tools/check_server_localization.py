@@ -742,6 +742,11 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # `add_device.node_proof` (0.5.245): the device can't prove its node. Same
     # order: client 0.5.239 adds it, and the entry leaves at that floor.
     "add_device.node_proof",
+    # `auth.oauth.flow_unknown` (0.5.246, CIRISServer#868): the hand-off poll's
+    # answer for a nonce this node never issued a flow for, split from
+    # `flow_expired`. Same order as the two above: the client adds it at a pin of
+    # 0.5.246, and the entry leaves at that floor.
+    "auth.oauth.flow_unknown",
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the
