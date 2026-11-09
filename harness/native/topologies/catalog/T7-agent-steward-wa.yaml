@@ -9,7 +9,7 @@
 # the approval) are realized by CIRISAgent's QA against the claimed node this
 # topology builds, not by this harness.
 catalog_id: T7
-catalogue_version: 5
+catalogue_version: 6
 title: An agent under a steward with a Wise Authority
 serves: [CSD-111, CSD-112, CSD-113, CSD-114, CSD-115, CSD-116, CSD-117]
 derives: [5a, 5b, 5c, 5d, 5e, 5f, 5g, 7c, 8b]

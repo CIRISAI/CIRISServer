@@ -5,7 +5,7 @@
 # delegation door exists (CIRISServer#751, known red; the chain itself is
 # refused as in T6).
 catalog_id: T18
-catalogue_version: 5
+catalogue_version: 6
 title: Delegation ends — a withdrawal cascades, a term expires; a key grant held; a guardian bond absent and made
 serves: [CSD-119, CSD-120]
 promises: [delegation.link.withdrawn, delegation.link.expired, grant.state.held, guardian.bond.none]

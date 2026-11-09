@@ -34,8 +34,9 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
-CATALOGUE_VERSION = 5
-CATALOG_IDS = [f"T{i}" for i in range(20)]
+CATALOGUE_VERSION = 6
+# T20 is reserved for the durability tier (CIRISServer#809) and not yet written.
+CATALOG_IDS = [f"T{i}" for i in range(20)] + ["T21"]
 HERE = Path(__file__).parent
 CATALOG_DIR = HERE / "topologies" / "catalog"
 REQUIREMENTS = CATALOG_DIR / "requirements.yaml"
@@ -93,6 +94,23 @@ AWAITING_ENTRY: Dict[str, str] = {
     a: "T20 (CIRISServer#809)"
     for a in ATOMS if VOCABULARY_ROWS[a].get("added_in") == 4 and a.startswith("file.durable")
 }
+# The atoms T21 reaches or promises (CC's assignment, rc14): the ceremony
+# declares the whole tree; the agent realizes the evidence plane.
+T21_ATOMS = frozenset({
+    "goal.staged", "goal.proposed", "goal.declared",
+    "approach.declared", "method.declared", "progress_measure.declared",
+    "evidence.offered", "evidence.counted", "evidence.admitted", "evidence.superseded",
+    "evidence.standing.blessed", "evidence.standing.unblessed",
+    "goal.superseded", "goal.withdrawn", "goal.recanted", "evidence.reference_unresolved",
+})
+# Catalogue v6 (CC rc14): the registry's atoms (affiliation, licence,
+# recognition, delegation, grant, key, trust, the goal tree's later life,
+# evidence standing) arrived with no entry; T21 reaches the ceremony's own.
+AWAITING_ENTRY.update({
+    a: "an entry for the registry's rc14 atoms (CIRISRegistry)"
+    for a in ATOMS if VOCABULARY_ROWS[a].get("added_in") == 6
+    and a not in T21_ATOMS
+})
 
 # ── steps and their effects ─────────────────────────────────────────────────
 
@@ -358,6 +376,21 @@ def effects(rel: Decl, t: Decl) -> Tuple[Set[str], Set[str]]:
         return {"root.halt_confirmed"}, set()
     if k == "resume":
         return {"root.resumed"}, {"root.halted", "root.halt_confirmed"}
+    # catalogue v6: the Goals ceremony (CSD-130, FSD/GOALS_CEREMONY.md)
+    if k == "goals_stage":
+        return {"goal.staged"}, set()
+    if k == "goals_propose":
+        return {"goal.proposed"}, set()
+    if k == "goals_cosign":
+        return ({"goal.declared", "approach.declared", "method.declared", "progress_measure.declared"},
+                {"goal.staged", "goal.proposed"})
+    if k == "goals_amend":
+        # Below the community's quorum an amendment does not land (CC 3.1.9.3).
+        return ({"goal.superseded"}, set()) if int(rel.get("cosigns", 1)) >= 2 else (set(), set())
+    if k == "goals_withdraw":
+        return {"goal.withdrawn"}, set()
+    if k == "goals_recant":
+        return {"goal.recanted"}, set()
     return set(), set()
 
 
@@ -373,6 +406,8 @@ KNOWN_RELATIONS = {
     "moderator_lapse", "merit_promote", "fail_secure", "consent_grant", "consent_revoke", "consent_expire",
     "consent_decay", "community_trust", "community_trust_bound", "replication_withdraw", "scoped_file",
     "purge", "delegation_withdraw", "delegation_expire", "key_grant", "agent_bond", "agent_act", "retirement",
+    # catalogue v6
+    "goals_stage", "goals_propose", "goals_cosign", "goals_amend", "goals_withdraw", "goals_recant",
 }
 
 

@@ -1,18 +1,13 @@
 {
   "_meta": {
-    "catalogue_version": 5,
-    "owner": "CIRISConstitution (steward decision 2026-10-18: CC publishes the atom vocabulary; CIRISServer harness/native/model.py loads it)",
+    "catalogue_version": 6,
+    "owner": "CIRISConstitution (CC publishes the atom vocabulary; CIRISServer loads it)",
     "source_of_atoms": "CIRISServer feat/csd4-catalogue 5c4fdbaa harness/native/model.py ATOMS (51), meanings verbatim",
     "state_table": "formal/STATE_TABLE.tsv",
     "invariants": "formal/INVARIANTS.tsv",
     "bump_rule": "a new entry, a new atom, a change to an atom's meaning or to an entry's promises bumps catalogue_version; lifting a builder refusal or re-laying nodes that keep every promise does not",
-    "n_atoms": 120,
-    "n_atoms_in_state_table": 116,
-    "revision_note": "2026-10-18 b: session.unified, contact.added, contact.via_code and file.large mapped to state-table rows (server reading accepted); no atom or meaning changed, catalogue_version stays 1",
-    "version_2_note": "2026-10-18: steward ruling that the catalogue push waits on exhaustiveness over the formally defined states (formal/STATE_TABLE.tsv); version 2 adds one atom per modelled state no version-1 entry exercised (58) and proposes entries T10–T19 whose promises close them; version-1 atoms and meanings unchanged; the four reached-but-unpromised atoms are to be promised",
-    "version_3_note": "2026-10-20: one atom added at the server's request for CSD-095 (the held addition), key.membership.proposed_add; version-2 atoms and meanings unchanged; per the bump rule a new atom bumps catalogue_version, so catalogue entries re-pin at 3 (T10 promises the atom)",
-    "version_4_note": "2026-10-22: the durability tier (CC 6.1.5, per-item target-holder replication) adds the blob.durability variable and six atoms (file.durable.*) for the server's T20 topology, a durable item surviving the loss of every one of its owner's devices; version-3 atoms and meanings unchanged; catalogue entries re-pin at 4 when T20 lands",
-    "version_5_note": "2026-10-22: the deferral and identity-amendment rows (CC 3.1.9.4 deferral:request/response, CC 3.1.5 identity_amendment:v1) add agent.deferral and agent.identity to the state table and four agent.* atoms, for T7 to promise, each realized by the CIRISAgent repo's QA against a claimed node (an entry is a topology; the scenarios that run on it are its promises, each naming its realizer); version-4 atoms and meanings unchanged; the server re-pins when the entry lands"
+    "n_atoms": 156,
+    "n_atoms_in_state_table": 152
   },
   "atoms": {
     "root.none": {
@@ -927,6 +922,294 @@
       "in_state_table": true,
       "meaning": "the agent applied the identity change its approved deferral authorised and published identity_amendment:v1 citing the response",
       "added_in": 5
+    },
+    "affiliation.charter.declared": {
+      "plane": "governance",
+      "state_predicate": "affiliation.charter=declared",
+      "cc_ref": "4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "the affiliation's record declares its charter at creation: role_term, the licence classes it issues, its succession; visible to members on joining",
+      "added_in": 6
+    },
+    "affiliation.charter.superseded": {
+      "plane": "governance",
+      "state_predicate": "affiliation.charter=superseded",
+      "cc_ref": "4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "the body amended its charter by supersedes under its consensus_protocol; the charter is read at read, so a dropped class stops matching",
+      "added_in": 6
+    },
+    "licence.issued": {
+      "plane": "authority",
+      "state_predicate": "licence.state=held",
+      "cc_ref": "2.4.1.2.1 4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "an authority signed a licensure:{authority_id} row in a class its charter declares; the subject holds standing to practise",
+      "added_in": 6
+    },
+    "licence.status.suspended": {
+      "plane": "authority",
+      "state_predicate": "licence.state=suspended",
+      "cc_ref": "2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "the authority suspended the licence (a bounded revocation:* by the issuing authority); it does not chain and nobody else can lift it",
+      "added_in": 6
+    },
+    "licence.status.revoked": {
+      "plane": "authority",
+      "state_predicate": "licence.state=revoked",
+      "cc_ref": "2.4.1.2.1 4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "the authority revoked the licence by revocation:*; the standing it conferred is gone for every later use",
+      "added_in": 6
+    },
+    "licence.honoured": {
+      "plane": "authority",
+      "state_predicate": "licence.reader=honoured",
+      "cc_ref": "4.4.3.8 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a reader honoured a licensure row: its own trust walk reached the issuing authority for the row's class and that authority's charter declares the class",
+      "added_in": 6
+    },
+    "licence.not_trusted": {
+      "plane": "authority",
+      "state_predicate": "licence.reader=not_trusted",
+      "cc_ref": "4.4.3.8 4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "a reader admitted a licensure row and honoured it by no reader: no trust-set entry reaches the issuer for the class, or the class is outside the issuer's charter (licence_class_not_trusted)",
+      "added_in": 6
+    },
+    "recognition.outbound": {
+      "plane": "node",
+      "state_predicate": "recognition.state=outbound",
+      "cc_ref": "4.4.3.8 4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "this reader's own trust-set entry recognises another authority as a licensor (for every class its charter declares, or the listed classes, to a depth)",
+      "added_in": 6
+    },
+    "recognition.inbound": {
+      "plane": "node",
+      "state_predicate": "recognition.state=inbound",
+      "cc_ref": "4.4.3.8 4.4.3.2.8",
+      "in_state_table": true,
+      "meaning": "another reader's trust-set entry recognises this authority as a licensor; a licence this authority issues reaches that reader",
+      "added_in": 6
+    },
+    "delegation.scope.license": {
+      "plane": "authority",
+      "state_predicate": "delegation.scope=license",
+      "cc_ref": "4.4.3.4.3.1 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a live delegates_to carries the license scope: the delegate issues licensure rows on behalf of a delegator that itself holds licence authority; the right to issue, never the authority",
+      "added_in": 6
+    },
+    "delegation.scope.grant": {
+      "plane": "authority",
+      "state_predicate": "delegation.scope=grant",
+      "cc_ref": "4.4.3.4.3.1 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a live delegates_to carries the grant scope: the delegate issues key_grant or consent:scope:* grants over assets the delegator owns, stewards or holds a grant-scoped delegation over",
+      "added_in": 6
+    },
+    "delegation.refused": {
+      "plane": "authority",
+      "state_predicate": "delegation.link=refused",
+      "cc_ref": "4.4.3.4.3.1 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a delegates_to or a scoped issuance was refused at admission: the delegator does not itself hold the underlying authority (licence authority for the authority_id, or the asset)",
+      "added_in": 6
+    },
+    "grant.axis.content": {
+      "plane": "authority",
+      "state_predicate": "grant.axis=content",
+      "cc_ref": "5.1 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a key_grant on the content axis: one wrap per (content_sha256, recipient_key_id) in the substrate's grant store, opening exactly one item",
+      "added_in": 6
+    },
+    "grant.onward_refused": {
+      "plane": "authority",
+      "state_predicate": "grant.state=onward_refused",
+      "cc_ref": "2.4.1.2.1 4.4.3.4.3.1",
+      "in_state_table": true,
+      "meaning": "a substrate refused a key_grant at admission whose issuer neither owns nor stewards the asset nor holds a grant-scoped delegation over it; possession of the DEK is not issuance authority",
+      "added_in": 6
+    },
+    "grant.ended_by_rotation": {
+      "plane": "authority",
+      "state_predicate": "grant.state=rotated",
+      "cc_ref": "5.1 2.4.1.2.1",
+      "in_state_table": true,
+      "meaning": "a rotation superseded the grant: a new row under a new axis identity with rotation_chain as supersession lineage; the old wrap is not removed and conveys no later epoch",
+      "added_in": 6
+    },
+    "key.successor_committed": {
+      "plane": "self",
+      "state_predicate": "key.succession=committed",
+      "cc_ref": "3.2 3.3.6.3",
+      "in_state_table": true,
+      "meaning": "the holder published a pre-rotation commitment: SHA-256 over the committed successor keys' public key material, so a later rotation verifies against it",
+      "added_in": 6
+    },
+    "key.rotated": {
+      "plane": "self",
+      "state_predicate": "key.succession=rotated",
+      "cc_ref": "3.3.6.3 5.1",
+      "in_state_table": true,
+      "meaning": "the holder rotated to a committed successor key: the new key joins the roster and signs; the old key's later rows are not admitted",
+      "added_in": 6
+    },
+    "key.escrowed": {
+      "plane": "self",
+      "state_predicate": "key.escrow=escrowed",
+      "cc_ref": "4.4.3.2.8 3.3.6.3",
+      "in_state_table": true,
+      "meaning": "a per-epoch archive key is held by an archive_custody custodian decoupled from the live roster, so permanent or retained records survive member turnover",
+      "added_in": 6
+    },
+    "trust.entry.licensor": {
+      "plane": "node",
+      "state_predicate": "trust.entry=licensor",
+      "cc_ref": "4.4.3.8",
+      "in_state_table": true,
+      "meaning": "the reader's trust-set entry names the authority as a licensor: every class its charter declares (trust_classes absent) at the entry's trust_depth",
+      "added_in": 6
+    },
+    "trust.entry.root_removed": {
+      "plane": "node",
+      "state_predicate": "trust.entry=root_removed",
+      "cc_ref": "4.4.3.8",
+      "in_state_table": true,
+      "meaning": "the reader removed the shipped root's entry like any other; what reached only through it no longer reaches",
+      "added_in": 6
+    },
+    "goal.staged": {
+      "plane": "goal",
+      "state_predicate": "goal.state=staged",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "the canonical holds the locked goal tree as stamped, unsigned rows",
+      "added_in": 6
+    },
+    "goal.proposed": {
+      "plane": "goal",
+      "state_predicate": "goal.state=proposed",
+      "cc_ref": "3.1.9.7 2.4",
+      "in_state_table": true,
+      "meaning": "at least one founder has scrubbed the staged rows, below quorum",
+      "added_in": 6
+    },
+    "goal.declared": {
+      "plane": "goal",
+      "state_predicate": "goal.state=declared",
+      "cc_ref": "3.1.9.7 2.4",
+      "in_state_table": true,
+      "meaning": "the founder quorum has cosigned and the goal rows are admitted under the community; the declarer's signed scores row on goal:{scale} is the Goal and goal_id is its attestation_id",
+      "added_in": 6
+    },
+    "goal.superseded": {
+      "plane": "goal",
+      "state_predicate": "goal.state=superseded",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "the declarer amended the Goal by supersedes; the new row is the Goal and approaches keyed on goal_id follow it",
+      "added_in": 6
+    },
+    "goal.withdrawn": {
+      "plane": "goal",
+      "state_predicate": "goal.state=withdrawn",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "the declarer retired the Goal by withdraws",
+      "added_in": 6
+    },
+    "goal.recanted": {
+      "plane": "goal",
+      "state_predicate": "goal.state=recanted",
+      "cc_ref": "3.1.9.7 2.4.1.3",
+      "in_state_table": true,
+      "meaning": "the declarer recanted the Goal: this goal was never mine, an epistemic-error admission distinct from retirement",
+      "added_in": 6
+    },
+    "approach.declared": {
+      "plane": "goal",
+      "state_predicate": "approach.state=declared",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "a signed approach:{goal_id} row names a strategic pathway from the current state toward a declared Goal",
+      "added_in": 6
+    },
+    "method.declared": {
+      "plane": "goal",
+      "state_predicate": "method.state=declared",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "a signed method:{approach_id}:{substrate_rung} row names a concrete operational practice serving an approach, with its required substrate_rung",
+      "added_in": 6
+    },
+    "progress_measure.declared": {
+      "plane": "goal",
+      "state_predicate": "progress_measure.state=declared",
+      "cc_ref": "3.1.9.7",
+      "in_state_table": true,
+      "meaning": "a signed progress_measure:{method_id} row declares tracks[], computation, validity_window and goodhart_resistance against a method",
+      "added_in": 6
+    },
+    "evidence.counted": {
+      "plane": "evidence",
+      "state_predicate": "evidence.state=counted",
+      "cc_ref": "3.1.9.3",
+      "in_state_table": true,
+      "meaning": "a declared progress_measure cites that evidence in evidence_refs",
+      "added_in": 6
+    },
+    "evidence.offered": {
+      "plane": "evidence",
+      "state_predicate": "evidence.state=offered",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "an evidence row names a declared goal, approach or method in references_attestation_id",
+      "added_in": 6
+    },
+    "evidence.reference_unresolved": {
+      "plane": "evidence",
+      "state_predicate": "evidence.state=reference_unresolved",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "the row's evidence_refs names a Commons blob by SHA-256 that no holder serves; the row stands, the evidence does not",
+      "added_in": 6
+    },
+    "evidence.admitted": {
+      "plane": "evidence",
+      "state_predicate": "evidence.state=admitted",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "the row admitted at federation scope from a key the root delegates infra:attest to, and its blob's digest matched the prefix in the dimension",
+      "added_in": 6
+    },
+    "evidence.superseded": {
+      "plane": "evidence",
+      "state_predicate": "evidence.state=superseded",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "a re-post of the same capture or interpret landed as supersedes, never a silent replace",
+      "added_in": 6
+    },
+    "evidence.standing.blessed": {
+      "plane": "evidence",
+      "state_predicate": "evidence.standing=blessed",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "the evidence counts: emitted by a key the root delegates infra:attest to, so a reader under that root honours it",
+      "added_in": 6
+    },
+    "evidence.standing.unblessed": {
+      "plane": "evidence",
+      "state_predicate": "evidence.standing=unblessed",
+      "cc_ref": "3.1.5.5",
+      "in_state_table": true,
+      "meaning": "the evidence does not count for this reader: no infra:attest delegation from a root the reader trusts reaches the emitter",
+      "added_in": 6
     }
   },
   "entries_proposed": [

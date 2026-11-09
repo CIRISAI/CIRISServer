@@ -501,7 +501,7 @@ jobs:
           # — turning a partial release into no release at all.
           # THE CSD/4 CATALOGUE as release assets (FSD/CSD4.md): the
           # requirements, the Constitution's vocabulary and its pin byte for
-          # byte, and the model's trace of T0–T19. CIRISClient's CSD/4 checker
+          # byte, and the model's trace of the catalogue. CIRISClient's CSD/4 checker
           # pins these per release, so it needs no server code and its copy
           # cannot change under it. `trace` refuses a catalogue that does not
           # evaluate clean, which fails the release rather than publishing it.

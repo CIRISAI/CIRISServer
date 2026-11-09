@@ -5,7 +5,7 @@
 # leaving the genesis key only. No lone-path route exists and the server has no
 # clock override for W_self, so both evictions are known red.
 catalog_id: T11
-catalogue_version: 5
+catalogue_version: 6
 title: Two lost devices — recovery by the lone path over the window
 serves: [CSD-037, CSD-095]
 promises: [key.membership.proposed_add, key.holder.lost, key.membership.evicted, self.roster_size.one]

@@ -6,7 +6,7 @@
 # (formal/accord_roster `c` and `s`). The standing rule holds throughout. A node
 # de-admits a key with a history bound (revoked_after), then without (revoked_all).
 catalog_id: T19
-catalogue_version: 5
+catalogue_version: 6
 title: Holders under coercion and censorship — the standing rule holds; an announced node; revoked_after
 serves: [CSD-129, CSD-105]
 promises: [root.holder_disposition.honest, root.holder_disposition.coerced, root.holder_disposition.censored,
