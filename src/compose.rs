@@ -5410,42 +5410,60 @@ pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
     });
 }
 
-/// The device this node reports to link shaping (CC 5.4.3). An operator's
-/// `CIRIS_DEVICE_KIND` (`server`, `home`, `phone`) wins; otherwise the canonical
-/// is a server, and every other node is its platform's default (a home node on
-/// a desktop OS, a phone on Android/iOS). Steward 2026-11-08: servers on, homes
-/// and phones off.
+/// The device this node reports to link shaping (CC 5.4.3), and the policy it
+/// runs. An operator's `CIRIS_DEVICE_KIND` (`server`, `home`, `phone`) wins and
+/// runs that device's fleet default. Otherwise every node runs its platform's
+/// fleet default (a home node on a desktop OS, a phone on Android/iOS), EXCEPT
+/// the canonical: it reports itself a server and runs shaping OFF.
+///
+/// Steward 2026-11-08 (0.5.245): canonical shaping stays off for this release.
+/// Measured A/B on edge v44.1.0 (native `person_store`, relayed through the
+/// canonical): with the canonical shaping, a seeded node's contact acceptance took
+/// 58.5 s to be seen and 72.6 s to key; unshaped, 15.4 s and 29.2 s. The shaper
+/// is one FIFO per link with a Poisson gap per frame (2.3 s at server class,
+/// 5.8 s at home, 47 s at phone-cellular, the lower class binding), so every
+/// handshake step waits. It turns on with `CIRIS_DEVICE_KIND=server` once edge's
+/// contact-first lane and CC's frame size land.
 async fn shaping_device(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
-) -> ciris_edge::transport::link_shaping::DeviceState {
-    use ciris_edge::transport::link_shaping::{DeviceKind, DeviceState};
+) -> (
+    ciris_edge::transport::link_shaping::DeviceState,
+    ciris_edge::transport::link_shaping::ShapingPolicy,
+) {
+    use ciris_edge::transport::link_shaping::{DeviceKind, DeviceState, ShapingPolicy};
     let chosen = std::env::var("CIRIS_DEVICE_KIND").ok();
-    let (kind, why) = match chosen.as_deref().map(str::trim).and_then(DeviceKind::parse) {
-        Some(k) => (k, "CIRIS_DEVICE_KIND"),
-        None => {
-            let me = crate::node_key::wire_identity().unwrap_or(&cfg.key_id);
-            if engine.is_canonical(me).await.unwrap_or(false) {
-                (DeviceKind::Server, "this node is the canonical")
-            } else {
-                (DeviceKind::platform_default(), "platform default")
-            }
-        }
-    };
     if let Some(v) = chosen
         .as_deref()
         .filter(|v| DeviceKind::parse(v.trim()).is_none())
     {
         tracing::warn!(value = %v, "CIRIS_DEVICE_KIND is not server/home/phone; ignored");
     }
-    let device = DeviceState::of(kind);
-    let policy = ciris_edge::transport::link_shaping::ShapingPolicy::for_device(&device);
+    let (device, policy, why) = match chosen.as_deref().map(str::trim).and_then(DeviceKind::parse) {
+        Some(k) => {
+            let d = DeviceState::of(k);
+            (d, ShapingPolicy::for_device(&d), "CIRIS_DEVICE_KIND")
+        }
+        None => {
+            let me = crate::node_key::wire_identity().unwrap_or(&cfg.key_id);
+            if engine.is_canonical(me).await.unwrap_or(false) {
+                (
+                    DeviceState::of(DeviceKind::Server),
+                    ShapingPolicy::default(),
+                    "the canonical: shaping off for 0.5.245 (steward 2026-11-08)",
+                )
+            } else {
+                let d = DeviceState::of(DeviceKind::platform_default());
+                (d, ShapingPolicy::for_device(&d), "platform default")
+            }
+        }
+    };
     tracing::info!(
-        kind = ?kind, why,
+        kind = ?device.kind, why,
         class = ?policy.class, scope = ?policy.scope, bytes_per_s = policy.bytes_per_s,
-        "link shaping: device fleet default"
+        "link shaping: device and policy"
     );
-    device
+    (device, policy)
 }
 
 async fn build_edge(
@@ -5517,9 +5535,9 @@ async fn build_edge(
     // (a UDP socket is a listener too).
     let client_only = client_only_interfaces(&cfg.bootstrap_peers);
     let serves_facilitator = transport_node && client_only.is_none();
-    // CC 5.4.3 (edge v44.1): link shaping follows the device's fleet default
-    // (steward 2026-11-08: servers on, homes and phones off).
-    let device = shaping_device(engine, cfg).await;
+    // CC 5.4.3 (edge v44.1): link shaping at the device's fleet default; the
+    // canonical runs it off for 0.5.245 (steward 2026-11-08, see shaping_device).
+    let (device, shaping) = shaping_device(engine, cfg).await;
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
@@ -5620,9 +5638,9 @@ async fn build_edge(
             &cfg.bootstrap_peers,
         ),
         // CC 5.4.3 (edge v44.1): link shaping at the device's fleet default
-        // (`shaping_device`): a server shapes every identity link, a home node
+        // (`shaping_device`): the canonical runs it off for 0.5.245, a home node
         // only its layer links, a phone per its network and opt-ins.
-        shaping: ciris_edge::transport::link_shaping::ShapingPolicy::for_device(&device),
+        shaping,
         device,
         // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first. Forwarding
         // does not close on load (steward 2026-11-06): first contact is the role a
