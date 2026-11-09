@@ -5413,17 +5413,24 @@ pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
 /// The device this node reports to link shaping (CC 5.4.3), and the policy it
 /// runs. An operator's `CIRIS_DEVICE_KIND` (`server`, `home`, `phone`) wins and
 /// runs that device's fleet default. Otherwise every node runs its platform's
-/// fleet default (a home node on a desktop OS, a phone on Android/iOS), EXCEPT
-/// the canonical: it reports itself a server and runs shaping OFF.
+/// fleet default (a home node on a desktop OS, a phone on Android/iOS), and the
+/// canonical runs a server's — a Linux host would otherwise call itself `home`.
 ///
-/// Steward 2026-11-08 (0.5.245): canonical shaping stays off for this release.
-/// Measured A/B on edge v44.1.0 (native `person_store`, relayed through the
-/// canonical): with the canonical shaping, a seeded node's contact acceptance took
-/// 58.5 s to be seen and 72.6 s to key; unshaped, 15.4 s and 29.2 s. The shaper
-/// is one FIFO per link with a Poisson gap per frame (2.3 s at server class,
-/// 5.8 s at home, 47 s at phone-cellular, the lower class binding), so every
-/// handshake step waits. It turns on with `CIRIS_DEVICE_KIND=server` once edge's
-/// contact-first lane and CC's frame size land.
+/// Steward 2026-11-09 (0.5.245): canonical shaping ON, on edge v44.1.1's 1,400 B
+/// shaped frame and contact-first lane. Measured A/B (native `person_store` +
+/// `av_call`, relayed through the canonical; seconds seen / keyed):
+///
+/// | edge     | canonical | stranger adds seeded | seeded adds stranger |
+/// |----------|-----------|----------------------|----------------------|
+/// | v44.1.0  | shaped    | 58.5 / 72.6          | —                    |
+/// | v44.1.0  | off       | 15.4 / 29.2          | 49 / 88              |
+/// | v44.1.1  | shaped    | 15.4 / 29.0          | 54.5 / 92.8          |
+/// | v44.1.1  | off       | 15.4 / 29.9          | 49.4 / 86.7          |
+///
+/// A live call through the shaped canonical heard 300/300 frames each way
+/// (max 42 ms). The seeded-adds-stranger direction misses 30 s with shaping
+/// off too: that is not the shaper (followups 0.5.246). The late joiner's
+/// ~730 s backlog is the same either way.
 async fn shaping_device(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -5447,10 +5454,11 @@ async fn shaping_device(
         None => {
             let me = crate::node_key::wire_identity().unwrap_or(&cfg.key_id);
             if engine.is_canonical(me).await.unwrap_or(false) {
+                let d = DeviceState::of(DeviceKind::Server);
                 (
-                    DeviceState::of(DeviceKind::Server),
-                    ShapingPolicy::default(),
-                    "the canonical: shaping off for 0.5.245 (steward 2026-11-08)",
+                    d,
+                    ShapingPolicy::for_device(&d),
+                    "the canonical: a server (steward 2026-11-09)",
                 )
             } else {
                 let d = DeviceState::of(DeviceKind::platform_default());
