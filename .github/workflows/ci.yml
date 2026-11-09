@@ -63,6 +63,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # cargo deny (advisories, licenses, bans, sources) over deny.toml — seeded
+  # from CIRISEdge's, so the substrate's curated ignores carry over and the
+  # server adds only what its own tree pulls (steward 2026-11-09: "we should
+  # have a cargo deny gate"). Runner-native, as edge and verify run it: the
+  # Docker cargo-deny-action failed on its musl toolchain (CIRISEdge#242).
+  # A new advisory turns this red on the day it is published, with no code
+  # change: read it, then fix the lock or add an ignore that names the owner.
+  cargo-deny:
+    name: cargo deny (advisories + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --log-level warn --all-features check
+
   clippy-test:
     name: clippy + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

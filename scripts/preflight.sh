@@ -153,6 +153,8 @@ fi
 
 # Lane 4 builds nothing, so it needs no target dir and always runs alongside.
 L4=( "rustfmt"             "cargo fmt --all --check"
+     # Reads Cargo.lock and the advisory db; builds nothing.
+     "cargo-deny"          "cargo deny --log-level warn --all-features check"
      "evidence"            "python3 tools/check_evidence.py"
      # The #38 ratchet. Lives here with the other python guards rather than in a
      # cargo lane: it builds nothing, so it costs a subprocess. The ceiling must
