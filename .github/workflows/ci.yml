@@ -313,7 +313,11 @@ jobs:
         # claimed node's owner signs (a federation owner-binding, CC 5.4.6), the owner's
         # root acceptance (trust:accepts is federation by definition), and the apply
         # door's refusal of any announcement that is not federation-scoped.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 52
+        # 52 -> 53 (0.5.245): `announced_relay::may_have_announced` filters a
+        # READ to the owner-binding's federation scope (`AttestationQuery::scope`)
+        # to ask whether a person could have announced. It emits nothing; the
+        # audit matches the token, and a read at federation scope widens no one.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 53
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
       # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of

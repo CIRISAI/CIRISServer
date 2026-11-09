@@ -136,7 +136,11 @@ class ReachableFromABrokenInstall(Base):
     def test_the_repair_command_runs_without_the_native_library(self):
         r = self.run_py("-m", "ciris_server.upgrade", "--json")
         self.assertIn('"healthy"', r.stdout, r.stderr)
-        self.assertEqual(json.loads(r.stdout)["site"], str(self.site))
+        # Resolved on both sides: macOS's temp dir is /var -> /private/var, and
+        # the helper reports the path the interpreter resolved.
+        self.assertEqual(
+            os.path.realpath(json.loads(r.stdout)["site"]), os.path.realpath(self.site)
+        )
 
     def test_anything_else_still_fails_loudly(self):
         r = self.run_py("-c", "import ciris_server")
