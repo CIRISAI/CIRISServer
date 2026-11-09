@@ -15,7 +15,8 @@ edge v3.2.0, verify v5.2.0 are tagged + on PyPI; CIRISServer is re-pinned to the
 there is **no edge-tag gate left**. The only remaining cross-repo work is the **family
 co-bump** of the cores: **[CIRISLensCore#53](https://github.com/CIRISAI/CIRISLensCore/issues/53)**
 is the LIVE blocker (it alone unblocks the lens-only 0.1 node), then
-[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (**0.6**) and
+[CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76) (**0.6**; since
+2026-11-09 a fold into this repo, not a co-bump: §4, [#537](https://github.com/CIRISAI/CIRISServer/issues/537)) and
 [CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38) (1.0). Server **0.5
 is config-as-CEG (zero env)** — no core co-bump, an in-repo increment. Full task
 graph, dependencies, and GANTT in [`FSD/SERVER_1.0_PLAN.md`](FSD/SERVER_1.0_PLAN.md).
@@ -445,7 +446,20 @@ persist majors):
 - **0.5** — config-as-CEG (zero env). **No core co-bump** — an in-repo increment
   (the fabric IS the config; all config is signed `config:*` CEG, owner-authored,
   runtime-reconciled, replicated). See §3.4.
-- **0.6** — co-bump `ciris-registry-core` ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76); narrowed to co-bump, no API change — we adapt).
+- **0.6** — **folds registry-core's surfaces into this repo, on the node's own
+  substrate** (`src/registry/`, gated by `src/registry_slice.rs`), rather than
+  co-bumping a `ciris-registry-core` pin
+  ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76),
+  [CIRISServer#537](https://github.com/CIRISAI/CIRISServer/issues/537)). The
+  registry's work moves to us (steward, 2026-11-09). The registry-core modules
+  that run on a persist `Engine` are ported at this repo's substrate pins, the
+  way lens-core was absorbed: there is no second substrate graph and no prost or
+  tonic. The sqlx/tonic half is rewritten onto the persist directory one surface
+  at a time. The slice is served only where the accord conferred `infra:attest`.
+
+  > *Superseded 2026-11-09 — the plan until then:* "**0.6** — co-bump
+  > `ciris-registry-core` ([CIRISRegistry#76](https://github.com/CIRISAI/CIRISRegistry/issues/76);
+  > narrowed to co-bump, no API change — we adapt)."
 - **1.0** — co-bump + de-stub `ciris-node-core` ([CIRISNodeCore#38](https://github.com/CIRISAI/CIRISNodeCore/issues/38)).
 
 **No core API change is needed (adapt, don't fix):** `attach_handler` is unchanged;
@@ -473,7 +487,7 @@ built once, not a per-shape fold built twice.
 | **2.9.6** ✅ | — | + `ciris-lens-core` | LensCore cohabits the agent — proves the pattern. [Deployed] |
 | **~2.9.7** | **Server 0.1** | lens-only | The agent's direct lens-core cohabitation is **replaced by CIRISServer (lens-only)** — the agent depends on the `ciris-server` wheel — and the **standalone CIRISLens server retires** in the same move (Grafana/TimescaleDB/Python ingest gone). Smallest fabric node; proves the wheel/compose/pip path. Blocker: CIRISLensCore#53 only. [Spec] |
 | **(in-repo)** | **Server 0.5** | lens (**config-as-CEG**) | **Config-as-CEG / zero env.** The node boots with NO environment variables — one `--home` flag + `--key-id`, all other config is baked constants or signed `config:*` CEG (owner-authored, runtime-reconciled, replicated). No core co-bump; an in-repo increment that hardens the composition before registry folds in. [Shipped] |
-| **~2.9.8/9** | **Server 0.6** | lens + **registry** | Registry-core was slated to fold into the *agent* at 2.9.8 — **superseded**: the agent adopts **CIRISServer 0.6** (the lens+registry fabric node) as its composition instead of a bespoke agent fold. [Spec — gated §4] |
+| **~2.9.8/9** | **Server 0.6** | lens + **registry** | Registry-core was slated to fold into the *agent* at 2.9.8 — **superseded**: the agent adopts **CIRISServer 0.6** (the lens+registry fabric node) as its composition instead of a bespoke agent fold. 2026-11-09: registry-core's surfaces are folded into this repo rather than pinned (§4, CIRISRegistry#76, #537). [Spec — gated §4] |
 | **2.9.9** | — | (same) | **Cleanup**: retire the half-built agent-2.9.8 registry-fold scaffolding; align the agent onto the shared composition. [Spec] |
 | **2.9.10** | **Server 1.0** | registry + lens + **node** | The **node fold completes the fabric node** — **CIRISServer 1.0** is the full three-core node; the agent adopts the complete composition instead of folding node itself. Gated additionally on node-core readiness. [Spec] |
 

@@ -22,6 +22,14 @@
 //! and the watcher below went red the same commit — not months later. The rung
 //! now runs live as [`crate::planes::gate_trace_flow_over_replication`]. The
 //! watcher never got to be wrong about it, which is the whole design.
+//!
+//! **It fired a second time on 2026-11-09, for the 0.6 boundary itself.**
+//! `src/registry/` landed (the registry fold, CIRISServer#537), the watcher went
+//! red in that commit, and `gate_registry_surface_present` was promoted to a LIVE
+//! gate: no `#[ignore]`, off [`crate::ladder::IGNORE_ALLOWLIST`]. The steward
+//! named the cut 0.6.0 the same day. So "the one forward gate that is RED BY
+//! DESIGN" above is history: no forward gate is ignored now, and the ignored
+//! entries left on the allowlist are the external-fact gates only.
 
 use std::path::PathBuf;
 
@@ -50,15 +58,11 @@ fn registry_surface_present() -> bool {
 /// someone promotes the gate to a live one and removes it from the allowlist.
 #[test]
 fn gate0_no_forward_rung_has_quietly_become_satisfiable() {
-    let mut ripe: Vec<&str> = Vec::new();
-    if registry_surface_present() {
-        ripe.push(
-            "  `gate_registry_surface_present` — src/registry.rs now EXISTS. This is the 0.6\n\
-             \x20   boundary: the +registry surface is built. Promote the gate (drop its\n\
-             \x20   #[ignore] and its IGNORE_ALLOWLIST entry) and decide deliberately whether\n\
-             \x20   this cut is still 0.5.",
-        );
-    }
+    // No forward rung is watched today. `gate_registry_surface_present` left this
+    // list on 2026-11-09 when `src/registry/` landed (the registry fold,
+    // CIRISServer#537): the watcher fired in the commit that made it true, and
+    // the gate went live below. The next forward rung is added here.
+    let ripe: Vec<&str> = Vec::new();
     assert!(
         ripe.is_empty(),
         "\n\
@@ -77,27 +81,28 @@ fn gate0_no_forward_rung_has_quietly_become_satisfiable() {
 // The forward gate — the 0.6 boundary
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **The 0.6 boundary, carried forward from the previous ladder unchanged.**
+/// **The 0.6 boundary, carried forward from the previous ladder.**
 ///
-/// It is the one gate of that suite that still means exactly what it says: 0.6 is
-/// the registry fold, and 0.6 must not tag until `src/registry.rs` exists. While
-/// we are on 0.5.X it is correctly RED and correctly ignored.
+/// 0.6 is the registry fold, and 0.6 must not tag until the registry surface
+/// exists. It was RED by design and ignored through 0.5.X; it went LIVE on
+/// 2026-11-09 when `src/registry/` (CEG-native `/v1/builds`, CIRISServer#537)
+/// landed. A live gate cannot decide the version: whether the cut that carries
+/// it is 0.6 is the steward's call, made in Cargo.toml, not here.
 #[test]
-#[ignore = "RED BY DESIGN — the 0.6 boundary: `src/registry.rs` does not exist while we are on 0.5.X. Watched live by gate0_no_forward_rung_has_quietly_become_satisfiable. Run with --include-ignored."]
 fn gate_registry_surface_present() {
     assert!(
         registry_surface_present(),
         "\n\
          🚫 RELEASE GATE [0.6-boundary] — DO NOT TAG 0.6.\n\
          \n\
-         Unsafe to ship as 0.6: `src/registry.rs` is absent, so the +registry surface —\n\
+         Unsafe to ship as 0.6: `src/registry/` is absent, so the +registry surface —\n\
          the thing that bootstraps the canonical mesh and the whole content of the 0.6\n\
          fold — is not built. A 0.6 tag without it is a version number claiming a\n\
          capability the binary does not have, and downstream floors are written against\n\
          the number.\n\
          \n\
-         (This is expected and correct on 0.5.X. It is here so 0.6 cannot be tagged by\n\
-         momentum.)\n"
+         (It is here so 0.6 cannot be tagged by momentum, and so the surface cannot\n\
+         be deleted out from under a 0.6 tag.)\n"
     );
 }
 

@@ -1217,7 +1217,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // (src/registry_slice.rs, CIRISServer#537). `slices.registry` and the owner's
     // signed `config:slices.registry` can only decline it; the walk inside
     // compose_registry is the authorization. Always evaluated, never fatal.
-    let _registry_slice =
+    let registry_slice =
         compose_registry(&engine, &node_resolution.node_key_id, cfg.slices.registry).await;
     if cfg.slices.node {
         compose_node(&edge, &engine, &cfg).await?;
@@ -1608,6 +1608,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     .merge(crate::trust_root_api::public_router(
                         Arc::clone(&engine),
                         node_code.key_id.clone(),
+                    ))
+                    // REGISTRY SLICE (CIRISServer#537): CEG-native /v1/builds,
+                    // mounted ONLY where the accord conferred infra:attest and the
+                    // owner has not declined it (src/registry_slice.rs). Public,
+                    // not loopback-gated: a submitted Contribution authenticates
+                    // itself (pipeline signature + blessing walk), and the reads
+                    // re-verify every row they return.
+                    .merge(crate::registry::router_if_conferred(
+                        &registry_slice,
+                        Arc::clone(&engine),
+                        node_resolution.node_key_id.clone(),
                     ))
                     // claim REMOTE ownership (substrate-native, node-to-node):
                     // POST /v1/setup/claim-remote — the LOCAL node decodes the

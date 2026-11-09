@@ -182,7 +182,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # questions about the WORLD, and each reports BLOCKED rather than passing
      # when it cannot be evaluated.
      "client-wheel"        "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_pinned_client_offers_a_non_desktop_wheel"
-     "boundary-advisory"   "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_registry_surface_present gate_peer_nodes_on_the_shipping_floor || true" )
+     "boundary-advisory"   "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_peer_nodes_on_the_shipping_floor || true" )
 
 if [ "$SEQUENTIAL" = "1" ]; then
   lane target/pf-default "${L1[@]}"

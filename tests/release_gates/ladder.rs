@@ -918,10 +918,6 @@ fn gate_sources() -> Vec<(String, String)> {
 /// leaving this list is the intended end state of every entry on it.
 pub const IGNORE_ALLOWLIST: &[(&str, &str)] = &[
     (
-        "gate_registry_surface_present",
-        "the 0.6 boundary — RED by design while we are on 0.5.X",
-    ),
-    (
         "gate_peer_nodes_on_the_shipping_floor",
         "external fact — needs a reachable peer; BLOCKED, never passed, without one",
     ),

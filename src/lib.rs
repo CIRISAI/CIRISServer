@@ -491,6 +491,10 @@ pub mod receive_axis;
 /// N_eff from ingested traces and emits federation-tier `capacity:*` attestations
 /// (CIRISServer federation Round 1, deliverable 2). Public so the integration
 /// test (`tests/capacity_scorer.rs`) can drive a single deterministic pass.
+/// CIRISServer#537 — the registry slice's surfaces (CEG-native `/v1/builds`),
+/// ported from `ciris-registry-core`'s fold modules onto this server's pins.
+/// Mounted only on a node [`registry_slice`] resolves as conferred.
+pub mod registry;
 /// CIRISServer#537 — the registry slice's role gate: conferred by the accord
 /// (`infra:attest` from a root this node accepts), declinable by the owner,
 /// never configured on.

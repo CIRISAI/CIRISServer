@@ -228,7 +228,8 @@ jobs:
       # `continue-on-error`, which buries the only gate here that should normally
       # be GREEN under two that are legitimately red:
       #
-      #   gate_registry_surface_present         RED BY DESIGN on 0.5.x (the 0.6 boundary)
+      #   gate_registry_surface_present         (LIVE since the registry fold,
+      #                                         #537; runs in the plain step now)
       #   gate_peer_nodes_on_the_shipping_floor BLOCKED without CIRIS_GATE_NODE_A/_B
       #   gate_pinned_client_offers_...         should PASS — a pinned client that
       #                                         cannot be resolved off-desktop is a
@@ -239,9 +240,9 @@ jobs:
       # written to stop.
       - name: Boundary — the pinned client must be resolvable off-desktop (BLOCKING)
         run: 'cargo test --test release_gates -- --include-ignored gate_pinned_client_offers_a_non_desktop_wheel'
-      - name: Boundary — forward + external-fact gates (advisory; read before tagging)
+      - name: Boundary — external-fact gates (advisory; read before tagging)
         continue-on-error: true
-        run: 'cargo test --test release_gates -- --include-ignored gate_registry_surface_present gate_peer_nodes_on_the_shipping_floor'
+        run: 'cargo test --test release_gates -- --include-ignored gate_peer_nodes_on_the_shipping_floor'
       # CIRISServer#373 — `cargo test` above tests the ROOT PACKAGE ONLY. With a
       # root package present and no `default-members`, the workspace member is
       # never built as a test target, so ciris-lens-core's 364 unit tests — the

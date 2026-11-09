@@ -169,5 +169,6 @@ integrity).
 | Phase 1 | The role gate: conferred by the accord, declinable by the owner | `src/registry_slice.rs` |
 | Phase 2a | `GET /v1/trust-root/bundle` (+ `/v1/steward-key`) in the CC 5.3.4 / registry wrapper | `src/trust_root_api.rs` (#830) |
 | Phase 2b | CEG-native `/v1/builds`, mounted on conferred nodes only | `src/registry/builds.rs` |
-| Phase 2c | `/v1/evidence/{suite}` (CC 3.1.5.5), the same door generalized | `src/registry/evidence.rs` |
+| Deferred | `/v1/evidence/{suite}` (CC 3.1.5.5), the same door generalized: it cites Goal-side rows (CSD-130, #833/#834) and its reads walk every author kind, so it waits for a dimension-indexed read | — |
+| — | `src/registry/` existing makes the release ladder's 0.6 boundary (`gate_registry_surface_present`) live. Whether the cut carrying it is 0.6 is the steward's call | `tests/release_gates/boundary.rs` |
 | Later | Commons-blob holding of manifests between canonicals; the P-tier directory reads; licensure | — |

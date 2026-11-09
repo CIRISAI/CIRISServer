@@ -44,6 +44,9 @@
 //! | [`surfaces`] | distinct zeroes, localization reachable |
 //! | [`boundary`] | the 0.6 registry gate and the one external probe — RED BY DESIGN, watched live |
 //!
+//! (Since 0.6.0 the registry gate is LIVE, not RED BY DESIGN: `src/registry/` exists and
+//! `gate_registry_surface_present` runs on every invocation. See [`boundary`].)
+//!
 //! ## Two things worth knowing before reading a failure
 //!
 //! **Anchored rungs assert the proof is installed and armed, not that it passes.**
