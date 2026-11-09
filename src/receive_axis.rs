@@ -199,6 +199,22 @@ pub async fn pull_on_peers_gained(
     failed
 }
 
+/// [`pull_on_peers_gained`] on a task of its own. It asks each peer in turn and
+/// waits, so run inline from a reconcile loop, a node whose peers are unreachable
+/// stops converging for as long as the walk takes.
+pub fn spawn_pull_on_peers_gained(
+    engine: &Arc<Engine>,
+    runtime: &Arc<ciris_edge::replication::ReplicationRuntime>,
+    node_key_id: &str,
+    gained: &[String],
+) {
+    let (engine, runtime) = (Arc::clone(engine), Arc::clone(runtime));
+    let (node_key_id, gained) = (node_key_id.to_owned(), gained.to_vec());
+    tokio::spawn(async move {
+        pull_on_peers_gained(&engine, &runtime, &node_key_id, &gained).await;
+    });
+}
+
 /// **This node's own keys**, the caller's first, deduped: the key the caller
 /// names, the wire identity (the NODE key on a split install) and the actor
 /// identity. A read keyed on "this node's key" must fold over all of them — the

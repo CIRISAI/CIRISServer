@@ -1052,6 +1052,10 @@ async fn federation_identity(
     let req = Request::builder()
         .method("GET")
         .uri("/v1/federation/identity")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))))
         .body(Body::empty())
         .expect("build request");
     let resp = app.oneshot(req).await.expect("router oneshot");
@@ -1277,6 +1281,10 @@ async fn the_metrics_surface_names_the_live_link_count() {
     let req = Request::builder()
         .method("GET")
         .uri("/v1/federation/metrics")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))))
         .body(Body::empty())
         .expect("build request");
     let resp = app.oneshot(req).await.expect("router oneshot");
@@ -1317,6 +1325,8 @@ async fn the_metrics_surface_names_the_live_link_count() {
         "apply_refusals_by_class",
         "removal_delivery",
         "link_pool_links",
+        "av_plane",
+        "link_stall",
         "link_pool_max_per_destination",
         "link_pool_closed_by_reason",
         "replication_round_duration_seconds",
@@ -1380,4 +1390,37 @@ fn every_local_key_write_releases_what_edge_parked_on_it() {
             "{file}: {calls} release_parked_on call(s), expected at least {writes} (CIRISEdge#858)"
         );
     }
+}
+
+/// The monitor's pressure reaches edge's ladder, and the host's lifecycle reaches
+/// its transport. Both were written against a far side that wasn't there, and
+/// nothing failed: `Normal` was never pushed and shedding simply never happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_pressure_and_sleep_reach_edge() {
+    use ciris_server::capacity_monitor::{LoadPressure, PressureSink};
+    use ciris_server::edge_hooks::{EdgePressure, EdgeSleep};
+    use ciris_server::node_lifecycle::TransportSleep;
+
+    let engine = node(0xE8, "node-hooks").await;
+    let edge = edge_over(&engine, "edge-hooks", 0x48).await;
+
+    assert_eq!(edge.service_tier(), ciris_edge::ServiceTier::FullOps);
+    EdgePressure(Arc::clone(&edge)).set_load_pressure(LoadPressure::Critical);
+    assert_ne!(
+        edge.service_tier(),
+        ciris_edge::ServiceTier::FullOps,
+        "critical pressure must move edge's ladder"
+    );
+
+    // From a runtime thread on purpose: a host's callback can be, and `block_on`
+    // here would panic. The answer must come back inside the deadline.
+    let sleep = EdgeSleep {
+        edge: Arc::clone(&edge),
+        runtime: tokio::runtime::Handle::current(),
+    };
+    let started = std::time::Instant::now();
+    let closed = sleep.suspend(std::time::Duration::from_secs(2));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(closed, "a transport with nothing open sleeps at once");
+    sleep.resume();
 }

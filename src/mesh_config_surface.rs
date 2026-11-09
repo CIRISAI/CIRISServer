@@ -1303,7 +1303,7 @@ async fn build_row(
     additional_scrubs: Vec<ScrubSig>,
     _now: DateTime<Utc>,
 ) -> Result<Attestation, String> {
-    let core = ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+    let core = crate::attest::envelope_core(envelope)
         .map_err(|e| format!("type the mesh-config envelope: {e}"))?;
     let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
         attestation_type::SCORES,

@@ -38,6 +38,73 @@ use crate::config::{Capabilities, ServerConfig};
 /// Re-announce cadence for the local Reticulum destination (Leviculum default).
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 
+/// **A phone holds no listener** (CIRISEdge request 2026-11-01; steward
+/// 2026-11-01, the minimum listener, CIRISServer#24). A phone behind carrier
+/// NAT cannot be reached inbound, so a TCP server on `:4242` is only one more
+/// socket the OS must keep for a backgrounded app — and both platforms
+/// expect a backgrounded app to hold none
+/// (<https://developer.android.com/training/monitoring-device-state/doze-standby>,
+/// <https://developer.apple.com/documentation/backgroundtasks>). Its inbound
+/// arrives down the outbound link it holds to a transport node (#24's warm
+/// link).
+///
+/// So on Android and iOS the transport is client-only: one `TcpClient`
+/// interface per bootstrap peer. A non-empty `interfaces` list turns off edge's
+/// legacy `listen_addr` path, which is what binds the server. Elsewhere `None`
+/// keeps today's posture. `CIRIS_TRANSPORT_CLIENT_ONLY=1` forces it on any
+/// platform (tests; a desktop that wants no listener); `=0` forces it off.
+///
+/// No bootstrap peer → `None`, with a warning: an empty list would bring the
+/// legacy listener back, and a phone with nothing to dial is unreachable
+/// either way.
+/// Whether the transport is client-only: the `CIRIS_TRANSPORT_CLIENT_ONLY`
+/// override when it says yes or no, else whether this build is for a phone.
+fn client_only_wanted(env: Option<&str>, phone: bool) -> bool {
+    match env.map(str::trim) {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => phone,
+    }
+}
+
+fn client_only_interfaces(
+    bootstrap: &[std::net::SocketAddr],
+) -> Option<Vec<ciris_edge::transport::reticulum::ReticulumInterfaceConfig>> {
+    use ciris_edge::transport::reticulum::{ReticulumInterfaceConfig, TcpClientInterfaceConfig};
+    let env = std::env::var("CIRIS_TRANSPORT_CLIENT_ONLY").ok();
+    if !client_only_wanted(
+        env.as_deref(),
+        cfg!(any(target_os = "android", target_os = "ios")),
+    ) {
+        return None;
+    }
+    if bootstrap.is_empty() {
+        tracing::warn!(
+            "transport: client-only wanted (a phone holds no listener) but there is no \
+             bootstrap peer to dial — keeping the legacy listener; this node is reachable \
+             only on its LAN until a bootstrap peer is configured"
+        );
+        return None;
+    }
+    tracing::info!(
+        peers = ?bootstrap,
+        "transport: CLIENT-ONLY — one outbound link per bootstrap peer, no TCP listener and no \
+         facilitator; inbound arrives down the outbound link (CIRISServer#24)"
+    );
+    Some(
+        bootstrap
+            .iter()
+            .map(|a| {
+                ReticulumInterfaceConfig::TcpClient(TcpClientInterfaceConfig {
+                    target_addr: *a,
+                    transit: None,
+                    ifac: None,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The effective periodic-announce interval. PROD: the 300s const, always
 /// (zero-env). TEST-ANCHOR builds only: `CIRIS_TEST_ANNOUNCE_SECS` overrides it
 /// (floor 5s) so the mesh-repro harness converges in seconds instead of waiting
@@ -45,19 +112,10 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 /// the ~7-minute run. Compile-fenced like every other harness knob.
 /// **This node's direct-link posture** (CIRISEdge#915, #920; edge v43.4.0).
 ///
-/// - **Proposing** — OPT-IN (off by default until leviculum's two-sided commit;
-///   see the TODO below). `CIRIS_DIRECT_LINK_FACILITATOR=bootstrap` proposes
-///   direct paths to room peers and consented contacts (`allow_direct_contact`)
-///   through the first bootstrap peer as facilitator: a canonical serves one on UDP at its listener's
-///   port, and learning a NAT'd node's public address is what a facilitator is
-///   for (steward 2026-10-30: "collapse to direct immediately"). Edge never
-///   proposes without a facilitator, and until 0.5.243 every node this repo
-///   started was built without one — no server-hosted phone or desktop could
-///   take a direct path at all. `transport.node` does not decide it: it
-///   defaults ON for every node, NAT'd devices included. A public server has
-///   no room peers to propose to, so it proposes nothing in practice.
-///   `CIRIS_DIRECT_LINK_FACILITATOR=host:port` names another; unset or `off`
-///   proposes nothing.
+/// - **Proposing** — on by default from edge v44: through the first bootstrap
+///   peer, to accepted contacts only. `CIRIS_DIRECT_LINK_FACILITATOR=off` turns it
+///   off and `host:port` names another facilitator. Edge never proposes without
+///   a facilitator, and `transport.node` does not decide it.
 /// - **Serving** — a transport node serves a facilitator on UDP at its TCP
 ///   listener's port (4242 in production) and accepts upgrades from room
 ///   peers. `CIRIS_DIRECT_LINK_FACILITATOR_PORT` moves the port, and `0` turns
@@ -67,20 +125,22 @@ fn direct_links(
     listen_port: u16,
     bootstrap: &[std::net::SocketAddr],
 ) -> ciris_edge::transport::direct_path::DirectLinksConfig {
-    use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig};
-    // OPT-IN until leviculum's two-sided commit (steward ruling 2026-10-31):
-    // a punch that succeeds on one side only moves that side onto the UDP path
-    // while the other stays relayed, and the link dies `ChannelExhausted`
-    // (Eric↔Francesco, 2026-10-31: every send 0/N landed for 14 min).
-    // TODO(CIRISAI/leviculum#89 two-sided commit + CIRISEdge#926 stall guard): default to
-    // `bootstrap` again once both ship and a cross-NAT run is green.
-    let facilitator = match std::env::var("CIRIS_DIRECT_LINK_FACILITATOR") {
-        Ok(v) if v.trim().eq_ignore_ascii_case("bootstrap") => {
-            bootstrap.first().map(std::string::ToString::to_string)
-        }
-        Ok(v) if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("off") => None,
-        Ok(v) => Some(v.trim().to_owned()),
-        Err(_) => None,
+    use ciris_edge::transport::direct_path::{DirectAccept, DirectLinksConfig, Proposing};
+    // ON by default from edge v44 (steward ruling 2026-11-04), with leviculum's
+    // two-sided commit and edge's stall guard underneath. Unset or `bootstrap`
+    // proposes through the first bootstrap peer; `off` turns it off. A link is
+    // still proposed only to an accepted contact (ruling 2026-10-31).
+    let chosen = std::env::var("CIRIS_DIRECT_LINK_FACILITATOR").ok();
+    let chosen = chosen.as_deref().map(str::trim);
+    let proposing = if chosen.is_some_and(|v| v.is_empty() || v.eq_ignore_ascii_case("off")) {
+        Proposing::Off
+    } else {
+        Proposing::On
+    };
+    let facilitator = match chosen {
+        _ if proposing == Proposing::Off => None,
+        Some(v) if !v.eq_ignore_ascii_case("bootstrap") => Some(v.to_owned()),
+        _ => bootstrap.first().map(std::string::ToString::to_string),
     };
     if !transport_node {
         tracing::info!(
@@ -89,6 +149,7 @@ fn direct_links(
              through its facilitator, and serves none"
         );
         return DirectLinksConfig {
+            proposing,
             facilitator,
             ..DirectLinksConfig::default()
         };
@@ -116,10 +177,55 @@ fn direct_links(
          upgrades, and proposes through its own facilitator when it has a bootstrap peer"
     );
     DirectLinksConfig {
+        proposing,
         facilitator,
         serve_facilitator,
         accept: DirectAccept::RoomPeers,
     }
+}
+
+/// The transport identity this home already has. The fold's edge keeps it at
+/// `<home>/data/edge/edge_identity.rid`, with its transit KEX seed beside it, and
+/// the no-AI hand-off replaces that process with this one: minting another here
+/// is a new destination for the same node, and its signed route no longer matches.
+/// So copy the fold's to the conventional path when this home has none there.
+/// Copy, not move: edge archives what it adopts into the keystore, and turning AI
+/// back on boots the fold again from its own files, on the same identity.
+fn inherited_ret_identity(cfg: &ServerConfig) -> Result<std::path::PathBuf> {
+    let own = cfg.ret_identity_path();
+    inherit_ret_identity(&cfg.home.join("data/edge/edge_identity.rid"), &own)?;
+    Ok(own)
+}
+
+fn inherit_ret_identity(fold: &std::path::Path, own: &std::path::Path) -> Result<()> {
+    if own.exists() || !fold.exists() {
+        return Ok(());
+    }
+    use ciris_edge::transport::transit_kex_custody::seed_path;
+    if let Some(dir) = own.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    for (from, to) in [
+        (fold.to_path_buf(), own.to_path_buf()),
+        (seed_path(fold), seed_path(own)),
+    ] {
+        if from.exists() {
+            let bytes = std::fs::read(&from).with_context(|| format!("read {}", from.display()))?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts
+                .open(&to)
+                .with_context(|| format!("create {}", to.display()))?;
+            std::io::Write::write_all(&mut file, &bytes)?;
+        }
+    }
+    tracing::info!(path = %fold.display(), "transport identity: inherited the embedded edge's");
+    Ok(())
 }
 
 fn announce_interval() -> Duration {
@@ -1247,6 +1353,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         Arc::clone(&mesh_dispatch_router),
     ));
     crate::mesh_relay::register_mesh_control_handler(&edge, Arc::clone(&mesh_responder));
+    crate::edge_hooks::register(&edge);
 
     // edge v8.2.0 (CIRISEdge#249) makes `Edge::run` take `self: Arc<Self>`, so
     // the composition root can now retain a live `Arc<Edge>` ACROSS the run loop
@@ -1885,6 +1992,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&edge),
                     ))
+                    // QA call routes (0.5.245): mounted only under
+                    // CIRIS_QA_CALLS=1, owner-gated — the cross-NAT A/V step's
+                    // HTTP door onto edge's call API.
+                    .merge(crate::qa_call::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&edge),
+                    ))
                     // The receipt's canonical door (CIRISServer#369's other half):
                     // a producer asks what this node holds for one agent hash.
                     .merge(crate::trace_receipt::router(Arc::clone(&engine)))
@@ -1938,12 +2052,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                     // GET /v1/memory/{node_id}, GET /v1/memory/{node_id}/edges. Projects
                     // the cirisgraph_nodes / cirisgraph_edges SQLite tables onto the
                     // client's wire contract so both cards work in server mode.
-                    // Unauthenticated (read-only public surface, same posture as
+                    // For the node's host or its owner (`auth::operator_gate`), not
+                    // the network: on a node with an agent this is private. Was public,
+                    // same posture as
                     // federation_peers and the health endpoint).
                     .merge(crate::memory_api::router(Arc::clone(&engine)))
                     // GET /v1/telemetry/logs — the node's own logs for the client
                     // Logs screen (tails <home>/logs/ciris-server.log*). Read-only.
-                    .merge(crate::telemetry_logs::router(cfg.home.join("logs")))
+                    .merge(crate::telemetry_logs::router(
+                        Arc::clone(&engine),
+                        cfg.home.join("logs"),
+                    ))
                     // Data page: owner-gated data wipe (reset-account = data-only;
                     // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
                     .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()));
@@ -2133,6 +2252,55 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         )
     });
 
+    // Being found follows the live canonical roster: a node that announced before
+    // announcing carried this consent, a canonical added since, a first try that
+    // failed. It reads the config each pass, so an announce after boot joins in.
+    {
+        let engine = Arc::clone(&engine);
+        let node = this_node.clone();
+        let config = config_rx.clone();
+        tokio::spawn(async move {
+            let mut cadence = crate::loop_cadence::Cadence::new(
+                "announce_consent",
+                crate::announced_relay::RELAY_REFRESH,
+            );
+            let mut consented = std::collections::BTreeSet::new();
+            let mut traces_consented = std::collections::BTreeSet::new();
+            let mut sharing_traces = None;
+            loop {
+                cadence.tick().await;
+                let capture = engine.community_trust_consent_for(&node).await;
+                if let Ok(capture) = capture {
+                    let now = capture.is_some();
+                    if sharing_traces == Some(true) && !now {
+                        crate::peer::traces_turned_off(&engine, &node).await;
+                        crate::replication_reconcile::nudge("traces turned off");
+                        traces_consented.clear();
+                    }
+                    sharing_traces = Some(now);
+                }
+                if sharing_traces == Some(true) {
+                    let before = traces_consented.len();
+                    crate::peer::consent_to_share_traces(&engine, &node, &mut traces_consented)
+                        .await;
+                    if traces_consented.len() != before {
+                        crate::replication_reconcile::nudge("traces: consent written");
+                    }
+                }
+                let announced = config.borrow().announce_ownership;
+                if announced {
+                    let before = consented.len();
+                    crate::peer::consent_to_be_found(&engine, &node, &mut consented).await;
+                    if consented.len() != before {
+                        crate::replication_reconcile::nudge(
+                            "announced: the roster gained a canonical",
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     crate::compose_status::phase("config_reconcile_loop");
     // ── The CEG-driven CONFIG reconcile loop (Server 0.5 Phase 2) ─────────────
     // Re-resolves the migrated knobs from the corpus's `config:*` objects on its
@@ -2250,10 +2418,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         // drivers would contend over the same person's room (Codex,
         // CIRISServer#628).
         let engine_for_roster = Arc::clone(&engine);
+        let room_escape_node = node_code.key_id.clone();
+        let room_escape_seeds = crate::user_seed_dir(&cfg);
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
+            let mut rooms_escaped = false;
             loop {
                 if *self_room_sd_rx.borrow() {
                     break;
@@ -2297,6 +2468,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         error = %format!("{e:#}"),
                         "self roster: the sweep could not run — held changes wait for the next tick"
                     ),
+                }
+                // Rooms stored under founder_only (CC 4.5.13). Once clean, one
+                // process never needs to look again: nothing can create another.
+                if !rooms_escaped {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::communities::escape_founder_only_rooms(
+                        &engine_for_roster,
+                        &node,
+                        room_escape_seeds.clone(),
+                    )
+                    .await
+                    {
+                        Ok(moved) => {
+                            rooms_escaped = true;
+                            if moved > 0 {
+                                crate::compose::kick_replication("rooms left founder_only");
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "founder_only rooms: not yet"),
+                    }
                 }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
@@ -4266,7 +4458,7 @@ async fn setup_peer_replication(
 /// `list_revocations`, one permit per member read). Correctness wins until edge
 /// offers a per-kind cadence or kick-only rounds; the operator's relief stays
 /// the brake.
-pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] = {
+pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 7] = {
     use ciris_edge::replication::EnvelopeKind as K;
     [
         // capacity:* / trace out, health:liveness in — the one Consentable
@@ -4288,36 +4480,6 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
         // for this kind the signed TD is published locally but never
         // transferred (the item-2 dead end).
         K::TransportDestination,
-        // THE COMMUNITY PLANE — the roster. A `cohort_scope: community` row is
-        // readable only by members, and the receiving node decides membership
-        // from ITS roster. Without this round the far side has no community to
-        // be a member OF, and one-sided initiation cannot work at all.
-        K::Community,
-        // Its REMOVAL primitive, wired with it deliberately: the roster is
-        // append-only, effective membership is `admitted AND NOT revoked`, so
-        // admissions without revocations replicate a roster that can only GROW
-        // — a removed member keeps passing `require_member` on the far side.
-        K::CommunityMembershipRevocation,
-        // ── CIRISServer#646 (0.5.218) — planes the server wrote and never
-        //    routed. Appended so the six above keep their order. ──
-        //
-        // persist v48 (#860): the roster's APPEND plane, the revocation's
-        // mirror. Adding a member to a room writes one (`communities.rs`,
-        // `put_community_membership_widening`); without this round a member
-        // added after first contact exists only on the node that added them,
-        // and the fold diverges per node (the `CommunityRosterFork` class the
-        // plane replaced).
-        K::CommunityMembershipWidening,
-        // The household roster (`family_api.rs` → `put_family`). Without it a
-        // household created on one device never reaches another, so a
-        // `cohort_scope: family` row sealed there has no family to be a member
-        // of anywhere else (CIRISServer#647's rung).
-        K::Family,
-        // A household member removed / leaving / a family dissolved
-        // (`family_api.rs` → `put_family_membership_revocation`). Same argument
-        // as `CommunityMembershipRevocation`: without it a removed member stays
-        // a member on every peer.
-        K::FamilyMembershipRevocation,
         // A device released from the owner's self (`auth/occurrence.rs` →
         // `put_identity_occurrence_revocation`). Without it a released device
         // is still one of the owner's occurrences on every OTHER device, and
@@ -4338,20 +4500,6 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
         // EVALUATING node's directory, so the proof must reach every node that
         // holds the room. Edge advertises it at `cohort` only.
         K::LocationProof,
-        // ── persist v49.0.0 / edge v32 (0.5.218) — kinds 18 and 19. ──
-        //
-        // #910: the HOUSEHOLD roster's append plane, the family twin of
-        // `CommunityMembershipWidening`. A member added after a family was
-        // created now travels as its own signed row; without this round the
-        // grown roster exists only on the node that added them, and a device
-        // of that member never sees the household (the devices ladder's
-        // `family_on_b` rung, and the reason it was XFAIL on #910).
-        K::FamilyMembershipWidening,
-        // #912: CC 2 `listed` — a member's OWN signed choice to appear in a
-        // room's enumerable roster. It is the member's row about themselves;
-        // without this round their choice stays on their node and every other
-        // member renders a roster that disagrees with it.
-        K::CommunityMembershipListing,
     ]
 };
 
@@ -4365,7 +4513,7 @@ pub(crate) const REPLICATED_KINDS: [ciris_edge::replication::EnvelopeKind; 14] =
 /// Read only by that gate: it is a decision RECORD, which is why it lives here
 /// beside the list it partitions rather than inside the test.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 5] = {
+pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, &str); 12] = {
     use ciris_edge::replication::EnvelopeKind as K;
     [
         (
@@ -4402,6 +4550,34 @@ pub(crate) const NOT_REPLICATED_KINDS: [(ciris_edge::replication::EnvelopeKind, 
             "operational-data plane (CIRISRegistry): as Organization, no \
              `OperationalProviders`, so every delivered row is refused terminally, and the \
              server writes none",
+        ),
+        (
+            K::Community,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipRevocation,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipWidening,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::Family,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::FamilyMembershipRevocation,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::FamilyMembershipWidening,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
+        ),
+        (
+            K::CommunityMembershipListing,
+            "persist v61 retired this plane's framed carriage: its rows ride the Attestation plane",
         ),
     ]
 };
@@ -4560,6 +4736,19 @@ async fn refresh_publish_own_set(held: &PublishOwn) -> bool {
     w.push(owner);
     held.owner_admitted.store(true, Ordering::Relaxed);
     true
+}
+
+/// **A local write changed who this node's audience is** (a room record, a widening,
+/// a binding). Rows parked waiting for that group or owner are re-asked now, rather
+/// than after edge's terminal wait: writes this node makes itself skip the apply
+/// path that would have released them. `group_or_key` is a group id or owner key.
+pub(crate) fn audience_changed(group_or_key: &str) {
+    if let Some(runtime) = held_replication_runtime() {
+        let released = runtime.bridge().release_audience(group_or_key);
+        if released > 0 {
+            tracing::debug!(group_or_key, released, "parked rows released");
+        }
+    }
 }
 
 pub(crate) fn kick_replication(reason: &'static str) -> bool {
@@ -5049,6 +5238,7 @@ pub(crate) async fn start_replication_runtime(
         // `self_provider` above reads, so an owner admitted after the claim is
         // in the union without a rebuild. Routes (`TransportDestination`) are
         // never relayed. The closure does no I/O; see `announced_relay`.
+        recognised_seats: Some(edge.recognised_seats()),
         kind_publish_selector: Some(crate::announced_relay::selector(Arc::clone(
             &self_publish_keys,
         ))),
@@ -5220,6 +5410,70 @@ pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
     });
 }
 
+/// The device this node reports to link shaping (CC 5.4.3), and the policy it
+/// runs. An operator's `CIRIS_DEVICE_KIND` (`server`, `home`, `phone`) wins and
+/// runs that device's fleet default. Otherwise every node runs its platform's
+/// fleet default (a home node on a desktop OS, a phone on Android/iOS), and the
+/// canonical runs a server's — a Linux host would otherwise call itself `home`.
+///
+/// Steward 2026-11-09 (0.5.245): canonical shaping ON, on edge v44.1.1's 1,400 B
+/// shaped frame and contact-first lane. Measured A/B (native `person_store` +
+/// `av_call`, relayed through the canonical; seconds seen / keyed):
+///
+/// | edge     | canonical | stranger adds seeded | seeded adds stranger |
+/// |----------|-----------|----------------------|----------------------|
+/// | v44.1.0  | shaped    | 58.5 / 72.6          | —                    |
+/// | v44.1.0  | off       | 15.4 / 29.2          | 49 / 88              |
+/// | v44.1.1  | shaped    | 15.4 / 29.0          | 54.5 / 92.8          |
+/// | v44.1.1  | off       | 15.4 / 29.9          | 49.4 / 86.7          |
+///
+/// A live call through the shaped canonical heard 300/300 frames each way
+/// (max 42 ms). The seeded-adds-stranger direction misses 30 s with shaping
+/// off too: that is not the shaper (followups 0.5.246). The late joiner's
+/// ~730 s backlog is the same either way.
+async fn shaping_device(
+    engine: &Arc<Engine>,
+    cfg: &ServerConfig,
+) -> (
+    ciris_edge::transport::link_shaping::DeviceState,
+    ciris_edge::transport::link_shaping::ShapingPolicy,
+) {
+    use ciris_edge::transport::link_shaping::{DeviceKind, DeviceState, ShapingPolicy};
+    let chosen = std::env::var("CIRIS_DEVICE_KIND").ok();
+    if let Some(v) = chosen
+        .as_deref()
+        .filter(|v| DeviceKind::parse(v.trim()).is_none())
+    {
+        tracing::warn!(value = %v, "CIRIS_DEVICE_KIND is not server/home/phone; ignored");
+    }
+    let (device, policy, why) = match chosen.as_deref().map(str::trim).and_then(DeviceKind::parse) {
+        Some(k) => {
+            let d = DeviceState::of(k);
+            (d, ShapingPolicy::for_device(&d), "CIRIS_DEVICE_KIND")
+        }
+        None => {
+            let me = crate::node_key::wire_identity().unwrap_or(&cfg.key_id);
+            if engine.is_canonical(me).await.unwrap_or(false) {
+                let d = DeviceState::of(DeviceKind::Server);
+                (
+                    d,
+                    ShapingPolicy::for_device(&d),
+                    "the canonical: a server (steward 2026-11-09)",
+                )
+            } else {
+                let d = DeviceState::of(DeviceKind::platform_default());
+                (d, ShapingPolicy::for_device(&d), "platform default")
+            }
+        }
+    };
+    tracing::info!(
+        kind = ?device.kind, why,
+        class = ?policy.class, scope = ?policy.scope, bytes_per_s = policy.bytes_per_s,
+        "link shaping: device and policy"
+    );
+    (device, policy)
+}
+
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -5238,7 +5492,25 @@ async fn build_edge(
     // node emits carries a FULL HYBRID signature (Ed25519 + ML-DSA-65). One
     // federation identity per node (distinct from the RNS transport-tier identity
     // held in the keystore below).
-    let signer = Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, Some(pqc)));
+    //
+    // On a split home the wire identity is the NODE key, and the transport signs
+    // with it. Signing with the actor while advertising the node is a node nobody
+    // can attribute: every peer's rooting refuses the mismatch and drops its
+    // frames, with nothing wrong on this side but one log line. That was the
+    // no-AI hand-off, where the fold's edge carries the node key and this boot
+    // came up as the actor (five-platform run 41905966241).
+    let signer = match crate::node_key::held_node_edge_signer() {
+        Some(node) if crate::node_key::wire_identity() == Some(node.key_id.as_str()) => node,
+        _ => Arc::new(EdgeSigner::new(cfg.key_id.clone(), signer, Some(pqc))),
+    };
+    if let Some(wire) = crate::node_key::wire_identity() {
+        anyhow::ensure!(
+            wire == signer.key_id,
+            "this node advertises {wire} but would sign as {}: no peer could attribute it, so \
+             the transport refuses to start",
+            signer.key_id
+        );
+    }
 
     // Hardware-backed transport-identity keystore (verify v5.2.0 #68 / edge #99):
     // TPM-sealed when available (the `tpm` feature + hardware), encrypted software
@@ -5267,10 +5539,17 @@ async fn build_edge(
     // owner opts out via the `transport.node` config:* object (Phase 2). (Leviculum's builder
     // default is true; edge always calls .enable_transport explicitly, so this
     // value is honoured either way.)
+    // A phone holds no listener: client-only interfaces, and no facilitator
+    // (a UDP socket is a listener too).
+    let client_only = client_only_interfaces(&cfg.bootstrap_peers);
+    let serves_facilitator = transport_node && client_only.is_none();
+    // CC 5.4.3 (edge v44.1): link shaping at the device's fleet default; the
+    // canonical runs it off for 0.5.245 (steward 2026-11-08, see shaping_device).
+    let (device, shaping) = shaping_device(engine, cfg).await;
     let ret_config = ReticulumTransportConfig {
         listen_addr: cfg.listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
-        identity_path: cfg.ret_identity_path(),
+        identity_path: inherited_ret_identity(cfg)?,
         announce_interval: announce_interval(),
         // ADVERTISE the wire identity — what peers are told this node is. On a
         // split node that is the NODE key; everywhere else it is `cfg.key_id`
@@ -5294,7 +5573,9 @@ async fn build_edge(
             .is_some_and(|w| w != cfg.key_id))
         .then(|| cfg.key_id.clone()),
         local_epoch: 0,
-        interfaces: vec![],
+        // Empty = edge's legacy listen + dial path (a fabric node's TCP server
+        // on `listen_addr`); a phone's client-only list replaces it.
+        interfaces: client_only.unwrap_or_default(),
         enable_transport: transport_node,
         // CIRISEdge#363: 30s bootstrap link keepalive (60s stale = 2× the
         // anti-entropy cadence) so an advisory-admitted link survives long enough
@@ -5359,10 +5640,22 @@ async fn build_edge(
         // and accepts an upgrade only from a room peer or a consented contact.
         // Fixed at node build: leviculum takes it before the transport starts,
         // never later.
-        direct_links: direct_links(transport_node, cfg.listen_addr.port(), &cfg.bootstrap_peers),
-        // CC 5.4.3 (edge v43.2): link shaping. Default `off` — nothing offered,
-        // no link shaped — so a re-pin does not move this node's posture.
-        shaping: Default::default(),
+        direct_links: direct_links(
+            serves_facilitator,
+            cfg.listen_addr.port(),
+            &cfg.bootstrap_peers,
+        ),
+        // CC 5.4.3 (edge v44.1): link shaping at the device's fleet default
+        // (`shaping_device`): the canonical runs it off for 0.5.245, a home node
+        // only its layer links, a phone per its network and opt-ins.
+        shaping,
+        device,
+        // Edge v44 defaults (FSD/CIRIS_MESH.md R2): roster relays first. Forwarding
+        // does not close on load (steward 2026-11-06): first contact is the role a
+        // loaded relay keeps, and shedding is the levers' job.
+        steer_roster_relays: true,
+        relay_establish_budget: std::time::Duration::from_secs(5),
+        forward_admission: Default::default(),
     };
     // CIRISServer#125 — gate the Reticulum announce's federation-IDENTITY
     // attestation on the `net.announce_ownership` opt-in (default FALSE). The
@@ -5480,6 +5773,15 @@ async fn build_edge(
         // `Edge::local_transport_pubkey()` / `local_dest_hash()` resolve — which
         // populate the RET-transport role of GET /v1/identity.
         .reticulum_transport(transport)
+        // CIRISEdge#805 item 5: the room groups a call keys from (edge's
+        // `join_call`). The same durable MLS store the chat driver opens for
+        // this node; read only when a call joins.
+        .room_groups(Arc::new(ciris_edge::mls::CohortGroups::new(
+            crate::mls_state::store_for(crate::node_key::wire_identity().unwrap_or(&cfg.key_id)),
+            crate::node_key::wire_identity()
+                .unwrap_or(&cfg.key_id)
+                .to_owned(),
+        )))
         // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
         // row pointing at bytes this node has asks for them with a
         // `BlobChunkFetch`; without a source wired here edge drops it —
@@ -5960,6 +6262,52 @@ mod own_key_ids_tests {
 }
 
 #[cfg(test)]
+mod ret_identity_tests {
+    use super::inherit_ret_identity;
+    use ciris_edge::transport::transit_kex_custody::seed_path as seed;
+
+    /// The hand-off keeps the fold's identity, and leaves the fold's files in
+    /// place so turning AI back on boots on the same one.
+    #[test]
+    fn a_home_the_fold_started_keeps_its_identity_in_both_directions() {
+        let dir = std::env::temp_dir().join(format!("ret-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (fold, own) = (dir.join("fold/e.rid"), dir.join("own/e.rid"));
+        inherit_ret_identity(&fold, &own).unwrap();
+        assert!(!own.exists(), "nothing to inherit: edge mints");
+        std::fs::create_dir_all(fold.parent().unwrap()).unwrap();
+        std::fs::write(&fold, b"rns").unwrap();
+        std::fs::write(seed(&fold), b"kex").unwrap();
+        inherit_ret_identity(&fold, &own).unwrap();
+        assert_eq!(std::fs::read(&own).unwrap(), b"rns");
+        assert_eq!(std::fs::read(seed(&own)).unwrap(), b"kex");
+        assert!(fold.exists(), "the fold keeps its own files");
+        std::fs::write(&own, b"its own").unwrap();
+        inherit_ret_identity(&fold, &own).unwrap();
+        assert_eq!(
+            std::fs::read(&own).unwrap(),
+            b"its own",
+            "an existing identity stands"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod routed_kinds_tests {
+    /// persist v61 retired these planes' framed carriage; their rows ride the
+    /// Attestation plane. Routing one does nothing but log on every reconcile.
+    #[test]
+    fn no_routed_kind_is_a_retired_plane() {
+        let retired: Vec<_> = super::REPLICATED_KINDS
+            .iter()
+            .filter(|k| k.is_retired_plane())
+            .collect();
+        assert!(retired.is_empty(), "routed but retired: {retired:?}");
+    }
+}
+
+#[cfg(test)]
 mod direct_link_tests {
     use super::direct_links;
 
@@ -5967,6 +6315,26 @@ mod direct_link_tests {
     /// beside its own TCP listener, so nodes sharing a host never collide, and
     /// accepts room peers' upgrades. A node that is not a transport node keeps
     /// edge's inert default.
+    /// A phone holds no listener: client-only by default on Android/iOS, and
+    /// the override wins either way.
+    #[test]
+    fn a_phone_is_client_only_and_the_override_wins() {
+        assert!(
+            super::client_only_wanted(None, true),
+            "a phone build is client-only"
+        );
+        assert!(
+            !super::client_only_wanted(None, false),
+            "a server keeps its listener"
+        );
+        assert!(super::client_only_wanted(Some("1"), false));
+        assert!(!super::client_only_wanted(Some("0"), true));
+        assert!(
+            super::client_only_wanted(Some("junk"), true),
+            "junk falls back to the build"
+        );
+    }
+
     #[test]
     fn a_transport_node_facilitates_beside_its_listener() {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR_PORT").is_some() {
@@ -5990,21 +6358,17 @@ mod direct_link_tests {
     /// facilitator edge never proposes, and no server-hosted node could go
     /// direct (2026-10-31).
     #[test]
-    fn a_node_proposes_only_when_opted_in() {
+    fn a_node_proposes_through_its_bootstrap_peer_by_default() {
         if std::env::var_os("CIRIS_DIRECT_LINK_FACILITATOR").is_some() {
             return;
         }
-        // OFF by default until the two-sided commit (2026-10-31): a bootstrap
-        // peer alone does not make a node propose.
         let canonical: std::net::SocketAddr = "108.61.242.236:4242".parse().unwrap();
-        let off = direct_links(false, 4242, &[canonical]);
-        assert!(
-            !off.proposes(),
-            "proposing is opt-in until leviculum's two-sided commit"
-        );
-        assert_eq!(off.serve_facilitator, None, "a NAT'd node serves none");
+        let on = direct_links(false, 4242, &[canonical]);
+        assert!(on.proposes(), "on by default from edge v44");
+        assert_eq!(on.facilitator.as_deref(), Some("108.61.242.236:4242"));
+        assert_eq!(on.serve_facilitator, None, "a NAT'd node serves none");
         let both = direct_links(true, 4242, &[canonical]);
-        assert!(!both.proposes());
+        assert!(both.proposes());
         assert_eq!(both.serve_facilitator, Some(4242), "serving is unchanged");
     }
 }

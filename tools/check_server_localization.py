@@ -733,6 +733,15 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # `mesh.announce_costs` (0.5.245) replaces `mesh.announce_requirement`, whose
+    # translations state the old costs. It can't be translated first: the client's
+    # gate compares its bundle to the server at its pin, and this one reads the
+    # released bundle, so neither side could move first with a changed value.
+    # Client 0.5.239 pins 0.5.245 and adds it; the entry leaves at that floor.
+    "mesh.announce_costs",
+    # `add_device.node_proof` (0.5.245): the device can't prove its node. Same
+    # order: client 0.5.239 adds it, and the entry leaves at that floor.
+    "add_device.node_proof",
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the
@@ -908,13 +917,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # CHAT MESSAGE REVISIONS (CIRISEdge#917, CIRISPersist#1155): the author's
     # supersede / withdraw / recant routes and their history. Queued for the
     # client bundle with their English (CIRISClient chat-revisions card).
-    "chat.attachment_not_in_room",
-    "drive.flagged_by_moderation",
-    "drive.withheld_by_moderation",
-    "moderation.item_not_in_room",
-    "moderation.not_flagged",
-    "moderation.reveal_failed",
-    "moderation.unknown_action",
+    # PAID AT CLIENT 0.5.238 (2026-11-08, for 0.5.245): chat.attachment_not_in_room,
+    # drive.{flagged,withheld}_by_moderation, moderation.{item_not_in_room,
+    # not_flagged,reveal_failed,unknown_action}; the floor in pyproject.toml is
+    # 0.5.238.
     # OWNER REQUESTS: what a remotely claimed node needs its owner to sign, the
     # owner's device signing it, and the node applying it
     # (src/owner_requests.rs). Queued for the client bundle with their English.

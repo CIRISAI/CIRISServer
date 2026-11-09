@@ -926,6 +926,26 @@ async fn mesh_seed_runbook_through_relay_is_red_until_phase_d() {
 
     // ── STEP 4: peer A↔B through the relay, with attestation_prefixes covering BOTH
     //    capacity: AND traces (so the consent actually starts the RNS trace-sync).
+    //    Sharing traces is the owner's own consent, given first: peering refuses
+    //    `trace:` without it (steward 2026-11-04: two consents).
+    const AGENT_KEY_ID: &str = "agent-meshseed";
+    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
+    cross_register_agent(&node_a, AGENT_KEY_ID, &agent_sk).await;
+    cross_register_agent(&node_b, AGENT_KEY_ID, &agent_sk).await;
+    for (node, key) in [(&node_a, &NODE_A_KEY_ID), (&node_b, &NODE_B_KEY_ID)] {
+        let grant = ciris_server::federation_delivery::community_trust_grant(
+            &owner_signer,
+            &owner_minted.key_id,
+            key,
+            &owner_minted.key_id,
+            Some(AGENT_KEY_ID),
+        )
+        .await
+        .expect("sign the traces consent as the owner");
+        ciris_server::attest::put(node, grant)
+            .await
+            .expect("store the traces consent");
+    }
     let seed_prefixes = vec![CAPACITY_PREFIX, TRACE_PREFIX];
     let peer_a = relay(
         &client,
@@ -971,10 +991,6 @@ async fn mesh_seed_runbook_through_relay_is_red_until_phase_d() {
     //    proven green today in `peering_consent_covers_traces_and_trace_syncs_a_to_b`;
     //    here it is the runbook's closing post-condition, reachable once the relay
     //    executes the peering above.)
-    const AGENT_KEY_ID: &str = "agent-meshseed";
-    let agent_sk = SigningKey::from_bytes(&[0x11; 32]);
-    cross_register_agent(&node_a, AGENT_KEY_ID, &agent_sk).await;
-    cross_register_agent(&node_b, AGENT_KEY_ID, &agent_sk).await;
     let bytes = build_batch_bytes(&agent_sk, AGENT_KEY_ID, "trace-meshseed-0001");
     let on_a = node_a
         .receive_and_persist(&bytes, &NullScrubber)

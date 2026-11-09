@@ -420,7 +420,7 @@ async fn grant_analyze_consent_to_canonicals(engine: &std::sync::Arc<Engine>) ->
         });
         let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
             ciris_persist::federation::types::attestation_type::SCORES,
-            ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            crate::attest::envelope_core(envelope)
                 .map_err(|e| anyhow!("analyze-consent: EnvelopeCore: {e}"))?,
             // FEDERATION, not self: it is read on the SCORING node, not here.
             cohort_scope::FEDERATION,
@@ -634,7 +634,7 @@ async fn perform_trust_root_ceremony(
             .map_err(|e| anyhow!("ceremony: {e}"))?;
         let mut input = ciris_persist::federation::EmitAttestationInput::with_envelope(
             attestation_type::DELEGATES_TO,
-            ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)
+            crate::attest::envelope_core(envelope)
                 .map_err(|e| anyhow!("ceremony: trust-edge EnvelopeCore: {e}"))?,
             // FEDERATION, as `mesh_genesis::accept_trust_root` writes it on every
             // production boot. This was `self` ("read locally, no peer needs it")

@@ -500,7 +500,9 @@ class Node:
         return out
 
 
-DEFAULT_PREFIXES = ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:", "trace:"]
+# No `trace:`: peering refuses it on an owned node until the owner chose to share
+# traces. A scenario that wants traces passes it, after that choice.
+DEFAULT_PREFIXES = ["capacity:", "chat:", "file:", "ownership:", "self:delegates_to:"]
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -556,6 +558,12 @@ class Mesh:
         # Infrastructure: a server-class node (persist v53 S1 keeps a person's
         # self/family content off it).
         n.env["CIRIS_DEVICE_CLASS"] = "server"
+        # Link-shaping A/B on the canonical ALONE (CC 5.4.3): HARNESS_CANONICAL_
+        # DEVICE_KIND=server runs its fleet-default shaping, as an operator's
+        # CIRIS_DEVICE_KIND would; the people's nodes keep their platform default.
+        kind = os.environ.get("HARNESS_CANONICAL_DEVICE_KIND", "").strip()
+        if kind:
+            n.env["CIRIS_DEVICE_KIND"] = kind
         n.env["CIRIS_TEST_CANONICAL_DIAL"] = n.transport
         n.configure(dial=[])
         n.start()

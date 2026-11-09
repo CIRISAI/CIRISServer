@@ -113,7 +113,11 @@ async fn list_peers(engine: Arc<Engine>) -> Vec<serde_json::Value> {
         .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local addr");
     let _h = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
     let body: serde_json::Value = reqwest::get(format!("http://{addr}/v1/federation/peers"))
         .await

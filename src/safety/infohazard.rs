@@ -628,10 +628,7 @@ pub async fn emit_content_flag(
     let input = EmitAttestationInput {
         attestation_type: attestation_type::SCORES.to_owned(),
         attested_key_id: Some(subject_key_id.to_owned()),
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .map_err(|e| e.to_string())?,
+        attestation_envelope: crate::attest::envelope_core(envelope).map_err(|e| e.to_string())?,
         subject_key_ids: vec![subject_key_id.to_owned()],
         cohort_scope: cohort_scope::FEDERATION.to_owned(),
         expires_at: None,

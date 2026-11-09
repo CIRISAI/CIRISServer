@@ -61,7 +61,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use ciris_persist::federation::admission::MAX_MODERATION_DELEGATION_DEPTH;
+use ciris_persist::federation::admission::{
+    DELEGATION_VALID_UNTIL_FIELD, MAX_MODERATION_DELEGATION_DEPTH,
+};
 use ciris_persist::federation::envelope::paths;
 use ciris_persist::federation::trust_root::TRUST_CONFERS_DIMENSION;
 use ciris_persist::federation::types::{attestation_type, cohort_scope, Attestation, ScrubSig};
@@ -94,6 +96,11 @@ use sha2::{Digest, Sha256};
 /// catches a future re-hand-rolling), and drops the source-grep that stood in for
 /// this import.
 pub const CONFERRABLE_DUTIES: &[&str] = ciris_persist::federation::admission::DELEGATED_DUTY_SCOPES;
+
+/// How long a conferral runs. CC 2.4 refuses a perpetual duty edge and caps the
+/// term at a year from its signed start; a day under the cap keeps the end inside
+/// it whenever the row is stamped. The accord confers again to continue.
+const CONFERRAL_TERM_DAYS: i64 = 364;
 
 #[derive(Clone)]
 pub struct DutyState {
@@ -184,6 +191,9 @@ fn conferral_envelope(
         (paths::DIMENSION): TRUST_CONFERS_DIMENSION,
         "scope": duties,
         "subject_key_id": subject,
+        (DELEGATION_VALID_UNTIL_FIELD): (chrono::Utc::now()
+            + chrono::Duration::days(CONFERRAL_TERM_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
     // Written only when TRUE. Absent and `false` mean the same thing to persist
     // (leaf), and emitting `false` would put a field on the wire that reads like
@@ -560,7 +570,11 @@ async fn cosign(State(st): State<DutyState>, body: axum::body::Bytes) -> Respons
     } else {
         "leaf — may act, may not pass it on".to_string()
     };
-    let conferred = format!("{duty} conferred on {subject}; sub-delegation: {depth}");
+    let until = env
+        .get(DELEGATION_VALID_UNTIL_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("no end date");
+    let conferred = format!("{duty} conferred on {subject} until {until}; sub-delegation: {depth}");
     tracing::warn!(
         subject = %subject, duty = %duty, scrubs = count, needed,
         "DUTY CONFERRAL ADOPTED — federation-tier, replicates by anti-entropy"

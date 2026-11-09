@@ -599,6 +599,92 @@ async fn self_key_record_round_trips_through_register_on_a_fresh_engine() {
 /// owner-binding) REFUSES federation peering — even from a SYSTEM_ADMIN session.
 /// The node has no accountable party to root the cross-node authority in, so it
 /// may only serve cleartext from the canonical root.
+/// Sharing traces has one door (steward 2026-11-04: two consents): an owner who
+/// has not chosen it cannot have `trace:` named for them by a peering or consent
+/// call, supplied or defaulted. The name comes out and the rest of the grant stands,
+/// because the wizard sends this a moment before the capture consent, and refusing
+/// it failed every yes.
+#[tokio::test]
+async fn naming_trace_without_the_traces_consent_leaves_it_out() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let skr = self_key_record_json(&engine).await;
+    let owner = mint_session(&engine, "wa-owner", WaRole::Root).await;
+    let (base, _h) = serve(Arc::clone(&engine), skr).await;
+    let client = reqwest::Client::new();
+    for (route, body) in [
+        (
+            "peering",
+            serde_json::json!({
+                "peer_key_id": peer_key_id(),
+                "peer_key_record": peer_signed_key_record().await,
+                "attestation_prefixes": ["trace:", "capacity:"],
+            }),
+        ),
+        (
+            "consent",
+            serde_json::json!({
+                "peer_key_id": peer_key_id(),
+                "attestation_prefixes": ["trace:", "capacity:"],
+            }),
+        ),
+    ] {
+        let resp = client
+            .post(format!("{base}/v1/federation/{route}"))
+            .bearer_auth(&owner)
+            .json(&body)
+            .send()
+            .await
+            .expect("POST");
+        assert!(resp.status().is_success(), "{route}: {}", resp.status());
+    }
+    // What the routes do to the request. Their responses can't show it here: the
+    // fixture's peer already holds a grant, and that row is what they answer with.
+    let node = engine.local_derived_key_id().await.expect("node key");
+    let mut prefixes = vec!["trace:".to_owned(), "capacity:".to_owned()];
+    ciris_server::peer::drop_unchosen_traces(&engine, &node, &mut prefixes).await;
+    assert_eq!(prefixes, ["capacity:"]);
+}
+
+/// Turning traces off takes `trace:` off a live grant and leaves the rest; a
+/// second pass, as a healing cycle would be, finds nothing to do and adds nothing.
+#[tokio::test]
+async fn turning_traces_off_narrows_the_grant_and_stays_off() {
+    let engine = node().await;
+    register_self(&engine).await;
+    bind_owner(&engine).await;
+    admit_peer(&engine).await;
+    let me = engine.local_derived_key_id().await.expect("derive");
+    ciris_server::peer::emit_replication_consent(
+        &engine,
+        &me,
+        &peer_key_id(),
+        &["trace:", "ownership:"],
+    )
+    .await
+    .expect("a grant carrying traces");
+    let changed = ciris_server::peer::drop_traces_from_grants(&engine, &me, &peer_key_id())
+        .await
+        .expect("narrow");
+    assert!(changed >= 1, "the grant carried trace:");
+    let grants = ciris_server::peer::live_consent_grants_for_machine(&engine, &me)
+        .await
+        .expect("read");
+    let peer = peer_key_id();
+    let grant = grants
+        .iter()
+        .find(|g| g.subject_key_ids.contains(&peer))
+        .expect("the grant is still live");
+    let live = ciris_server::peer::grant_receipt(grant)["consent_prefixes"].clone();
+    assert_eq!(live, serde_json::json!(["ownership:"]));
+    let again = ciris_server::peer::drop_traces_from_grants(&engine, &me, &peer_key_id())
+        .await
+        .expect("again");
+    assert_eq!(again, 0, "nothing re-added it");
+}
+
 #[tokio::test]
 async fn unowned_node_refuses_peering_even_for_system_admin() {
     let engine = node().await;
@@ -861,7 +947,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     // handler normalizes (sorts / dedupes / drops empty), like peering.
     let body = serde_json::json!({
         "peer_key_id": peer_key_id(),
-        "attestation_prefixes": ["trace:", "capacity:", "capacity:", "  "],
+        "attestation_prefixes": ["health:", "capacity:", "capacity:", "  "],
     });
     let resp = client
         .post(format!("{base}/v1/federation/consent"))
@@ -881,7 +967,7 @@ async fn owner_consent_authors_directed_grant_at_admitted_peer() {
     assert_eq!(json["freshly_emitted"], true);
     assert_eq!(
         json["attestation_prefixes"],
-        serde_json::json!(["capacity:", "trace:"]),
+        serde_json::json!(["capacity:", "health:"]),
         "explicit scope echoed sorted + deduped + empty-dropped"
     );
 

@@ -226,6 +226,31 @@ impl Spec {
     }
 }
 
+/// **Type an envelope this node is authoring.** Every authored row comes through
+/// here, whichever door it then takes. An optional member that is not carried is
+/// absent, never null (CC 2.6.1.1.1): persist refuses a null member outright, and
+/// a `json!` envelope built from an `Option` writes one, so a rarely-used optional
+/// field otherwise fails only in the field. `role` stays: a membership row signs
+/// an explicit null role, and persist reads that as meaningful.
+///
+/// Never for bytes someone else signed: dropping a member would break their
+/// signature. `tests/envelope_core_gate.rs` holds that line.
+///
+/// # Errors
+/// The envelope is not a JSON object persist can type.
+// persist v61.0.5 grew `federation::Error` past clippy's 128-byte line; this
+// returns persist's own error type to callers that `?` it into persist doors, so
+// boxing it here would only re-wrap it at every call site.
+#[allow(clippy::result_large_err)]
+pub fn envelope_core(
+    mut envelope: serde_json::Value,
+) -> Result<EnvelopeCore, ciris_persist::federation::Error> {
+    if let Some(members) = envelope.as_object_mut() {
+        members.retain(|k, v| !v.is_null() || k == "role");
+    }
+    EnvelopeCore::from_value(envelope)
+}
+
 /// Everything that can go wrong between a [`Spec`] and a stored row.
 ///
 /// Distinct variants because they are distinct operator situations: a
@@ -295,8 +320,7 @@ impl Emit {
         spec: Spec,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Self, Error> {
-        let core =
-            EnvelopeCore::from_value(spec.envelope).map_err(|e| Error::Envelope(e.to_string()))?;
+        let core = envelope_core(spec.envelope).map_err(|e| Error::Envelope(e.to_string()))?;
         let mut input =
             EmitAttestationInput::with_envelope(spec.attestation_type, core, spec.cohort_scope);
         input.attested_key_id = spec.attested_key_id;

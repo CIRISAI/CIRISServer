@@ -986,6 +986,7 @@ pub fn round_diagnostics_json(
     let rounds_total: u64 = snap.replication_round_outcomes_total.values().sum();
     let round_timed_out = round_outcomes.get("timed_out").copied().unwrap_or(0);
     let round_completed = round_outcomes.get("completed").copied().unwrap_or(0);
+    let round_no_route = round_outcomes.get("no_route").copied().unwrap_or(0);
     // CIRISEdge#373 (edge v13.6.0): inbound frames dropped because a stalled
     // responder reply parked the coordinator drain. The tripwire — should sit at
     // 0. Non-zero = the trace is being actively LOST (a reply is still stalling
@@ -1070,6 +1071,10 @@ pub fn round_diagnostics_json(
         // round contention under concurrent-peer load, transport-layer ceiling —
         // CIRISEdge#370 / leviculum concurrency).
         "kex missing + round_timed_out >= round_completed — the reverse IdentityOccurrence round is TIMING OUT, not completing. This is canonical round contention under concurrent-peer load (FSD/RNS_LIFECYCLE_STATES.md KEX-none RCA; transport-layer ceiling per CIRISEdge#370). Check the canonical's live peer count — advisory/low-legitimacy peers starving real ones"
+    } else if round_no_route > 0 && round_completed == 0 {
+        // Nothing failed: a peer with no live link and no path has nowhere to send
+        // to, and comes back by dialing in.
+        "kex missing + rounds found NO ROUTE (edge v44.1) — these peers have no live link and no path; check whether they dial this node"
     } else if failures_by_class.get("timeout").copied().unwrap_or(0) > 0 {
         "kex missing + transport send timeouts — reverse round transport timing out; likely canonical round contention (FSD KEX-none RCA). Corroborate with replication_plane.round_outcomes.timed_out. NOTE the plane: send_failures_by_class is the APPLICATION plane (announce/durable sends), so it corroborates transport health, it does not measure replication carriage"
     } else if failures_by_class.get("unreachable").copied().unwrap_or(0) > 0 {
@@ -1392,11 +1397,29 @@ pub fn author_consent_embedded(
     let (rt, _controller) = HELD
         .get()
         .context("author_federation_consent: federation delivery not started")?;
+    // Every caller reaches here, and several default their prefixes. Sharing traces
+    // has one door, the capture grant: without it `trace:` is not this call's to
+    // add, so turning traces off stays off across a retry or a heal.
+    let mut prefixes = prefixes.to_vec();
+    if rt
+        .block_on(crate::peer::check_traces_consent(
+            &engine,
+            &node_key_id,
+            &prefixes,
+        ))
+        .is_err()
+    {
+        tracing::info!(
+            peer_key_id,
+            "consent authored without trace:: this node's owner has not chosen to share traces"
+        );
+        prefixes.retain(|p| p != "trace:");
+    }
     let grant = rt.block_on(crate::peer::emit_replication_consent(
         &engine,
         &node_key_id,
         peer_key_id,
-        prefixes,
+        &prefixes,
     ))?;
 
     // ── CIRISConstitution#46 — the `analyze` grant, the SECOND half ──────────
@@ -1966,13 +1989,12 @@ pub async fn run_federation_delivery(
                         crate::replication_reconcile::note_convergence(&mut last_logged, reconciled)
                     {
                         if !gained.is_empty() {
-                            crate::receive_axis::pull_on_peers_gained(
+                            crate::receive_axis::spawn_pull_on_peers_gained(
                                 &reconcile_engine,
                                 &reconcile_runtime,
                                 &reconcile_node_key,
                                 &gained,
-                            )
-                            .await;
+                            );
                         }
                         if count == 0 {
                             // ZERO IS NOT CONVERGENCE. This read "converged to 0
@@ -2298,23 +2320,11 @@ mod tests {
             EnvelopeKind::IdentityOccurrence,
             // The PQ transport-attribution plane (CIRISEdge#406).
             EnvelopeKind::TransportDestination,
-            // The chat roster — without it a `cohort_scope: community` row
-            // arrives somewhere with no community to be a member of.
-            EnvelopeKind::Community,
-            // And its removals: the roster is append-only, so admissions
-            // without revocations replicate a membership that can only grow.
-            EnvelopeKind::CommunityMembershipRevocation,
-            // CIRISServer#646 — the planes the server wrote and never routed.
-            EnvelopeKind::CommunityMembershipWidening,
-            EnvelopeKind::Family,
-            EnvelopeKind::FamilyMembershipRevocation,
+            // Roster and family planes are retired (persist v61): their rows ride
+            // the Attestation plane, so they are not routed.
             EnvelopeKind::IdentityOccurrenceRevocation,
             EnvelopeKind::Revocation,
             EnvelopeKind::LocationProof,
-            // persist v49.0.0 — the household roster's append plane (#910) and
-            // a member's own `listed` choice (#912).
-            EnvelopeKind::FamilyMembershipWidening,
-            EnvelopeKind::CommunityMembershipListing,
         ];
         assert_eq!(peers.len(), desired.len() * expected.len());
         for (target_index, target) in desired.iter().enumerate() {
@@ -2411,10 +2421,9 @@ mod tests {
         // The kinds this server WRITES on a roster / device / key change are
         // named here on their own, so shrinking the routed list by moving one
         // of them into the exclusions is a visible edit to this test too.
+        // Roster and family rows ride the Attestation plane since persist v61.
         for must in [
-            EnvelopeKind::CommunityMembershipWidening,
-            EnvelopeKind::Family,
-            EnvelopeKind::FamilyMembershipRevocation,
+            EnvelopeKind::Attestation,
             EnvelopeKind::IdentityOccurrenceRevocation,
             EnvelopeKind::Revocation,
         ] {

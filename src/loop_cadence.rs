@@ -78,7 +78,7 @@ use tokio::time::{sleep_until, Instant};
 ///
 /// Adding a loop here moves the others' slots. That is intended: the invariant
 /// is even spread, not a fixed offset for any one loop.
-pub const LOOPS: [&str; 13] = [
+pub const LOOPS: [&str; 14] = [
     "config_reconcile",
     "replication_reconcile",
     "scorer",
@@ -114,6 +114,8 @@ pub const LOOPS: [&str; 13] = [
     // The released-device watch (`crate::device_release`, steward 2026-10-29):
     // a minute's read of the node's own occurrences, on its own slot.
     "device_release",
+    // Being found follows the live canonical roster (`peer::consent_to_be_found`).
+    "announce_consent",
 ];
 
 /// The origin every cadence measures its phase from, captured once per process.
@@ -143,7 +145,13 @@ fn epoch() -> Instant {
 /// At 2.25 s the widest slot is 27 s and every pair is still at least 2.25 s
 /// apart, above the 1-2 s burst width. A fourteenth loop needs the spacing
 /// revisited again (30 s / 14 is 2.14 s, near the burst width).
-pub const SLOT_SPACING: Duration = Duration::from_millis(2250);
+///
+/// 2.25 s → 2.1 s for 0.5.245, when `announce_consent` became that FOURTEENTH
+/// loop: at 2.25 s its slot sits at 29.25 s, 750 ms from `config_reconcile`. At
+/// 2.1 s the widest slot is 27.3 s and every pair is at least 2.1 s apart,
+/// still above the 1-2 s burst width. A fifteenth loop does not fit: 30 s / 15
+/// is 2 s, the burst width, so it needs a longer shortest cadence instead.
+pub const SLOT_SPACING: Duration = Duration::from_millis(2100);
 
 /// This loop's offset into its period: slot `i` of [`LOOPS`] sits at
 /// `i ×` [`SLOT_SPACING`], wrapped into the period.
@@ -190,6 +198,9 @@ pub struct Cadence {
     seq: u64,
     /// Whether the immediate first tick has been taken.
     started: bool,
+    /// Held from a tick returning to the next `tick` call: this loop is
+    /// mid-pass (`node_lifecycle::enter_background` waits for these).
+    pass: Option<crate::node_lifecycle::PassGuard>,
 }
 
 impl Cadence {
@@ -213,6 +224,7 @@ impl Cadence {
             base: epoch() + phase_for(name, period),
             seq: 0,
             started: false,
+            pass: None,
         };
         c.seq = c.first_seq_after(Instant::now());
         c
@@ -277,6 +289,27 @@ impl Cadence {
     /// config write could postpone the next pass by a full cadence, and a stream
     /// of them could postpone it indefinitely.
     pub async fn tick(&mut self) {
+        // The pass that the previous tick started is over.
+        self.pass = None;
+        self.wait_for_deadline().await;
+        self.pass = Some(crate::node_lifecycle::PassGuard::begin());
+    }
+
+    /// [`tick`](Self::tick)'s schedule, held while the node is backgrounded
+    /// (`node_lifecycle`, steward 2026-11-01): a backgrounded node starts no
+    /// pass. A deadline that falls while backgrounded is overdue on return, so
+    /// the loop runs its catch-up pass as soon as the node is foregrounded.
+    async fn wait_for_deadline(&mut self) {
+        loop {
+            crate::node_lifecycle::foreground().await;
+            self.wait_on_grid().await;
+            if crate::node_lifecycle::phase() == crate::node_lifecycle::Phase::Foreground {
+                return;
+            }
+        }
+    }
+
+    async fn wait_on_grid(&mut self) {
         if !self.started {
             self.started = true;
             return;

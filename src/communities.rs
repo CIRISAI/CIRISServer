@@ -146,10 +146,6 @@ const MAX_NAME_CHARS: usize = 200;
 const MAX_LIST_LIMIT: usize = 500;
 const DEFAULT_LIST_LIMIT: usize = 100;
 
-/// Page size when walking the widening plane for rooms the caller was ADDED
-/// to — persist indexes the record's members, not the widening plane's.
-const WIDENING_SCAN_PAGE: u32 = 500;
-
 // ─── Vocabulary ─────────────────────────────────────────────────────────────
 
 /// A room's audience tier (FSD §4): `community`, or `affiliations` — the same
@@ -771,14 +767,18 @@ fn planned_rows(room: &Room, op: &ChangeOp) -> Vec<PlannedRow> {
             member: key_id.clone(),
             reason: "removed",
         }],
-        ChangeOp::Dissolve => room
-            .roster
-            .iter()
-            .map(|m| PlannedRow::Revocation {
-                member: m.key_id.clone(),
-                reason: "dissolved",
-            })
-            .collect(),
+        // Founders last: a room's last founder cannot leave while others remain.
+        ChangeOp::Dissolve => {
+            let (founders, rest): (Vec<_>, Vec<_>) =
+                room.roster.iter().partition(|m| room.is_founder(&m.key_id));
+            rest.into_iter()
+                .chain(founders)
+                .map(|m| PlannedRow::Revocation {
+                    member: m.key_id.clone(),
+                    reason: "dissolved",
+                })
+                .collect()
+        }
     }
 }
 
@@ -965,7 +965,9 @@ async fn tally(
     let (eligible, required): (BTreeSet<String>, usize) = match protocol {
         Protocol::FounderOnly => {
             let mut e: BTreeSet<String> = room.founders().into_iter().collect();
-            if op.touches_only_plain_members(room) {
+            // Adding only: a moderator alone cannot remove anyone (persist v61.0.3,
+            // CIRISPersist#1200), in any protocol.
+            if op.touches_only_plain_members(room) && op.removal_target().is_none() {
                 // An APPOINTED roster-duty holder: a founder-rooted,
                 // `moderate`-scoped `delegates_to` chain (persist's
                 // `appointed_moderators_of`, CIRISPersist#591) — not the
@@ -992,11 +994,28 @@ async fn tally(
         }
         Protocol::Majority => {
             let n = strict_majority(everyone.len());
-            (everyone.clone(), n)
+            let e = everyone
+                .iter()
+                .filter(|k| Some(k.as_str()) != op.removal_target())
+                .cloned()
+                .collect();
+            (e, n)
         }
         // M absolute (CC 4.4.3.4.2.1), exactly as persist's evaluator counts.
         Protocol::Quorum { m, .. } => (everyone.clone(), m),
     };
+    // A removal needs a strict majority of the roster from everyone but the person
+    // named (CC 3.1.3.2), so at two members nobody can be removed: leaving is the
+    // exit. Refused, not left pending for a voice that cannot exist.
+    if op.removal_target().is_some()
+        && protocol != Protocol::FounderOnly
+        && eligible.len() < strict_majority(everyone.len())
+    {
+        return Err(not_authorized(
+            &protocol_str,
+            "nobody can be removed from a room this small; leaving is the exit",
+        ));
+    }
     let mut members: Vec<ThresholdMember> = Vec::with_capacity(eligible.len());
     for k in &eligible {
         if let Some(rec) = dir
@@ -1180,7 +1199,10 @@ async fn apply_change(
                 .iter()
                 .any(|m| !cosigs("revocation", &m.key_id).is_empty()) =>
         {
-            for m in &room.roster {
+            // Founders last, as `planned_rows`: the last founder cannot leave first.
+            let (founders, rest): (Vec<_>, Vec<_>) =
+                room.roster.iter().partition(|m| room.is_founder(&m.key_id));
+            for m in rest.into_iter().chain(founders) {
                 put_revocation(
                     dir.as_ref(),
                     room.id(),
@@ -1220,6 +1242,7 @@ async fn apply_change(
             }
         }
     }
+    crate::compose::audience_changed(room.id());
     crate::compose::kick_replication("community roster changed");
     tracing::info!(
         room = %room.id(),
@@ -1272,6 +1295,15 @@ async fn precheck(
             if role.as_str() != MEMBER_ROLE_FOUNDER && room.orphans_if_gone(key_id) {
                 return Err(last_founder(key_id));
             }
+        }
+        // Persist v61 dissolves a community by a cosigned `withdraws` of its roster
+        // record (CC 4.4.3.2.8), and revocations one member at a time cannot reach
+        // it past two. Until that door is here, say so rather than half-do it.
+        ChangeOp::Dissolve if room.roster.len() > 1 => {
+            return Err(not_authorized(
+                &room.record.consensus_protocol,
+                "dissolving a room with other members isn't available yet; members can leave",
+            ));
         }
         ChangeOp::Dissolve => {}
     }
@@ -1458,18 +1490,18 @@ async fn create_community(
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .unwrap_or(consensus_protocol::FOUNDER_ONLY)
+        .unwrap_or(consensus_protocol::MAJORITY)
         .to_owned();
     match Protocol::parse(&protocol) {
-        Some(Protocol::Quorum { n, .. }) if n != members.len() + 1 => {
+        // A room cannot be founder_only above a family (persist v61), and until
+        // a quorum room can grow (CIRISPersist#1173) the only one that could be
+        // created is quorum:1/1, one voice at any size: refused rather than
+        // offered as a quorum.
+        Some(Protocol::FounderOnly | Protocol::Quorum { .. }) => {
             return refuse(
                 StatusCode::BAD_REQUEST,
                 "community.bad_consensus_protocol",
-                format!(
-                    "{protocol:?} names {n} member(s) but the room is founded with {} — a \
-                     quorum's N is its roster size",
-                    members.len() + 1
-                ),
+                format!("{protocol:?} cannot found a room; use majority or unanimous"),
             )
         }
         Some(_) => {}
@@ -1515,6 +1547,7 @@ async fn create_community(
         return write_failed(format!("put_community: {e:#}"));
     }
     ensure_owner_content_occurrence(&st, &owner.key_id).await;
+    crate::compose::audience_changed(&community_id);
     crate::compose::kick_replication("community room founded");
     let Ok(Some(room)) = load_room(&st, &community_id).await else {
         return store_unavailable("the room was written and could not be read back");
@@ -1598,11 +1631,15 @@ struct ListQuery {
 }
 
 /// `GET /v1/communities` — every room the caller is ACTIVE in, pair rooms
-/// included, by the fold. Candidates are the rooms whose RECORD names the
-/// caller (persist's index) plus the rooms whose WIDENING plane does (persist
-/// indexes no widening by member, so the plane is walked) — then each is
-/// judged by the fold, so a removed member's room drops out and an added
-/// member's room appears.
+/// included, by the fold. Candidates come from ONE member-indexed read:
+/// persist's `list_communities_for_member` names the rooms whose record lists
+/// the caller AND the rooms a widening seated them in
+/// (`federation_community_membership_widenings_by_member`, V151) — then each
+/// is judged by the fold, so a removed member's room drops out and an added
+/// member's room appears. (Until 0.5.245 this also walked the WHOLE widening
+/// plane per request to find the caller's widenings — every member's, every
+/// room's — which the member index already answers: steward 2026-11-01, route
+/// on the field we route on.)
 async fn list_communities(
     State(st): State<ChatState>,
     headers: HeaderMap,
@@ -1613,34 +1650,10 @@ async fn list_communities(
         Err(r) => return r,
     };
     let dir = st.engine.federation_directory();
-    let mut ids: BTreeSet<String> = match dir.list_communities_for_member(&owner.key_id).await {
+    let ids: BTreeSet<String> = match dir.list_communities_for_member(&owner.key_id).await {
         Ok(v) => v.into_iter().map(|c| c.community_key_id).collect(),
         Err(e) => return store_unavailable(format!("list_communities_for_member: {e:#}")),
     };
-    let mut cursor = None;
-    loop {
-        let page = match dir
-            .list_signed_community_membership_widenings_since(cursor.clone(), WIDENING_SCAN_PAGE)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return store_unavailable(format!(
-                    "list_signed_community_membership_widenings_since: {e:#}"
-                ))
-            }
-        };
-        for w in &page {
-            let row = &w.widening.community_membership_widening;
-            if row.member_key_id == owner.key_id {
-                ids.insert(row.community_key_id.clone());
-            }
-        }
-        if page.len() < WIDENING_SCAN_PAGE as usize {
-            break;
-        }
-        cursor = page.last().map(|p| p.resume_pair());
-    }
     let limit = q
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -1799,6 +1812,8 @@ async fn invite(
                 room = %room.id(), invitee = %key_id, proposal = %proposal.attestation_id,
                 "communities: invitation sent — the invitee joins only on their own acceptance"
             );
+            // The invitee's KeyPackage lands after this; keep the room driver hurried.
+            crate::contacts_chat::hurry_pair_rooms();
             crate::compose::kick_replication("community invitation sent");
             crate::membership_invites::invited(
                 room.tier.group_scope(),
@@ -1850,7 +1865,11 @@ async fn list_invites(
         .any(|(v, _)| v.state == crate::membership_invites::STATE_ACCEPTED);
     let mut seated = Vec::new();
     if accepted
-        && Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+        // One signature seats: the founder of a room of one, whose acceptance is the
+        // second voice, or a family's founder. Past that it takes the protocol's
+        // signatures, through changes/envelope.
+        && (Protocol::parse(&room.record.consensus_protocol) == Some(Protocol::FounderOnly)
+            || room.roster.len() == 1)
         && room.is_founder(&owner.key_id)
         && require_verb(
             &owner,
@@ -2042,6 +2061,79 @@ async fn leave_room(st: &ChatState, headers: &HeaderMap, owner: &Owner, room: Ro
         })),
     )
         .into_response()
+}
+
+/// **A room stored under `founder_only` moves to `majority`** (CC 4.5.13; persist
+/// v61 #1123). Above a family that protocol is refused, so such a room refuses
+/// every event but a resignation until its one admissible new version lands. That
+/// version changes the protocol and nothing else, and needs an active founder's
+/// signature, so it runs on a node holding a founder's pen: a room with no founder
+/// on this node waits for one who is. Returns how many rooms moved.
+///
+/// # Errors
+/// The directory could not be read. One room's refusal is logged and skipped.
+pub async fn escape_founder_only_rooms(
+    engine: &std::sync::Arc<ciris_persist::prelude::Engine>,
+    node_key_id: &str,
+    seed_dir: std::path::PathBuf,
+) -> Result<usize, String> {
+    let dir = engine.federation_directory();
+    let Some(owner) = admission::owner_of(dir.as_ref(), node_key_id)
+        .await
+        .map_err(|e| format!("owner_of: {e:#}"))?
+    else {
+        return Ok(0);
+    };
+    let rooms = dir
+        .list_communities_for_member(&owner)
+        .await
+        .map_err(|e| format!("list_communities_for_member: {e:#}"))?;
+    // The live roster: a founder who left is still on the record, and persist would
+    // refuse their signature.
+    let mut stored = Vec::new();
+    for room in &rooms {
+        if Protocol::parse(&room.consensus_protocol) != Some(Protocol::FounderOnly) {
+            continue;
+        }
+        let active = crate::contacts_chat::active_roster(dir.as_ref(), room).await?;
+        if active
+            .iter()
+            .any(|m| m.key_id == owner && m.role.as_deref() == Some(MEMBER_ROLE_FOUNDER))
+        {
+            stored.push(room);
+        }
+    }
+    if stored.is_empty() {
+        return Ok(0);
+    }
+    let pen = crate::owner_signer_capsule::for_owned_node_in(engine, node_key_id, seed_dir)
+        .await
+        .map_err(|e| format!("open the founder's pen: {e:?}"))?;
+    let mut moved = 0;
+    for room in stored {
+        let mut next = room.clone();
+        next.consensus_protocol = consensus_protocol::MAJORITY.to_owned();
+        next.prev_head_digest = room.persist_row_hash.clone();
+        next.persist_row_hash = String::new();
+        let id = room.community_key_id.clone();
+        let outcome = match ciris_edge::chat::signed_community(next, pen.edge_signer()).await {
+            Ok(signed) => dir
+                .supersede_community(signed, None)
+                .await
+                .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(_) => {
+                moved += 1;
+                tracing::info!(room = %id, "communities: room moved from founder_only to majority");
+            }
+            Err(e) => {
+                tracing::warn!(room = %id, error = %e, "communities: founder_only room did not move");
+            }
+        }
+    }
+    Ok(moved)
 }
 
 /// `DELETE /v1/communities/{id}` — dissolve: every active member revoked, the

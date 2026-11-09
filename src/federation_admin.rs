@@ -246,7 +246,7 @@ async fn peering(
         return resp;
     }
 
-    let req: PeeringRequest = match serde_json::from_slice(&body) {
+    let mut req: PeeringRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
     };
@@ -340,6 +340,8 @@ async fn peering(
 
     // ── (b) Consent: emit THIS node's directed consent:replication:v1 grant at
     //    the peer, carrying the caller-supplied prefixes (idempotent). ──────────
+    crate::peer::drop_unchosen_traces(&st.engine, &st.node_key_id, &mut req.attestation_prefixes)
+        .await;
     let grant = match crate::peer::emit_replication_consent(
         &st.engine,
         &st.node_key_id,
@@ -718,7 +720,7 @@ async fn consent(
         return resp;
     }
 
-    let req: ConsentRequest = match serde_json::from_slice(&body) {
+    let mut req: ConsentRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad request: {e}")),
     };
@@ -790,6 +792,8 @@ async fn consent(
         principle: None,
         purpose: None,
     };
+    crate::peer::drop_unchosen_traces(&st.engine, &st.node_key_id, &mut req.attestation_prefixes)
+        .await;
     let grant = match crate::peer::emit_replication_consent_with_policy(
         &st.engine,
         &st.node_key_id,

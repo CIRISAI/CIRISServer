@@ -23,10 +23,11 @@
 //!
 //! ## Auth posture
 //!
-//! `identity` / `metrics` / `events` are unauthenticated — the agent gated
-//! them OBSERVER+ (its lowest tier), and the node's read surface has no
-//! observer tier; they carry non-sensitive operational telemetry, same
-//! posture as the peers list ([`crate::federation_peers`]) and `/v1/health`.
+//! `identity` is public, same posture as the peers list
+//! ([`crate::federation_peers`]) and `/v1/health`. `metrics` and `events` are for
+//! the node's host or its owner ([`crate::auth::operator_gate`]): the read API
+//! binds `0.0.0.0` by default, and their counters are a timing feed of the node's
+//! real activity, which is what shaping hides from an observer.
 //! `content` POST stays owner-gated (the agent required SYSTEM_ADMIN — it
 //! commands a network fetch on the node's behalf), via the SAME session gate
 //! the peers sideband PUTs share ([`crate::federation_peers::require_owner_session`]).
@@ -121,7 +122,26 @@ fn err(code: StatusCode, error: &str) -> Response {
 /// resolved from the engine (CIRISServer#372 Level 2), not threaded in from
 /// `cfg.key_id`. It was documented as `== edge.signer_key_id()`; asking the
 /// engine makes that an identity rather than an assertion.
-async fn get_identity(State(st): State<SurfaceState>) -> Response {
+async fn get_identity(
+    State(st): State<SurfaceState>,
+    extensions: axum::http::Extensions,
+    headers: HeaderMap,
+) -> Response {
+    // Who a node peers with, and how many, is the operator's: a stranger gets the
+    // identity and capabilities only.
+    if !crate::auth::operator_gate::is_operator(&st.engine, &extensions, &headers).await {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "data": {
+                    "signer_key_id": st.edge.signer_key_id(),
+                    "crate_version": ciris_edge::version::VERSION,
+                    "capabilities": FEDERATION_CAPABILITIES,
+                }
+            })),
+        )
+            .into_response();
+    }
     let (total, canonical, standing) =
         match crate::self_identity::resolve(&st.engine, "federation_surface").await {
             Err(_) => (0, 0, crate::self_identity::REFUSAL_TOKEN),
@@ -416,6 +436,11 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     // macro's recursion limit.
     let unread = serde_json::json!({
         "log_dedup_suppressed_total": crate::log_dedup::suppressed_snapshot(),
+        // edge v44.1: the A/V plane's counters (`av_sent_timed`,
+        // `av_frame_expired_late`, `av_frame_stale_dropped`, …) and the link
+        // stall guard's (`link_stall_zero_landed_send`, `link_stall_closed`).
+        "av_plane": bundle.av_plane,
+        "link_stall": bundle.link_stall,
         "inbound_dropped_low_trust": bundle.inbound_dropped_low_trust,
         "replication_inbound_backpressure_drops_by_role":
                     bundle.replication_inbound_backpressure_drops_by_role,
@@ -872,17 +897,23 @@ async fn events_stream(
 /// **It takes no key id** (CIRISServer#372 Level 2): the node's own derived
 /// federation `key_id` is resolved from the engine at request time.
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
-    let state = SurfaceState { engine, edge };
-    Router::new()
-        .route("/v1/federation/identity", axum::routing::get(get_identity))
+    let operator = Router::new()
         .route("/v1/federation/metrics", axum::routing::get(get_metrics))
-        .route(
-            "/v1/federation/content/{content_id}",
-            axum::routing::post(fetch_content),
-        )
         .route(
             "/v1/federation/events/{channel}",
             axum::routing::get(events_stream),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&engine),
+            crate::auth::operator_gate::require_operator,
+        ));
+    let state = SurfaceState { engine, edge };
+    Router::new()
+        .route("/v1/federation/identity", axum::routing::get(get_identity))
+        .route(
+            "/v1/federation/content/{content_id}",
+            axum::routing::post(fetch_content),
+        )
+        .merge(operator)
         .with_state(state)
 }

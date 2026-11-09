@@ -263,6 +263,9 @@ async fn emit_delegation(
         "attested_key_id": recipient,
         "scope": scope,
         "sub_delegation": true,
+        // Every duty here is term-bearing (CC 2.4): no perpetual edge.
+        "delegation_valid_until": (chrono::Utc::now() + chrono::Duration::days(180))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
     let spec = ciris_server::attest::Spec::new(
         attestation_type::DELEGATES_TO,
@@ -404,7 +407,7 @@ async fn put_community(engine: &Engine, community_id: &str, founder: &str) {
             role: Some("founder".to_string()),
         }],
         founded_at: now,
-        consensus_protocol: "founder_only".to_string(),
+        consensus_protocol: "majority".to_string(),
         policy_blob: None,
         persist_row_hash: String::new(),
         prev_head_digest: String::new(),

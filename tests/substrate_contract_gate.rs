@@ -131,7 +131,7 @@ const RATIFIED_TRANSFORM_ALGEBRA_HASH: &str =
 /// server writes it only through persist's ceremony assembler. `c9558c98…` →
 /// `8064aafe…`.
 const RATIFIED_ENVELOPE_VOCABULARY_SHA256: &str =
-    "8064aafe07646acefad93f51fbf7e79cb8ac421bd49318c5aad50ded142295b1";
+    "4c5a5e8a019bc8c9c895a5b91693438aafe9066237305d07e04dd31d36596eff";
 
 // ─────────────────────────── persist: trace-summary extraction ─────────────
 

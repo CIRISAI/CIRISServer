@@ -559,13 +559,8 @@ pub fn announce_ownership_unclaimed(node_code: &str, claim_pin: &str, pin_file: 
     // reaches an operator only through that 0600 file or, on the embedded
     // topology, the in-process accessor.
     let where_to_find_it: String = match pin_file {
-        Some(path) => match std::fs::write(&path, format!("{claim_pin}\n")) {
+        Some(path) => match write_pin_file(&path, claim_pin) {
             Ok(()) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
                 tracing::info!(pin_file = %path.display(), "one-time claim PIN written to file (0600; consumed on the first successful claim)");
                 format!("read it from {} (0600 file)", path.display())
             }
@@ -1434,7 +1429,11 @@ async fn setup_root(State(st): State<SetupState>, body: axum::body::Bytes) -> Re
             let (session, session_pickup) = if claimed_by_other_device {
                 // The PIN was verified above; it is what this device's own wizard
                 // holds, so it is what collects the session.
-                hold_claimed_session(req.claim_pin.as_deref().unwrap_or_default(), &wa_id);
+                hold_claimed_session(
+                    req.claim_pin.as_deref().unwrap_or_default(),
+                    &wa_id,
+                    st.claim_pin_file.as_deref(),
+                );
                 (None, Some("local"))
             } else {
                 (
@@ -1493,18 +1492,50 @@ struct HeldSession {
     pin: String,
     wa_id: String,
     held_at: std::time::Instant,
+    /// Where the PIN file stays until this session is collected.
+    pin_file: Option<std::path::PathBuf>,
 }
 
 static CLAIMED_SESSION: Mutex<Option<HeldSession>> = Mutex::new(None);
 
-fn hold_claimed_session(pin: &str, wa_id: &str) {
+/// Holds the session, and puts the PIN file back. The claim consumed it, but this
+/// wizard reads the file only after the claim lands (the add-device path), so
+/// without this it finds nothing and the person is left with no way in. The PIN
+/// opens nothing else now: the claim route has closed. It goes when the session is
+/// collected or its window ends, whichever comes first.
+fn hold_claimed_session(pin: &str, wa_id: &str, pin_file: Option<&std::path::Path>) {
+    let pin_file = pin_file.map(std::path::Path::to_path_buf);
+    if let Some(path) = &pin_file {
+        if let Err(e) = write_pin_file(path, pin) {
+            tracing::warn!(pin_file = %path.display(), error = %e, "the claim PIN file could not be restored for session pickup");
+        }
+        let path = path.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                tokio::time::sleep(CLAIMED_SESSION_TTL).await;
+                let _ = std::fs::remove_file(path);
+            });
+        }
+    }
     if let Ok(mut slot) = CLAIMED_SESSION.lock() {
         *slot = Some(HeldSession {
             pin: pin.to_owned(),
             wa_id: wa_id.to_owned(),
             held_at: std::time::Instant::now(),
+            pin_file,
         });
     }
+}
+
+/// The PIN file: owner-only where the platform has modes.
+fn write_pin_file(path: &std::path::Path, pin: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("{pin}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Constant-time PIN equality (the same discipline as [`verify_claim_pin`]).
@@ -1565,6 +1596,9 @@ async fn claimed_session(Json(req): Json<ClaimedSessionRequest>) -> Response {
              the last 15 minutes, or its session was already collected",
         );
     };
+    if let Some(path) = &held.pin_file {
+        let _ = std::fs::remove_file(path);
+    }
     let grant =
         super::session::SessionGrant::issue(&held.wa_id, &super::roles::UserRole::SystemAdmin);
     (StatusCode::OK, Json(grant)).into_response()

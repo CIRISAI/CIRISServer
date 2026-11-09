@@ -146,11 +146,15 @@ L2=( "clippy-python"       "cargo clippy --lib --features python -- -D warnings"
 L3=( "clippy-test-anchor"  "cargo clippy --all-targets --features test-anchor -- -D warnings" )
 if [ "$FAST" = "0" ]; then
   L3+=( "trace-round+trust-root" \
-        "cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa" )
+        "cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa --test accord_duty_grant --test first_run_to_moderation_e2e --test final_genesis_dry_run --test contact_key_pull_e2e --test anchor_block_verifies --test seed_digest_probe" )
+  L3+=( "remote-admin-mesh" \
+        "cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor && python3 -m harness.native remote_admin --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-remote-admin\"" )
 fi
 
 # Lane 4 builds nothing, so it needs no target dir and always runs alongside.
 L4=( "rustfmt"             "cargo fmt --all --check"
+     # Reads Cargo.lock and the advisory db; builds nothing.
+     "cargo-deny"          "cargo deny --log-level warn --all-features check"
      "evidence"            "python3 tools/check_evidence.py"
      # The #38 ratchet. Lives here with the other python guards rather than in a
      # cargo lane: it builds nothing, so it costs a subprocess. The ceiling must
@@ -158,7 +162,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # preflight, because it teaches people to trust it.
      # 48 -> 49 (CIRISServer#632): the NODE key's own trust-root acceptance on a split install
      # (mesh_genesis::accept_trust_root_as_node_key) — edge's serve gate (leg B) reads the wire key.
-     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 52"
+     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 53"
      "localization"        "python3 tools/check_server_localization.py --strict"
      # Pure python over synthetic Mach-O headers — it needs no iOS toolchain and
      # no device, so it belongs here rather than in the gate's PLATFORM_ONLY

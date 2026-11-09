@@ -108,7 +108,8 @@
 //! every [`RELAY_REFRESH`], and immediately when [`nudge`] fires (every
 //! `kick_replication`: an announce, a release, an eviction, a claim). An
 //! announce made on ANOTHER node reaches this one as an inbound row, which
-//! nothing kicks on; the period bounds that lag.
+//! nothing kicks on; the period bounds that lag, and someone asking for that
+//! person cuts it short ([`someone_is_waiting_for`]).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -249,6 +250,35 @@ pub fn nudge() {
     state().wake.notify_one();
 }
 
+/// Are any of `nodes` missing from the relay? `None` when this node is not a
+/// relay, or has not computed its sets yet.
+fn any_unrelayed(sets: Option<&RelaySets>, nodes: &[String]) -> bool {
+    sets.is_some_and(|s| nodes.iter().any(|n| !s.announced_nodes.contains(n)))
+}
+
+/// Someone is looking for a person whose announced `nodes` this node holds. If
+/// any of them is not relayed yet, it is served only from the next recompute,
+/// and at [`RELAY_REFRESH`] that is the whole wait of a first contact. So
+/// recompute now, and again when the floor lifts in case this nudge fell inside
+/// it. The route that calls this is public: a node already relayed costs
+/// nothing, and [`NUDGE_FLOOR`] bounds the rest.
+pub fn someone_is_waiting_for(nodes: &[String]) {
+    static RETRY_QUEUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let snapshot = state().snapshot.read().ok().and_then(|g| g.clone());
+    if !any_unrelayed(snapshot.as_deref(), nodes) {
+        return;
+    }
+    nudge();
+    if RETRY_QUEUED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(NUDGE_FLOOR).await;
+        RETRY_QUEUED.store(false, std::sync::atomic::Ordering::SeqCst);
+        nudge();
+    });
+}
+
 /// Wait for a nudge, at most `period`. The publish-own updater's sleep.
 pub(crate) async fn wait_for_nudge(period: Duration) -> bool {
     tokio::time::timeout(period, state().wake.notified())
@@ -296,34 +326,23 @@ pub async fn serves_infrastructure(engine: &Engine, own_key_ids: &[String]) -> b
 /// relay built from half a corpus would silently drop people.
 pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> {
     let dir = engine.federation_directory();
-    // persist v59 retired the framed occurrence listing this paged through
-    // (`list_signed_identity_occurrences_since`, the sealed-transport floor).
-    // ONLY A PERSON ANNOUNCES (below), so the candidates are the `user`-typed
-    // keys, each kept only when it holds a SIGNED occurrence here — the same
-    // set the occurrence plane named, read from the key table (small) instead
-    // of the attestation log (orders of magnitude larger on a canonical).
+    // Candidates first, because the walk below is several reads a person and a
+    // canonical holds thousands of `user` keys. A candidate has a signed occurrence
+    // here, or has itself signed a federation-scope owner-binding: edge serves a
+    // stranger the binding of a node in this set, so waiting on the occurrence,
+    // which arrives separately, withheld a binding this node already held from the
+    // first person to ask. A device joined by approval has both.
     let users = dir
         .list_keys_by_identity_type(identity_type::USER)
         .await
         .map_err(|e| format!("list_keys_by_identity_type(user): {e:#}"))?;
-    let mut identities: BTreeSet<String> = BTreeSet::new();
-    for user in users {
-        let signed = dir
-            .list_signed_identity_occurrences_for(&user.key_id)
-            .await
-            .map_err(|e| {
-                format!(
-                    "list_signed_identity_occurrences_for({}): {e:#}",
-                    user.key_id
-                )
-            })?;
-        if !signed.is_empty() {
-            identities.insert(user.key_id);
-        }
-    }
     let mut nodes: BTreeSet<String> = BTreeSet::new();
     let mut owners: BTreeSet<String> = BTreeSet::new();
-    for identity in identities {
+    for user in users {
+        let identity = user.key_id;
+        if !may_have_announced(dir.as_ref(), &identity).await? {
+            continue;
+        }
         // ONLY A PERSON ANNOUNCES — applied at enumeration above: an
         // owner-binding is user → node, and `announced_nodes_of` reads every
         // row the identity ever AUTHORED, which for agents is by far the most
@@ -340,6 +359,31 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
         announced_nodes: nodes.into_iter().collect(),
         owners: owners.into_iter().collect(),
     })
+}
+
+/// Could this person have announced? At most two indexed reads.
+async fn may_have_announced(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    identity: &str,
+) -> Result<bool, String> {
+    use ciris_persist::federation::attestation_query::AttestationQuery;
+    use ciris_persist::federation::types::{cohort_scope, owner_binding};
+    let signed = dir
+        .list_signed_identity_occurrences_for(identity)
+        .await
+        .map_err(|e| format!("list_signed_identity_occurrences_for({identity}): {e:#}"))?;
+    if !signed.is_empty() {
+        return Ok(true);
+    }
+    let mut bindings = AttestationQuery::by(identity, std::num::NonZeroU32::MIN)
+        .dimension(owner_binding::DIMENSION)
+        .scope(cohort_scope::FEDERATION, None)
+        .pages();
+    bindings
+        .next(dir)
+        .await
+        .map(|page| page.is_some_and(|rows| !rows.is_empty()))
+        .map_err(|e| format!("federation bindings by({identity}): {e:#}"))
 }
 
 /// One refresh pass: decide whether this node relays, recompute the sets if
@@ -464,6 +508,15 @@ mod tests {
             t0 + NUDGE_FLOOR - Duration::from_millis(1)
         ));
         assert!(nudge_may_recompute(Some(t0), t0 + NUDGE_FLOOR));
+    }
+
+    #[test]
+    fn only_a_node_not_yet_relayed_asks_for_a_recompute() {
+        let r = relay();
+        let held = r.announced_nodes[0].clone();
+        assert!(!any_unrelayed(Some(&r), std::slice::from_ref(&held)));
+        assert!(any_unrelayed(Some(&r), &[held, "new-node".to_owned()]));
+        assert!(!any_unrelayed(None, &s(&["new-node"])), "not a relay");
     }
 
     #[test]

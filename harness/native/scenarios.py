@@ -10,9 +10,12 @@ import base64
 import hashlib
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -278,6 +281,586 @@ ROOM FILE — a file in the pair room reaches the other person (CSD-107 for room
 # ── two people peered directly, NO canonical (CIRISServer#808) ──────────────
 
 
+def remote_admin(mesh: Mesh, args: Any) -> Record:
+    """A person administers a node they own from another of their devices, through
+    their own node, over the mesh (steward 2026-11-05). The owner is checked against
+    the self-key roster, so a key the binding never named still counts. The same
+    check against a removed key and an agent is `self_roster_key`'s, on one engine."""
+    step = Steps("""
+REMOTE ADMIN — a roster device reads and acts on a node its person owns, over the relay.
+  nodes:  the canonical; A (alice: claimed, announced, the target); B (joined to alice's roster
+          by the real add-device flow); S (a stranger with their own owner).
+  proves: (1) B holds a roster key, not the key A's binding names;
+          (2) B reads A's metrics and logs through the relay, with no session on A;
+          (3) the answer is A's, not B's;
+          (4) S, owner of its own node, is refused by A;
+          (5) a route off the allow-list is refused on the gateway and signs nothing.""")
+    ok = True
+    cnl, _anchor, _done = mint_accord_root(mesh, args, step)
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    a.self_record()
+    a.peer_with(cnl)
+    cnl.peer_with(a)
+    b = mesh.add("newdev")
+    s = mesh.add("stranger")
+    s.claim("stranger-person")
+    s.announce()
+    s.self_record()
+    s.peer_with(cnl)
+    cnl.peer_with(s)
+    b_pin = (b.home / "claim_pin").read_text().strip()
+    b.self_record()
+    step("booted", alice_owner=a.owner_key_id, a_node=a.node_key_id, b_node=b.node_key_id,
+         stranger_owner=s.owner_key_id)
+
+    a.must("POST", "/v1/self/device-requests/open", {"seconds": 600})
+    code_link = a.contact_code()
+    last: Any = None
+
+    def ask() -> Optional[Tuple[int, Any]]:
+        nonlocal last
+        last = b.api("POST", "/v1/setup/add-device", {"contact": code_link, "label": "second device"})
+        return last if last[0] == 202 else None
+    # This proves administration, not first-contact speed, which contact_edges times.
+    wait_for("B to reach A with its join request", ask, max(args.owner_wait, 300), every=5)
+    rows = a.must("GET", "/v1/self/device-requests").get("requests", [])
+    row = next(r for r in rows if r.get("node_key_id") == b.node_key_id)
+    occ = a.must("POST", f"/v1/self/device-requests/{row['request_id']}/approve").get("occurrence_key_id")
+
+    def held() -> Optional[Dict[str, Any]]:
+        st = b.must("GET", "/v1/setup/add-device")
+        return st if st.get("state") == "approved" else None
+    wait_for("B to hold the owner's approval", held, args.arrive_wait, every=2)
+    b.must("POST", "/v1/setup/add-device/complete",
+           {"owner_username": "second-device", "owner_password": "a-long-local-password"})
+    # In the client's order: it reads the PIN file only after the claim has landed.
+    # Reading it first passed here for months while no real device could sign in.
+    pin_file = b.home / "claim_pin"
+    after_pin = pin_file.read_text().strip() if pin_file.exists() else ""
+    if after_pin != b_pin:
+        ok = False
+        step.fail("pin_after_claim", "the PIN must still be readable to collect the session", [b],
+                  r"claim PIN", found=bool(after_pin))
+    b.token = b.must("POST", "/v1/setup/claimed-session", {"claim_pin": after_pin or b_pin})["access_token"]
+    if pin_file.exists():
+        ok = False
+        step.fail("pin_kept", "the PIN file must go once the session is collected", [b], r"claim PIN")
+    # An agent restart ends that session, so the device must be able to sign in.
+    code, login = b.api("POST", "/v1/auth/login",
+                        {"username": "second-device", "password": "a-long-local-password"})
+    if code != 200:
+        ok = False
+        step.fail("device_login", "a device added by approval must be able to sign in", [b],
+                  r"login", status=code, body=str(login)[:200])
+    step("b_can_sign_in", status=code)
+    if not occ or occ == a.owner_key_id:
+        ok = False
+        step.fail("roster_key", "B must hold its own roster key, not the key the binding names", [a, b],
+                  r"occurrence", occurrence=occ)
+    step("b_on_the_roster", occurrence=occ, binding_names=a.owner_key_id)
+
+    def relay(n: Node, method: str, path: str) -> Tuple[int, Any]:
+        return n.api("POST", "/v1/mesh/relay",
+                     {"target_key_id": a.node_key_id, "method": method, "path": path})
+
+    last_read: Any = None
+
+    def read_metrics() -> Optional[Tuple[int, Any]]:
+        nonlocal last_read
+        last_read = relay(b, "GET", "/v1/federation/metrics")
+        return last_read if last_read[0] == 200 else None
+    try:
+        code, metrics = wait_for("B to read A's metrics through the relay", read_metrics,
+                                 args.arrive_wait, every=5)
+    except MeshError:
+        code, metrics = last_read
+    if code != 200:
+        ok = False
+        step.fail("relay_metrics", "a roster device must read its person's node through the relay", [a, b],
+                  r"mesh control|relay|signer does not", status=code, body=str(metrics)[:300])
+    step("metrics_over_the_relay", status=code)
+
+    code, logs = relay(b, "GET", "/v1/telemetry/logs?limit=5")
+    if code != 200:
+        ok = False
+        step.fail("relay_logs", "logs must cross the relay for a roster device", [a, b],
+                  r"mesh control|relay", status=code, body=str(logs)[:300])
+    step("logs_over_the_relay", status=code)
+
+    code, seen = relay(b, "GET", "/v1/federation/self-key-record")
+    answered_by_a = a.node_key_id in str(seen) or a.owner_key_id in str(seen)
+    if code != 200 or not answered_by_a:
+        ok = False
+        step.fail("answer_is_the_targets", "the relayed answer must come from the target", [a, b],
+                  r"mesh control|relay", status=code, body=str(seen)[:300])
+    step("the_answer_is_As", status=code)
+
+    code, refused = relay(s, "GET", "/v1/federation/metrics")
+    if code == 200:
+        ok = False
+        step.fail("stranger", "a stranger must not read a node it does not own", [a, s],
+                  r"mesh control|signer does not", status=code, body=str(refused)[:300])
+    step("stranger_refused", status=code, body=str(refused)[:160])
+
+    code, offlist = relay(b, "POST", "/v1/system/data/wipe-signing-key")
+    if code != 403:
+        ok = False
+        step.fail("allow_list", "a route off the allow-list must be refused on the gateway", [b],
+                  r"relayable", status=code, body=str(offlist)[:300])
+    step("off_the_list_refused", status=code)
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
+def _first_seen(node: Node, pattern: str, after: float) -> Optional[float]:
+    """Seconds after `after` (epoch) of the first log line matching `pattern`."""
+    for line in node.grep(pattern):
+        m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+)Z", line)
+        if not m:
+            continue
+        at = datetime.strptime(m.group(1)[:26], "%Y-%m-%dT%H:%M:%S.%f")
+        secs = at.replace(tzinfo=timezone.utc).timestamp() - after
+        if secs >= 0:
+            return round(secs, 1)
+    return None
+
+
+def _relay_pair(mesh: Mesh, args: Any, i: int) -> Dict[str, Any]:
+    """One pair that meets only through the code, as a client does: no peering."""
+    a = mesh.add(f"p{i}a")
+    b = mesh.add(f"p{i}b")
+    a.claim(f"p{i}a-person")
+    b.claim(f"p{i}b-person")
+    for n in (a, b):
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)  # An agent's mesh-participation consent.
+        wait_for(f"{n.name} to publish its transit route", n.transit_route, 60)
+    code = lambda n: wait_for(  # noqa: E731
+        f"{n.name}'s code to carry a node",
+        lambda: "CIRIS-V3" in (c := n.contact_code()) and c, 60, every=2)
+    code_b, code_a = code(b), code(a)
+    rec: Dict[str, Any] = {"pair": i, "alice": a.name, "bob": b.name}
+    # 202 is the ordinary answer for a stranger: the node keeps resolving them.
+    def add(host: Node, code: str) -> None:
+        got = host.api("POST", "/v1/contacts", {"key_id": code})
+        if got[0] not in (200, 201, 202):
+            raise MeshError(f"{host.name}: POST /v1/contacts answered {got[0]}: {got[1]}")
+
+    t0 = time.time()
+    add(a, code_b)
+
+    def seen() -> bool:
+        return a.owner_key_id in str(b.must("GET", "/v1/contacts/requests"))
+
+    def stage(name: str, fn: Callable[[], Any], wait: float) -> bool:
+        try:
+            wait_for(f"p{i} {name}", fn, wait, every=1)
+            rec[name] = round(time.time() - t0, 1)
+            return True
+        except MeshError:
+            rec[name] = None
+            return False
+
+    if stage("request_seen", seen, args.ready_wait):
+        add(b, code_a)
+        rec["mutual_added"] = round(time.time() - t0, 1)
+        cid_a = a.open_pair(b.owner_key_id)
+        cid_b = b.open_pair(a.owner_key_id)
+        creator, cid = (a, cid_a) if a.owner_key_id < b.owner_key_id else (b, cid_b)
+        stage("keyed", lambda: creator.room(cid)["ready"], args.ready_wait)
+    rec["re_aimed"] = _first_seen(a, r"re-aimed", t0)
+    if rec.get("keyed") is not None and rec["re_aimed"] is not None:
+        rec["keyed_after_re_aim"] = round(rec["keyed"] - rec["re_aimed"], 1)
+    if rec.get("request_seen") is not None and rec["re_aimed"] is not None:
+        rec["seen_after_re_aim"] = round(rec["request_seen"] - rec["re_aimed"], 1)
+    rec["link_requests"] = len(a.grep(r"[Ll]ink request|LINKREQUEST|initiate_link"))
+    return rec
+
+
+def relay_rig(mesh: Mesh, args: Any) -> Record:
+    """The stalled-link rig: pairs that meet only through one relay, each stage timed.
+
+    RIG_PAIRS pairs (default 10). RIG_SHAPE: a shape file to seed the relay with,
+    using RIG_SEEDER (`seed_synthetic_seat`). RIG_KEEP_PAIRS=1 leaves each pair
+    running, so later pairs have earlier ones behind the relay. RIG_RELAY_PRESSURE
+    (warning, critical) holds the relay at that level. Results go to
+    <work>/rig.jsonl and every node's log to <work>/<node>/node.log."""
+    pairs = int(os.environ.get("RIG_PAIRS", "10"))
+    keep = os.environ.get("RIG_KEEP_PAIRS") == "1"
+    shape = os.environ.get("RIG_SHAPE")
+    step = Steps(f"""
+RELAY RIG — {pairs} pairs through one relay, contact code only, no peering.
+  shape: {shape or 'fresh relay'}; earlier pairs {'stay up' if keep else 'stop'}.""")
+    relay = mesh.start_canonical()
+    pressure = os.environ.get("RIG_RELAY_PRESSURE")
+    if shape or pressure:
+        relay.stop()
+        if shape:
+            subprocess.run([os.environ["RIG_SEEDER"], str(relay.home / "data" / "ciris_engine.db"),
+                            shape], check=True, capture_output=True, timeout=300)
+        if pressure:
+            relay.env["CIRIS_TEST_LOAD_PRESSURE"] = pressure
+        relay.start()
+    step("relay_up", url=relay.url, seeded=bool(shape), pressure=pressure)
+    out = mesh.work / "rig.jsonl"
+    rows = []
+    for i in range(pairs):
+        rec = _relay_pair(mesh, args, i)
+        rows.append(rec)
+        with out.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        step("pair", **{k: v for k, v in rec.items() if k not in ("alice", "bob")})
+        if not keep:
+            mesh.nodes[rec["alice"]].stop()
+            mesh.nodes[rec["bob"]].stop()
+    reads = relay.api("GET", "/v1/node/diagnostics/reads")
+    (mesh.work / "relay-reads.json").write_text(json.dumps(reads[1]), encoding="utf-8")
+    missed = [r["pair"] for r in rows if r.get("keyed") is None]
+    return {"verdict": "FAIL" if missed else "PASS", "steps": step.log, "rows": rows,
+            "unkeyed_pairs": missed}
+
+
+def _person_contact(mesh: Mesh, args: Any, adder: Node, accepter: Node) -> Dict[str, Any]:
+    """`adder` adds `accepter` by code, as a client does; the stages are timed."""
+    codes = {}
+    for n in (adder, accepter):
+        codes[n.name] = wait_for(
+            f"{n.name}'s code to carry a node",
+            lambda m=n: "CIRIS-V3" in (c := m.contact_code()) and c, 90, every=2)
+
+    def add(host: Node, code: str) -> None:
+        got = host.api("POST", "/v1/contacts", {"key_id": code})
+        if got[0] not in (200, 201, 202):
+            raise MeshError(f"{host.name}: POST /v1/contacts answered {got[0]}: {got[1]}")
+
+    def seen() -> bool:
+        return adder.owner_key_id in str(accepter.must("GET", "/v1/contacts/requests"))
+
+    rec: Dict[str, Any] = {"adder": adder.name, "accepter": accepter.name}
+    t0 = time.time()
+
+    def stage(name: str, fn: Callable[[], Any]) -> bool:
+        try:
+            wait_for(f"{adder.name}→{accepter.name} {name}", fn, args.ready_wait, every=1)
+            rec[name] = round(time.time() - t0, 1)
+            return True
+        except MeshError:
+            rec[name] = None
+            return False
+
+    add(adder, codes[accepter.name])
+    if stage("request_seen", seen):
+        add(accepter, codes[adder.name])
+        rec["accepted"] = round(time.time() - t0, 1)
+        cid_a = adder.open_pair(accepter.owner_key_id)
+        cid_b = accepter.open_pair(adder.owner_key_id)
+        first = adder.owner_key_id < accepter.owner_key_id
+        creator, cid = (adder, cid_a) if first else (accepter, cid_b)
+        stage("keyed", lambda: creator.room(cid)["ready"])
+    rec["re_aimed"] = _first_seen(adder, r"re-aimed", t0)
+    return rec
+
+
+def _reads(node: Node) -> Dict[str, List[int]]:
+    """Reads per persist door on `node`, since it booted: {door: [calls, rows, bytes]}."""
+    snap = node.api("GET", "/v1/node/diagnostics/reads")[1]
+    out: Dict[str, List[int]] = {}
+    for d in snap.get("reads", []) if isinstance(snap, dict) else []:
+        out[str(d.get("door"))] = [int(d.get(k, 0)) for k in ("reads", "rows", "bytes")]
+    return out
+
+
+def _late_joiner(founder: Node, joiner: Node, history: int, wait: float) -> Dict[str, Any]:
+    """A room with history on the seeded node, then a contact who joins late: how long
+    until the joiner holds the room and reads the backlog. Times from the accept."""
+    got = founder.must("POST", "/v1/communities", {"name": "history"})
+    cid = got.get("community_id") or got.get("id")
+    for i in range(history):
+        founder.say(cid, f"history {i}")
+    code, body = founder.api("POST", f"/v1/communities/{cid}/invites",
+                             {"key_id": joiner.owner_key_id})
+    if code not in (200, 201, 202):
+        raise MeshError(f"invite answered {code}: {body}")
+    rec: Dict[str, Any] = {"room": cid, "history": history}
+    t0 = time.time()
+
+    def invite() -> Optional[str]:
+        rows = joiner.must("GET", "/v1/self/invites").get("invites", [])
+        return next((r["proposal_id"] for r in rows if r.get("group_id") == cid), None)
+
+    try:
+        pid = wait_for("the joiner to list the invitation", invite, wait, every=2)
+    except MeshError:
+        rec["invite_seen"] = None
+        return rec
+    rec["invite_seen"] = round(time.time() - t0, 1)
+    joiner.must("POST", f"/v1/self/invites/{pid}/accept", {})
+    t1 = time.time()
+
+    # MLS: a joiner holds the backlog's rows but cannot open bodies sealed before it
+    # joined. What it must get promptly: the rows, the room keyed, then a message.
+    def transcript(n: Node) -> Dict[str, Any]:
+        code, body = n.api("GET", f"/v1/chat/{cid}/messages")
+        return body if code == 200 and isinstance(body, dict) else {}
+
+    def rows_held() -> bool:
+        return len(transcript(joiner).get("messages", [])) >= history
+
+    def keyed() -> bool:
+        transcript(founder)  # the founder's app has the room open
+        return bool(transcript(joiner).get("ready"))
+
+    for name, fn in (("backlog_rows_held", rows_held), ("keyed", keyed)):
+        try:
+            wait_for(f"the joiner: {name}", fn, wait, every=3)
+            rec[name] = round(time.time() - t1, 1)
+        except MeshError:
+            rec[name] = None
+    if rec.get("keyed") is not None:
+        sent = founder.say(cid, "after the join")
+        t2 = time.time()
+        try:
+            wait_for("the joiner to read a new message", lambda: any(
+                m.get("attestation_id") == sent and m.get("body")
+                for m in transcript(joiner).get("messages", [])), wait, every=2)
+            rec["new_message_read"] = round(time.time() - t2, 1)
+        except MeshError:
+            rec["new_message_read"] = None
+    return rec
+
+
+def person_store(mesh: Mesh, args: Any) -> Record:
+    """A long-lived person's node meets a stranger, in both directions.
+
+    The seeded node's store has the shape of a real one, every row really signed
+    and admitted (`seed_person_store`). PERSON_SEEDER names that binary, PERSON_SHAPE
+    the shape file, PERSON_SCALE scales it for a smoke run. Results go to
+    <work>/person-store.json, the seed tally to <work>/seed.json."""
+    shape = os.environ.get("PERSON_SHAPE") or str(HARNESS / "native" / "shapes" / "person-store.json")
+    seeder = os.environ.get("PERSON_SEEDER") or str(
+        Path(args.binary).parent / "examples" / "seed_person_store")
+    scale = os.environ.get("PERSON_SCALE", "1.0")
+    root = os.environ.get("PERSON_ROOT", "test-accord-holder-0")
+    step = Steps(f"""
+PERSON STORE — a seeded person's node and a stranger, through one relay, both directions.
+  shape: {shape} at scale {scale}.
+  proves: the seeded node can request (1) and accept (2) a contact and key a room, without
+          walking its store for a row the stranger needs.""")
+    relay = mesh.start_canonical()
+    # Seeded before it is claimed: a boot makes the schema and holds the root, and
+    # the claim's session then outlives no restart.
+    s = mesh.add("seeded")
+    s.stop()
+    t0 = time.time()
+    done = subprocess.run([seeder, str(s.home / "data" / "ciris_engine.db"), shape, root, scale],
+                          capture_output=True, text=True, timeout=3600,
+                          env={**os.environ, **s.env})
+    (mesh.work / "seed.log").write_text(done.stderr, encoding="utf-8")
+    if done.returncode != 0:
+        step.fail("seed_failed", done.stderr[-400:], [s], r"$^")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    seed = json.loads(done.stdout.strip().splitlines()[-1])
+    (mesh.work / "seed.json").write_text(json.dumps(seed, indent=1), encoding="utf-8")
+    step("seeded", secs=round(time.time() - t0),
+         admitted={k: v["admitted"] for k, v in seed["dimensions"].items()},
+         refused={k: v["refused"] for k, v in seed["dimensions"].items() if v["refused"]})
+    t0 = time.time()
+    s.start(health_timeout=600.0)
+    step("seeded_booted", secs=round(time.time() - t0))
+    s.claim("seeded-person")
+    s.announce()
+    s.self_record()
+    s.peer_with(relay)
+    wait_for("seeded to publish its transit route", s.transit_route, 60)
+    step("seeded_claimed", owner=s.owner_key_id)
+
+    def stranger(name: str) -> Node:
+        n = mesh.add(name)
+        n.claim(f"{name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(relay)
+        wait_for(f"{name} to publish its transit route", n.transit_route, 60)
+        return n
+
+    before = _reads(s)
+    p = stranger("stranger1")
+    asking = _person_contact(mesh, args, s, p)
+    step("seeded_requesting", **asking)
+    q = stranger("stranger2")
+    answering = _person_contact(mesh, args, q, s)
+    step("seeded_accepting", **answering)
+    late = _late_joiner(s, q, int(os.environ.get("PERSON_HISTORY", "20")),
+                        float(os.environ.get("PERSON_LATE_WAIT", "900")))
+    step("late_joiner", **late)
+    after = _reads(s)
+    moved = {d: [v[i] - before.get(d, [0, 0, 0])[i] for i in range(3)] for d, v in after.items()}
+    busiest = dict(sorted(moved.items(), key=lambda kv: -kv[1][1])[:8])
+    step("reads_on_the_seeded_node", doors_reads_rows_bytes=busiest)
+    (mesh.work / "person-store.json").write_text(
+        json.dumps({"seed": seed, "requesting": asking, "accepting": answering,
+                    "late_joiner": late, "reads": busiest}, indent=1), encoding="utf-8")
+    ok = all(r.get("keyed") is not None for r in (asking, answering)) and late.get("new_message_read") is not None
+    return {"verdict": "PASS" if ok else "FAIL", "steps": step.log,
+            "requesting": asking, "accepting": answering}
+
+
+def pair_alice_announced(mesh: Mesh, args: Any) -> Record:
+    """`pair_unannounced` with only the room's creator announced."""
+    return pair_unannounced(mesh, args, announced=("alice",))
+
+
+def pair_bob_announced(mesh: Mesh, args: Any) -> Record:
+    """`pair_unannounced` with only the room's joiner announced."""
+    return pair_unannounced(mesh, args, announced=("bob",))
+
+
+def pair_both_announced(mesh: Mesh, args: Any) -> Record:
+    """The control for the two above: `pair_unannounced` with both announced."""
+    return pair_unannounced(mesh, args, announced=("alice", "bob"))
+
+
+def pair_unannounced(mesh: Mesh, args: Any, announced: Tuple[str, ...] = ()) -> Record:
+    """CIRISPersist#1140: two people who never announced, no canonical anywhere, each
+    node sealing for its owner. A peer lifts a node to its person through the owner-
+    binding, which an unannounced owner holds at `self`, so no peer ever receives it.
+    Unsplit nodes, so a pass is necessary and not sufficient: the issue is written
+    for a split home, where the node seals and the agent doesn't."""
+    step = Steps("""
+PAIR, UNANNOUNCED — two people's nodes, no canonical, neither owner announced (CIRISPersist#1140).
+  proves:  (1) they reach each other by direct peering; (2) a pair room seats and keys;
+           (3) a sealed message crosses and reads back; (4) neither side refused a row with
+           signer_not_active_member or NoHolders, the issue's failure.""")
+    a = mesh.add("alice", canonical=False)
+    b = mesh.add("bob", dial=[a], canonical=False)
+    a.claim("alice-person")
+    b.claim("bob-person")
+    for n in (a, b):
+        if n.name in announced:
+            n.announce()
+        n.self_record()
+    step("claimed", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id, announced=announced)
+    a.peer_with(b)
+    b.peer_with(a)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    step("keys_crossed")
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    step("contacts_added")
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    step("room_opened", room=room)
+
+    def keyed() -> Optional[bool]:
+        return True if a.room(room)["ready"] and b.room(room)["ready"] else None
+    bad = r"signer_not_active_member|NoHolders"
+    try:
+        wait_for("the pair room to key on both sides", keyed, args.arrive_wait, every=2)
+    except MeshError:
+        step.fail("room_not_keyed", "a pair room between unannounced owners must key", [a, b], bad)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("room_keyed")
+    secret = f"unannounced-{os.urandom(4).hex()}"
+    a.say(room, secret)
+
+    def read() -> Optional[bool]:
+        return True if any(secret in str(m) for m in b.room(room)["messages"]) else None
+    try:
+        wait_for("bob to read alice's message", read, args.arrive_wait, every=2)
+    except MeshError:
+        step.fail("message_not_read", "the sealed body must cross", [a, b], bad)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("message_read")
+    seen = {n.name: len(n.grep(bad)) for n in (a, b)}
+    if any(seen.values()):
+        step.fail("refused_rows", "the issue's refusal appeared", [a, b], bad, seen=seen)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("no_refusals", seen=seen)
+    return {"verdict": "PASS", "steps": step.log}
+
+
+def av_call(mesh: Mesh, args: Any) -> Record:
+    """Two people's nodes on the canonical, a keyed pair room, then a call over the
+    QA call routes (CIRIS_QA_CALLS=1): both join, both stream generated frames, both
+    read stats, both leave. Env AV_RATE_HZ (30), AV_FRAME_BYTES (600), AV_SECONDS (10)."""
+    rate = int(os.environ.get("AV_RATE_HZ", "30"))
+    size = int(os.environ.get("AV_FRAME_BYTES", "600"))
+    secs = int(os.environ.get("AV_SECONDS", "10"))
+    step = Steps(f"""
+AV CALL — a pair room's call over the QA call routes (0.5.245).
+  proves:  join on both sides → each publishes {rate} Hz x {size} B for {secs} s → each hears
+           the other's stream (>= 80% of what the other sent) → both leave cleanly.""")
+    os.environ["CIRIS_QA_CALLS"] = "1"
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    t0 = time.time()
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    step("room_keyed", room=room, keyed_s=round(time.time() - t0, 1))
+    for n in (a, b):
+        st, got = n.api("POST", "/v1/qa/call/start", {"room": room})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "join_call refused", [a, b],
+                      r"qa call|join_call|CallError", status=st, body=got)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        step(f"joined:{n.name}", legs=got.get("legs"), budget=got.get("frame_budget_bytes"))
+    # The peer is in the call once this side has a leg to it; the frame budget
+    # is known only then (the smallest leg's Channel limit less chunk overhead).
+    budgets = {}
+    for n in (a, b):
+        def leg_up(n=n) -> Optional[int]:
+            _, s = n.api("GET", f"/v1/qa/call/stats?room={room}")
+            c = (s or {}).get("call") or {}
+            return c.get("frame_budget_bytes") if c.get("legs") else None
+        try:
+            budgets[n.name] = wait_for(f"{n.name}'s call leg", leg_up, 60, every=1)
+        except MeshError:
+            step.fail(f"no_leg:{n.name}", "no call leg to the peer within 60 s", [a, b],
+                      r"call leg|dial failed|av_call")
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    size = min([size] + list(budgets.values()))
+    step("legs_up", budgets=budgets, frame_bytes=size)
+    for n in (a, b):
+        n.must("POST", "/v1/qa/call/stream",
+               {"room": room, "rate_hz": rate, "frame_bytes": size, "seconds": secs})
+    time.sleep(secs + 4)
+    stats = {}
+    for n in (a, b):
+        _, stats[n.name] = n.api("POST", "/v1/qa/call/stop", {"room": room})
+        s = stats[n.name]
+        step(f"stats:{n.name}", sent=s.get("sent"), received=s.get("received"),
+             call=s.get("call"), summary=s.get("summary"), events=s.get("events"))
+    ok = True
+    for me, other in (("alice", "bob"), ("bob", "alice")):
+        sent = (stats[other].get("sent") or {}).get("frames") or 0
+        got = (stats[me].get("received") or {}).get("frames") or 0
+        ratio = got / sent if sent else 0.0
+        step(f"heard:{me}<-{other}", sent=sent, received=got, ratio=round(ratio, 3))
+        ok = ok and sent > 0 and ratio >= 0.8
+    if not ok:
+        step.fail("stream_not_heard", "each side must hear >= 80% of the other's frames", [a, b],
+                  r"qa call|av_call|call|stream")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -453,7 +1036,21 @@ def _owned_canonical_baseline(mesh: Mesh, args: Any, step: "Steps") -> Record:
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "baseline": True}
 
 
-def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True):
+def _serve_input(n: Node) -> Dict[str, Any]:
+    """A seat the ceremony host has never met: its whole record, as a bundle takes it."""
+    r = n.record["record"]
+    roles = ["infra:attest", "infra:serve", "infra:store", "infra:transport"]
+    envelope = {**(r.get("registration_envelope") or {}), "roles": roles,
+                "transport_hints": [{"kind": "ip", "destination": n.transport}]}
+    return {"key_id": r["key_id"], "identity_type": "canonical,node",
+            "pubkey_ed25519_base64": r["pubkey_ed25519_base64"],
+            "pubkey_ml_dsa_65_base64": r["pubkey_ml_dsa_65_base64"],
+            "capability_roles": roles, "registration_envelope": envelope,
+            "attestation_evidence": r.get("attestation_evidence")}
+
+
+def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True,
+                     second_seat: bool = False):
     """Layers 1-2 of the T8 catalogue entry: the 0.5.220 ceremony over the
     routes with THREE software holders, and a canonical rebooted on the minted
     bundle as its baked genesis, claimed and announced. Returns
@@ -478,13 +1075,25 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
     mesh.canonical, mesh.nodes["canonical"] = c, c
     c.self_record()
     step("canonical_booted", key_id=c.node_key_id)
+    seat2: Optional[Node] = None
+    if second_seat:
+        seat2 = mesh._node("seat2", {"CIRIS_TEST_BLESS_CANONICAL": "false",
+                                     "CIRIS_DEVICE_CLASS": "server"})
+        seat2.configure(dial=[])
+        seat2.start()
+        mesh.nodes["seat2"] = seat2
+        seat2.self_record()
+        step("second_seat_booted", key_id=seat2.node_key_id)
 
     # 2. The ceremony, over the routes.
     planned = c.must("POST", "/v1/accord/final-genesis/plan", {
         # Where peers dial it — as the baked canonical carries it.
         "serve_nodes": [{"key_id": c.node_key_id,
-                         "transport_hints": [{"kind": "ip", "destination": c.transport}]}],
+                         "transport_hints": [{"kind": "ip", "destination": c.transport}]}]
+                       + ([_serve_input(seat2)] if seat2 else []),
         "recovery_keys": anchor["recovery_keys"],
+        "serve_transport_destinations": ([wait_for("seat 2's transit route", seat2.transit_route, 60)]
+                                         if seat2 else []),
         "clock_checked": True})
     step("planned", complete=planned.get("complete"), owed=planned.get("owed"))
     for rnd in (1, 2):
@@ -516,6 +1125,17 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
         f.unlink()
     c.configure(dial=[])  # the listen address lives in the database's config:*
     c.start()
+    if seat2:
+        seat2.env["CIRIS_TEST_GENESIS_BUNDLE"] = bundle_path
+        seat2.stop()
+        for f in (seat2.home / "data").glob("ciris_engine.db*"):
+            f.unlink()
+        seat2.configure(dial=[c.transport])
+        seat2.start()
+        seat2.claim("operator-two")
+        if announce:
+            seat2.announce()
+        seat2.self_record()
     step("canonical_rebooted_on_bundle",
          evidence=c.grep(r"booting on a ceremony-minted genesis bundle")[-1:])
     # The production canonical is OWNED (the operator's fedID) — an unowned
@@ -527,6 +1147,71 @@ def mint_accord_root(mesh: Mesh, args: Any, step: "Steps", announce: bool = True
     step("canonical_claimed", owner=c.owner_key_id)
     mesh.accord_holders = anchor["holders"]
     return c, anchor, done
+
+
+def _held_rows(n: Node, author: str, dimension: str) -> int:
+    """How many rows of `dimension` by `author` this node's store holds. Read-only."""
+    db = sqlite3.connect(f"file:{n.home / 'data' / 'ciris_engine.db'}?mode=ro", uri=True, timeout=5)
+    try:
+        return db.execute(
+            "select count(*) from federation_attestations where attesting_key_id = ? "
+            "and json_extract(attestation_envelope, '$.dimension') = ?",
+            (author, dimension)).fetchone()[0]
+    finally:
+        db.close()
+
+
+def two_seats(mesh: Mesh, args: Any) -> Record:
+    """CC 5.2: two serve seats walk the commons between themselves, and a seat offers
+    a person's node only what is required or appropriate.
+
+    Not a witness for `recognised_seats`: both seats are in the bundle, so the
+    directory fallback finds them and the scenario passes with it unset. It proves
+    the walk on one bundle, nothing about a seat the directory doesn't name. The
+    second assertion also passes on edge v44.0.0, so it is a floor, not a witness."""
+    step = Steps("""
+TWO SEATS — two seats on one bundle, a person behind each.
+  proves: (1) a row a person published at seat 1 reaches seat 2 by the commons walk;
+          (2) a person at seat 2 who never asked is not handed it.""")
+    c, _, _ = mint_accord_root(mesh, args, step, second_seat=True)
+    seat2 = mesh.nodes["seat2"]
+    c.peer_with(seat2)
+    seat2.peer_with(c)
+    step("seats_peered")
+    a = mesh.add("alice")
+    a.claim("alice-person")
+    a.announce()
+    a.self_record()
+    a.peer_with(c)
+    c.peer_with(a)
+    b = mesh.add("bob", canonical=False, dial=[seat2])
+    b.claim("bob-person")
+    b.announce()
+    b.self_record()
+    b.peer_with(seat2)
+    seat2.peer_with(b)
+    step("people_up", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
+    # A key, an owner-binding and an acceptance are the announced set everyone may
+    # hold. A consent row is commons between seats and appropriate to no stranger.
+    def holds_consent(n: Node) -> bool:
+        return _held_rows(n, a.owner_key_id, "consent:replication:v1") > 0
+
+    try:
+        wait_for("seat 2 to hold alice's consent row", lambda: holds_consent(seat2),
+                 args.owner_wait, every=2)
+    except MeshError:
+        step.fail("commons_walk_stopped", "seats do not walk the commons between themselves",
+                  [c, seat2], r"recognised|seat|withheld")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("commons_crossed_seats")
+    time.sleep(90)
+    unasked = holds_consent(b)
+    step("person_left_alone", bob_holds_alice_consent=unasked)
+    if unasked:
+        step.fail("person_handed_the_commons", "a seat offered a person's node a row that is "
+                  "neither required nor appropriate", [seat2, b], r"SEND SET|offered")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
 
 
 def mint_accord_mesh(mesh: Mesh, args: Any, step: "Steps"):
@@ -1114,11 +1799,13 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
     c = mesh.add("stranger")
     d = mesh.add("changer")   # withdraws before approval (8)
     e = mesh.add("regret")    # withdraws after approval (9)
+    f = mesh.add("barefedid") # holds only a fedID, never a code (8b)
     b_pin = (b.home / "claim_pin").read_text().strip()
     b.self_record()
     c.self_record()
     d.self_record()
     e.self_record()
+    f.self_record()
     step("booted", alice_owner=a.owner_key_id, b_node=b.node_key_id, c_node=c.node_key_id)
 
     # A self file on A before anything joins.
@@ -1290,6 +1977,22 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
                   dropped=dropped)
     step("withdrawn_pending_dropped", request=d_code, seen_before=seen, cancel_status=c_code2, dropped=dropped)
 
+    # (8b) A BARE FEDID, no code at all (steward 2026-11-04): a fresh device knows
+    # only `alice-person-…`. F has never seen a code: it must find alice's nodes
+    # through the canonical and reach the same held request.
+    f_bare, _ = wait_for("the bare fedID to reach alice", lambda: (lambda r: r if r[0] == 202 else None)(
+        f.api("POST", "/v1/setup/add-device", {"contact": a.owner_key_id, "label": "bare-fedid"})),
+        args.arrive_wait, every=5)
+    bare_seen = any(r.get("node_key_id") == f.node_key_id
+                    for r in a.must("GET", "/v1/self/device-requests").get("requests", []))
+    f.api("DELETE", "/v1/setup/add-device")
+    if f_bare != 202 or not bare_seen:
+        ok = False
+        step.fail("bare_fedid", "a bare fedID finds the person's nodes through the canonical", [a, f],
+                  r"device-join|add-device", request=f_bare, seen=bare_seen)
+    step("bare_fedid_reached_the_owner", request=f_bare, seen_on_a=bare_seen,
+         proves="a device holding only a fedID finds the person's announced nodes through the canonical")
+
     # (9) a device that changes its mind AFTER approval: the owner's device
     # evicts what it recorded (B's occurrence revoked) — nothing lingers.
     e_code, _ = ask(e, "regret")
@@ -1302,9 +2005,12 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
         # it lands by the quorum or the lone path (routes: CIRISServer#794). The
         # approval answers 409 add_device.roster_change_held, naming it.
         st_e, body_e = a.api("POST", f"/v1/self/device-requests/{e_row['request_id']}/approve")
-        if st_e == 409 and (body_e or {}).get("reason_id") == "add_device.roster_change_held":
+        # (Since the held-approval path it answers 202 {"approved": false, "held": true};
+        # it resumes when the roster lands the key.)
+        held_e = st_e == 202 and (body_e or {}).get("held") is True
+        if held_e or (st_e == 409 and (body_e or {}).get("reason_id") == "add_device.roster_change_held"):
             e.api("DELETE", "/v1/setup/add-device")
-            step("third_device_held", status=st_e, reason_id=body_e.get("reason_id"),
+            step("third_device_held", status=st_e, reason_id=(body_e or {}).get("reason_id"),
                  proves="from a roster of two, an addition is held as a proposal (CC 3.3.6.3)")
             return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
         if st_e not in (200, 201):
@@ -1333,6 +2039,11 @@ ADD A DEVICE — a new device joins its owner's identity as a new occurrence (CI
                   cancel=e_cancel, revoked=is_revoked)
     step("withdrawn_approval_undone", occurrence=occ_e, cancel_status=e_cancel, revoked_on_a=is_revoked)
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+
+# Add to the other person's `request-seen` (steward 2026-11-04: "we need this to
+# be rapid, even when relayed").
+NEW_CONTACT_LIMIT_SECS = 30
 
 
 def contact_edges(mesh: Mesh, args: Any) -> Record:
@@ -1437,6 +2148,67 @@ CONTACT EDGES — the add-contact paths that failed on Eric's desktop (2026-10-1
         step.fail("code_chat", "a completed pending contact must open a chat", [a], r"chat",
                   got={"status": chat_code, "body": chat_body})
     step("code_chat", status=chat_code)
+
+    # ── A NEW PERSON, ADDED BY FED ID ONCE ── the person reinstalled and came back
+    # as someone alice's node has never met. One add, no retry: the canonical
+    # names their node, and the request has to reach them inside the limit.
+    d = mesh.add("dan")
+    d.claim("dan-person")
+    d.announce()
+    join(d)
+    d.self_record()
+    wait_for("the canonical to name dan's node",
+             lambda: d.node_key_id in (cnl.must("GET", f"/v1/federation/people/{d.owner_key_id}/nodes").get("nodes") or []),
+             args.owner_wait, every=1)
+    t_added = time.monotonic()
+    code, body = a.api("POST", "/v1/contacts", {"key_id": d.owner_key_id})
+    if code not in (200, 201, 202):
+        ok = False
+        step.fail("new_person_add", "a fed ID the canonical can name must be accepted first time", [a],
+                  r"contacts", got={"status": code, "body": body})
+    step("new_person_added", status=code, reason_id=(body or {}).get("reason_id"))
+
+    def request_seen() -> bool:
+        reqs = d.must("GET", "/v1/contacts/requests").get("requests", [])
+        return any(r.get("requester_key_id") == a.owner_key_id for r in reqs)
+    # Wait past the limit, so a miss still reports the real time.
+    try:
+        wait_for("dan to see alice's request", request_seen, args.arrive_wait, every=1)
+    except MeshError:
+        pass
+    seconds = round(time.monotonic() - t_added, 1)
+    if seconds > NEW_CONTACT_LIMIT_SECS:
+        ok = False
+        step.fail("new_person_request_slow", f"the request must arrive inside {NEW_CONTACT_LIMIT_SECS} s of the add",
+                  [a, d, mesh.canonical], r"contacts|re-aimed|CONTACT|RATE LIMITED|parked", seconds=seconds)
+    else:
+        step("new_person_saw_the_request", seconds=seconds, limit=NEW_CONTACT_LIMIT_SECS)
+
+    # ── THE ROOM, END TO END ── through the canonical, from dan accepting to a first
+    # message read on the other side. Measured, not gated: no target is set yet.
+    t_room = time.monotonic()
+    lap = lambda: round(time.monotonic() - t_room, 1)
+    d.must("POST", "/v1/contacts", {"key_id": a.owner_key_id})
+    step("room:accepted", seconds=lap())
+    cid = a.open_pair(d.owner_key_id)
+    if d.open_pair(a.owner_key_id) != cid:
+        ok = False
+        step.fail("room_two_rooms", "both people must land in one pair room", [a, d], r"chat|pair")
+    step("room:opened", seconds=lap())
+    creator, joiner = (a, d) if a.owner_key_id < d.owner_key_id else (d, a)
+    try:
+        wait_for("the pair room to key", lambda: creator.room(cid)["ready"], args.ready_wait, every=1)
+        step("room:keyed", seconds=lap(), creator=creator.name)
+        sent = creator.say(cid, "first message")
+        step("room:sent", seconds=lap())
+        wait_for("the first message to arrive", lambda: any(
+            m.get("attestation_id") == sent and m.get("body") for m in joiner.room(cid)["messages"]),
+            args.arrive_wait, every=1)
+        step("room:first_message_read", seconds=lap(), proves="accepted, seated, keyed, sent, read")
+    except MeshError:
+        ok = False
+        step.fail("room_not_end_to_end", "the pair room must reach a read message", [a, d, mesh.canonical],
+                  _HANDSHAKE, seconds=lap(), creator_state=creator.room(cid)["state"])
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
@@ -1754,6 +2526,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "halt": halt,
     "halt_agent": halt_agent,
     "add_device": add_device,
+    "remote_admin": remote_admin,
     "kex_fresh_node": kex_fresh_node,
     "kex_unannounced_canonical": kex_unannounced_canonical,
     "contact_edges": contact_edges,
@@ -1762,4 +2535,12 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "chat": chat,
     "corpus": corpus,
     "peer_pair": peer_pair,
+    "av_call": av_call,
+    "pair_unannounced": pair_unannounced,
+    "relay_rig": relay_rig,
+    "two_seats": two_seats,
+    "person_store": person_store,
+    "pair_alice_announced": pair_alice_announced,
+    "pair_bob_announced": pair_bob_announced,
+    "pair_both_announced": pair_both_announced,
 }

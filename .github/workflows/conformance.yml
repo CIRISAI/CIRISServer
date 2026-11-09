@@ -199,9 +199,23 @@ jobs:
           key: ${{ steps.cachekey.outputs.key }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # The substrate the wheel is BUILT from is the substrate the cohabitation gate
+  # installs beside it (tools/substrate_pin_overrides.py; CIRISEdge's
+  # `extract-substrate-pins` shape). Without it the gate took CIRISConformance's
+  # live matrix, which lagged our pins at 0.5.245 and segfaulted on postgres.
+  substrate-pins:
+    name: substrate pins from Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      pin-overrides: ${{ steps.extract.outputs.json }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: extract
+        run: python3 tools/substrate_pin_overrides.py --github >> "$GITHUB_OUTPUT" && grep '^json=' "$GITHUB_OUTPUT"
+
   cohabitation-conformance:
     name: cohabitation (linux-x86_64 × ${{ matrix.backend }})
-    needs: build-wheel
+    needs: [build-wheel, substrate-pins]
     strategy:
       fail-fast: false
       matrix:
@@ -212,5 +226,6 @@ jobs:
       backend: ${{ matrix.backend }}
       under-test-wheel-artifact: ciris_server-wheel-linux-x86_64
       under-test-package: ciris-server
+      pin-overrides: ${{ needs.substrate-pins.outputs.pin-overrides }}
       # matrix-ref defaults to main, which pins the persist-7 substrate triple
       # + maps requires_lens → ciris_server (CIRISConformance#14, merged).

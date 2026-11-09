@@ -63,6 +63,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # cargo deny (advisories, licenses, bans, sources) over deny.toml — seeded
+  # from CIRISEdge's, so the substrate's curated ignores carry over and the
+  # server adds only what its own tree pulls (steward 2026-11-09: "we should
+  # have a cargo deny gate"). Runner-native, as edge and verify run it: the
+  # Docker cargo-deny-action failed on its musl toolchain (CIRISEdge#242).
+  # A new advisory turns this red on the day it is published, with no code
+  # change: read it, then fix the lock or add an ignore that names the owner.
+  cargo-deny:
+    name: cargo deny (advisories + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --log-level warn --all-features check
+
   clippy-test:
     name: clippy + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -313,7 +329,11 @@ jobs:
         # claimed node's owner signs (a federation owner-binding, CC 5.4.6), the owner's
         # root acceptance (trust:accepts is federation by definition), and the apply
         # door's refusal of any announcement that is not federation-scoped.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 52
+        # 52 -> 53 (0.5.245): `announced_relay::may_have_announced` filters a
+        # READ to the owner-binding's federation scope (`AttestationQuery::scope`)
+        # to ask whether a person could have announced. It emits nothing; the
+        # audit matches the token, and a read at federation scope widens no one.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 53
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
       # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of
@@ -389,7 +409,23 @@ jobs:
       # any assertion. Compilation coverage is not execution coverage.
       - name: test (test-anchor surface, Linux)
         if: runner.os == 'Linux'
-        run: cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa
+        run: >-
+          cargo test --features test-anchor
+          --test trace_round_e2e --test trust_root_qa --test accord_duty_grant
+          --test first_run_to_moderation_e2e --test final_genesis_dry_run
+          --test contact_key_pull_e2e --test anchor_block_verifies --test seed_digest_probe
+      # Remote administration on a real mesh, every run (steward 2026-11-05: it
+      # has to work organically and stay part of standard testing). A device
+      # added by the real flow reads a node its person owns over the relay, and a
+      # stranger is refused. `cargo test` rebuilds the binary without the feature
+      # in some orders, so this builds what it runs.
+      - name: remote administration (native mesh, Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor
+          python3 -m pip install --quiet pyyaml
+          python3 -m harness.native remote_admin --binary target/debug/ciris-server --work "$RUNNER_TEMP/remote-admin"
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the

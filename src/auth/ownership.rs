@@ -1997,10 +1997,16 @@ pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<Stri
     // candidates too. `owner_of` already names a roster granter as its self
     // (persist v59 `self_of_at`), so the verdict below is unchanged.
     for k in owner_keys.iter().filter(|k| k.as_str() != owner) {
-        let rows = dir
-            .attestations_by_all(k)
-            .await
-            .map_err(|e| format!("attestations_by({k}): {e:#}"))?;
+        // Only `delegates_to` rows can be bindings: a typed seek, not every
+        // row the roster key ever signed (steward 2026-11-01, router rule).
+        let rows = crate::attestation_reads::attestations_of_types(
+            dir.as_ref(),
+            k,
+            true,
+            &[attestation_type::DELEGATES_TO],
+        )
+        .await
+        .map_err(|e| format!("delegates_to by({k}): {e:#}"))?;
         for row in rows {
             if row.attestation_type != attestation_type::DELEGATES_TO
                 || row.attested_key_id.is_empty()
@@ -2025,10 +2031,17 @@ pub async fn announced_nodes_of(engine: &Engine, owner: &str) -> Result<Vec<Stri
     nodes.dedup();
     let mut announced = Vec::new();
     for node in nodes {
-        let inbound = dir
-            .attestations_to_all(&node)
-            .await
-            .map_err(|e| format!("list_attestations_for({node}): {e:#}"))?;
+        // `widest_owner_binding` reads only `delegates_to` rows: seek those,
+        // never every row about the node (the canonical's own node has
+        // thousands, and this pass runs every minute on a relay).
+        let inbound = crate::attestation_reads::attestations_of_types(
+            dir.as_ref(),
+            &node,
+            false,
+            &[attestation_type::DELEGATES_TO],
+        )
+        .await
+        .map_err(|e| format!("delegates_to to({node}): {e:#}"))?;
         if widest_owner_binding(&inbound, &owner_keys).is_some_and(|a| is_federation_placed(&a)) {
             announced.push(node);
         }

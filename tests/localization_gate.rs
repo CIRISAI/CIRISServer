@@ -848,7 +848,12 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// (CIRISEdge#917) — same reason, same list, queued with their English.
     /// 24 -> 32: the owner-request routes' eight `owner_requests.*` ids
     /// (a remotely claimed node's owner acts) — same reason, same list.
-    const MAX_UNCOVERED: usize = 26;
+    ///
+    /// 26 -> 28 for 0.5.245: `mesh.announce_costs` replaces
+    /// `mesh.announce_requirement`, whose translations state the old costs, and
+    /// the new `add_device.node_proof`. Same reason as above, on the debt list;
+    /// client 0.5.239 adds both.
+    const MAX_UNCOVERED: usize = 28;
 
     let en = load_en();
     let ids = scraped_server_ids();

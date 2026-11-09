@@ -1,0 +1,17 @@
+{"source": "aggregates of one long-lived person's node, 2026-11-06; no identifiers",
+ "dimensions": {
+  "session:claim:v1": {"rows": 4700, "signers": 2, "avg_bytes": 537, "most_from_one": 4682},
+  "key:record:v1": {"rows": 2190, "signers": 2190, "avg_bytes": 10907, "most_from_one": 1},
+  "trust:accepts:v1": {"rows": 1676, "signers": 1676, "avg_bytes": 525, "most_from_one": 1},
+  "identity:occurrence:v1": {"rows": 1530, "signers": 1052, "avg_bytes": 9001, "most_from_one": 2},
+  "ownership:responsible_party:node": {"rows": 1009, "signers": 1005, "avg_bytes": 646, "most_from_one": 4},
+  "consent:community_trust:v1": {"rows": 387, "signers": 8, "avg_bytes": 654, "most_from_one": 243},
+  "consent:replication:v1": {"rows": 28, "signers": 11, "avg_bytes": 859, "most_from_one": 14}
+ },
+ "days": [
+  {"day": "10-17", "rows": 400}, {"day": "10-18", "rows": 400}, {"day": "10-19", "rows": 400},
+  {"day": "10-20", "rows": 400}, {"day": "10-21", "rows": 400}, {"day": "10-22", "rows": 1103},
+  {"day": "10-23", "rows": 400}, {"day": "10-24", "rows": 400}, {"day": "10-25", "rows": 400},
+  {"day": "10-26", "rows": 400}, {"day": "10-27", "rows": 400}, {"day": "10-28", "rows": 400},
+  {"day": "10-29", "rows": 400}, {"day": "10-30", "rows": 2082}
+ ]}

@@ -21,7 +21,7 @@
 //!      persist `src/fountain/aggregation.rs`).
 
 use ciris_persist::fountain::{EjectionAction, FountainContent, FountainReadClass, FountainTier};
-use ciris_verify_core::holonomic::{
+use ciris_verify_core::substrate::{
     eject_aggregated_tier, ejection_verdict, ConsentState, EjectionVerdict,
 };
 

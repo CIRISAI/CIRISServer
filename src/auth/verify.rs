@@ -91,6 +91,25 @@ pub async fn signer_acts_for(engine: &Engine, signer: &str, identity_key_id: &st
     }
 }
 
+/// **Does `signer` speak for the same person as `owner`?** A node's owner is a
+/// person, and a person is their self-key roster, not the one key that happened to
+/// sign the owner-binding: any live roster key signs as the fedID for every owner
+/// act (CC 3.3.6.3). So both sides are resolved to their self and compared, at the
+/// moment of asking, which is what makes removing a key from the roster take
+/// effect. A key on no roster resolves to itself, so it matches only itself.
+pub async fn signer_is_owner(engine: &Engine, signer: &str, owner: &str) -> bool {
+    if signer == owner {
+        return true;
+    }
+    let directory = engine.federation_directory();
+    let now = chrono::Utc::now();
+    let selves = tokio::join!(
+        ciris_persist::federation::self_roster::self_of_at(directory.as_ref(), signer, now),
+        ciris_persist::federation::self_roster::self_of_at(directory.as_ref(), owner, now),
+    );
+    matches!(selves, (Ok(a), Ok(b)) if a == b)
+}
+
 fn header(headers: &HeaderMap, name: &'static str) -> Result<String, VerifyError> {
     headers
         .get(name)

@@ -329,10 +329,14 @@ impl MessageVisitor {
 /// producer, and each exists to be read per occurrence. `compose_status` emits
 /// one line per boot phase/mark (~24 + marks per boot); `diag` emits the
 /// allocator's trim and peak-rise lines, at most one per trim period at info.
+/// `ciris_edge::edge` logs each reply that answered no round.
 const NEVER_COLLAPSED: &[&str] = &[
     SUMMARY_TARGET,
     "ciris_server::compose_status",
     "ciris_server::diag",
+    // A dropped reply is read per occurrence: collapsing hid 11 of 14 in the run
+    // that needed them timed.
+    "ciris_edge::edge",
 ];
 
 impl<S: Subscriber> Layer<S> for DedupLayer {

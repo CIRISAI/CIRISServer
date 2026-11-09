@@ -67,6 +67,21 @@ struct FinalGenesisState {
     home: std::path::PathBuf,
 }
 
+/// Where a genesis door replays a bundle (persist v60): a throwaway in-memory
+/// database, on any backend this node stores to. It holds only what a fresh node
+/// holds, and the replay is a verification, so it need not be the live backend.
+async fn replay_scratch() -> Result<ciris_persist::store::SqliteBackend, Response> {
+    ciris_persist::store::SqliteBackend::open_in_memory()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": format!("genesis scratch: {e:#}") })),
+            )
+                .into_response()
+        })
+}
+
 /// One ceremony transaction at a time on this node: every route that reads
 /// the state (or recovery file), changes it and writes it back holds this for
 /// the whole read-modify-write. Two holders signing at once otherwise load the
@@ -1071,7 +1086,11 @@ async fn finish(State(st): State<FinalGenesisState>) -> Response {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let done = match state.finish().await {
+    let scratch = match replay_scratch().await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let done = match state.finish(&scratch).await {
         Ok(d) => d,
         Err(e) => return ceremony_refusal(&e),
     };
@@ -1256,9 +1275,11 @@ fn amend_store(home: &std::path::Path, stored: &AmendStored) -> Result<(), Respo
 async fn amend_state(
     stored: &AmendStored,
 ) -> Result<ciris_persist::federation::genesis::amend::AmendState, Response> {
+    let scratch = replay_scratch().await?;
     let mut state = ciris_persist::federation::genesis::amend::AmendState::plan(
         &stored.pinned_json,
         stored.serve_transport_destinations.clone(),
+        &scratch,
     )
     .await
     .map_err(|e| amend_refusal(&e))?;
@@ -1537,7 +1558,11 @@ async fn amend_finish(State(st): State<FinalGenesisState>) -> Response {
         Ok(s) => s,
         Err(r) => return r,
     };
-    let done = match state.finish().await {
+    let scratch = match replay_scratch().await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let done = match state.finish(&scratch).await {
         Ok(d) => d,
         Err(e) => return amend_refusal(&e),
     };

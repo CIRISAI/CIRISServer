@@ -12,9 +12,9 @@ use crate::ladder::{
 
 /// The substrate floor this cut ships on. Moving a release means moving these
 /// three deliberately, in one commit.
-pub const TARGET_VERIFY: &str = "v20.2.0";
-pub const TARGET_PERSIST: &str = "v59.1.2";
-pub const TARGET_EDGE: &str = "v43.4.1";
+pub const TARGET_VERIFY: &str = "v22.0.0";
+pub const TARGET_PERSIST: &str = "v61.0.5";
+pub const TARGET_EDGE: &str = "v44.1.1";
 
 /// Every substrate repo we pin by git tag, and the crate names that come out of
 /// it. All crates from one repo MUST carry ONE tag.
@@ -236,7 +236,9 @@ fn gate_envelope_vocabulary_is_the_one_we_adopted() {
     // 0.5.220 (persist v53, CC 4.2.6 rc7): one key ADDED, the accord charter's
     //   `recovery_commitments`; none removed or renamed, and the server writes
     //   it only through persist's ceremony assembler. `c9558c98…` → `8064aafe…`.
-    const ADOPTED: &str = "8064aafe07646acefad93f51fbf7e79cb8ac421bd49318c5aad50ded142295b1";
+    // 0.5.245 (persist v61): `listed` removed, the steward's ruling that there is
+    //   no outward member listing; the server never wrote it. `8064aafe…` → `4c5a5e8a…`.
+    const ADOPTED: &str = "4c5a5e8a019bc8c9c895a5b91693438aafe9066237305d07e04dd31d36596eff";
     assert_eq!(
         ENVELOPE_VOCABULARY_SHA256, ADOPTED,
         "\n\

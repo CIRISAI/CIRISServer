@@ -687,7 +687,6 @@ async fn a_legacy_single_leaf_row_still_reads_and_is_shadowed_by_the_next_write(
             "version": 1,
             "updated_by": "old",
             "scope": "local",
-            "previous_version": null,
         }),
     );
     spec.attested_key_id = Some(nk.clone());

@@ -936,7 +936,20 @@ pub async fn migrate_consent_to_owner(
             if already.contains(&(engine_key.clone(), peer.clone())) || moved.contains(&peer) {
                 continue;
             }
-            let (mut opts, prefixes) = policy_of(grant, &owner_signer)?;
+            let (mut opts, mut prefixes) = policy_of(grant, &owner_signer)?;
+            // A provisional grant from before the claim carries no one's choice
+            // about traces. Sharing them is the owner's, on its own door.
+            let mut sharing_traces = false;
+            for key in crate::peer::own_keys_of_this_node(&engine_key) {
+                sharing_traces |=
+                    matches!(engine.community_trust_consent_for(&key).await, Ok(Some(_)));
+            }
+            if !sharing_traces {
+                prefixes.retain(|p| p != "trace:");
+                if prefixes.is_empty() {
+                    continue;
+                }
+            }
             // The human's row names THE AGENT — the engine's key, the one every
             // consent read is keyed by — never a blanket, and never the node key
             // that 0.5.203's redirect happened to sign the legacy row with: the

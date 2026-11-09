@@ -1725,8 +1725,8 @@ async fn score_and_emit(
         // thing. Being on a bucket boundary, it is a whole number of seconds and
         // therefore cannot carry the sub-microsecond precision CIRISPersist#598
         // refuses — `the_scorers_floored_instant_is_storable` pins that.
-        "asserted_at": asserted_at.to_rfc3339(),
-        "valid_until": valid_until.to_rfc3339(),
+        "asserted_at": asserted_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "valid_until": valid_until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "cohort_scope": cohort_scope::FEDERATION,
     });
 
@@ -1740,7 +1740,7 @@ async fn score_and_emit(
     // model reads the real score, not the `1.0` default.
     let mut input = EmitAttestationInput::with_envelope(
         ATTESTATION_TYPE_SCORES,
-        ciris_persist::federation::envelope::EnvelopeCore::from_value(envelope)?,
+        crate::attest::envelope_core(envelope)?,
         // capacity:* is a REPUTATIONAL claim about an agent, federation-visible
         // by design (the whole point is that peers read it).
         cohort_scope::FEDERATION,

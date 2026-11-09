@@ -202,10 +202,7 @@ pub async fn enable_watchlist(
         attestation_type: attestation_type::SCORES.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .map_err(|e| e.to_string())?,
+        attestation_envelope: crate::attest::envelope_core(envelope).map_err(|e| e.to_string())?,
         subject_key_ids: vec![enable.group_key_id.clone()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Self-emitted producer-authority local row: sig deferred to promote
@@ -268,10 +265,7 @@ pub async fn disable_watchlist(
         attestation_type: attestation_type::WITHDRAWS.to_owned(),
         weight: None,
         expires_at: None,
-        attestation_envelope: ciris_persist::federation::envelope::EnvelopeCore::from_value(
-            envelope,
-        )
-        .map_err(|e| e.to_string())?,
+        attestation_envelope: crate::attest::envelope_core(envelope).map_err(|e| e.to_string())?,
         subject_key_ids: vec![group_key_id.to_owned()],
         cohort_scope: cohort_scope::SELF.to_owned(),
         // Producer-authority withdrawal of the watchlist config the signer

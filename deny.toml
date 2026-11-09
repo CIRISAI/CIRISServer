@@ -1,0 +1,243 @@
+# cargo-deny config for ciris-server (0.5.245). Seeded from CIRISEdge v44.1.1's
+# deny.toml, so the substrate's curated licenses, ignores and sources carry over
+# unchanged; the SERVER section at the end of [advisories] is what this tree adds.
+# Gate: `cargo deny --log-level warn --all-features check` in ci.yml (and
+# scripts/preflight.sh). An ignore names who owns the fix; the advisory-not-
+# detected warning tells you when an inherited ignore can go.
+#
+# (Edge's header: enforces MISSION.md §6 license-locked mission preservation.
+# Inherits the dep-tree concerns persist + verify already curated.)
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    # MIT-0 (MIT No Attribution) — strictly more permissive than MIT
+    # (no attribution requirement); AGPL-compatible. Transitive via
+    # ciris-persist v2.7.0's jsonschema dep (CIRISPersist#102 Ask 4
+    # envelope-schema admission): `borrow-or-share` → `fluent-uri` →
+    # `referencing` → `jsonschema` → persist. Same rationale persist's
+    # own deny.toml documents.
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+    "OpenSSL",
+    "AGPL-3.0",
+    "AGPL-3.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+    "CC0-1.0",
+    # webpki-roots 0.26+ — CDLA-Permissive-2.0 (Linux Foundation's
+    # Community Data License Agreement, permissive variant). AGPL-
+    # compatible: distribution permitted, no patent-grant requirement,
+    # attribution preserved. Transitive via ciris-verify-core's
+    # reqwest/ureq stack — same finding persist v0.1.9 documented.
+    "CDLA-Permissive-2.0",
+    # bzip2 — the bzip2/libbzip2 license (BSD-style, permissive: use,
+    # redistribution, and modification permitted with attribution; no
+    # copyleft). AGPL-compatible. Transitive via the Leviculum
+    # Reticulum stack (reticulum-core resource-layer compression).
+    "bzip2-1.0.6",
+    # MIT-0 — "MIT No Attribution" (OSI-approved, strictly more
+    # permissive than MIT: no attribution requirement). AGPL-compatible.
+    # Transitive via persist v2.7.0's jsonschema admission gates
+    # (CIRISEdge#20 persist bump) → fluent-uri → borrow-or-share.
+    "MIT-0",
+    # v3.10.1 (CIRISEdge#133 codec wiring) — NCSA license, OSI-approved
+    # (University of Illinois/NCSA Open Source License). Permissive,
+    # functionally equivalent to MIT + BSD-3-Clause merged; explicitly
+    # AGPL-compatible. Transitive via rav1e → libfuzzer-sys (fuzz-
+    # harness dev-dep; ships in zero production binaries).
+    "NCSA",
+]
+confidence-threshold = 0.85
+
+[bans]
+# v0.1.0-pre1 — `allow` not `warn` because cargo-deny's bans check
+# treats `warn` as a hard fail despite the docs. Edge's tree pulls
+# duplicate transitive deps via the secret-service / zbus / pyo3 /
+# axum stacks (mostly two-versions splits across async-io,
+# async-lock, base64, getrandom, hashbrown, etc.) — all transitive
+# through ciris-keyring + the web-stack additions, none on edge's
+# verify hot path. Dedup pass when the dep tree stabilizes.
+# TODO: flip back to "warn" or "deny" once the upstream stacks
+# converge on single versions of the common transitives.
+multiple-versions = "allow"
+# ALLOW, unlike edge: every "wildcard" here is a CIRISAI git dependency pinned
+# by `tag = "vX.Y.Z"` (no `version`), and Cargo.lock pins each to a commit. A
+# registry wildcard would also pass, so review new `*` requirements by hand.
+wildcards         = "allow"
+
+[advisories]
+yanked = "warn"
+# Inherited ignores from CIRISPersist's deny.toml — same dep tree, same
+# transitive-only exposure. None of these advisories touch CIRISEdge's
+# verify-and-dispatch hot path (persist owns the DB / DNS / TLS
+# surfaces).
+ignore = [
+    "RUSTSEC-2024-0388",  # derivative unmaintained (via ciris-keyring TPM derive stack)
+    "RUSTSEC-2024-0384",  # instant unmaintained (Phase 3 Reticulum may obsolete)
+
+    # rustls / webpki / DNS branch — transitive via ciris-verify-core's
+    # verification stack. Persist's deny.toml documents the rationale;
+    # edge inherits.
+    "RUSTSEC-2026-0119",  # hickory-proto DNS encoding O(n²); edge has no DNS encode path
+    "RUSTSEC-2026-0118",  # hickory-proto NSEC3 closest-encloser DNSSEC-validation loop;
+                          # unreachable — hickory is pulled for DoH only (feature
+                          # "https-ring"), NOT the dnssec-validation feature, so the
+                          # NSEC3 proof path is never invoked. No patched 0.25.x exists
+                          # (unaffected >= 0.26.0-beta.1); clears when verify bumps hickory.
+    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
+    "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
+    "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)
+    "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic (no CRL parsing here)
+
+    # persist v58 / verify 20.2.0 — mirrors persist's v58 rationale (5de50ebc).
+    # zip 7.x extraction: all three advisories are in `ZipArchive::extract` /
+    # `ZipStreamReader::extract`. zip reaches edge only via ciris-verify-core,
+    # whose sole use (`security::wheel::read_wheel_identity`) reads named
+    # dist-info entries into memory under a size cap and never extracts; edge
+    # does not call it. Clears when verify moves zip to >= 9.
+    "RUSTSEC-2026-0367",  # zip extract preserves SUID/SGID bits
+    "RUSTSEC-2026-0368",  # zip extract creates out-of-tree symlinks
+    "RUSTSEC-2026-0369",  # zip extract applies permissions through symlinks
+    # zbus 3.x name/value crates unmaintained (merged into zbus 6). Transitive
+    # via ciris-keyring -> secret-service -> zbus; maintenance gap only, no
+    # vulnerability. Clears when keyring's secret-service moves to zbus >= 6.
+    "RUSTSEC-2026-0370",  # zvariant unmaintained
+    "RUSTSEC-2026-0371",  # zbus_names unmaintained
+    "RUSTSEC-2026-0372",  # zvariant_derive unmaintained
+
+    # v43.1.0 — two advisories published 2026-10-20.
+    # RUSTSEC-2026-0381 (bundled roots trust distrusted emSign intermediates):
+    # webpki-roots 1.x is upgraded to the fixed 1.0.10. The flagged 0.26.11 is
+    # the compatibility shim whose ONLY dependency is webpki-roots 1.0.10, so
+    # the roots it serves are already the fixed set; it is flagged by version
+    # number alone (reached via ciris-verify-core / hickory-proto). Clears when
+    # verify drops the 0.26 shim.
+    "RUSTSEC-2026-0381",  # webpki-roots 0.26 shim; data is 1.0.10 (fixed)
+    # RUSTSEC-2026-0374: basic-toml unmaintained, reached only via
+    # uniffi_bindgen → askama_derive (build-time binding generation, the
+    # ffi-uniffi feature); maintenance gap, no vulnerability.
+    "RUSTSEC-2026-0374",  # basic-toml unmaintained (uniffi_bindgen build tool)
+    # v43.1.2 — three advisories published 2026-10-24. RUSTSEC-2026-0385
+    # (ctutils) and RUSTSEC-2026-0386 (tokio AsyncFd) are FIXED by lockfile
+    # patch bumps (ctutils 0.4.5, tokio 1.53.3), as is RUSTSEC-2026-0387 for
+    # crypto-bigint 0.7 (0.7.7). RUSTSEC-2026-0387 stays for crypto-bigint
+    # 0.5.5 alone: it is reached only through elliptic-curve 0.13 (k256 / p256
+    # in CIRISVerify's ciris-crypto and ciris-keyring, and openmls's basic
+    # credential), and no fixed 0.5.x exists; it clears when verify moves to
+    # elliptic-curve 0.14. The same 0.5.5 shipped in v43.1.1. Tracked:
+    # CIRISEdge#890.
+    "RUSTSEC-2026-0387",  # crypto-bigint 0.5.5 via elliptic-curve 0.13 (no 0.5 fix)
+
+    # v0.11.0 — `unic-*` family unmaintained. Transitive via
+    # `pyo3-stub-gen` → `askama` → `unic-emoji-char` (Unicode emoji
+    # property tables). The crates are read-only Unicode data; the
+    # maintenance gap doesn't expose us to a vulnerability path. They
+    # ship in dev-deps (stub_gen bin) only, not the production wheel.
+    "RUSTSEC-2025-0075",  # unic-* unmaintained
+    "RUSTSEC-2025-0080",  # unic-* unmaintained
+    "RUSTSEC-2025-0081",  # unic-* unmaintained
+    "RUSTSEC-2025-0090",  # unic-* unmaintained
+    "RUSTSEC-2025-0098",  # unic-* unmaintained
+    "RUSTSEC-2025-0100",  # unic-* unmaintained
+
+    # bincode 1.3.3 unmaintained — NOT a vulnerability. The bincode team
+    # permanently ceased development after a doxxing/harassment incident and
+    # consider 1.3.3 a COMPLETE version needing no updates ("No safe upgrade is
+    # available" because none is needed). Transitive DEV-ONLY via
+    # `iai-callgrind v0.16.1` (the CIRISEdge#461 deterministic instruction-count
+    # bench harness); it never ships in any wheel or transport binary. Clears if
+    # the icount harness migrates to gungraun (the post-rename iai successor).
+    "RUSTSEC-2025-0141",  # bincode 1.3.3 unmaintained (dev-only, via iai-callgrind)
+
+    # v3.0.0 (CIRISEdge#89) — the pyo3 0.28 → 0.29 family lockstep
+    # landed. RUSTSEC-2026-0176 + RUSTSEC-2026-0177 are GONE from the
+    # tree (pyo3 0.29 ships both fixes); the ignores that lived here
+    # since v2.1.1 are removed. If `cargo deny check advisories`
+    # surfaces either again, something regressed the substrate pin.
+
+    # The libcrux advisories once ignored here (RUSTSEC-2026-0073/0075/0124,
+    # 0207-0212) and RUSTSEC-2026-0330/0331 (libcrux-kem X-Wing short-input
+    # panic) are GONE: CIRISEdge#822 moved openmls_libcrux_crypto onto
+    # hpke-rs 0.8 / libcrux-kem 0.0.10 (the CIRISAI/openmls fork Cargo.toml
+    # declares). If any resurfaces, the fork pin regressed.
+    "RUSTSEC-2026-0173",  # proc-macro-error2 unmaintained.
+    # Build-time dev-dep only (procedural-macro support crate); ships
+    # in zero production binaries. Pulled transitively via openmls's
+    # macro stack. Migration to manyhow / proc-macro2-diagnostics is
+    # openmls-upstream's call.
+
+    # v3.10.0 (CIRISEdge#133 codec wiring + #134/#135/#136/#137 holonomic
+    # substrate) — opus + rav1e transitives pulled by the v3.9.0 codec
+    # cut surface two unmaintained advisories. Both are build-time /
+    # non-exploitable; documented here rather than carrying the bump
+    # blocker upstream.
+    "RUSTSEC-2026-0150",  # audiopus_sys (transitive: opus 0.3 → audiopus
+    # 0.3 → audiopus_sys 0.2.2). Upstream is unmaintained — last commit
+    # 5 years ago; CMake-4.0 incompatibility flagged. NOT exploitable:
+    # audiopus_sys is a build-time bindgen wrapper around libopus. We
+    # bundle libopus statically into the wheel sidecar (same discipline
+    # persist uses for libsqlite3 at v3.5.3); the bindgen surface is
+    # invoked once at compile time and never touches network or
+    # attacker-controlled bytes. No safe upgrade is available per the
+    # advisory; the codec ecosystem hasn't reconverged on a
+    # post-audiopus_sys binding yet. Bench when one ships.
+    "RUSTSEC-2024-0436",  # paste 1.0.15 (transitive: rav1e 0.8 → paste).
+    # `paste` is dtolnay's procedural-macro-helper crate; the author
+    # archived the repo and announced no longer maintaining it.
+    # NOT exploitable: paste is a procedural-macro support crate,
+    # build-time only, ships in zero production binaries. The drop-in
+    # replacement `pastey` requires rav1e upstream to migrate; tracking
+    # https://github.com/xiph/rav1e/issues for a paste→pastey swap.
+    # v44.1.1 — RUSTSEC-2026-0459 (CVE-2026-119375), published 2026-11-09:
+    # bundled SQLite < 3.54.0 can return uninitialized page-cache memory when a
+    # database file is opened with a crafted sibling `-wal` of a different page
+    # size. Local only: the process must open a db + wal a less trusted party
+    # wrote; edge and persist open only the node's own store in its private data
+    # dir. The fix is libsqlite3-sys >= 0.39 / rusqlite 0.41, pinned through
+    # ciris-persist, ciris-verify-core and refinery; edge cannot take it alone.
+    # Clears when those pins move (tracked: CIRISEdge#966).
+    "RUSTSEC-2026-0459",  # bundled SQLite WAL page-size uninit read (local)
+    # ── SERVER (0.5.245): advisories in this tree beyond edge's list ──
+    # Fixed by lock bump in 0.5.245, not ignored: rustls 0.23.46
+    # (RUSTSEC-2026-0285/0346/0348/0349), cryptoki 0.12.1 (RUSTSEC-2026-0286).
+    "RUSTSEC-2026-0429",  # zip 7.x ZipArchive::extract abort on a symlink entry; via
+                          # persist → candle-core 0.10 (model files). The server never
+                          # calls extract; fixed in zip 8 — persist's to lift (candle).
+    "RUSTSEC-2025-0119",  # number_prefix unmaintained; persist → hf-hub → indicatif.
+    "RUSTSEC-2024-0375",  # atty unmaintained; build-time only (cbindgen 0.26 → clap 3).
+    "RUSTSEC-2024-0449",  # unsafe-libyaml unmaintained; via serde_yaml 0.9 (deprecated)
+                          # in our own ciris-lens-core. Replace serde_yaml: 0.5.246.
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "warn"
+# v0.1.0-pre1 — persist + verify ship as `publish = false` Rust
+# crates pulled via git tag. allow-list explicitly until they're on
+# crates.io (or a private registry).
+allow-git = [
+    "https://github.com/CIRISAI/CIRISEdge",
+    "https://github.com/CIRISAI/CIRISPersist",
+    "https://github.com/CIRISAI/CIRISVerify",
+    # v3.7.0 (CIRISEdge#62 Reticulum) — leviculum is CIRIS's reticulum
+    # implementation fork (`reticulum-core` + `reticulum-std`). Tracked
+    # by exact rev pin in Cargo.toml; ships as the Reticulum transport
+    # substrate's canonical wire.
+    "https://github.com/CIRISAI/leviculum",
+    # CIRISEdge#822 — openmls_libcrux_crypto 0.3.1+ciris.1 (hpke-rs 0.8 /
+    # libcrux-kem 0.0.10 backport for openmls 0.8.1), edge's direct git dep.
+    "https://github.com/CIRISAI/openmls",
+]

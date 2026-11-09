@@ -343,6 +343,8 @@ pub async fn authorize_slash(engine: &Engine, revoking_key_id: &str) {
             "references_attestation_id": grant_id,
             "dimension": trust_root::TRUST_CONFERS_DIMENSION,
             "scope": [DELEGATION_SCOPE_SLASH],
+            "delegation_valid_until": (chrono::Utc::now() + chrono::Duration::days(180))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         }),
         &grant_id,
     )
@@ -447,7 +449,9 @@ pub async fn revoke(
         revoked_at: effective_at,
         effective_at,
         revocation_envelope: match revoked_after {
-            Some(b) => serde_json::json!({ "revoked_after": b.to_rfc3339() }),
+            Some(b) => serde_json::json!({
+                "revoked_after": b.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            }),
             None => serde_json::json!({}),
         },
         original_content_hash: String::new(),

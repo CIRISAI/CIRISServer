@@ -1,0 +1,145 @@
+name: mobile node lanes
+
+# The crash scenarios the embedded node must survive, run ON the platforms that
+# inflict them (steward 2026-11-01: "we test for this scenario and any other
+# common crash scenarios on ios and android"; "use CI for testing").
+#
+# Two test binaries, cross-compiled and executed inside an Android emulator and
+# an iOS simulator — the same binaries `cargo test` runs on Linux:
+#
+#   tests/node_crash.rs     — SIGKILL mid-write then reopen (Android low-memory
+#                             kill, iOS jetsam); restart from disk; an unopenable
+#                             database refused, never replaced (iOS data
+#                             protection while locked).
+#   tests/node_lifecycle.rs — enter_background drains in-flight passes inside the
+#                             host's deadline and starts no new one; foreground
+#                             resumes with the catch-up pass.
+#
+# These prove the NODE. The host-shell scenarios (Android background FGS start,
+# dataSync timeout, iOS launch watchdog, BGTask expiration) test the app's
+# Kotlin/Swift and run in the app's own repo.
+#
+# Scarce-lane policy: the Android lane is ubuntu (KVM) and runs on PRs that touch
+# the node lifecycle; the iOS lane takes a macOS runner and runs on main, on
+# dispatch, or with the `ci:full` label.
+
+on:
+  pull_request:
+    paths:
+      - "src/node_lifecycle.rs"
+      - "src/loop_cadence.rs"
+      - "tests/node_crash.rs"
+      - "tests/node_lifecycle.rs"
+      - ".github/workflows/mobile-node-lanes.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-node-lanes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TESTS: "--test node_crash --test node_lifecycle"
+
+jobs:
+  android:
+    name: android emulator (x86_64, API 34)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: x86_64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+      - name: Build the test binaries for x86_64-linux-android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          # The NDK wiring the android wheel leg uses (build-wheels.yml): cc-rs
+          # and openssl-src need the real r26b tool names.
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG="${TC}/x86_64-linux-android24-clang"
+          export CC_x86_64_linux_android="${CLANG}"
+          export CXX_x86_64_linux_android="${CLANG}++"
+          export AR_x86_64_linux_android="${TC}/llvm-ar"
+          export RANLIB_x86_64_linux_android="${TC}/llvm-ranlib"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="${CLANG}"
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+          ln -sf "${TC}/llvm-ar"     "${TC}/x86_64-linux-android-ar"
+          ln -sf "${TC}/llvm-ranlib" "${TC}/x86_64-linux-android-ranlib"
+          ln -sf "${CLANG}"          "${TC}/x86_64-linux-android-clang"
+          ln -sf "${CLANG}++"        "${TC}/x86_64-linux-android-clang++"
+          export PATH="${TC}:${PATH}"
+          cargo test --target x86_64-linux-android $TESTS --no-run \
+            --message-format=json \
+            | jq -r 'select(.profile.test == true and .executable != null) | .executable' \
+            > bins.txt
+          cat bins.txt
+          test "$(wc -l < bins.txt)" -eq 2
+          mkdir -p lane && xargs -I{} cp {} lane/ < bins.txt
+      # KVM for the emulator on GitHub's ubuntu runners.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim
+          script: |
+            adb shell mkdir -p /data/local/tmp/lane
+            for b in lane/*; do adb push "$b" /data/local/tmp/lane/; done
+            adb shell chmod 755 /data/local/tmp/lane/*
+            set -e; for b in lane/*; do n=$(basename "$b"); echo "::group::$n"; adb shell "cd /data/local/tmp/lane && TMPDIR=/data/local/tmp ./$n --test-threads=1 ; echo EXIT=\$?" | tee "out-$n.txt"; echo "::endgroup::"; grep -q '^EXIT=0' "out-$n.txt"; done
+
+  ios:
+    name: ios simulator (aarch64-apple-ios-sim)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: aarch64-apple-ios-sim
+      - name: Build the test binaries for aarch64-apple-ios-sim
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          cargo test --target aarch64-apple-ios-sim $TESTS --no-run \
+            --message-format=json \
+            | jq -r 'select(.profile.test == true and .executable != null) | .executable' \
+            > bins.txt
+          cat bins.txt
+          test "$(wc -l < bins.txt)" -eq 2
+      - name: Boot a simulator and run
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[] | .[] | select(.name | test("^iPhone"))][0].udid')
+          echo "simulator: $UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          rc=0
+          while read -r b; do
+            echo "::group::$(basename "$b")"
+            xcrun simctl spawn "$UDID" "$b" --test-threads=1 || rc=1
+            echo "::endgroup::"
+          done < bins.txt
+          xcrun simctl shutdown "$UDID" || true
+          exit $rc

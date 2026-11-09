@@ -56,10 +56,15 @@ stage_converge() { harness_log_count agent "converged to [1-9][0-9]* consent pee
 # RECEIVER's line names the sender, the plane and the count, so it is the
 # direct evidence; the counter stays so a future edge that counts pushes still
 # reads here.
+#
+# The sender is the agent's NODE key since the harness agent splits (0.5.245,
+# as CIRISAgent 2.19 does): `source_peer="ciris-node-bootstrap-…"`. A pattern
+# naming only `ciris-agent…` read 0 beside arrive=15 (PR #866), so both names
+# count.
 stage_ship() {
   local sent recv
   sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]')"
-  recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris-agent[^"]*" envelopes=[1-9]')"
+  recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris-(agent|node)[^"]*" envelopes=[1-9]')"
   echo $(( ${sent:-0} + ${recv:-0} ))
 }
 
@@ -142,6 +147,31 @@ except urllib.error.HTTPError as e:
     print("✗ import refused:", e.code, e.read().decode()[:300])
 except Exception as e:
     print("✗ import failed:", e)
+PY
+  # 6b. Traces: the OWNER chooses to share traces (steward 2026-11-04, 520de876).
+  # Peering may name `trace:` only after the capture grant exists
+  # (`consent:community_trust`), and only the owner's pen writes it. A product
+  # client does this as the owner-requests round trip (list → sign on the device
+  # holding the pen → apply), and so does this owner: the pen is on this node.
+  compose exec -T "$agent_svc" python - "$token" <<'PY' 2>/dev/null | sed 's/^/  /'
+import json, sys, urllib.request
+base, auth = "http://127.0.0.1:4243", {"Authorization": "Bearer " + sys.argv[1], "Content-Type": "application/json"}
+def call(method, path, body=None):
+    req = urllib.request.Request(base + path, method=method, headers=auth,
+                                 data=None if body is None else json.dumps(body).encode())
+    return json.load(urllib.request.urlopen(req, timeout=60))
+try:
+    listed = call("GET", "/v1/self/owner-requests")
+    want = [r for r in listed.get("requests", []) if r.get("kind") == "community_trust"]
+    if not want:
+        print("✗ traces choice: no community_trust request listed:", json.dumps(listed)[:300]); sys.exit(0)
+    signed = call("POST", "/v1/self/owner-requests/sign", {"node_key_id": listed["node_key_id"], "requests": want})
+    applied = call("POST", "/v1/self/owner-requests/apply", signed)
+    print("✓ traces shared by the owner (community_trust signed + applied):", json.dumps(applied)[:200])
+except urllib.error.HTTPError as e:
+    print("✗ traces choice refused:", e.code, e.read().decode()[:300])
+except Exception as e:
+    print("✗ traces choice failed:", e)
 PY
   # 7. Consent: the OWNER grants replication to the canonical (production's owner-gated act).
   compose exec -T "$agent_svc" python - "$token" <<'PY' 2>/dev/null | sed 's/^/  /'

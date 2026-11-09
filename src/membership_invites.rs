@@ -510,12 +510,17 @@ pub(crate) async fn widen_held_acceptances(
             continue;
         };
         match em::widen_on_acceptance(dir, acceptance, widener).await {
-            Ok(em::WidenOutcome::Widened { member_key_id, .. }) => {
+            Ok(em::WidenOutcome::Widened {
+                group_key_id,
+                member_key_id,
+                ..
+            }) => {
                 tracing::info!(
                     member = %member_key_id,
                     proposal = %view.proposal_id,
                     "membership: an accepted invitee seated (CIRISPersist#955)"
                 );
+                crate::compose::audience_changed(&group_key_id);
                 seated.push(member_key_id);
             }
             Ok(other) => tracing::debug!(
@@ -605,6 +610,7 @@ pub async fn widen_own_accepted_proposals(engine: &Arc<Engine>, node_key_id: &st
                     "membership: an accepted invitee seated by this node's owner \
                      (CIRISPersist#955; the runtime had no widener)"
                 );
+                crate::compose::audience_changed(&group_key_id);
                 if scope == GroupScope::Family {
                     // The household's existing content, re-wrapped to them —
                     // what the pre-v52 direct add did, now after their consent.
@@ -984,6 +990,10 @@ async fn answer(st: InboxState, headers: HeaderMap, proposal_id: String, accept:
                 tracing::warn!(room, error = %e, "pair intent could not be removed after a decline");
             }
         }
+    }
+    if accept {
+        // The room's creator adds us on its next touch, and we join from the Welcome.
+        crate::contacts_chat::hurry_pair_rooms();
     }
     let _ = crate::compose::kick_replication(if accept {
         "membership: invitation accepted"

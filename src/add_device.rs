@@ -84,8 +84,8 @@ pub enum JoinOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub v: u32,
-    /// B's NodeCode — what the owner-binding pins, and the node it names MUST be
-    /// the request's signer.
+    /// B's NodeCode — what the owner-binding pins. The node it names is the
+    /// request's signer, or has signed `node_proof` for that signer.
     pub node_code: String,
     /// 32 fresh random bytes, hex. Correlates B's polls and seeds the code.
     pub challenge: String,
@@ -95,6 +95,58 @@ pub struct JoinRequest {
     pub occurrence_key_record: SignedKeyRecord,
     /// B's content-KEM keys for that occurrence (the self-DEK recipient).
     pub encryption_pubkeys: EncryptionPubkeys,
+    /// On a split home the agent is on the wire and the NodeCode names the node,
+    /// so the node vouches for the request: its Ed25519 signature over
+    /// [`node_proof_message`], base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_proof: Option<String>,
+    /// With `node_proof`: first contact introduced the agent's key, and A must
+    /// hold the node's before it can record an owner-binding naming it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_key_record: Option<SignedKeyRecord>,
+}
+
+/// What the node signs to vouch for a join sent by another key of its home.
+#[must_use]
+pub fn node_proof_message(sender: &str, challenge: &str) -> Vec<u8> {
+    format!("ciris:add-device:node-proof:v1\n{sender}\n{challenge}").into_bytes()
+}
+
+/// **The node a join is really from**, or `None` if the request can't show one.
+/// Nobody may ask on another node's behalf: the sender is the node, or it holds a
+/// proof only that node's private key can make. A split home has to take the
+/// second path, since its wire identity is the agent (CC 3.4.7.3).
+#[must_use]
+pub fn request_node(req: &JoinRequest, sender: &str) -> Option<String> {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let nc = crate::nodecode::decode(&req.node_code).ok()?;
+    if nc.key_id == sender {
+        return Some(nc.key_id);
+    }
+    let record = &req.node_key_record.as_ref()?.record;
+    if record.key_id != nc.key_id || record.pubkey_ed25519_base64 != nc.pubkey_ed25519_base64 {
+        return None;
+    }
+    let key: [u8; 32] = b64
+        .decode(&nc.pubkey_ed25519_base64)
+        .ok()?
+        .try_into()
+        .ok()?;
+    let sig: [u8; 64] = b64
+        .decode(req.node_proof.as_deref()?)
+        .ok()?
+        .try_into()
+        .ok()?;
+    VerifyingKey::from_bytes(&key)
+        .ok()?
+        .verify(
+            &node_proof_message(sender, &req.challenge),
+            &Signature::from_bytes(&sig),
+        )
+        .ok()?;
+    Some(nc.key_id)
 }
 
 /// A → B, the answer payload.
@@ -158,7 +210,11 @@ fn opaque(status: u16, answer: &JoinAnswer) -> ciris_edge::OpaqueResponse {
 
 struct Held {
     id: String,
+    /// The wire signer, which polls and withdraws.
     sender: String,
+    /// The node that asked, which the owner-binding names. The same key unless
+    /// this is a split home.
+    node: String,
     req: JoinRequest,
     code: String,
     at: Instant,
@@ -242,15 +298,18 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
                 tracing::info!(sender = %ctx.sender_key_id, "device-join: refused — the owner has not opened \"add a device\"");
                 return opaque(403, &JoinAnswer::NotAccepting).into();
             }
-            // The NodeCode must name the request's signer: the binding the owner
-            // will sign pins that node, and nobody may ask on another node's behalf.
-            let names_signer = crate::nodecode::decode(&req.node_code)
-                .map(|nc| nc.key_id == ctx.sender_key_id)
-                .unwrap_or(false);
-            if !names_signer || req.challenge.len() < 32 {
-                tracing::info!(sender = %ctx.sender_key_id, "device-join: refused — malformed request (node code does not name the signer, or no challenge)");
+            // The binding the owner will sign pins this node, and nobody may ask
+            // on another node's behalf. The answer stays generic (#554 D3), so the
+            // reason goes to the owner's log.
+            let node = request_node(&req, &ctx.sender_key_id);
+            let Some(node) = node.filter(|_| req.challenge.len() >= 32) else {
+                tracing::warn!(
+                    sender = %ctx.sender_key_id,
+                    "device-join: refused with the window open — the node code names another \
+                     key and carries no valid proof, or there is no challenge"
+                );
                 return opaque(400, &JoinAnswer::NotAccepting).into();
-            }
+            };
             // One per sender: a repeat returns the held request (idempotent).
             if let Some(held) = h.pending.iter().find(|p| p.sender == ctx.sender_key_id) {
                 return opaque(
@@ -279,6 +338,7 @@ fn answer(ctx: ciris_edge::OpaqueRequestContext) -> ciris_edge::OpaqueAnswer {
             h.pending.push(Held {
                 id: id.clone(),
                 sender: ctx.sender_key_id,
+                node,
                 req: *req,
                 code: code.clone(),
                 at: Instant::now(),
@@ -454,30 +514,43 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     // 1. Who: resolve the person's code (QR / long form / short form) to their nodes.
     let directory = st.engine.federation_directory();
     let lens = ciris_edge::contact::PersistLens::new(&*directory);
-    let subject = match ciris_edge::contact::resolve_contact(&lens, req.contact.trim()).await {
-        Ok(ciris_edge::contact::ContactResolution::Known(s)) => s,
-        Ok(ciris_edge::contact::ContactResolution::ReadyFromCode { subject, .. }) => subject,
-        Err(stall) => {
-            return refuse(
-                StatusCode::NOT_FOUND,
-                "add_device.unknown_identity",
-                format!("could not find that identity: {stall:?}"),
-            )
-        }
-    };
-    let Some(target) = subject
-        .nodes
-        .iter()
-        .find(|n| **n != st.node_key_id)
-        .cloned()
-    else {
+    use ciris_edge::contact::{ContactResolution, LadderStall};
+    let (fed_id, known_nodes) =
+        match ciris_edge::contact::resolve_contact(&lens, req.contact.trim()).await {
+            Ok(ContactResolution::Known(s)) => (s.fed_id, s.nodes),
+            Ok(ContactResolution::ReadyFromCode { subject, .. }) => (subject.fed_id, subject.nodes),
+            // A bare fedID this device has never heard of. A fresh device knows
+            // nobody, so this is the normal case, not a refusal: the canonical
+            // knows the person's announced nodes (steward 2026-11-04).
+            Err(LadderStall::NotYetDiscovered { fed_id } | LadderStall::Unreachable { fed_id }) => {
+                (fed_id, Vec::new())
+            }
+            Err(stall) => {
+                return refuse(
+                    StatusCode::NOT_FOUND,
+                    "add_device.unknown_identity",
+                    format!("could not find that identity: {stall:?}"),
+                )
+            }
+        };
+    // Every node of the person's, not the first: the list is sorted, and a
+    // node they stopped running still has a live owner-binding until they
+    // release it (Eric's laptop, 2026-11-03: `ciris-client-…` sorts before the
+    // real `ciris-node-…`, so the join never reached the node holding the
+    // window open). Each is asked in turn below, and each attempt is logged.
+    // The union of what the code named, what this directory holds, and what the
+    // canonicals have registered for the person.
+    let registered = canonical_nodes_of(&st.engine, &fed_id).await;
+    let targets = other_nodes(&union_nodes(known_nodes, registered), &st.node_key_id);
+    tracing::info!(fed_id = %fed_id, targets = ?targets, "add-device: the nodes to ask");
+    if targets.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
             "add_device.no_device",
             "that code names no device to ask — open Share my ID on your other device and use its QR or long form",
         );
-    };
-    // 1a. Wait, bounded, for the other device's ROUTE (edge v43, CC 5.3.3.5 E1):
+    }
+    // 1a. Wait, bounded, for ANY of the other devices' ROUTES (edge v43, CC 5.3.3.5 E1):
     // every link is sealed, so B can reach A only once it holds A's signed
     // route row with A's transit pair. An ANNOUNCED node's identity rows reach
     // everyone on their bootstrap planes, so the canonical B already dials
@@ -485,7 +558,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     // round now rather than waiting the cadence. Not here yet is RETRYABLE
     // (503 + Retry-After), never a refusal: a 502 means A refused. BEFORE the
     // mint, so a retry after the 503 has nothing of its own to collide with.
-    if let Err(r) = await_owner_route(&st.engine, &target).await {
+    if let Err(r) = await_owner_route(&st.engine, &targets, &fed_id).await {
         return r;
     }
     // 1b. An approval already held names the key an earlier ask minted; minting
@@ -505,7 +578,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
     //    fingerprint. Never a device name: the device name (`label`) belongs to
     //    the NODE key, and `device-<hex>-<fp>` is refused (tracked: CIRISServer#793).
     let label = req.label.unwrap_or_else(|| "new device".into());
-    let alias = subject.fed_id.clone();
+    let alias = fed_id.clone();
     let occurrence_dir = st.identity_dir.join("user");
     // An earlier ask from this device (unanswered, or failed after its mint)
     // left never-approved keys under this alias; this ask supersedes it. The
@@ -570,6 +643,42 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         );
     }
     let challenge = hex::encode(ch);
+    // On a split home the agent is on the wire, so the node vouches for it.
+    let sender = edge.signer_key_id().to_owned();
+    let (node_proof, node_key_record) = if st.node_key_id == sender {
+        (None, None)
+    } else {
+        use base64::Engine as _;
+        let signed = match crate::node_key::held_node_signer() {
+            Some(node) => node
+                .sign_hybrid(&node_proof_message(&sender, &challenge))
+                .await
+                .map_err(|e| e.to_string()),
+            None => Err("this node holds no node key".to_owned()),
+        };
+        let record = directory
+            .lookup_public_key(&st.node_key_id)
+            .await
+            .ok()
+            .flatten();
+        match (signed, record) {
+            (Ok(sig), Some(record)) => (
+                Some(base64::engine::general_purpose::STANDARD.encode(&sig.classical.signature)),
+                Some(SignedKeyRecord { record }),
+            ),
+            (signed, record) => {
+                return refuse_with(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "add_device.node_proof",
+                    "this device could not prove which node it is",
+                    serde_json::json!({
+                        "detail": signed.err().unwrap_or_else(|| "no key record".to_owned()),
+                        "node_key_record": record.is_some(),
+                    }),
+                )
+            }
+        }
+    };
     let join = JoinOp::Join(Box::new(JoinRequest {
         v: 1,
         node_code: st.node_code.clone(),
@@ -581,40 +690,82 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         device_class: crate::backend::host_device_class().into(),
         occurrence_key_record: keyset.key_record.clone(),
         encryption_pubkeys: enc,
+        node_proof,
+        node_key_record,
     }));
     // 3. Ask — a first contact: the request carries this node's own key record.
-    let exchange = match edge
-        .send_opaque_request_introducing(
-            &target,
-            DEVICE_JOIN_KIND,
-            serde_json::to_vec(&join).unwrap_or_default(),
-            ROUND_TIMEOUT_MS,
-        )
-        .await
-    {
-        Ok(x) => x,
-        Err(e) => {
-            return refuse(
-                StatusCode::BAD_GATEWAY,
-                "add_device.unreachable",
-                format!("could not reach your other device: {e}"),
+    //    Each of the person's nodes in turn, until one holds the window open: a
+    //    node that is gone, or that is up but not accepting, must not end the
+    //    join while another of theirs is waiting for it.
+    let payload = serde_json::to_vec(&join).unwrap_or_default();
+    let mut outcomes: Vec<AskOutcome> = Vec::with_capacity(targets.len());
+    let mut held = None;
+    for node in &targets {
+        if !matches!(
+            ciris_persist::federation::self_at_login::transit_kex_pair_for(
+                directory.as_ref(),
+                node
             )
+            .await,
+            Ok(Some(_))
+        ) {
+            tracing::info!(node = %node, "add-device: skipping — no route to this node yet");
+            outcomes.push(AskOutcome::NoRoute);
+            continue;
         }
-    };
-    let ans: JoinAnswer =
-        serde_json::from_slice(&exchange.response.payload).unwrap_or(JoinAnswer::Unknown);
-    let (request_id, code) = match ans {
-        JoinAnswer::Pending { request_id, match_code } => (request_id, match_code),
-        JoinAnswer::NotAccepting => {
-            return refuse(
+        tracing::info!(node = %node, "add-device: asking this node");
+        let sent = edge
+            .send_opaque_request_introducing(
+                node,
+                DEVICE_JOIN_KIND,
+                payload.clone(),
+                ROUND_TIMEOUT_MS,
+            )
+            .await;
+        match sent {
+            Err(e) => {
+                tracing::info!(node = %node, error = %e, "add-device: this node could not be reached");
+                outcomes.push(AskOutcome::Unreachable(format!("{node}: {e}")));
+            }
+            Ok(x) => {
+                match serde_json::from_slice(&x.response.payload).unwrap_or(JoinAnswer::Unknown) {
+                    JoinAnswer::Pending {
+                        request_id,
+                        match_code,
+                    } => {
+                        held = Some((node.clone(), request_id, match_code));
+                        break;
+                    }
+                    JoinAnswer::NotAccepting => {
+                        tracing::info!(node = %node, "add-device: this node is not accepting new devices");
+                        outcomes.push(AskOutcome::NotAccepting);
+                    }
+                    other => {
+                        tracing::info!(node = %node, answer = ?other, "add-device: unexpected answer");
+                        outcomes.push(AskOutcome::Unexpected(format!("{node}: {other:?}")));
+                    }
+                }
+            }
+        }
+    }
+    let Some((target, request_id, code)) = held else {
+        return match summarize_asks(&outcomes) {
+            AskVerdict::NotAccepting => refuse(
                 StatusCode::CONFLICT,
                 "add_device.not_accepting",
                 "your other device is not accepting new devices — open Add a device on it, then try again",
-            )
-        }
-        other => {
-            return refuse(StatusCode::BAD_GATEWAY, "add_device.unexpected", format!("unexpected answer: {other:?}"))
-        }
+            ),
+            AskVerdict::Unreachable(detail) => refuse(
+                StatusCode::BAD_GATEWAY,
+                "add_device.unreachable",
+                format!("could not reach your other device: {detail}"),
+            ),
+            AskVerdict::Unexpected(detail) => refuse(
+                StatusCode::BAD_GATEWAY,
+                "add_device.unexpected",
+                format!("unexpected answer: {detail}"),
+            ),
+        };
     };
     set_progress(|p| {
         *p = JoinProgress {
@@ -644,7 +795,7 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
             request_id,
             challenge,
             alias,
-            expected_owner: subject.fed_id.clone(),
+            expected_owner: fed_id.clone(),
             occurrence_key: keyset.key_id.clone(),
             gen,
         },
@@ -654,6 +805,110 @@ async fn start(State(st): State<AddDeviceState>, Json(req): Json<StartRequest>) 
         Json(progress().lock().map(|p| p.clone()).unwrap_or_default()),
     )
         .into_response()
+}
+
+/// Ask each canonical which nodes `fed_id` announced
+/// (`GET /v1/federation/people/{fed_id}/nodes`). Best effort: an unreachable
+/// canonical, or one too old to serve the read, contributes nothing and the
+/// code's nodes still stand.
+pub(crate) async fn canonical_nodes_of(engine: &Engine, fed_id: &str) -> Vec<String> {
+    let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap_or_default();
+    let mut nodes = Vec::new();
+    for read in crate::trace_receipt::roster_from_hints(hints) {
+        let url = format!("{}/v1/federation/people/{fed_id}/nodes", read.url);
+        let body = match http.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+            Ok(r) => {
+                tracing::info!(url = %url, status = %r.status(), "this canonical serves no node list");
+                None
+            }
+            Err(e) => {
+                tracing::info!(url = %url, error = %e, "could not ask this canonical for the person's nodes");
+                None
+            }
+        };
+        let found = body.as_ref().map(nodes_from_body).unwrap_or_default();
+        tracing::info!(canonical = %read.key_id, nodes = ?found, "nodes registered with this canonical");
+        nodes = union_nodes(nodes, found);
+    }
+    nodes
+}
+
+/// The `nodes` array of the canonical's answer.
+fn nodes_from_body(v: &serde_json::Value) -> Vec<String> {
+    v.get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `a` then whatever `b` adds, without repeats. The order is kept: the code's
+/// nodes, the ones the person handed over, are asked first.
+fn union_nodes(mut a: Vec<String>, b: Vec<String>) -> Vec<String> {
+    for n in b {
+        if !a.contains(&n) {
+            a.push(n);
+        }
+    }
+    a
+}
+
+/// The person's nodes other than this one, in the order given.
+fn other_nodes(nodes: &[String], me: &str) -> Vec<String> {
+    nodes.iter().filter(|n| *n != me).cloned().collect()
+}
+
+/// What asking one node came to, when it did not take the request.
+#[derive(Debug, PartialEq, Eq)]
+enum AskOutcome {
+    NoRoute,
+    Unreachable(String),
+    NotAccepting,
+    Unexpected(String),
+}
+
+/// What to tell the person when no node took the request.
+#[derive(Debug, PartialEq, Eq)]
+enum AskVerdict {
+    NotAccepting,
+    Unreachable(String),
+    Unexpected(String),
+}
+
+/// A node that ANSWERED beats one that did not: "open Add a device on it" is
+/// the actionable reply when one device is up and another is gone.
+fn summarize_asks(outcomes: &[AskOutcome]) -> AskVerdict {
+    if outcomes.contains(&AskOutcome::NotAccepting) {
+        return AskVerdict::NotAccepting;
+    }
+    let detail = |want_unexpected: bool| -> Vec<String> {
+        outcomes
+            .iter()
+            .filter_map(|o| match o {
+                AskOutcome::Unexpected(d) if want_unexpected => Some(d.clone()),
+                AskOutcome::Unreachable(d) if !want_unexpected => Some(d.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let unexpected = detail(true);
+    if !unexpected.is_empty() {
+        return AskVerdict::Unexpected(unexpected.join("; "));
+    }
+    let unreachable = detail(false);
+    if unreachable.is_empty() {
+        AskVerdict::Unreachable("no route to any of your devices".into())
+    } else {
+        AskVerdict::Unreachable(unreachable.join("; "))
+    }
 }
 
 /// One outstanding join request on B: where it went and what it expects back.
@@ -1079,12 +1334,27 @@ fn preflight(
     Ok(fc.key_id)
 }
 
+/// The local account the wizard collected, when it asked for one. Optional: an older
+/// client sends no body, and a node with no agent has no use for it.
+#[derive(Debug, Default, Deserialize)]
+struct CompleteRequest {
+    #[serde(default)]
+    owner_username: Option<String>,
+    #[serde(default)]
+    owner_password: Option<String>,
+}
+
 /// `POST /v1/setup/add-device/complete` — the end of first run on a device
 /// joining an existing identity: apply the verified, held approval (the claim
 /// through this node's own setup/root, then the occurrence and the active
 /// identity). The wizard then collects its session with `claimed-session`, as
 /// the new-identity path does.
-async fn complete(State(st): State<AddDeviceState>) -> Response {
+///
+/// `owner_username` / `owner_password`, when the wizard asked for them, go to
+/// `setup/root` as the creator's do. With an agent the runtime restarts after setup
+/// and ends the wizard's session, so without them this device has no way to sign in.
+async fn complete(State(st): State<AddDeviceState>, body: axum::body::Bytes) -> Response {
+    let account: CompleteRequest = serde_json::from_slice(&body).unwrap_or_default();
     let held = pending().lock().ok().and_then(|g| g.clone());
     let Some(p) = held else {
         return refuse(
@@ -1093,7 +1363,7 @@ async fn complete(State(st): State<AddDeviceState>) -> Response {
             "your other device has not approved this one yet",
         );
     };
-    match apply(&st, p.approval, &p.alias).await {
+    match apply(&st, p.approval, &p.alias, &account).await {
         Ok(()) => {
             if let Ok(mut g) = pending().lock() {
                 *g = None;
@@ -1178,7 +1448,12 @@ pub fn roster_key_named_under(fed_id: &str, record: &SignedKeyRecord) -> Result<
 
 /// Apply the owner's approval on B: the binding through B's OWN setup/root with
 /// B's own claim PIN (local presence), then the owner-signed occurrence.
-async fn apply(st: &AddDeviceState, a: Approval, alias: &str) -> Result<(), String> {
+async fn apply(
+    st: &AddDeviceState,
+    a: Approval,
+    alias: &str,
+    account: &CompleteRequest,
+) -> Result<(), String> {
     let pin = std::fs::read_to_string(&st.claim_pin_file)
         .map_err(|e| format!("read this device's claim PIN file: {e}"))?;
     let body = serde_json::json!({
@@ -1187,6 +1462,8 @@ async fn apply(st: &AddDeviceState, a: Approval, alias: &str) -> Result<(), Stri
         "claim_pin": pin.trim(),
         "owner_binding": a.owner_binding,
         "claimer_key_record": a.claimer_key_record,
+        "owner_username": account.owner_username,
+        "owner_password": account.owner_password,
     });
     let url = format!("{}/v1/setup/root", st.local_self_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
@@ -1282,7 +1559,7 @@ async fn list_requests(State(st): State<AddDeviceState>, headers: HeaderMap) -> 
                 "label": p.req.label,
                 "device_class": p.req.device_class,
                 "match_code": p.code,
-                "node_key_id": p.sender,
+                "node_key_id": p.node,
                 "requested_secs_ago": p.at.elapsed().as_secs(),
             })
         })
@@ -1336,10 +1613,15 @@ async fn approve(
     if let Err(r) = crate::federation_peers::require_owner_session(&st.engine, &headers).await {
         return r;
     }
-    let (sender, req, code) = {
+    let (sender, node, req, code) = {
         let h = host().lock().unwrap_or_else(|p| p.into_inner());
         match h.pending.iter().find(|p| p.id == id) {
-            Some(p) => (p.sender.clone(), p.req.clone(), p.code.clone()),
+            Some(p) => (
+                p.sender.clone(),
+                p.node.clone(),
+                p.req.clone(),
+                p.code.clone(),
+            ),
             None => {
                 return refuse(
                     StatusCode::NOT_FOUND,
@@ -1349,7 +1631,7 @@ async fn approve(
             }
         }
     };
-    match sign_and_record(&st, &sender, &req).await {
+    match sign_and_record(&st, &node, &req).await {
         Ok(signed) => record_approved(&id, &sender, &req, &code, signed).into_response(),
         Err(e) if e.starts_with(ROSTER_CHANGE_HELD) => {
             // CC 3.3.6.3: from a roster of two or more keys the addition is a
@@ -1391,7 +1673,7 @@ async fn approve(
                     "approved": false,
                     "held": true,
                     "match_code": code,
-                    "node_key_id": sender,
+                    "node_key_id": node,
                     "occurrence_key_id": occ_key,
                     "proposal_id": proposal_id,
                     "detail": e,
@@ -1416,6 +1698,9 @@ fn record_approved(
     code: &str,
     (approval, intro, granted): (Approval, ciris_edge::Introductions, usize),
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // The node the owner approved, which on a split home is not the wire signer.
+    let node =
+        crate::nodecode::decode(&req.node_code).map_or_else(|_| sender.to_owned(), |nc| nc.key_id);
     let occurrence_key_id = approval
         .occurrence
         .identity_occurrence
@@ -1433,7 +1718,7 @@ fn record_approved(
         },
     );
     tracing::info!(
-        request_id = %id, node = %sender, occurrence = %occurrence_key_id, self_dek_granted = granted,
+        request_id = %id, node = %node, occurrence = %occurrence_key_id, self_dek_granted = granted,
         "device-join: APPROVED — owner-binding and occurrence signed by the owner; self DEKs re-wrapped"
     );
     (
@@ -1441,7 +1726,7 @@ fn record_approved(
         Json(serde_json::json!({
             "approved": true,
             "match_code": code,
-            "node_key_id": sender,
+            "node_key_id": node,
             "occurrence_key_id": occurrence_key_id,
             "self_dek_granted": granted,
         })),
@@ -1467,9 +1752,16 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
             h.pending
                 .iter()
                 .find(|p| p.id == id && p.held_since.is_some())
-                .map(|p| (p.sender.clone(), p.req.clone(), p.code.clone()))
+                .map(|p| {
+                    (
+                        p.sender.clone(),
+                        p.node.clone(),
+                        p.req.clone(),
+                        p.code.clone(),
+                    )
+                })
         };
-        let Some((sender, req, code)) = held else {
+        let Some((sender, node, req, code)) = held else {
             return;
         };
         match ciris_persist::federation::self_roster::roster_now(dir.as_ref(), &owner).await {
@@ -1480,7 +1772,7 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
                 continue;
             }
         }
-        match sign_and_record(&st, &sender, &req).await {
+        match sign_and_record(&st, &node, &req).await {
             Ok(signed) => {
                 let _ = record_approved(&id, &sender, &req, &code, signed);
                 tracing::info!(request_id = %id, occurrence = %occ_key, "device-join: the self roster LANDED the key — the held approval is delivered");
@@ -1494,28 +1786,32 @@ async fn resume_when_landed(st: AddDeviceState, id: String, owner: String, occ_k
 }
 
 /// How long the join waits for the other device's route before answering
-/// "try again" (the canonical's next bootstrap-plane round carries it).
-const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// "try again" (the canonical's next bootstrap-plane round carries it). Under the
+/// client's 30 s request timeout, or it never reads the answer: run 41896619027.
+const OWNER_ROUTE_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
 
-/// Wait until this node holds `target`'s signed route WITH its transit pair
-/// (`transit_kex_pair_for`, Rooted), kicking a replication round toward the
-/// canonical every few seconds. `Err` is the 503 to answer: retryable, and it
+/// Wait until this node holds at least one of `targets`' signed routes WITH
+/// its transit pair (`transit_kex_pair_for`, Rooted), kicking a replication
+/// round toward the canonical every few seconds. `Err` is the 503 to answer: retryable, and it
 /// names the case the online path cannot serve — an UNANNOUNCED device's rows
 /// never leave its owner's nodes, so only the pairing QR / LAN reaches it
 /// (CC 3.2 (f)).
 async fn await_owner_route(
     engine: &ciris_persist::prelude::Engine,
-    target: &str,
+    targets: &[String],
+    fed_id: &str,
 ) -> Result<(), Response> {
     let dir = engine.federation_directory();
     let deadline = std::time::Instant::now() + OWNER_ROUTE_WAIT;
     let mut kicked_at: Option<std::time::Instant> = None;
     loop {
-        if let Ok(Some(_)) =
-            ciris_persist::federation::self_at_login::transit_kex_pair_for(dir.as_ref(), target)
-                .await
-        {
-            return Ok(());
+        for target in targets {
+            if let Ok(Some(_)) =
+                ciris_persist::federation::self_at_login::transit_kex_pair_for(dir.as_ref(), target)
+                    .await
+            {
+                return Ok(());
+            }
         }
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -1541,9 +1837,13 @@ async fn await_owner_route(
             if let Some(runtime) = crate::compose::held_replication_runtime() {
                 let hints = engine.canonical_bootstrap_hints().await.unwrap_or_default();
                 for canonical in crate::federation_delivery::distinct_canonical_key_ids(&hints) {
-                    if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
-                        tracing::debug!(canonical = %canonical, target, error = %e,
-                            "add-device: subject Pull for the other device's route not sent yet");
+                    // The person's own key too: from a bare fedID this device
+                    // holds nothing to verify the owner's answer against.
+                    for target in targets.iter().map(String::as_str).chain([fed_id]) {
+                        if let Err(e) = runtime.pull_subject_testimony(&canonical, target).await {
+                            tracing::debug!(canonical = %canonical, target = %target, error = %e,
+                                "add-device: subject Pull for the other device's route not sent yet");
+                        }
                     }
                 }
             }
@@ -1561,7 +1861,7 @@ const ROSTER_CHANGE_HELD: &str = "the self roster holds this addition as a propo
 /// with the OWNER's pen; record both here; re-wrap the self DEKs to B.
 async fn sign_and_record(
     st: &AddDeviceState,
-    sender: &str,
+    node: &str,
     req: &JoinRequest,
 ) -> Result<(Approval, ciris_edge::Introductions, usize), String> {
     let alias = crate::active_user_alias(&st.user_seed_dir, &st.user_key_id);
@@ -1587,11 +1887,28 @@ async fn sign_and_record(
         crate::claim_remote::build_claim_for_target(&pen, &req.node_code, &cohort)
             .await
             .map_err(|e| format!("build the owner-binding: {e}"))?;
-    if nc.key_id != sender {
-        return Err("the request's NodeCode does not name its signer".into());
+    if nc.key_id != node {
+        return Err("the request's NodeCode does not name the node that asked".into());
     }
-    // Recorded HERE too, so this node knows its owner's new device (B's node key
-    // was admitted by edge's first contact).
+    // A split home's first contact introduced its agent, so its node key comes
+    // with the request (already checked against the NodeCode by `request_node`).
+    if let Some(record) = &req.node_key_record {
+        let known = st
+            .engine
+            .federation_directory()
+            .lookup_public_key(node)
+            .await
+            .map_err(|e| e.to_string())?;
+        if known.is_none() {
+            crate::hardware_attestation::register_attested_federation_key(
+                &st.engine,
+                record.clone(),
+            )
+            .await
+            .map_err(|e| format!("register the asking node's key: {e}"))?;
+        }
+    }
+    // Recorded HERE too, so this node knows its owner's new device.
     crate::auth::ownership::apply_signed_owner_binding(
         &st.engine,
         &nc.key_id,
@@ -1601,6 +1918,7 @@ async fn sign_and_record(
     )
     .await
     .map_err(|e| format!("record the owner-binding locally: {e}"))?;
+    crate::compose::audience_changed(&owner);
 
     // (2) B's occurrence key, then the occurrence signed by the owner.
     let occ_key = req.occurrence_key_record.record.key_id.clone();
@@ -1771,5 +2089,172 @@ mod tests {
             "an attacker who copies B's challenge must show a different code (N1)"
         );
         assert_eq!(b, match_code("ciris-node-b", &ch), "deterministic");
+    }
+
+    /// A split home has its agent on the wire and its node in the NodeCode, so a
+    /// join must show the node vouched for that agent. Every agent install is one.
+    #[test]
+    fn a_split_home_proves_its_node_and_nobody_else_can() {
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let node = SigningKey::from_bytes(&[3u8; 32]);
+        let pubkey = b64.encode(node.verifying_key().to_bytes());
+        let node_code = crate::nodecode::encode(&crate::nodecode::NodeCode {
+            key_id: "the-node".into(),
+            pubkey_ed25519_base64: pubkey.clone(),
+            transport_hint: None,
+            alias_hint: None,
+        })
+        .expect("encode");
+        let challenge = "ab".repeat(32);
+        let record: SignedKeyRecord = serde_json::from_value(serde_json::json!({ "record": {
+            "key_id": "the-node",
+            "pubkey_ed25519_base64": pubkey,
+            "pubkey_ml_dsa_65_base64": null,
+            "algorithm": "hybrid",
+            "identity_type": "node",
+            "identity_ref": "the-node",
+            "valid_from": "2026-11-05T00:00:00.000Z",
+            "valid_until": null,
+            "registration_envelope": {},
+            "original_content_hash": "",
+            "scrub_signature_classical": "",
+            "scrub_signature_pqc": null,
+            "scrub_key_id": "the-node",
+            "scrub_timestamp": "2026-11-05T00:00:00.000Z",
+            "pqc_completed_at": null,
+            "persist_row_hash": "",
+        }}))
+        .expect("a key record");
+        let proof = |signer: &SigningKey, sender: &str, ch: &str| {
+            Some(b64.encode(signer.sign(&node_proof_message(sender, ch)).to_bytes()))
+        };
+        let occurrence = record.clone();
+        let req = |node_proof: Option<String>, node_key_record: Option<SignedKeyRecord>| {
+            serde_json::from_value::<JoinRequest>(serde_json::json!({
+                "v": 1, "node_code": node_code, "challenge": challenge, "label": "x",
+                "device_class": "phone",
+                "occurrence_key_record": occurrence,
+                "encryption_pubkeys": {"x25519_base64": "", "ml_kem_768_base64": ""},
+            }))
+            .map(|mut r| {
+                r.node_proof = node_proof;
+                r.node_key_record = node_key_record;
+                r
+            })
+            .expect("a join request")
+        };
+        let good = proof(&node, "the-agent", &challenge);
+
+        assert_eq!(
+            request_node(&req(None, None), "the-node").as_deref(),
+            Some("the-node"),
+            "an unsplit node is its own signer, and needs no proof"
+        );
+        assert_eq!(
+            request_node(&req(good.clone(), Some(record.clone())), "the-agent").as_deref(),
+            Some("the-node"),
+            "the agent of a split home, vouched for by its node"
+        );
+        assert_eq!(request_node(&req(None, None), "the-agent"), None);
+        assert_eq!(
+            request_node(&req(good.clone(), None), "the-agent"),
+            None,
+            "the host couldn't hold the node's key"
+        );
+        assert_eq!(
+            request_node(&req(good, Some(record.clone())), "someone-else"),
+            None,
+            "a proof made for one sender is no use to another"
+        );
+        let stranger = SigningKey::from_bytes(&[4u8; 32]);
+        assert_eq!(
+            request_node(
+                &req(
+                    proof(&stranger, "the-agent", &challenge),
+                    Some(record.clone())
+                ),
+                "the-agent"
+            ),
+            None,
+            "only the named node's key can vouch"
+        );
+        assert_eq!(
+            request_node(
+                &req(proof(&node, "the-agent", "another-challenge"), Some(record)),
+                "the-agent"
+            ),
+            None,
+            "a proof is for one request"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ask_every_node_tests {
+    use super::*;
+
+    #[test]
+    fn every_other_node_is_a_target_in_order() {
+        let nodes = vec![
+            "ciris-client-old".to_owned(),
+            "me".to_owned(),
+            "ciris-node-real".to_owned(),
+        ];
+        assert_eq!(
+            other_nodes(&nodes, "me"),
+            vec!["ciris-client-old".to_owned(), "ciris-node-real".to_owned()],
+            "the stale node that sorts first does not hide the real one"
+        );
+    }
+
+    #[test]
+    fn the_codes_nodes_come_first_and_the_canonicals_add_to_them() {
+        let code = vec!["from-code".to_owned()];
+        let reg = vec!["from-code".to_owned(), "registered".to_owned()];
+        assert_eq!(
+            union_nodes(code, reg),
+            vec!["from-code".to_owned(), "registered".to_owned()]
+        );
+        // A bare fedID: nothing from a code, everything from the canonical.
+        assert_eq!(
+            union_nodes(Vec::new(), vec!["registered".to_owned()]),
+            vec!["registered".to_owned()]
+        );
+    }
+
+    #[test]
+    fn the_canonicals_answer_parses_and_junk_is_nothing() {
+        let v = serde_json::json!({ "nodes": ["a", "b", 7] });
+        assert_eq!(nodes_from_body(&v), vec!["a".to_owned(), "b".to_owned()]);
+        assert!(nodes_from_body(&serde_json::json!({ "error": "x" })).is_empty());
+    }
+
+    #[test]
+    fn a_node_that_answered_beats_one_that_is_gone() {
+        let gone = AskOutcome::Unreachable("ciris-client-old: no route".into());
+        assert_eq!(
+            summarize_asks(&[gone, AskOutcome::NotAccepting]),
+            AskVerdict::NotAccepting,
+            "tell the person to open Add a device, not that their device is unreachable"
+        );
+    }
+
+    #[test]
+    fn nothing_routable_says_so() {
+        assert_eq!(
+            summarize_asks(&[AskOutcome::NoRoute, AskOutcome::NoRoute]),
+            AskVerdict::Unreachable("no route to any of your devices".into())
+        );
+        let v = summarize_asks(&[
+            AskOutcome::Unreachable("a: x".into()),
+            AskOutcome::Unreachable("b: y".into()),
+        ]);
+        assert_eq!(
+            v,
+            AskVerdict::Unreachable("a: x; b: y".into()),
+            "every attempt is named"
+        );
     }
 }

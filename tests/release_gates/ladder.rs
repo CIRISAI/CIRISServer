@@ -458,7 +458,7 @@ pub const VOCABULARY_SINGLE_SOURCED: Invariant = Invariant {
         },
         Proof {
             file: "tests/wire_vocabulary_gate.rs",
-            tests: &["edge_wire_vocabulary_matches_ratified_v1_0_1"],
+            tests: &["edge_wire_vocabulary_matches_ratified_v1_0_2"],
         },
     ],
 };

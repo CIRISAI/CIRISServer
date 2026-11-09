@@ -74,8 +74,23 @@ async fn plain_health() -> Json<serde_json::Value> {
 /// node reports `status: "ok"` with no `cognitive_state` — that field appears only
 /// when an agent enriches this endpoint (optional). `services` is the server's own
 /// (empty at this layer; the agent adds its service map).
-async fn server_health() -> Json<serde_json::Value> {
-    Json(node_health())
+async fn server_health(extensions: axum::http::Extensions) -> Json<serde_json::Value> {
+    Json(for_caller(node_health(), &extensions))
+}
+
+/// Health is public: status, version and the conformance fingerprint stay
+/// (CC 2.6.4). The host's own pressure is the operator's. It moves with the node's
+/// real activity, which is what shaping hides from an observer.
+fn for_caller(
+    mut health: serde_json::Value,
+    extensions: &axum::http::Extensions,
+) -> serde_json::Value {
+    if !crate::auth::loopback::caller_is_loopback(extensions) {
+        if let Some(data) = health["data"].as_object_mut() {
+            data.remove("resources");
+        }
+    }
+    health
 }
 
 fn node_health() -> serde_json::Value {
@@ -192,8 +207,11 @@ struct BrainState {
 /// which is the failure mode this endpoint just had. A client may still key
 /// purely on `cognitive_state`; the extra field costs it nothing and tells an
 /// operator which of the two they are looking at.
-async fn folded_health(State(st): State<BrainState>) -> Json<serde_json::Value> {
-    let mut out = node_health();
+async fn folded_health(
+    State(st): State<BrainState>,
+    extensions: axum::http::Extensions,
+) -> Json<serde_json::Value> {
+    let mut out = for_caller(node_health(), &extensions);
     let Some(upstream) = st.upstream.as_deref() else {
         out["data"]["agent"] = serde_json::json!({ "folded": false, "reachable": false });
         return Json(out);

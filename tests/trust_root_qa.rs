@@ -96,7 +96,7 @@ use ciris_persist::federation::types::{
     attestation_type, cohort_scope, identity_type, Attestation, SignedAttestation,
 };
 use ciris_persist::federation::{FederationDirectory, SignedKeyRecord};
-use ciris_persist::store::MemoryBackend;
+use ciris_persist::store::SqliteBackend;
 use ciris_verify_core::federation_self_record::{
     append_scrub, produce_scrubbed_key_record, produce_self_key_record, ScrubTarget,
     SignedKeyRecord as VerifySignedKeyRecord,
@@ -352,7 +352,7 @@ async fn signed_lifecycle(
     .await
 }
 
-async fn put_att(dir: &MemoryBackend, row: Attestation) {
+async fn put_att(dir: &SqliteBackend, row: Attestation) {
     let id = row.attestation_id.clone();
     dir.put_attestation(SignedAttestation { attestation: row })
         .await
@@ -364,7 +364,7 @@ async fn put_att(dir: &MemoryBackend, row: Attestation) {
 /// (field order matters: `_env` restores the env BEFORE `_serialized` frees
 /// the next test).
 struct PortableRoot {
-    dir: MemoryBackend,
+    dir: SqliteBackend,
     /// A1/B1/C1 — `test-accord-holder-{0,1,2}`; `holders[0]` is [`ROOT`].
     holders: Vec<HybridSigningIdentity>,
     user: HybridSigningIdentity,
@@ -411,7 +411,12 @@ async fn mint_portable_root() -> PortableRoot {
 
     // (3) Fresh directory, seeded with the EFFECTIVE (synthesized) holder
     // roster — the same rows the admission quorum resolves pubkeys from.
-    let dir = MemoryBackend::new();
+    let dir = SqliteBackend::open_in_memory()
+        .await
+        .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir)
+        .await
+        .expect("migrate the directory");
     let holder_rows =
         ciris_persist::federation::genesis::effective_accord_holder_records().into_owned();
     assert_eq!(
@@ -697,7 +702,12 @@ async fn qa_mints_and_produces_a_portable_genesis() {
     // node re-enters through `put_public_key`, i.e. the 2-of-3 canonical
     // admission gate re-verifies the co-scrub against the freshly seeded
     // holder rows.
-    let dir2 = MemoryBackend::new();
+    let dir2 = SqliteBackend::open_in_memory()
+        .await
+        .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir2)
+        .await
+        .expect("migrate the directory");
     let report = install_trust_root_records(&dir2, &bundle)
         .await
         .expect("attach onto a fresh directory");
@@ -1042,7 +1052,12 @@ async fn qa_reblesses_an_unblessed_canonical_in_ceremony() {
             });
     }
 
-    let dir2 = MemoryBackend::new();
+    let dir2 = SqliteBackend::open_in_memory()
+        .await
+        .expect("in-memory directory");
+    ciris_persist::store::Backend::run_migrations(&dir2)
+        .await
+        .expect("migrate the directory");
     install_trust_root_records(&dir2, &bundle)
         .await
         .expect("attach");

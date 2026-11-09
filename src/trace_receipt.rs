@@ -525,7 +525,7 @@ pub fn roster_from_hints(
                 let host = host_of(&hint.destination);
                 CanonicalRead {
                     key_id,
-                    url: format!("http://{host}:{READ_API_PORT}"),
+                    url: format!("http://{host}:{}", read_port_of(&hint.destination)),
                     url_source: UrlSource::DerivedFromIpHint,
                 }
             }
@@ -543,6 +543,17 @@ pub fn roster_from_hints(
         }
     }
     out
+}
+
+/// The read API sits one port above the transport (`net.listen_addr + 1`), so
+/// an `ip` hint's own port says where; [`READ_API_PORT`] when it names none.
+fn read_port_of(destination: &str) -> u16 {
+    destination
+        .trim()
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .and_then(|p| p.checked_add(1))
+        .unwrap_or(READ_API_PORT)
 }
 
 /// `host:port` → `host`; a bracketed IPv6 literal keeps its brackets.
@@ -1359,6 +1370,17 @@ mod tests {
 
     #[test]
     fn host_of_strips_a_port_and_keeps_ipv6_brackets() {
+        assert_eq!(read_port_of("108.61.242.236:4242"), 4243, "production");
+        assert_eq!(
+            read_port_of("127.0.0.1:25344"),
+            25345,
+            "the harness's own port"
+        );
+        assert_eq!(
+            read_port_of("node.example"),
+            READ_API_PORT,
+            "no port: the default"
+        );
         assert_eq!(host_of("108.61.242.236:4242"), "108.61.242.236");
         assert_eq!(host_of("node.example:4242"), "node.example");
         assert_eq!(host_of("node.example"), "node.example");
