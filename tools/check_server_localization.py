@@ -745,6 +745,7 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "call.cross_origin",
     "call.ended",
     "call.frame_over_budget",
+    "call.leave_reason_unknown",
     "call.not_a_member",
     "call.not_joined",
     "call.not_owner",

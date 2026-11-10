@@ -375,15 +375,43 @@ async fn join_view(
     })
 }
 
+#[derive(serde::Deserialize, Default)]
+struct LeaveQuery {
+    #[serde(default)]
+    left: Option<String>,
+}
+
+/// The reasons a client may give for leaving. `lost` is never given: it is what
+/// the node says when a leg vanished without one.
+fn leave_reason(q: Option<&str>) -> Option<&'static str> {
+    match q.map(str::trim) {
+        None | Some("" | "left") => Some("left"),
+        Some("backgrounded") => Some("backgrounded"),
+        Some(_) => None,
+    }
+}
+
+/// `DELETE /v1/chat/{room}/call?left=left|backgrounded`. The reason is what the
+/// others are told (CSD-134). On edge v44 it reaches only this node's log and
+/// answer; edge 45.1's `leave_with` carries it to the others' `attendee_left`.
 async fn leave(
     State(st): State<CallState>,
     headers: HeaderMap,
     Path(room): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<LeaveQuery>,
 ) -> Response {
     if let Err(r) = require_owner(&st, &headers).await {
         return r;
     }
-    match leave_room(&room, "left").await {
+    let Some(why) = leave_reason(q.left.as_deref()) else {
+        return refuse_with(
+            StatusCode::BAD_REQUEST,
+            "call.leave_reason_unknown",
+            "That isn't a reason for leaving a call.",
+            json!({ "accepted": ["left", "backgrounded"] }),
+        );
+    };
+    match leave_room(&room, why).await {
         Some(summary) => (StatusCode::OK, Json(summary)).into_response(),
         None => (
             StatusCode::OK,
@@ -917,6 +945,16 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_names_left_or_backgrounded_and_never_lost() {
+        assert_eq!(leave_reason(None), Some("left"));
+        assert_eq!(leave_reason(Some("")), Some("left"));
+        assert_eq!(leave_reason(Some("left")), Some("left"));
+        assert_eq!(leave_reason(Some("backgrounded")), Some("backgrounded"));
+        assert_eq!(leave_reason(Some("lost")), None, "lost is the node's word");
+        assert_eq!(leave_reason(Some("bogus")), None);
+    }
 
     #[test]
     fn audio_only_admits_only_the_base_layer() {
