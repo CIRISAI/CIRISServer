@@ -2010,6 +2010,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&edge),
                     ))
+                    // MEMBER CALLS (CIRISServer#859, 0.5.246): join as the
+                    // person, the frames socket, call state, receive caps.
+                    .merge(crate::call_routes::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&edge),
+                    ))
                     // The receipt's canonical door (CIRISServer#369's other half):
                     // a producer asks what this node holds for one agent hash.
                     .merge(crate::trace_receipt::router(Arc::clone(&engine)))

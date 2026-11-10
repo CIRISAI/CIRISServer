@@ -149,8 +149,17 @@ pub struct BackgroundReport {
 /// callback with the interpreter lock released; it runs no tokio itself.
 #[must_use]
 pub fn enter_background(deadline: Duration) -> BackgroundReport {
-    let was = phase_tx().send_replace(Phase::Background);
     let start = Instant::now();
+    // A live call first (CSD-134): the others are told `left: backgrounded`
+    // rather than hearing this device stall when its links close.
+    let calls_left = crate::call_routes::leave_all_blocking(deadline / 2);
+    if calls_left > 0 {
+        tracing::info!(
+            calls_left,
+            "background: left this device's calls as backgrounded"
+        );
+    }
+    let was = phase_tx().send_replace(Phase::Background);
     while in_pass() > 0 && start.elapsed() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }

@@ -1412,6 +1412,138 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
     return rec
 
 
+def av_member(mesh: Mesh, args: Any) -> Record:
+    """The MEMBER call surface end to end (CIRISServer#859): two people join their
+    pair room's call through POST /v1/chat/{room}/call, open the frames socket
+    with their single-use tickets, send real Opus frames (the frames-v1 vector's
+    packet, 50 per second) for AV_SECONDS (10), read each other's frames off the
+    socket, then one leaves and the other must see attendee_left. No retries."""
+    import struct
+    import threading
+    import websocket  # websocket-client
+
+    secs = int(os.environ.get("AV_SECONDS", "10"))
+    vec = json.loads((Path(__file__).resolve().parents[2] / "tests" / "vectors"
+                      / "call_frames_v1.json").read_text())
+    opus = bytes.fromhex(vec["client_to_node"][0]["payload_hex"])
+    step = Steps(f"""
+AV MEMBER — the production call routes, frames socket and events.
+  proves:  join as the member → ticketed socket → {secs} s of 20 ms Opus frames both ways →
+           each hears >= 99% of the other → a leave is seen as attendee_left.""")
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    st, conf = a.api("GET", "/v1/federation/conformance")
+    feats = ((conf or {}).get("data") or conf or {}).get("features") if isinstance(conf, dict) else None
+    step("feature_declared", features=feats)
+    joins = {}
+    for n in (a, b):
+        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": False})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "the member join was refused", [a, b],
+                      r"call|join_call|CallError", status=st, body=got)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        joins[n.name] = got
+        step(f"joined:{n.name}", budget=got.get("frame_budget_bytes"), legs=got.get("legs"),
+             stream_id=got.get("stream_id"), ticket=bool(got.get("frames_ticket")))
+    _, gs = a.api("GET", f"/v1/chat/{room}/call")
+    step("call_state", live=(gs or {}).get("live"), room_may_keep=(gs or {}).get("room_may_keep"),
+         visible_to_watcher=(gs or {}).get("visible_to_watcher"))
+
+    received = {"alice": {}, "bob": {}}
+    events = {"alice": [], "bob": []}
+    socks = {}
+
+    def reader(name: str, ws: Any) -> None:
+        while True:
+            try:
+                op, data = ws.recv_data()
+            except Exception:  # noqa: BLE001
+                return
+            if op == websocket.ABNF.OPCODE_BINARY:
+                pl = struct.unpack(">H", data[5:7])[0]
+                pub = data[7:7 + pl].decode()
+                received[name][pub] = received[name].get(pub, 0) + 1
+            elif op == websocket.ABNF.OPCODE_TEXT:
+                events[name].append(json.loads(data))
+            elif op == websocket.ABNF.OPCODE_CLOSE:
+                return
+
+    for n in (a, b):
+        url = n.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/frames?ticket=" + \
+            joins[n.name]["frames_ticket"]
+        ws = websocket.create_connection(url, timeout=10)
+        socks[n.name] = ws
+        threading.Thread(target=reader, args=(n.name, ws), daemon=True).start()
+    step("sockets_open")
+    t_ready = time.time()
+    wait_for("both sockets to say ready", lambda: True if all(
+        any(e.get("type") == "ready" for e in events[n]) for n in events) else None, 60, every=0.2)
+    step("ready", seconds=round(time.time() - t_ready, 2),
+         budgets={n: next(e.get("frame_budget_bytes") for e in events[n] if e.get("type") == "ready")
+                  for n in events})
+    frame = bytes([1, 0xFF, 0, 0, 0]) + opus
+    sent = {"alice": 0, "bob": 0}
+    t0 = time.time()
+    tick = 0
+    while time.time() - t0 < secs:
+        for name, ws in socks.items():
+            ws.send_binary(frame)
+            sent[name] += 1
+        tick += 1
+        nxt = t0 + tick * 0.02
+        time.sleep(max(0.0, nxt - time.time()))
+    time.sleep(2)
+    a_key = a.node_key_id or a.key_id
+    b_key = b.node_key_id or b.key_id
+
+    def heard(me: str, pub_key: str) -> int:
+        return sum(v for k, v in received[me].items() if k == pub_key or k.startswith(pub_key.rsplit("-", 1)[0]))
+
+    ratio_ab = heard("bob", a_key) / max(1, sent["alice"])
+    ratio_ba = heard("alice", b_key) / max(1, sent["bob"])
+    step("heard", alice_sent=sent["alice"], bob_heard_alice=heard("bob", a_key), ratio_bob=round(ratio_ab, 3),
+         bob_sent=sent["bob"], alice_heard_bob=heard("alice", b_key), ratio_alice=round(ratio_ba, 3),
+         received_keys={k: list(v) for k, v in received.items()},
+         refusals={k: [e for e in v if e.get("type") == "publish_refused"][:3] for k, v in events.items()})
+    _, left = b.api("DELETE", f"/v1/chat/{room}/call")
+    step("bob_left", answer=left)
+    wait_for("alice to see attendee_left", lambda: True if any(
+        e.get("type") == "attendee_left" for e in events["alice"]) else None, 30, every=0.5)
+    step("events", alice=[e.get("type") for e in events["alice"]][:12], bob=[e.get("type") for e in events["bob"]][:12])
+    for ws in socks.values():
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+    record = {"scenario": "av_member", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "versions": _versions(), "seconds": secs, "frame_bytes": len(frame),
+              "sent": sent, "ratio": {"bob_from_alice": round(ratio_ab, 4), "alice_from_bob": round(ratio_ba, 4)},
+              "features": feats}
+    ok = ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
+    record["verdict"] = "PASS" if ok else "FAIL"
+    _evidence(record, "av_member")
+    if not ok:
+        step.fail("member_call", "each side must hear >= 99% and the node must declare chat:call",
+                  [a, b], r"call|frames|publish")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -3089,6 +3221,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "av_call": av_call,
     "av_room": av_room,
     "av_mesh": av_mesh,
+    "av_member": av_member,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
     "two_seats": two_seats,

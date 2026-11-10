@@ -733,6 +733,21 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # MEMBER CALLS (CIRISServer#859, 0.5.246): the call routes' refusals and the
+    # two before-join statements. Queued for the client bundle with their English
+    # (CSD-134); they leave at the floor that pins 0.5.246.
+    "call.anonymous_mode",
+    "call.bad_layer_policy",
+    "call.cross_origin",
+    "call.ended",
+    "call.frame_over_budget",
+    "call.not_a_member",
+    "call.not_joined",
+    "call.not_owner",
+    "call.owner_pen_unavailable",
+    "call.plumbing",
+    "call.session_absent",
+    "call.socket_already_open",
     # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
     # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
     # languages; the floor in pyproject.toml is 0.5.239.

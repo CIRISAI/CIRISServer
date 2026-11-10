@@ -200,7 +200,7 @@ anyhow  = "1"
 fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 # GET /v1/identity (the fabric-node identity surface) — merged onto the lens
 # read-API listener. axum pinned to lens-core's 0.8 so the merged Router unifies.
-axum       = "0.8"
+axum       = { version = "0.8", features = ["ws"] }
 base64     = "0.22"
 serde      = { version = "1", features = ["derive"] } # holonomic scoreboard model (benchmarks::)
 serde_json = "1"

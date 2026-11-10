@@ -486,6 +486,10 @@ pub struct DeclaredConformance {
     /// Conferred only — a locally-detected capability (free disk enabling the lens
     /// store) is a different authority and is not laundered through this list.
     pub capabilities: Option<Vec<String>>,
+    /// The client features this build SERVES (routes that exist on this node),
+    /// apart from `capabilities` (authority conferred by a root). The client's
+    /// Call action waits for `chat:call` here (CSD-134, CIRISServer#859).
+    pub features: Vec<String>,
 }
 
 /// The conferred capability set, computed ONCE at boot.
@@ -636,6 +640,7 @@ pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
         wire_vocabulary_sha256: wire_vocabulary_sha256(),
         declared_by_config,
         capabilities: capabilities.clone(),
+        features: vec![crate::call_routes::FEATURE.to_owned()],
     };
     match crate::graph_config::get_config(engine, KEY_CONFORMANCE_PROFILES).await {
         Ok(None) => base(build.clone(), false),
@@ -999,6 +1004,7 @@ mod tests {
             wire_vocabulary_sha256: wire_vocabulary_sha256(),
             declared_by_config: true,
             capabilities: None,
+            features: Vec::new(),
         }
     }
 
