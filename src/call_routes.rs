@@ -869,6 +869,29 @@ async fn pump(
     let _ = leave_room(&room, why).await;
 }
 
+/// `POST`/`DELETE /v1/chat/{room}/call/share`: a member's screen or window share,
+/// a second stream that replaces nothing (CC; edge 45.1 `Call::add_stream`). Until
+/// that pin it is refused by name, so the client tells "not on this node yet" from
+/// a missing route. The contract is agreed (CSD-134): POST answers
+/// `{stream_id, frames_ticket, frame_budget_bytes}`; the share's outgoing frames go
+/// on `WS …/call/share/frames`, which also sends `ready`; receivers get
+/// `share_started` / `share_stopped` (with `person`) on their main socket.
+async fn share(
+    State(st): State<CallState>,
+    headers: HeaderMap,
+    Path(_room): Path<String>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    refuse_with(
+        StatusCode::NOT_IMPLEMENTED,
+        "call.share_unavailable",
+        "Sharing your screen isn't available on this node yet.",
+        json!({ "needs": "edge 45.1 (Call::add_stream)" }),
+    )
+}
+
 /// The member call routes. Mounted on every node; each route is the owner's.
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
     if let Ok(h) = tokio::runtime::Handle::try_current() {
@@ -884,6 +907,10 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
             axum::routing::get(frames_socket),
         )
         .route("/v1/chat/{room}/call/layers", axum::routing::post(layers))
+        .route(
+            "/v1/chat/{room}/call/share",
+            axum::routing::post(share).delete(share),
+        )
         .with_state(CallState { engine, edge })
 }
 
