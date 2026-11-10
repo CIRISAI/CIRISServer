@@ -24,9 +24,6 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
-/// HUMANITY_ACCORD server surface (CIRISServer#41, CC 4.2 / §9.2) — the
-/// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
-/// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
 pub mod accord;
 /// HUMANITY_ACCORD holder-device **portable high-secure** provisioning
 /// (CIRISServer#41) — the caller-run library tool that mints a holder's
@@ -78,6 +75,10 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 pub mod attestation_reads;
+/// HUMANITY_ACCORD server surface (CIRISServer#41, CC 4.2 / §9.2) — the
+/// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
+/// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
+pub mod call_frames;
 pub mod qa_call;
 
 /// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the

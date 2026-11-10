@@ -1,0 +1,112 @@
+{
+ "name": "call_frames_v1",
+ "spec": "CIRISServer 0.5.246 call frames socket, WS /v1/chat/{room}/call/frames; one WebSocket binary message = one frame; integers big-endian. Agreed with CIRISClient CSD-134 (PR #287) and CIRISEdge.",
+ "layout": {
+  "client_to_node": "ver u8 (=1) | codec_id u8 | spatial u8 | temporal u8 | quality u8 | payload...",
+  "node_to_client": "ver u8 (=1) | codec_id u8 | spatial u8 | temporal u8 | quality u8 | pub_len u16 | publisher[pub_len] UTF-8 key_id | stream_id[32] | epoch u64 | chunk_seq u64 | payload..."
+ },
+ "audio_payload": "opus/48000/1/20ms",
+ "notes": [
+  "Audio: codec_id 0xFF (edge CODEC_OPAQUE), layer (0,0,0), payload = exactly one Opus packet (RFC 6716), 48 kHz mono, 20 ms, VBR, VOIP application, 24-32 kbit/s. No inner header; no DTX or FEC in v1; the app does PLC.",
+  "Video: codec_id is passed through unchanged. Which video codec is open (edge registers only 0x01 AV1 SVC; 0x02/0x03 reserved) and pending Eric and the CC; frames v1 pins no video rule.",
+  "codec_id 0xFF with a layer other than (0,0,0) is refused (edge requires the base cell for opaque chunks).",
+  "publisher is at most 256 bytes. A payload over the call's frame_budget_bytes is refused with a text event, never cut; that check is the route's, not the codec's.",
+  "The opus vector payload is a real 60-byte packet: TOC 0x78 (hybrid full-band, mono, one 20 ms frame), a 440 Hz tone encoded by libopus."
+ ],
+ "client_to_node": [
+  {
+   "name": "audio_opus_20ms",
+   "hex": "01ff000000789f6701e7ff835eee7a0ad259100cc21ed655634006963a32e5f4145666d96820f5a499408b4b1edf9be926314772adadfde69703d8f04f41f789bd",
+   "codec_id": 255,
+   "layer": [
+    0,
+    0,
+    0
+   ],
+   "payload_hex": "789f6701e7ff835eee7a0ad259100cc21ed655634006963a32e5f4145666d96820f5a499408b4b1edf9be926314772adadfde69703d8f04f41f789bd"
+  },
+  {
+   "name": "audio_empty_payload",
+   "hex": "01ff000000",
+   "codec_id": 255,
+   "layer": [
+    0,
+    0,
+    0
+   ],
+   "payload_hex": ""
+  },
+  {
+   "name": "video_av1_layered",
+   "hex": "010101020000010203040506070809",
+   "codec_id": 1,
+   "layer": [
+    1,
+    2,
+    0
+   ],
+   "payload_hex": "00010203040506070809"
+  }
+ ],
+ "client_to_node_invalid": [
+  {
+   "name": "wrong_version",
+   "hex": "02ff000000",
+   "error": "unsupported_version"
+  },
+  {
+   "name": "truncated_header",
+   "hex": "01ff0000",
+   "error": "truncated"
+  },
+  {
+   "name": "opaque_with_a_layer",
+   "hex": "01ff00010078",
+   "error": "opaque_layer_not_base"
+  }
+ ],
+ "node_to_client": [
+  {
+   "name": "audio_from_alice",
+   "hex": "01ff00000000176e61746976652d616c6963652d33766876647177677268101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f0000000000000001000000000000002a789f6701e7ff835eee7a0ad259100cc21ed655634006963a32e5f4145666d96820f5a499408b4b1edf9be926314772adadfde69703d8f04f41f789bd",
+   "codec_id": 255,
+   "layer": [
+    0,
+    0,
+    0
+   ],
+   "publisher": "native-alice-3vhvdqwgrh",
+   "stream_id_hex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+   "epoch": 1,
+   "chunk_seq": 42,
+   "payload_hex": "789f6701e7ff835eee7a0ad259100cc21ed655634006963a32e5f4145666d96820f5a499408b4b1edf9be926314772adadfde69703d8f04f41f789bd"
+  },
+  {
+   "name": "max_publisher_empty_payload",
+   "hex": "0101000000010061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f8000000000000000ffffffffffffffff",
+   "codec_id": 1,
+   "layer": [
+    0,
+    0,
+    0
+   ],
+   "publisher": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "stream_id_hex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+   "epoch": 9223372036854775808,
+   "chunk_seq": 18446744073709551615,
+   "payload_hex": ""
+  }
+ ],
+ "node_to_client_invalid": [
+  {
+   "name": "publisher_runs_past_the_end",
+   "hex": "01ff000000003273686f7274",
+   "error": "truncated"
+  },
+  {
+   "name": "publisher_over_256",
+   "hex": "01ff00000001016161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f00000000000000000000000000000000",
+   "error": "publisher_too_long"
+  }
+ ]
+}
