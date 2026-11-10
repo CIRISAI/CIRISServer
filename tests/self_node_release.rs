@@ -315,6 +315,11 @@ async fn a_device_is_relabelled_and_only_its_owner_reads_the_label() {
     let o = find(&v, &phone).expect("the phone is listed");
     assert_eq!(o["label"], "Pixel 9", "the newest label wins: {v}");
     assert_eq!(o["revoked"], false);
+    // CIRISServer#871: whether persist counts the binding from the device's side.
+    assert!(
+        o["agreed"].is_boolean(),
+        "every row says whether it is agreed: {v}"
+    );
     // Unauthenticated: the phone is not an announced node, so it is not public
     // at all (CIRISServer#655).
     let (st, v) = alice.call("GET", &list, None, None).await;

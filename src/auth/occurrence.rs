@@ -470,6 +470,14 @@ struct OccurrenceView {
     /// `true` for an occurrence a revocation has taken out of the self. Only
     /// ever `true` under `include_revoked=true`.
     revoked: bool,
+    /// `true` when persist COUNTS this binding from the occurrence's side: the
+    /// identity is among `active_identities_for_occurrence(occurrence)`, so the
+    /// device's rows resolve to this person (authorization, consent, rooms).
+    /// A row can be active on the roster and still `false`: an identity-signed
+    /// binding the occurrence never agreed to resolves nothing
+    /// (CIRISPersist#932; CIRISServer#871, where an agent listed here was its
+    /// own key for every seat check). Always `false` for a revoked row.
+    agreed: bool,
     /// The owner's display label for this device (`POST /v1/self/occurrence/label`).
     /// Returned ONLY to the identity's own owner session. The roster is public
     /// only for the nodes the owner announced (CIRISServer#655); the name a
@@ -494,9 +502,11 @@ struct ListOccurrencesResponse {
 fn occurrence_view(
     o: IdentityOccurrence,
     revoked: bool,
+    agreed: bool,
     labels: &std::collections::HashMap<String, String>,
 ) -> OccurrenceView {
     OccurrenceView {
+        agreed,
         label: labels.get(&o.occurrence_key_id).cloned(),
         occurrence_key_id: o.occurrence_key_id,
         device_class: o.device_class,
@@ -622,11 +632,14 @@ async fn list_occurrences(
     };
     let active_ids: std::collections::HashSet<String> =
         active.iter().map(|o| o.occurrence_key_id.clone()).collect();
-    let mut occurrences: Vec<OccurrenceView> = active
-        .into_iter()
-        .filter(|o| visible(o))
-        .map(|o| occurrence_view(o, false, &labels))
-        .collect();
+    let mut occurrences: Vec<OccurrenceView> = Vec::new();
+    for o in active.into_iter().filter(|o| visible(o)) {
+        let agreed = directory
+            .active_identities_for_occurrence(&o.occurrence_key_id)
+            .await
+            .is_ok_and(|ids| ids.iter().any(|i| i == &q.identity_key_id));
+        occurrences.push(occurrence_view(o, false, agreed, &labels));
+    }
     if q.include_revoked {
         let all = match directory
             .list_identity_occurrences_for(&q.identity_key_id)
@@ -649,7 +662,7 @@ async fn list_occurrences(
                 .filter(|o| !active_ids.contains(&o.occurrence_key_id))
                 .filter(|o| visible(o))
                 .filter(|o| seen.insert(o.occurrence_key_id.clone()))
-                .map(|o| occurrence_view(o, true, &labels)),
+                .map(|o| occurrence_view(o, true, false, &labels)),
         );
     }
     (
