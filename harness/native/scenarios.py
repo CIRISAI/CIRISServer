@@ -1525,6 +1525,11 @@ AV MEMBER — the production call routes, frames socket and events.
     wait_for("alice to see attendee_left", lambda: True if any(
         e.get("type") == "attendee_left" for e in events["alice"]) else None, 30, every=0.5)
     step("events", alice=[e.get("type") for e in events["alice"]][:12], bob=[e.get("type") for e in events["bob"]][:12])
+    left_ev = next((e for e in events["alice"] if e.get("type") == "attendee_left"), {})
+    ready_ev = next((e for e in events["alice"] if e.get("type") == "ready"), {})
+    people = joins["bob"].get("attendee_people")
+    step("person_beside_member", left_member=left_ev.get("member"), left_person=left_ev.get("person"),
+         bob_person=b.owner_key_id, ready_fragmenting=ready_ev.get("fragmenting"), join_people=people)
     for ws in socks.values():
         try:
             ws.close()
@@ -1534,7 +1539,8 @@ AV MEMBER — the production call routes, frames socket and events.
               "versions": _versions(), "seconds": secs, "frame_bytes": len(frame),
               "sent": sent, "ratio": {"bob_from_alice": round(ratio_ab, 4), "alice_from_bob": round(ratio_ba, 4)},
               "features": feats}
-    ok = ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
+    ok = (ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
+          and left_ev.get("person") == b.owner_key_id and ready_ev.get("fragmenting") is False)
     record["verdict"] = "PASS" if ok else "FAIL"
     _evidence(record, "av_member")
     if not ok:

@@ -118,6 +118,65 @@ fn origin_ok(headers: &HeaderMap) -> bool {
     !host.is_empty() && origin_host.eq_ignore_ascii_case(host)
 }
 
+/// The person a call member's NODE belongs to (its live owner-binding), for the
+/// socket's events: frames name the node (a stream is a device), and the client
+/// groups a person's devices under them without keeping a second copy of the
+/// roster. Cached 60 s when found, 5 s when not yet bound.
+type PersonCache = StdMutex<HashMap<String, (Option<String>, std::time::Instant)>>;
+
+async fn person_of(engine: &Engine, node: &str) -> Option<String> {
+    static C: OnceLock<PersonCache> = OnceLock::new();
+    let cache = C.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Some((p, at)) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(node)
+        .cloned()
+    {
+        let ttl = if p.is_some() { 60 } else { 5 };
+        if at.elapsed() < std::time::Duration::from_secs(ttl) {
+            return p;
+        }
+    }
+    let p = ciris_persist::federation::admission::owner_of(
+        engine.federation_directory().as_ref(),
+        node,
+    )
+    .await
+    .ok()
+    .flatten();
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(node.to_owned(), (p.clone(), std::time::Instant::now()));
+    p
+}
+
+async fn people_of(engine: &Engine, members: &[String]) -> serde_json::Value {
+    let mut out = Vec::new();
+    // Attendance rows are authored by the PERSON (`join_call_as`), so an attendee
+    // with no owner-binding of its own is already the person; a node that
+    // attended (the QA door) resolves to its owner.
+    for m in members {
+        let person = person_of(engine, m).await.unwrap_or_else(|| m.clone());
+        out.push(json!({ "member": m, "person": person }));
+    }
+    serde_json::Value::Array(out)
+}
+
+/// Add `person` beside `member` on an event that names one.
+async fn with_person(engine: &Engine, mut v: serde_json::Value) -> serde_json::Value {
+    if let Some(m) = v
+        .get("member")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        let p = person_of(engine, &m).await;
+        v["person"] = json!(p);
+    }
+    v
+}
+
 fn joined() -> &'static StdMutex<HashMap<String, Arc<Joined>>> {
     static J: OnceLock<StdMutex<HashMap<String, Arc<Joined>>>> = OnceLock::new();
     J.get_or_init(|| StdMutex::new(HashMap::new()))
@@ -242,7 +301,7 @@ async fn join(
         if let Some(c) = guard.as_ref() {
             return (
                 StatusCode::OK,
-                Json(join_view(&room, c, j.video, true).await),
+                Json(join_view(&st.engine, &room, c, j.video, true).await),
             )
                 .into_response();
         }
@@ -271,7 +330,7 @@ async fn join(
     };
     let frames = call.frames();
     let events = call.events();
-    let view = join_view(&room, &call, body.video, false).await;
+    let view = join_view(&st.engine, &room, &call, body.video, false).await;
     joined()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -289,7 +348,15 @@ async fn join(
     (StatusCode::OK, Json(view)).into_response()
 }
 
-async fn join_view(room: &str, call: &Call, video: bool, already: bool) -> serde_json::Value {
+async fn join_view(
+    engine: &Engine,
+    room: &str,
+    call: &Call,
+    video: bool,
+    already: bool,
+) -> serde_json::Value {
+    let attendees = call.attendees().await;
+    let people = people_of(engine, &attendees).await;
     json!({
         "room": room,
         "already_joined": already,
@@ -299,7 +366,8 @@ async fn join_view(room: &str, call: &Call, video: bool, already: bool) -> serde
         "video": video,
         "frame_budget_bytes": call.chunk_plaintext_budget(),
         "service_tier": format!("{:?}", call.service_tier()),
-        "attendees": call.attendees().await,
+        "attendees": attendees,
+        "attendee_people": people,
         "legs": call.legs(),
         "frames_socket": format!("/v1/chat/{room}/call/frames"),
         // Browsers: open the socket with `?ticket=<this>` (single use, 30 s).
@@ -395,6 +463,7 @@ async fn state(
             let g = j.call.lock().await;
             match g.as_ref() {
                 Some(c) => Some(json!({
+                    "attendee_people": people_of(&st.engine, &c.attendees().await).await,
                     "stream_id": hex::encode(c.stream().0),
                     "state": format!("{:?}", c.state()),
                     "frame_budget_bytes": c.chunk_plaintext_budget(),
@@ -612,11 +681,13 @@ async fn frames_socket(
             json!({}),
         );
     };
-    ws.on_upgrade(move |socket| pump(socket, room, j, frames, events))
+    let engine = Arc::clone(&st.engine);
+    ws.on_upgrade(move |socket| pump(socket, engine, room, j, frames, events))
 }
 
 async fn pump(
     socket: WebSocket,
+    engine: Arc<Engine>,
     room: String,
     j: Arc<Joined>,
     mut frames: tokio::sync::mpsc::Receiver<ciris_edge::transport::av_call::ReceivedFrame>,
@@ -665,9 +736,10 @@ async fn pump(
         }
     });
     let out_e = out_tx.clone();
+    let eng_e = Arc::clone(&engine);
     let event_task = tokio::spawn(async move {
         while let Some(e) = events.recv().await {
-            let text = event_json(&e).to_string();
+            let text = with_person(&eng_e, event_json(&e)).await.to_string();
             if out_e.send(Message::Text(text.into())).await.is_err() {
                 break;
             }
@@ -681,6 +753,7 @@ async fn pump(
     // take a leg for over 2 s). A client publishes only after `ready`.
     let jw = Arc::clone(&j);
     let out_w = out_tx.clone();
+    let eng_w = Arc::clone(&engine);
     let watch_task = tokio::spawn(async move {
         let mut last_budget: Option<usize> = None;
         let mut legs_seen: HashMap<String, Option<std::time::Instant>> = HashMap::new();
@@ -695,7 +768,10 @@ async fn pump(
             };
             if budget.is_some() && budget != last_budget {
                 last_budget = budget;
-                let m = json!({ "type": "ready", "frame_budget_bytes": budget });
+                // `fragmenting`: whether the node splits a frame over the budget
+                // (edge 45.1) or refuses it (v44). The client switches on THIS.
+                let m = json!({ "type": "ready", "frame_budget_bytes": budget,
+                                "fragmenting": false });
                 if out_w
                     .send(Message::Text(m.to_string().into()))
                     .await
@@ -723,7 +799,11 @@ async fn pump(
             }
             for k in gone {
                 legs_seen.remove(&k);
-                let m = json!({ "type": "attendee_left", "member": k, "left": "lost" });
+                let m = with_person(
+                    &eng_w,
+                    json!({ "type": "attendee_left", "member": k, "left": "lost" }),
+                )
+                .await;
                 if out_w
                     .send(Message::Text(m.to_string().into()))
                     .await

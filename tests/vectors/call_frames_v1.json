@@ -121,32 +121,37 @@
   }
  ],
  "events": {
-  "encoding": "one JSON object per WebSocket text message; member = a key_id, never a name; every stream_id = 64 lowercase hex, the binary frame's raw 32 bytes",
+  "encoding": "one JSON object per WebSocket text message; member = a key_id, never a name; every stream_id = 64 lowercase hex, the binary frame's raw 32 bytes; an event naming a member also carries `person` (the node's owner, null until bound); `ready.fragmenting` says whether the node splits an over-budget frame (edge 45.1) or refuses it",
   "examples": [
    {
     "type": "ready",
-    "frame_budget_bytes": 244
+    "frame_budget_bytes": 244,
+    "fragmenting": false
    },
    {
     "type": "attendee_joined",
-    "member": "native-bob-v5lo2uulck"
+    "member": "native-bob-v5lo2uulck",
+    "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "attendee_left",
     "member": "native-bob-v5lo2uulck",
     "stream_id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
-    "left": "left"
+    "left": "left",
+    "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "attendee_left",
     "member": "native-bob-v5lo2uulck",
-    "left": "lost"
+    "left": "lost",
+    "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "stream_replaced",
     "member": "native-bob-v5lo2uulck",
     "old_stream_id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
-    "new_stream_id": "301112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+    "new_stream_id": "301112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "epoch_rolled",
@@ -159,7 +164,8 @@
    {
     "type": "video_paused",
     "member": "native-bob-v5lo2uulck",
-    "reason": "load"
+    "reason": "load",
+    "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "keep_refused",
