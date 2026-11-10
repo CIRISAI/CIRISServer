@@ -506,6 +506,12 @@ async fn on_a_split_home_the_owners_approval_authorises_the_amendment() {
     )
     .await
     .expect("the owner claims the NODE");
+    // As production: the split passes this node's content-KEM pubkeys, so persist
+    // PUBLISHES both anchors as identity-signed rows instead of trusted-local ones.
+    let enc = ciris_server::backend::content_kem_pubkeys(&engine)
+        .await
+        .expect("kem")
+        .expect("a sqlite engine has a content-KEM identity");
     let out = engine
         .self_at_login(SelfAtLoginInput {
             identity_key_id: owner.key_id().to_owned(),
@@ -514,14 +520,14 @@ async fn on_a_split_home_the_owners_approval_authorises_the_amendment() {
                 occurrence_key_id: node.clone(),
                 device_class: device_class::SERVER.to_owned(),
                 hardware_attestation: None,
-                encryption_pubkeys: None,
+                encryption_pubkeys: Some(enc.clone()),
                 transport_destinations: Vec::new(),
             },
             agent: SelfAtLoginOccurrence {
                 occurrence_key_id: agent.clone(),
                 device_class: device_class::AGENT.to_owned(),
                 hardware_attestation: None,
-                encryption_pubkeys: None,
+                encryption_pubkeys: Some(enc.clone()),
                 transport_destinations: Vec::new(),
             },
             bilateral_pair_id: format!("fold:{}:{agent}", owner.key_id()),
@@ -530,15 +536,34 @@ async fn on_a_split_home_the_owners_approval_authorises_the_amendment() {
         .await
         .expect("the login ceremony anchors the agent under its human");
     assert!(out.delegation_promoted);
-    // The precondition persist's seat rule needs on a split home: the agent's
-    // occurrence resolves to its human (no owner-binding names the agent key).
+    assert!(
+        !out.occurrences_published.is_empty(),
+        "with content keys the ceremony PUBLISHES the anchors, signed by the owner alone"
+    );
+    let dir = engine.federation_directory();
+    // The fault: an identity-signed anchor the agent never agreed to resolves
+    // nothing (CIRISPersist#932), so the agent is its own key and no owner
+    // stands behind it; persist's seat rule then refuses the owner's approval.
     assert_eq!(
-        engine
-            .federation_directory()
-            .active_identity_for_occurrence(&agent)
+        dir.active_identity_for_occurrence(&agent).await.unwrap(),
+        agent
+    );
+    // The cure: the agent agrees in its own hand, as the node already does.
+    assert!(
+        ciris_server::node_key::publish_agent_occurrence(&engine, &agent, owner.key_id())
+            .await
+            .expect("the agent publishes its agreement")
+    );
+    assert!(
+        !ciris_server::node_key::publish_agent_occurrence(&engine, &agent, owner.key_id())
             .await
             .unwrap(),
-        owner.key_id()
+        "a second call is a no-op"
+    );
+    assert_eq!(
+        dir.active_identity_for_occurrence(&agent).await.unwrap(),
+        owner.key_id(),
+        "the agent now resolves to its human"
     );
 
     let req_id = emit_deferral_request(&engine, &node, &request(None))

@@ -1259,6 +1259,66 @@ async fn publish_node_occurrence(
     Ok(true)
 }
 
+/// CIRISServer#871 — on a split home, **the agent agrees, in its own hand, to be
+/// its owner's occurrence.** The login ceremony publishes the `{owner, agent}`
+/// anchor signed by the OWNER only, and persist counts an identity-signed
+/// anchor only once the occurrence itself has agreed to it (CIRISPersist#932).
+/// Without this row the agent resolves to itself, no owner stands behind it,
+/// and persist's seat rule refuses every owner-approved identity amendment
+/// (34/34 in RATCHET). The node's own agreement is [`publish_node_occurrence`];
+/// this is the same act for the agent, signed by the engine's (agent's) key.
+///
+/// A no-op when the current signed row for the pair is already the agent's.
+pub async fn publish_agent_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    agent_key: &str,
+    owner: &str,
+) -> Result<bool> {
+    use ciris_persist::federation::types::device_class;
+    let current_is_mine = engine
+        .federation_directory()
+        .list_signed_identity_occurrences_for(owner)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_signed_identity_occurrences_for({owner}): {e}"))?
+        .iter()
+        .any(|r| {
+            r.identity_occurrence.occurrence_key_id == agent_key && r.attesting_key_id == agent_key
+        });
+    if current_is_mine {
+        return Ok(false);
+    }
+    engine
+        .publish_self_occurrence(owner, device_class::AGENT, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("publish the agent's occurrence under {owner}: {e}"))?;
+    tracing::info!(
+        agent_key_id = %agent_key,
+        owner_key_id = %owner,
+        "split home: the agent agreed, in its own hand, to be its owner's occurrence — its \
+         rows now resolve to the person, and the owner's approvals seat (CIRISServer#871)"
+    );
+    Ok(true)
+}
+
+/// Publish the agent's agreement, logging rather than failing: the anchor it
+/// completes has already been written.
+async fn reaffirm_agent_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    agent_key: &str,
+    owner: &str,
+) {
+    if let Err(e) = publish_agent_occurrence(engine, agent_key, owner).await {
+        tracing::warn!(
+            agent_key_id = %agent_key,
+            owner_key_id = %owner,
+            error = %format!("{e:#}"),
+            "split home: the agent's own occurrence agreement was NOT published — the agent \
+             resolves to itself, so its owner's Wise Authority approvals are refused \
+             (CIRISServer#871)"
+        );
+    }
+}
+
 /// On a SPLIT home, anchor the agent to the human: the login ceremony,
 /// `self_at_login(identity_signer: Some(human), agent: <engine key>)`, run with
 /// the same human whose owner-binding names the node (CIRISServer#601 items 7
@@ -1308,6 +1368,11 @@ pub async fn reaffirm_node_occurrence(engine: &ciris_persist::prelude::Engine) {
         .ok()
         .flatten();
         if let Some(owner) = owner {
+            if let Ok(agent_key) = engine.local_derived_key_id().await {
+                if agent_key != node_key {
+                    reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
+                }
+            }
             if let Err(e) = publish_node_occurrence(engine, &node, &owner).await {
                 tracing::warn!(
                     node_key_id = %node_key,
@@ -1370,6 +1435,8 @@ async fn anchor_agent_to_owner_inner(
         Err(_) => false,
     };
     if stewards.iter().any(|s| s == &owner) && !misclassed {
+        // Anchored before CIRISServer#871: heal the agent's own agreement.
+        reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
         return Ok(None);
     }
     let Some((seed_dir, default_alias)) = held_user_seed_dir() else {
@@ -1423,6 +1490,7 @@ async fn anchor_agent_to_owner_inner(
         })
         .await
         .map_err(|e| anyhow::anyhow!("self_at_login(owner={owner}, agent={agent_key}): {e}"))?;
+    reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
     tracing::info!(
         owner_key_id = %owner,
         agent_key_id = %agent_key,
