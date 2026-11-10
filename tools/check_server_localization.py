@@ -733,20 +733,9 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
-    # `mesh.announce_costs` (0.5.245) replaces `mesh.announce_requirement`, whose
-    # translations state the old costs. It can't be translated first: the client's
-    # gate compares its bundle to the server at its pin, and this one reads the
-    # released bundle, so neither side could move first with a changed value.
-    # Client 0.5.239 pins 0.5.245 and adds it; the entry leaves at that floor.
-    "mesh.announce_costs",
-    # `add_device.node_proof` (0.5.245): the device can't prove its node. Same
-    # order: client 0.5.239 adds it, and the entry leaves at that floor.
-    "add_device.node_proof",
-    # `auth.oauth.flow_unknown` (0.5.246, CIRISServer#868): the hand-off poll's
-    # answer for a nonce this node never issued a flow for, split from
-    # `flow_expired`. Same order as the two above: the client adds it at a pin of
-    # 0.5.246, and the entry leaves at that floor.
-    "auth.oauth.flow_unknown",
+    # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
+    # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
+    # languages; the floor in pyproject.toml is 0.5.239.
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the
