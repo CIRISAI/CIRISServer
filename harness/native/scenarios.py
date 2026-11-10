@@ -1615,6 +1615,104 @@ DECISIONS — "approve X joining" reaches every member with standing.
     return {"verdict": "PASS", "steps": step.log}
 
 
+def av_echo(mesh: Mesh, args: Any) -> Record:
+    """The QA echo node (0.5.246): one client leg calls ONE node. bob's node runs
+    POST /v1/qa/call/echo (CIRIS_QA_CALLS=1) and republishes every frame it hears;
+    alice joins through the MEMBER routes and must get her own frames back, codec_id
+    and layer unchanged, from bob's person. No retries."""
+    import struct
+    import threading
+    import websocket
+
+    secs = int(os.environ.get("AV_SECONDS", "10"))
+    os.environ["CIRIS_QA_CALLS"] = "1"
+    vec = json.loads((Path(__file__).resolve().parents[2] / "tests" / "vectors"
+                      / "call_frames_v1.json").read_text())
+    opus = bytes.fromhex(vec["client_to_node"][0]["payload_hex"])
+    step = Steps(f"""
+AV ECHO — one client leg against one echoing node.
+  proves:  bob echoes → alice sends {secs} s of Opus → alice hears >= 99% back, unchanged.""")
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    wait_for("the pair room to key", lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    st, got = b.api("POST", "/v1/qa/call/echo", {"room": room})
+    step("echo_started", status=st, body=got)
+    if st != 200:
+        step.fail("echo_refused", "the echo node did not start", [a, b], r"qa call|echo|join")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    st, j = a.api("POST", f"/v1/chat/{room}/call", {"video": False})
+    if st != 200:
+        step.fail("join_refused", "alice's member join was refused", [a, b], r"call|join")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    back = {"frames": 0, "codecs": set(), "layers": set(), "publishers": set(), "payload_ok": 0}
+    events: List[Dict[str, Any]] = []
+    url = a.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/frames?ticket=" + j["frames_ticket"]
+    ws = websocket.create_connection(url, timeout=10)
+
+    def reader() -> None:
+        while True:
+            try:
+                op, data = ws.recv_data()
+            except Exception:  # noqa: BLE001
+                return
+            if op == websocket.ABNF.OPCODE_BINARY:
+                pl = struct.unpack(">H", data[5:7])[0]
+                back["frames"] += 1
+                back["codecs"].add(data[1])
+                back["layers"].add(tuple(data[2:5]))
+                back["publishers"].add(data[7:7 + pl].decode())
+                if data[7 + pl + 32 + 16:] == opus:
+                    back["payload_ok"] += 1
+            elif op == websocket.ABNF.OPCODE_TEXT:
+                events.append(json.loads(data))
+            else:
+                return
+
+    threading.Thread(target=reader, daemon=True).start()
+    wait_for("alice's socket to say ready", lambda: True if any(e.get("type") == "ready" for e in events)
+             else None, 60, every=0.2)
+    frame = bytes([1, 0xFF, 0, 0, 0]) + opus
+    sent = 0
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        ws.send_binary(frame)
+        sent += 1
+        time.sleep(max(0.0, t0 + sent * 0.02 - time.time()))
+    time.sleep(3)
+    _, stopped = b.api("POST", "/v1/qa/call/echo/stop", {"room": room})
+    ratio = back["frames"] / max(1, sent)
+    step("echoed", sent=sent, back=back["frames"], ratio=round(ratio, 3), payload_intact=back["payload_ok"],
+         codecs=sorted(back["codecs"]), layers=sorted(back["layers"]), publishers=sorted(back["publishers"]),
+         node_counts=stopped)
+    try:
+        ws.close()
+    except Exception:  # noqa: BLE001
+        pass
+    ok = ratio >= 0.99 and back["codecs"] == {0xFF} and back["layers"] == {(0, 0, 0)} \
+        and back["payload_ok"] == back["frames"] and all(p.startswith(b.key_id.rsplit("-", 1)[0]) or p for p in back["publishers"])
+    _evidence({"scenario": "av_echo", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "versions": _versions(), "sent": sent, "back": back["frames"], "ratio": round(ratio, 4),
+               "verdict": "PASS" if ok else "FAIL"}, "av_echo")
+    if not ok:
+        step.fail("echo", "alice must hear >= 99% of her frames back, codec and layer unchanged", [a, b],
+                  r"echo|qa call|publish")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -3294,6 +3392,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "av_mesh": av_mesh,
     "av_member": av_member,
     "decisions": decisions,
+    "av_echo": av_echo,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
     "two_seats": two_seats,

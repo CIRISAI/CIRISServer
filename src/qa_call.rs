@@ -538,6 +538,128 @@ async fn stop(State(st): State<QaState>, headers: HeaderMap, Json(b): Json<RoomQ
 }
 
 /// The QA call routes, or an empty router when `CIRIS_QA_CALLS` is not `1`.
+// ─── Echo (0.5.246): one client leg can call ONE node ───────────────────────
+//
+// `POST /v1/qa/call/echo {room}` joins `room`'s call as this node's OWNER (the
+// person, like a member) and republishes every frame it hears, codec_id,
+// layer and bytes unchanged, so the five-platform runner proves mic → node →
+// speaker and camera → node → tile with no second device. A republished frame's
+// publisher is the echo node's person. `POST /v1/qa/call/echo/stop {room}`.
+
+struct Echo {
+    task: tokio::task::JoinHandle<()>,
+    echoed: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+}
+
+fn echoes() -> &'static StdMutex<HashMap<String, Echo>> {
+    static E: OnceLock<StdMutex<HashMap<String, Echo>>> = OnceLock::new();
+    E.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+async fn echo_start(
+    State(st): State<QaState>,
+    headers: HeaderMap,
+    Json(b): Json<RoomQuery>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let room = b.room;
+    if echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&room)
+    {
+        return fail(StatusCode::CONFLICT, "echo_already_running", &room);
+    }
+    let node = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let actor = match crate::owner_signer_capsule::for_owned_node(&st.engine, &node).await {
+        Ok(c) => Some(Arc::clone(c.edge_signer())),
+        Err(e) => {
+            return fail(
+                StatusCode::FORBIDDEN,
+                "owner_pen_unavailable",
+                format!("{e:?}"),
+            )
+        }
+    };
+    let mut call = match st
+        .edge
+        .join_call_as(&room, CallOptions::default(), actor)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, "join_refused", e),
+    };
+    let Some(mut frames) = call.frames() else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "frames_taken", &room);
+    };
+    let echoed = Arc::new(AtomicU64::new(0));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let (e2, d2) = (Arc::clone(&echoed), Arc::clone(&dropped));
+    let task = tokio::spawn(async move {
+        while let Some(f) = frames.recv().await {
+            let frame = Frame {
+                codec_id: f.codec_id,
+                layer: f.layer,
+                bytes: f.bytes,
+            };
+            match call.publish(frame).await {
+                Ok(_) => e2.fetch_add(1, Ordering::Relaxed),
+                Err(_) => d2.fetch_add(1, Ordering::Relaxed),
+            };
+        }
+        let _ = call.leave().await;
+    });
+    echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            room.clone(),
+            Echo {
+                task,
+                echoed,
+                dropped,
+            },
+        );
+    tracing::info!(room = %room, "qa call: ECHO joined as the owner; republishing every frame heard");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "room": room, "echo": "running" })),
+    )
+        .into_response()
+}
+
+async fn echo_stop(
+    State(st): State<QaState>,
+    headers: HeaderMap,
+    Json(b): Json<RoomQuery>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let Some(e) = echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&b.room)
+    else {
+        return fail(StatusCode::NOT_FOUND, "echo_not_running", &b.room);
+    };
+    e.task.abort();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "room": b.room,
+            "echoed": e.echoed.load(Ordering::Relaxed),
+            "dropped": e.dropped.load(Ordering::Relaxed),
+        })),
+    )
+        .into_response()
+}
+
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
     if !enabled() {
         return Router::new();
@@ -551,5 +673,7 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
         .route("/v1/qa/call/stream", axum::routing::post(stream))
         .route("/v1/qa/call/stats", axum::routing::get(stats))
         .route("/v1/qa/call/stop", axum::routing::post(stop))
+        .route("/v1/qa/call/echo", axum::routing::post(echo_start))
+        .route("/v1/qa/call/echo/stop", axum::routing::post(echo_stop))
         .with_state(QaState { engine, edge })
 }
