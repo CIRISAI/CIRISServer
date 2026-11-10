@@ -453,7 +453,7 @@ async fn state(
             // Calls do not ride the hidden connections (FSD/PRIVACY_MODES.md).
             "visible_to_watcher": {
                 "visible": true,
-                "reason_id": "call.visible_to_watcher",
+                "reason_id": "call.visible_to_watcher.visible",
                 "says": "Someone watching your network can see that you're on a call, not what's said.",
             },
             "save_state": "not_saved",
