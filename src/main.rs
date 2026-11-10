@@ -28,6 +28,14 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     // File logging to <home>/logs (resolved from --home, else the default data
     // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `accord sign-bytes` prints exactly one JSON object on stdout for a wrapper to
+    // parse, and the tracing sink writes to stdout, so that verb runs with no
+    // subscriber at all. Its prompts and errors go to stderr.
+    if argv.first().map(String::as_str) == Some("accord")
+        && argv.get(1).map(String::as_str) == Some("sign-bytes")
+    {
+        return ciris_server::accord_sign_bytes::run_cli(argv.into_iter().skip(2)).await;
+    }
     ciris_server::init_tracing_with(Some(&ciris_server::log_dir_from_args(&argv)));
     tracing::info!(
         worker_threads,
@@ -159,11 +167,15 @@ async fn async_main(worker_threads: usize) -> Result<()> {
             // point: a halted node cannot be reached, only read.
             Some("release-request") => run_accord_release_request(args),
             Some("release") => run_accord_release(args),
+            // `ciris-server accord sign-bytes --key-id <holder> --usb <dir> --in <file>`
+            // is dispatched before tracing starts (see the top of `async_main`); this
+            // arm only exists so the usage text names it.
             other => Err(anyhow::anyhow!(
                 "usage: ciris-server accord reactivate --home <path> [--key-id <name>] \
                  --proof <file.json>\n       ciris-server accord release-request --home <path> \
                  [--ttl-hours <n>] [--out <file.json>]\n       ciris-server accord release --home <path> --token \
-                 <file.json> (got {:?})",
+                 <file.json>\n       ciris-server accord sign-bytes --key-id <holder> --usb <dir> \
+                 --in <file> [--pin-stdin] [--piv-slot 9c] [--module <libykcs11>] (got {:?})",
                 other
             )),
         },

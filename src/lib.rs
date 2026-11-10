@@ -53,6 +53,7 @@ pub mod accord_reactivate;
 /// database. Removes the O(nodes) physical recovery from a mistaken tier-5 halt
 /// without softening the halt (the same accord quorum authorizes both).
 pub mod accord_release;
+pub mod accord_sign_bytes;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
