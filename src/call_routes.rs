@@ -754,6 +754,12 @@ async fn pump(
                 stream_id: f.stream.0,
                 epoch: f.epoch.0,
                 chunk_seq: f.chunk_seq.0,
+                // NOT YET WRITTEN: edge v45's received frame gains the signed
+                // `source_ts_ms` and `frame_seq` (Eric, 2026-11-10). Map them
+                // here when the call series lands on release/45.0.0; 0.5.246
+                // does not ship with these zeros.
+                source_ts_ms: 0,
+                frame_seq: None,
                 payload: f.bytes,
             };
             if let Ok(bytes) = call_frames::encode_incoming(&incoming) {

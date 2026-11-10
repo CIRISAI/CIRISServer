@@ -1680,7 +1680,8 @@ AV ECHO — one client leg against one echoing node.
                 back["codecs"].add(data[1])
                 back["layers"].add(tuple(data[2:5]))
                 back["publishers"].add(data[7:7 + pl].decode())
-                if data[7 + pl + 32 + 16:] == opus:
+                # pub_len, publisher, stream_id, epoch+chunk_seq, source_ts_ms+flags+frame_seq
+                if data[7 + pl + 32 + 16 + 13:] == opus:
                     back["payload_ok"] += 1
             elif op == websocket.ABNF.OPCODE_TEXT:
                 events.append(json.loads(data))

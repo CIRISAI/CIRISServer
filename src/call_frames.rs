@@ -9,8 +9,16 @@
 //! client → node: ver u8 (=1) | codec_id u8 | spatial u8 | temporal u8 | quality u8 | payload…
 //! node → client: ver u8 (=1) | codec_id u8 | spatial u8 | temporal u8 | quality u8
 //!                | pub_len u16 | publisher[pub_len] (UTF-8 key_id) | stream_id[32]
-//!                | epoch u64 | chunk_seq u64 | payload…
+//!                | epoch u64 | chunk_seq u64 | source_ts_ms u64
+//!                | flags u8 | frame_seq u32 | payload…
 //! ```
+//!
+//! `source_ts_ms` is the publisher's signed capture time (edge v45), for lip
+//! sync. `frame_seq` is the publisher's per-codec-class frame counter, present
+//! on video and other non-audio frames (`flags` bit 0; `frame_seq` is 0 when
+//! absent), so a client tells a lost video frame from lost audio. Fixed width,
+//! so a wrapping counter never collides with a sentinel. Other `flags` bits are
+//! reserved and written 0.
 //!
 //! Audio is `codec_id 0xFF` (edge's `CODEC_OPAQUE`) at layer (0,0,0) carrying one
 //! Opus packet: 48 kHz, mono, 20 ms. Video passes `codec_id` through unchanged;
@@ -43,8 +51,15 @@ pub struct Incoming {
     pub stream_id: [u8; 32],
     pub epoch: u64,
     pub chunk_seq: u64,
+    /// The publisher's signed capture time, ms since the Unix epoch.
+    pub source_ts_ms: u64,
+    /// The publisher's per-codec-class frame counter; `None` on audio.
+    pub frame_seq: Option<u32>,
     pub payload: Vec<u8>,
 }
+
+/// `flags` bit 0: `frame_seq` is present.
+const FLAG_FRAME_SEQ: u8 = 0b1;
 
 /// Why a frame was refused. The token is what the socket reports in its
 /// `publish_refused` text event.
@@ -116,13 +131,20 @@ pub fn encode_incoming(f: &Incoming) -> Result<Vec<u8>, FrameError> {
         return Err(FrameError::PublisherTooLong);
     }
     let len = u16::try_from(pub_bytes.len()).map_err(|_| FrameError::PublisherTooLong)?;
-    let mut out = Vec::with_capacity(HEADER + 2 + pub_bytes.len() + 32 + 16 + f.payload.len());
+    let mut out = Vec::with_capacity(HEADER + 2 + pub_bytes.len() + 32 + 29 + f.payload.len());
     out.extend_from_slice(&[VERSION, f.codec_id, f.layer.0, f.layer.1, f.layer.2]);
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(pub_bytes);
     out.extend_from_slice(&f.stream_id);
     out.extend_from_slice(&f.epoch.to_be_bytes());
     out.extend_from_slice(&f.chunk_seq.to_be_bytes());
+    out.extend_from_slice(&f.source_ts_ms.to_be_bytes());
+    out.push(if f.frame_seq.is_some() {
+        FLAG_FRAME_SEQ
+    } else {
+        0
+    });
+    out.extend_from_slice(&f.frame_seq.unwrap_or(0).to_be_bytes());
     out.extend_from_slice(&f.payload);
     Ok(out)
 }
@@ -165,6 +187,17 @@ pub fn decode_incoming(buf: &[u8]) -> Result<Incoming, FrameError> {
             .try_into()
             .map_err(|_| FrameError::Truncated)?,
     );
+    let source_ts_ms = u64::from_be_bytes(
+        take(&mut at, 8)?
+            .try_into()
+            .map_err(|_| FrameError::Truncated)?,
+    );
+    let flags = take(&mut at, 1)?[0];
+    let seq = u32::from_be_bytes(
+        take(&mut at, 4)?
+            .try_into()
+            .map_err(|_| FrameError::Truncated)?,
+    );
     Ok(Incoming {
         codec_id,
         layer,
@@ -172,6 +205,8 @@ pub fn decode_incoming(buf: &[u8]) -> Result<Incoming, FrameError> {
         stream_id,
         epoch,
         chunk_seq,
+        source_ts_ms,
+        frame_seq: (flags & FLAG_FRAME_SEQ != 0).then_some(seq),
         payload: buf[at..].to_vec(),
     })
 }
@@ -228,6 +263,13 @@ mod tests {
             assert_eq!(f.stream_id.to_vec(), hex_of(c, "stream_id_hex"));
             assert_eq!(f.epoch, c["epoch"].as_u64().unwrap());
             assert_eq!(f.chunk_seq, c["chunk_seq"].as_u64().unwrap());
+            assert_eq!(f.source_ts_ms, c["source_ts_ms"].as_u64().unwrap());
+            assert_eq!(
+                f.frame_seq.map(u64::from),
+                c["frame_seq"].as_u64(),
+                "{}",
+                c["name"]
+            );
             assert_eq!(f.layer, layer_of(c));
             assert_eq!(f.payload, hex_of(c, "payload_hex"));
             assert_eq!(encode_incoming(&f).unwrap(), bytes, "{}", c["name"]);
@@ -259,6 +301,8 @@ mod tests {
             stream_id: [0; 32],
             epoch: 0,
             chunk_seq: 0,
+            source_ts_ms: 0,
+            frame_seq: None,
             payload: vec![],
         };
         assert_eq!(encode_incoming(&f), Err(FrameError::PublisherTooLong));
