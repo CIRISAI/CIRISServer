@@ -1544,6 +1544,77 @@ AV MEMBER — the production call routes, frames socket and events.
     return {"verdict": "PASS", "steps": step.log}
 
 
+def decisions(mesh: Mesh, args: Any) -> Record:
+    """The pending-decisions queue's first kind (0.5.246): in a room of two, a third
+    person's accepted invitation shows to BOTH members as "approve joining" with the
+    room's count, and an approval is recorded and reported as waiting on the others
+    (in-mesh cosignatures land with persist 61.3.0 / edge 45.1)."""
+    step = Steps("""
+DECISIONS — "approve X joining" reaches every member with standing.
+  proves:  alice + bob seated → carol invited and accepts → both see the decision with
+           required = 2 → alice approves → 202 awaiting_members, and her answer shows.""")
+    names = ("alice", "bob", "carol")
+    nodes = {n: mesh.add(n) for n in names}
+    for n in nodes.values():
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    allx = list(nodes.values())
+    for h in allx:
+        for g in allx:
+            if h is not g:
+                wait_for(f"{h.name} to hold {g.name}'s owner key",
+                         lambda h=h, g=g: h.knows(g.owner_key_id), args.owner_wait)
+                h.add_contact(g.contact_code())
+    a, b, c = (nodes[n] for n in names)
+    room = a.must("POST", "/v1/communities", {"name": "decisions"}).get("community_id")
+
+    def invite_and_accept(m: Node) -> None:
+        code, body = a.api("POST", f"/v1/communities/{room}/invites", {"key_id": m.owner_key_id})
+        if code not in (200, 201, 202):
+            raise MeshError(f"invite {m.name} answered {code}: {body}")
+        pid = wait_for(f"{m.name} to list the invitation", lambda: next(
+            (r["proposal_id"] for r in m.must("GET", "/v1/self/invites").get("invites", [])
+             if r.get("group_id") == room), None), args.arrive_wait, every=2)
+        m.must("POST", f"/v1/self/invites/{pid}/accept", {})
+
+    invite_and_accept(b)
+    wait_for("bob seated", lambda: True if (a.api("GET", f"/v1/communities/{room}/invites") and any(
+        b.owner_key_id in json.dumps(x) for x in (a.api("GET", f"/v1/communities/{room}")[1] or {}).get("members", [])))
+        else None, args.arrive_wait * 2, every=2)
+    step("bob_seated")
+    invite_and_accept(c)
+
+    def queued(n: Node) -> Optional[Dict[str, Any]]:
+        _, body = n.api("GET", f"/v1/self/decisions?circle={room}")
+        items = (body or {}).get("decisions") or [] if isinstance(body, dict) else []
+        return next((d for d in items if d.get("subject") == c.owner_key_id), None)
+
+    seen = {}
+    for n in (a, b):
+        seen[n.name] = wait_for(f"{n.name} to see 'approve carol joining'", lambda n=n: queued(n),
+                                args.arrive_wait * 2, every=2)
+        d = seen[n.name]
+        step(f"queued:{n.name}", required=d.get("required"), protocol=d.get("consensus_protocol"),
+             eligible=len(d.get("eligible") or []), says=d.get("says"))
+    did = seen["alice"]["decision_id"]
+    st, ans = a.api("POST", f"/v1/self/decisions/{did}/answer", {"answer": "approve"})
+    step("alice_approved", status=st, state=(ans or {}).get("state"), reason=(ans or {}).get("reason_id"))
+    mine = queued(a)
+    ok = (seen["alice"].get("required") == 2 and seen["bob"].get("required") == 2
+          and st == 202 and (ans or {}).get("state") == "awaiting_members"
+          and (mine or {}).get("my_answer") == "approve"
+          and seen["alice"]["decision_id"] == seen["bob"]["decision_id"])
+    step("my_answer_shown", my_answer=(mine or {}).get("my_answer"),
+         same_id_on_both=seen["alice"]["decision_id"] == seen["bob"]["decision_id"])
+    if not ok:
+        step.fail("decisions", "the decision must reach both members with required=2, and an "
+                  "approval must be recorded as awaiting the others", allx, r"decision|membership|widen")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -3222,6 +3293,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "av_room": av_room,
     "av_mesh": av_mesh,
     "av_member": av_member,
+    "decisions": decisions,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
     "two_seats": two_seats,

@@ -733,6 +733,10 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # PENDING DECISIONS (CC #198 §5, 0.5.246): the queue's answers. Queued for the
+    # client bundle with their English (CSD-106); they leave at the floor that pins 0.5.246.
+    "decisions.awaiting_members",
+    "decisions.not_found",
     # MEMBER CALLS (CIRISServer#859, 0.5.246): the call routes' refusals and the
     # two before-join statements. Queued for the client bundle with their English
     # (CSD-134); they leave at the floor that pins 0.5.246.
