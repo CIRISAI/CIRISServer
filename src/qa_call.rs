@@ -537,7 +537,6 @@ async fn stop(State(st): State<QaState>, headers: HeaderMap, Json(b): Json<RoomQ
     Json(v).into_response()
 }
 
-/// The QA call routes, or an empty router when `CIRIS_QA_CALLS` is not `1`.
 // ─── Echo (0.5.246): one client leg can call ONE node ───────────────────────
 //
 // `POST /v1/qa/call/echo {room}` joins `room`'s call as this node's OWNER (the
@@ -660,6 +659,7 @@ async fn echo_stop(
         .into_response()
 }
 
+/// The QA call routes, or an empty router when `CIRIS_QA_CALLS` is not `1`.
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
     if !enabled() {
         return Router::new();
