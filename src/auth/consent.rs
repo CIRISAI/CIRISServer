@@ -137,6 +137,7 @@ async fn consent(State(st): State<ConsentState>, headers: HeaderMap, body: Bytes
             )
         }
     };
+    crate::compose::wrote_rows("consent: a grant written");
 
     let promoted = if req.promote {
         // v39.0.0 — see `attestation_crossing`. The grant is the CONSENTING

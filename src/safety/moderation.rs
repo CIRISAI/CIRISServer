@@ -187,6 +187,7 @@ pub async fn emit_moderation_event(
         .attestation_upsert_local(input)
         .await
         .map_err(|e| format!("upsert moderation event: {e}"))?;
+    crate::compose::wrote_rows("safety: moderation event written");
     // Promote to federation tier so the ModerationEvent is federation-visible
     // (the audit chain + the track-record signal read it across the federation).
     let outcome = attestation_crossing::enter_mesh_at(

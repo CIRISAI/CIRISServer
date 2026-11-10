@@ -214,6 +214,7 @@ pub async fn enable_watchlist(
         .attestation_upsert_local(input)
         .await
         .map_err(|e| format!("upsert watchlist_config: {e}"))?;
+    crate::compose::wrote_rows("safety: watchlist enabled");
     // Promote to federation tier so a peer reads the same enable (cross-fabric
     // agreement on "is a watchlist on for this group"). Attributed to the
     // enabling authority; node co-signs the promotion.
@@ -279,6 +280,7 @@ pub async fn disable_watchlist(
         .attestation_upsert_local(input)
         .await
         .map_err(|e| format!("withdraw watchlist_config: {e}"))?;
+    crate::compose::wrote_rows("safety: watchlist withdrawn");
     let outcome = attestation_crossing::enter_mesh_at(
         engine,
         &attestation_id,

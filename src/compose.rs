@@ -4768,6 +4768,33 @@ pub(crate) fn audience_changed(group_or_key: &str) {
     }
 }
 
+/// After a write this node made to persist outside an edge door: tell edge,
+/// so peers are offered the row at once rather than at the next feed probe
+/// (up to 5 s on edge v45, FEED_PROBE_SPACING). A kick marks edge's feed dirty
+/// (CIRISEdge release/45.0.0 bridge.rs:13620). Rows a pending-decision reader
+/// must see (consent, membership, family roster) move to
+/// `ReplicationRuntime::note_local_write(s)` at the v45 pin.
+///
+/// Coalesced: the first write schedules ONE kick 250 ms later and later writes
+/// inside that window ride it, so a path that writes several rows starts one
+/// round, not one per row (`kick_replication` itself does not coalesce).
+pub(crate) fn wrote_rows(reason: &'static str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    if PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        PENDING.store(false, Ordering::Release);
+        return;
+    };
+    handle.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        PENDING.store(false, Ordering::Release);
+        let _ = kick_replication(reason);
+    });
+}
+
 pub(crate) fn kick_replication(reason: &'static str) -> bool {
     let Some(runtime) = held_replication_runtime() else {
         return false;

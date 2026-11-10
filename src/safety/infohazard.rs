@@ -634,10 +634,14 @@ pub async fn emit_content_flag(
         expires_at: None,
         weight: None,
     };
-    engine
+    let out = engine
         .emit_attestation(substrate_signer, input)
         .await
-        .map_err(|e| format!("emit content_class:{class} flag (substrate-signed): {e}"))
+        .map_err(|e| format!("emit content_class:{class} flag (substrate-signed): {e}"));
+    if out.is_ok() {
+        crate::compose::wrote_rows("safety: content class flagged");
+    }
+    out
 }
 
 // ─── HTTP surface ───────────────────────────────────────────────────────────
