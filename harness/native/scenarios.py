@@ -861,6 +861,557 @@ AV CALL — a pair room's call over the QA call routes (0.5.245).
     return {"verdict": "PASS", "steps": step.log}
 
 
+def av_room(mesh: Mesh, args: Any) -> Record:
+    """A live call in a room of three, then the orders edge asked for (Eric,
+    2026-11-10: calls and scale are what 0.5.246 adds). No retries: every call
+    placed and every phase is reported, and a lossy phase is a FAIL.
+
+    Phases, on one timeline (AV_PHASE_S, default 40 s each):
+      1. alice and bob join and stream; carol joins LATE (time to her first frame);
+      2. all three stream; dave is added to the room mid-call (an MLS epoch roll);
+      3. bob LEAVES mid-call (the others' gap is read from their counters);
+      4. bob REJOINS (a new stream_id, never the old one);
+      5. all stream to the end; the whole call runs AV_TOTAL_S (default 210 s).
+    Env AV_RATE_HZ (30), AV_FRAME_BYTES (600)."""
+    rate = int(os.environ.get("AV_RATE_HZ", "30"))
+    size = int(os.environ.get("AV_FRAME_BYTES", "600"))
+    phase = int(os.environ.get("AV_PHASE_S", "40"))
+    total = int(os.environ.get("AV_TOTAL_S", "210"))
+    step = Steps(f"""
+AV ROOM — a call in a three-member community room (0.5.246 gate).
+  proves:  late join → epoch roll mid-call → a publisher leaves → it rejoins with a new
+           stream → all three hear each other at >= 80% in every phase, {total} s in all.""")
+    os.environ["CIRIS_QA_CALLS"] = "1"
+    names = ("alice", "bob", "carol", "dave")
+    nodes = {n: mesh.add(n) for n in names}
+    for n in nodes.values():
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    everyone = list(nodes.values())
+    for host in everyone:
+        for guest in everyone:
+            if host is not guest:
+                wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                         lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    for host in everyone:
+        for guest in everyone:
+            if host is not guest:
+                host.add_contact(guest.contact_code())
+    a, b, c, d = (nodes[n] for n in names)
+    got = a.must("POST", "/v1/communities", {"name": "av-room"})
+    room = got.get("community_id") or got.get("id")
+
+    seated_members: List[Node] = [a]
+
+    def admit(member: Node) -> None:
+        code, body = a.api("POST", f"/v1/communities/{room}/invites",
+                           {"key_id": member.owner_key_id})
+        if code not in (200, 201, 202):
+            raise MeshError(f"invite {member.name} answered {code}: {body}")
+
+        def invite() -> Optional[str]:
+            rows = member.must("GET", "/v1/self/invites").get("invites", [])
+            return next((r["proposal_id"] for r in rows if r.get("group_id") == room), None)
+
+        pid = wait_for(f"{member.name} to list the invitation", invite, args.arrive_wait, every=2)
+        member.must("POST", f"/v1/self/invites/{pid}/accept", {})
+        # Setup waits, not call retries: the founder must SEAT the acceptance
+        # and the member must read the room as a member, before anyone joins.
+        t_acc = time.time()
+
+        def seated() -> Optional[bool]:
+            # The founder's app lists the room's invites, which re-attempts the
+            # seat with the owner's pen (widen_held_acceptances). The background
+            # sweep alone left an invitee unseated for 6 min (2026-11-10).
+            a.api("GET", f"/v1/communities/{room}/invites")
+            _, room_view = a.api("GET", f"/v1/communities/{room}")
+            ms = (room_view or {}).get("members") or [] if isinstance(room_view, dict) else []
+            return True if any(member.owner_key_id in json.dumps(x) for x in ms) else None
+
+        roster_now = [x for x in seated_members if x is not member]
+        if len(roster_now) >= 2:
+            # A room of two or more seats by quorum (majority: > half of the
+            # CURRENT members). The founder's one voice is 1 of 2, so the other
+            # members co-sign on their own nodes and the founder assembles —
+            # the flow a real room needs (no server prompt for it yet, 0.5.246).
+            env = a.must("POST", f"/v1/communities/{room}/changes/envelope",
+                         {"op": "add", "key_id": member.owner_key_id})
+            sigs = list(env.get("signatures") or [])
+            for other in roster_now:
+                if other is a:
+                    continue
+                got = other.must("POST", f"/v1/communities/{room}/changes/cosign",
+                                 {"change_envelope": env["change_envelope"]})
+                sigs.append(got["signature"])
+            # Setup wait: the founder must HOLD the joiner's acceptance before the
+            # add can land ("membership.awaiting_acceptance" until it replicates).
+            t_wait = time.time()
+
+            def assembled() -> Optional[Any]:
+                code, body = a.api("POST", f"/v1/communities/{room}/changes/assemble",
+                                   {"change_envelope": env["change_envelope"], "signatures": sigs})
+                if code in (200, 201, 202):
+                    return body
+                if isinstance(body, dict) and body.get("reason_id") == "membership.awaiting_acceptance":
+                    return None
+                raise MeshError(f"assemble answered {code}: {body}")
+
+            done = wait_for(f"alice to hold {member.name}'s acceptance and assemble", assembled,
+                            args.arrive_wait * 2, every=2)
+            step(f"acceptance_reached_founder:{member.name}", seconds=round(time.time() - t_wait, 1))
+            step(f"cosigned:{member.name}", signers=len(sigs),
+                 required=env.get("required"), result=str(done)[:200])
+        wait_for(f"alice to seat {member.name}", seated, args.arrive_wait * 2, every=2)
+        seated_members.append(member)
+        wait_for(f"{member.name} to read the room as a member",
+                 lambda: True if member.room(room)["status"] == 200 else None,
+                 args.arrive_wait * 2, every=2)
+        step(f"seated:{member.name}", seated_s=round(time.time() - t_acc, 1))
+
+    # Every member must resolve every other's person to a node first (the
+    # handshake needs the owner->node binding, not only the owner key).
+    t_res = time.time()
+    for host in (a, b, c):
+        for guest in (a, b, c):
+            if host is not guest:
+                wait_for(f"{host.name} to resolve {guest.name} to a node", lambda h=host, g=guest:
+                         True if g.node_key_id and h.knows(g.node_key_id) else None,
+                         args.arrive_wait * 2, every=2)
+    step("resolved", seconds=round(time.time() - t_res, 1))
+    for m in (b, c):
+        admit(m)
+    members = [a, b, c]
+    # Edge: the room's MLS group must be on every member before a join, so
+    # one sealed chat row read everywhere is the check.
+    probe = a.say(room, "before the call")
+    for m in members:
+        def read_probe(m: Node = m) -> Optional[bool]:
+            a.room(room)  # the founder's app has the room open
+            return True if any(x.get("attestation_id") == probe and x.get("body")
+                               for x in m.room(room)["messages"]) else None
+        wait_for(f"{m.name} to read the room's sealed row", read_probe, args.arrive_wait * 2, every=2)
+    step("room_keyed", room=room, members=[m.name for m in members])
+
+    t_start = time.time()
+    placed: List[Record] = []
+
+    def join(n: Node) -> bool:
+        st, body = n.api("POST", "/v1/qa/call/start", {"room": room})
+        placed.append({"node": n.name, "at_s": round(time.time() - t_start, 1),
+                       "status": st, "legs": (body or {}).get("legs") if isinstance(body, dict) else None,
+                       "body": body if st != 200 else None})
+        return st == 200
+
+    size_box = [size]
+
+    def stream(n: Node, seconds: int) -> None:
+        n.must("POST", "/v1/qa/call/stream",
+               {"room": room, "rate_hz": rate, "frame_bytes": size_box[0], "seconds": seconds})
+
+    def stats(n: Node) -> Dict[str, Any]:
+        _, s = n.api("GET", f"/v1/qa/call/stats?room={room}")
+        return s if isinstance(s, dict) else {}
+
+    def snap(tag: str, who: List[Node]) -> Dict[str, Any]:
+        out = {}
+        for n in who:
+            s = stats(n)
+            call = s.get("call") or {}
+            out[n.name] = {
+                "sent": (s.get("sent") or {}).get("frames"),
+                "received": (s.get("received") or {}).get("frames"),
+                "delay_ms_p50": (s.get("received") or {}).get("delay_ms_p50"),
+                "delay_ms_p95": (s.get("received") or {}).get("delay_ms_p95"),
+                "by_publisher": (s.get("received") or {}).get("by_publisher"),
+                "state": call.get("state"), "tier": call.get("service_tier"),
+                "legs": call.get("legs"), "streams": call.get("streams"),
+                "alm": call.get("alm"), "reorder": call.get("reorder"),
+                "chunk_auth": call.get("chunk_auth"),
+                "leg_sends": (s.get("sent") or {}).get("legs"),
+                "events_tail": (s.get("events") or [])[-6:]}
+        step(f"snapshot:{tag}", **out)
+        return out
+
+    def heard_ok(before: Dict[str, Any], after: Dict[str, Any], senders: int,
+                 seconds: float) -> Dict[str, Any]:
+        # Each receiver should hear (senders other than itself) x rate x seconds.
+        verdict = {}
+        for name, now in after.items():
+            prev = before.get(name, {})
+            got = (now.get("received") or 0) - (prev.get("received") or 0)
+            want = max(0, senders - 1) * rate * seconds
+            verdict[name] = {"got": got, "expected": int(want),
+                             "ratio": round(got / want, 3) if want else None}
+        return verdict
+
+    failures: List[str] = []
+
+    # Phase 1: alice and bob join and stream; carol joins late.
+    for n in (a, b):
+        if not join(n):
+            step.fail(f"join_refused:{n.name}", "join_call refused", members,
+                      r"qa call|join_call|CallError", placed=placed)
+            return {"verdict": "FAIL", "steps": step.log, "placed": placed,
+                    "first_failure": step.first_failure}
+    # Frames must fit the call's chunk budget (the smallest leg's limit less
+    # chunk overhead), known only once a leg is up — as av_call does.
+    budgets = {}
+    for n in (a, b):
+        def leg_budget(n: Node = n) -> Optional[int]:
+            c = stats(n).get("call") or {}
+            return c.get("frame_budget_bytes") if c.get("legs") else None
+        budgets[n.name] = wait_for(f"{n.name}'s call leg", leg_budget, 60, every=1)
+    nonlocal_size = min([size] + list(budgets.values()))
+    step("legs_up", budgets=budgets, frame_bytes=nonlocal_size)
+    size_box[0] = nonlocal_size
+    for n in (a, b):
+        stream(n, total)
+    time.sleep(phase / 2)
+    t_c = time.time()
+    if not join(c):
+        step.fail("join_refused:carol", "late join refused", members,
+                  r"qa call|join_call|CallError", placed=placed)
+        return {"verdict": "FAIL", "steps": step.log, "placed": placed,
+                "first_failure": step.first_failure}
+    stream(c, total - int(time.time() - t_start))
+    try:
+        wait_for("carol's first frame", lambda: (stats(c).get("received") or {}).get("frames") or None,
+                 120, every=0.5)
+        step("late_join_first_frame", carol_s=round(time.time() - t_c, 1))
+    except MeshError:
+        step("late_join_first_frame", carol_s=None)
+        failures.append("late_join_no_frame")
+    time.sleep(max(0, phase / 2))
+    p1 = snap("phase1_end", members)
+
+    # Phase 2: all stream; dave added mid-call (an epoch roll).
+    t2 = time.time()
+    try:
+        admit(d)
+        step("epoch_roll", added="dave", at_s=round(time.time() - t_start, 1))
+    except MeshError as e:
+        step("epoch_roll", added=None, error=str(e))
+        failures.append("epoch_roll_admit_failed")
+    time.sleep(phase)
+    p2 = snap("phase2_end", members)
+    v2 = heard_ok(p1, p2, 3, time.time() - t2)
+    step("heard:phase2_epoch_roll", **v2)
+    failures += [f"phase2:{k}" for k, v in v2.items() if (v["ratio"] or 0) < 0.8]
+
+    # Phase 3: bob leaves mid-call.
+    old_b = (p2.get("bob") or {}).get("streams")
+    t3 = time.time()
+    _, left = b.api("POST", "/v1/qa/call/stop", {"room": room})
+    step("bob_left", at_s=round(t3 - t_start, 1), final=left)
+    time.sleep(phase)
+    p3 = snap("phase3_end", [a, c])
+    v3 = heard_ok(p2, p3, 2, time.time() - t3)
+    step("heard:phase3_after_leave", **v3)
+    failures += [f"phase3:{k}" for k, v in v3.items() if (v["ratio"] or 0) < 0.8]
+
+    # Phase 4: bob rejoins; his stream must be new.
+    t4 = time.time()
+    if join(b):
+        stream(b, max(10, total - int(time.time() - t_start)))
+        time.sleep(phase)
+        p4 = snap("phase4_end", members)
+        step("rejoin_streams", before=old_b, after=(p4.get("bob") or {}).get("streams"),
+             others_see=[(p4.get(n) or {}).get("streams") for n in ("alice", "carol")])
+        v4 = heard_ok(p3, p4, 3, time.time() - t4)
+        v4.pop("bob", None)  # bob's own baseline restarted with his new slot
+        step("heard:phase4_after_rejoin", **v4)
+        failures += [f"phase4:{k}" for k, v in v4.items() if (v["ratio"] or 0) < 0.8]
+    else:
+        failures.append("rejoin_refused")
+        p4 = p3
+
+    # Phase 5: run to the end, then everyone leaves.
+    rest = total - (time.time() - t_start)
+    if rest > 0:
+        time.sleep(rest)
+    final = {}
+    for n in members:
+        _, final[n.name] = n.api("POST", "/v1/qa/call/stop", {"room": room})
+    step("call_duration", seconds=round(time.time() - t_start, 1))
+    step("final", **{k: {"sent": (v.get("sent") or {}), "received": (v.get("received") or {}),
+                         "call": v.get("call")} for k, v in final.items() if isinstance(v, dict)})
+    alm_lines = {n.name: n.grep(r"edge\.alm\.decision|alm_|chunk_auth_counts")[-20:] for n in members}
+    step("alm_lines", **{k: len(v) for k, v in alm_lines.items()})
+    rec: Record = {"steps": step.log, "placed": placed, "alm_lines": alm_lines}
+    if failures:
+        step.fail("phases", "a phase heard under 80% or an order failed: " + ", ".join(failures),
+                  members, r"qa call|av_call|call|stream|alm|epoch")
+        rec.update({"verdict": "FAIL", "failures": failures, "first_failure": step.first_failure})
+        return rec
+    rec["verdict"] = "PASS"
+    return rec
+
+
+def _versions() -> Dict[str, str]:
+    root = Path(__file__).resolve().parents[2]
+    out = {}
+    try:
+        out["server_commit"] = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                                              capture_output=True, text=True).stdout.strip()
+        out["server_dirty"] = bool(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                                  capture_output=True, text=True).stdout.strip())
+        lock = (root / "Cargo.lock").read_text()
+        for crate in ("ciris-edge", "ciris-persist", "ciris-verify-core", "leviculum-core"):
+            m = re.search(rf'name = "{crate}"\nversion = "([^"]+)"', lock)
+            if m:
+                out[crate] = m.group(1)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)
+    return out
+
+
+def _evidence(record: Dict[str, Any], name: str) -> str:
+    root = Path(__file__).resolve().parents[2]
+    d = root / "evidence" / "av"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{name}.jsonl"
+    with open(path, "a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+    return str(path)
+
+
+def av_mesh(mesh: Mesh, args: Any) -> Record:
+    """N members, member relays ON, everyone publishing; then one publisher's uplink
+    is capped mid-call (tc netem in its own container, HARNESS_DOCKER=1) and later
+    lifted. Proves calls scale by member relay, not N-1 uplink (Eric, 2026-11-10).
+
+    Env: AV_MEMBERS (4), AV_RATE_HZ (30), AV_FRAME_BYTES (600, clamped to the call's
+    budget), AV_BASE_S (45), AV_CAP_S (90), AV_LIFT_S (60), AV_CAP_KBIT (250: about
+    2.5 copies of one stream on the wire), AV_RELAY (1). One JSONL line per run to
+    evidence/av/av_mesh.jsonl, with the versions."""
+    n_members = int(os.environ.get("AV_MEMBERS", "4"))
+    rate = int(os.environ.get("AV_RATE_HZ", "30"))
+    size = int(os.environ.get("AV_FRAME_BYTES", "600"))
+    base_s = int(os.environ.get("AV_BASE_S", "45"))
+    cap_s = int(os.environ.get("AV_CAP_S", "90"))
+    lift_s = int(os.environ.get("AV_LIFT_S", "60"))
+    cap_kbit = int(os.environ.get("AV_CAP_KBIT", "250"))
+    relay = os.environ.get("AV_RELAY", "1") == "1"
+    capping = bool(mesh.docker) and cap_s > 0
+    step = Steps(f"""
+AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishing.
+  proves:  baseline {base_s} s → cap the first publisher's uplink to {cap_kbit} kbit/s for {cap_s} s
+           (subscribers move to member relays, everyone still hears it) → lift it for {lift_s} s.""")
+    os.environ["CIRIS_QA_CALLS"] = "1"
+    names = [f"m{i}" for i in range(n_members)]
+    nodes = [mesh.add(nm) for nm in names]
+    for n in nodes:
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for h in nodes:
+        for g in nodes:
+            if h is not g:
+                wait_for(f"{h.name} to hold {g.name}'s owner key",
+                         lambda h=h, g=g: h.knows(g.owner_key_id), args.owner_wait)
+    for h in nodes:
+        for g in nodes:
+            if h is not g:
+                h.add_contact(g.contact_code())
+    founder = nodes[0]
+    got = founder.must("POST", "/v1/communities", {"name": "av-mesh"})
+    room = got.get("community_id") or got.get("id")
+    seated: List[Node] = [founder]
+    t_setup = time.time()
+    for m in nodes[1:]:
+        code, body = founder.api("POST", f"/v1/communities/{room}/invites", {"key_id": m.owner_key_id})
+        if code not in (200, 201, 202):
+            raise MeshError(f"invite {m.name} answered {code}: {body}")
+        pid = wait_for(f"{m.name} to list the invitation", lambda m=m: next(
+            (r["proposal_id"] for r in m.must("GET", "/v1/self/invites").get("invites", [])
+             if r.get("group_id") == room), None), args.arrive_wait, every=2)
+        m.must("POST", f"/v1/self/invites/{pid}/accept", {})
+        if len(seated) >= 2:
+            env = founder.must("POST", f"/v1/communities/{room}/changes/envelope",
+                               {"op": "add", "key_id": m.owner_key_id})
+            sigs = list(env.get("signatures") or [])
+            for o in seated[1:]:
+                sigs.append(o.must("POST", f"/v1/communities/{room}/changes/cosign",
+                                   {"change_envelope": env["change_envelope"]})["signature"])
+
+            def assembled() -> Optional[Any]:
+                c, b = founder.api("POST", f"/v1/communities/{room}/changes/assemble",
+                                   {"change_envelope": env["change_envelope"], "signatures": sigs})
+                if c in (200, 201, 202):
+                    return b
+                if isinstance(b, dict) and b.get("reason_id") == "membership.awaiting_acceptance":
+                    return None
+                raise MeshError(f"assemble {m.name} answered {c}: {b}")
+
+            wait_for(f"{m.name} seated by quorum", assembled, args.arrive_wait * 2, every=2)
+
+        def is_seated(m: Node = m) -> Optional[bool]:
+            founder.api("GET", f"/v1/communities/{room}/invites")
+            _, rv = founder.api("GET", f"/v1/communities/{room}")
+            ms = (rv or {}).get("members") or [] if isinstance(rv, dict) else []
+            return True if any(m.owner_key_id in json.dumps(x) for x in ms) else None
+
+        wait_for(f"{m.name} seated", is_seated, args.arrive_wait * 2, every=2)
+        seated.append(m)
+    probe = founder.say(room, "before the call")
+    for m in nodes:
+        def read_probe(m: Node = m) -> Optional[bool]:
+            founder.room(room)
+            return True if any(x.get("attestation_id") == probe and x.get("body")
+                               for x in m.room(room)["messages"]) else None
+        wait_for(f"{m.name} to read the room", read_probe, args.arrive_wait * 2, every=2)
+    step("room_ready", members=n_members, setup_s=round(time.time() - t_setup, 1))
+
+    placed = []
+    for n in nodes:
+        st, body = n.api("POST", "/v1/qa/call/start", {"room": room, "relay": relay})
+        placed.append({"node": n.name, "status": st})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "join_call refused", nodes,
+                      r"qa call|join_call|CallError", status=st, body=body)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+    def stats(n: Node) -> Dict[str, Any]:
+        _, s = n.api("GET", f"/v1/qa/call/stats?room={room}")
+        return s if isinstance(s, dict) else {}
+
+    def budget(n: Node) -> Optional[int]:
+        c = stats(n).get("call") or {}
+        return c.get("frame_budget_bytes") if len(c.get("legs") or []) >= n_members - 1 else None
+
+    budgets = {n.name: wait_for(f"{n.name}'s legs to all members", lambda n=n: budget(n), 120, every=1)
+               for n in nodes}
+    size = min([size] + list(budgets.values()))
+    step("legs_up", budgets=budgets, frame_bytes=size)
+    total = base_s + cap_s + lift_s + 10
+    for n in nodes:
+        n.must("POST", "/v1/qa/call/stream",
+               {"room": room, "rate_hz": rate, "frame_bytes": size, "seconds": total})
+
+    capped = nodes[0]
+    capped_key = capped.node_key_id or capped.key_id
+
+    def heard_from(n: Node, pub: Node) -> int:
+        bp = (stats(n).get("received") or {}).get("by_publisher") or {}
+        key = pub.node_key_id or pub.key_id
+        for k, v in bp.items():
+            if k == key or k.startswith(pub.key_id):
+                return int(v.get("frames") or 0)
+        return 0
+
+    def snapshot(tag: str) -> Dict[str, Any]:
+        out = {}
+        for n in nodes:
+            s = stats(n)
+            c = s.get("call") or {}
+            out[n.name] = {
+                "sent": (s.get("sent") or {}).get("frames"),
+                "publish_refused": (s.get("sent") or {}).get("publish_refused"),
+                "leg_sends": (s.get("sent") or {}).get("legs"),
+                "received": (s.get("received") or {}).get("frames"),
+                "by_publisher": (s.get("received") or {}).get("by_publisher"),
+                "streams": c.get("streams"), "alm": c.get("alm"),
+                "chunk_auth": c.get("chunk_auth"), "state": c.get("state"),
+                "tier": c.get("service_tier")}
+        step(f"snapshot:{tag}", **out)
+        return out
+
+    def watch(seconds: float) -> Dict[str, Dict[str, Any]]:
+        """Poll every receiver's count of the capped publisher's frames; the longest
+        stretch with no new frame is that receiver's gap."""
+        last = {n.name: (heard_from(n, capped), time.time()) for n in nodes if n is not capped}
+        gaps = {k: 0.0 for k in last}
+        end = time.time() + seconds
+        while time.time() < end:
+            time.sleep(1)
+            now = time.time()
+            for n in nodes:
+                if n is capped:
+                    continue
+                cnt = heard_from(n, capped)
+                prev_cnt, prev_t = last[n.name]
+                if cnt > prev_cnt:
+                    last[n.name] = (cnt, now)
+                else:
+                    gaps[n.name] = max(gaps[n.name], now - prev_t)
+        return {k: {"max_gap_s": round(v, 1)} for k, v in gaps.items()}
+
+    def ratios(before: Dict[str, Any], after: Dict[str, Any], seconds: float) -> Dict[str, Any]:
+        r = {}
+        for n in nodes:
+            if n is capped:
+                continue
+            b = heard_from_snap(before, n.name)
+            a = heard_from_snap(after, n.name)
+            want = rate * seconds
+            r[n.name] = {"got": a - b, "expected": int(want), "ratio": round((a - b) / want, 3)}
+        return r
+
+    def heard_from_snap(snap: Dict[str, Any], name: str) -> int:
+        bp = (snap.get(name) or {}).get("by_publisher") or {}
+        for k, v in bp.items():
+            if k == capped_key or k.startswith(capped.key_id):
+                return int(v.get("frames") or 0)
+        return 0
+
+    s0 = snapshot("start")
+    t0 = time.time()
+    time.sleep(base_s)
+    s1 = snapshot("baseline_end")
+    r_base = ratios(s0, s1, time.time() - t0)
+    step("heard_capped_publisher:baseline", **r_base)
+    phases = {"baseline": r_base}
+    gaps_cap: Dict[str, Any] = {}
+    if capping:
+        capped.netem("rate", f"{cap_kbit}kbit", "limit", "1000")
+        t1 = time.time()
+        step("cap_on", node=capped.name, kbit=cap_kbit)
+        gaps_cap = watch(cap_s)
+        s2 = snapshot("cap_end")
+        r_cap = ratios(s1, s2, time.time() - t1)
+        step("heard_capped_publisher:capped", **r_cap, gaps=gaps_cap)
+        phases["capped"] = r_cap
+        capped.netem()
+        t2 = time.time()
+        step("cap_off", node=capped.name)
+        gaps_lift = watch(lift_s)
+        s3 = snapshot("lift_end")
+        r_lift = ratios(s2, s3, time.time() - t2)
+        step("heard_capped_publisher:lifted", **r_lift, gaps=gaps_lift)
+        phases["lifted"] = r_lift
+    else:
+        step("cap_skipped", reason="needs HARNESS_DOCKER=1" if not mesh.docker else "AV_CAP_S=0")
+        s3 = s1
+    final = {}
+    for n in nodes:
+        _, final[n.name] = n.api("POST", "/v1/qa/call/stop", {"room": room})
+    legs_capped = {n.name: [x.get("leg") for x in ((s3.get(n.name) or {}).get("streams") or [])
+                            if str(x.get("publisher") or "").startswith(capped.key_id)]
+                   for n in nodes if n is not capped}
+    alm = {n.name: (s3.get(n.name) or {}).get("alm") for n in nodes}
+    auth = {n.name: (s3.get(n.name) or {}).get("chunk_auth") for n in nodes}
+    failures = [f"{ph}:{k}" for ph, rs in phases.items() for k, v in rs.items() if v["ratio"] < 0.99]
+    verdict = "PASS" if not failures else "FAIL"
+    record = {"scenario": "av_mesh", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "versions": _versions(), "docker": bool(mesh.docker), "members": n_members,
+              "relay": relay, "rate_hz": rate, "frame_bytes": size, "cap_kbit": cap_kbit if capping else None,
+              "phase_seconds": {"base": base_s, "cap": cap_s if capping else 0, "lift": lift_s if capping else 0},
+              "heard_capped_publisher": phases, "gaps_while_capped": gaps_cap,
+              "capped_publisher_legs_at_end": legs_capped, "alm": alm, "chunk_auth": auth,
+              "placed": placed, "verdict": verdict, "failures": failures}
+    path = _evidence(record, "av_mesh")
+    step("evidence", path=path)
+    rec: Record = {"steps": step.log, "verdict": verdict, "evidence": path}
+    if failures:
+        step.fail("phases", "the capped publisher was heard under 99% in a phase: " + ", ".join(failures),
+                  nodes, r"alm|shed|relay|offer|call")
+        rec["first_failure"] = step.first_failure
+    return rec
+
+
 def peer_pair(mesh: Mesh, args: Any) -> Record:
     """The client's two-node fixture: two nodes, no canonical anywhere, claimed,
     announced and peered both ways over the production routes. Under the sealed
@@ -2536,6 +3087,8 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "corpus": corpus,
     "peer_pair": peer_pair,
     "av_call": av_call,
+    "av_room": av_room,
+    "av_mesh": av_mesh,
     "pair_unannounced": pair_unannounced,
     "relay_rig": relay_rig,
     "two_seats": two_seats,

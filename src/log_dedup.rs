@@ -337,6 +337,12 @@ const NEVER_COLLAPSED: &[&str] = &[
     // A dropped reply is read per occurrence: collapsing hid 11 of 14 in the run
     // that needed them timed.
     "ciris_edge::edge",
+    // ALM decisions are read as a sequence (who was admitted, shed, re-parented,
+    // and why): collapsing kept 3 per key per 5 min and hid the shed that the
+    // first N>3 relay run needed traced (2026-11-10). DEBUG-only at edge, so
+    // they cost nothing unless asked for.
+    "edge.alm.decision",
+    "edge.alm.failover",
 ];
 
 impl<S: Subscriber> Layer<S> for DedupLayer {

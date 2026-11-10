@@ -385,6 +385,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         lens_store = caps.lens_store,
         "host capabilities"
     );
+    // Server tier (Eric, 2026-11-10): reported at every boot so an operator can
+    // see which nodes qualify. Host facts only: no name, no path.
+    let tier = crate::host_kind::ServerTier::detect(&cfg.data_dir);
+    tracing::info!(
+        server_tier = tier.qualifies,
+        disk_total_gb = tier.disk_total_bytes / 1_000_000_000,
+        personal = tier.personal,
+        host_kind = %crate::host_kind::host_kind(),
+        why = tier.why(),
+        "host: server tier"
+    );
 
     // ── ONE federation signing identity — a TPM / Secure-Enclave / StrongBox
     //    SEALED Ed25519 seed (verify v5.4.0 get_platform_ed25519_signer;
@@ -5459,6 +5470,15 @@ async fn shaping_device(
                     d,
                     ShapingPolicy::for_device(&d),
                     "the canonical: a server (steward 2026-11-09)",
+                )
+            } else if crate::host_kind::ServerTier::detect(&cfg.data_dir).qualifies {
+                // Server tier (Eric, 2026-11-10): a data disk of at least 1 TB
+                // and not a personal install. Blessed or not, it is a server.
+                let d = DeviceState::of(DeviceKind::Server);
+                (
+                    d,
+                    ShapingPolicy::for_device(&d),
+                    "server tier: a data disk of at least 1 TB, not a personal install",
                 )
             } else {
                 let d = DeviceState::of(DeviceKind::platform_default());

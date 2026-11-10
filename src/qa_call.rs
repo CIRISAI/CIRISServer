@@ -82,6 +82,9 @@ struct Slot {
     call: tokio::sync::Mutex<Option<Call>>,
     counters: Counters,
     delays_ms: StdMutex<Vec<u64>>,
+    /// Per publisher: frames heard and their delays (the 0.5.246 room test reads
+    /// each stream on its own, not one sum across the room).
+    by_publisher: StdMutex<std::collections::BTreeMap<String, (u64, Vec<u64>)>>,
     events: StdMutex<Vec<String>>,
     last_publish_error: StdMutex<Option<String>>,
     started: Instant,
@@ -186,6 +189,7 @@ async fn start(
         call: tokio::sync::Mutex::new(None),
         counters: Counters::default(),
         delays_ms: StdMutex::new(Vec::new()),
+        by_publisher: StdMutex::new(std::collections::BTreeMap::new()),
         events: StdMutex::new(Vec::new()),
         last_publish_error: StdMutex::new(None),
         started: Instant::now(),
@@ -201,16 +205,29 @@ async fn start(
                 s.counters
                     .bytes_received
                     .fetch_add(f.bytes.len() as u64, Ordering::Relaxed);
-                if f.bytes.len() >= HEADER {
+                let delay = (f.bytes.len() >= HEADER).then(|| {
                     let mut sent = [0u8; 8];
                     sent.copy_from_slice(&f.bytes[8..16]);
-                    let delay = now_ms().saturating_sub(u64::from_be_bytes(sent));
+                    now_ms().saturating_sub(u64::from_be_bytes(sent))
+                });
+                if let Some(delay) = delay {
                     let mut d = s
                         .delays_ms
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if d.len() < MAX_SAMPLES {
                         d.push(delay);
+                    }
+                }
+                let mut by = s
+                    .by_publisher
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = by.entry(f.publisher.clone()).or_default();
+                entry.0 += 1;
+                if let Some(delay) = delay {
+                    if entry.1.len() < MAX_SAMPLES {
+                        entry.1.push(delay);
                     }
                 }
             }
@@ -353,6 +370,27 @@ fn percentile(sorted: &[u64], p: f64) -> Option<u64> {
     sorted.get(i).copied()
 }
 
+fn by_publisher_json(slot: &Slot) -> serde_json::Value {
+    let by = slot
+        .by_publisher
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = serde_json::Map::new();
+    for (publisher, (frames, delays)) in by.iter() {
+        let mut d = delays.clone();
+        d.sort_unstable();
+        out.insert(
+            publisher.clone(),
+            serde_json::json!({
+                "frames": frames,
+                "delay_ms_p50": percentile(&d, 0.5),
+                "delay_ms_p95": percentile(&d, 0.95),
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
 async fn stats_of(slot: &Slot) -> serde_json::Value {
     let c = &slot.counters;
     let mut delays = slot
@@ -365,6 +403,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
     let call_view = guard.as_ref().map(|call| {
         let reorder = call.reorder_counts();
         let alm = call.alm_counts();
+        let auth = call.chunk_auth_counts();
         // How each heard stream reaches this node: straight from its
         // publisher, or through another member relaying it (the ALM's parent).
         let streams: Vec<_> = call
@@ -397,6 +436,13 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
                 "skipped": reorder.skipped,
                 "duplicates": reorder.duplicates,
                 "expired_late": reorder.late,
+            },
+            "chunk_auth": {
+                "verified": auth.verified,
+                "forged": auth.forged,
+                "unbound": auth.unbound,
+                "bindings_installed": auth.bindings_installed,
+                "bindings_refused": auth.bindings_refused,
             },
             "alm": {
                 "stale_dropped": alm.stale_dropped,
@@ -431,6 +477,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
             "delay_ms_p50": percentile(&delays, 0.5),
             "delay_ms_p95": percentile(&delays, 0.95),
             "delay_ms_max": delays.last(),
+            "by_publisher": by_publisher_json(slot),
         },
         "call": call_view,
         "events": slot.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),

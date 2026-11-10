@@ -76,6 +76,10 @@ def anchor_env() -> Dict[str, str]:
     return env
 
 
+DOCKER_IMAGE = os.environ.get("HARNESS_DOCKER_IMAGE", "ciris-native-node:1")
+DOCKER_API_OFFSET = 10000
+
+
 def free_port_pair(start: int = 7242) -> int:
     """A port p with p and p+1 both free (edge on p, HTTP on p+1)."""
     p = start
@@ -147,16 +151,30 @@ class Node:
     owner_key_id: str = ""
     node_key_id: str = ""
     record: Any = None
+    # HARNESS_DOCKER=1: this node runs in its own container (its own network
+    # namespace, NET_ADMIN for tc/netem) at `ip` on the mesh's bridge network.
+    ip: str = ""
+    container: str = ""
+    network: str = ""
 
     # -- process --
 
     @property
+    def host(self) -> str:
+        return self.ip or "127.0.0.1"
+
+    @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.port + 1}"
+        # Docker: the harness drives the API through a forwarder INSIDE the
+        # container, so setup routes see a loopback caller (they are
+        # localhost-only by design); peers still reach ip:port directly.
+        if self.container:
+            return f"http://{self.host}:{self.port + 1 + DOCKER_API_OFFSET}"
+        return f"http://{self.host}:{self.port + 1}"
 
     @property
     def transport(self) -> str:
-        return f"127.0.0.1:{self.port}"
+        return f"{self.host}:{self.port}"
 
     def _cli(self, *args: str, timeout: float = 180.0) -> str:
         cmd = [str(self.binary), *args, "--home", str(self.home), "--key-id", self.key_id]
@@ -169,13 +187,73 @@ class Node:
 
     def configure(self, dial: List[str]) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
-        self._cli("config", "set", "net.listen_addr", json.dumps(self.transport))
+        # Docker: listen on every interface in the node's own namespace, so the
+        # in-container API forwarder reaches it on loopback; peers dial ip:port.
+        listen = f"0.0.0.0:{self.port}" if self.container else self.transport
+        self._cli("config", "set", "net.listen_addr", json.dumps(listen))
         if dial:
             self._cli("config", "set", "net.bootstrap_peers", json.dumps(dial),
                       "--reason", "native mesh fixture")
 
+    def _docker_start(self) -> None:
+        envfile = self.log_path.parent / "env.list"
+        # Native nodes inherit the harness's environment (a scenario sets e.g.
+        # CIRIS_QA_CALLS there); a container gets the same CIRIS_*/RUST_LOG set.
+        inherited = {k: v for k, v in os.environ.items() if k.startswith("CIRIS_") or k == "RUST_LOG"}
+        merged = {**inherited, **self.env}
+        envfile.write_text("".join(f"{k}={v}\n" for k, v in merged.items() if "\n" not in str(v)))
+        work = str(self.log_path.parent.parent)
+        subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+        cmd = ["docker", "run", "-d", "--name", self.container, "--network", self.network,
+               "--ip", self.ip, "--cap-add", "NET_ADMIN", "--user", f"{os.getuid()}:{os.getgid()}",
+               "--env-file", str(envfile),
+               "-v", f"{self.binary}:{self.binary}:ro", "-v", f"{work}:{work}",
+               DOCKER_IMAGE, "sh", "-c",
+               f"socat TCP-LISTEN:{self.port + 1 + DOCKER_API_OFFSET},fork,reuseaddr "
+               f"TCP:127.0.0.1:{self.port + 1} & "
+               f"exec {self.binary} --home {self.home} --key-id {self.key_id} >> {self.log_path} 2>&1"]
+        got = subprocess.run(cmd, capture_output=True, text=True)
+        if got.returncode != 0:
+            raise MeshError(f"{self.name}: docker run failed: {got.stderr[-600:]}")
+
+    def kill(self) -> None:
+        """SIGKILL, not a clean stop: the crashed-publisher case."""
+        if self.container:
+            subprocess.run(["docker", "kill", self.container], capture_output=True)
+        elif self.proc and self.proc.poll() is None:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc = None
+
+    def netem(self, *spec: str) -> None:
+        """Impair this node's interface (docker mode only), e.g. netem("rate", "120kbit")
+        or netem("loss", "5%", "delay", "40ms", "20ms"). netem() with no args clears it."""
+        if not self.container:
+            raise MeshError("netem needs HARNESS_DOCKER=1")
+        if not spec:
+            subprocess.run(["docker", "exec", "-u", "0", self.container, "tc", "qdisc", "del",
+                            "dev", "eth0", "root"], capture_output=True)
+            return
+        got = subprocess.run(["docker", "exec", "-u", "0", self.container, "tc", "qdisc",
+                              "replace", "dev", "eth0", "root", "netem", *spec],
+                             capture_output=True, text=True)
+        if got.returncode != 0:
+            raise MeshError(f"{self.name}: tc netem {' '.join(spec)}: {got.stderr[-400:]}")
+
     def start(self, health_timeout: float = 120.0) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.container:
+            self._docker_start()
+
+            def healthy_c() -> bool:
+                st = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", self.container],
+                                    capture_output=True, text=True).stdout.strip()
+                if st == "false":
+                    raise MeshError(f"{self.name} container exited during boot; tail of "
+                                    f"{self.log_path}:\n{self.log_tail(40)}")
+                return http("GET", f"{self.url}/health", timeout=3)[0] == 200
+
+            wait_for(f"{self.name} /health", healthy_c, health_timeout, every=1.0)
+            return
         log = open(self.log_path, "ab")
         self.proc = subprocess.Popen(
             [str(self.binary), "--home", str(self.home), "--key-id", self.key_id],
@@ -192,6 +270,10 @@ class Node:
         wait_for(f"{self.name} /health", healthy, health_timeout, every=1.0)
 
     def stop(self) -> None:
+        if self.container:
+            subprocess.run(["docker", "stop", "-t", "15", self.container], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+            return
         if self.proc and self.proc.poll() is None:
             try:
                 os.killpg(self.proc.pid, signal.SIGTERM)
@@ -537,6 +619,13 @@ class Mesh:
         self.work = Path(work).resolve()
         self.keep = keep
         self.base_env = {**anchor_env(), "RUST_LOG": rust_log, **(extra_env or {})}
+        # HARNESS_DOCKER=1: one container per node on a private bridge network.
+        self.docker = os.environ.get("HARNESS_DOCKER") == "1"
+        import zlib as _z
+        _h = _z.crc32(str(self.work).encode())
+        self.network = f"cirisnat{_h % 100000}"
+        self.subnet_prefix = f"172.{28 + (_h % 3)}.{(_h >> 8) % 250}"
+        self._ip_next = 9
         self.nodes: Dict[str, Node] = {}
         self.canonical: Optional[Node] = None
         # A port base per WORK DIR, so two meshes run side by side without
@@ -548,9 +637,15 @@ class Mesh:
         port = free_port_pair(self._next_port)
         self._next_port = port + 2
         key_id = f"native-{name}"
-        return Node(name=name, binary=self.binary, home=self.work / name / "home",
-                    key_id=key_id, port=port, env={**self.base_env, **env},
-                    log_path=self.work / name / "node.log")
+        n = Node(name=name, binary=self.binary, home=self.work / name / "home",
+                 key_id=key_id, port=port, env={**self.base_env, **env},
+                 log_path=self.work / name / "node.log")
+        if self.docker:
+            self._ip_next += 1
+            n.ip = f"{self.subnet_prefix}.{self._ip_next}"
+            n.container = f"{self.network}-{name}"
+            n.network = self.network
+        return n
 
     def start_canonical(self) -> Node:
         n = self._node("canonical", {})
@@ -566,9 +661,9 @@ class Mesh:
             n.env["CIRIS_DEVICE_KIND"] = kind
         n.env["CIRIS_TEST_CANONICAL_DIAL"] = n.transport
         n.configure(dial=[])
+        self.nodes["canonical"] = n  # before start, so a failed boot is still torn down
         n.start()
         self.canonical = n
-        self.nodes["canonical"] = n
         return n
 
     def add(self, name: str, start: bool = True, dial: Optional[List["Node"]] = None,
@@ -628,8 +723,17 @@ class Mesh:
         if self.work.exists() and not self.keep:
             shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True, exist_ok=True)
+        if self.docker:
+            subprocess.run(["docker", "network", "rm", self.network], capture_output=True)
+            got = subprocess.run(["docker", "network", "create", "--subnet",
+                                  f"{self.subnet_prefix}.0/24", self.network],
+                                 capture_output=True, text=True)
+            if got.returncode != 0:
+                raise MeshError(f"docker network create: {got.stderr[-400:]}")
         return self
 
     def __exit__(self, *exc: Any) -> None:
         if not self.keep:
             self.stop()
+            if self.docker:
+                subprocess.run(["docker", "network", "rm", self.network], capture_output=True)

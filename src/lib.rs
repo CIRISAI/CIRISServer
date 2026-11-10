@@ -300,6 +300,7 @@ pub mod halt_gate;
 /// `register_federation_key` call site in this crate goes through.
 pub mod hardware_attestation;
 pub mod health;
+pub mod host_kind;
 /// HTTP error-response logging middleware (the "never guess" layer).
 pub mod http_log;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
@@ -721,13 +722,23 @@ pub async fn run(home: std::path::PathBuf, key_id: String, diagnostics: bool) ->
 /// [`config::DEFAULT_KEY_ID`]) — the entry point for hosts that take no flags
 /// (the PyO3 wheel `main`).
 pub async fn run_default() -> Result<()> {
+    let home = std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME);
+    let key_id = home_key_id(&home);
     run(
-        std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME),
-        config::DEFAULT_KEY_ID.to_string(),
+        home, key_id,
         // No flags on this path; `CIRIS_DIAGNOSTICS` is still honoured inside `run`.
         false,
     )
     .await
+}
+
+/// The key a home boots as when no `--key-id` is given — the ONE rule every
+/// entry point uses (serve, `config get/set`, `identity create`, `claim`,
+/// `identity-paths`, `accord reactivate`), so a home is one node whoever launches
+/// it. See [`node_key::home_key_alias`].
+#[must_use]
+pub fn home_key_id(home: &std::path::Path) -> String {
+    node_key::home_key_alias(&home.join("identity"))
 }
 
 /// Parse the default-serve flags `--home <path>` and `--key-id <name>` (both
@@ -779,9 +790,16 @@ pub fn parse_serve_flags(
         }
     }
 
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
-    Ok((std::path::PathBuf::from(home), key_id, diagnostics))
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    // No `--key-id`: the home's own keystore names the key, so a home is one node
+    // whoever launches it (`node_key::home_key_alias`). An explicit `--key-id`
+    // (the canonical, the agent, every headless deployment) is used as given.
+    let key_id = match key_id {
+        Some(k) => k,
+        None => home_key_id(&home),
+    };
+    Ok((home, key_id, diagnostics))
 }
 
 /// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
@@ -815,8 +833,49 @@ pub fn active_user_alias(user_seed_dir: &std::path::Path, default_alias: &str) -
     let p = user_seed_dir.join(ACTIVE_USER_ALIAS_FILE);
     match std::fs::read_to_string(&p) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => default_alias.to_string(),
+        _ => legacy_user_alias(user_seed_dir, default_alias),
     }
+}
+
+/// The owner key of a home with no [`ACTIVE_USER_ALIAS_FILE`], found READ-ONLY.
+///
+/// The pointer is written by every owner mint since 0.5.59, so a home lacks it
+/// only if its owner was minted earlier, or the file was lost. Its key then sits
+/// under `<host alias>-user`, and the host alias depended on who launched the
+/// home: the agent (`ciris-agent-bootstrap`), the desktop app (`ciris-client`) or
+/// a bare server (`ciris-server`). Since 0.5.246 a bare boot runs as the home's
+/// node key (`node_key::home_key_alias`), so `default_alias` may no longer be the
+/// name the key was minted under. Try it first, then the names the home could
+/// have used, and take the first that exists. Nothing is written: the pointer is
+/// left to the owner's next mint or import (Eric, 2026-11-10).
+fn legacy_user_alias(user_seed_dir: &std::path::Path, default_alias: &str) -> String {
+    let held = |alias: &str| {
+        user_seed_dir.join(format!("{alias}.backend")).exists()
+            || user_seed_dir.join(format!("{alias}.ed25519.seed")).exists()
+            || !matches!(
+                key_tier::on_disk_tier(alias, user_seed_dir),
+                key_tier::OnDiskTier::Absent
+            )
+    };
+    if held(default_alias) {
+        return default_alias.to_string();
+    }
+    for host in [
+        "ciris-agent-bootstrap",
+        "ciris-client",
+        config::DEFAULT_KEY_ID,
+    ] {
+        let alias = format!("{host}-user");
+        if alias != default_alias && held(&alias) {
+            tracing::info!(
+                default_alias,
+                found = %alias,
+                "no active_user_alias pointer: using the owner key this home holds under its earlier name"
+            );
+            return alias;
+        }
+    }
+    default_alias.to_string()
 }
 
 /// Record the active owner user alias (the slug the user chose at mint) into
@@ -2061,9 +2120,10 @@ pub fn identity_paths_cli(mut args: impl Iterator<Item = String>) -> anyhow::Res
             o => anyhow::bail!("unknown identity-paths arg: {o}"),
         }
     }
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -2082,14 +2142,14 @@ pub fn identity_paths_cli(mut args: impl Iterator<Item = String>) -> anyhow::Res
 pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
-    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut key_id: Option<String> = None;
     let mut reason = "console-cli".to_string();
     let mut key: Option<String> = None;
     let mut value_raw: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--home" => home = Some(args.next().context("--home needs a path")?),
-            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--key-id" => key_id = Some(args.next().context("--key-id needs a name")?),
             "--reason" => reason = args.next().context("--reason needs a value")?,
             other if other.starts_with("--") => {
                 return Err(anyhow::anyhow!("unknown config-set arg: {other}"))
@@ -2111,8 +2171,10 @@ pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyho
     let value_raw = value_raw
         .context("config set requires <json-value> (e.g. true or '[\"108.61.242.236:4242\"]')")?;
     let value = parse_config_value(&value_raw);
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     let entry = run_config_set(cfg, &key, value, &reason).await?;
     println!(
         "✅ config set {} (version {}, authored by {})",
@@ -2127,12 +2189,12 @@ pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyho
 pub async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
-    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut key_id: Option<String> = None;
     let mut key: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--home" => home = Some(args.next().context("--home needs a path")?),
-            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--key-id" => key_id = Some(args.next().context("--key-id needs a name")?),
             other if other.starts_with("--") => {
                 return Err(anyhow::anyhow!("unknown config-get arg: {other}"))
             }
@@ -2148,8 +2210,10 @@ pub async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> anyho
         }
     }
     let key = key.context("config get requires <key> (e.g. net.announce_ownership)")?;
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     match run_config_get(cfg, &key).await? {
         Some(entry) => println!("{}", serde_json::to_string_pretty(&entry.value)?),
         None => eprintln!("(no config for key {key:?})"),
@@ -2510,6 +2574,9 @@ mod python {
         crate::init_tracing_with(Some(&home.join("logs")));
         // Read the Python adapter's static config under the GIL.
         let adapter = crate::py_adapter::build(py, adapter)?;
+        // NOT `home_key_id`: on this path the configured key is the AGENT's (the
+        // actor), and the home rule would hand it the node key. The agent passes
+        // its own; a host that passes none keeps the old default.
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
         let mut cfg = crate::config::ServerConfig::from_home(home, key_id).map_err(py_err)?;
         // The embedded fold has no CLI; the environment is its switch
@@ -3721,5 +3788,59 @@ mod python {
         // remaining UX handles (trust/consent toggles, membership) fold into the
         // wheel API the KMP client consumes as their slices land (MISSION §3.4).
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod legacy_user_alias_tests {
+    use super::legacy_user_alias;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "legacy-user-alias-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A home with no pointer finds its owner key under the name it was minted
+    /// with, read-only: the default first, then the agent's, the desktop's and the
+    /// server's earlier names. Nothing is written.
+    #[test]
+    fn a_home_without_a_pointer_finds_its_owner_key_by_its_earlier_name() {
+        let d = dir("none");
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-node-bootstrap-user"
+        );
+
+        let d = dir("agent");
+        std::fs::write(d.join("ciris-agent-bootstrap-user.backend"), "software").unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-agent-bootstrap-user"
+        );
+
+        let d = dir("desktop");
+        std::fs::write(d.join("ciris-client-user.ed25519.seed"), [0u8; 32]).unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-client-user"
+        );
+
+        let d = dir("default-wins");
+        std::fs::write(d.join("ciris-client-user.backend"), "software").unwrap();
+        std::fs::write(d.join("ciris-node-bootstrap-user.backend"), "software").unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-node-bootstrap-user"
+        );
+        assert!(
+            !d.join(super::ACTIVE_USER_ALIAS_FILE).exists(),
+            "the lookup writes nothing"
+        );
     }
 }

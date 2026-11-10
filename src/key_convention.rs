@@ -117,6 +117,27 @@
 /// having its own keystore and its own key material.
 pub const NODE_ALIAS: &str = "ciris-node-bootstrap";
 
+/// **The alias a NEW node key is minted under** (Eric, 2026-11-10): which
+/// product installed it, a coarse word for the host, then `node`. For example
+/// `cirisagent-datum-node`, `cirisagent-desktop-node`, `cirisserver-docker-node`.
+///
+/// [`NODE_ALIAS`] stays as the name every node key minted before 0.5.246
+/// carries. Those keys are never renamed: an alias is the keystore lookup, so a
+/// new alias is a new key and a new node identity. A home records the alias it
+/// minted (`node_key::NODE_ALIAS_FILE`) and reads it back on every boot.
+///
+/// The alias is public (it is the front of the `key_id`), so it carries nothing
+/// personal, and it keeps I3: the role word is `node`, and the installer word is
+/// one segment (`cirisagent`), never a bare `agent`.
+#[must_use]
+pub fn descriptive_node_alias(installer: crate::host_kind::Installer) -> String {
+    format!(
+        "{}-{}-node",
+        installer.word(),
+        crate::host_kind::host_kind()
+    )
+}
+
 /// The three key roles, and what each one is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyRole {
@@ -319,6 +340,22 @@ mod tests {
              A second spelling can drift from the first without any test failing \
              (CIRISEdge#548). Import it instead. Found: {foreign:?}"
         );
+    }
+
+    /// **I3 for the 0.5.246 names.** Every descriptive alias ends in `node`
+    /// and carries no bare `agent` or `user` segment, for both installers.
+    #[test]
+    fn descriptive_node_aliases_name_node_and_no_other_role() {
+        use crate::host_kind::Installer;
+        for installer in [Installer::CirisAgent, Installer::CirisServer] {
+            let alias = descriptive_node_alias(installer);
+            let segments: Vec<&str> = alias.split('-').collect();
+            assert_eq!(segments.last(), Some(&identity_type::NODE), "{alias}");
+            assert_eq!(segments.first(), Some(&installer.word()), "{alias}");
+            for foreign in [identity_type::AGENT, identity_type::USER] {
+                assert!(!segments.contains(&foreign), "{alias} carries `{foreign}`");
+            }
+        }
     }
 
     /// **I3.** The node alias says `node` and nothing else. An alias carrying

@@ -58,13 +58,14 @@ stage_converge() { harness_log_count agent "converged to [1-9][0-9]* consent pee
 # reads here.
 #
 # The sender is the agent's NODE key since the harness agent splits (0.5.245,
-# as CIRISAgent 2.19 does): `source_peer="ciris-node-bootstrap-…"`. A pattern
-# naming only `ciris-agent…` read 0 beside arrive=15 (PR #866), so both names
-# count.
+# as CIRISAgent 2.19 does): `source_peer="ciris-node-bootstrap-…"` before
+# 0.5.246, `source_peer="cirisagent-<host>-node-…"` for a key minted since. A
+# pattern naming only `ciris-agent…` read 0 beside arrive=15 (PR #866), so every
+# `ciris…` sender counts.
 stage_ship() {
   local sent recv
   sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]')"
-  recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris-(agent|node)[^"]*" envelopes=[1-9]')"
+  recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris[^"]*" envelopes=[1-9]')"
   echo $(( ${sent:-0} + ${recv:-0} ))
 }
 
