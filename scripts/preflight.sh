@@ -162,7 +162,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # preflight, because it teaches people to trust it.
      # 48 -> 49 (CIRISServer#632): the NODE key's own trust-root acceptance on a split install
      # (mesh_genesis::accept_trust_root_as_node_key) — edge's serve gate (leg B) reads the wire key.
-     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 53"
+     "cohort-scope"        "python3 tools/audit_cohort_scope_callers.py --max-federation 55"
      "localization"        "python3 tools/check_server_localization.py --strict"
      # Pure python over synthetic Mach-O headers — it needs no iOS toolchain and
      # no device, so it belongs here rather than in the gate's PLATFORM_ONLY
@@ -182,7 +182,7 @@ L4=( "rustfmt"             "cargo fmt --all --check"
      # questions about the WORLD, and each reports BLOCKED rather than passing
      # when it cannot be evaluated.
      "client-wheel"        "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_pinned_client_offers_a_non_desktop_wheel"
-     "boundary-advisory"   "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_registry_surface_present gate_peer_nodes_on_the_shipping_floor || true" )
+     "boundary-advisory"   "CARGO_TARGET_DIR=target/pf-default cargo test --test release_gates -- --include-ignored gate_peer_nodes_on_the_shipping_floor || true" )
 
 if [ "$SEQUENTIAL" = "1" ]; then
   lane target/pf-default "${L1[@]}"

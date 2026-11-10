@@ -89,12 +89,58 @@ async fn the_bake_is_served_only_when_trusted_and_importable() {
     let (status, body) = get_bundle(app()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["bundle"], serde_json::to_value(baked).unwrap());
-    assert_eq!(
+    // CC 5.3.4 (CIRISServer#830): `sha256:` + 64 hex over the JCS-canonical
+    // bundle, recomputed here from the bytes served — the same value a
+    // registry host serves for the same bundle.
+    let jcs = ciris_verify_core::jcs::canonicalize(&body["bundle"]).expect("JCS");
+    let expected = {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{}", hex::encode(Sha256::digest(jcs)))
+    };
+    assert_eq!(body["bundle_fingerprint"], serde_json::json!(expected));
+    assert_ne!(
         body["bundle_fingerprint"],
-        ciris_server::mesh_genesis::fingerprint(baked).unwrap()
+        serde_json::json!(ciris_server::mesh_genesis::fingerprint(baked).unwrap()),
+        "the wire fingerprint is not the ceremony's 16-hex handle"
     );
     assert_eq!(body["charter_root_key_id"], "humanity-accord");
-    assert_eq!(body["served_by"], serde_json::json!(node));
+    assert_eq!(
+        body["served_by"],
+        serde_json::json!({"node_key_id": node, "accepts_this_root": true}),
+        "served_by is an object in the registry's shape (CC 5.3.4)"
+    );
+    // The outer envelope claims no authority (CIRISRegistry#133): signing the
+    // wrapper would prove only that the relay said so.
+    for forbidden in [
+        "response_signature",
+        "signature_mode",
+        "hardware_class",
+        "stewards",
+    ] {
+        assert!(
+            body.get(forbidden).is_none(),
+            "`{forbidden}` on the envelope: {body}"
+        );
+    }
+
+    // The retired registry path serves the same body.
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/steward-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let steward: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), 16 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(steward, body, "/v1/steward-key serves the bundle broadcast");
     assert_eq!(
         body["community"]["community"]["community_key_id"], "ciris-canonical",
         "the ciris-canonical birth rides beside the bundle: {}",

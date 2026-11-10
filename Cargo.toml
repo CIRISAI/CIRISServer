@@ -1,6 +1,7 @@
 [package]
 name = "ciris-server"
-version = "0.5.245" # 0.5.245 (OPENED): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
+version = "0.6.0" # 0.6.0 (OPENED): THE REGISTRY FOLDS IN — the registry slice is CONFERRED BY THE ACCORD and SERVED BY THE NODE: a node serves it iff it holds infra:attest from a trust root it accepts (capability_roots_to_trusted_root), the owner may decline it (config:slices.registry = false) and nothing may configure it on (steward 2026-09-22: infrastructure does not vote); CEG-native /v1/builds on conferred nodes, ported from ciris-registry-core v4.1.0 onto this substrate; GET /v1/trust-root/bundle in the CC 5.3.4 wrapper, also at /v1/steward-key (#830); the release ladder's 0.6 boundary is live (CIRISServer#537, CIRISRegistry#62). Cut after the 0.5.246 LTS; substrate unchanged (persist v61.0.5 / edge v44.1.1 / verify v22.0.0) until rebased on it
+# 0.5.245 headline (history, kept when 0.6.0 opened): 0.5.245 (OPENED): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
 edition = "2021"
 # MSRV floor is set by the substrate: ciris-verify v5.2.0 requires 1.86
 # (persist v6.0.1 is 1.83). Build with the higher of the two.

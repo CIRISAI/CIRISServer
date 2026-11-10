@@ -19,6 +19,10 @@ const SIGNED_BYTES: &[(&str, &str)] = &[
         "src/mesh_config_surface.rs",
         "reads back rows already typed",
     ),
+    (
+        "src/registry/builds.rs",
+        "a pipeline's signed Contribution and grant, re-opened to check and store",
+    ),
 ];
 
 fn scan(dir: &Path, found: &mut Vec<String>) {

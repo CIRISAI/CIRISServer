@@ -524,9 +524,14 @@ async fn delete_root(State(st): State<TrustRootState>, Path(root): Path<String>)
     }
 }
 
-/// `GET /v1/trust-root/bundle` — the genesis bundle this node runs on, in the
-/// shape the registry serves (`FSD/FINAL_GENESIS.md` §3 item 8):
-/// `{bundle, community, bundle_fingerprint, charter_root_key_id, served_by}`.
+/// `GET /v1/trust-root/bundle` (and the retired `GET /v1/steward-key`, which
+/// serves the same body) — the genesis bundle this node runs on, in the shape
+/// CC 5.3.4 specifies and the registry serves (`FSD/FINAL_GENESIS.md` §3 item 8):
+/// `{bundle, community, bundle_fingerprint, charter_root_key_id, served_by}`,
+/// with `bundle_fingerprint = "sha256:<64 hex>"` over the JCS-canonical
+/// `bundle` and `served_by = {node_key_id, accepts_this_root}` (CIRISServer#830).
+/// Everything outside `bundle` is unsigned convenience metadata; a reader
+/// recomputes the fingerprint and verifies only `bundle`.
 /// The bundle is its own proof (every row is holder-signed and the
 /// authorizations cover the whole), so there is no wrapper signature; a reader
 /// verifies it with `POST /v1/trust-root/import`. `community` is the
@@ -592,7 +597,17 @@ async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
             ),
         );
     }
-    let fingerprint = match crate::mesh_genesis::fingerprint(bundle) {
+    let bundle_json = match serde_json::to_value(bundle) {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "trust_root.bad_bundle",
+                format!("serialize the baked bundle: {e:#}"),
+            )
+        }
+    };
+    let fingerprint = match wire_fingerprint(&bundle_json) {
         Ok(f) => f,
         Err(e) => {
             return err(
@@ -603,13 +618,33 @@ async fn serve_bundle(State(st): State<TrustRootState>) -> Response {
         }
     };
     Json(serde_json::json!({
-        "bundle": bundle,
+        "bundle": bundle_json,
         "community": bundle.community_record(crate::final_genesis::COMMUNITY_KEY_ID),
         "bundle_fingerprint": fingerprint,
         "charter_root_key_id": crate::mesh_genesis::charter_root_key_id(bundle),
-        "served_by": st.node_key_id,
+        // Unsigned, like everything outside `bundle`. `accepts_this_root` is
+        // the operator's un-trust lever; this route serves only while this
+        // node trusts the bundle's root (checked above), so it is `true`
+        // whenever a body is served at all. The field is kept so one consumer
+        // reads one shape from this node and from a registry host (CC 5.3.4).
+        "served_by": {
+            "node_key_id": st.node_key_id,
+            "accepts_this_root": trusted,
+        },
     }))
     .into_response()
+}
+
+/// The wire `bundle_fingerprint` (CC 5.3.4): `"sha256:" + 64 lowercase hex` of
+/// SHA-256 over the JCS-canonical bundle JSON — every byte a consumer receives
+/// in `bundle`, detached signatures and authorizations included. Not
+/// [`crate::mesh_genesis::fingerprint`], which is the ceremony's 16-hex short
+/// handle over the authorization preimage (CIRISServer#830).
+pub fn wire_fingerprint(bundle_json: &serde_json::Value) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = ciris_verify_core::jcs::canonicalize(bundle_json)
+        .map_err(|e| format!("JCS-canonicalize the bundle: {e}"))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }
 
 /// `GET /v1/trust-root/transit-row` — THIS node's signed `transport_destination`
@@ -673,11 +708,17 @@ async fn serve_transit_row(State(st): State<TrustRootState>) -> Response {
 }
 
 /// The PUBLIC trust-root read: the bundle (signed public rows, served to any
-/// peer or client — the registry serves the same shape) and, from a seated
+/// peer or client — the registry serves the same shape, at the same two
+/// paths) and, from a seated
 /// canonical, its transit row for the amend.
 pub fn public_router(engine: Arc<Engine>, node_key_id: String) -> Router {
     Router::new()
         .route("/v1/trust-root/bundle", axum::routing::get(serve_bundle))
+        // The retired registry path (CIRISRegistry#133): a consumer still
+        // pinned to it receives the portable root, never a node's own key.
+        // The registry served both paths with one body; a canonical that takes
+        // over a registry host's name must too.
+        .route("/v1/steward-key", axum::routing::get(serve_bundle))
         .route(
             "/v1/trust-root/transit-row",
             axum::routing::get(serve_transit_row),
