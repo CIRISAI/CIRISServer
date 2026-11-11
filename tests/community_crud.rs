@@ -1322,6 +1322,116 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     assert_eq!(reason(&v), "community.last_founder", "{s}: {v}");
 }
 
+/// One message of `room`'s transcript, as `n` reads it.
+async fn message_in(n: &Node, room: &str, id: &str) -> Value {
+    let (s, v) = get(n, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "{v}");
+    v["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["attestation_id"] == id)
+        .cloned()
+        .expect("the message is listed")
+}
+
+/// **A room's moderators flag and clear its items over the owner API**
+/// (CC 4.5.5). Alice founded the room, Bob is her appointed moderator, Carol is
+/// a plain member. Carol cannot flag; Bob's flag is signed by Bob's own pen, so
+/// the read side believes it and withholds the message from every member until
+/// they reveal it; Bob's clear lifts it; Alice, a founder, moderates zero-hop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_moderator_flags_and_clears_a_rooms_message_over_the_api() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "moderated chat", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "something contested" }),
+    )
+    .await;
+    assert_eq!(s, 200, "Carol posts: {v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+
+    // Carol holds no duty: refused, and nothing changes.
+    let (s, v) = post(c, &item("flag"), json!({})).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_moderator"), "{v}");
+    assert!(message_in(a, &room, &id).await.get("moderation").is_none());
+
+    // Bob: an unknown class, and a clear with nothing to clear.
+    let (s, v) = post(b, &item("flag"), json!({ "class": "bogus" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_class"), "{v}");
+    let (s, v) = post(b, &item("clear"), json!({})).await;
+    assert_eq!((s, reason(&v)), (409, "moderation.nothing_to_clear"), "{v}");
+    let (s, v) = post(b, &item("takedown"), json!({})).await;
+    assert_eq!((s, reason(&v)), (404, "moderation.unknown_action"), "{v}");
+
+    // Bob flags it.
+    let (s, v) = post(b, &item("flag"), json!({ "class": "reported" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["flag"], "reported", "{v}");
+    assert_eq!(
+        v["moderation"]["flagged_by"],
+        b.owner.key_id.as_str(),
+        "{v}"
+    );
+    let decision = v["decision_attestation_id"]
+        .as_str()
+        .expect("signed")
+        .to_owned();
+    // Every member reads it withheld, Carol (its author) included.
+    for n in [a, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["moderation"]["withheld"], true, "{m}");
+        assert_eq!(
+            m["moderation"]["flag_attestation_id"],
+            decision.as_str(),
+            "{m}"
+        );
+        assert!(m.get("body").is_none(), "the body is withheld: {m}");
+        assert_eq!(m["unopened_reason"], "withheld_by_moderation", "{m}");
+    }
+    // Flagging it again the same way signs nothing new.
+    let (s, v) = post(b, &item("flag"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v.get("decision_attestation_id").is_none(), "{v}");
+
+    // Alice chooses to see it; Carol still reads it withheld.
+    let (s, v) = post(a, &item("reveal"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        message_in(a, &room, &id).await["body"],
+        "something contested"
+    );
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+
+    // Bob clears it: the history stays, the flag does not.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(b, &item("clear"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["moderation"]["flag"].is_null(), "cleared: {v}");
+    let m = message_in(c, &room, &id).await;
+    assert_eq!(m["moderation"]["withheld"], false, "{m}");
+    assert_eq!(m["body"], "something contested", "{m}");
+
+    // Alice, a founder, moderates zero-hop.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("flag"), json!({ "class": "infohazard" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["flag"], "infohazard", "{v}");
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+}
+
 // ─── 6. Roles, leaving, the last founder ────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

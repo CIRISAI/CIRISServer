@@ -6402,7 +6402,8 @@ pub fn router_with_driver(
         )
         // The room's moderation of one item — a message or a room file — by
         // its attestation id (CC 4.5.5; `room_moderation`). `{action}` is
-        // `reveal`: the viewer's own consent to see what a moderator flagged.
+        // `reveal` (the viewer's own consent to see what a moderator flagged),
+        // or `flag` / `clear` (a `moderate` holder's decision for the room).
         .route(
             "/v1/chat/{community_id}/items/{attestation_id}/{action}",
             axum::routing::post(moderate_item),
@@ -6414,18 +6415,202 @@ pub fn router_with_driver(
     (router, PairRoomDriver(state))
 }
 
-/// `POST /v1/chat/{room}/items/{id}/reveal` — **the viewer chooses to see
-/// what a moderator withheld.** `{id}` is the flagged item — a message or a
-/// room file; a message's `moderation.item_attestation_id` names it when the
-/// flag sits on an earlier version. The consent is the viewer's own signed act,
-/// kept on their devices ([`crate::room_moderation::reveal`]), so a delegate
-/// cannot give it for them. Answers the item's moderation as it now stands.
+/// `flag` / `clear` on one item, once [`moderate_item`] found it in the room
+/// and read its moderation as it stands (`view`).
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+async fn moderator_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    action: &str,
+    body: &[u8],
+    view: Option<crate::room_moderation::ModerationView>,
+) -> Response {
+    use crate::safety::infohazard::ContentFlag;
+    let req: FlagItemRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        FlagItemRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"class\"?: \"reported\"|\"infohazard\"}}: {e}"),
+                )
+            }
+        }
+    };
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    // THE DUTY, as the read side will judge the row: the attester must hold
+    // `moderate` in this room.
+    let dir = st.engine.federation_directory();
+    match ciris_persist::federation::admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        ciris_persist::federation::admission::DELEGATION_SCOPE_MODERATE,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.not_a_moderator",
+                "only someone who moderates this room may flag or clear what is in it",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator: {e}"),
+            )
+        }
+    }
+    let live = view.as_ref().and_then(|v| v.flag);
+    let (class, target, withdrawn) = if action == "flag" {
+        let class = match req.class.as_deref().map(str::trim) {
+            None | Some("") => ContentFlag::Reported,
+            Some(t) => match ContentFlag::from_token(t) {
+                Some(c) => c,
+                None => {
+                    return refuse(
+                        StatusCode::BAD_REQUEST,
+                        "moderation.unknown_class",
+                        "an item is flagged as reported or infohazard",
+                    )
+                }
+            },
+        };
+        if live == Some(class.as_str()) {
+            // Already flagged so: nothing new to sign.
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "attestation_id": attestation_id, "moderation": view })),
+            )
+                .into_response();
+        }
+        (class, attestation_id.to_owned(), false)
+    } else {
+        let Some(c) = live.and_then(ContentFlag::from_token) else {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_clear",
+                "no moderator of this room has flagged that item, so there is nothing to clear",
+            );
+        };
+        // Clear what the flag names: an earlier version of a message, if that
+        // is where it sits.
+        let target = view.as_ref().map_or_else(
+            || attestation_id.to_owned(),
+            |v| v.item_attestation_id.clone(),
+        );
+        (c, target, true)
+    };
+    let mut envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION): format!("content_class:{}:v1", class.as_str()),
+        "content_class": class.as_str(),
+        "community_id": community_id,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): target,
+    });
+    if withdrawn {
+        envelope["withdrawn"] = serde_json::Value::Bool(true);
+    }
+    let spec = crate::attest::Spec::new(
+        attestation_type::SCORES,
+        // FEDERATION, not COMMUNITY: persist's community door refuses a row
+        // naming a party other than its producer (AV-84). The read side finds
+        // the room by `community_id`, not by the tier.
+        cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about_all(author, &[author.to_owned()]);
+    let decision_id = match crate::attest::emit(
+        &st.engine,
+        crate::attest::KeySigner::Local(signer),
+        spec,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.flag_failed",
+                format!("sign and record the moderator's decision: {e:#}"),
+            )
+        }
+    };
+    tracing::info!(
+        room = community_id,
+        item = attestation_id,
+        action,
+        class = class.as_str(),
+        "moderation: a moderator's decision recorded"
+    );
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut crate::room_moderation::DutyCache::default(),
+        community_id,
+        attestation_id,
+        author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "decision_attestation_id": decision_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
+}
+
+/// The body of `POST …/items/{id}/flag`: which class. Optional; `reported`
+/// when absent. `clear` takes no body (it clears the live flag's class).
+#[derive(Debug, Default, Deserialize)]
+struct FlagItemRequest {
+    #[serde(default)]
+    class: Option<String>,
+}
+
+/// `POST /v1/chat/{room}/items/{id}/{reveal|flag|clear}`.
+///
+/// **`reveal`: the viewer chooses to see what a moderator withheld.** `{id}`
+/// is the flagged item — a message or a room file; a message's
+/// `moderation.item_attestation_id` names it when the flag sits on an earlier
+/// version. The consent is the viewer's own signed act, kept on their devices
+/// ([`crate::room_moderation::reveal`]), so a delegate cannot give it for them.
+///
+/// **`flag` / `clear`: a moderator's decision for the room** (CC 4.5.5). The
+/// `content_class:{class}` row is signed by the person's own pen — never the
+/// node's — because the read side believes a flag only when its attester
+/// `is_named_moderator(attester, room, moderate)`. The same predicate is
+/// checked here first, so a non-holder is refused rather than writing a row
+/// every reader would ignore. A flag withholds the body or bytes from every
+/// member until they reveal it; `clear` lifts it and keeps the history.
+///
+/// Every action answers the item's moderation as it now stands.
 async fn moderate_item(
     State(st): State<ChatState>,
     headers: HeaderMap,
     Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if action != "reveal" {
+    if !matches!(action.as_str(), "reveal" | "flag" | "clear") {
         return refuse(
             StatusCode::NOT_FOUND,
             "moderation.unknown_action",
@@ -6436,11 +6621,22 @@ async fn moderate_item(
         Ok(o) => o,
         Err(r) => return r,
     };
-    if let Some(resp) = require_verb(
-        &owner,
-        crate::auth::gate::CapabilityVerb::ChatAuthor,
-        "moderation.delegate_may_not_reveal",
-    ) {
+    // A delegate session acts for nobody here: revealing is the viewer's own
+    // consent, and a moderator's decision is the moderator's own signature.
+    let delegate_refused = if action == "reveal" {
+        require_verb(
+            &owner,
+            crate::auth::gate::CapabilityVerb::ChatAuthor,
+            "moderation.delegate_may_not_reveal",
+        )
+    } else {
+        require_verb(
+            &owner,
+            crate::auth::gate::CapabilityVerb::ChatAuthor,
+            "moderation.delegate_may_not_moderate",
+        )
+    };
+    if let Some(resp) = delegate_refused {
         return resp;
     }
     if let Err(r) = require_member(&st, &owner, &community_id).await {
@@ -6497,6 +6693,20 @@ async fn moderate_item(
             )
         }
     };
+    if action != "reveal" {
+        return moderator_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            &action,
+            &body,
+            view,
+        )
+        .await;
+    }
     let class = match view.as_ref().and_then(|v| v.flag) {
         Some(c) => c,
         None => {

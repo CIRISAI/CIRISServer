@@ -754,6 +754,13 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "call.session_absent",
     "call.socket_already_open",
     "call.share_unavailable",
+    # ROOM MODERATION (0.5.246): a moderator flags and clears a room's message or
+    # file over the owner API (POST /v1/chat/{room}/items/{id}/flag|clear). Queued
+    # for the client bundle with their English.
+    "moderation.flag_failed",
+    "moderation.not_a_moderator",
+    "moderation.nothing_to_clear",
+    "moderation.unknown_class",
     # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
     # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
     # languages; the floor in pyproject.toml is 0.5.239.

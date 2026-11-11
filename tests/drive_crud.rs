@@ -2181,7 +2181,6 @@ async fn a_family_files_chunks_are_served_under_the_family() {
 /// out of the room while the flag stands (CC 4.5.5, `room_moderation`).
 #[tokio::test]
 async fn a_flagged_room_file_is_withheld_and_stays_in_the_room() {
-    use ciris_persist::federation::types::{attestation_type, cohort_scope};
     let fx = fixture().await;
     let community = fx.owners_community("flagged", &[]).await;
     let id = fx
@@ -2197,29 +2196,17 @@ async fn a_flagged_room_file_is_withheld_and_stays_in_the_room() {
     let id = v["attestation_id"].as_str().unwrap().to_owned();
     let in_room = format!("cohort=community&room_id={community}");
 
-    // The owner founded the room, so they hold `moderate` zero-hop.
+    // The owner founded the room, so they hold `moderate` zero-hop, and flag
+    // the file over the owner API: signed by their own pen.
     let owner = fx.owner_id.signer().await;
-    ciris_server::attest::emit(
-        &fx.engine,
-        ciris_server::attest::KeySigner::Local(&owner),
-        ciris_server::attest::Spec::new(
-            attestation_type::SCORES,
-            // FEDERATION until persist's duty-family carve-out (AV-84).
-            cohort_scope::FEDERATION,
-            serde_json::json!({
-                "dimension": "content_class:infohazard:v1",
-                "content_class": "infohazard",
-                "community_id": community,
-                "references_attestation_id": id,
-            }),
+    let (s, v) = fx
+        .post(
+            &format!("/v1/chat/{community}/items/{id}/flag"),
+            serde_json::json!({ "class": "infohazard" }),
         )
-        .about_all(
-            &fx.owner_id.key_id,
-            std::slice::from_ref(&fx.owner_id.key_id),
-        ),
-    )
-    .await
-    .expect("a moderator's flag is admitted");
+        .await;
+    assert_eq!(s, 200, "a moderator's flag is admitted: {v}");
+    assert_eq!(v["moderation"]["flag"], "infohazard", "{v}");
 
     let (s, drive) = fx.get(&format!("/v1/drive?{in_room}")).await;
     assert_eq!(s, 200, "{drive}");
@@ -2266,4 +2253,24 @@ async fn a_flagged_room_file_is_withheld_and_stays_in_the_room() {
     .await
     .expect("reveal");
     assert_eq!(fx.read_bytes(&id, &in_room).await, b"contested bytes");
+
+    // The moderator clears it: listed with its history, flagged no longer.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = fx
+        .post(
+            &format!("/v1/chat/{community}/items/{id}/clear"),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (_, drive) = fx.get(&format!("/v1/drive?{in_room}")).await;
+    let entry = drive["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["attestation_id"] == id.as_str())
+        .cloned()
+        .expect("listed");
+    assert!(entry["moderation"]["flag"].is_null(), "cleared: {entry}");
+    assert_eq!(entry["moderation"]["withheld"], false, "{entry}");
 }
