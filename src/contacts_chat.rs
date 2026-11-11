@@ -861,6 +861,7 @@ fn transcript_pending(
         edits: None,
         attachment: None,
         moderation: None,
+        takedown: None,
         // A system note is no one's words: nothing to revise.
         viewer_ops: Vec::new(),
         body: Some(note.to_string()),
@@ -4389,7 +4390,13 @@ pub const UNOPENED_REASONS: &[&str] = &[
     "not_text",
     "substrate",
     UNOPENED_WITHHELD,
+    UNOPENED_TAKEN_DOWN,
 ];
+
+/// A message whose body a moderator of the room took down (CC 4.5.3;
+/// [`crate::room_takedown`]). The server's word: the bytes are withheld by
+/// every holder and nothing reveals them; the row stays.
+const UNOPENED_TAKEN_DOWN: &str = "taken_down";
 
 /// A message a moderator of the room flagged, withheld until the viewer
 /// reveals it ([`crate::room_moderation`]). The server's word, not edge's: the
@@ -4459,6 +4466,12 @@ struct ChatMessage {
     /// `POST /v1/chat/{room}/items/{id}/reveal` is the viewer's consent to see it.
     #[serde(skip_serializing_if = "Option::is_none")]
     moderation: Option<crate::room_moderation::ModerationView>,
+    /// **What the room did to this message's body** (CC 4.5.3): present once
+    /// a moderator took it down. While `withheld`, `body` and `attachment` are
+    /// absent and `unopened_reason` is `taken_down`; nothing reveals it, and an
+    /// appeal (`…/items/{id}/reconsider`) names its notice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    takedown: Option<crate::room_takedown::TakedownView>,
     /// **What THIS viewer may do to THIS row**: any of `supersede`, `withdraw`,
     /// `recant`, as the node judges it. Only the author, only while the row is
     /// live, and never a delegate (authoring is never delegable). Always
@@ -5198,6 +5211,7 @@ async fn collect_messages(
     // query: this is the same list the transcript is anchored on.
     let mut duty_cache: HashMap<String, Vec<&'static str>> = HashMap::new();
     let mut moderation_duties = crate::room_moderation::DutyCache::default();
+    let mut takedown_notices = crate::room_takedown::NoticeCache::default();
     let roles: HashMap<&str, Option<String>> = members
         .iter()
         .map(|m| (m.key_id.as_str(), m.role.clone()))
@@ -5366,6 +5380,38 @@ async fn collect_messages(
             }
             _ => (body, unopened_reason, unopened_detail),
         };
+        // THE ROOM'S TAKEDOWN of the body's bytes (CC 4.5.3): withheld by
+        // every holder, no reveal. Checked after the flag: a takedown is the
+        // stronger act and names itself.
+        let takedown = match crate::room_takedown::content_sha_of(row, community_id) {
+            Some(sha) => crate::room_takedown::view_of(
+                &st.engine,
+                &mut takedown_notices,
+                community_id,
+                &opened.author_key_id,
+                &sha,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "chat: the room's takedowns could not be read");
+                None
+            }),
+            None => None,
+        };
+        let (body, unopened_reason, unopened_detail) = match &takedown {
+            Some(t) if t.withheld => {
+                attachment = None;
+                (
+                    None,
+                    Some(UNOPENED_TAKEN_DOWN),
+                    Some(format!(
+                        "a moderator of this room took it down under {}",
+                        t.legal_basis
+                    )),
+                )
+            }
+            _ => (body, unopened_reason, unopened_detail),
+        };
         out.push(ChatMessage {
             attestation_id: row.attestation_id.clone(),
             attesting_key_id: row.attesting_key_id.clone(),
@@ -5386,6 +5432,7 @@ async fn collect_messages(
             edits,
             attachment,
             moderation,
+            takedown,
             viewer_ops,
             body,
             unopened_reason,
@@ -6415,6 +6462,418 @@ pub fn router_with_driver(
     (router, PairRoomDriver(state))
 }
 
+/// The body of `POST …/items/{id}/takedown`.
+#[derive(Debug, Default, Deserialize)]
+struct TakedownRequest {
+    /// Why, in the moderator's words (the notice's `claim_text`). Required.
+    #[serde(default)]
+    reason: Option<String>,
+    /// ISO 3166 code the room's standards are filed under; `ZZ` when absent.
+    #[serde(default)]
+    jurisdiction: Option<String>,
+}
+
+/// `takedown` on one item (CC 4.5.3, `community_standards`): **the room
+/// removes its bytes.** Every holder stops serving them at once, with no
+/// reveal, and deletes them when the 30-day window closes; the row stays. The
+/// notice is the moderator's own signature; persist admits it only from a
+/// `takedown` holder of the room (or the item's author). Other members' nodes
+/// apply it as it reaches them ([`crate::room_takedown::sweep`]).
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+async fn takedown_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    content_sha: Option<&str>,
+    body: &[u8],
+    existing: Option<crate::room_takedown::TakedownView>,
+) -> Response {
+    use ciris_persist::federation::admission;
+    let req: TakedownRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        TakedownRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"reason\", \"jurisdiction\"?}}: {e}"),
+                )
+            }
+        }
+    };
+    let Some(sha) = content_sha else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "moderation.nothing_to_take_down",
+            "that item carries no separate content to take down",
+        );
+    };
+    if let Some(t) = existing.filter(|t| t.withheld) {
+        // Already down: nothing new to sign.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "attestation_id": attestation_id, "takedown": t })),
+        )
+            .into_response();
+    }
+    let reason = req.reason.as_deref().map(str::trim).unwrap_or_default();
+    if reason.is_empty() {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "moderation.takedown_needs_reason",
+            "a takedown says why, in the moderator's own words",
+        );
+    }
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    let dir = st.engine.federation_directory();
+    let holds = match admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        admission::DELEGATION_SCOPE_TAKEDOWN,
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator(takedown): {e}"),
+            )
+        }
+    };
+    if !holds && signer.key_id() != author {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "moderation.not_a_moderator",
+            "only someone who moderates this room may flag or clear what is in it",
+        );
+    }
+    let jurisdiction = req
+        .jurisdiction
+        .as_deref()
+        .map(str::trim)
+        .filter(|j| !j.is_empty())
+        .unwrap_or(crate::room_takedown::DEFAULT_JURISDICTION);
+    let notice_id = match crate::room_takedown::take_down(
+        &st.engine,
+        signer,
+        community_id,
+        attestation_id,
+        author,
+        sha,
+        reason,
+        jurisdiction,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.takedown_failed",
+                format!("sign and apply the takedown: {e}"),
+            )
+        }
+    };
+    crate::compose::kick_replication("a room takedown");
+    let takedown = crate::room_takedown::view_of(
+        &st.engine,
+        &mut crate::room_takedown::NoticeCache::default(),
+        community_id,
+        author,
+        sha,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "notice_attestation_id": notice_id,
+            "takedown": takedown,
+        })),
+    )
+        .into_response()
+}
+
+/// The grounds CC 3.3 allows a `reconsideration:{grounds}` filing.
+const RECONSIDERATION_GROUNDS: [&str; 3] =
+    ["new_evidence", "procedural_error", "quorum_compromise"];
+/// The outcomes CC 3.3 allows a review holder's ruling.
+const RECONSIDERATION_OUTCOMES: [&str; 3] = ["upheld", "partial", "reversed"];
+
+/// The body of `POST …/items/{id}/reconsider` or `…/rule`.
+#[derive(Debug, Default, Deserialize)]
+struct AppealRequest {
+    #[serde(default)]
+    grounds: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+}
+
+/// `reconsider` / `rule` on one item's flag (CC 4.5.5): **the appeal.**
+///
+/// A filing (`reconsider {grounds}`) is the flagged item's author's — the
+/// subject of the flag — or a `review` holder's. A ruling (`rule {outcome}`)
+/// is a `review` holder's only. Both are `reconsideration:{grounds}` rows
+/// naming the FLAG row, signed by the person's own pen; persist admits them by
+/// the same rule, and [`crate::room_moderation::view_of`] folds them: a
+/// ruling `reversed` lifts the flag for everyone.
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+#[allow(clippy::too_many_lines)] // the two acts' gates, in order, in one place
+async fn appeal_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    action: &str,
+    body: &[u8],
+    view: Option<crate::room_moderation::ModerationView>,
+    takedown: Option<crate::room_takedown::TakedownView>,
+) -> Response {
+    use ciris_persist::federation::admission;
+    let req: AppealRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        AppealRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"grounds\"}} or {{\"outcome\"}}: {e}"),
+                )
+            }
+        }
+    };
+    // WHAT is appealed: a takedown of the item's bytes when there is one
+    // (its notice row, at `community` scope naming the room — where persist's
+    // reversal looks), else the room's flag (its flag row, as the flag is
+    // placed). `live`: still in force, so a filing is open to it.
+    let (target_id, live, filing, scope) =
+        match (&takedown, view.as_ref()) {
+            (Some(t), _) => (
+                t.notice_attestation_id.clone(),
+                t.appeal != Some(crate::room_takedown::Appeal::Reversed),
+                t.appeal_attestation_id.clone(),
+                cohort_scope::COMMUNITY,
+            ),
+            (None, Some(v)) => (
+                v.flag_attestation_id.clone(),
+                v.flag.is_some(),
+                v.reconsideration_attestation_id.clone(),
+                // FEDERATION, as the flag it answers (AV-84).
+                cohort_scope::FEDERATION,
+            ),
+            (None, None) => return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_appeal",
+                "no moderator of this room has flagged that item, so there is nothing to appeal",
+            ),
+        };
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    let dir = st.engine.federation_directory();
+    let reviewer = match admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        admission::DELEGATION_SCOPE_REVIEW,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator(review): {e}"),
+            )
+        }
+    };
+    let (grounds, outcome) = if action == "reconsider" {
+        if !live {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_appeal",
+                "no moderator of this room has flagged that item, so there is nothing to appeal",
+            );
+        }
+        if signer.key_id() != author && !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.no_standing",
+                "only the person whose item was flagged, or a reviewer of this room, may appeal it",
+            );
+        }
+        let grounds = req.grounds.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_GROUNDS.contains(&grounds) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_grounds",
+                "an appeal gives new_evidence, procedural_error or quorum_compromise as its grounds",
+            );
+        }
+        (grounds.to_owned(), None)
+    } else {
+        if !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.not_a_reviewer",
+                "only someone who reviews this room's moderation may rule on an appeal",
+            );
+        }
+        let outcome = req.outcome.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_OUTCOMES.contains(&outcome) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_outcome",
+                "a ruling is upheld, partial or reversed",
+            );
+        }
+        // A ruling answers a filing, under the filing's grounds.
+        let Some(filing_id) = filing.as_deref() else {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_rule",
+                "nobody has appealed that item's flag, so there is nothing to rule on",
+            );
+        };
+        let grounds = match dir.get_attestation(filing_id).await {
+            Ok(Some(row)) => row
+                .attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|d| d.strip_prefix(admission::RECONSIDERATION_DIMENSION_PREFIX))
+                .and_then(|t| t.split(':').next())
+                .filter(|g| RECONSIDERATION_GROUNDS.contains(g))
+                .unwrap_or("new_evidence")
+                .to_owned(),
+            Ok(None) => "new_evidence".to_owned(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("read the appeal {filing_id}: {e}"),
+                )
+            }
+        };
+        (grounds, Some(outcome.to_owned()))
+    };
+    let mut envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION):
+            format!("{}{grounds}:v1", admission::RECONSIDERATION_DIMENSION_PREFIX),
+        "community_id": community_id,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): target_id,
+    });
+    if let Some(o) = &outcome {
+        envelope[admission::RECONSIDERATION_OUTCOME_MEMBER] = serde_json::json!(o);
+    }
+    let spec = crate::attest::Spec::new(attestation_type::SCORES, scope, envelope);
+    // A flag's appeal is about the flagged author, as the flag is. A
+    // takedown's sits in the room at `community` scope, where a row naming a
+    // party other than its producer is refused (AV-84): it is about its signer.
+    let spec = if scope == cohort_scope::COMMUNITY {
+        spec.about(signer.key_id())
+    } else {
+        spec.about_all(author, &[author.to_owned()])
+    };
+    let appeal_id = match crate::attest::emit(
+        &st.engine,
+        crate::attest::KeySigner::Local(signer),
+        spec,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.appeal_failed",
+                format!("sign and record the appeal: {e:#}"),
+            )
+        }
+    };
+    tracing::info!(
+        room = community_id,
+        item = attestation_id,
+        action,
+        grounds,
+        outcome = outcome.as_deref().unwrap_or(""),
+        of_takedown = takedown.is_some(),
+        "moderation: an appeal recorded"
+    );
+    let takedown = match &takedown {
+        Some(t) => {
+            let sha = st
+                .engine
+                .federation_directory()
+                .get_attestation(&t.notice_attestation_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|r| {
+                    r.attestation_envelope
+                        .get("content_sha256")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            match sha {
+                Some(sha) => crate::room_takedown::view_of(
+                    &st.engine,
+                    &mut crate::room_takedown::NoticeCache::default(),
+                    community_id,
+                    author,
+                    &sha,
+                )
+                .await
+                .ok()
+                .flatten(),
+                None => None,
+            }
+        }
+        None => None,
+    };
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut crate::room_moderation::DutyCache::default(),
+        community_id,
+        attestation_id,
+        author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "appeal_attestation_id": appeal_id,
+            "moderation": view,
+            "takedown": takedown,
+        })),
+    )
+        .into_response()
+}
+
 /// `flag` / `clear` on one item, once [`moderate_item`] found it in the room
 /// and read its moderation as it stands (`view`).
 #[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
@@ -6610,7 +7069,10 @@ async fn moderate_item(
     Path((community_id, attestation_id, action)): Path<(String, String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !matches!(action.as_str(), "reveal" | "flag" | "clear") {
+    if !matches!(
+        action.as_str(),
+        "reveal" | "flag" | "clear" | "reconsider" | "rule" | "takedown"
+    ) {
         return refuse(
             StatusCode::NOT_FOUND,
             "moderation.unknown_action",
@@ -6646,7 +7108,7 @@ async fn moderate_item(
     // room) or a file (`files::belongs_to`). Its author is whom the room's
     // moderation rows are about.
     let room = ciris_edge::scope_room::ScopeRoom::community(&community_id);
-    let author = match st
+    let (author, content_sha) = match st
         .engine
         .federation_directory()
         .get_attestation(&attestation_id)
@@ -6656,7 +7118,8 @@ async fn moderate_item(
             if ciris_edge::chat::ChatMessage::from_row(&row, &community_id).is_some()
                 || ciris_edge::files::belongs_to(&room, &row).is_some() =>
         {
-            row.attesting_key_id
+            let sha = crate::room_takedown::content_sha_of(&row, &community_id);
+            (row.attesting_key_id, sha)
         }
         Ok(_) => {
             return refuse(
@@ -6693,6 +7156,57 @@ async fn moderate_item(
             )
         }
     };
+    // What the room did to the item's BYTES, if anything (CC 4.5.3).
+    let takedown = match &content_sha {
+        Some(sha) => match crate::room_takedown::view_of(
+            &st.engine,
+            &mut crate::room_takedown::NoticeCache::default(),
+            &community_id,
+            &author,
+            sha,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("read the room's takedowns of {attestation_id}: {e}"),
+                )
+            }
+        },
+        None => None,
+    };
+    if action == "takedown" {
+        return takedown_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            content_sha.as_deref(),
+            &body,
+            takedown,
+        )
+        .await;
+    }
+    if matches!(action.as_str(), "reconsider" | "rule") {
+        return appeal_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            &action,
+            &body,
+            view,
+            takedown,
+        )
+        .await;
+    }
     if action != "reveal" {
         return moderator_decision(
             &st,

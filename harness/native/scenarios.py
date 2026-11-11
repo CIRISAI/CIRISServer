@@ -278,6 +278,130 @@ ROOM FILE — a file in the pair room reaches the other person (CSD-107 for room
         k: v[0] for k, v in written.items()}}}
 
 
+_TAKEDOWN = r"takedown|purge|reconsideration|room takedowns|withheld|Purged"
+
+
+def room_takedown(mesh: Mesh, args: Any) -> Record:
+    """A room's takedown reaches the OTHER member's node, and so does its appeal
+    (CC 4.5.3, CC 4.5.5; Eric 2026-11-11, 0.5.246). Builds on `chat`, so the
+    pair room is keyed. Bob writes a file and a message into the room; alice
+    (a founder, so she holds `takedown` and `review`) takes both down on HER
+    node. Bob's OWN node, which wrote and holds the bytes, must stop serving
+    them: edge has no purge plane, so the notice row crosses like any signed
+    row and bob's server applies it (`room_takedown::sweep`). Then bob appeals
+    from his node, alice reverses from hers, and the file reads again on bob's."""
+    base = chat(mesh, args)
+    room = base["values"]["ROOM_ID"]
+    a, b = mesh.nodes["alice"], mesh.nodes["bob"]
+    step = Steps(f"""
+ROOM TAKEDOWN — a moderator's takedown and its appeal cross to the other member (CC 4.5.3).
+  builds on: the chat scenario (room {room} keyed, a message crossed).
+  proves:    bob's file and message, taken down on alice's node, are withheld on BOB's node
+             (the author, the holder) with no reveal; bob's appeal reaches alice; alice's
+             reversal reaches bob and the file serves again there.""")
+    step.log.extend(base["steps"])
+    data = os.urandom(64 * 1024)
+    digest = hashlib.sha256(data).hexdigest()
+    got = b.must("POST", "/v1/files", {
+        "cohort": "community", "room_id": room,
+        "bytes_base64": base64.b64encode(data).decode(),
+        "media_type": "application/octet-stream", "filename": "contested.bin",
+    }, timeout=300)
+    att = got["attestation_id"]
+    step("written", attestation_id=att, by="bob")
+    q = f"cohort=community&room_id={room}"
+
+    def reads(n: Node) -> Optional[bool]:
+        st, body = n.api("GET", f"/v1/files/{att}?{q}&raw=1", raw=True, timeout=120)
+        return True if st == 200 and hashlib.sha256(body).hexdigest() == digest else None
+
+    wait_for("bob's file on alice's node", lambda: reads(a), args.arrive_wait, every=3)
+    step("read:alice", proves="the file crossed before the takedown")
+    sent = b.must("POST", f"/v1/chat/{room}/messages", {"body": "contested words"}, timeout=120)
+    msg = sent["attestation_id"]
+
+    def message_on(n: Node) -> Optional[Dict[str, Any]]:
+        st, body = n.api("GET", f"/v1/chat/{room}/messages", timeout=60)
+        if st != 200 or not isinstance(body, dict):
+            return None
+        return next((m for m in body.get("messages", []) if m.get("attestation_id") == msg), None)
+
+    wait_for("bob's message on alice's node",
+             lambda: (m := message_on(a)) and m.get("body") == "contested words" and m or None,
+             args.arrive_wait, every=3)
+    step("message:read:alice")
+
+    # ALICE TAKES BOTH DOWN, on her node.
+    for item in (att, msg):
+        got = a.must("POST", f"/v1/chat/{room}/items/{item}/takedown",
+                     {"reason": "breaks the room's standards"}, timeout=120)
+        step(f"takedown:{item[:12]}", withheld=(got.get("takedown") or {}).get("withheld"),
+             notice=got.get("notice_attestation_id"))
+
+    def entry_on(n: Node) -> Optional[Dict[str, Any]]:
+        st, body = n.api("GET", f"/v1/drive?{q}", timeout=60)
+        if st != 200 or not isinstance(body, dict):
+            return None
+        return next((e for e in body.get("entries", []) if e.get("attestation_id") == att), None)
+
+    def withheld_on_bob() -> Optional[Dict[str, Any]]:
+        e = entry_on(b)
+        if not e or not (e.get("takedown") or {}).get("withheld"):
+            return None
+        st, _ = b.api("GET", f"/v1/files/{att}?{q}&raw=1", raw=True, timeout=60)
+        return e if st != 200 else None
+
+    try:
+        e = wait_for("the takedown applied on BOB's node (his own bytes withheld)",
+                     withheld_on_bob, args.arrive_wait, every=5)
+        step("withheld:bob", bytes=e.get("bytes"), by=(e.get("takedown") or {}).get("taken_down_by"),
+             proves="the notice crossed to the author's node and his server applied it: "
+                    "his own copy of the bytes no longer serves")
+    except MeshError:
+        step.fail("takedown_NOT_on_bob",
+                  "the notice row did not reach bob's node, or his sweep did not apply it "
+                  "(content row or alice's duty not held there yet = takedown_content_unbound / "
+                  "takedown_unauthorised, retried each 30 s tick)",
+                  [a, b], _TAKEDOWN, entry=entry_on(b))
+        raise
+    try:
+        m = wait_for("the message's body taken down on bob's node",
+                     lambda: (m := message_on(b)) and m.get("unopened_reason") == "taken_down"
+                     and m or None, args.arrive_wait, every=5)
+        step("message:withheld:bob", has_body="body" in m)
+    except MeshError:
+        step.fail("message_takedown_NOT_on_bob", "as above, for the message body",
+                  [a, b], _TAKEDOWN, message=message_on(b))
+        raise
+    st, _ = b.api("POST", f"/v1/chat/{room}/items/{att}/reveal", {}, timeout=60)
+    step("reveal:refused", status=st, proves="nothing reveals a takedown")
+
+    # BOB APPEALS from his node; ALICE sees it and reverses from hers.
+    got = b.must("POST", f"/v1/chat/{room}/items/{att}/reconsider",
+                 {"grounds": "new_evidence"}, timeout=120)
+    step("appeal:filed:bob", appeal=(got.get("takedown") or {}).get("appeal"))
+    try:
+        wait_for("bob's appeal on alice's node",
+                 lambda: (e := entry_on(a)) and (e.get("takedown") or {}).get("appeal") == "filed"
+                 and e or None, args.arrive_wait, every=5)
+        step("appeal:seen:alice", proves="the filing crossed to the reviewer's node")
+    except MeshError:
+        step.fail("appeal_NOT_on_alice", "the community-scope filing did not reach alice's node",
+                  [a, b], _TAKEDOWN, entry=entry_on(a))
+        raise
+    got = a.must("POST", f"/v1/chat/{room}/items/{att}/rule", {"outcome": "reversed"}, timeout=120)
+    step("appeal:reversed:alice", withheld=(got.get("takedown") or {}).get("withheld"))
+    try:
+        wait_for("the file serves again on bob's node", lambda: reads(b), args.arrive_wait, every=5)
+        step("restored:bob", proves="the reversal crossed and lifted the withholding inside the window")
+    except MeshError:
+        step.fail("reversal_NOT_on_bob", "the ruling did not reach bob's node, or persist did not "
+                  "lift the tombstone there", [a, b], _TAKEDOWN, entry=entry_on(b))
+        raise
+    return {"verdict": "PASS", "steps": step.log,
+            "values": {**base["values"], "TAKEDOWN_FILE": att, "TAKEDOWN_MESSAGE": msg}}
+
+
 # ── two people peered directly, NO canonical (CIRISServer#808) ──────────────
 
 
@@ -3381,6 +3505,7 @@ def kex_unannounced_canonical(mesh: Mesh, args: Any) -> Record:
 
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "room_file": room_file,
+    "room_takedown": room_takedown,
     "final_genesis": final_genesis,
     "halt": halt,
     "halt_agent": halt_agent,
