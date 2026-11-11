@@ -761,6 +761,16 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "moderation.not_a_moderator",
     "moderation.nothing_to_clear",
     "moderation.unknown_class",
+    # APPEALS (0.5.246): the flagged item's author files, a review holder rules
+    # (POST /v1/chat/{room}/items/{id}/reconsider|rule, CC 4.5.5). Queued for the
+    # client bundle with their English.
+    "moderation.appeal_failed",
+    "moderation.no_standing",
+    "moderation.not_a_reviewer",
+    "moderation.nothing_to_appeal",
+    "moderation.nothing_to_rule",
+    "moderation.unknown_grounds",
+    "moderation.unknown_outcome",
     # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
     # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
     # languages; the floor in pyproject.toml is 0.5.239.

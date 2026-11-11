@@ -6415,6 +6415,224 @@ pub fn router_with_driver(
     (router, PairRoomDriver(state))
 }
 
+/// The grounds CC 3.3 allows a `reconsideration:{grounds}` filing.
+const RECONSIDERATION_GROUNDS: [&str; 3] =
+    ["new_evidence", "procedural_error", "quorum_compromise"];
+/// The outcomes CC 3.3 allows a review holder's ruling.
+const RECONSIDERATION_OUTCOMES: [&str; 3] = ["upheld", "partial", "reversed"];
+
+/// The body of `POST …/items/{id}/reconsider` or `…/rule`.
+#[derive(Debug, Default, Deserialize)]
+struct AppealRequest {
+    #[serde(default)]
+    grounds: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+}
+
+/// `reconsider` / `rule` on one item's flag (CC 4.5.5): **the appeal.**
+///
+/// A filing (`reconsider {grounds}`) is the flagged item's author's — the
+/// subject of the flag — or a `review` holder's. A ruling (`rule {outcome}`)
+/// is a `review` holder's only. Both are `reconsideration:{grounds}` rows
+/// naming the FLAG row, signed by the person's own pen; persist admits them by
+/// the same rule, and [`crate::room_moderation::view_of`] folds them: a
+/// ruling `reversed` lifts the flag for everyone.
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+#[allow(clippy::too_many_lines)] // the two acts' gates, in order, in one place
+async fn appeal_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    action: &str,
+    body: &[u8],
+    view: Option<crate::room_moderation::ModerationView>,
+) -> Response {
+    use ciris_persist::federation::admission;
+    let req: AppealRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        AppealRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"grounds\"}} or {{\"outcome\"}}: {e}"),
+                )
+            }
+        }
+    };
+    // There must be a flag to appeal: the row the filing and ruling name.
+    let Some(v) = view.as_ref() else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "moderation.nothing_to_appeal",
+            "no moderator of this room has flagged that item, so there is nothing to appeal",
+        );
+    };
+    let (target_id, live, filing) = (
+        v.flag_attestation_id.clone(),
+        v.flag.is_some(),
+        v.reconsideration_attestation_id.clone(),
+    );
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    let dir = st.engine.federation_directory();
+    let reviewer = match admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        admission::DELEGATION_SCOPE_REVIEW,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator(review): {e}"),
+            )
+        }
+    };
+    let (grounds, outcome) = if action == "reconsider" {
+        if !live {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_appeal",
+                "no moderator of this room has flagged that item, so there is nothing to appeal",
+            );
+        }
+        if signer.key_id() != author && !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.no_standing",
+                "only the person whose item was flagged, or a reviewer of this room, may appeal it",
+            );
+        }
+        let grounds = req.grounds.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_GROUNDS.contains(&grounds) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_grounds",
+                "an appeal gives new_evidence, procedural_error or quorum_compromise as its grounds",
+            );
+        }
+        (grounds.to_owned(), None)
+    } else {
+        if !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.not_a_reviewer",
+                "only someone who reviews this room's moderation may rule on an appeal",
+            );
+        }
+        let outcome = req.outcome.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_OUTCOMES.contains(&outcome) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_outcome",
+                "a ruling is upheld, partial or reversed",
+            );
+        }
+        // A ruling answers a filing, under the filing's grounds.
+        let Some(filing_id) = filing.as_deref() else {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_rule",
+                "nobody has appealed that item's flag, so there is nothing to rule on",
+            );
+        };
+        let grounds = match dir.get_attestation(filing_id).await {
+            Ok(Some(row)) => row
+                .attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|d| d.strip_prefix(admission::RECONSIDERATION_DIMENSION_PREFIX))
+                .and_then(|t| t.split(':').next())
+                .filter(|g| RECONSIDERATION_GROUNDS.contains(g))
+                .unwrap_or("new_evidence")
+                .to_owned(),
+            Ok(None) => "new_evidence".to_owned(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("read the appeal {filing_id}: {e}"),
+                )
+            }
+        };
+        (grounds, Some(outcome.to_owned()))
+    };
+    let mut envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION):
+            format!("{}{grounds}:v1", admission::RECONSIDERATION_DIMENSION_PREFIX),
+        "community_id": community_id,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): target_id,
+    });
+    if let Some(o) = &outcome {
+        envelope[admission::RECONSIDERATION_OUTCOME_MEMBER] = serde_json::json!(o);
+    }
+    let spec = crate::attest::Spec::new(
+        attestation_type::SCORES,
+        // FEDERATION, as the flag it answers (AV-84).
+        cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about_all(author, &[author.to_owned()]);
+    let appeal_id = match crate::attest::emit(
+        &st.engine,
+        crate::attest::KeySigner::Local(signer),
+        spec,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.appeal_failed",
+                format!("sign and record the appeal: {e:#}"),
+            )
+        }
+    };
+    tracing::info!(
+        room = community_id,
+        item = attestation_id,
+        action,
+        grounds,
+        outcome = outcome.as_deref().unwrap_or(""),
+        "moderation: an appeal recorded"
+    );
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut crate::room_moderation::DutyCache::default(),
+        community_id,
+        attestation_id,
+        author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "appeal_attestation_id": appeal_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
+}
+
 /// `flag` / `clear` on one item, once [`moderate_item`] found it in the room
 /// and read its moderation as it stands (`view`).
 #[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
@@ -6610,7 +6828,10 @@ async fn moderate_item(
     Path((community_id, attestation_id, action)): Path<(String, String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !matches!(action.as_str(), "reveal" | "flag" | "clear") {
+    if !matches!(
+        action.as_str(),
+        "reveal" | "flag" | "clear" | "reconsider" | "rule"
+    ) {
         return refuse(
             StatusCode::NOT_FOUND,
             "moderation.unknown_action",
@@ -6693,6 +6914,20 @@ async fn moderate_item(
             )
         }
     };
+    if matches!(action.as_str(), "reconsider" | "rule") {
+        return appeal_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            &action,
+            &body,
+            view,
+        )
+        .await;
+    }
     if action != "reveal" {
         return moderator_decision(
             &st,

@@ -858,8 +858,10 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// queue's `decisions.*`, net of the two client 0.5.239 paid — same reason,
     /// same list. 35 -> 39: the room moderator's flag and clear,
     /// `moderation.{flag_failed,not_a_moderator,nothing_to_clear,unknown_class}`
-    /// — same reason, same list, queued with their English.
-    const MAX_UNCOVERED: usize = 39;
+    /// — same reason, same list, queued with their English. 39 -> 46: the
+    /// appeal routes' `moderation.{appeal_failed,no_standing,not_a_reviewer,
+    /// nothing_to_appeal,nothing_to_rule,unknown_grounds,unknown_outcome}`.
+    const MAX_UNCOVERED: usize = 46;
 
     let en = load_en();
     let ids = scraped_server_ids();

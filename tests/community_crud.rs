@@ -1367,7 +1367,7 @@ async fn a_moderator_flags_and_clears_a_rooms_message_over_the_api() {
     assert_eq!((s, reason(&v)), (400, "moderation.unknown_class"), "{v}");
     let (s, v) = post(b, &item("clear"), json!({})).await;
     assert_eq!((s, reason(&v)), (409, "moderation.nothing_to_clear"), "{v}");
-    let (s, v) = post(b, &item("takedown"), json!({})).await;
+    let (s, v) = post(b, &item("delete"), json!({})).await;
     assert_eq!((s, reason(&v)), (404, "moderation.unknown_action"), "{v}");
 
     // Bob flags it.
@@ -1429,6 +1429,106 @@ async fn a_moderator_flags_and_clears_a_rooms_message_over_the_api() {
     assert_eq!(
         message_in(c, &room, &id).await["moderation"]["withheld"],
         true
+    );
+}
+
+/// **The appeal (CC 4.5.5)**: the flagged item's author files against the
+/// flag, a `review` holder rules, and `reversed` lifts it for everyone. Bob
+/// moderates but does not review; Alice founded the room and holds both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_author_appeals_a_flag_and_a_reviewer_rules() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "appealed", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "contested, appealed" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+
+    // Nothing flagged: nothing to appeal.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (409, "moderation.nothing_to_appeal"),
+        "{v}"
+    );
+
+    let (s, v) = post(b, &item("flag"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Standing and vocabulary.
+    let (s, v) = post(b, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (403, "moderation.no_standing"),
+        "not the author: {v}"
+    );
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "because" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_grounds"), "{v}");
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "upheld" })).await;
+    assert_eq!((s, reason(&v)), (409, "moderation.nothing_to_rule"), "{v}");
+
+    // Carol, the author, files.
+    let (s, v) = post(
+        c,
+        &item("reconsider"),
+        json!({ "grounds": "procedural_error" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "filed", "{v}");
+    assert_eq!(
+        v["moderation"]["reconsideration_attestation_id"], v["appeal_attestation_id"],
+        "{v}"
+    );
+
+    // Bob moderates but does not review; Carol neither.
+    for n in [b, c] {
+        let (s, v) = post(n, &item("rule"), json!({ "outcome": "reversed" })).await;
+        assert_eq!((s, reason(&v)), (403, "moderation.not_a_reviewer"), "{v}");
+    }
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "maybe" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_outcome"), "{v}");
+
+    // Alice upholds: the flag stands.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "upheld" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "upheld", "{v}");
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+
+    // Alice reverses: lifted for every member.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "reversed", "{v}");
+    assert!(v["moderation"]["flag"].is_null(), "{v}");
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["moderation"]["withheld"], false, "{m}");
+        assert_ne!(m["unopened_reason"], "withheld_by_moderation", "{m}");
+    }
+    // The author reads it (another member's body waits on their key grant,
+    // which this shared-store fixture does not drive).
+    assert_eq!(
+        message_in(c, &room, &id).await["body"],
+        "contested, appealed"
+    );
+    // A reversed flag has nothing left to appeal.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (409, "moderation.nothing_to_appeal"),
+        "{v}"
     );
 }
 
