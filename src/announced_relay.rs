@@ -361,6 +361,158 @@ pub async fn announced_relay_sets(engine: &Engine) -> Result<RelaySets, String> 
     })
 }
 
+/// How often every held announced node is re-asked, for what the feed cannot
+/// see: a binding's `expires_at` passing, or its granter's key record or
+/// roster changing, moves the fold's answer without a row (persist #1163).
+pub const RELAY_RECHECK: Duration = Duration::from_secs(15 * 60);
+
+/// One feed page: the persist bound is 1..=500.
+const FEED_PAGE: i64 = 500;
+
+/// The incremental relay: node → owner for every announced node, kept by
+/// applying persist's owner-binding change feed (CIRISPersist#1163) from a
+/// cursor, instead of walking every `user` key each pass (production 2026-11-10:
+/// 4–10 s a pass, every minute, at ~1,450 announced nodes).
+#[derive(Default)]
+struct Feed {
+    /// The engine this feed was read for (one per process in production; a
+    /// test process may build several, and a cursor must never cross them).
+    engine_key: String,
+    cursor: Option<ciris_persist::federation::types::ServePosition>,
+    announced: std::collections::BTreeMap<String, String>,
+    /// Nodes whose fold failed at the read: kept as held, re-asked next pass.
+    unresolved: BTreeSet<String>,
+    /// Owner key → is a `user` key (only a person announces).
+    is_person: std::collections::HashMap<String, bool>,
+    rechecked: Option<std::time::Instant>,
+}
+
+fn feed() -> &'static tokio::sync::Mutex<Feed> {
+    static F: OnceLock<tokio::sync::Mutex<Feed>> = OnceLock::new();
+    F.get_or_init(|| tokio::sync::Mutex::new(Feed::default()))
+}
+
+impl Feed {
+    async fn apply(
+        &mut self,
+        dir: &dyn ciris_persist::federation::FederationDirectory,
+        node: String,
+        state: ciris_persist::federation::types::AnnouncedOwnerState,
+    ) {
+        use ciris_persist::federation::types::AnnouncedOwnerState as S;
+        match state {
+            S::Announced { owner_key_id } => {
+                self.unresolved.remove(&node);
+                let person = match self.is_person.get(&owner_key_id) {
+                    Some(p) => *p,
+                    None => {
+                        let p = dir
+                            .lookup_public_key(&owner_key_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|r| {
+                                identity_type::set_contains(&r.identity_type, identity_type::USER)
+                            });
+                        self.is_person.insert(owner_key_id.clone(), p);
+                        p
+                    }
+                };
+                if person {
+                    self.announced.insert(node, owner_key_id);
+                } else {
+                    self.announced.remove(&node);
+                }
+            }
+            S::NotAnnounced | S::AmbiguousOwner => {
+                self.unresolved.remove(&node);
+                self.announced.remove(&node);
+            }
+            // Keep what is held; re-ask on the next pass.
+            S::Unresolved { .. } => {
+                self.unresolved.insert(node);
+            }
+        }
+    }
+
+    fn sets(&self) -> RelaySets {
+        let owners: BTreeSet<&String> = self.announced.values().collect();
+        RelaySets {
+            announced_nodes: self.announced.keys().cloned().collect(),
+            owners: owners.into_iter().cloned().collect(),
+        }
+    }
+}
+
+/// **The relay sets, kept incrementally** from persist's owner-binding change
+/// feed: the first call reads the feed from its start (one fold per bound
+/// node), every later call only what was admitted since its cursor, and every
+/// [`RELAY_RECHECK`] the held nodes are re-asked for the changes no row marks.
+/// A backend without the feed falls back to [`announced_relay_sets`].
+///
+/// # Errors
+/// The directory could not be read. As for the walk, a partial answer is never
+/// returned: the cursor and the held set move only when a whole read succeeds.
+pub async fn announced_relay_sets_incremental(engine: &Engine) -> Result<RelaySets, String> {
+    use ciris_persist::federation::admission::announced_owner_state;
+    let dir = engine.federation_directory();
+    let mut f = feed().lock().await;
+    let me = engine.local_derived_key_id().await.unwrap_or_default();
+    if f.engine_key != me {
+        *f = Feed {
+            engine_key: me,
+            ..Feed::default()
+        };
+    }
+    // Read every page first; apply only once the whole read succeeded.
+    let mut cursor = f.cursor.clone();
+    let mut items = Vec::new();
+    loop {
+        let page = match dir
+            .list_owner_bindings_since(cursor.clone(), FEED_PAGE)
+            .await
+        {
+            Ok(p) => p,
+            Err(ciris_persist::federation::Error::Unsupported { .. }) => {
+                drop(f);
+                return announced_relay_sets(engine).await;
+            }
+            Err(e) => return Err(format!("list_owner_bindings_since: {e:#}")),
+        };
+        items.extend(page.items);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => {
+                cursor = Some(page.high_water);
+                break;
+            }
+        }
+    }
+    for item in items {
+        f.apply(dir.as_ref(), item.node_key_id, item.state).await;
+    }
+    f.cursor = cursor;
+    let due = f.rechecked.is_none_or(|t| t.elapsed() >= RELAY_RECHECK);
+    let mut ask: BTreeSet<String> = f.unresolved.clone();
+    if due {
+        ask.extend(f.announced.keys().cloned());
+    }
+    for node in ask {
+        match announced_owner_state(dir.as_ref(), &node).await {
+            Ok(state) => f.apply(dir.as_ref(), node, state).await,
+            Err(e) => {
+                tracing::debug!(node = %node, error = %format!("{e:#}"),
+                    "announced relay: a held node's fold failed — kept, re-asked next pass");
+                f.unresolved.insert(node);
+            }
+        }
+    }
+    if due {
+        f.rechecked = Some(std::time::Instant::now());
+    }
+    Ok(f.sets())
+}
+
 /// Could this person have announced? At most two indexed reads.
 async fn may_have_announced(
     dir: &dyn ciris_persist::federation::FederationDirectory,
@@ -424,7 +576,7 @@ pub async fn refresh(engine: &Engine, own_key_ids: &[String], recheck_role: bool
         relaying
     };
     let next: Option<Arc<RelaySets>> = if serves {
-        match announced_relay_sets(engine).await {
+        match announced_relay_sets_incremental(engine).await {
             Ok(sets) => Some(Arc::new(sets)),
             Err(e) => {
                 // Keep the previous snapshot: a read failure is not "nobody

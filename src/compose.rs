@@ -1194,6 +1194,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                  are addressed and served only if an earlier arm succeeded"
             ),
         }
+        // THE ROOM GROUPS, on the Edge the agent built (CIRISEdge#970, edge
+        // v45). `init_edge_runtime` builds an Edge with none, so a call on an
+        // agent-hosted node was refused `Plumbing("join_call needs the room
+        // groups ...")`. Set-once, like the blob plane above.
+        match edge.arm_room_groups(room_groups_for(&cfg.key_id)) {
+            Ok(()) => {
+                tracing::info!("fold: room groups ARMED on the agent's Edge — calls can join")
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "fold: room groups NOT armed on the agent's Edge (already set) — calls use \
+                 the groups an earlier arm installed"
+            ),
+        }
         edge
     } else {
         Arc::new(
@@ -5527,6 +5541,16 @@ async fn shaping_device(
     (device, policy)
 }
 
+/// The room groups a call keys from (CIRISEdge#805 item 5): the same durable MLS
+/// store the chat driver opens for this node. Read only when a call joins.
+fn room_groups_for(key_id: &str) -> Arc<ciris_edge::mls::CohortGroups> {
+    let me = crate::node_key::wire_identity().unwrap_or(key_id);
+    Arc::new(ciris_edge::mls::CohortGroups::new(
+        crate::mls_state::store_for(me),
+        me.to_owned(),
+    ))
+}
+
 async fn build_edge(
     engine: &Arc<Engine>,
     cfg: &ServerConfig,
@@ -5829,12 +5853,7 @@ async fn build_edge(
         // CIRISEdge#805 item 5: the room groups a call keys from (edge's
         // `join_call`). The same durable MLS store the chat driver opens for
         // this node; read only when a call joins.
-        .room_groups(Arc::new(ciris_edge::mls::CohortGroups::new(
-            crate::mls_state::store_for(crate::node_key::wire_identity().unwrap_or(&cfg.key_id)),
-            crate::node_key::wire_identity()
-                .unwrap_or(&cfg.key_id)
-                .to_owned(),
-        )))
+        .room_groups(room_groups_for(&cfg.key_id))
         // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
         // row pointing at bytes this node has asks for them with a
         // `BlobChunkFetch`; without a source wired here edge drops it —

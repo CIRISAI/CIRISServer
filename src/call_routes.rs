@@ -36,6 +36,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use ciris_edge::transport::av_call::{Call, CallError, CallEvent, CallOptions, Frame};
+use ciris_edge::transport::av_chunk_auth::SignedEnd;
 use ciris_edge::transport::realtime_av::{ChunkLayer, ReceiverLayerPolicy};
 use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
@@ -435,7 +436,8 @@ fn leave_reason(q: Option<&str>) -> Option<&'static str> {
 
 /// `DELETE /v1/chat/{room}/call?left=left|backgrounded`. The reason is what the
 /// others are told (CSD-134). On edge v44 it reaches only this node's log and
-/// answer; edge 45.1's `leave_with` carries it to the others' `attendee_left`.
+/// answer; edge v45's `leave_with` signs it into the end of this node's stream,
+/// so the others' `attendee_left` carries it.
 async fn leave(
     State(st): State<CallState>,
     headers: HeaderMap,
@@ -469,7 +471,7 @@ pub async fn leave_room(room: &str, why: &str) -> Option<serde_json::Value> {
     let j = forget(room)?;
     let call = j.call.lock().await.take()?;
     let stream = hex::encode(call.stream().0);
-    let summary = call.leave().await.ok();
+    let summary = call.leave_with(signed_end(why)).await.ok();
     tracing::info!(room, why, "call: left");
     Some(json!({
         "room": room,
@@ -477,6 +479,16 @@ pub async fn leave_room(room: &str, why: &str) -> Option<serde_json::Value> {
         "stream_id": stream,
         "summary": summary.map(|s| format!("{s:?}")),
     }))
+}
+
+/// The signed end a leave carries. `lost` is this node's word for a device
+/// whose socket vanished; the node itself is still here and ends the stream,
+/// so the others are told `left`.
+fn signed_end(why: &str) -> SignedEnd {
+    match why {
+        "backgrounded" => SignedEnd::Backgrounded,
+        _ => SignedEnd::Left,
+    }
 }
 
 fn runtime() -> &'static OnceLock<tokio::runtime::Handle> {
@@ -683,17 +695,71 @@ fn event_json(e: &CallEvent) -> serde_json::Value {
         CallEvent::AttendeeJoined { key_id } | CallEvent::MemberJoined { key_id } => {
             json!({ "type": "attendee_joined", "member": key_id })
         }
+        // The room dropped a member: it is out of the call too.
         CallEvent::MemberLeft { key_id } => {
-            json!({ "type": "attendee_left", "member": key_id, "left": "left" })
+            json!({ "type": "attendee_left", "member": key_id, "left": "removed" })
         }
-        CallEvent::EpochRolled { .. } => {
-            json!({ "type": "epoch_rolled", "detail": format!("{e:?}") })
+        CallEvent::AttendeeLeft {
+            key_id,
+            stream,
+            cause,
+            truncated,
+        } => json!({
+            "type": "attendee_left",
+            "member": key_id,
+            "stream_id": hex::encode(stream.0),
+            "left": cause.token(),
+            "truncated": truncated,
+        }),
+        CallEvent::StreamAdded {
+            publisher,
+            stream,
+            kind,
+        } => json!({
+            "type": "stream_added",
+            "member": publisher,
+            "stream_id": hex::encode(stream.0),
+            // CC rc18: 0 media, 1 share; an unknown value renders as media.
+            "kind": if *kind == 1 { "share" } else { "media" },
+        }),
+        CallEvent::StreamEnded {
+            publisher,
+            stream,
+            cause,
+            truncated,
+        } => json!({
+            "type": "stream_ended",
+            "member": publisher,
+            "stream_id": hex::encode(stream.0),
+            "ended": cause.token(),
+            "truncated": truncated,
+        }),
+        CallEvent::StreamReplaced {
+            publisher,
+            old,
+            new,
+        } => json!({
+            "type": "stream_replaced",
+            "member": publisher,
+            "old_stream_id": hex::encode(old.0),
+            "new_stream_id": hex::encode(new.0),
+        }),
+        CallEvent::VideoUnavailable { publisher, reason } => json!({
+            "type": "video_unavailable",
+            "member": publisher,
+            "reason_id": format!("call.{reason}"),
+        }),
+        CallEvent::VideoRestored { publisher } => {
+            json!({ "type": "video_restored", "member": publisher })
         }
-        CallEvent::LoadTier { .. } => json!({ "type": "tier_changed", "detail": format!("{e:?}") }),
+        CallEvent::EpochRolled { to, .. } => json!({ "type": "epoch_rolled", "epoch": to }),
+        CallEvent::LoadTier { tier } => json!({ "type": "tier_changed", "tier": tier }),
         CallEvent::KeepRefused { .. } => {
             json!({ "type": "keep_refused", "reason_id": "call.keep_refused" })
         }
-        CallEvent::Stranded { .. } => json!({ "type": "stranded", "detail": format!("{e:?}") }),
+        CallEvent::Stranded { epoch, reason } => {
+            json!({ "type": "stranded", "epoch": epoch, "reason": reason })
+        }
         other => json!({ "type": "event", "detail": format!("{other:?}") }),
     }
 }
@@ -796,12 +862,10 @@ async fn pump(
                 stream_id: f.stream.0,
                 epoch: f.epoch.0,
                 chunk_seq: f.chunk_seq.0,
-                // NOT YET WRITTEN: edge v45's received frame gains the signed
-                // `source_ts_ms` and `frame_seq` (Eric, 2026-11-10). Map them
-                // here when the call series lands on release/45.0.0; 0.5.246
-                // does not ship with these zeros.
-                source_ts_ms: 0,
-                frame_seq: None,
+                // Edge v45: the publisher's signed source time (the lip-sync
+                // clock) and, on a framed stream, the per-class frame counter.
+                source_ts_ms: f.source_ts_ms,
+                frame_seq: f.frame_seq,
                 payload: f.bytes,
             };
             if let Ok(bytes) = call_frames::encode_incoming(&incoming) {
@@ -1125,7 +1189,126 @@ mod tests {
         let v = event_json(&CallEvent::MemberLeft { key_id: "k".into() });
         assert_eq!(v["type"], "attendee_left");
         assert_eq!(v["member"], "k");
-        assert_eq!(v["left"], "left");
+        assert_eq!(v["left"], "removed");
         assert!(v.get("name").is_none() && v.get("display_name").is_none());
+    }
+
+    #[test]
+    fn a_leave_carries_its_signed_cause_and_stream() {
+        use ciris_edge::transport::av_call::LeaveCause;
+        use ciris_edge::transport::realtime_av::StreamId;
+        let v = event_json(&CallEvent::AttendeeLeft {
+            key_id: "k".into(),
+            stream: StreamId([7; 32]),
+            cause: LeaveCause::Backgrounded,
+            truncated: false,
+        });
+        assert_eq!(v["type"], "attendee_left");
+        assert_eq!(v["left"], "backgrounded");
+        assert_eq!(v["stream_id"], hex::encode([7u8; 32]));
+        let v = event_json(&CallEvent::StreamAdded {
+            publisher: "k".into(),
+            stream: StreamId([1; 32]),
+            kind: 9,
+        });
+        assert_eq!(v["kind"], "media", "an unknown kind renders as media");
+        let v = event_json(&CallEvent::StreamEnded {
+            publisher: "k".into(),
+            stream: StreamId([1; 32]),
+            cause: LeaveCause::Ended,
+            truncated: true,
+        });
+        assert_eq!(
+            (v["type"].as_str(), v["ended"].as_str()),
+            (Some("stream_ended"), Some("ended"))
+        );
+        assert_eq!(v["truncated"], true);
+    }
+
+    /// Every event the socket builds from an edge `CallEvent` has the same
+    /// keys as its example in the golden vectors the client pins (`person` is
+    /// added later, by `with_person`).
+    #[test]
+    fn socket_events_match_the_golden_vectors() {
+        use ciris_edge::transport::av_call::LeaveCause;
+        use ciris_edge::transport::realtime_av::StreamId;
+        use std::collections::BTreeSet;
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/call_frames_v1.json"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let examples = v["events"]["examples"].as_array().unwrap().clone();
+        let keys = |o: &serde_json::Value| -> BTreeSet<String> {
+            o.as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| *k != "person")
+                .cloned()
+                .collect()
+        };
+        let s = StreamId([1; 32]);
+        let built = [
+            CallEvent::AttendeeJoined { key_id: "k".into() },
+            CallEvent::MemberLeft { key_id: "k".into() },
+            CallEvent::AttendeeLeft {
+                key_id: "k".into(),
+                stream: s,
+                cause: LeaveCause::Left,
+                truncated: false,
+            },
+            CallEvent::StreamAdded {
+                publisher: "k".into(),
+                stream: s,
+                kind: 0,
+            },
+            CallEvent::StreamEnded {
+                publisher: "k".into(),
+                stream: s,
+                cause: LeaveCause::Ended,
+                truncated: false,
+            },
+            CallEvent::StreamReplaced {
+                publisher: "k".into(),
+                old: s,
+                new: StreamId([2; 32]),
+            },
+            CallEvent::EpochRolled { from: 1, to: 2 },
+            CallEvent::LoadTier { tier: 1 },
+            CallEvent::KeepRefused {
+                epoch: 1,
+                reason: "x",
+            },
+            CallEvent::Stranded {
+                epoch: 1,
+                reason: "x".into(),
+            },
+            CallEvent::VideoUnavailable {
+                publisher: "k".into(),
+                reason: "relay_canonical_audio_only",
+            },
+            CallEvent::VideoRestored {
+                publisher: "k".into(),
+            },
+        ];
+        for e in &built {
+            let out = event_json(e);
+            let ty = out["type"].as_str().unwrap();
+            assert!(
+                examples
+                    .iter()
+                    .any(|x| x["type"] == ty && keys(x) == keys(&out)),
+                "{ty}: socket keys {:?} match no vector example",
+                keys(&out)
+            );
+        }
+    }
+
+    #[test]
+    fn only_backgrounded_is_signed_as_backgrounded() {
+        assert_eq!(signed_end("backgrounded"), SignedEnd::Backgrounded);
+        assert_eq!(signed_end("left"), SignedEnd::Left);
+        assert_eq!(signed_end("lost"), SignedEnd::Left);
     }
 }
