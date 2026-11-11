@@ -67,6 +67,42 @@ struct Joined {
     events: StdMutex<Option<tokio::sync::mpsc::Receiver<CallEvent>>>,
     caps: StdMutex<HashMap<String, ReceiverLayerPolicy>>,
     video: bool,
+    /// Whether video and screen share may be published now: the call has at
+    /// most [`VIDEO_MAX_PEOPLE`] people (see [`video_allowed`]).
+    video_ok: std::sync::atomic::AtomicBool,
+}
+
+/// **Video only between two people, on edge v45.0.0** (Eric, 2026-11-10: "Yes
+/// enforce it, above 2 drop to audio only"). v45.0.0 has no keyframe request
+/// and fans a keyframe out unpaced to every receiver, so room video freezes
+/// under ordinary loss; a two-person call has no fan-out. Audio is allowed at
+/// any size. Counted in PEOPLE (distinct persons; one person's phone and
+/// laptop are one), in the CALL, not the room. Above it, the frames socket
+/// refuses non-audio frames (`publish_refused {reason: "video_two_people_only"}`)
+/// and a `video_allowed` event says so; back at two, video may resume (the
+/// client resumes it if the person's camera is still on). Lifted at edge v45.1.
+pub const VIDEO_MAX_PEOPLE: usize = 2;
+
+/// The people in `call`: its attendees' persons, and this node's own person.
+async fn people_in_call(engine: &Engine, call: &Call) -> usize {
+    let mut people = std::collections::BTreeSet::new();
+    for m in call.attendees().await {
+        people.insert(person_of(engine, &m).await.unwrap_or(m));
+    }
+    if let Some(node) = crate::node_key::wire_identity() {
+        people.insert(
+            person_of(engine, node)
+                .await
+                .unwrap_or_else(|| node.to_owned()),
+        );
+    }
+    people.len()
+}
+
+/// Whether video may be published in a call of `people` people.
+#[must_use]
+pub const fn video_allowed(people: usize) -> bool {
+    people <= VIDEO_MAX_PEOPLE
 }
 
 /// Single-use frames-socket tickets: a browser cannot put a bearer header on a
@@ -330,6 +366,7 @@ async fn join(
     };
     let frames = call.frames();
     let events = call.events();
+    let video_ok = video_allowed(people_in_call(&st.engine, &call).await);
     let view = join_view(&st.engine, &room, &call, body.video, false).await;
     joined()
         .lock()
@@ -342,6 +379,7 @@ async fn join(
                 events: StdMutex::new(events),
                 caps: StdMutex::new(HashMap::new()),
                 video: body.video,
+                video_ok: std::sync::atomic::AtomicBool::new(video_ok),
             }),
         );
     tracing::info!(room = %room, relay = body.relay, video = body.video, "call: joined as the member");
@@ -357,7 +395,11 @@ async fn join_view(
 ) -> serde_json::Value {
     let attendees = call.attendees().await;
     let people = people_of(engine, &attendees).await;
+    let video_ok = video_allowed(people_in_call(engine, call).await);
     json!({
+        // Video and screen share may be sent now (VIDEO_MAX_PEOPLE).
+        "video_allowed": video_ok,
+        "video_max_people": VIDEO_MAX_PEOPLE,
         "room": room,
         "already_joined": already,
         "call_id": format!("{:?}", call.id()),
@@ -791,8 +833,36 @@ async fn pump(
     let watch_task = tokio::spawn(async move {
         let mut last_budget: Option<usize> = None;
         let mut legs_seen: HashMap<String, Option<std::time::Instant>> = HashMap::new();
+        let mut last_video: Option<bool> = None;
+        let mut tick: u32 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            // Once a second: how many people are in the call (VIDEO_MAX_PEOPLE).
+            if tick % 4 == 0 {
+                let people = {
+                    let g = jw.call.lock().await;
+                    match g.as_ref() {
+                        Some(c) => people_in_call(&eng_w, c).await,
+                        None => break,
+                    }
+                };
+                let ok = video_allowed(people);
+                jw.video_ok.store(ok, std::sync::atomic::Ordering::Relaxed);
+                if last_video != Some(ok) {
+                    last_video = Some(ok);
+                    let m = json!({ "type": "video_allowed", "allowed": ok, "people": people,
+                                    "max_people": VIDEO_MAX_PEOPLE,
+                                    "reason_id": "call.video_two_people_only" });
+                    if out_w
+                        .send(Message::Text(m.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            tick = tick.wrapping_add(1);
             let (budget, legs) = {
                 let g = jw.call.lock().await;
                 match g.as_ref() {
@@ -863,6 +933,16 @@ async fn pump(
         };
         let refusal = match call_frames::decode_outgoing(&bytes) {
             Err(e) => Some(json!({ "type": "publish_refused", "reason": e.token() })),
+            Ok(f)
+                if f.codec_id != call_frames::CODEC_OPAQUE
+                    && !j.video_ok.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                Some(
+                    json!({ "type": "publish_refused", "reason": "video_two_people_only",
+                             "reason_id": "call.video_two_people_only",
+                             "max_people": VIDEO_MAX_PEOPLE }),
+                )
+            }
             Ok(f) => {
                 let mut guard = j.call.lock().await;
                 match guard.as_mut() {
@@ -951,6 +1031,14 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_is_two_people_and_audio_any() {
+        assert!(video_allowed(1));
+        assert!(video_allowed(2));
+        assert!(!video_allowed(3), "above two the call drops to audio only");
+        assert!(!video_allowed(10));
+    }
 
     #[test]
     fn a_client_names_left_or_backgrounded_and_never_lost() {
