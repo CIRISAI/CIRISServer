@@ -754,7 +754,6 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "call.session_absent",
     "call.socket_already_open",
     "call.share_unavailable",
-    "call.video_two_people_only",
     # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
     # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
     # languages; the floor in pyproject.toml is 0.5.239.
