@@ -167,12 +167,13 @@
     "member": "native-bob-v5lo2uulck",
     "stream_id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
     "left": "left",
+    "truncated": false,
     "person": "bob-person-user-n7utwedh3z"
    },
    {
     "type": "attendee_left",
     "member": "native-bob-v5lo2uulck",
-    "left": "lost",
+    "left": "removed",
     "person": "bob-person-user-n7utwedh3z"
    },
    {
@@ -180,6 +181,21 @@
     "member": "native-bob-v5lo2uulck",
     "old_stream_id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
     "new_stream_id": "301112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "person": "bob-person-user-n7utwedh3z"
+   },
+   {
+    "type": "stream_added",
+    "member": "native-bob-v5lo2uulck",
+    "stream_id": "401112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "kind": "share",
+    "person": "bob-person-user-n7utwedh3z"
+   },
+   {
+    "type": "stream_ended",
+    "member": "native-bob-v5lo2uulck",
+    "stream_id": "401112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "ended": "ended",
+    "truncated": false,
     "person": "bob-person-user-n7utwedh3z"
    },
    {
@@ -191,10 +207,27 @@
     "tier": 1
    },
    {
-    "type": "video_paused",
+    "type": "stranded",
+    "epoch": 2,
+    "reason": "the room's epoch could not be followed"
+   },
+   {
+    "type": "video_unavailable",
     "member": "native-bob-v5lo2uulck",
-    "reason": "load",
+    "reason_id": "call.relay_canonical_audio_only",
     "person": "bob-person-user-n7utwedh3z"
+   },
+   {
+    "type": "video_restored",
+    "member": "native-bob-v5lo2uulck",
+    "person": "bob-person-user-n7utwedh3z"
+   },
+   {
+    "type": "video_allowed",
+    "allowed": false,
+    "people": 3,
+    "max_people": 2,
+    "reason_id": "call.video_two_people_only"
    },
    {
     "type": "keep_refused",
@@ -208,6 +241,12 @@
    {
     "type": "publish_refused",
     "reason": "truncated"
+   },
+   {
+    "type": "publish_refused",
+    "reason": "video_two_people_only",
+    "reason_id": "call.video_two_people_only",
+    "max_people": 2
    }
   ],
   "left_values": [
@@ -216,6 +255,13 @@
    "removed",
    "lost"
   ],
-  "notes": "stream_replaced arrives with edge 45.1 (CallEvent::StreamReplaced, Call::replace_stream; CC-accepted) and is never sent before. attendee_left with stream_id and left=left|backgrounded|removed comes from edge 45.1's signed CallEvent::AttendeeLeft; on v44 only left=lost is emitted, when a member's leg has been gone 5 s (edge's Down bound at depth 0)."
+  "notes": "Edge v45.0.0 (0.5.246). attendee_left with stream_id carries the attendee's signed cause (CallEvent::AttendeeLeft): left|backgrounded from its signed end, removed when its key left the room's MLS group, lost when every leg went and its stream stayed silent 5 s. attendee_left without stream_id is the room dropping a member (CallEvent::MemberLeft, left=removed); a client may see both for one person and treats leaving as idempotent. stream_added.kind is media|share (CC rc18; an unknown value renders as media). stream_ended.ended adds `ended` (a share stopped, the attendee stays). stream_replaced: new_stream_id carries on old_stream_id, with no leave. video_unavailable: this node hears that member only through the canonical, audio only; video_restored when a member path carries it again. video_allowed: sent on connect and on change; above max_people the call is audio only and video frames are refused (publish_refused video_two_people_only). Screen share is refused (call.share_unavailable) until 45.1.",
+  "ended_values": [
+   "left",
+   "backgrounded",
+   "removed",
+   "lost",
+   "ended"
+  ]
  }
 }
