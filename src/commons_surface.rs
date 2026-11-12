@@ -648,6 +648,54 @@ fn parse_cohort(raw: &str) -> Result<Cohort, Response> {
 /// `Ok(None)` is "this node does not hold it" — the [`CommonsStanding::ActionUnknown`]
 /// zero — and is deliberately different from `Err`, which is
 /// [`CommonsStanding::Unreadable`].
+/// The id of `objector`'s objection to `action_id` that the fold COUNTS, if
+/// one is. `Ok(None)` when the action is not held or the cohort reads nothing.
+async fn counted_objection_by(
+    engine: &Engine,
+    cohort: Cohort,
+    cohort_key_id: &str,
+    action_id: &str,
+    objector: &str,
+) -> Result<Option<String>, String> {
+    let Some(action) = load_action(engine, action_id).await? else {
+        return Ok(None);
+    };
+    let dir = engine.federation_directory();
+    let fold = resolve_reverse_quorum(&*dir, cohort, cohort_key_id, &action, Utc::now())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    for id in &fold.counted_objection_ids {
+        if let Some(row) = dir.get_attestation(id).await.map_err(|e| format!("{e}"))? {
+            if row.attesting_key_id == objector {
+                return Ok(Some(id.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the fold counts `objection_id` as DISMISSED — the one place a
+/// dismissal's force is decided.
+async fn objection_dismissed(
+    engine: &Engine,
+    cohort: Cohort,
+    cohort_key_id: &str,
+    action_id: &str,
+    objection_id: &str,
+) -> Result<bool, String> {
+    let Some(action) = load_action(engine, action_id).await? else {
+        return Ok(false);
+    };
+    let dir = engine.federation_directory();
+    let fold = resolve_reverse_quorum(&*dir, cohort, cohort_key_id, &action, Utc::now())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(fold
+        .dismissed_objection_ids
+        .iter()
+        .any(|id| id == objection_id))
+}
+
 async fn load_action(engine: &Engine, action_id: &str) -> Result<Option<Attestation>, String> {
     engine
         .federation_directory()
@@ -1069,6 +1117,31 @@ async fn post_objection(
         Err(e) => return sign_failed(e),
     };
     let dir = st.engine.federation_directory();
+    // ONE OBJECTION PER MEMBER. Persist >= 61.1 (CIRISPersist#1198) admits a
+    // second objection and its fold counts it for nothing, so the door no
+    // longer says `duplicate_objection`. This node does not write a row that
+    // can never count: if this member's objection to the action is already
+    // counted, it is refused here under the token persist used to return.
+    match counted_objection_by(
+        &st.engine,
+        ctx.cohort,
+        req.base.cohort_key_id.trim(),
+        req.base.action_id.trim(),
+        &row.attesting_key_id,
+    )
+    .await
+    {
+        Ok(Some(_)) => {
+            return refusal(
+                StatusCode::CONFLICT,
+                "duplicate_objection",
+                "commons_surface.refusal.duplicate_objection",
+"You already hold a live objection against this action. One member is one objection — otherwise a single member could reach the threshold alone.",
+            )
+        }
+        Ok(None) => {}
+        Err(e) => return store_unavailable(e),
+    }
     let outcome = match record_objection(&*dir, &row).await {
         Ok(o) => o,
         Err(e) => return store_unavailable(format!("{e}")),
@@ -1314,6 +1387,41 @@ async fn post_dismissal(
             "roster_size": decision.quorum.roster_size,
         }),
     );
+    // A DISMISSAL SHORT OF ITS FLOOR HAS NO FORCE. Persist >= 61.1 holds it
+    // (the read re-counts it, CIRISPersist#1198) where it used to refuse it as
+    // `dismissal_quorum_short`; "admitted" no longer means it lifted anything.
+    // Say what it is, under the token the client already renders.
+    // Persist's fold decides whether it has force: the objection it names is
+    // then among the fold's dismissed objections.
+    let lifted = if decision.outcome.refusal().is_none() {
+        match objection_dismissed(
+            &st.engine,
+            ctx.cohort,
+            req.base.cohort_key_id.trim(),
+            req.base.action_id.trim(),
+            req.objection_id.trim(),
+        )
+        .await
+        {
+            Ok(l) => l,
+            Err(e) => return store_unavailable(e),
+        }
+    } else {
+        true
+    };
+    if !lifted {
+        body.insert("refused".into(), json!(true));
+        body.insert("held".into(), json!(true));
+        body.insert("refusal".into(), json!("dismissal_quorum_short"));
+        body.insert(
+            "message".into(),
+            m(
+                "commons_surface.refusal.dismissal_quorum_short",
+"Fewer distinct verified roster members co-signed than the cohort's threshold demands. The counted and required numbers are beside this message.",
+            ),
+        );
+        return (StatusCode::CONFLICT, Json(Value::Object(body))).into_response();
+    }
     outcome_response(
         decision.outcome,
         m(
