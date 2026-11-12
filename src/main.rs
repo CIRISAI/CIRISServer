@@ -28,6 +28,13 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     // File logging to <home>/logs (resolved from --home, else the default data
     // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `ciris-server --version`: print the version and exit, before ANYTHING else
+    // — no log directory, no home, no port (the client probes it before launch to
+    // choose its flags; CIRISClient, 0.5.246).
+    if ciris_server::is_version_request(&argv) {
+        println!("{}", ciris_server::version_line());
+        return Ok(());
+    }
     // `accord sign-bytes` prints exactly one JSON object on stdout for a wrapper to
     // parse, and the tracing sink writes to stdout, so that verb runs with no
     // subscriber at all. Its prompts and errors go to stderr.

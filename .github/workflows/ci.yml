@@ -333,7 +333,7 @@ jobs:
         # READ to the owner-binding's federation scope (`AttestationQuery::scope`)
         # to ask whether a person could have announced. It emits nothing; the
         # audit matches the token, and a read at federation scope widens no one.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 53
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 55
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
       # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of

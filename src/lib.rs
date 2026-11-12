@@ -2058,6 +2058,21 @@ pub fn init_tracing_with_status(log_dir: Option<&std::path::Path>) -> TracingIni
     install_or_reattach_tracing(log_dir, filter, false)
 }
 
+/// `ciris-server --version` (or `-V`) as the ONLY argument. Anything else on
+/// the line is a serve or a subcommand, never a version probe.
+#[must_use]
+pub fn is_version_request(args: &[String]) -> bool {
+    matches!(args, [one] if one == "--version" || one == "-V")
+}
+
+/// What `ciris-server --version` prints: `ciris-server <MAJOR.MINOR.PATCH>`,
+/// the crate version (no `v`, no suffix). A build between tags carries the
+/// version of the NEXT tag.
+#[must_use]
+pub fn version_line() -> String {
+    format!("ciris-server {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
 /// the value of `--home <path>` / `--home=<path>` if present, else
 /// [`config::DEFAULT_CIRIS_HOME`]. Used by every node serve entry so file logging
@@ -2424,6 +2439,11 @@ mod python {
         // sets `sys.argv[0]` = the program and `sys.argv[1:]` = the real args, so
         // `skip(1)` here yields exactly the user args — matching the binary path.
         let argv: Vec<String> = py.import("sys")?.getattr("argv")?.extract()?;
+        // `ciris-server --version`: before anything else, as the binary does.
+        if crate::is_version_request(&argv[1.min(argv.len())..]) {
+            println!("{}", crate::version_line());
+            return Ok(());
+        }
         // File logging to <home>/logs (the node serve paths); resolved from argv so
         // it targets the same --home the node boots against.
         crate::init_tracing_with(Some(&crate::log_dir_from_args(&argv)));
@@ -3795,6 +3815,28 @@ mod python {
 
 #[cfg(test)]
 mod legacy_user_alias_tests {
+    /// The client's launch probe (CIRISClient, 0.5.246): `--version` alone is a
+    /// version request and prints `ciris-server X.Y.Z`; with any other argument
+    /// it is not, so a serve is never mistaken for a probe.
+    #[test]
+    fn version_is_the_only_argument_and_prints_a_bare_semver() {
+        let v = |a: &[&str]| {
+            crate::is_version_request(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        };
+        assert!(v(&["--version"]));
+        assert!(v(&["-V"]));
+        assert!(!v(&[]));
+        assert!(!v(&["--version", "--home", "/h"]));
+        assert!(!v(&["--home", "/h"]));
+        let line = crate::version_line();
+        let ver = line.strip_prefix("ciris-server ").expect("prefix");
+        assert_eq!(ver.split('.').count(), 3, "{line}");
+        assert!(
+            ver.split('.').all(|p| p.parse::<u64>().is_ok()),
+            "no v, no suffix: {line}"
+        );
+    }
+
     use super::legacy_user_alias;
 
     fn dir(tag: &str) -> std::path::PathBuf {
