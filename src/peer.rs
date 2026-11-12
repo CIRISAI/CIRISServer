@@ -830,8 +830,21 @@ async fn consent_for_canonicals(
     }
 }
 
+/// **A room's moderation, carried between its members** (Eric, 2026-11-11,
+/// 0.5.246). A moderator's `content_class:` flag and an author's or reviewer's
+/// `reconsideration:` appeal are federation-scope rows (persist's community
+/// door refuses a row naming a party other than its producer, AV-84), so they
+/// travel by this grant like any other. Without these two prefixes a flag
+/// reached only the flagged author's node, because a row about the recipient
+/// crosses regardless, and an appeal reached nobody: the client's two-node run
+/// on d892af04 saw the reviewer's node never hold the filing. Superset of
+/// edge's floor, as `default_covers_everything_edges_default_does` allows.
+pub const MODERATION_GRANT_PREFIXES: &[&str] = &["content_class:", "reconsideration:"];
+
 pub fn default_attestation_prefixes() -> Vec<String> {
-    normalize_prefixes(DEFAULT_GRANT_ATTESTATION_PREFIXES)
+    let mut all: Vec<&str> = DEFAULT_GRANT_ATTESTATION_PREFIXES.to_vec();
+    all.extend_from_slice(MODERATION_GRANT_PREFIXES);
+    normalize_prefixes(&all)
 }
 
 /// Register Node B's *self-signed* `SignedKeyRecord` in A's federation directory
@@ -1203,7 +1216,7 @@ async fn bound_own_key_for(
                 return Some(k);
             }
             // …or a live roster key of one of them: the fedID's other keypair
-            // is the fedID (CC 3.3.6.3, tracked: CIRISServer#793).
+            // is the fedID (CC 3.3.6.3, history: CIRISServer#793).
             for st in &stewards {
                 if crate::auth::verify::signer_acts_for(engine, author, st).await {
                     return Some(k);
@@ -1439,7 +1452,7 @@ pub async fn owner_consent_pen(
         // — its registered id — for persist's steward gate to resolve to the
         // fedID at the row's asserted_at (CIRISPersist#1099). The owner capsule
         // has accepted a roster key since CIRISServer#391; this was the one
-        // owner door still asking for the genesis key (tracked: CIRISServer#793).
+        // owner door still asking for the genesis key (history: CIRISServer#793).
         Some(signer)
             if crate::auth::verify::signer_acts_for(engine, signer.key_id(), &owner).await =>
         {
@@ -1448,7 +1461,7 @@ pub async fn owner_consent_pen(
                 roster_key_id = %signer.key_id(),
                 node_key_id = %node_key_id,
                 "owner act signed by a live ROSTER KEY of the owner's fedID — CC 3.3.6.3 \
-                 (tracked: CIRISServer#793)"
+                 (history: CIRISServer#793)"
             );
             Ok(Some(ConsentAuthor {
                 key_id: signer.key_id().to_owned(),
@@ -2717,6 +2730,18 @@ mod default_prefix_gate {
     ///
     /// `DEFAULT_GRANT_ATTESTATION_PREFIXES` is edge's constant today, so this
     /// holds trivially. It is a gate against the next person re-declaring it.
+    /// A room's flags and appeals cross between members (0.5.246).
+    #[test]
+    fn default_covers_room_moderation() {
+        let ours = default_attestation_prefixes();
+        for prefix in MODERATION_GRANT_PREFIXES {
+            assert!(
+                ours.iter().any(|p| prefix.starts_with(p.as_str())),
+                "the default grant must carry `{prefix}`: {ours:?}"
+            );
+        }
+    }
+
     #[test]
     fn default_covers_everything_edges_default_does() {
         let ours = default_attestation_prefixes();

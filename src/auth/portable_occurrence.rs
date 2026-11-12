@@ -1024,6 +1024,7 @@ async fn associate_handler(
                 format!("admit the identity's public key: {e}"),
             );
         }
+        crate::compose::wrote_rows("portable occurrence: the identity's key admitted");
     }
 
     // (4) Mint a FRESH keyset for THIS device, in this node's own seed dir. This is

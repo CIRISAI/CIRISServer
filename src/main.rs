@@ -28,6 +28,21 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     // File logging to <home>/logs (resolved from --home, else the default data
     // root) so a node logs reliably to disk; stdout stays on for CLI subcommands.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `ciris-server --version`: print the version and exit, before ANYTHING else
+    // — no log directory, no home, no port (the client probes it before launch to
+    // choose its flags; CIRISClient, 0.5.246).
+    if ciris_server::is_version_request(&argv) {
+        println!("{}", ciris_server::version_line());
+        return Ok(());
+    }
+    // `accord sign-bytes` prints exactly one JSON object on stdout for a wrapper to
+    // parse, and the tracing sink writes to stdout, so that verb runs with no
+    // subscriber at all. Its prompts and errors go to stderr.
+    if argv.first().map(String::as_str) == Some("accord")
+        && argv.get(1).map(String::as_str) == Some("sign-bytes")
+    {
+        return ciris_server::accord_sign_bytes::run_cli(argv.into_iter().skip(2)).await;
+    }
     ciris_server::init_tracing_with(Some(&ciris_server::log_dir_from_args(&argv)));
     tracing::info!(
         worker_threads,
@@ -159,11 +174,15 @@ async fn async_main(worker_threads: usize) -> Result<()> {
             // point: a halted node cannot be reached, only read.
             Some("release-request") => run_accord_release_request(args),
             Some("release") => run_accord_release(args),
+            // `ciris-server accord sign-bytes --key-id <holder> --usb <dir> --in <file>`
+            // is dispatched before tracing starts (see the top of `async_main`); this
+            // arm only exists so the usage text names it.
             other => Err(anyhow::anyhow!(
                 "usage: ciris-server accord reactivate --home <path> [--key-id <name>] \
                  --proof <file.json>\n       ciris-server accord release-request --home <path> \
                  [--ttl-hours <n>] [--out <file.json>]\n       ciris-server accord release --home <path> --token \
-                 <file.json> (got {:?})",
+                 <file.json>\n       ciris-server accord sign-bytes --key-id <holder> --usb <dir> \
+                 --in <file> [--pin-stdin] [--piv-slot 9c] [--module <libykcs11>] (got {:?})",
                 other
             )),
         },
@@ -197,8 +216,8 @@ async fn async_main(worker_threads: usize) -> Result<()> {
         // default arm boots the fabric node. The default-serve path takes the ONLY
         // two bootstrap inputs (Server 0.5 zero-env): `--home <path>` (the data
         // root; default DEFAULT_CIRIS_HOME) and `--key-id <name>` (the federation
-        // key label; default DEFAULT_KEY_ID — the status-node deploy passes
-        // `--key-id ciris-status`). Everything else is baked constants or config:*
+        // key label; with none, the key the home already holds — `home_key_id`,
+        // 0.5.246 — so the status-node deploy still passes `--key-id ciris-status`). Everything else is baked constants or config:*
         // CEG resolved at boot.
         first => {
             // `first` is the already-consumed first token (Some for the default
@@ -212,15 +231,15 @@ async fn async_main(worker_threads: usize) -> Result<()> {
 
 /// Parse `accord reactivate` flags + clear the halt latch on a verified 2/3 proof.
 async fn run_accord_reactivate(mut args: impl Iterator<Item = String>) -> Result<()> {
-    use ciris_server::config::{ServerConfig, DEFAULT_CIRIS_HOME, DEFAULT_KEY_ID};
+    use ciris_server::config::{ServerConfig, DEFAULT_CIRIS_HOME};
 
     let mut home: Option<String> = None;
-    let mut key_id = DEFAULT_KEY_ID.to_string();
+    let mut key_id: Option<String> = None;
     let mut proof_path: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--home" => home = Some(args.next().context("--home needs a path")?),
-            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--key-id" => key_id = Some(args.next().context("--key-id needs a name")?),
             "--proof" => proof_path = Some(args.next().context("--proof needs a file")?),
             other => return Err(anyhow::anyhow!("unknown accord-reactivate arg: {other}")),
         }
@@ -229,7 +248,9 @@ async fn run_accord_reactivate(mut args: impl Iterator<Item = String>) -> Result
     let proof_path = proof_path
         .ok_or_else(|| anyhow::anyhow!("accord reactivate requires --proof <file.json>"))?;
 
-    let cfg = ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home = std::path::PathBuf::from(home);
+    let key_id = key_id.unwrap_or_else(|| ciris_server::home_key_id(&home));
+    let cfg = ServerConfig::from_home(home, key_id)?;
     let proof_bytes = std::fs::read(&proof_path)
         .with_context(|| format!("read reactivation proof {proof_path}"))?;
     let proof: ciris_server::accord_reactivate::ReactivationProof =
@@ -443,12 +464,11 @@ async fn run_identity_create(mut args: impl Iterator<Item = String>) -> Result<(
     };
 
     // Build the node config from the conventions + flags (Server 0.5 zero-env).
-    let cfg = ciris_server::ServerConfig::from_home(
-        std::path::PathBuf::from(
-            home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
-        ),
-        key_id.unwrap_or_else(|| ciris_server::config::DEFAULT_KEY_ID.to_string()),
-    )?;
+    let home = std::path::PathBuf::from(
+        home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
+    );
+    let key_id = key_id.unwrap_or_else(|| ciris_server::home_key_id(&home));
+    let cfg = ciris_server::ServerConfig::from_home(home, key_id)?;
     let seed_dir_override = seed_dir.map(std::path::PathBuf::from);
     let minted =
         ciris_server::provision_user_identity(&cfg, backend, label, seed_dir_override).await?;
@@ -542,14 +562,16 @@ async fn run_claim(mut args: impl Iterator<Item = String>) -> Result<()> {
 
     // Open YOUR local user fed-ID exactly as the node resolves it: alias
     // `<keystore_alias>-user` at the conventional user-seed path.
-    let cfg = ciris_server::ServerConfig::from_home(
-        std::path::PathBuf::from(
-            home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
-        ),
-        key_id.unwrap_or_else(|| ciris_server::config::DEFAULT_KEY_ID.to_string()),
-    )?;
-    let user_key_id = format!("{}-user", cfg.keystore_alias);
+    let home = std::path::PathBuf::from(
+        home.unwrap_or_else(|| ciris_server::config::DEFAULT_CIRIS_HOME.to_string()),
+    );
+    let key_id = key_id.unwrap_or_else(|| ciris_server::home_key_id(&home));
+    let cfg = ciris_server::ServerConfig::from_home(home, key_id)?;
     let seed_dir = ciris_server::user_seed_dir(&cfg);
+    // The owner key this home holds: the mint's pointer, else the names the home
+    // used before (`active_user_alias` is read-only).
+    let user_key_id =
+        ciris_server::active_user_alias(&seed_dir, &format!("{}-user", cfg.keystore_alias));
     eprintln!("opening user fed-ID {user_key_id} ({backend_name}) — touch your token if prompted…");
     let signer =
         ciris_server::identity::hardware_user_local_signer(backend, &user_key_id, seed_dir).await?;

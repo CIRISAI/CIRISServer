@@ -539,6 +539,20 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
     {
         data.extend(extra);
     }
+    // EVERY edge metric, by edge's own projection (0.5.246): the hand-built
+    // keys above fold the fields this route was written for, and about
+    // seventy newer bundle fields (sweep_permits, holdings_index,
+    // key_plane_sweep, the shaping and load levers, ...) never reached it.
+    // `flatten` names every field even when nothing was recorded, so a reader
+    // can tell "zero" from "not exported", and a new edge field arrives here
+    // without a server change.
+    let flat = bundle.flatten();
+    if let Some(data) = body.get_mut("data").and_then(|d| d.as_object_mut()) {
+        data.insert(
+            "series".to_owned(),
+            serde_json::json!({ "counters": flat.counters, "gauges": flat.gauges }),
+        );
+    }
     (StatusCode::OK, Json(body)).into_response()
 }
 

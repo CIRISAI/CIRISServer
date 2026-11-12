@@ -313,13 +313,21 @@ pub async fn mint_delegated_token(
     )
 }
 
-/// Serve the drive router on an ephemeral port.
+/// Serve the drive router on an ephemeral port, with the chat routes beside it
+/// as the node mounts them (a room file is moderated by `/v1/chat/{room}/items`).
 pub async fn serve_drive(
     engine: Arc<Engine>,
     node_signer: Arc<ciris_edge::identity::LocalSigner>,
     seed_dir: PathBuf,
 ) -> String {
-    let app = ciris_server::drive::router(engine, node_signer, seed_dir, None);
+    let chat = ciris_server::contacts_chat::router(
+        Arc::clone(&engine),
+        Arc::clone(&node_signer),
+        seed_dir.clone(),
+        None,
+        None,
+    );
+    let app = ciris_server::drive::router(engine, node_signer, seed_dir, None).merge(chat);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");

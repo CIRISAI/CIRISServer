@@ -312,6 +312,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     cfg.ensure_dirs()?;
     // Before ANY key is opened by this crate, edge or persist: a home whose keys
     // are software-tier must not meet a newly loadable TPM plugin (#783).
+    crate::key_tier::apply_apple_store_defaults();
     crate::key_tier::pin_process_tier(&cfg.home);
 
     // SIGTERM handling for the life of the PROCESS, installed before anything
@@ -384,6 +385,17 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         disk_free_gib = caps.disk_free_gib(),
         lens_store = caps.lens_store,
         "host capabilities"
+    );
+    // Server tier (Eric, 2026-11-10): reported at every boot so an operator can
+    // see which nodes qualify. Host facts only: no name, no path.
+    let tier = crate::host_kind::ServerTier::detect(&cfg.data_dir);
+    tracing::info!(
+        server_tier = tier.qualifies,
+        disk_total_gb = tier.disk_total_bytes / 1_000_000_000,
+        personal = tier.personal,
+        host_kind = %crate::host_kind::host_kind(),
+        why = tier.why(),
+        "host: server tier"
     );
 
     // ── ONE federation signing identity — a TPM / Secure-Enclave / StrongBox
@@ -1181,6 +1193,20 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 "fold: blob plane NOT armed on the agent's Edge (already armed by an \
                  earlier serve in this process, or no Reticulum transport) — room bodies \
                  are addressed and served only if an earlier arm succeeded"
+            ),
+        }
+        // THE ROOM GROUPS, on the Edge the agent built (CIRISEdge#970, edge
+        // v45). `init_edge_runtime` builds an Edge with none, so a call on an
+        // agent-hosted node was refused `Plumbing("join_call needs the room
+        // groups ...")`. Set-once, like the blob plane above.
+        match edge.arm_room_groups(room_groups_for(&cfg.key_id)) {
+            Ok(()) => {
+                tracing::info!("fold: room groups ARMED on the agent's Edge — calls can join")
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "fold: room groups NOT armed on the agent's Edge (already set) — calls use \
+                 the groups an earlier arm installed"
             ),
         }
         edge
@@ -1999,6 +2025,12 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         Arc::clone(&edge),
                     ))
+                    // MEMBER CALLS (CIRISServer#859, 0.5.246): join as the
+                    // person, the frames socket, call state, receive caps.
+                    .merge(crate::call_routes::router(
+                        Arc::clone(&engine),
+                        Arc::clone(&edge),
+                    ))
                     // The receipt's canonical door (CIRISServer#369's other half):
                     // a producer asks what this node holds for one agent hash.
                     .merge(crate::trace_receipt::router(Arc::clone(&engine)))
@@ -2425,6 +2457,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
             let mut rooms_escaped = false;
+            let mut contacts_widened = false;
             loop {
                 if *self_room_sd_rx.borrow() {
                     break;
@@ -2468,6 +2501,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         error = %format!("{e:#}"),
                         "self roster: the sweep could not run — held changes wait for the next tick"
                     ),
+                }
+                // Contacts' grants widened to the current families (0.5.246:
+                // room moderation). Once per process, after the owner exists.
+                if !contacts_widened {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::contacts_chat::widen_contact_grants(&engine_for_roster, &node)
+                        .await
+                    {
+                        Ok(n) => {
+                            contacts_widened = true;
+                            if n > 0 {
+                                tracing::info!(
+                                    widened = n,
+                                    "contacts: grants widened to carry room moderation"
+                                );
+                                crate::compose::kick_replication("contact grants widened");
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "contacts: grants not widened yet"),
+                    }
                 }
                 // Rooms stored under founder_only (CC 4.5.13). Once clean, one
                 // process never needs to look again: nothing can create another.
@@ -4751,6 +4805,33 @@ pub(crate) fn audience_changed(group_or_key: &str) {
     }
 }
 
+/// After a write this node made to persist outside an edge door: tell edge,
+/// so peers are offered the row at once rather than at the next feed probe
+/// (up to 5 s on edge v45, FEED_PROBE_SPACING). A kick marks edge's feed dirty
+/// (CIRISEdge release/45.0.0 bridge.rs:13620). Rows a pending-decision reader
+/// must see (consent, membership, family roster) move to
+/// `ReplicationRuntime::note_local_write(s)` at the v45 pin.
+///
+/// Coalesced: the first write schedules ONE kick 250 ms later and later writes
+/// inside that window ride it, so a path that writes several rows starts one
+/// round, not one per row (`kick_replication` itself does not coalesce).
+pub(crate) fn wrote_rows(reason: &'static str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    if PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        PENDING.store(false, Ordering::Release);
+        return;
+    };
+    handle.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        PENDING.store(false, Ordering::Release);
+        let _ = kick_replication(reason);
+    });
+}
+
 pub(crate) fn kick_replication(reason: &'static str) -> bool {
     let Some(runtime) = held_replication_runtime() else {
         return false;
@@ -5460,6 +5541,15 @@ async fn shaping_device(
                     ShapingPolicy::for_device(&d),
                     "the canonical: a server (steward 2026-11-09)",
                 )
+            } else if crate::host_kind::ServerTier::detect(&cfg.data_dir).qualifies {
+                // Server tier (Eric, 2026-11-10): a data disk of at least 1 TB
+                // and not a personal install. Blessed or not, it is a server.
+                let d = DeviceState::of(DeviceKind::Server);
+                (
+                    d,
+                    ShapingPolicy::for_device(&d),
+                    "server tier: a data disk of at least 1 TB, not a personal install",
+                )
             } else {
                 let d = DeviceState::of(DeviceKind::platform_default());
                 (d, ShapingPolicy::for_device(&d), "platform default")
@@ -5472,6 +5562,16 @@ async fn shaping_device(
         "link shaping: device and policy"
     );
     (device, policy)
+}
+
+/// The room groups a call keys from (CIRISEdge#805 item 5): the same durable MLS
+/// store the chat driver opens for this node. Read only when a call joins.
+fn room_groups_for(key_id: &str) -> Arc<ciris_edge::mls::CohortGroups> {
+    let me = crate::node_key::wire_identity().unwrap_or(key_id);
+    Arc::new(ciris_edge::mls::CohortGroups::new(
+        crate::mls_state::store_for(me),
+        me.to_owned(),
+    ))
 }
 
 async fn build_edge(
@@ -5776,12 +5876,7 @@ async fn build_edge(
         // CIRISEdge#805 item 5: the room groups a call keys from (edge's
         // `join_call`). The same durable MLS store the chat driver opens for
         // this node; read only when a call joins.
-        .room_groups(Arc::new(ciris_edge::mls::CohortGroups::new(
-            crate::mls_state::store_for(crate::node_key::wire_identity().unwrap_or(&cfg.key_id)),
-            crate::node_key::wire_identity()
-                .unwrap_or(&cfg.key_id)
-                .to_owned(),
-        )))
+        .room_groups(room_groups_for(&cfg.key_id))
         // THE SERVE SIDE OF THE BLOB SWARM (CIRISEdge#55). A peer that holds a
         // row pointing at bytes this node has asks for them with a
         // `BlobChunkFetch`; without a source wired here edge drops it —

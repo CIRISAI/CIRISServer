@@ -1,0 +1,1 @@
+{"at": "2026-11-10T18:21:56Z", "back": 500, "ratio": 1.0, "scenario": "av_echo", "sent": 500, "verdict": "PASS", "versions": {"ciris-edge": "44.1.1", "ciris-persist": "61.0.5", "ciris-verify-core": "22.0.0", "leviculum-core": "0.34.0+ciris.1", "server_commit": "4d48b781", "server_dirty": true}}

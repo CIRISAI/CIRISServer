@@ -2121,6 +2121,43 @@ pub(crate) fn bearer_of(headers: &HeaderMap) -> Option<&str> {
 /// with each person's grant receipt (CIRISServer#616). One rule for "who is
 /// already my contact", shared by `GET /v1/contacts` and the incoming-request
 /// reader, so the two can never disagree about who still awaits an answer.
+/// **Widen every existing contact's grant to the current contact prefixes**
+/// (0.5.246: the room moderation rows, `content_class:` and `reconsideration:`).
+/// A contact's grant is otherwise re-checked only when the contact is added or
+/// first resolves, so a node upgraded from 0.5.245 would keep its contacts on
+/// the old five families and its rooms' appeals would still never cross.
+/// `ensure_contact_consent_covers` is a no-op on a grant that already covers
+/// them. Returns how many grants were re-signed wider.
+///
+/// # Errors
+/// The node has no owner yet, or the contact set could not be read.
+pub async fn widen_contact_grants(engine: &Engine, node_key_id: &str) -> Result<usize, String> {
+    let dir = engine.federation_directory();
+    let Some(owner) = ciris_persist::federation::admission::owner_of(dir.as_ref(), node_key_id)
+        .await
+        .map_err(|e| format!("owner_of: {e:#}"))?
+    else {
+        return Err("this node has no owner yet".to_owned());
+    };
+    let (contacts, _) = contact_persons(engine, &owner, node_key_id).await?;
+    let prefixes = crate::peer::contact_attestation_prefixes();
+    let mut widened = 0;
+    for contact in &contacts {
+        match crate::peer::ensure_contact_consent_covers(engine, node_key_id, contact, &prefixes)
+            .await
+        {
+            Ok((coverage, _)) if coverage.freshly_emitted => widened += 1,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                contact = %contact,
+                error = %format!("{e:#}"),
+                "contacts: could not widen this contact's grant — retried next boot"
+            ),
+        }
+    }
+    Ok(widened)
+}
+
 pub(crate) async fn contact_persons(
     engine: &Engine,
     owner_key_id: &str,
@@ -6402,7 +6439,8 @@ pub fn router_with_driver(
         )
         // The room's moderation of one item — a message or a room file — by
         // its attestation id (CC 4.5.5; `room_moderation`). `{action}` is
-        // `reveal`: the viewer's own consent to see what a moderator flagged.
+        // `reveal` (the viewer's own consent to see what a moderator flagged),
+        // or `flag` / `clear` (a `moderate` holder's decision for the room).
         .route(
             "/v1/chat/{community_id}/items/{attestation_id}/{action}",
             axum::routing::post(moderate_item),
@@ -6414,18 +6452,421 @@ pub fn router_with_driver(
     (router, PairRoomDriver(state))
 }
 
-/// `POST /v1/chat/{room}/items/{id}/reveal` — **the viewer chooses to see
-/// what a moderator withheld.** `{id}` is the flagged item — a message or a
-/// room file; a message's `moderation.item_attestation_id` names it when the
-/// flag sits on an earlier version. The consent is the viewer's own signed act,
-/// kept on their devices ([`crate::room_moderation::reveal`]), so a delegate
-/// cannot give it for them. Answers the item's moderation as it now stands.
+/// The grounds CC 3.3 allows a `reconsideration:{grounds}` filing.
+const RECONSIDERATION_GROUNDS: [&str; 3] =
+    ["new_evidence", "procedural_error", "quorum_compromise"];
+/// The outcomes CC 3.3 allows a review holder's ruling.
+const RECONSIDERATION_OUTCOMES: [&str; 3] = ["upheld", "partial", "reversed"];
+
+/// The body of `POST …/items/{id}/reconsider` or `…/rule`.
+#[derive(Debug, Default, Deserialize)]
+struct AppealRequest {
+    #[serde(default)]
+    grounds: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+}
+
+/// `reconsider` / `rule` on one item's flag (CC 4.5.5): **the appeal.**
+///
+/// A filing (`reconsider {grounds}`) is the flagged item's author's — the
+/// subject of the flag — or a `review` holder's. A ruling (`rule {outcome}`)
+/// is a `review` holder's only. Both are `reconsideration:{grounds}` rows
+/// naming the FLAG row, signed by the person's own pen; persist admits them by
+/// the same rule, and [`crate::room_moderation::view_of`] folds them: a
+/// ruling `reversed` lifts the flag for everyone.
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+#[allow(clippy::too_many_lines)] // the two acts' gates, in order, in one place
+async fn appeal_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    action: &str,
+    body: &[u8],
+    view: Option<crate::room_moderation::ModerationView>,
+) -> Response {
+    use ciris_persist::federation::admission;
+    let req: AppealRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        AppealRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"grounds\"}} or {{\"outcome\"}}: {e}"),
+                )
+            }
+        }
+    };
+    // There must be a flag to appeal: the row the filing and ruling name.
+    let Some(v) = view.as_ref() else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "moderation.nothing_to_appeal",
+            "No moderator of this room has flagged that item, so there is nothing to appeal.",
+        );
+    };
+    let (target_id, live, filing) = (
+        v.flag_attestation_id.clone(),
+        v.flag.is_some(),
+        v.reconsideration_attestation_id.clone(),
+    );
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    let dir = st.engine.federation_directory();
+    let reviewer = match admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        admission::DELEGATION_SCOPE_REVIEW,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator(review): {e}"),
+            )
+        }
+    };
+    let (grounds, outcome) = if action == "reconsider" {
+        if !live {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_appeal",
+                "No moderator of this room has flagged that item, so there is nothing to appeal.",
+            );
+        }
+        if signer.key_id() != author && !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.no_standing",
+                "Only the person whose item was flagged, or a reviewer of this room, can appeal it.",
+            );
+        }
+        let grounds = req.grounds.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_GROUNDS.contains(&grounds) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_grounds",
+                "An appeal gives one of three grounds: there is new evidence, the process wasn't followed, or the people who decided weren't free to decide fairly.",
+            );
+        }
+        (grounds.to_owned(), None)
+    } else {
+        if !reviewer {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.not_a_reviewer",
+                "Only someone who reviews this room's moderation can rule on an appeal.",
+            );
+        }
+        let outcome = req.outcome.as_deref().map(str::trim).unwrap_or_default();
+        if !RECONSIDERATION_OUTCOMES.contains(&outcome) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "moderation.unknown_outcome",
+                "A ruling says the flag stays, that the appeal is right in part, or that the flag is lifted.",
+            );
+        }
+        // A ruling answers a filing, under the filing's grounds.
+        let Some(filing_id) = filing.as_deref() else {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_rule",
+                "Nobody has appealed that item's flag, so there is nothing to rule on.",
+            );
+        };
+        let grounds = match dir.get_attestation(filing_id).await {
+            Ok(Some(row)) => row
+                .attestation_envelope
+                .get(ciris_persist::federation::envelope::paths::DIMENSION)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|d| d.strip_prefix(admission::RECONSIDERATION_DIMENSION_PREFIX))
+                .and_then(|t| t.split(':').next())
+                .filter(|g| RECONSIDERATION_GROUNDS.contains(g))
+                .unwrap_or("new_evidence")
+                .to_owned(),
+            Ok(None) => "new_evidence".to_owned(),
+            Err(e) => {
+                return refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "chat.store_unavailable",
+                    format!("read the appeal {filing_id}: {e}"),
+                )
+            }
+        };
+        (grounds, Some(outcome.to_owned()))
+    };
+    let mut envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION):
+            format!("{}{grounds}:v1", admission::RECONSIDERATION_DIMENSION_PREFIX),
+        "community_id": community_id,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): target_id,
+    });
+    if let Some(o) = &outcome {
+        envelope[admission::RECONSIDERATION_OUTCOME_MEMBER] = serde_json::json!(o);
+    }
+    let spec = crate::attest::Spec::new(
+        attestation_type::SCORES,
+        // FEDERATION, as the flag it answers (AV-84).
+        cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about_all(author, &[author.to_owned()]);
+    let appeal_id = match crate::attest::emit(
+        &st.engine,
+        crate::attest::KeySigner::Local(signer),
+        spec,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.appeal_failed",
+                format!("sign and record the appeal: {e:#}"),
+            )
+        }
+    };
+    tracing::info!(
+        room = community_id,
+        item = attestation_id,
+        action,
+        grounds,
+        outcome = outcome.as_deref().unwrap_or(""),
+        "moderation: an appeal recorded"
+    );
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut crate::room_moderation::DutyCache::default(),
+        community_id,
+        attestation_id,
+        author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "appeal_attestation_id": appeal_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
+}
+
+/// `flag` / `clear` on one item, once [`moderate_item`] found it in the room
+/// and read its moderation as it stands (`view`).
+#[allow(clippy::too_many_arguments)] // the item, its room, its author and the asker, as found
+async fn moderator_decision(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    community_id: &str,
+    attestation_id: &str,
+    author: &str,
+    action: &str,
+    body: &[u8],
+    view: Option<crate::room_moderation::ModerationView>,
+) -> Response {
+    use crate::safety::infohazard::ContentFlag;
+    let req: FlagItemRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        FlagItemRequest::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "chat.malformed_body",
+                    format!("expected {{\"class\"?: \"reported\"|\"infohazard\"}}: {e}"),
+                )
+            }
+        }
+    };
+    let pen = match membership_pen(st, headers, owner).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let signer = pen.local_signer();
+    // THE DUTY, as the read side will judge the row: the attester must hold
+    // `moderate` in this room.
+    let dir = st.engine.federation_directory();
+    match ciris_persist::federation::admission::is_named_moderator(
+        dir.as_ref(),
+        signer.key_id(),
+        community_id,
+        ciris_persist::federation::admission::DELEGATION_SCOPE_MODERATE,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "moderation.not_a_moderator",
+                "Only someone who moderates this room can flag or clear what is in it.",
+            )
+        }
+        Err(e) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat.store_unavailable",
+                format!("is_named_moderator: {e}"),
+            )
+        }
+    }
+    let live = view.as_ref().and_then(|v| v.flag);
+    let (class, target, withdrawn) = if action == "flag" {
+        let class = match req.class.as_deref().map(str::trim) {
+            None | Some("") => ContentFlag::Reported,
+            Some(t) => match ContentFlag::from_token(t) {
+                Some(c) => c,
+                None => return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "moderation.unknown_class",
+                    "An item is flagged as reported or as potentially harmful, and nothing else.",
+                ),
+            },
+        };
+        if live == Some(class.as_str()) {
+            // Already flagged so: nothing new to sign.
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "attestation_id": attestation_id, "moderation": view })),
+            )
+                .into_response();
+        }
+        (class, attestation_id.to_owned(), false)
+    } else {
+        let Some(c) = live.and_then(ContentFlag::from_token) else {
+            return refuse(
+                StatusCode::CONFLICT,
+                "moderation.nothing_to_clear",
+                "No moderator of this room has flagged that item, so there is nothing to clear.",
+            );
+        };
+        // Clear what the flag names: an earlier version of a message, if that
+        // is where it sits.
+        let target = view.as_ref().map_or_else(
+            || attestation_id.to_owned(),
+            |v| v.item_attestation_id.clone(),
+        );
+        (c, target, true)
+    };
+    let mut envelope = serde_json::json!({
+        (ciris_persist::federation::envelope::paths::DIMENSION): format!("content_class:{}:v1", class.as_str()),
+        "content_class": class.as_str(),
+        "community_id": community_id,
+        (ciris_persist::federation::envelope::paths::REFERENCES_ATTESTATION_ID): target,
+    });
+    if withdrawn {
+        envelope["withdrawn"] = serde_json::Value::Bool(true);
+    }
+    let spec = crate::attest::Spec::new(
+        attestation_type::SCORES,
+        // FEDERATION, not COMMUNITY: persist's community door refuses a row
+        // naming a party other than its producer (AV-84). The read side finds
+        // the room by `community_id`, not by the tier.
+        cohort_scope::FEDERATION,
+        envelope,
+    )
+    .about_all(author, &[author.to_owned()]);
+    let decision_id = match crate::attest::emit(
+        &st.engine,
+        crate::attest::KeySigner::Local(signer),
+        spec,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "moderation.flag_failed",
+                format!("sign and record the moderator's decision: {e:#}"),
+            )
+        }
+    };
+    tracing::info!(
+        room = community_id,
+        item = attestation_id,
+        action,
+        class = class.as_str(),
+        "moderation: a moderator's decision recorded"
+    );
+    let view = crate::room_moderation::view_of(
+        &st.engine,
+        &mut crate::room_moderation::DutyCache::default(),
+        community_id,
+        attestation_id,
+        author,
+        &owner.key_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "attestation_id": attestation_id,
+            "decision_attestation_id": decision_id,
+            "moderation": view,
+        })),
+    )
+        .into_response()
+}
+
+/// The body of `POST …/items/{id}/flag`: which class. Optional; `reported`
+/// when absent. `clear` takes no body (it clears the live flag's class).
+#[derive(Debug, Default, Deserialize)]
+struct FlagItemRequest {
+    #[serde(default)]
+    class: Option<String>,
+}
+
+/// `POST /v1/chat/{room}/items/{id}/{reveal|flag|clear}`.
+///
+/// **`reveal`: the viewer chooses to see what a moderator withheld.** `{id}`
+/// is the flagged item — a message or a room file; a message's
+/// `moderation.item_attestation_id` names it when the flag sits on an earlier
+/// version. The consent is the viewer's own signed act, kept on their devices
+/// ([`crate::room_moderation::reveal`]), so a delegate cannot give it for them.
+///
+/// **`flag` / `clear`: a moderator's decision for the room** (CC 4.5.5). The
+/// `content_class:{class}` row is signed by the person's own pen — never the
+/// node's — because the read side believes a flag only when its attester
+/// `is_named_moderator(attester, room, moderate)`. The same predicate is
+/// checked here first, so a non-holder is refused rather than writing a row
+/// every reader would ignore. A flag withholds the body or bytes from every
+/// member until they reveal it; `clear` lifts it and keeps the history.
+///
+/// Every action answers the item's moderation as it now stands.
 async fn moderate_item(
     State(st): State<ChatState>,
     headers: HeaderMap,
     Path((community_id, attestation_id, action)): Path<(String, String, String)>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if action != "reveal" {
+    if !matches!(
+        action.as_str(),
+        "reveal" | "flag" | "clear" | "reconsider" | "rule"
+    ) {
         return refuse(
             StatusCode::NOT_FOUND,
             "moderation.unknown_action",
@@ -6436,11 +6877,22 @@ async fn moderate_item(
         Ok(o) => o,
         Err(r) => return r,
     };
-    if let Some(resp) = require_verb(
-        &owner,
-        crate::auth::gate::CapabilityVerb::ChatAuthor,
-        "moderation.delegate_may_not_reveal",
-    ) {
+    // A delegate session acts for nobody here: revealing is the viewer's own
+    // consent, and a moderator's decision is the moderator's own signature.
+    let delegate_refused = if action == "reveal" {
+        require_verb(
+            &owner,
+            crate::auth::gate::CapabilityVerb::ChatAuthor,
+            "moderation.delegate_may_not_reveal",
+        )
+    } else {
+        require_verb(
+            &owner,
+            crate::auth::gate::CapabilityVerb::ChatAuthor,
+            "moderation.delegate_may_not_moderate",
+        )
+    };
+    if let Some(resp) = delegate_refused {
         return resp;
     }
     if let Err(r) = require_member(&st, &owner, &community_id).await {
@@ -6497,6 +6949,34 @@ async fn moderate_item(
             )
         }
     };
+    if matches!(action.as_str(), "reconsider" | "rule") {
+        return appeal_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            &action,
+            &body,
+            view,
+        )
+        .await;
+    }
+    if action != "reveal" {
+        return moderator_decision(
+            &st,
+            &headers,
+            &owner,
+            &community_id,
+            &attestation_id,
+            &author,
+            &action,
+            &body,
+            view,
+        )
+        .await;
+    }
     let class = match view.as_ref().and_then(|v| v.flag) {
         Some(c) => c,
         None => {
@@ -7703,7 +8183,7 @@ pub(crate) mod pending_contacts {
                      peer for their records every pass, and the code's nodes' keys first. Where to look: \
                      (1) pulled_from=[] → no peer to ask; code_node_keys_missing non-empty → the \
                      binding cannot be admitted until those keys land; (2) on the peer, `subject Pull refused … not publicly pullable` means \
-                     it will not serve their owner-binding on request (tracked: CIRISEdge#907); \
+                     it will not serve their owner-binding on request (history: CIRISEdge#907); \
                      (3) on the peer, is there a live federation `delegates_to` from this key_id to \
                      a node at all — if not, they have not announced"
                 );

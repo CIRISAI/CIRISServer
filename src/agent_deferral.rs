@@ -513,13 +513,34 @@ pub async fn emit_identity_amendment(
         "evidence_refs": [authorized_by],
     });
     inherit_room(&mut body, &response.attestation_envelope);
-    let id = attest::emit(
+    let id = match attest::emit(
         engine,
         KeySigner::Engine(engine),
         spec(IDENTITY_AMENDMENT, body).about(&identity),
     )
     .await
-    .map_err(|e| AgentRowError::Store(format!("emit {IDENTITY_AMENDMENT}: {e}")))?;
+    {
+        Ok(id) => id,
+        // persist's own CC 3.1.5 gate (CIRISPersist#1120) refused it: an
+        // authorization answer, never an outage (CIRISServer#871).
+        Err(e) if e.to_string().contains("identity_amendment_unauthorized") => {
+            log_seat_resolution(
+                engine,
+                node_key_id,
+                &occurrence,
+                &identity,
+                &response,
+                &owner,
+            )
+            .await;
+            return Err(unauthorized(format!("persist refused it: {e}")));
+        }
+        Err(e) => {
+            return Err(AgentRowError::Store(format!(
+                "emit {IDENTITY_AMENDMENT}: {e}"
+            )))
+        }
+    };
     tracing::info!(
         attestation_id = %id,
         occurrence = %occurrence,
@@ -529,6 +550,70 @@ pub async fn emit_identity_amendment(
         "identity_amendment:v1 signed, citing the WA's approval"
     );
     Ok(id)
+}
+
+/// CIRISServer#871 — when persist's gate refuses an amendment this door passed,
+/// log every read both rules depend on, so the refusal names its own cause.
+/// This door seats the owner of the NODE; persist seats the owner of the
+/// amendment's signer, else of the agent, else the newest `user` principal of
+/// the signing occurrence. On a split home only the last one can answer.
+async fn log_seat_resolution(
+    engine: &Engine,
+    node_key_id: &str,
+    occurrence: &str,
+    identity: &str,
+    response: &ciris_persist::federation::types::Attestation,
+    owner: &str,
+) {
+    use ciris_persist::federation::admission::owner_of;
+    let dir = engine.federation_directory();
+    let at = response.asserted_at;
+    let principals = dir.active_identities_for_occurrence(occurrence).await;
+    let mut typed = Vec::new();
+    if let Ok(ps) = &principals {
+        for p in ps {
+            let ty = dir
+                .lookup_public_key(p)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.identity_type);
+            let p_self = self_at(engine, p, at).await.ok();
+            typed.push(format!("{p} type={ty:?} self={p_self:?}"));
+        }
+    }
+    let all = dir
+        .list_identity_occurrences_by_occurrence_key(occurrence)
+        .await;
+    let rows: Vec<String> = all
+        .map(|v| {
+            v.iter()
+                .map(|o| {
+                    format!(
+                        "{} at {} valid_until={:?}",
+                        o.identity_key_id, o.asserted_at, o.valid_until
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_else(|e| vec![format!("read failed: {e:#}")]);
+    tracing::warn!(
+        node = %node_key_id,
+        occurrence = %occurrence,
+        identity = %identity,
+        wa = %response.attesting_key_id,
+        response_at = %at,
+        door_owner = %owner,
+        door_owner_self = ?self_at(engine, owner, at).await.ok(),
+        wa_self = ?self_at(engine, &response.attesting_key_id, at).await.ok(),
+        owner_of_occurrence = ?owner_of(dir.as_ref(), occurrence).await.ok().flatten(),
+        owner_of_identity = ?owner_of(dir.as_ref(), identity).await.ok().flatten(),
+        identity_for_occurrence = ?dir.active_identity_for_occurrence(occurrence).await.ok(),
+        principals = ?typed,
+        occurrence_rows = ?rows,
+        "identity amendment: persist's seat rule refused what this door's rule passed \
+         (tracked: CIRISServer#871) — the reads both rules use"
+    );
 }
 
 /// **Read rows back by id** (T7's chain check): the request, response and

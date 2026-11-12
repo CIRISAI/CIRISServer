@@ -285,11 +285,33 @@ struct HandoffStore {
     /// poll answer "expired" and the app give up on a sign-in that then
     /// succeeded. See [`UNSEEN_NONCE_GRACE`].
     unseen: HashMap<String, (Instant, Instant)>,
+    /// **Nonces `/login` has issued**, until a flow that started could no
+    /// longer be pending or collectable (CIRISServer#868). This is what lets
+    /// `410 flow_expired` mean ONLY "this flow existed and is dead": a nonce
+    /// the node never issued is a flow that has not started (or never will),
+    /// and is told so in different words.
+    issued: HashMap<String, Instant>,
 }
 
 /// How long a poll for a nonce this node has never seen hears "not yet". Past
-/// this it is a flow that never started, and the app is told to stop.
-const UNSEEN_NONCE_GRACE: Duration = Duration::from_secs(30);
+/// this it is a flow that never started, and the app is told so
+/// (`auth.oauth.flow_unknown`, not `flow_expired`).
+///
+/// 30 s was not enough (CIRISServer#868): a cold default browser, `xdg-open`
+/// latency or a browser restoring its session can take longer than that to
+/// reach `/login`, and the app polls from the moment it opens the browser.
+/// Two minutes covers a slow launch without leaving an abandoned app polling
+/// for long.
+const UNSEEN_NONCE_GRACE: Duration = Duration::from_secs(120);
+/// How long an issued nonce is remembered as issued: the CSRF deadline (600 s)
+/// plus the parked outcome's (300 s), so `flow_expired` stays precise for the
+/// whole life of a flow that started, and a little past it.
+const ISSUED_NONCE_TTL: Duration = Duration::from_secs(960);
+/// Bounds the issued set. `/login` is reachable by any browser, so this keeps a
+/// caller spraying `/login?app_nonce=…` from growing the map; past it the
+/// oldest entries are dropped, which can only turn a precise `flow_expired`
+/// into `flow_unknown`, never a dead flow into "keep waiting".
+const ISSUED_NONCE_MAX: usize = 1024;
 /// Forget an unseen nonce nobody has polled for this long. It must outlast the
 /// gap between polls: forgetting one still being polled would restart its grace.
 const UNSEEN_NONCE_IDLE: Duration = Duration::from_secs(300);
@@ -373,13 +395,11 @@ impl HandoffStore {
         self.prune();
         if let Some((outcome, deadline)) = self.ready.remove(nonce) {
             if deadline > Instant::now() {
-                self.recent = None; // claimed; do not hand it out twice
-                                    // This flow is over: its next poll is told so, not given the
-                                    // grace meant for a nonce whose flow has yet to start.
-                let now = Instant::now();
-                if let Some(past) = now.checked_sub(UNSEEN_NONCE_GRACE) {
-                    self.unseen.insert(nonce.to_owned(), (past, now));
-                }
+                // Claimed: do not hand it out twice.
+                self.recent = None;
+                // This flow is over: its next poll is told `flow_expired`, not
+                // given the grace meant for a nonce whose flow has yet to start.
+                self.mark_issued(nonce, Instant::now());
                 return Some(outcome);
             }
         }
@@ -404,6 +424,31 @@ impl HandoffStore {
     fn is_in_flight(&mut self, nonce: &str) -> bool {
         self.prune();
         self.in_flight.contains_key(nonce)
+    }
+
+    /// Record that `/login` issued a flow for `nonce` (CIRISServer#868). From
+    /// here on a poll that finds nothing pending is told `flow_expired`, and
+    /// the unseen grace no longer applies.
+    fn mark_issued(&mut self, nonce: &str, now: Instant) {
+        self.issued.retain(|_, until| *until > now);
+        if self.issued.len() >= ISSUED_NONCE_MAX && !self.issued.contains_key(nonce) {
+            if let Some(oldest) = self
+                .issued
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(k, _)| k.clone())
+            {
+                self.issued.remove(&oldest);
+            }
+        }
+        self.issued.insert(nonce.to_owned(), now + ISSUED_NONCE_TTL);
+        self.unseen.remove(nonce);
+    }
+
+    /// Did a flow for `nonce` start on this node, recently enough to matter?
+    fn was_issued(&mut self, nonce: &str, now: Instant) -> bool {
+        self.issued.retain(|_, until| *until > now);
+        self.issued.contains_key(nonce)
     }
 
     /// May a poll for this nonce, known to nothing else here, still be waiting
@@ -1869,6 +1914,13 @@ async fn oauth_login(
         let mut csrf = st.csrf.lock().unwrap();
         csrf.issue(q.app_nonce.clone(), post_login_redirect)
     };
+    // The flow now exists, so the hand-off poll can call its death by its name
+    // (CIRISServer#868).
+    if let Some(n) = q.app_nonce.as_deref() {
+        if let Ok(mut h) = st.handoff.lock() {
+            h.mark_issued(n, Instant::now());
+        }
+    }
     // The provider redirect_uri is ALWAYS our registered callback — the
     // app-supplied post-login `redirect_uri` is a DIFFERENT axis (where the
     // BROWSER goes after we finish) and is carried on the CSRF entry above.
@@ -2345,6 +2397,12 @@ const PROVIDER_NOT_CONFIGURED: &str = "provider not configured";
 /// its English text.
 const FLOW_EXPIRED_REASON: &str = "auth.oauth.flow_expired";
 
+/// The hand-off poll's other "stop polling" id (CIRISServer#868): this node
+/// never issued a flow for the nonce, and the unseen grace has run out. Not
+/// `flow_expired`, because nothing here existed to expire: the browser never
+/// reached `/login` with it.
+const FLOW_UNKNOWN_REASON: &str = "auth.oauth.flow_unknown";
+
 /// One browser-leg refusal: HTML for the human, `{error, reason_id}` JSON when
 /// the caller explicitly asked for JSON (`Accept: application/json`). Logs with
 /// the reason_id either way — the browser page is the one refusal surface an
@@ -2578,11 +2636,17 @@ struct ExchangeRequest {
 ///  3. the flow is still PENDING — an unconsumed authorization carries this
 ///     nonce, or the callback holds it between CSRF-consume and outcome-park
 ///     (the in-flight window, THE race) → `204` *not yet*;
-///  4. a nonce first polled under [`UNSEEN_NONCE_GRACE`] ago → `204` *not yet*:
-///     the app polls from when it opens the browser, and the nonce is registered
-///     only when the browser reaches `/login`;
-///  5. nothing anywhere → `410` `{"status":"expired", …}` — this flow is dead
-///     and polling harder will not revive it.
+///  4. a nonce this node never issued, first polled under
+///     [`UNSEEN_NONCE_GRACE`] ago → `204` *not yet*: the app polls from when it
+///     opens the browser, and the nonce is registered only when the browser
+///     reaches `/login`;
+///  5. a nonce `/login` issued, with nothing pending → `410`
+///     `{"status":"expired", "reason_id":"auth.oauth.flow_expired"}`: this flow
+///     existed and is dead, and polling harder will not revive it;
+///  6. a nonce never issued, past the grace → `410`
+///     `{"status":"unknown", "reason_id":"auth.oauth.flow_unknown"}`: the
+///     browser never reached `/login` with it (CIRISServer#868). "Never seen"
+///     and "expired" used to share answer 5.
 ///
 /// `204` means *keep waiting* and ONLY that. It used to also mean "your flow
 /// failed" (failures parked nothing) and "no such flow ever existed" — three
@@ -2654,14 +2718,38 @@ async fn oauth_handoff(State(st): State<OAuthState>, Query(q): Query<HandoffQuer
                     .lock()
                     .map(|mut c| c.has_pending_nonce(&q.app_nonce))
                     .unwrap_or(false);
-            let waiting_on_browser = !pending
+            let now = Instant::now();
+            // A flow that started here and is no longer pending is dead. One
+            // that never started may still be waiting on its browser.
+            let started = !pending
                 && st
                     .handoff
                     .lock()
-                    .map(|mut h| h.in_unseen_grace(&q.app_nonce, Instant::now()))
+                    .map(|mut h| h.was_issued(&q.app_nonce, now))
+                    .unwrap_or(false);
+            let waiting_on_browser = !pending
+                && !started
+                && st
+                    .handoff
+                    .lock()
+                    .map(|mut h| h.in_unseen_grace(&q.app_nonce, now))
                     .unwrap_or(false);
             if pending || waiting_on_browser {
                 StatusCode::NO_CONTENT.into_response()
+            } else if !started {
+                tracing::info!(
+                    reason_id = FLOW_UNKNOWN_REASON,
+                    "hand-off poll for a nonce this node never issued a flow for, past the \
+                     grace for a slow browser — telling the app to stop polling"
+                );
+                (
+                    StatusCode::GONE,
+                    Json(serde_json::json!({
+                        "status": "unknown",
+                        "reason_id": FLOW_UNKNOWN_REASON,
+                    })),
+                )
+                    .into_response()
             } else {
                 tracing::info!(
                     reason_id = FLOW_EXPIRED_REASON,
@@ -3694,6 +3782,70 @@ mod tests {
         // A real gap between polls does not hand the same nonce a new grace.
         let later = t0 + UNSEEN_NONCE_GRACE + UNSEEN_NONCE_IDLE - Duration::from_secs(1);
         assert!(!h.in_unseen_grace("n", later));
+    }
+
+    /// **#868: the grace outlasts a slow browser, and a started flow is never
+    /// called unknown.** A cold browser can take longer than 30 s to reach
+    /// `/login`; the app must still be waiting when it does.
+    #[test]
+    fn a_never_issued_nonce_waits_for_a_slow_browser() {
+        let mut h = HandoffStore::default();
+        let t0 = Instant::now();
+        assert!(h.in_unseen_grace("slow", t0));
+        assert!(
+            h.in_unseen_grace("slow", t0 + Duration::from_secs(45)),
+            "45 s in, a slow browser is still expected"
+        );
+        assert!(!h.was_issued("slow", t0 + Duration::from_secs(45)));
+        // The browser arrives: the flow is now one that started.
+        h.mark_issued("slow", t0 + Duration::from_secs(50));
+        assert!(h.was_issued("slow", t0 + Duration::from_secs(50)));
+        assert!(
+            !h.unseen.contains_key("slow"),
+            "a started flow leaves the unseen set, so it can never be told flow_unknown"
+        );
+    }
+
+    /// **#868: `flow_expired` stays precise for a flow's whole life.** An issued
+    /// nonce is remembered past the CSRF deadline and the parked outcome's, and
+    /// a collected one reads as issued (so its next poll is `flow_expired`).
+    #[test]
+    fn an_issued_nonce_is_remembered_for_the_life_of_its_flow() {
+        let mut h = HandoffStore::default();
+        let t0 = Instant::now();
+        h.mark_issued("n", t0);
+        let csrf_and_park = Duration::from_secs(600 + 300);
+        assert!(
+            h.was_issued("n", t0 + csrf_and_park),
+            "still known when its flow could last be collected"
+        );
+        assert!(
+            !h.was_issued("n", t0 + ISSUED_NONCE_TTL),
+            "forgotten after its TTL"
+        );
+
+        h.park(Some("c".into()), complete("sess:c"));
+        assert!(h.collect("c").is_some());
+        assert!(
+            h.was_issued("c", Instant::now()),
+            "a collected flow reads as one that existed"
+        );
+    }
+
+    /// `/login` is reachable by any browser, so the issued set is bounded; the
+    /// oldest entry goes first.
+    #[test]
+    fn issued_nonces_are_bounded() {
+        let mut h = HandoffStore::default();
+        let t0 = Instant::now();
+        for i in 0..ISSUED_NONCE_MAX {
+            h.mark_issued(&format!("n{i}"), t0 + Duration::from_millis(i as u64));
+        }
+        let t1 = t0 + Duration::from_secs(1);
+        h.mark_issued("newest", t1);
+        assert_eq!(h.issued.len(), ISSUED_NONCE_MAX);
+        assert!(h.was_issued("newest", t1));
+        assert!(!h.was_issued("n0", t1), "the oldest was dropped");
     }
 
     /// A local client spraying nonces cannot grow the map without limit.

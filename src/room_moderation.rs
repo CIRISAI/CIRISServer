@@ -210,9 +210,9 @@ pub async fn view_of(
     let dir = engine.federation_directory();
     let rows = duties.moderation_rows(dir.as_ref(), author).await?;
 
-    // THE FLAG: per class, the newest row from a `moderate` holder of THIS
-    // room. A cleared flag (`withdrawn: true`) is the newest row saying so.
-    let mut newest: HashMap<&'static str, &Attestation> = HashMap::new();
+    // THE FLAG ROWS: every unexpired row from a `moderate` holder of THIS
+    // room naming the item. A clear is such a row with `withdrawn: true`.
+    let mut flags: Vec<(&Attestation, ContentFlag, bool)> = Vec::new();
     for row in rows.iter() {
         if row.attestation_type != attestation_type::SCORES
             || !names_room(row, room)
@@ -237,37 +237,34 @@ pub async fn view_of(
         {
             continue;
         }
-        let slot = newest.entry(class.as_str()).or_insert(row);
-        if row.asserted_at > slot.asserted_at {
-            *slot = row;
-        }
+        let withdrawn = row
+            .attestation_envelope
+            .get("withdrawn")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        flags.push((row, class, withdrawn));
     }
-    // The more severe class leads when both were ever flagged.
-    let Some(flag_row) = [ContentFlag::Infohazard, ContentFlag::Reported]
-        .iter()
-        .find_map(|c| newest.get(c.as_str()).copied())
-    else {
+    if flags.is_empty() {
         return Ok(None);
-    };
-    let class = dimension(flag_row)
-        .and_then(flag_class)
-        .unwrap_or(ContentFlag::Reported);
-    let cleared = flag_row
-        .attestation_envelope
-        .get("withdrawn")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    }
 
-    // THE APPEAL: the newest filing against this flag row, and the newest
-    // ruling from a `review` holder after it.
-    let mut filing: Option<&Attestation> = None;
-    let mut ruling: Option<(&Attestation, String)> = None;
+    // THE APPEAL ROWS against ANY of those flag rows: the appeal is about the
+    // item's moderation, not one row of it. An author who appeals `reported`
+    // in the seconds after a moderator raised it to `infohazard` has appealed
+    // the item, and the reviewer must see the filing.
+    let mut filings: Vec<&Attestation> = Vec::new();
+    let mut rulings: Vec<(&Attestation, String)> = Vec::new();
     for row in rows.iter() {
         if row.attestation_type != attestation_type::SCORES
             || !dimension(row)
                 .is_some_and(|d| d.starts_with(admission::RECONSIDERATION_DIMENSION_PREFIX))
-            || references(row) != Some(flag_row.attestation_id.as_str())
         {
+            continue;
+        }
+        let Some(named) = references(row) else {
+            continue;
+        };
+        if !flags.iter().any(|(f, _, _)| f.attestation_id == named) {
             continue;
         }
         match row
@@ -275,13 +272,9 @@ pub async fn view_of(
             .get(admission::RECONSIDERATION_OUTCOME_MEMBER)
             .and_then(serde_json::Value::as_str)
         {
-            None => {
-                if filing.is_none_or(|f| row.asserted_at > f.asserted_at) {
-                    filing = Some(row);
-                }
-            }
+            None => filings.push(row),
             Some(outcome) => {
-                if !duties
+                if duties
                     .holds(
                         dir.as_ref(),
                         &row.attesting_key_id,
@@ -290,33 +283,99 @@ pub async fn view_of(
                     )
                     .await?
                 {
-                    continue;
-                }
-                if ruling
-                    .as_ref()
-                    .is_none_or(|(r, _)| row.asserted_at > r.asserted_at)
-                {
-                    ruling = Some((row, outcome.to_owned()));
+                    rulings.push((row, outcome.to_owned()));
                 }
             }
         }
     }
-    let reconsideration = match (filing, &ruling) {
-        (Some(f), Some((r, outcome))) if r.asserted_at >= f.asserted_at => {
-            Some(match outcome.as_str() {
-                "reversed" => Reconsideration::Reversed,
-                "partial" => Reconsideration::Partial,
-                // An outcome this build does not know does not lift a flag.
-                _ => Reconsideration::Upheld,
-            })
+
+    // THE ROUND: a clear or a reversal ends one. Every flag at or before the
+    // newest such act is spent, whatever its class — a reversal of
+    // `infohazard` lifts the `reported` it replaced, and a later flag is a
+    // moderator's NEW decision, live until it is cleared or reversed itself.
+    let round_start = flags
+        .iter()
+        .filter(|(_, _, withdrawn)| *withdrawn)
+        .map(|(f, _, _)| f.asserted_at)
+        .chain(
+            rulings
+                .iter()
+                .filter(|(_, o)| o == "reversed")
+                .map(|(r, _)| r.asserted_at),
+        )
+        .max();
+    let in_round = |at: chrono::DateTime<chrono::Utc>| round_start.is_none_or(|s| at > s);
+
+    // The more severe class leads among the LIVE flags of this round.
+    let live_flag = [ContentFlag::Infohazard, ContentFlag::Reported]
+        .iter()
+        .find_map(|c| {
+            flags
+                .iter()
+                .filter(|(f, class, withdrawn)| class == c && !withdrawn && in_round(f.asserted_at))
+                .max_by_key(|(f, _, _)| f.asserted_at)
+        })
+        .map(|(f, class, _)| (*f, *class));
+
+    let (flag_row, class, reconsideration, filing) = if let Some((flag_row, class)) = live_flag {
+        // This round's newest filing, and the newest ruling after it.
+        let filing = filings
+            .iter()
+            .copied()
+            .filter(|f| in_round(f.asserted_at))
+            .max_by_key(|f| f.asserted_at);
+        let ruling = rulings
+            .iter()
+            .filter(|(r, _)| in_round(r.asserted_at))
+            .max_by_key(|(r, _)| r.asserted_at);
+        let reconsideration = match (filing, ruling) {
+            (Some(f), Some((r, outcome))) if r.asserted_at >= f.asserted_at => {
+                Some(match outcome.as_str() {
+                    "partial" => Reconsideration::Partial,
+                    // An outcome this build does not know does not lift a flag.
+                    _ => Reconsideration::Upheld,
+                })
+            }
+            (Some(_), _) => Some(Reconsideration::Filed),
+            // A ruling with no filing on this node yet: the ruling still binds.
+            (None, Some(_)) => Some(Reconsideration::Upheld),
+            (None, None) => None,
+        };
+        (flag_row, class, reconsideration, filing)
+    } else {
+        // Nothing live: the history of the act that ended the last round —
+        // a reversal (with the filing it answered) or a clear.
+        let last_reversal = rulings
+            .iter()
+            .filter(|(_, o)| o == "reversed")
+            .max_by_key(|(r, _)| r.asserted_at);
+        let last_clear = flags
+            .iter()
+            .filter(|(_, _, withdrawn)| *withdrawn)
+            .max_by_key(|(f, _, _)| f.asserted_at);
+        let reversal = last_reversal
+            .filter(|(r, _)| last_clear.is_none_or(|(c, _, _)| r.asserted_at > c.asserted_at));
+        match (reversal, last_clear) {
+            (Some((r, _)), _) => {
+                let named = references(r).unwrap_or_default();
+                let (flag_row, class, _) = flags
+                    .iter()
+                    .find(|(f, _, _)| f.attestation_id == named)
+                    .copied()
+                    .unwrap_or(flags[0]);
+                let filing = filings
+                    .iter()
+                    .copied()
+                    .filter(|f| f.asserted_at <= r.asserted_at)
+                    .max_by_key(|f| f.asserted_at);
+                (flag_row, class, Some(Reconsideration::Reversed), filing)
+            }
+            (_, Some((c, class, _))) => (*c, *class, None, None),
+            // Unreachable: no live flag means a clear or a reversal spent them.
+            (None, None) => (flags[0].0, flags[0].1, None, None),
         }
-        (Some(_), _) => Some(Reconsideration::Filed),
-        // A ruling with no filing on this node yet: the ruling still binds.
-        (None, Some((_, outcome))) if outcome == "reversed" => Some(Reconsideration::Reversed),
-        (None, Some(_)) => Some(Reconsideration::Upheld),
-        (None, None) => None,
     };
-    let live = !cleared && reconsideration != Some(Reconsideration::Reversed);
+    let live = live_flag.is_some();
     let revealed = live && has_view_consent(engine, viewer, target_id, class).await?;
     Ok(Some(ModerationView {
         flag: live.then_some(class.as_str()),

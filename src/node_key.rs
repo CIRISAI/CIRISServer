@@ -245,10 +245,32 @@ fn legacy_node_alias(host_alias: &str) -> String {
 /// `ciris-node-bootstrap`. That makes the base-alias change genuinely
 /// no-migration rather than merely rare.
 fn resolve_node_alias(host_alias: &str, identity_dir: &std::path::Path) -> String {
+    // 0.5.246: the alias this home recorded when it minted its node key wins —
+    // whoever minted it (an earlier bare boot or an earlier split), so a home is
+    // one node whatever launches it.
+    if let Some(recorded) = recorded_node_alias(identity_dir) {
+        return recorded;
+    }
     let legacy = legacy_node_alias(host_alias);
     match crate::key_tier::ed25519_open_existing(&legacy, identity_dir) {
-        // ABSENT — genuinely no legacy identity. Take the base alias.
-        Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => NODE_ALIAS.to_owned(),
+        // ABSENT — no legacy identity. Keep a pre-0.5.246 base-alias key if
+        // the home holds one; only a home with no node key at all mints the
+        // descriptive name.
+        Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => {
+            match crate::key_tier::ed25519_open_existing(NODE_ALIAS, identity_dir) {
+                Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => {
+                    let alias = crate::key_convention::descriptive_node_alias(
+                        crate::host_kind::Installer::CirisAgent,
+                    );
+                    record_node_alias(identity_dir, &alias);
+                    tracing::info!(alias = %alias, "a new node key: minting under a descriptive name");
+                    alias
+                }
+                // Present, or present-but-unreadable: keep it (same reasoning as
+                // the legacy arm below — never boot as somebody else).
+                _ => NODE_ALIAS.to_owned(),
+            }
+        }
 
         // PRESENT BUT UNREADABLE — permissions, corruption, a locked keystore.
         // This is NOT proof that no legacy identity exists, and treating it as
@@ -281,6 +303,115 @@ fn resolve_node_alias(host_alias: &str, identity_dir: &std::path::Path) -> Strin
             );
             legacy
         }
+    }
+}
+
+/// **The key a home boots as when the launcher names none** — one identity per
+/// home, whoever launches it (Eric, 2026-11-10: "server side").
+///
+/// Before this, the name came from the launcher: the desktop app and the wheel's
+/// bare `ciris-server` passed `--key-id ciris-client`, the agent passed
+/// `ciris-agent-bootstrap` (which splits to [`NODE_ALIAS`]). One home booted both
+/// ways held two node identities, each with a live owner-binding, and the one not
+/// launched last sat on peers' rosters as a stopped node (the canonical's eight
+/// `ciris-client-*` no_route peers, CIRISEdge#971; Eric's laptop, 2026-11-03).
+///
+/// The home's own keystore decides, first hit wins, and nothing is minted here:
+///
+/// 1. [`NODE_ALIAS`] — the node key an agent-hosted boot split out. A bare boot of
+///    that home IS that node, so it runs as it.
+/// 2. A legacy `{host}-node` node key (the pre-base-alias split), for the hosts
+///    that ever split: the agent, the desktop client, the plain server.
+/// 3. `ciris-client` — a desktop home that has only ever booted bare. Keeping it
+///    is what stops an upgrade from silently changing that node's identity.
+/// 4. `ciris-server` — [`crate::config::DEFAULT_KEY_ID`], a bare server home.
+///
+/// The ACTOR key (`ciris-agent-bootstrap`) is never a candidate: a bare node does
+/// not sign as the agent.
+///
+/// A home holding none of them is new: it takes a descriptive name
+/// (`cirisserver-<host>-node`) and records it in [`NODE_ALIAS_FILE`]. A later
+/// agent boot of the same home reads that record and adopts the key as its node,
+/// so the home never gains a second node identity.
+///
+/// Probing uses [`crate::key_tier::ed25519_open_existing`], which reaches every
+/// tier (file, TPM seal, keychain/Secure Enclave). As in [`resolve_node_alias`], a
+/// key that exists but cannot be opened this boot counts as present: stopping on
+/// it is recoverable, booting as somebody else is not.
+#[must_use]
+pub fn home_key_alias(identity_dir: &std::path::Path) -> String {
+    if let Some(recorded) = recorded_node_alias(identity_dir) {
+        tracing::info!(alias = %recorded, "no --key-id: booting as the node key this home recorded");
+        return recorded;
+    }
+    let mut candidates: Vec<String> = vec![NODE_ALIAS.to_owned()];
+    for host in [
+        "ciris-agent-bootstrap",
+        "ciris-client",
+        crate::config::DEFAULT_KEY_ID,
+    ] {
+        candidates.push(legacy_node_alias(host));
+    }
+    candidates.push("ciris-client".to_owned());
+    candidates.push(crate::config::DEFAULT_KEY_ID.to_owned());
+    for alias in candidates {
+        match crate::key_tier::ed25519_open_existing(&alias, identity_dir) {
+            Err(ciris_keyring::KeyringError::KeyNotFound { .. }) => continue,
+            Ok(_) => {
+                tracing::info!(alias = %alias, "no --key-id: booting as the key this home holds");
+                return alias;
+            }
+            Err(e) => {
+                tracing::error!(
+                    alias = %alias,
+                    error = %e,
+                    "no --key-id: this home's key exists or may exist and could not be \
+                     opened; keeping it rather than booting as a different node"
+                );
+                return alias;
+            }
+        }
+    }
+    let alias =
+        crate::key_convention::descriptive_node_alias(crate::host_kind::Installer::CirisServer);
+    record_node_alias(identity_dir, &alias);
+    tracing::info!(alias = %alias, "no --key-id and no key in this home: a new node, named for its host");
+    alias
+}
+
+/// The file, inside the identity dir, naming the alias this home minted its
+/// node key under (0.5.246). Node keys minted since then carry a descriptive
+/// name rather than one fixed literal, so the name has to be remembered.
+pub const NODE_ALIAS_FILE: &str = "node_alias";
+
+/// The alias this home recorded, if any. A blank or unreadable file is no
+/// record, and an alias that fails [`crate::host_kind::slug`]-style checks is
+/// refused rather than trusted.
+#[must_use]
+pub fn recorded_node_alias(identity_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(identity_dir.join(NODE_ALIAS_FILE)).ok()?;
+    let alias = raw.trim();
+    let ok = !alias.is_empty()
+        && alias.len() <= 64
+        && alias.ends_with("-node")
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    ok.then(|| alias.to_owned())
+}
+
+/// Record the alias a new node key is minted under. Best effort: if the write
+/// fails the next boot detects the same host and derives the same name, unless
+/// the host changed in between, which the log line says.
+fn record_node_alias(identity_dir: &std::path::Path, alias: &str) {
+    let write = std::fs::create_dir_all(identity_dir)
+        .and_then(|()| std::fs::write(identity_dir.join(NODE_ALIAS_FILE), alias));
+    if let Err(e) = write {
+        tracing::warn!(
+            alias,
+            error = %e,
+            "could not record the node key's alias; the next boot derives it again from the host"
+        );
     }
 }
 
@@ -323,6 +454,95 @@ pub async fn plan_owner_binding_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn soft_key(dir: &std::path::Path, alias: &str, b: u8) {
+        use ciris_keyring::storage::{SecureBlobStorage, SoftwareSecureBlobStorage};
+        let sw = SoftwareSecureBlobStorage::new(alias, dir).unwrap();
+        sw.store("ed25519.seed", &[b; 32]).unwrap();
+    }
+
+    fn home(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "home-key-alias-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// One identity per home, whoever launches it: the node key an agent split
+    /// out wins over a bare desktop key, a lone desktop key is kept, and the agent
+    /// key is never what a bare node boots as.
+    #[test]
+    fn a_home_boots_as_the_key_it_already_holds() {
+        let d = home("empty");
+        let fresh = home_key_alias(&d);
+        assert!(
+            fresh.starts_with("cirisserver-") && fresh.ends_with("-node"),
+            "a new home is a new node, named for its host: {fresh}"
+        );
+        assert_eq!(
+            recorded_node_alias(&d).as_deref(),
+            Some(fresh.as_str()),
+            "and remembers it"
+        );
+        assert_eq!(home_key_alias(&d), fresh, "the next boot is the same node");
+
+        let d = home("recorded");
+        soft_key(&d, "ciris-client", 1);
+        std::fs::write(d.join(NODE_ALIAS_FILE), "cirisagent-datum-node\n").unwrap();
+        assert_eq!(
+            home_key_alias(&d),
+            "cirisagent-datum-node",
+            "the recorded node key wins"
+        );
+        std::fs::write(d.join(NODE_ALIAS_FILE), "../etc/passwd").unwrap();
+        assert_eq!(
+            recorded_node_alias(&d),
+            None,
+            "a malformed record is not trusted"
+        );
+
+        let d = home("desktop");
+        soft_key(&d, "ciris-client", 1);
+        assert_eq!(
+            home_key_alias(&d),
+            "ciris-client",
+            "an upgrade keeps a desktop node"
+        );
+
+        let d = home("both");
+        soft_key(&d, "ciris-client", 1);
+        soft_key(&d, NODE_ALIAS, 2);
+        assert_eq!(home_key_alias(&d), NODE_ALIAS, "the split node key wins");
+
+        let d = home("actor-only");
+        soft_key(&d, "ciris-agent-bootstrap", 3);
+        let a = home_key_alias(&d);
+        assert!(
+            a != "ciris-agent-bootstrap" && a.ends_with("-node"),
+            "never the actor key: {a}"
+        );
+
+        let d = home("legacy");
+        soft_key(&d, "ciris-client", 1);
+        soft_key(&d, "ciris-agent-bootstrap-node", 4);
+        assert_eq!(
+            home_key_alias(&d),
+            "ciris-agent-bootstrap-node",
+            "a legacy split is adopted"
+        );
+
+        let d = home("server");
+        soft_key(&d, "ciris-server", 5);
+        assert_eq!(
+            home_key_alias(&d),
+            "ciris-server",
+            "a bare server home keeps its key"
+        );
+    }
 
     #[test]
     fn an_unclaimed_node_with_a_brain_waits() {
@@ -1039,6 +1259,66 @@ async fn publish_node_occurrence(
     Ok(true)
 }
 
+/// CIRISServer#871 — on a split home, **the agent agrees, in its own hand, to be
+/// its owner's occurrence.** The login ceremony publishes the `{owner, agent}`
+/// anchor signed by the OWNER only, and persist counts an identity-signed
+/// anchor only once the occurrence itself has agreed to it (CIRISPersist#932).
+/// Without this row the agent resolves to itself, no owner stands behind it,
+/// and persist's seat rule refuses every owner-approved identity amendment
+/// (34/34 in RATCHET). The node's own agreement is [`publish_node_occurrence`];
+/// this is the same act for the agent, signed by the engine's (agent's) key.
+///
+/// A no-op when the current signed row for the pair is already the agent's.
+pub async fn publish_agent_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    agent_key: &str,
+    owner: &str,
+) -> Result<bool> {
+    use ciris_persist::federation::types::device_class;
+    let current_is_mine = engine
+        .federation_directory()
+        .list_signed_identity_occurrences_for(owner)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_signed_identity_occurrences_for({owner}): {e}"))?
+        .iter()
+        .any(|r| {
+            r.identity_occurrence.occurrence_key_id == agent_key && r.attesting_key_id == agent_key
+        });
+    if current_is_mine {
+        return Ok(false);
+    }
+    engine
+        .publish_self_occurrence(owner, device_class::AGENT, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("publish the agent's occurrence under {owner}: {e}"))?;
+    tracing::info!(
+        agent_key_id = %agent_key,
+        owner_key_id = %owner,
+        "split home: the agent agreed, in its own hand, to be its owner's occurrence — its \
+         rows now resolve to the person, and the owner's approvals seat (tracked: CIRISServer#871)"
+    );
+    Ok(true)
+}
+
+/// Publish the agent's agreement, logging rather than failing: the anchor it
+/// completes has already been written.
+async fn reaffirm_agent_occurrence(
+    engine: &ciris_persist::prelude::Engine,
+    agent_key: &str,
+    owner: &str,
+) {
+    if let Err(e) = publish_agent_occurrence(engine, agent_key, owner).await {
+        tracing::warn!(
+            agent_key_id = %agent_key,
+            owner_key_id = %owner,
+            error = %format!("{e:#}"),
+            "split home: the agent's own occurrence agreement was NOT published — the agent \
+             resolves to itself, so its owner's Wise Authority approvals are refused \
+             (tracked: CIRISServer#871)"
+        );
+    }
+}
+
 /// On a SPLIT home, anchor the agent to the human: the login ceremony,
 /// `self_at_login(identity_signer: Some(human), agent: <engine key>)`, run with
 /// the same human whose owner-binding names the node (CIRISServer#601 items 7
@@ -1088,6 +1368,11 @@ pub async fn reaffirm_node_occurrence(engine: &ciris_persist::prelude::Engine) {
         .ok()
         .flatten();
         if let Some(owner) = owner {
+            if let Ok(agent_key) = engine.local_derived_key_id().await {
+                if agent_key != node_key {
+                    reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
+                }
+            }
             if let Err(e) = publish_node_occurrence(engine, &node, &owner).await {
                 tracing::warn!(
                     node_key_id = %node_key,
@@ -1150,6 +1435,8 @@ async fn anchor_agent_to_owner_inner(
         Err(_) => false,
     };
     if stewards.iter().any(|s| s == &owner) && !misclassed {
+        // Anchored before CIRISServer#871: heal the agent's own agreement.
+        reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
         return Ok(None);
     }
     let Some((seed_dir, default_alias)) = held_user_seed_dir() else {
@@ -1203,6 +1490,7 @@ async fn anchor_agent_to_owner_inner(
         })
         .await
         .map_err(|e| anyhow::anyhow!("self_at_login(owner={owner}, agent={agent_key}): {e}"))?;
+    reaffirm_agent_occurrence(engine, &agent_key, &owner).await;
     tracing::info!(
         owner_key_id = %owner,
         agent_key_id = %agent_key,

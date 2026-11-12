@@ -81,6 +81,10 @@ requires-python = ">=3.10"
 # `chat.unsupported_content_type` — CIRISClient#36). 0.5.201 defines none of
 # them; below it a fresh install renders those states as raw ids. The
 # `contacts.*` ladder stalls are still on the guard's debt list (CIRISClient#37).
+# FLOOR 0.5.239 (2026-11-10): the client localizing `mesh.announce_costs`,
+# `add_device.node_proof` and `auth.oauth.flow_unknown` (CIRISServer#868) in all
+# 29 languages, and counting a pre-204 410 as "not yet" for 60 s; five-platform
+# run 42732055746 green against server v0.5.245.
 # FLOOR 0.5.238 (2026-11-08): the client localizing the seven room-file and
 # moderation refusals (`chat.attachment_not_in_room`, `drive.*_by_moderation`,
 # `moderation.*`), off the guard's debt list.
@@ -112,7 +116,7 @@ requires-python = ">=3.10"
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
 dependencies = [
-    "ciris-client>=0.5.238,<0.6",
+    "ciris-client>=0.5.239,<0.6",
 ]
 
 [project.urls]

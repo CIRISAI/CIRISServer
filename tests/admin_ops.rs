@@ -509,7 +509,7 @@ async fn fixture() -> Fixture {
         &engine,
         &target,
         "t-early-1",
-        "health:liveness:v1",
+        "health:observed:v1",
         t0() - chrono::Duration::hours(2),
     )
     .await;
@@ -517,7 +517,7 @@ async fn fixture() -> Fixture {
         &engine,
         &target,
         "t-early-2",
-        "health:liveness:v1",
+        "health:observed:v1",
         t0() - chrono::Duration::hours(1),
     )
     .await;
@@ -525,7 +525,7 @@ async fn fixture() -> Fixture {
         &engine,
         &target,
         "t-late-1",
-        "health:liveness:v1",
+        "health:observed:v1",
         t0() + chrono::Duration::hours(1),
     )
     .await;
@@ -533,11 +533,11 @@ async fn fixture() -> Fixture {
         &engine,
         &target,
         "t-late-2",
-        "health:liveness:v1",
+        "health:observed:v1",
         t0() + chrono::Duration::hours(2),
     )
     .await;
-    emit_score(&engine, &noise, "n-1", "health:liveness:v1", t0()).await;
+    emit_score(&engine, &noise, "n-1", "health:observed:v1", t0()).await;
 
     let slash_a = emit_delegation(&engine, &root_a, &node_key, &["slash"]).await;
     let slash_a2 = emit_delegation(&engine, &root_a, &node_key, &["slash", "moderate"]).await;
@@ -753,7 +753,7 @@ async fn property_1_a_stale_preview_hash_refuses_the_commit_and_writes_nothing()
     // A fifth matching row lands between preview and commit — exactly the TOCTOU
     // window the hash exists to close.
     let target = party_signer(TARGET);
-    emit_score(&f.engine, &target, "t-late-3", "health:liveness:v1", t0()).await;
+    emit_score(&f.engine, &target, "t-late-3", "health:observed:v1", t0()).await;
 
     let before = hard_cases(&f.engine).await.len();
     let (status, json) = post(
@@ -1284,7 +1284,7 @@ async fn target_write(f: &Fixture, target: &LocalSigner, id: &str) -> Result<Str
         &f.engine,
         target,
         id,
-        "health:liveness:v1",
+        "health:observed:v1",
         chrono::Utc::now(),
     )
     .await

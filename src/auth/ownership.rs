@@ -1212,7 +1212,7 @@ pub async fn emit_signed_attestation(
     // `signer.key_id()` (not `derived_key_id()`) contract is the whole reason
     // this helper exists rather than `Engine::emit_attestation`; it is documented
     // above and carried by `crate::attest::emit`.
-    crate::attest::emit(
+    let out = crate::attest::emit(
         engine,
         crate::attest::KeySigner::Local(signer),
         crate::attest::Spec::new(attestation_type, cohort_scope::FEDERATION, envelope)
@@ -1223,7 +1223,11 @@ pub async fn emit_signed_attestation(
             .about(subject_key_id),
     )
     .await
-    .map_err(|e| OwnershipError::Persist(e.to_string()))
+    .map_err(|e| OwnershipError::Persist(e.to_string()));
+    if out.is_ok() {
+        crate::compose::wrote_rows("ownership: a signed attestation written");
+    }
+    out
 }
 
 // ─── Read the owner-binding (is the node owned?) ────────────────────────────

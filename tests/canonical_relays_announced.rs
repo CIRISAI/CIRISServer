@@ -321,6 +321,22 @@ async fn the_canonical_offers_an_announced_device_to_a_stranger_and_never_an_una
         },
         "exactly the announced device and its owner"
     );
+    // The incremental relay (persist's owner-binding feed, 0.5.246) answers
+    // exactly what the full walk does: the walk is now only its fallback.
+    assert_eq!(
+        ciris_server::announced_relay::announced_relay_sets_incremental(&c)
+            .await
+            .expect("incremental relay sets"),
+        sets,
+        "the feed and the walk agree"
+    );
+    // A second pass reads only what arrived since its cursor: still the same.
+    assert_eq!(
+        ciris_server::announced_relay::announced_relay_sets_incremental(&c)
+            .await
+            .unwrap(),
+        sets
+    );
 
     let x = "x-another-persons-node-never-consented";
     let own = vec![c_key.clone()];

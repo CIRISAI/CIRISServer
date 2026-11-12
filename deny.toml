@@ -97,6 +97,27 @@ ignore = [
                           # "https-ring"), NOT the dnssec-validation feature, so the
                           # NSEC3 proof path is never invoked. No patched 0.25.x exists
                           # (unaffected >= 0.26.0-beta.1); clears when verify bumps hickory.
+    # edge v45.0.0 — four hickory-proto advisories published 2026-09-03
+    # (patched only in >= 0.26.2; no patched 0.25.x). Mirrors CIRISEdge's
+    # deny.toml at v45.0.0, which documents them as unreachable: no Rust source
+    # in ciris-edge, ciris-persist v61.2.2 or ciris-verify v22.2.0 (7146fa4)
+    # names hickory_resolver or hickory_proto; verify declares hickory-resolver
+    # 0.25 but its dns.rs is gone, and ciris-verify-core is its only dependent.
+    # The server names neither crate either. Clears at CIRISVerify 22.2.1.
+    "RUSTSEC-2026-0487",  # SVCB/HTTPS alpn text-parse panic (zone-file text only)
+    "RUSTSEC-2026-0489",  # SVCB/HTTPS lone-quote text-parse panic (zone-file text only)
+    "RUSTSEC-2026-0490",  # zone-file lexer 4096-char token panic (zone-file text only)
+    "RUSTSEC-2026-0491",  # header-count Vec::with_capacity amplification on DNS decode;
+                          # no DNS message is decoded anywhere in the tree
+    # hickory-proto 0.25 DNSSEC validation (published 2026-11-12). Reached via
+    # ciris-verify-core -> hickory-resolver, built WITHOUT any dnssec-* feature,
+    # so no DNSSEC validation runs here. Fixed only in hickory-net 0.26.2; the
+    # move belongs to CIRISVerify.
+    "RUSTSEC-2026-0504",  # inverted NSEC3 comparison (DNSSEC validation)
+    "RUSTSEC-2026-0505",  # NSEC3 owner names not checked against the zone (DNSSEC)
+    "RUSTSEC-2026-0511",  # NXDOMAIN accepted for a proven empty non-terminal (DNSSEC)
+    "RUSTSEC-2026-0512",  # unrelated signed RRset accepted as the answer (DNSSEC)
+    "RUSTSEC-2026-0514",  # lookup returned records that failed DNSSEC validation
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
     "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)

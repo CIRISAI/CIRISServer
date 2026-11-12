@@ -853,7 +853,16 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// `mesh.announce_requirement`, whose translations state the old costs, and
     /// the new `add_device.node_proof`. Same reason as above, on the debt list;
     /// client 0.5.239 adds both.
-    const MAX_UNCOVERED: usize = 28;
+    ///
+    /// 28 -> 35 for 0.5.246: the member call routes' `call.*` and the decisions
+    /// queue's `decisions.*`, net of the two client 0.5.239 paid — same reason,
+    /// same list. 35 -> 39: the room moderator's flag and clear,
+    /// `moderation.{flag_failed,not_a_moderator,nothing_to_clear,unknown_class}`
+    /// — same reason, same list, queued with their English. 39 -> 46: the
+    /// appeal routes' `moderation.{appeal_failed,no_standing,not_a_reviewer,
+    /// nothing_to_appeal,nothing_to_rule,unknown_grounds,unknown_outcome}`.
+    /// 46 -> 47: `community.two_people_only` (two people per room in 0.5.246).
+    const MAX_UNCOVERED: usize = 47;
 
     let en = load_en();
     let ids = scraped_server_ids();

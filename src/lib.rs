@@ -24,9 +24,6 @@
 //! shared SQLite persist Engine, zero-setup. The registry (0.5) and node (1.0)
 //! slices are scaffolded in `compose.rs` and fold in as their co-bumps land.
 
-/// HUMANITY_ACCORD server surface (CIRISServer#41, CC 4.2 / §9.2) — the
-/// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
-/// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
 pub mod accord;
 /// HUMANITY_ACCORD holder-device **portable high-secure** provisioning
 /// (CIRISServer#41) — the caller-run library tool that mints a holder's
@@ -53,6 +50,7 @@ pub mod accord_reactivate;
 /// database. Removes the O(nodes) physical recovery from a mistaken tier-5 halt
 /// without softening the halt (the same accord quorum authorizes both).
 pub mod accord_release;
+pub mod accord_sign_bytes;
 /// The public **adapter seam** — a Rust mirror of CIRISAgent's
 /// `BaseAdapterProtocol`. A downstream crate (e.g. CIRISStatus) implements
 /// [`adapter::Adapter`] and boots via [`serve_with_adapter`] to become
@@ -77,6 +75,11 @@ pub mod admin_ops;
 /// it.
 pub mod attest;
 pub mod attestation_reads;
+/// HUMANITY_ACCORD server surface (CIRISServer#41, CC 4.2 / §9.2) — the
+/// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
+/// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
+pub mod call_frames;
+pub mod call_routes;
 pub mod qa_call;
 
 /// CC 5.4.6 (CIRISServer#655) — a node that serves infrastructure relays the
@@ -299,6 +302,7 @@ pub mod halt_gate;
 /// `register_federation_key` call site in this crate goes through.
 pub mod hardware_attestation;
 pub mod health;
+pub mod host_kind;
 /// HTTP error-response logging middleware (the "never guess" layer).
 pub mod http_log;
 /// Mint a hardware-rooted (YubiKey / TPM-SE / software) **USER** federation
@@ -720,13 +724,23 @@ pub async fn run(home: std::path::PathBuf, key_id: String, diagnostics: bool) ->
 /// [`config::DEFAULT_KEY_ID`]) — the entry point for hosts that take no flags
 /// (the PyO3 wheel `main`).
 pub async fn run_default() -> Result<()> {
+    let home = std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME);
+    let key_id = home_key_id(&home);
     run(
-        std::path::PathBuf::from(config::DEFAULT_CIRIS_HOME),
-        config::DEFAULT_KEY_ID.to_string(),
+        home, key_id,
         // No flags on this path; `CIRIS_DIAGNOSTICS` is still honoured inside `run`.
         false,
     )
     .await
+}
+
+/// The key a home boots as when no `--key-id` is given — the ONE rule every
+/// entry point uses (serve, `config get/set`, `identity create`, `claim`,
+/// `identity-paths`, `accord reactivate`), so a home is one node whoever launches
+/// it. See [`node_key::home_key_alias`].
+#[must_use]
+pub fn home_key_id(home: &std::path::Path) -> String {
+    node_key::home_key_alias(&home.join("identity"))
 }
 
 /// Parse the default-serve flags `--home <path>` and `--key-id <name>` (both
@@ -778,9 +792,16 @@ pub fn parse_serve_flags(
         }
     }
 
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
-    Ok((std::path::PathBuf::from(home), key_id, diagnostics))
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    // No `--key-id`: the home's own keystore names the key, so a home is one node
+    // whoever launches it (`node_key::home_key_alias`). An explicit `--key-id`
+    // (the canonical, the agent, every headless deployment) is used as given.
+    let key_id = match key_id {
+        Some(k) => k,
+        None => home_key_id(&home),
+    };
+    Ok((home, key_id, diagnostics))
 }
 
 /// Import the legacy CIRISLens TimescaleDB trace dump into the persist corpus as
@@ -814,8 +835,49 @@ pub fn active_user_alias(user_seed_dir: &std::path::Path, default_alias: &str) -
     let p = user_seed_dir.join(ACTIVE_USER_ALIAS_FILE);
     match std::fs::read_to_string(&p) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => default_alias.to_string(),
+        _ => legacy_user_alias(user_seed_dir, default_alias),
     }
+}
+
+/// The owner key of a home with no [`ACTIVE_USER_ALIAS_FILE`], found READ-ONLY.
+///
+/// The pointer is written by every owner mint since 0.5.59, so a home lacks it
+/// only if its owner was minted earlier, or the file was lost. Its key then sits
+/// under `<host alias>-user`, and the host alias depended on who launched the
+/// home: the agent (`ciris-agent-bootstrap`), the desktop app (`ciris-client`) or
+/// a bare server (`ciris-server`). Since 0.5.246 a bare boot runs as the home's
+/// node key (`node_key::home_key_alias`), so `default_alias` may no longer be the
+/// name the key was minted under. Try it first, then the names the home could
+/// have used, and take the first that exists. Nothing is written: the pointer is
+/// left to the owner's next mint or import (Eric, 2026-11-10).
+fn legacy_user_alias(user_seed_dir: &std::path::Path, default_alias: &str) -> String {
+    let held = |alias: &str| {
+        user_seed_dir.join(format!("{alias}.backend")).exists()
+            || user_seed_dir.join(format!("{alias}.ed25519.seed")).exists()
+            || !matches!(
+                key_tier::on_disk_tier(alias, user_seed_dir),
+                key_tier::OnDiskTier::Absent
+            )
+    };
+    if held(default_alias) {
+        return default_alias.to_string();
+    }
+    for host in [
+        "ciris-agent-bootstrap",
+        "ciris-client",
+        config::DEFAULT_KEY_ID,
+    ] {
+        let alias = format!("{host}-user");
+        if alias != default_alias && held(&alias) {
+            tracing::info!(
+                default_alias,
+                found = %alias,
+                "no active_user_alias pointer: using the owner key this home holds under its earlier name"
+            );
+            return alias;
+        }
+    }
+    default_alias.to_string()
 }
 
 /// Record the active owner user alias (the slug the user chose at mint) into
@@ -1996,6 +2058,21 @@ pub fn init_tracing_with_status(log_dir: Option<&std::path::Path>) -> TracingIni
     install_or_reattach_tracing(log_dir, filter, false)
 }
 
+/// `ciris-server --version` (or `-V`) as the ONLY argument. Anything else on
+/// the line is a serve or a subcommand, never a version probe.
+#[must_use]
+pub fn is_version_request(args: &[String]) -> bool {
+    matches!(args, [one] if one == "--version" || one == "-V")
+}
+
+/// What `ciris-server --version` prints: `ciris-server <MAJOR.MINOR.PATCH>`,
+/// the crate version (no `v`, no suffix). A build between tags carries the
+/// version of the NEXT tag.
+#[must_use]
+pub fn version_line() -> String {
+    format!("ciris-server {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
 /// the value of `--home <path>` / `--home=<path>` if present, else
 /// [`config::DEFAULT_CIRIS_HOME`]. Used by every node serve entry so file logging
@@ -2060,9 +2137,10 @@ pub fn identity_paths_cli(mut args: impl Iterator<Item = String>) -> anyhow::Res
             o => anyhow::bail!("unknown identity-paths arg: {o}"),
         }
     }
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let key_id = key_id.unwrap_or_else(|| config::DEFAULT_KEY_ID.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -2081,14 +2159,14 @@ pub fn identity_paths_cli(mut args: impl Iterator<Item = String>) -> anyhow::Res
 pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
-    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut key_id: Option<String> = None;
     let mut reason = "console-cli".to_string();
     let mut key: Option<String> = None;
     let mut value_raw: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--home" => home = Some(args.next().context("--home needs a path")?),
-            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--key-id" => key_id = Some(args.next().context("--key-id needs a name")?),
             "--reason" => reason = args.next().context("--reason needs a value")?,
             other if other.starts_with("--") => {
                 return Err(anyhow::anyhow!("unknown config-set arg: {other}"))
@@ -2110,8 +2188,10 @@ pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyho
     let value_raw = value_raw
         .context("config set requires <json-value> (e.g. true or '[\"108.61.242.236:4242\"]')")?;
     let value = parse_config_value(&value_raw);
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     let entry = run_config_set(cfg, &key, value, &reason).await?;
     println!(
         "✅ config set {} (version {}, authored by {})",
@@ -2126,12 +2206,12 @@ pub async fn run_config_set_cli(mut args: impl Iterator<Item = String>) -> anyho
 pub async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut home: Option<String> = None;
-    let mut key_id = config::DEFAULT_KEY_ID.to_string();
+    let mut key_id: Option<String> = None;
     let mut key: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--home" => home = Some(args.next().context("--home needs a path")?),
-            "--key-id" => key_id = args.next().context("--key-id needs a name")?,
+            "--key-id" => key_id = Some(args.next().context("--key-id needs a name")?),
             other if other.starts_with("--") => {
                 return Err(anyhow::anyhow!("unknown config-get arg: {other}"))
             }
@@ -2147,8 +2227,10 @@ pub async fn run_config_get_cli(mut args: impl Iterator<Item = String>) -> anyho
         }
     }
     let key = key.context("config get requires <key> (e.g. net.announce_ownership)")?;
-    let home = home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string());
-    let cfg = config::ServerConfig::from_home(std::path::PathBuf::from(home), key_id)?;
+    let home =
+        std::path::PathBuf::from(home.unwrap_or_else(|| config::DEFAULT_CIRIS_HOME.to_string()));
+    let key_id = key_id.unwrap_or_else(|| home_key_id(&home));
+    let cfg = config::ServerConfig::from_home(home, key_id)?;
     match run_config_get(cfg, &key).await? {
         Some(entry) => println!("{}", serde_json::to_string_pretty(&entry.value)?),
         None => eprintln!("(no config for key {key:?})"),
@@ -2357,6 +2439,11 @@ mod python {
         // sets `sys.argv[0]` = the program and `sys.argv[1:]` = the real args, so
         // `skip(1)` here yields exactly the user args — matching the binary path.
         let argv: Vec<String> = py.import("sys")?.getattr("argv")?.extract()?;
+        // `ciris-server --version`: before anything else, as the binary does.
+        if crate::is_version_request(&argv[1.min(argv.len())..]) {
+            println!("{}", crate::version_line());
+            return Ok(());
+        }
         // File logging to <home>/logs (the node serve paths); resolved from argv so
         // it targets the same --home the node boots against.
         crate::init_tracing_with(Some(&crate::log_dir_from_args(&argv)));
@@ -2509,6 +2596,9 @@ mod python {
         crate::init_tracing_with(Some(&home.join("logs")));
         // Read the Python adapter's static config under the GIL.
         let adapter = crate::py_adapter::build(py, adapter)?;
+        // NOT `home_key_id`: on this path the configured key is the AGENT's (the
+        // actor), and the home rule would hand it the node key. The agent passes
+        // its own; a host that passes none keeps the old default.
         let key_id = key_id.unwrap_or_else(|| crate::config::DEFAULT_KEY_ID.to_string());
         let mut cfg = crate::config::ServerConfig::from_home(home, key_id).map_err(py_err)?;
         // The embedded fold has no CLI; the environment is its switch
@@ -3641,6 +3731,7 @@ mod python {
         let _ = std::hint::black_box(ciris_verify_ffi::ciris_verify_ffi_link_anchor());
         // The embedded agent opens keys (its persist Engine) right after import,
         // before any serve names a home: pin the keyring tier now (#783).
+        crate::key_tier::apply_apple_store_defaults();
         crate::key_tier::pin_process_tier_at_import();
         // Test-anchor builds only: a ceremony-minted genesis bundle named by
         // CIRIS_TEST_GENESIS_BUNDLE is installed at IMPORT time, so an embedding
@@ -3720,5 +3811,81 @@ mod python {
         // remaining UX handles (trust/consent toggles, membership) fold into the
         // wheel API the KMP client consumes as their slices land (MISSION §3.4).
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod legacy_user_alias_tests {
+    /// The client's launch probe (CIRISClient, 0.5.246): `--version` alone is a
+    /// version request and prints `ciris-server X.Y.Z`; with any other argument
+    /// it is not, so a serve is never mistaken for a probe.
+    #[test]
+    fn version_is_the_only_argument_and_prints_a_bare_semver() {
+        let v = |a: &[&str]| {
+            crate::is_version_request(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        };
+        assert!(v(&["--version"]));
+        assert!(v(&["-V"]));
+        assert!(!v(&[]));
+        assert!(!v(&["--version", "--home", "/h"]));
+        assert!(!v(&["--home", "/h"]));
+        let line = crate::version_line();
+        let ver = line.strip_prefix("ciris-server ").expect("prefix");
+        assert_eq!(ver.split('.').count(), 3, "{line}");
+        assert!(
+            ver.split('.').all(|p| p.parse::<u64>().is_ok()),
+            "no v, no suffix: {line}"
+        );
+    }
+
+    use super::legacy_user_alias;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "legacy-user-alias-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A home with no pointer finds its owner key under the name it was minted
+    /// with, read-only: the default first, then the agent's, the desktop's and the
+    /// server's earlier names. Nothing is written.
+    #[test]
+    fn a_home_without_a_pointer_finds_its_owner_key_by_its_earlier_name() {
+        let d = dir("none");
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-node-bootstrap-user"
+        );
+
+        let d = dir("agent");
+        std::fs::write(d.join("ciris-agent-bootstrap-user.backend"), "software").unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-agent-bootstrap-user"
+        );
+
+        let d = dir("desktop");
+        std::fs::write(d.join("ciris-client-user.ed25519.seed"), [0u8; 32]).unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-client-user"
+        );
+
+        let d = dir("default-wins");
+        std::fs::write(d.join("ciris-client-user.backend"), "software").unwrap();
+        std::fs::write(d.join("ciris-node-bootstrap-user.backend"), "software").unwrap();
+        assert_eq!(
+            legacy_user_alias(&d, "ciris-node-bootstrap-user"),
+            "ciris-node-bootstrap-user"
+        );
+        assert!(
+            !d.join(super::ACTIVE_USER_ALIAS_FILE).exists(),
+            "the lookup writes nothing"
+        );
     }
 }

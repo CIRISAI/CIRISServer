@@ -346,7 +346,10 @@ async fn emit_action(
     id: &str,
     asserted_at: DateTime<Utc>,
 ) -> Attestation {
-    let key_id = author.key_id().to_string();
+    // ABOUT another key: persist >= 61.1 refuses a key scoring its own
+    // liveness (invariant_registry_self_emission_forbidden, CC 3.1.9.4).
+    // About this node (registered), observed by the author.
+    let key_id = node_key_id(engine).await;
     let envelope = serde_json::json!({
         "dimension": "health:liveness:v1",
         "score": 1.0,
@@ -997,17 +1000,28 @@ async fn property_3_silence_escalates_and_counts_respondents_not_roster() {
     let actor = party_signer("cb-actor");
     let action = emit_action(&f.engine, &actor, "b-1", t0).await;
 
+    let held_from = Utc::now();
     let (status, raised) = node_objects(&f, COMMUNITY_B, &action.attestation_id).await;
+    let held_to = Utc::now();
     assert_eq!(status, reqwest::StatusCode::OK, "{raised}");
     let objection_id = raised["objection_id"].as_str().expect("id").to_owned();
 
-    // Off the ACTION's own instant, not off `t0`. The two differ now: the emit
-    // door truncates `asserted_at` to the substrate's microsecond resolution
-    // before signing it (CIRISPersist#598), so the row's instant is `t0` minus
-    // its nanoseconds — and the deadline the route reports is a function of the
-    // row. Recomputing it from the raw clock read asserted a deadline for a
-    // different action.
-    let deadline = action.asserted_at + Duration::seconds(WINDOW_SECS + STEWARD_SECS);
+    // The window is THIS node's: it runs from the instant this node first held
+    // an objection to the action (persist >= 61.1, CIRISPersist#1198, V213),
+    // not from the action's signed instant. So the deadline is read back and
+    // checked to lie in the span of the POST that first held the objection.
+    let (_, probe) = standing_at(&f, COMMUNITY_B, &action.attestation_id, None).await;
+    let deadline: DateTime<Utc> = probe["escalation"]["steward_deadline"]
+        .as_str()
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Utc))
+        .unwrap_or_else(|| panic!("a steward deadline: {probe}"));
+    let span = Duration::seconds(WINDOW_SECS + STEWARD_SECS);
+    assert!(
+        deadline >= held_from - Duration::milliseconds(1) + span
+            && deadline <= held_to + Duration::milliseconds(1) + span,
+        "the deadline runs from this node's first-held objection: {deadline} not in [{held_from}, {held_to}] + {span}"
+    );
 
     // ── BEFORE the deadline. The duty-holders may still answer. This is the
     //    healthy in-progress state and must NOT read as silence.
@@ -1031,7 +1045,7 @@ async fn property_3_silence_escalates_and_counts_respondents_not_roster() {
     assert_eq!(
         early["escalation"]["steward_deadline"],
         serde_json::json!(deadline.to_rfc3339()),
-        "the deadline is a function of the ACTION and the declaration alone"
+        "the deadline does not move between reads"
     );
     assert_localizable(&early);
 

@@ -436,6 +436,9 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
         .unwrap_or("majority")
         .to_owned();
     let community_id = ciris_edge::chat::new_room_community_key_id();
+    // Rooms seeded here test the machinery of rooms of three or more, which
+    // 0.5.246 closes in production (two people per room) and 0.6 re-opens.
+    ciris_server::communities::lift_room_limit_for_tests(&community_id);
     let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .expect("ms instant");
     let mut roster: Vec<(&str, Option<&str>)> = vec![(
@@ -1322,6 +1325,216 @@ async fn an_appointed_moderator_adds_and_removes_plain_members_only() {
     assert_eq!(reason(&v), "community.last_founder", "{s}: {v}");
 }
 
+/// One message of `room`'s transcript, as `n` reads it.
+async fn message_in(n: &Node, room: &str, id: &str) -> Value {
+    let (s, v) = get(n, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "{v}");
+    v["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["attestation_id"] == id)
+        .cloned()
+        .expect("the message is listed")
+}
+
+/// **A room's moderators flag and clear its items over the owner API**
+/// (CC 4.5.5). Alice founded the room, Bob is her appointed moderator, Carol is
+/// a plain member. Carol cannot flag; Bob's flag is signed by Bob's own pen, so
+/// the read side believes it and withholds the message from every member until
+/// they reveal it; Bob's clear lifts it; Alice, a founder, moderates zero-hop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_moderator_flags_and_clears_a_rooms_message_over_the_api() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "moderated chat", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "something contested" }),
+    )
+    .await;
+    assert_eq!(s, 200, "Carol posts: {v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+
+    // Carol holds no duty: refused, and nothing changes.
+    let (s, v) = post(c, &item("flag"), json!({})).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_moderator"), "{v}");
+    assert!(message_in(a, &room, &id).await.get("moderation").is_none());
+
+    // Bob: an unknown class, and a clear with nothing to clear.
+    let (s, v) = post(b, &item("flag"), json!({ "class": "bogus" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_class"), "{v}");
+    let (s, v) = post(b, &item("clear"), json!({})).await;
+    assert_eq!((s, reason(&v)), (409, "moderation.nothing_to_clear"), "{v}");
+    let (s, v) = post(b, &item("delete"), json!({})).await;
+    assert_eq!((s, reason(&v)), (404, "moderation.unknown_action"), "{v}");
+
+    // Bob flags it.
+    let (s, v) = post(b, &item("flag"), json!({ "class": "reported" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["flag"], "reported", "{v}");
+    assert_eq!(
+        v["moderation"]["flagged_by"],
+        b.owner.key_id.as_str(),
+        "{v}"
+    );
+    let decision = v["decision_attestation_id"]
+        .as_str()
+        .expect("signed")
+        .to_owned();
+    // Every member reads it withheld, Carol (its author) included.
+    for n in [a, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["moderation"]["withheld"], true, "{m}");
+        assert_eq!(
+            m["moderation"]["flag_attestation_id"],
+            decision.as_str(),
+            "{m}"
+        );
+        assert!(m.get("body").is_none(), "the body is withheld: {m}");
+        assert_eq!(m["unopened_reason"], "withheld_by_moderation", "{m}");
+    }
+    // Flagging it again the same way signs nothing new.
+    let (s, v) = post(b, &item("flag"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v.get("decision_attestation_id").is_none(), "{v}");
+
+    // Alice chooses to see it; Carol still reads it withheld.
+    let (s, v) = post(a, &item("reveal"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        message_in(a, &room, &id).await["body"],
+        "something contested"
+    );
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+
+    // Bob clears it: the history stays, the flag does not.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(b, &item("clear"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["moderation"]["flag"].is_null(), "cleared: {v}");
+    let m = message_in(c, &room, &id).await;
+    assert_eq!(m["moderation"]["withheld"], false, "{m}");
+    assert_eq!(m["body"], "something contested", "{m}");
+
+    // Alice, a founder, moderates zero-hop.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("flag"), json!({ "class": "infohazard" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["flag"], "infohazard", "{v}");
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+}
+
+/// **The appeal (CC 4.5.5)**: the flagged item's author files against the
+/// flag, a `review` holder rules, and `reversed` lifts it for everyone. Bob
+/// moderates but does not review; Alice founded the room and holds both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_author_appeals_a_flag_and_a_reviewer_rules() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "appealed", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "contested, appealed" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+
+    // Nothing flagged: nothing to appeal.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (409, "moderation.nothing_to_appeal"),
+        "{v}"
+    );
+
+    let (s, v) = post(b, &item("flag"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+
+    // Standing and vocabulary.
+    let (s, v) = post(b, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (403, "moderation.no_standing"),
+        "not the author: {v}"
+    );
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "because" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_grounds"), "{v}");
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "upheld" })).await;
+    assert_eq!((s, reason(&v)), (409, "moderation.nothing_to_rule"), "{v}");
+
+    // Carol, the author, files.
+    let (s, v) = post(
+        c,
+        &item("reconsider"),
+        json!({ "grounds": "procedural_error" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "filed", "{v}");
+    assert_eq!(
+        v["moderation"]["reconsideration_attestation_id"], v["appeal_attestation_id"],
+        "{v}"
+    );
+
+    // Bob moderates but does not review; Carol neither.
+    for n in [b, c] {
+        let (s, v) = post(n, &item("rule"), json!({ "outcome": "reversed" })).await;
+        assert_eq!((s, reason(&v)), (403, "moderation.not_a_reviewer"), "{v}");
+    }
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "maybe" })).await;
+    assert_eq!((s, reason(&v)), (400, "moderation.unknown_outcome"), "{v}");
+
+    // Alice upholds: the flag stands.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "upheld" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "upheld", "{v}");
+    assert_eq!(
+        message_in(c, &room, &id).await["moderation"]["withheld"],
+        true
+    );
+
+    // Alice reverses: lifted for every member.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["moderation"]["reconsideration"], "reversed", "{v}");
+    assert!(v["moderation"]["flag"].is_null(), "{v}");
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["moderation"]["withheld"], false, "{m}");
+        assert_ne!(m["unopened_reason"], "withheld_by_moderation", "{m}");
+    }
+    // The author reads it (another member's body waits on their key grant,
+    // which this shared-store fixture does not drive).
+    assert_eq!(
+        message_in(c, &room, &id).await["body"],
+        "contested, appealed"
+    );
+    // A reversed flag has nothing left to appeal.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (409, "moderation.nothing_to_appeal"),
+        "{v}"
+    );
+}
+
 // ─── 6. Roles, leaving, the last founder ────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1794,6 +2007,64 @@ async fn a_pair_rooms_roster_cannot_be_changed_here() {
 /// - Only the invitee answers (`membership.not_the_invitee`), only a founder
 ///   invites under `founder_only`, an expiry outside 1..=30 days is
 ///   `membership.bad_expiry`, and only the proposer withdraws.
+/// **Two people per room in 0.5.246** (Eric, 2026-11-11). A third person
+/// would accept and never be seated (members' approvals combine in the mesh
+/// only with CIRISPersist#1252, 0.6), so a room created through the route
+/// refuses the invitation that would make a third: an open invitation counts,
+/// a declined one does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_holds_two_people_for_now() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let (s, v) = post(a, "/v1/communities", json!({ "name": "two of us" })).await;
+    assert_eq!(s, 201, "{v}");
+    let room = v["community_id"].as_str().expect("id").to_owned();
+    let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
+    assert_eq!(r["max_people"], 2, "the room says its limit: {r}");
+    let (_, list) = get(a, "/v1/communities").await;
+    assert!(
+        list.to_string().contains("\"max_people\":2"),
+        "the listing says it too: {list}"
+    );
+    let invite = |who: &Node| {
+        let path = format!("/v1/communities/{room}/invites");
+        let key = who.owner.key_id.clone();
+        async move { post(a, &path, json!({ "key_id": key })).await }
+    };
+    // Bob is invited: one member and one open invitation make two.
+    let (s, v) = invite(b).await;
+    invited(s, &v);
+    let bob_p = v["proposal_id"].as_str().unwrap().to_owned();
+    let (s, v) = invite(c).await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["max_people"], 2, "{v}");
+    assert_eq!(v["open_invitations"], 1, "{v}");
+    // Bob declines: his invitation no longer holds the seat.
+    let (s, v) = post(b, &format!("/v1/self/invites/{bob_p}/decline"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = invite(c).await;
+    invited(s, &v);
+    // Carol accepts and is seated: two members, and no third.
+    let carol_p = v["proposal_id"].as_str().unwrap().to_owned();
+    let (s, v) = post(c, &format!("/v1/self/invites/{carol_p}/accept"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let _ = get(a, &format!("/v1/communities/{room}/invites")).await;
+    assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
+    let (s, v) = invite(b).await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["members"], 2, "{v}");
+    // The carried change refuses a third seat too — past the contact gate.
+    contact(a, b).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/changes/envelope"),
+        json!({ "op": "add", "key_id": b.owner.key_id }),
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["members"], 2, "{v}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_invite_flow_seats_only_the_person_who_accepted() {
     let nodes = mesh(4).await;

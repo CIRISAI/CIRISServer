@@ -1132,13 +1132,71 @@ async fn the_handoff_reports_pending_then_failure_then_expired() {
         Some("auth.oauth.exchange_failed")
     );
 
-    // Collected once — after that the flow is gone.
+    // Collected once — after that the flow is gone, and is called EXPIRED: it
+    // existed (#868 keeps that answer for flows that did).
     let h = app
         .clone()
         .oneshot(handoff_req("n-seq"))
         .await
         .expect("poll");
     assert_eq!(h.status(), StatusCode::GONE);
+    let v = body_json(h).await;
+    assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("expired"));
+    assert_eq!(
+        v.get("reason_id").and_then(|x| x.as_str()),
+        Some("auth.oauth.flow_expired")
+    );
+}
+
+/// **#868: the app polls before its browser reaches `/login`, and the sign-in
+/// still lands.** The desktop app opens the browser and polls at once; a cold
+/// browser reaches `/login` later. Before #868 that first poll could be a 410
+/// `flow_expired`, which the client treats as final, for a flow that had not
+/// started. Here the poll comes first, the browser arrives after it, and the
+/// hand-off is collected.
+#[tokio::test]
+async fn a_poll_that_beats_the_browser_still_collects_the_sign_in() {
+    let app = app_with(None).await;
+
+    let h = app
+        .clone()
+        .oneshot(handoff_req("n-late"))
+        .await
+        .expect("poll");
+    assert_eq!(
+        h.status(),
+        StatusCode::NO_CONTENT,
+        "a nonce the node has never seen waits for its browser"
+    );
+
+    // The browser reaches /login after the first poll.
+    let state = start_flow(&app, "?app_nonce=n-late").await;
+    let h = app
+        .clone()
+        .oneshot(handoff_req("n-late"))
+        .await
+        .expect("poll");
+    assert_eq!(
+        h.status(),
+        StatusCode::NO_CONTENT,
+        "now pending at the provider"
+    );
+
+    let r = app
+        .clone()
+        .oneshot(callback_req("ok-owner", &state, None))
+        .await
+        .expect("callback");
+    assert!(r.status().is_success(), "callback: {}", r.status());
+
+    let h = app
+        .clone()
+        .oneshot(handoff_req("n-late"))
+        .await
+        .expect("poll");
+    assert_eq!(h.status(), StatusCode::OK);
+    let v = body_json(h).await;
+    assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("complete"));
 }
 
 /// **THE RACE, held open** (#425): with the CSRF entry consumed and the

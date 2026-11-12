@@ -733,15 +733,50 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
-    # `mesh.announce_costs` (0.5.245) replaces `mesh.announce_requirement`, whose
-    # translations state the old costs. It can't be translated first: the client's
-    # gate compares its bundle to the server at its pin, and this one reads the
-    # released bundle, so neither side could move first with a changed value.
-    # Client 0.5.239 pins 0.5.245 and adds it; the entry leaves at that floor.
-    "mesh.announce_costs",
-    # `add_device.node_proof` (0.5.245): the device can't prove its node. Same
-    # order: client 0.5.239 adds it, and the entry leaves at that floor.
-    "add_device.node_proof",
+    # PENDING DECISIONS (CC #198 §5, 0.5.246): the queue's answers. Queued for the
+    # client bundle with their English (CSD-106); they leave at the floor that pins 0.5.246.
+    "decisions.awaiting_members",
+    "decisions.not_found",
+    # MEMBER CALLS (CIRISServer#859, 0.5.246): the call routes' refusals and the
+    # two before-join statements. Queued for the client bundle with their English
+    # (CSD-134); they leave at the floor that pins 0.5.246.
+    "call.anonymous_mode",
+    "call.bad_layer_policy",
+    "call.cross_origin",
+    "call.ended",
+    "call.frame_over_budget",
+    "call.leave_reason_unknown",
+    "call.not_a_member",
+    "call.not_joined",
+    "call.not_owner",
+    "call.owner_pen_unavailable",
+    "call.plumbing",
+    "call.session_absent",
+    "call.socket_already_open",
+    "call.share_unavailable",
+    # ROOM MODERATION (0.5.246): a moderator flags and clears a room's message or
+    # file over the owner API (POST /v1/chat/{room}/items/{id}/flag|clear). Queued
+    # for the client bundle with their English.
+    "moderation.flag_failed",
+    "moderation.not_a_moderator",
+    "moderation.nothing_to_clear",
+    "moderation.unknown_class",
+    # APPEALS (0.5.246): the flagged item's author files, a review holder rules
+    # (POST /v1/chat/{room}/items/{id}/reconsider|rule, CC 4.5.5). Queued for the
+    # client bundle with their English.
+    # TWO PEOPLE PER ROOM (0.5.246, Eric 2026-11-11): the invite and the
+    # cosigned add refuse a third person until CIRISPersist#1252 (0.6).
+    "community.two_people_only",
+    "moderation.appeal_failed",
+    "moderation.no_standing",
+    "moderation.not_a_reviewer",
+    "moderation.nothing_to_appeal",
+    "moderation.nothing_to_rule",
+    "moderation.unknown_grounds",
+    "moderation.unknown_outcome",
+    # PAID AT CLIENT 0.5.239 (2026-11-10, for 0.5.246): mesh.announce_costs,
+    # add_device.node_proof, auth.oauth.flow_unknown (CIRISServer#868), in all 29
+    # languages; the floor in pyproject.toml is 0.5.239.
     # PAID AT CLIENT 0.5.226 (2026-10-01, for 0.5.219): the bundle now carries
     # every id of the planes the comments below describe — drive, community,
     # household, self-device, announce, evict, consent to join, sessions, the

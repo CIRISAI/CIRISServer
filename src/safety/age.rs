@@ -340,6 +340,7 @@ async fn emit_age_assurance_inner(
         .attestation_upsert_local(input)
         .await
         .map_err(|e| format!("upsert age_assurance: {e}"))?;
+    crate::compose::wrote_rows("safety: age assurance written");
     // Promote to federation tier so the age level is readable across the
     // federation (a gate running on any node consumes it). The node co-signs the
     // promotion (the same recipe consent.rs uses). The DECLARED VALUE remains the

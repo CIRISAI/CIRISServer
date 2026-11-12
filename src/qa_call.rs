@@ -82,6 +82,9 @@ struct Slot {
     call: tokio::sync::Mutex<Option<Call>>,
     counters: Counters,
     delays_ms: StdMutex<Vec<u64>>,
+    /// Per publisher: frames heard and their delays (the 0.5.246 room test reads
+    /// each stream on its own, not one sum across the room).
+    by_publisher: StdMutex<std::collections::BTreeMap<String, (u64, Vec<u64>)>>,
     events: StdMutex<Vec<String>>,
     last_publish_error: StdMutex<Option<String>>,
     started: Instant,
@@ -186,6 +189,7 @@ async fn start(
         call: tokio::sync::Mutex::new(None),
         counters: Counters::default(),
         delays_ms: StdMutex::new(Vec::new()),
+        by_publisher: StdMutex::new(std::collections::BTreeMap::new()),
         events: StdMutex::new(Vec::new()),
         last_publish_error: StdMutex::new(None),
         started: Instant::now(),
@@ -201,16 +205,29 @@ async fn start(
                 s.counters
                     .bytes_received
                     .fetch_add(f.bytes.len() as u64, Ordering::Relaxed);
-                if f.bytes.len() >= HEADER {
+                let delay = (f.bytes.len() >= HEADER).then(|| {
                     let mut sent = [0u8; 8];
                     sent.copy_from_slice(&f.bytes[8..16]);
-                    let delay = now_ms().saturating_sub(u64::from_be_bytes(sent));
+                    now_ms().saturating_sub(u64::from_be_bytes(sent))
+                });
+                if let Some(delay) = delay {
                     let mut d = s
                         .delays_ms
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if d.len() < MAX_SAMPLES {
                         d.push(delay);
+                    }
+                }
+                let mut by = s
+                    .by_publisher
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = by.entry(f.publisher.clone()).or_default();
+                entry.0 += 1;
+                if let Some(delay) = delay {
+                    if entry.1.len() < MAX_SAMPLES {
+                        entry.1.push(delay);
                     }
                 }
             }
@@ -353,6 +370,27 @@ fn percentile(sorted: &[u64], p: f64) -> Option<u64> {
     sorted.get(i).copied()
 }
 
+fn by_publisher_json(slot: &Slot) -> serde_json::Value {
+    let by = slot
+        .by_publisher
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = serde_json::Map::new();
+    for (publisher, (frames, delays)) in by.iter() {
+        let mut d = delays.clone();
+        d.sort_unstable();
+        out.insert(
+            publisher.clone(),
+            serde_json::json!({
+                "frames": frames,
+                "delay_ms_p50": percentile(&d, 0.5),
+                "delay_ms_p95": percentile(&d, 0.95),
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
 async fn stats_of(slot: &Slot) -> serde_json::Value {
     let c = &slot.counters;
     let mut delays = slot
@@ -365,6 +403,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
     let call_view = guard.as_ref().map(|call| {
         let reorder = call.reorder_counts();
         let alm = call.alm_counts();
+        let auth = call.chunk_auth_counts();
         // How each heard stream reaches this node: straight from its
         // publisher, or through another member relaying it (the ALM's parent).
         let streams: Vec<_> = call
@@ -397,6 +436,13 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
                 "skipped": reorder.skipped,
                 "duplicates": reorder.duplicates,
                 "expired_late": reorder.late,
+            },
+            "chunk_auth": {
+                "verified": auth.verified,
+                "forged": auth.forged,
+                "unbound": auth.unbound,
+                "bindings_installed": auth.bindings_installed,
+                "bindings_refused": auth.bindings_refused,
             },
             "alm": {
                 "stale_dropped": alm.stale_dropped,
@@ -431,6 +477,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
             "delay_ms_p50": percentile(&delays, 0.5),
             "delay_ms_p95": percentile(&delays, 0.95),
             "delay_ms_max": delays.last(),
+            "by_publisher": by_publisher_json(slot),
         },
         "call": call_view,
         "events": slot.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
@@ -490,6 +537,128 @@ async fn stop(State(st): State<QaState>, headers: HeaderMap, Json(b): Json<RoomQ
     Json(v).into_response()
 }
 
+// ─── Echo (0.5.246): one client leg can call ONE node ───────────────────────
+//
+// `POST /v1/qa/call/echo {room}` joins `room`'s call as this node's OWNER (the
+// person, like a member) and republishes every frame it hears, codec_id,
+// layer and bytes unchanged, so the five-platform runner proves mic → node →
+// speaker and camera → node → tile with no second device. A republished frame's
+// publisher is the echo node's person. `POST /v1/qa/call/echo/stop {room}`.
+
+struct Echo {
+    task: tokio::task::JoinHandle<()>,
+    echoed: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+}
+
+fn echoes() -> &'static StdMutex<HashMap<String, Echo>> {
+    static E: OnceLock<StdMutex<HashMap<String, Echo>>> = OnceLock::new();
+    E.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+async fn echo_start(
+    State(st): State<QaState>,
+    headers: HeaderMap,
+    Json(b): Json<RoomQuery>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let room = b.room;
+    if echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&room)
+    {
+        return fail(StatusCode::CONFLICT, "echo_already_running", &room);
+    }
+    let node = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let actor = match crate::owner_signer_capsule::for_owned_node(&st.engine, &node).await {
+        Ok(c) => Some(Arc::clone(c.edge_signer())),
+        Err(e) => {
+            return fail(
+                StatusCode::FORBIDDEN,
+                "owner_pen_unavailable",
+                format!("{e:?}"),
+            )
+        }
+    };
+    let mut call = match st
+        .edge
+        .join_call_as(&room, CallOptions::default(), actor)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, "join_refused", e),
+    };
+    let Some(mut frames) = call.frames() else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "frames_taken", &room);
+    };
+    let echoed = Arc::new(AtomicU64::new(0));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let (e2, d2) = (Arc::clone(&echoed), Arc::clone(&dropped));
+    let task = tokio::spawn(async move {
+        while let Some(f) = frames.recv().await {
+            let frame = Frame {
+                codec_id: f.codec_id,
+                layer: f.layer,
+                bytes: f.bytes,
+            };
+            match call.publish(frame).await {
+                Ok(_) => e2.fetch_add(1, Ordering::Relaxed),
+                Err(_) => d2.fetch_add(1, Ordering::Relaxed),
+            };
+        }
+        let _ = call.leave().await;
+    });
+    echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            room.clone(),
+            Echo {
+                task,
+                echoed,
+                dropped,
+            },
+        );
+    tracing::info!(room = %room, "qa call: ECHO joined as the owner; republishing every frame heard");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "room": room, "echo": "running" })),
+    )
+        .into_response()
+}
+
+async fn echo_stop(
+    State(st): State<QaState>,
+    headers: HeaderMap,
+    Json(b): Json<RoomQuery>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let Some(e) = echoes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&b.room)
+    else {
+        return fail(StatusCode::NOT_FOUND, "echo_not_running", &b.room);
+    };
+    e.task.abort();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "room": b.room,
+            "echoed": e.echoed.load(Ordering::Relaxed),
+            "dropped": e.dropped.load(Ordering::Relaxed),
+        })),
+    )
+        .into_response()
+}
+
 /// The QA call routes, or an empty router when `CIRIS_QA_CALLS` is not `1`.
 pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
     if !enabled() {
@@ -504,5 +673,7 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
         .route("/v1/qa/call/stream", axum::routing::post(stream))
         .route("/v1/qa/call/stats", axum::routing::get(stats))
         .route("/v1/qa/call/stop", axum::routing::post(stop))
+        .route("/v1/qa/call/echo", axum::routing::post(echo_start))
+        .route("/v1/qa/call/echo/stop", axum::routing::post(echo_stop))
         .with_state(QaState { engine, edge })
 }

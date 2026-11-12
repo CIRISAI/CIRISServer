@@ -117,10 +117,14 @@ pub async fn revoke_member(
     removed_key_id: &str,
     spec: RevokeSpec,
 ) -> Result<(), FedError> {
-    engine
+    let out = engine
         .federation_directory()
         .revoke_member(Cohort::Family, family_key_id, removed_key_id, spec)
-        .await
+        .await;
+    if out.is_ok() {
+        crate::compose::wrote_rows("family: a member revoked");
+    }
+    out
 }
 
 /// **Swap one seat**: revoke `out_key_id`, add `incoming`. The active roster stays

@@ -2774,6 +2774,7 @@ async fn withdraw_canonical(State(st): State<ProvisionState>, body: axum::body::
         .await
     {
         Ok(()) => {
+            crate::compose::wrote_rows("accord: canonical role withdrawn");
             tracing::info!(key_id = %req.key_id.trim(), "Trust Root: canonical server withdrawn (2-of-3)");
             (
                 StatusCode::OK,
