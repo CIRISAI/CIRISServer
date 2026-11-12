@@ -764,6 +764,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # APPEALS (0.5.246): the flagged item's author files, a review holder rules
     # (POST /v1/chat/{room}/items/{id}/reconsider|rule, CC 4.5.5). Queued for the
     # client bundle with their English.
+    # TWO PEOPLE PER ROOM (0.5.246, Eric 2026-11-11): the invite and the
+    # cosigned add refuse a third person until CIRISPersist#1252 (0.6).
+    "community.two_people_only",
     "moderation.appeal_failed",
     "moderation.no_standing",
     "moderation.not_a_reviewer",

@@ -1737,6 +1737,27 @@ struct InviteRequest {
     expires_in_days: Option<i64>,
 }
 
+/// The most people a room seats in 0.5.246 (Eric, 2026-11-11), until members'
+/// approvals combine in the mesh (CIRISPersist#1252, 0.6).
+pub const MAX_ROOM_PEOPLE: usize = 2;
+
+/// Rooms a TEST has lifted the two-people limit for, by id. The tests of
+/// rooms of three or more keep the machinery 0.6 re-opens honest; no
+/// production path ever adds to this set.
+fn rooms_above_two() -> &'static std::sync::Mutex<BTreeSet<String>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Lift [`MAX_ROOM_PEOPLE`] for ONE room, in a test of larger rooms.
+#[doc(hidden)]
+pub fn lift_room_limit_for_tests(room_id: &str) {
+    rooms_above_two()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(room_id.to_owned());
+}
+
 /// `POST /v1/communities/{id}/invites` — invite `key_id` into the room.
 ///
 /// One inviter: a founder under `founder_only` (persist refuses any other
@@ -1777,6 +1798,50 @@ async fn invite(
     }
     if room.member(&key_id).is_some() {
         return already_member(&key_id);
+    }
+    // TWO PEOPLE PER ROOM in 0.5.246 (Eric, 2026-11-11). Seating a third
+    // person needs two members' signatures, and members' approvals only
+    // combine in the mesh with persist 61.3.0 (CIRISPersist#1252, ruled for
+    // 0.6): a third invitee would accept and never be seated. So a room takes
+    // a new invitation only while its members plus its open invitations
+    // (pending or accepted, not yet seated) are fewer than two.
+    let active: std::collections::HashSet<String> =
+        room.roster.iter().map(|m| m.key_id.clone()).collect();
+    let open = match crate::membership_invites::group_invites(
+        st.engine.federation_directory().as_ref(),
+        room.tier.group_scope(),
+        room.id(),
+        &active,
+    )
+    .await
+    {
+        Ok(v) => v
+            .iter()
+            .filter(|(i, _)| {
+                matches!(
+                    i.state,
+                    crate::membership_invites::STATE_PENDING
+                        | crate::membership_invites::STATE_ACCEPTED
+                ) && i.invitee_key_id != key_id
+            })
+            .count(),
+        Err(e) => return store_unavailable(format!("group_invites: {e}")),
+    };
+    let lifted = rooms_above_two()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(room.id());
+    if !lifted && active.len() + open >= MAX_ROOM_PEOPLE {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "community.two_people_only",
+            "A room holds two people for now.",
+            serde_json::json!({
+                "max_people": MAX_ROOM_PEOPLE,
+                "members": active.len(),
+                "open_invitations": open,
+            }),
+        );
     }
     let protocol = room.record.consensus_protocol.clone();
     if Protocol::parse(&protocol) == Some(Protocol::FounderOnly) && !room.is_founder(&owner.key_id)
@@ -2189,6 +2254,26 @@ async fn change_envelope(
     };
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
+    }
+    // TWO PEOPLE PER ROOM (0.5.246): an `add` that would seat a third person
+    // is refused here as at the invite route.
+    if matches!(op, ChangeOp::Add { .. }) && room.roster.len() >= MAX_ROOM_PEOPLE {
+        let lifted = rooms_above_two()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(room.id());
+        if !lifted {
+            return refuse_with(
+                StatusCode::CONFLICT,
+                "community.two_people_only",
+                "A room holds two people for now.",
+                serde_json::json!({
+                    "max_people": MAX_ROOM_PEOPLE,
+                    "members": room.roster.len(),
+                    "open_invitations": 0,
+                }),
+            );
+        }
     }
     // CONSENT TO JOIN: M of N members cannot stand in for the joiner — and
     // need not: the `add` widening this change writes is admitted by persist

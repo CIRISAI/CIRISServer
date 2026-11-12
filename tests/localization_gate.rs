@@ -861,7 +861,8 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// — same reason, same list, queued with their English. 39 -> 46: the
     /// appeal routes' `moderation.{appeal_failed,no_standing,not_a_reviewer,
     /// nothing_to_appeal,nothing_to_rule,unknown_grounds,unknown_outcome}`.
-    const MAX_UNCOVERED: usize = 46;
+    /// 46 -> 47: `community.two_people_only` (two people per room in 0.5.246).
+    const MAX_UNCOVERED: usize = 47;
 
     let en = load_en();
     let ids = scraped_server_ids();

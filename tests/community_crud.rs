@@ -436,6 +436,9 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
         .unwrap_or("majority")
         .to_owned();
     let community_id = ciris_edge::chat::new_room_community_key_id();
+    // Rooms seeded here test the machinery of rooms of three or more, which
+    // 0.5.246 closes in production (two people per room) and 0.6 re-opens.
+    ciris_server::communities::lift_room_limit_for_tests(&community_id);
     let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .expect("ms instant");
     let mut roster: Vec<(&str, Option<&str>)> = vec![(
@@ -2004,6 +2007,47 @@ async fn a_pair_rooms_roster_cannot_be_changed_here() {
 /// - Only the invitee answers (`membership.not_the_invitee`), only a founder
 ///   invites under `founder_only`, an expiry outside 1..=30 days is
 ///   `membership.bad_expiry`, and only the proposer withdraws.
+/// **Two people per room in 0.5.246** (Eric, 2026-11-11). A third person
+/// would accept and never be seated (members' approvals combine in the mesh
+/// only with CIRISPersist#1252, 0.6), so a room created through the route
+/// refuses the invitation that would make a third: an open invitation counts,
+/// a declined one does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_holds_two_people_for_now() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let (s, v) = post(a, "/v1/communities", json!({ "name": "two of us" })).await;
+    assert_eq!(s, 201, "{v}");
+    let room = v["community_id"].as_str().expect("id").to_owned();
+    let invite = |who: &Node| {
+        let path = format!("/v1/communities/{room}/invites");
+        let key = who.owner.key_id.clone();
+        async move { post(a, &path, json!({ "key_id": key })).await }
+    };
+    // Bob is invited: one member and one open invitation make two.
+    let (s, v) = invite(b).await;
+    invited(s, &v);
+    let bob_p = v["proposal_id"].as_str().unwrap().to_owned();
+    let (s, v) = invite(c).await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["max_people"], 2, "{v}");
+    assert_eq!(v["open_invitations"], 1, "{v}");
+    // Bob declines: his invitation no longer holds the seat.
+    let (s, v) = post(b, &format!("/v1/self/invites/{bob_p}/decline"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = invite(c).await;
+    invited(s, &v);
+    // Carol accepts and is seated: two members, and no third.
+    let carol_p = v["proposal_id"].as_str().unwrap().to_owned();
+    let (s, v) = post(c, &format!("/v1/self/invites/{carol_p}/accept"), json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let _ = get(a, &format!("/v1/communities/{room}/invites")).await;
+    assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
+    let (s, v) = invite(b).await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["members"], 2, "{v}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_invite_flow_seats_only_the_person_who_accepted() {
     let nodes = mesh(4).await;
