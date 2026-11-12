@@ -57,6 +57,9 @@ fn revoke_spec() -> RevokeSpec {
         authority_key_id: String::new(),
         scrub_signature_classical: String::new(),
         scrub_signature_pqc: None,
+        // persist v61.1.0 (CIRISPersist#1226) added member co-signatures for a
+        // multi-signature consensus; this driver carries none, like witness_set.
+        cosignatures: Vec::new(),
     }
 }
 
