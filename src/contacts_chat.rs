@@ -2121,6 +2121,43 @@ pub(crate) fn bearer_of(headers: &HeaderMap) -> Option<&str> {
 /// with each person's grant receipt (CIRISServer#616). One rule for "who is
 /// already my contact", shared by `GET /v1/contacts` and the incoming-request
 /// reader, so the two can never disagree about who still awaits an answer.
+/// **Widen every existing contact's grant to the current contact prefixes**
+/// (0.5.246: the room moderation rows, `content_class:` and `reconsideration:`).
+/// A contact's grant is otherwise re-checked only when the contact is added or
+/// first resolves, so a node upgraded from 0.5.245 would keep its contacts on
+/// the old five families and its rooms' appeals would still never cross.
+/// `ensure_contact_consent_covers` is a no-op on a grant that already covers
+/// them. Returns how many grants were re-signed wider.
+///
+/// # Errors
+/// The node has no owner yet, or the contact set could not be read.
+pub async fn widen_contact_grants(engine: &Engine, node_key_id: &str) -> Result<usize, String> {
+    let dir = engine.federation_directory();
+    let Some(owner) = ciris_persist::federation::admission::owner_of(dir.as_ref(), node_key_id)
+        .await
+        .map_err(|e| format!("owner_of: {e:#}"))?
+    else {
+        return Err("this node has no owner yet".to_owned());
+    };
+    let (contacts, _) = contact_persons(engine, &owner, node_key_id).await?;
+    let prefixes = crate::peer::contact_attestation_prefixes();
+    let mut widened = 0;
+    for contact in &contacts {
+        match crate::peer::ensure_contact_consent_covers(engine, node_key_id, contact, &prefixes)
+            .await
+        {
+            Ok((coverage, _)) if coverage.freshly_emitted => widened += 1,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                contact = %contact,
+                error = %format!("{e:#}"),
+                "contacts: could not widen this contact's grant — retried next boot"
+            ),
+        }
+    }
+    Ok(widened)
+}
+
 pub(crate) async fn contact_persons(
     engine: &Engine,
     owner_key_id: &str,

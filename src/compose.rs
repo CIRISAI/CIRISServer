@@ -2456,6 +2456,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
             let mut rooms_escaped = false;
+            let mut contacts_widened = false;
             loop {
                 if *self_room_sd_rx.borrow() {
                     break;
@@ -2499,6 +2500,27 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         error = %format!("{e:#}"),
                         "self roster: the sweep could not run — held changes wait for the next tick"
                     ),
+                }
+                // Contacts' grants widened to the current families (0.5.246:
+                // room moderation). Once per process, after the owner exists.
+                if !contacts_widened {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::contacts_chat::widen_contact_grants(&engine_for_roster, &node)
+                        .await
+                    {
+                        Ok(n) => {
+                            contacts_widened = true;
+                            if n > 0 {
+                                tracing::info!(
+                                    widened = n,
+                                    "contacts: grants widened to carry room moderation"
+                                );
+                                crate::compose::kick_replication("contact grants widened");
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "contacts: grants not widened yet"),
+                    }
                 }
                 // Rooms stored under founder_only (CC 4.5.13). Once clean, one
                 // process never needs to look again: nothing can create another.

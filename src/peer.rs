@@ -830,8 +830,21 @@ async fn consent_for_canonicals(
     }
 }
 
+/// **A room's moderation, carried between its members** (Eric, 2026-11-11,
+/// 0.5.246). A moderator's `content_class:` flag and an author's or reviewer's
+/// `reconsideration:` appeal are federation-scope rows (persist's community
+/// door refuses a row naming a party other than its producer, AV-84), so they
+/// travel by this grant like any other. Without these two prefixes a flag
+/// reached only the flagged author's node, because a row about the recipient
+/// crosses regardless, and an appeal reached nobody: the client's two-node run
+/// on d892af04 saw the reviewer's node never hold the filing. Superset of
+/// edge's floor, as `default_covers_everything_edges_default_does` allows.
+pub const MODERATION_GRANT_PREFIXES: &[&str] = &["content_class:", "reconsideration:"];
+
 pub fn default_attestation_prefixes() -> Vec<String> {
-    normalize_prefixes(DEFAULT_GRANT_ATTESTATION_PREFIXES)
+    let mut all: Vec<&str> = DEFAULT_GRANT_ATTESTATION_PREFIXES.to_vec();
+    all.extend_from_slice(MODERATION_GRANT_PREFIXES);
+    normalize_prefixes(&all)
 }
 
 /// Register Node B's *self-signed* `SignedKeyRecord` in A's federation directory
@@ -2717,6 +2730,18 @@ mod default_prefix_gate {
     ///
     /// `DEFAULT_GRANT_ATTESTATION_PREFIXES` is edge's constant today, so this
     /// holds trivially. It is a gate against the next person re-declaring it.
+    /// A room's flags and appeals cross between members (0.5.246).
+    #[test]
+    fn default_covers_room_moderation() {
+        let ours = default_attestation_prefixes();
+        for prefix in MODERATION_GRANT_PREFIXES {
+            assert!(
+                ours.iter().any(|p| prefix.starts_with(p.as_str())),
+                "the default grant must carry `{prefix}`: {ours:?}"
+            );
+        }
+    }
+
     #[test]
     fn default_covers_everything_edges_default_does() {
         let ours = default_attestation_prefixes();
