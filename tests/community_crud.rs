@@ -2053,6 +2053,16 @@ async fn a_room_holds_two_people_for_now() {
     let (s, v) = invite(b).await;
     assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
     assert_eq!(v["members"], 2, "{v}");
+    // The carried change refuses a third seat too — past the contact gate.
+    contact(a, b).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/changes/envelope"),
+        json!({ "op": "add", "key_id": b.owner.key_id }),
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!(v["members"], 2, "{v}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
