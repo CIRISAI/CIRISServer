@@ -6471,7 +6471,7 @@ async fn appeal_decision(
         return refuse(
             StatusCode::CONFLICT,
             "moderation.nothing_to_appeal",
-            "no moderator of this room has flagged that item, so there is nothing to appeal",
+            "No moderator of this room has flagged that item, so there is nothing to appeal.",
         );
     };
     let (target_id, live, filing) = (
@@ -6507,14 +6507,14 @@ async fn appeal_decision(
             return refuse(
                 StatusCode::CONFLICT,
                 "moderation.nothing_to_appeal",
-                "no moderator of this room has flagged that item, so there is nothing to appeal",
+                "No moderator of this room has flagged that item, so there is nothing to appeal.",
             );
         }
         if signer.key_id() != author && !reviewer {
             return refuse(
                 StatusCode::FORBIDDEN,
                 "moderation.no_standing",
-                "only the person whose item was flagged, or a reviewer of this room, may appeal it",
+                "Only the person whose item was flagged, or a reviewer of this room, can appeal it.",
             );
         }
         let grounds = req.grounds.as_deref().map(str::trim).unwrap_or_default();
@@ -6522,7 +6522,7 @@ async fn appeal_decision(
             return refuse(
                 StatusCode::BAD_REQUEST,
                 "moderation.unknown_grounds",
-                "an appeal gives new_evidence, procedural_error or quorum_compromise as its grounds",
+                "An appeal gives one of three grounds: there is new evidence, the process wasn't followed, or the people who decided weren't free to decide fairly.",
             );
         }
         (grounds.to_owned(), None)
@@ -6531,7 +6531,7 @@ async fn appeal_decision(
             return refuse(
                 StatusCode::FORBIDDEN,
                 "moderation.not_a_reviewer",
-                "only someone who reviews this room's moderation may rule on an appeal",
+                "Only someone who reviews this room's moderation can rule on an appeal.",
             );
         }
         let outcome = req.outcome.as_deref().map(str::trim).unwrap_or_default();
@@ -6539,7 +6539,7 @@ async fn appeal_decision(
             return refuse(
                 StatusCode::BAD_REQUEST,
                 "moderation.unknown_outcome",
-                "a ruling is upheld, partial or reversed",
+                "A ruling says the flag stays, that the appeal is right in part, or that the flag is lifted.",
             );
         }
         // A ruling answers a filing, under the filing's grounds.
@@ -6547,7 +6547,7 @@ async fn appeal_decision(
             return refuse(
                 StatusCode::CONFLICT,
                 "moderation.nothing_to_rule",
-                "nobody has appealed that item's flag, so there is nothing to rule on",
+                "Nobody has appealed that item's flag, so there is nothing to rule on.",
             );
         };
         let grounds = match dir.get_attestation(filing_id).await {
@@ -6683,7 +6683,7 @@ async fn moderator_decision(
             return refuse(
                 StatusCode::FORBIDDEN,
                 "moderation.not_a_moderator",
-                "only someone who moderates this room may flag or clear what is in it",
+                "Only someone who moderates this room can flag or clear what is in it.",
             )
         }
         Err(e) => {
@@ -6700,13 +6700,11 @@ async fn moderator_decision(
             None | Some("") => ContentFlag::Reported,
             Some(t) => match ContentFlag::from_token(t) {
                 Some(c) => c,
-                None => {
-                    return refuse(
-                        StatusCode::BAD_REQUEST,
-                        "moderation.unknown_class",
-                        "an item is flagged as reported or infohazard",
-                    )
-                }
+                None => return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "moderation.unknown_class",
+                    "An item is flagged as reported or as potentially harmful, and nothing else.",
+                ),
             },
         };
         if live == Some(class.as_str()) {
@@ -6723,7 +6721,7 @@ async fn moderator_decision(
             return refuse(
                 StatusCode::CONFLICT,
                 "moderation.nothing_to_clear",
-                "no moderator of this room has flagged that item, so there is nothing to clear",
+                "No moderator of this room has flagged that item, so there is nothing to clear.",
             );
         };
         // Clear what the flag names: an earlier version of a message, if that
