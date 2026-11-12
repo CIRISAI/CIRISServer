@@ -4482,9 +4482,22 @@ async fn put_room_flag(
     author: &str,
     withdrawn: bool,
 ) -> Result<String, String> {
+    put_room_flag_as(engine, by, room, target, author, "reported", withdrawn).await
+}
+
+/// [`put_room_flag`] for a named class.
+async fn put_room_flag_as(
+    engine: &Engine,
+    by: &LocalSigner,
+    room: &str,
+    target: &str,
+    author: &str,
+    class: &str,
+    withdrawn: bool,
+) -> Result<String, String> {
     let mut envelope = serde_json::json!({
-        (paths::DIMENSION): "content_class:reported:v1",
-        "content_class": "reported",
+        (paths::DIMENSION): format!("content_class:{class}:v1"),
+        "content_class": class,
         "community_id": room,
         "references_attestation_id": target,
     });
@@ -4689,6 +4702,34 @@ async fn a_moderators_flag_withholds_until_the_viewer_reveals() {
     );
     assert_eq!(m["moderation"]["withheld"], false, "{m}");
 
+    // A LATER FLAG IS A NEW DECISION: a reversal spends the flag it ruled on,
+    // not the moderator's next one.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let reflag = put_room_flag(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        false,
+    )
+    .await
+    .expect("a re-flag is admitted");
+    let m = transcript().await;
+    assert_eq!(
+        m["moderation"]["flag"], "reported",
+        "the new flag is live: {m}"
+    );
+    assert_eq!(
+        m["moderation"]["flag_attestation_id"],
+        reflag.as_str(),
+        "{m}"
+    );
+    assert!(
+        m["moderation"].get("reconsideration").is_none(),
+        "the last round's appeal is not this flag's: {m}"
+    );
+
     // The moderator clears it: the history stays, the flag does not.
     put_room_flag(
         &engine,
@@ -4703,4 +4744,110 @@ async fn a_moderators_flag_withholds_until_the_viewer_reveals() {
     let m = transcript().await;
     assert!(m["moderation"]["flag"].is_null(), "cleared: {m}");
     assert_eq!(m["moderation"]["withheld"], false, "{m}");
+
+    // AN APPEAL OUTLIVES AN UPGRADE: the author appeals `reported` while the
+    // moderator is raising it to `infohazard`; the filing is the item's.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let reported = put_room_flag(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        false,
+    )
+    .await
+    .expect("flag again");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let infohazard = put_room_flag_as(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        "infohazard",
+        false,
+    )
+    .await
+    .expect("the upgrade is admitted");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let appeal = |by: LocalSigner, flag: String, outcome: Option<&'static str>| {
+        let engine = Arc::clone(&engine);
+        let room = community_id.clone();
+        let author = owner_id.key_id.clone();
+        async move {
+            let mut envelope = serde_json::json!({
+                (paths::DIMENSION): "reconsideration:new_evidence:v1",
+                "community_id": room,
+                "references_attestation_id": flag,
+            });
+            if let Some(o) = outcome {
+                envelope["outcome"] = serde_json::json!(o);
+            }
+            ciris_server::attest::emit(
+                &engine,
+                ciris_server::attest::KeySigner::Local(&by),
+                ciris_server::attest::Spec::new(
+                    attestation_type::SCORES,
+                    cohort_scope::FEDERATION,
+                    envelope,
+                )
+                .about_all(&author, std::slice::from_ref(&author)),
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))
+        }
+    };
+    let late = appeal(owner_id.signer().await, reported.clone(), None)
+        .await
+        .expect("an appeal of the superseded row is admitted");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["flag"], "infohazard", "{m}");
+    assert_eq!(
+        m["moderation"]["flag_attestation_id"],
+        infohazard.as_str(),
+        "{m}"
+    );
+    assert_eq!(
+        m["moderation"]["reconsideration"], "filed",
+        "the appeal against `reported` reaches the reviewer: {m}"
+    );
+    assert_eq!(
+        m["moderation"]["reconsideration_attestation_id"],
+        late.as_str(),
+        "{m}"
+    );
+
+    // A reversal of the upgrade lifts the item: the `reported` it replaced
+    // does not come back.
+    appeal(contact_signer(), infohazard.clone(), Some("reversed"))
+        .await
+        .expect("the ruling is admitted");
+    let m = transcript().await;
+    assert!(
+        m["moderation"]["flag"].is_null(),
+        "reversed lifts both: {m}"
+    );
+    assert_eq!(m["moderation"]["reconsideration"], "reversed", "{m}");
+    assert_eq!(m["body"], "something contested", "{m}");
+
+    // ...and a moderator's `reported` after it is live.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let after = put_room_flag(
+        &engine,
+        &contact_signer(),
+        &community_id,
+        &id,
+        &owner_id.key_id,
+        false,
+    )
+    .await
+    .expect("flag after the reversal");
+    let m = transcript().await;
+    assert_eq!(m["moderation"]["flag"], "reported", "{m}");
+    assert_eq!(
+        m["moderation"]["flag_attestation_id"],
+        after.as_str(),
+        "{m}"
+    );
 }
