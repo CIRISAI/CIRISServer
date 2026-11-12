@@ -1295,7 +1295,7 @@ pub async fn publish_agent_occurrence(
         agent_key_id = %agent_key,
         owner_key_id = %owner,
         "split home: the agent agreed, in its own hand, to be its owner's occurrence — its \
-         rows now resolve to the person, and the owner's approvals seat (CIRISServer#871)"
+         rows now resolve to the person, and the owner's approvals seat (tracked: CIRISServer#871)"
     );
     Ok(true)
 }
@@ -1314,7 +1314,7 @@ async fn reaffirm_agent_occurrence(
             error = %format!("{e:#}"),
             "split home: the agent's own occurrence agreement was NOT published — the agent \
              resolves to itself, so its owner's Wise Authority approvals are refused \
-             (CIRISServer#871)"
+             (tracked: CIRISServer#871)"
         );
     }
 }

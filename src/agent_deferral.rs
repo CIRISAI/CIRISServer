@@ -612,7 +612,7 @@ async fn log_seat_resolution(
         principals = ?typed,
         occurrence_rows = ?rows,
         "identity amendment: persist's seat rule refused what this door's rule passed \
-         (CIRISServer#871) — the reads both rules use"
+         (tracked: CIRISServer#871) — the reads both rules use"
     );
 }
 
