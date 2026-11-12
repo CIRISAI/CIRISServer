@@ -1590,6 +1590,11 @@ async fn room_json(st: &ChatState, room: &Room, owner: &Owner, detail: bool) -> 
         "consensus_protocol": room.record.consensus_protocol,
         "founded_at": room.record.founded_at.to_rfc3339(),
         "member_count": room.roster.len(),
+        // The most people this node seats in the room (0.5.246: two, until
+        // members' approvals combine in the mesh, CIRISPersist#1252). A
+        // client hides Invite when members plus open invitations reach it;
+        // a node that sends no field has no such limit.
+        "max_people": max_people_of(room.id()),
         "my_role": room.member(&owner.key_id).map(|m| role_token(m.role.as_deref())),
         "members": room.roster.iter().map(member_json).collect::<Vec<_>>(),
         "roles": roles,
@@ -1747,6 +1752,16 @@ pub const MAX_ROOM_PEOPLE: usize = 2;
 fn rooms_above_two() -> &'static std::sync::Mutex<BTreeSet<String>> {
     static R: std::sync::OnceLock<std::sync::Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
     R.get_or_init(Default::default)
+}
+
+/// The room's people limit as the room JSON reports it: [`MAX_ROOM_PEOPLE`],
+/// or `None` (no limit) for a room a test lifted.
+fn max_people_of(room_id: &str) -> Option<usize> {
+    (!rooms_above_two()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(room_id))
+    .then_some(MAX_ROOM_PEOPLE)
 }
 
 /// Lift [`MAX_ROOM_PEOPLE`] for ONE room, in a test of larger rooms.

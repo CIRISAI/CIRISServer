@@ -2019,6 +2019,13 @@ async fn a_room_holds_two_people_for_now() {
     let (s, v) = post(a, "/v1/communities", json!({ "name": "two of us" })).await;
     assert_eq!(s, 201, "{v}");
     let room = v["community_id"].as_str().expect("id").to_owned();
+    let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
+    assert_eq!(r["max_people"], 2, "the room says its limit: {r}");
+    let (_, list) = get(a, "/v1/communities").await;
+    assert!(
+        list.to_string().contains("\"max_people\":2"),
+        "the listing says it too: {list}"
+    );
     let invite = |who: &Node| {
         let path = format!("/v1/communities/{room}/invites");
         let key = who.owner.key_id.clone();
