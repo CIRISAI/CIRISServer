@@ -2544,6 +2544,29 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Err(e) => tracing::debug!(error = %e, "founder_only rooms: not yet"),
                     }
                 }
+                // THE ROOMS' TAKEDOWNS (CC 4.5.3): a moderator's notice
+                // replicates like any signed row, and edge carries no purge
+                // plane, so every member's node applies the notices about its
+                // rooms itself (re-verified against its own state, idempotent),
+                // then hard-deletes what a closed window settles.
+                {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::room_takedown::sweep(&engine_for_roster, &node).await {
+                        Ok(r) if r.finalized > 0 || r.waiting > 0 => tracing::debug!(
+                            seen = r.seen,
+                            applied = r.applied,
+                            waiting = r.waiting,
+                            finalized = r.finalized,
+                            "room takedowns: swept"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "room takedowns: the sweep could not read the rooms — next tick"
+                        ),
+                    }
+                }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
                 ));

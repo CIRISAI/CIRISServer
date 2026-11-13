@@ -495,6 +495,7 @@ pub mod replication_reconcile;
 pub mod retention_loop;
 /// A room's moderation decisions applied where its content is read (CC 4.5.5).
 pub mod room_moderation;
+pub mod room_takedown;
 pub mod safety;
 pub mod scorer;
 pub mod scrub;

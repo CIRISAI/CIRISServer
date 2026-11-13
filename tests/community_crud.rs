@@ -1597,6 +1597,102 @@ async fn the_author_appeals_a_flag_and_a_reviewer_rules() {
     );
 }
 
+/// **A takedown removes a message's body for everyone (CC 4.5.3), and an
+/// appeal can bring it back.** Alice founded the room and holds every duty;
+/// Bob moderates (flags) but holds no `takedown`; Carol wrote the message.
+/// Alice takes it down: no member reads the body, nothing reveals it, the row
+/// stays. Carol appeals; Bob cannot rule; Alice reverses and it reads again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_takedown_removes_the_body_and_a_reversed_appeal_restores_it() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "taken down", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "removed under the room's standards" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+    assert_eq!(
+        message_in(a, &room, &id).await["body"],
+        "removed under the room's standards"
+    );
+
+    // Bob holds `moderate`, not `takedown`; a takedown says why.
+    let (s, v) = post(b, &item("takedown"), json!({ "reason": "spam" })).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_moderator"), "{v}");
+    let (s, v) = post(a, &item("takedown"), json!({})).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (400, "moderation.takedown_needs_reason"),
+        "{v}"
+    );
+
+    // Alice takes it down.
+    let (s, v) = post(a, &item("takedown"), json!({ "reason": "spam" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["withheld"], true, "{v}");
+    assert_eq!(
+        v["takedown"]["taken_down_by"],
+        a.owner.key_id.as_str(),
+        "{v}"
+    );
+    assert_eq!(v["takedown"]["legal_basis"], "community_standards", "{v}");
+    let notice = v["notice_attestation_id"]
+        .as_str()
+        .expect("notice")
+        .to_owned();
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert!(m.get("body").is_none(), "taken down for every member: {m}");
+        assert_eq!(m["unopened_reason"], "taken_down", "{m}");
+        assert_eq!(
+            m["takedown"]["notice_attestation_id"],
+            notice.as_str(),
+            "{m}"
+        );
+    }
+    // Nothing reveals a takedown.
+    let (s, v) = post(c, &item("reveal"), json!({})).await;
+    assert_ne!(s, 200, "a takedown is not revealed: {v}");
+    assert!(message_in(c, &room, &id).await.get("body").is_none());
+    // A second takedown signs nothing new.
+    let (s, v) = post(a, &item("takedown"), json!({ "reason": "again" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v.get("notice_attestation_id").is_none(), "{v}");
+
+    // Carol appeals the takedown; Bob cannot rule.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["appeal"], "filed", "{v}");
+    let (s, v) = post(b, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_reviewer"), "{v}");
+
+    // Alice reverses inside the window: the body reads again.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["appeal"], "reversed", "{v}");
+    assert_eq!(v["takedown"]["withheld"], false, "{v}");
+    // Lifted for every member: no member reads it as taken down.
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_ne!(m["unopened_reason"], "taken_down", "{m}");
+        assert!(m["takedown"]["withheld"] == false, "{m}");
+    }
+    // The body reads again where it read before the takedown. Bob's body
+    // waits on his key grant, which this shared-store fixture does not drive
+    // (as in the flag test above); he read `not_granted` before it too.
+    for n in [a, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["body"], "removed under the room's standards", "{m}");
+    }
+}
+
 // ─── 6. Roles, leaving, the last founder ────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
