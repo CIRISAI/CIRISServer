@@ -2561,6 +2561,80 @@ async fn seat_decisions(
     Ok(out)
 }
 
+/// The id of a deferral decision: the request row's own id.
+const DEFERRAL_DECISION_PREFIX: &str = "deferral:";
+
+/// **The agent's pending deferrals, for the node's owner** (0.5.247; Eric
+/// 2026-11-13). The seated Wise Authority on a node is its owner (2026-10-22),
+/// so a `deferral:request:v1` this node's agent signed, with no response yet,
+/// is the owner's to answer, on the same one queue as everything else they
+/// decide (CC #198 §5, Eric 2026-11-02). `owner` is the node's owner by
+/// construction (`read_preamble`). The answer signs
+/// `deferral:response:{approved|rejected}:v1` with their own pen.
+async fn deferral_decisions(
+    st: &ChatState,
+    owner: &Owner,
+    only: Option<&str>,
+) -> Result<Vec<serde_json::Value>, Response> {
+    use crate::agent_deferral::{
+        dimension_of, DEFERRAL_APPROVED, DEFERRAL_REJECTED, DEFERRAL_REQUEST,
+    };
+    use crate::attestation_reads::AllAttestations as _;
+    use ciris_persist::federation::envelope::paths;
+    let dir = st.engine.federation_directory();
+    let agent = st
+        .engine
+        .local_derived_key_id()
+        .await
+        .map_err(|e| store_unavailable(format!("this engine's key: {e:#}")))?;
+    // Answered already: a response the owner signed, naming the request.
+    let answered: BTreeSet<String> = dir
+        .attestations_by_all(&owner.key_id)
+        .await
+        .map_err(|e| store_unavailable(format!("attestations_by_all(owner): {e:#}")))?
+        .into_iter()
+        .filter(|r| matches!(dimension_of(r), Some(DEFERRAL_APPROVED | DEFERRAL_REJECTED)))
+        .filter_map(|r| {
+            r.attestation_envelope
+                .get(paths::REFERENCES_ATTESTATION_ID)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for r in dir
+        .attestations_by_all(&agent)
+        .await
+        .map_err(|e| store_unavailable(format!("attestations_by_all(agent): {e:#}")))?
+    {
+        if dimension_of(&r) != Some(DEFERRAL_REQUEST) || answered.contains(&r.attestation_id) {
+            continue;
+        }
+        let env = &r.attestation_envelope;
+        let room = env
+            .get(crate::agent_deferral::ROOM_FIELD)
+            .and_then(serde_json::Value::as_str);
+        if only.is_some_and(|o| room != Some(o)) {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "decision_id": format!("{DEFERRAL_DECISION_PREFIX}{}", r.attestation_id),
+            "kind": "deferral",
+            "circle": room,
+            "subject": r.attested_key_id,
+            "deferral_id": env.get("deferral_id"),
+            "task_id": env.get("task_id"),
+            "domain_hint": env.get("domain_hint"),
+            "reason_digest": env.get("reason_digest"),
+            "proposed_at": r.asserted_at,
+            "request_attestation_id": r.attestation_id,
+            "reason_id": "decisions.deferral.answer",
+            "says": "Your agent is waiting for your decision.",
+        }));
+    }
+    Ok(out)
+}
+
 #[derive(Deserialize, Default)]
 struct DecisionsQuery {
     #[serde(default)]
@@ -2577,7 +2651,12 @@ async fn list_decisions(
         Ok(o) => o,
         Err(r) => return r,
     };
-    match seat_decisions(&st, &owner, q.circle.as_deref()).await {
+    let seats = seat_decisions(&st, &owner, q.circle.as_deref()).await;
+    let deferrals = deferral_decisions(&st, &owner, q.circle.as_deref()).await;
+    match seats.and_then(|mut s| {
+        s.extend(deferrals?);
+        Ok(s)
+    }) {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "decisions": items, "count": items.len() })),
@@ -2610,6 +2689,56 @@ async fn answer_decision(
             return malformed("expected {\"answer\": \"approve\" | \"decline\"}".to_owned());
         }
     };
+    // A deferral: the node's owner answers their agent, signed with their own
+    // pen (`agent_deferral::emit_deferral_response`, the same door the agent's
+    // own UI uses).
+    if let Some(request_id) = decision_id.strip_prefix(DEFERRAL_DECISION_PREFIX) {
+        let open = match deferral_decisions(&st, &owner, None).await {
+            Ok(v) => v.iter().any(|d| d["decision_id"] == decision_id),
+            Err(r) => return r,
+        };
+        if !open {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "decisions.not_found",
+                "That decision isn't open for you any more.",
+            );
+        }
+        return match crate::agent_deferral::emit_deferral_response(
+            &st.engine,
+            bearer_of(&headers),
+            &owner.key_id,
+            st.user_seed_dir.clone(),
+            request_id,
+            answer == "approve",
+        )
+        .await
+        {
+            Ok(response_id) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "decision_id": decision_id,
+                    "answer": answer,
+                    "state": "applied",
+                    "response_attestation_id": response_id,
+                })),
+            )
+                .into_response(),
+            Err(e) => {
+                use crate::agent_deferral::AgentRowError as E;
+                let status = match &e {
+                    E::BadInput(_) => StatusCode::BAD_REQUEST,
+                    E::UnknownDeferral(_) => StatusCode::NOT_FOUND,
+                    E::NotSignedIn => StatusCode::UNAUTHORIZED,
+                    E::Delegated | E::ResolverHasNoKey => StatusCode::FORBIDDEN,
+                    E::NoIdentity | E::ResponseAlreadyUsed(_) => StatusCode::CONFLICT,
+                    E::Unauthorized(_) => StatusCode::FORBIDDEN,
+                    E::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+                };
+                refuse(status, e.reason_id(), e.to_string())
+            }
+        };
+    }
     let items = match seat_decisions(&st, &owner, None).await {
         Ok(v) => v,
         Err(r) => return r,
