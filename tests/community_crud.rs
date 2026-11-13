@@ -731,6 +731,68 @@ async fn appoint_moderator(appointer: &Node, who: &Node) {
 /// both joiners from their KeyPackages, each joins from the Welcome addressed
 /// to them) without ever gating a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approving_one_seat_decision_seats_only_that_person() {
+    // Kernel census, risk 1: before 0.5.247 an approval that met the room's
+    // rule widened EVERY accepted invite, so approving Bob also seated Carol.
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    // A room of one under `majority`: the founder's one signature meets the
+    // rule for the FIRST seat only. The old code widened the room's accepted
+    // invites in list order, so approving Carol seated Bob, and Carol's own
+    // widening was then refused (two members need two signatures).
+    let room = test_only_found(a, "one at a time", &[], json!({})).await;
+    for who in [b, c] {
+        contact(a, who).await;
+        let (s, v) = post(
+            a,
+            &format!("/v1/communities/{room}/invites"),
+            json!({ "key_id": who.owner.key_id }),
+        )
+        .await;
+        invited(s, &v);
+        let proposal = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+        let (s, v) = post(
+            who,
+            &format!("/v1/self/invites/{proposal}/accept"),
+            json!({}),
+        )
+        .await;
+        assert_eq!((s, v["state"].as_str()), (200, Some("accepted")), "{v}");
+    }
+    // Both acceptances are decisions for the founder; nobody is seated yet.
+    let (s, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    assert_eq!(s, 200, "{v}");
+    let items = v["decisions"].as_array().expect("decisions").clone();
+    assert_eq!(items.len(), 2, "{v}");
+    assert_eq!(fold(&a.engine, &room).await, sorted(&[&a.owner.key_id]));
+
+    let carols = items
+        .iter()
+        .find(|d| d["subject"] == c.owner.key_id.as_str())
+        .expect("Carol's decision");
+    let did = carols["decision_id"].as_str().expect("decision_id");
+    let (s, v) = post(
+        a,
+        &format!("/v1/self/decisions/{did}/answer"),
+        json!({ "answer": "approve" }),
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("applied")), "{v}");
+    assert_eq!(v["seated"], json!([c.owner.key_id]), "{v}");
+    assert_eq!(
+        fold(&a.engine, &room).await,
+        sorted(&[&a.owner.key_id, &c.owner.key_id]),
+        "approving Carol seats Carol, not Bob"
+    );
+    // The answer is the founder's, on the founder's own listing.
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    let left = v["decisions"].as_array().expect("decisions");
+    assert_eq!(left.len(), 1, "{v}");
+    assert_eq!(left[0]["subject"], b.owner.key_id.as_str());
+    assert_eq!(left[0]["my_answer"], Value::Null, "{v}");
+}
+
+#[tokio::test]
 async fn a_three_member_room_where_all_three_read_each_other() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);

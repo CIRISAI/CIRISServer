@@ -2473,8 +2473,14 @@ async fn change_assemble(
 // meets the room's rule; otherwise it is recorded here and the decision says it
 // is waiting on the other members.
 
-fn my_answers() -> &'static std::sync::Mutex<BTreeMap<String, &'static str>> {
-    static A: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, &'static str>>> =
+/// Each person's answers, keyed by (who answered, decision). Before 0.5.247 the
+/// key was the decision alone, so on a node several people use, one person's
+/// answer showed as everyone's `my_answer`. Still process memory: the durable,
+/// signed answer is persist's `roster:cosignature:v1` (CIRISPersist#1252),
+/// which arrives with the 61.4.0 adopt.
+type AnswerKey = (String, String);
+fn my_answers() -> &'static std::sync::Mutex<BTreeMap<AnswerKey, &'static str>> {
+    static A: std::sync::OnceLock<std::sync::Mutex<BTreeMap<AnswerKey, &'static str>>> =
         std::sync::OnceLock::new();
     A.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
 }
@@ -2546,7 +2552,7 @@ async fn seat_decisions(
                 "consensus_protocol": t.protocol,
                 "required": t.required,
                 "eligible": t.eligible,
-                "my_answer": answers.get(&did).copied(),
+                "my_answer": answers.get(&(owner.key_id.clone(), did.clone())).copied(),
                 "reason_id": "decisions.quorum_cosign.approve_joining",
                 "says": "Approve this person joining the room.",
             }));
@@ -2618,7 +2624,7 @@ async fn answer_decision(
     my_answers()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(decision_id.clone(), answer);
+        .insert((owner.key_id.clone(), decision_id.clone()), answer);
     let required = item["required"].as_u64().unwrap_or(0);
     if answer == "approve" && required <= 1 {
         // This one signature meets the room's rule: seat now, the same widening
@@ -2642,9 +2648,16 @@ async fn answer_decision(
                     ciris_edge::membership::MembershipWidener::new(vec![std::sync::Arc::clone(
                         pen.edge_signer(),
                     )]);
+                // THIS decision's invite only. Before 0.5.247 every accepted
+                // invite of the room was widened, so approving one person
+                // seated everyone waiting (kernel census, risk 1).
+                let this: Vec<_> = invites
+                    .into_iter()
+                    .filter(|(v, _)| seat_decision_id(&v.proposal_id) == decision_id)
+                    .collect();
                 let seated = crate::membership_invites::widen_held_acceptances(
                     dir.as_ref(),
-                    &invites,
+                    &this,
                     &widener,
                 )
                 .await;
