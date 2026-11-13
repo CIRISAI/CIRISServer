@@ -770,9 +770,15 @@ pub async fn register_node_key_with_record(
     use ciris_verify_core::federation_self_record::produce_self_key_record;
 
     let valid_from = chrono::Utc::now().to_rfc3339();
-    let v_rec = produce_self_key_record(identity, identity_type::NODE, &valid_from, None, &[])
-        .await
-        .map_err(|e| anyhow::anyhow!("produce node self key record: {e}"))?;
+    let v_rec = produce_self_key_record(
+        identity,
+        identity_type::NODE,
+        &valid_from,
+        crate::identity_ttl::valid_until_str().as_deref(),
+        &[],
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("produce node self key record: {e}"))?;
     let mut signed: SignedKeyRecord = serde_json::from_value(serde_json::to_value(&v_rec)?)
         .map_err(|e| anyhow::anyhow!("bridge verify→persist node SignedKeyRecord: {e}"))?;
     // See `compose::build_self_key_record`: under a live TEST anchor the node key

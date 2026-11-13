@@ -591,7 +591,10 @@ pub async fn build_signed_owner_binding(
         )
         // The node is the subject: `subject_key_ids` is what will let it be
         // revoked, so it is signed rather than stamped by whoever stores the row.
-        .about(node_key_id),
+        .about(node_key_id)
+        // A harness node's binding lapses with its identity (0.5.247); `None`
+        // in production.
+        .expiring(crate::identity_ttl::valid_until()),
     )
     .map_err(|e| OwnershipError::Canonicalize(e.to_string()))?;
 
@@ -1162,7 +1165,9 @@ pub async fn emit_steward_binding(
             cohort_scope::FEDERATION,
             build_owner_binding_envelope(&responsible_user_key_id, node_key_id, infra_scopes)?,
         )
-        .about(node_key_id),
+        .about(node_key_id)
+        // The claim's and the announce's binding alike (0.5.247).
+        .expiring(crate::identity_ttl::valid_until()),
     )
     .await
     .map_err(|e| OwnershipError::Persist(e.to_string()))?;

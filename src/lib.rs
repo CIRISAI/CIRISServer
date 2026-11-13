@@ -318,6 +318,7 @@ pub mod identity;
 /// One federation identity per node, hybrid on both halves — the boot gate
 /// that refuses a forked identity instead of stalling silently (CIRISServer#380).
 mod identity_gate;
+pub mod identity_ttl;
 /// A single cosmetic-id helper (`new_id`) shared by the attestation builders —
 /// replaces the per-module hand-rolled `new_uuid_v4` copies.
 pub mod ids;

@@ -3155,13 +3155,19 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
         "app_name": "ciris",
         "aspects": ["edge"],
     });
-    let envelope = self_occurrence_envelope(
+    let mut envelope = self_occurrence_envelope(
         key_id,
         &tb_env,
         &enc.x25519_base64,
         &enc.ml_kem_768_base64,
         now,
     );
+    // A harness node's occurrence lapses with its identity (0.5.247). Signed in
+    // the envelope and mirrored on the typed row below; absent in production.
+    let valid_until = crate::identity_ttl::valid_until();
+    if let Some(v) = crate::identity_ttl::valid_until_str() {
+        envelope["valid_until"] = serde_json::Value::from(v);
+    }
 
     // Sign with the node's own hybrid identity (the build_self_key_record pattern);
     // attesting_key_id == identity_key_id == this node's registered key, so the
@@ -3203,7 +3209,7 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
         device_class: "agent".to_string(),
         hardware_attestation: None,
         asserted_at: now,
-        valid_until: None,
+        valid_until,
         encryption_pubkeys: Some(ciris_persist::federation::EncryptionPubkeys {
             x25519_base64: enc.x25519_base64.clone(),
             ml_kem_768_base64: enc.ml_kem_768_base64.clone(),
@@ -3880,7 +3886,7 @@ async fn register_substrate_key(
         identity,
         identity_type::SUBSTRATE_PERSIST,
         &valid_from,
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
         &[],
     )
     .await
@@ -4369,7 +4375,7 @@ pub(crate) async fn build_self_key_record(
         &identity,
         ciris_persist::federation::types::identity_type::NODE,
         &valid_from,
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
         &[],
     )
     .await
